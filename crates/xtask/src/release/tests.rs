@@ -487,3 +487,64 @@ fn publish_checks_the_directory_before_it_asks_github_anything() {
     assert!(publish_in(&gh, &dir, "v0.3.0").is_err());
     assert!(gh.ran.borrow().is_empty());
 }
+
+#[test]
+fn a_reply_that_is_not_a_list_is_an_empty_list() {
+    // Catches: a missing or malformed reply from GitHub read as holding releases or runs.
+    assert!(array(&None).is_empty());
+    assert!(array(&Some(json!({ "a": 1 }))).is_empty());
+    assert_eq!(array(&Some(json!([1, 2]))).len(), 2);
+}
+
+#[test]
+fn locate_refuses_a_run_of_another_branch_or_one_that_did_not_succeed() {
+    // Catches: a run on a branch other than main, or that failed, standing in for the build
+    // of the commit (GitHub's query filters both, and the verb does not rely on it alone).
+    for (key, value) in [("head_branch", "feature"), ("conclusion", "failure")] {
+        let mut gh = good_repo();
+        gh.api[1].1["workflow_runs"][0][key] = json!(value);
+        let problems = refused(locate(&gh, REPO, COMMIT, None));
+        assert!(problems[0].contains("artifacts.yml"), "{key}: {problems:?}");
+    }
+    let mut gh = good_repo();
+    gh.api[1].1 = json!({ "workflow_runs": "none" });
+    assert!(locate(&gh, REPO, COMMIT, None).is_err());
+}
+
+#[test]
+fn publish_leaves_the_releases_of_other_tags_alone() {
+    // Catches: a published release of another tag, or a draft of one, taken for this tag's:
+    // neither blocks a publish, and neither is deleted.
+    let dir = scratch("publish-others");
+    assets(&dir);
+    let gh = FakeGh::default();
+    gh.releases
+        .borrow_mut()
+        .push(json!({ "tag_name": "v0.2.0", "draft": false, "assets": [] }));
+    gh.releases
+        .borrow_mut()
+        .push(json!({ "tag_name": "v0.2.1", "draft": true, "assets": [] }));
+    gh.releases
+        .borrow_mut()
+        .push(json!({ "tag_name": "v0.3.0", "draft": true }));
+    let printed = publish_in(&gh, &dir, "v0.3.0").expect("publish");
+    assert!(
+        printed
+            .last()
+            .is_some_and(|l| l.contains("published v0.3.0"))
+    );
+    let kept: Vec<String> = gh
+        .releases
+        .borrow()
+        .iter()
+        .map(|r| r["tag_name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(kept, ["v0.2.0", "v0.2.1", "v0.3.0"]);
+}
+
+#[test]
+fn locate_without_an_output_file_only_prints() {
+    // Catches: a locate that needs `--output`, and one that prints the run id wrongly without.
+    let printed = locate(&good_repo(), REPO, COMMIT, None).expect("locate");
+    assert_eq!(printed.last().map(String::as_str), Some("run-id=11"));
+}

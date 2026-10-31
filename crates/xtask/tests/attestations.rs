@@ -2,13 +2,14 @@
 //! the attestations that exist. Each test builds the ledger of a good release, then spoils one
 //! thing, and the verb must refuse exactly that.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use xtask::Error;
+use xtask::bundles::{DEAD_PROXY, ISSUER};
 use xtask::sums::{Attestations, verify_attestations};
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -50,15 +51,20 @@ impl Release {
     /// Two tarballs with their SBOMs and bundles, the sums, and the ledger of a release that
     /// was signed as it should be.
     fn good(name: &str) -> Release {
+        Release::good_for(name, &["linux-arm64", "linux-x86_64"])
+    }
+
+    /// The same for the platforms `platforms` alone.
+    fn good_for(name: &str, platforms: &[&str]) -> Release {
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("attestations-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let mut ledger = Vec::new();
         let mut sums = String::new();
-        let stems = [
-            format!("tierstore-{COMMIT}-linux-arm64"),
-            format!("tierstore-{COMMIT}-linux-x86_64"),
-        ];
+        let stems: Vec<String> = platforms
+            .iter()
+            .map(|p| format!("tierstore-{COMMIT}-{p}"))
+            .collect();
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
         for stem in &stems {
             files.push((
@@ -113,6 +119,28 @@ impl Release {
 
     /// Runs the verb with the ledger as it is now.
     fn verify(&self) -> Result<Vec<String>, Error> {
+        self.verify_with(None)
+    }
+
+    /// Runs the verb with the ledger as it is now, and `trusted_root` for the bundles.
+    fn verify_with(&self, trusted_root: Option<&Path>) -> Result<Vec<String>, Error> {
+        // What the verb is to pass `gh`, held by the stand-in: the repository, the issuer, the
+        // branch, and the trusted root with the dead proxies around it, or no root at all.
+        let root = match trusted_root {
+            Some(root) => format!("root={}\nproxy={DEAD_PROXY}\n", root.display()),
+            None => "root=-\n".to_owned(),
+        };
+        let expect = format!("repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\n{root}");
+        self.verify_expecting(trusted_root, &expect)
+    }
+
+    /// Runs the verb with `trusted_root`, the stand-in holding the command line to `expect`.
+    fn verify_expecting(
+        &self,
+        trusted_root: Option<&Path>,
+        expect: &str,
+    ) -> Result<Vec<String>, Error> {
+        std::fs::write(self.dir.join("expect.txt"), expect).expect("expect");
         std::fs::write(self.dir.join("ledger.txt"), self.ledger.join("\n")).expect("ledger");
         let scratch = self.dir.join("scratch");
         let _ = std::fs::remove_dir_all(&scratch);
@@ -123,7 +151,7 @@ impl Release {
             workflow_ref: &format!("{SIGNER}@refs/heads/main"),
             source_ref: "refs/heads/main",
             commit: COMMIT,
-            trusted_root: None,
+            trusted_root,
             gh: &gh,
             scratch: &scratch,
         };
@@ -322,4 +350,114 @@ fn a_workflow_or_branch_that_does_not_fit_is_a_usage_error() {
         attest(&own, "refs/heads/main", "0123456789ab"),
         Err(Error::Usage(_))
     ));
+}
+
+#[test]
+fn a_trusted_root_and_the_dead_proxies_reach_every_bundle_check() {
+    // Catches: the offline check dropping its trusted root or its proxies (the call would then
+    // go to the network). The stand-in refuses any bundle verification whose command line or
+    // environment departs from `expect.txt`, so the release verifies only when every one of
+    // them carried both; it also refuses a root where none is expected, and the other way.
+    let release = Release::good("trusted-root");
+    let root = release.dir.join("trusted_root.jsonl");
+    std::fs::write(&root, "{}").expect("root");
+    let printed = release.verify_with(Some(&root)).expect("verify");
+    assert_eq!(printed.len(), 5, "{printed:?}");
+
+    let base = format!("repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\n");
+    let proxy = format!("proxy={DEAD_PROXY}\n");
+    let failed = failure(release.verify_expecting(Some(&root), &format!("{base}root=-\n")));
+    assert!(
+        failed.contains("its bundle"),
+        "a root where none is expected: {failed}"
+    );
+    let failed =
+        failure(release.verify_expecting(None, &format!("{base}root={}\n", root.display())));
+    assert!(
+        failed.contains("its bundle"),
+        "no root where one is expected: {failed}"
+    );
+    let failed = failure(release.verify_expecting(
+        Some(&root),
+        &format!("{base}root={}\nproxy=http://127.0.0.1:1\n", root.display()),
+    ));
+    assert!(failed.contains("its bundle"), "other proxies: {failed}");
+    let failed = failure(release.verify_expecting(None, &format!("{base}root=-\n{proxy}")));
+    assert!(
+        failed.contains("its bundle"),
+        "proxies without a root: {failed}"
+    );
+}
+
+#[test]
+fn the_repository_the_issuer_and_the_branch_are_passed_as_given() {
+    // Catches: `--repo`, `--cert-oidc-issuer` or `--source-ref` dropped or changed. The
+    // stand-in refuses a command line that departs from `expect.txt`, so each wrong
+    // expectation below fails the release as a dropped or altered flag would.
+    let release = Release::good("expectations");
+    let root = "root=-\n";
+    for (wrong, what) in [
+        (format!("repo=example/other\n{root}"), "the repository"),
+        (
+            format!("issuer=https://issuer.example\n{root}"),
+            "the issuer",
+        ),
+        (format!("source-ref=refs/heads/other\n{root}"), "the branch"),
+    ] {
+        let failed = failure(release.verify_expecting(None, &wrong));
+        assert!(
+            failed.contains("verifies") || failed.contains("its bundle"),
+            "{what}: {failed}"
+        );
+    }
+}
+
+#[test]
+fn a_release_of_one_platform_has_no_other_bundle_to_swap_in() {
+    // Catches: the swapped-bundle control assuming a second tarball, which fails the release
+    // of a single platform.
+    let release = Release::good_for("one-platform", &["linux-x86_64"]);
+    let printed = release.verify().expect("verify");
+    assert_eq!(printed.len(), 2 + 1, "{printed:?}");
+}
+
+#[test]
+fn a_bundle_that_attests_another_tarball_or_a_flipped_one_fails_its_control() {
+    // Catches: the two bundle controls that no other test trips: the bundle of the second
+    // tarball accepted for the first, and the first tarball with a byte flipped accepted
+    // against its own bundle.
+    let good = Release::good("bundle-controls");
+    let arm = format!("tierstore-{COMMIT}-linux-arm64.tar.gz");
+    let x86 = format!("tierstore-{COMMIT}-linux-x86_64.tar.gz");
+
+    let any_subject = |tarball: &str| {
+        let digest = good.digest_of(tarball);
+        good.changed(|l| {
+            if l.starts_with(&digest) && l.ends_with(COMMIT) {
+                l.replacen(&digest, "*", 1)
+            } else {
+                l.to_owned()
+            }
+        })
+    };
+    let failed = failure(any_subject(&x86).verify());
+    assert!(
+        failed.contains("a bundle is to attest its own tarball only"),
+        "{failed}"
+    );
+    let failed = failure(any_subject(&arm).verify());
+    assert!(failed.contains("a flipped byte"), "{failed}");
+}
+
+#[test]
+fn a_sums_file_that_lists_neither_a_tarball_nor_an_sbom_is_refused() {
+    // Catches: a file of another kind listed in SHA256SUMS passing as verified.
+    let release = Release::good("other-kind");
+    std::fs::write(release.dir.join("NOTES"), b"notes").expect("notes");
+    let sums = release.dir.join("SHA256SUMS");
+    let mut text = std::fs::read_to_string(&sums).expect("sums");
+    text.push_str(&format!("{}  NOTES\n", release.digest_of("NOTES")));
+    std::fs::write(&sums, text).expect("sums");
+    let failed = failure(release.verify());
+    assert!(failed.contains("neither a tarball nor an SBOM"), "{failed}");
 }

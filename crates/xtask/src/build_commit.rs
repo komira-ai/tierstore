@@ -77,6 +77,17 @@ pub fn check_with(
     commit: &str,
     run: fn(&Path) -> Result<Said, Error>,
 ) -> Result<String, Error> {
+    check_naming(binary, commit, run, names_commit)
+}
+
+/// [`check_with`] with the way the version text is read (tests pass a reader that accepts any
+/// text, which the control must catch).
+pub fn check_naming(
+    binary: &Path,
+    commit: &str,
+    run: fn(&Path) -> Result<Said, Error>,
+    names: fn(&str, &str) -> bool,
+) -> Result<String, Error> {
     if !is_commit(commit) {
         return Err(Error::NotACommit(commit.to_owned()));
     }
@@ -89,14 +100,14 @@ pub fn check_with(
         )));
     }
     let text = said.stdout.trim_end().to_owned();
-    if !names_commit(&text, commit) {
+    if !names(&text, commit) {
         return Err(Error::WrongCommit {
             version: text,
             commit: commit.to_owned(),
         });
     }
     let other = other_short_commit(commit);
-    if names_commit(&text, &other) {
+    if names(&text, &other) {
         return Err(Error::ControlPassed {
             version: text,
             other,

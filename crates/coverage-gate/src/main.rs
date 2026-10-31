@@ -63,8 +63,7 @@ fn source_root(root: &Path) -> Result<PathBuf, Box<dyn Error>> {
     if root.is_absolute() {
         return Ok(root.to_path_buf());
     }
-    std::fs::canonicalize(root)
-        .map_err(|e| format!("resolve --root {}: {e}", root.display()).into())
+    std::fs::canonicalize(root).map_err(|e| format!("--root {}: {e}", root.display()).into())
 }
 
 /// Prints the table (and appends it to `--summary-file`); returns whether the gate passed.
