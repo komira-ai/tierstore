@@ -1,19 +1,23 @@
 <h1>Install</h1>
-<p class="lede">tierstore is a Linux binary. For now it ships from the <a href="https://github.com/komira-ai/kbf">kbf repository</a>: every kbf release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
+<p class="lede">tierstore is a Linux binary. It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
 
-<div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/kbf">komira-ai/kbf</a>, and a release of kbf is a release of tierstore (its version is kbf's). The packaging notes are in <a href="https://github.com/komira-ai/kbf/blob/main/packaging/tierstore/README.md"><code>packaging/tierstore</code></a>. When tierstore moves to a repository of its own, this page will say so.</p></div>
+<div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. tierstore began in kbf: versions up to 0.2.0 were built there, and the release history of those versions is kbf's. From 0.3.0 on, every release is built and signed here.</p></div>
 
 <ol class="steps">
   <li>
     <h3>Take the tarball of your architecture <span class="tag tag-ok">works today</span></h3>
-    <p>A <a href="https://github.com/komira-ai/kbf/releases">kbf release</a> lists <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code> and <code>tierstore-&lt;commit&gt;-linux-arm64.tar.gz</code>, each with a <code>.sigstore.json</code> bundle, and all of them in <code>SHA256SUMS</code>. Take the one for the host by its digest.</p>
+    <p>A <a href="https://github.com/komira-ai/tierstore/releases">release</a> lists <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code> and <code>tierstore-&lt;commit&gt;-linux-arm64.tar.gz</code>, each with a <code>.sigstore.json</code> bundle, and all of them in <code>SHA256SUMS</code>. Take the one for the host by its digest.</p>
     <p><code>&lt;commit&gt;</code> is the full 40-hex SHA of the commit the release was built from. Find it in the release's asset list, or in <code>SHA256SUMS</code>, where each line is a digest and a file name, so the name of a tierstore tarball carries it. For instance, with the example SHA <code>0123456789abcdef0123456789abcdef01234567</code>:</p>
     <div class="code"><pre>tierstore-0123456789abcdef0123456789abcdef01234567-linux-x86_64.tar.gz
 tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div>
   </li>
   <li>
     <h3>Verify it <span class="tag tag-ok">works today</span></h3>
-    <p>Verify the tarball as every kbf tarball is verified: <a href="https://github.com/komira-ai/kbf/blob/main/docs/artifacts.md">docs/artifacts.md</a>, section "Provenance bundles: verifying a tarball offline".</p>
+    <p>Check the tarball against the workflow of this repository that signed it:</p>
+    <div class="code"><pre><span class="p">$</span> gh attestation verify tierstore-&lt;commit&gt;-linux-x86_64.tar.gz --repo komira-ai/tierstore \
+    --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+    --source-ref refs/heads/main</pre></div>
+    <p>For an offline check use the <code>.sigstore.json</code> bundle of the tarball. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
   </li>
   <li>
     <h3>Place the binary <span class="tag tag-ok">works today</span></h3>

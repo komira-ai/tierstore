@@ -2,6 +2,7 @@
 
 An S3-compatible object store front with two tiers behind it, and a read cache for build nodes.
 
-tierstore is moving here from the kbf repository, where it has lived until now as `crates/tierstore` (its history before the move stays in kbf).
-The move is described in [MIGRATION.md](MIGRATION.md). Until it is done, the code, the docs and the
-releases are in kbf.
+tierstore was born in kbf, as `crates/tierstore`, and now lives here. Versions up to 0.2.0 were built in kbf (their
+history stays there); from 0.3.0 every release is built and signed in this repository.
+Download a release from the [releases page](https://github.com/komira-ai/tierstore/releases) and verify it with
+[docs/ci-and-release.md](docs/ci-and-release.md). The move is described in [MIGRATION.md](MIGRATION.md).
