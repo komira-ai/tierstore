@@ -314,7 +314,13 @@ fn the_repository_the_branch_and_the_issuer_are_held_to_the_expectation() {
     refused_for(&o, "wrong --source-ref");
     // A bundle verification that names no issuer at all, and one with no repository.
     let mut no_issuer = bundle_flags(&[]);
-    let o = verify_expecting("exp-no-issuer", BUNDLED, expect, &no_issuer, &[]);
+    let o = verify_expecting(
+        "exp-no-issuer",
+        BUNDLED,
+        "repo=example/tierstore\nissuer=https://issuer.example\n",
+        &no_issuer,
+        &[],
+    );
     refused_for(&o, "wrong --cert-oidc-issuer");
     no_issuer.drain(5..7);
     let o = verify_expecting(
