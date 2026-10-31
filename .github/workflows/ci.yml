@@ -116,7 +116,7 @@ jobs:
   # methods. Lines and branches, all the gate reads, are unaffected.
   #
   # The gate lists the crates it does not judge: `xtask` and `coverage-gate` (the tooling, whose
-  # tests run here and are required to pass) and `tierstore-testkit` (the test helper).
+  # tests run here and are required to pass).
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -168,7 +168,7 @@ jobs:
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --branch --lcov --output-path target/coverage/lcov.info
       # Fails when a crate is under 99.00% of its lines or of its branches.
       - name: Per-crate table and 99% gate
-        run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --exclude xtask --exclude coverage-gate --exclude tierstore-testkit --summary-file "$GITHUB_STEP_SUMMARY"
+        run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --exclude xtask --exclude coverage-gate --summary-file "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
