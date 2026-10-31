@@ -85,7 +85,7 @@ cannot be trusted is an operator's. The idle port is the other one of `serving`,
 
 **`prepare <artifact>`** (before anything visible). Check `tierstore --capabilities` of the staged release and of the one
 the `serving` slot links to: both must have `handover-v1`, else the hook records `mode=restart` and `cutover` does a plain
-restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Refuse with `75` (host not
+restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Refuse with `75` (class `environment`: host not
 ready, nothing done) if the guard table cannot be loaded, `nf_conntrack_tcp_timeout_established` is not longer than the
 service's idle bound, or `nf_conntrack_count` is near `nf_conntrack_max` ([`host-updates.md`][hu] 4.1.3). Point the idle slot's link at the artifact,
 start `tierstore@<idle>`, and poll `/readyz` on `127.0.0.1:<idle>` until it answers 200 with `read-only` (a counted
@@ -95,7 +95,7 @@ port comes from the validated record. *Fails*: v-next never ready: `1`, class `r
 
 **`cutover`** (the visible step). First check that the idle instance still answers `/readyz` with `read-only` (after a
 reboot it would not): if not, `1`, nothing changed. Then write intent to the record, apply the swap file of 4.1.2 for the
-idle port in one `nft -f`, then probe through 9300 until a request is answered by v-next (its build gauge names the slot
+idle port in one `nft -f -` (the ruleset on standard input, no file written), then probe through 9300 until a request is answered by v-next (its build gauge names the slot
 and the version), a counted number of times. A probe that never succeeds swaps back and exits `1`. Records `swapped` and
 sets `serving` to the new port. *Idempotent*: the file replaces the table and names the target port, so a second apply
 changes nothing; a crash before `swapped` is re-run. *Restart mode*: stop v-current, start v-next, wait for readiness,
@@ -114,9 +114,10 @@ receives the value as `updater.promotion_ceiling_secs` in the params file and mu
 updater also reports as `Failed(after_commit)` and never rolls back. **Exit `75` is not used**: nothing here is "not
 ready, try later with nothing done". *Idempotent*: it only observes, and sets the `verified` marker.
 
-**`rollback`** (before the stop of v-current only). Apply the swap file for the other port (the one `previous` names once
-`swapped`, else the one `serving` names), then stop the instance the restored rule does not name, and clear `previous` and
-the markers. *Idempotent*: stopping a stopped unit and re-applying a swap are no-ops. **It is valid only before `cleanup`
+**`rollback`** (before the stop of v-current only). Apply the swap file (on standard input, as in `cutover`) for the other port (the one `previous` names once
+`swapped`, else the one `serving` names), then stop the instance the restored rule does not name and remove that instance's slot link (a later `prepare` makes it
+again by rename), so that nobody starts an unvetted release by hand, and clear `previous` and the markers. *Idempotent*:
+stopping a stopped unit, removing an absent link and re-applying a swap are no-ops. **It is valid only before `cleanup`
 has written its `stopping` marker.** After it, v-current is exiting or gone and a swap back would send new connections
 to a closed port, so `rollback` exits `1` with `"reversible":false`, which the updater reads as `Failed(after_commit)`,
 not `halt` ([`host-updates.md`][hu] 3.2).
@@ -252,7 +253,7 @@ scrapes the two private ports from the node (the guard blocks off-host); one is 
 | step | case | what happens | state after |
 |---|---|---|---|
 | any | `state.json` invalid or forged (a port outside the declared two, a bad mode or marker, an unknown schema) | `1`, `state_invalid`, **no `nft`, `systemctl` or file call**; the updater's `rollback` refuses the same way and ends in `halt` | host as it was; an operator looks |
-| `prepare` | v-next never ready; guard cannot load; conntrack bounds fail | `1` or `75`; the updater runs `rollback`, which stops v-next | v-current serves, rule untouched |
+| `prepare` | v-next never ready; guard cannot load; conntrack bounds fail | `1` (class `release`) or `75` (class `environment`); the updater runs `rollback`, which stops v-next | v-current serves, rule untouched |
 | `cutover` | `nft -f` fails | one transaction: the old rule stays; `1` | v-current serves |
 | `cutover` | probe never answered by v-next | swap back inside the step; `1` | v-current serves |
 | `verify` (before cleanup) | v-next crashes or answers wrongly | `1`; the updater runs `rollback`: swap back, stop v-next; v-current still accepts | v-current serves |
@@ -279,8 +280,8 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
 - **C3 `verify`**: twice changes nothing; with the lock held it exits `0` with `promotion_pending`; with `read-write` it
   clears the flag; a wrong version or slot through 9300 is `1`; with `updater.promotion_ceiling_secs` in the params file
   and the lock never taken it still exits `0` (red: a hook that exits `1` at the ceiling).
-- **C4 `rollback`**: after `cutover` it returns the fake to its earlier state; after `cleanup`'s `stopping` marker it
-  exits `1` with `reversible:false` and changes nothing.
+- **C4 `rollback`**: after `cutover` it returns the fake to its earlier state, with the idle slot's link absent; after
+  `cleanup`'s `stopping` marker it exits `1` with `reversible:false` and changes nothing.
 - **C5 `cleanup`**: without `verified` it exits `1` and stops nothing (red: a hook that stops v-current); with it, twice and
   killed at each boundary, it ends with the unit stopped, link absent, `previous` cleared, and every exit
   after `stopping` carries `reversible:false`.
