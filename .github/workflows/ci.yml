@@ -6,10 +6,10 @@
 # `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
 # `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
 # every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
-# (crates/coverage-gate). The tooling crates (xtask, coverage-gate) are judged like the rest;
-# the test helper is tested and listed, and not judged (`--exclude` below). The workspace is
-# two library crates, so one job holds the whole run; a workspace that outgrows a runner would
-# split it into parts of the tests (nextest's `--partition`) whose raw profiles one job merges.
+# (crates/coverage-gate). Every crate is judged, the tooling and the test helper included,
+# with no exclusion. The workspace is small, so one job holds the whole run; a workspace that
+# outgrows a runner would split it into parts of the tests (nextest's `--partition`) whose raw
+# profiles one job merges.
 #
 # The pull request and the push to main run the same jobs. A push to main also saves the Cargo
 # cache; a pull request only restores it. Artifacts.yml builds and signs the release files on
@@ -115,8 +115,8 @@ jobs:
   # branch coverage on, llvm-cov's lcov exporter can crash while writing them for async
   # methods. Lines and branches, all the gate reads, are unaffected.
   #
-  # The gate lists the crate it does not judge: `tierstore-testkit` (the test helper). The
-  # tooling crates, `xtask` and `coverage-gate`, are judged like the libraries.
+  # The gate judges every crate of the workspace, the tooling (`xtask`, `coverage-gate`) and the
+  # test helper (`tierstore-testkit`) included: no `--exclude`.
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -168,7 +168,7 @@ jobs:
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --branch --lcov --output-path target/coverage/lcov.info
       # Fails when a crate is under 99.00% of its lines or of its branches.
       - name: Per-crate table and 99% gate
-        run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --exclude tierstore-testkit --summary-file "$GITHUB_STEP_SUMMARY"
+        run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --summary-file "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ !cancelled() }}
         with:
