@@ -1,0 +1,189 @@
+# The pull-request gate: the checks `lint` and `test`. GitHub-hosted runners only; the workflow
+# lint (crates/xtask/tests/workflows) holds every workflow of this repository to commit-SHA
+# pinned actions with a version comment, to a top-level `permissions: {}`, to no
+# `pull_request_target`, and to write scopes that only the jobs named there may hold.
+#
+# `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
+# `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
+# every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
+# (crates/coverage-gate). The tooling crates and the test helper are tested and listed, and not
+# judged (`--exclude` below). The workspace is two library crates, so one job holds the whole
+# run; a workspace that outgrows a runner would split it into parts of the tests (nextest's
+# `--partition`) whose raw profiles one job merges.
+#
+# The pull request and the push to main run the same jobs. A push to main also saves the Cargo
+# cache; a pull request only restores it. Artifacts.yml builds and signs the release files on
+# the same push, and release.yml refuses a commit that has no green run of this workflow.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# A pull request's newer run replaces its older one; a push to main always runs to its end.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  # Incremental artifacts only bloat a cached target directory.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Format, cargo-deny, clippy and the workflow lint, one after another on one Cargo cache. Each
+  # step runs after a failed one, so a run reports every failure at once. cargo-deny is the
+  # release binary, checked against its SHA-256 before use: licences, bans and sources, as
+  # deny.toml configures them. Advisories are not checked here: a new advisory against a crate
+  # we already use would fail every open pull request for something none of them did. They run
+  # in advisories.yml, daily and on every push to main, and are kept in one issue.
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DENY_VERSION: 0.20.2
+      DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: cargo fmt --all --check
+      - name: Install cargo-deny (pinned version and checksum)
+        if: ${{ !cancelled() }}
+        run: cargo xtask fetch --url "https://github.com/EmbarkStudios/cargo-deny/releases/download/$DENY_VERSION/cargo-deny-$DENY_VERSION-x86_64-unknown-linux-musl.tar.gz" --sha256 "$DENY_SHA256" --out "$HOME/.cargo/bin/cargo-deny" --extract tar.gz --member "cargo-deny-$DENY_VERSION-x86_64-unknown-linux-musl/cargo-deny"
+      - run: cargo deny --version
+        if: ${{ !cancelled() }}
+      # The arguments cargo-deny-action passes by default, without the advisories check.
+      - run: cargo deny --log-level warn --manifest-path ./Cargo.toml --all-features check bans licenses sources
+        if: ${{ !cancelled() }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        if: ${{ !cancelled() }}
+      # The object store library with its `s3` feature alone (the adapter over the S3 client of
+      # objstore-s3). The workspace run above has the feature on as well, since the crate's own
+      # tests turn `server` on and `server` enables `s3`; the library alone is built here, since
+      # its tests would turn `server` on in this build too, so the code that is compiled only
+      # without `server` is linted.
+      - run: cargo clippy -p tierstore --features s3 --lib --locked -- -D warnings
+        if: ${{ !cancelled() }}
+      # The library on its default features alone (no S3 backend, no server), and the library with
+      # the binary under `server`: the code that is compiled only in one of the builds is linted.
+      - run: cargo clippy -p tierstore --lib --locked -- -D warnings
+        if: ${{ !cancelled() }}
+      - run: cargo clippy -p tierstore --features server --lib --bins --locked -- -D warnings
+        if: ${{ !cancelled() }}
+      # The workflow lint is a test (crates/xtask/tests/workflows). The coverage run below runs
+      # it too; running it alone here makes a bad workflow red in seconds, not after that run.
+      - run: cargo test -p xtask --locked --test workflows
+        if: ${{ !cancelled() }}
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # Every test under cargo-llvm-cov and cargo-nextest (one process per test), and the gate.
+  # Branch coverage (`--branch`, rustc's `-Zcoverage-options=branch`) is unstable, so this job
+  # builds with a pinned nightly; every other job stays on the toolchain in rust-toolchain.toml.
+  # The nightly may warn where stable does not, so `-D warnings` is off here (clippy, in the lint
+  # job, enforces it). cargo-llvm-cov and cargo-nextest are release binaries, checked against
+  # their SHA-256 before use. xtask builds with the coverage nightly, the one toolchain this job
+  # installs.
+  #
+  # `--features tierstore/s3` puts the object store library's S3 backend (off by default; the
+  # crate's own tests turn it on through `server`) into the run whichever way the tests are
+  # built, so its tests count toward the 99% of tierstore.
+  #
+  # `-skip-functions` leaves the per-function records (FN, FNDA) out of the lcov export: with
+  # branch coverage on, llvm-cov's lcov exporter can crash while writing them for async
+  # methods. Lines and branches, all the gate reads, are unaffected.
+  #
+  # The gate lists the crates it does not judge: `xtask` and `coverage-gate` (the tooling, whose
+  # tests run here and are required to pass) and `tierstore-testkit` (the test helper).
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: ""
+      COVERAGE_TOOLCHAIN: nightly-2026-10-01
+      LLVM_COV_VERSION: 0.9.1
+      LLVM_COV_SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
+      NEXTEST_VERSION: 0.9.146
+      NEXTEST_SHA256: 682c21b777c333e96fd532e114d3a5a894e0729ab88d94c0a9f20f8419695428
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$COVERAGE_TOOLCHAIN" --profile minimal --component llvm-tools-preview
+      - name: Install cargo-llvm-cov (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v$LLVM_COV_VERSION/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$LLVM_COV_SHA256" --out "$HOME/.cargo/bin/cargo-llvm-cov" --extract tar.gz --member cargo-llvm-cov
+      - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov --version
+      - name: Install cargo-nextest (pinned version and checksum)
+        run: cargo "+$COVERAGE_TOOLCHAIN" xtask fetch --url "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-$NEXTEST_VERSION/cargo-nextest-$NEXTEST_VERSION-x86_64-unknown-linux-gnu.tar.gz" --sha256 "$NEXTEST_SHA256" --out "$HOME/.cargo/bin/cargo-nextest" --extract tar.gz --member cargo-nextest
+      # This job's own cache key: no other job's cache is restored here (the lint job's holds a
+      # build without coverage instrumentation).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-coverage-${{ runner.os }}-${{ runner.arch }}-
+      # The cache holds target/, and a push run left the instrumented test binaries and
+      # profiles in target/llvm-cov-target. `llvm-cov report` reads every instrumented binary
+      # and profile there, so a run that restored them merged a binary built from older
+      # sources. `llvm-cov clean --workspace` removes the workspace's own artifacts and keeps
+      # the dependencies' builds, which are what the cache is for.
+      - name: Drop the workspace's coverage artifacts the cache restored
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov clean --workspace
+      - run: mkdir -p target/coverage
+      # A process per test, so a test's line coverage must not rest on another test of the
+      # process: a `tracing` macro evaluates its fields only when a subscriber is registered,
+      # so a test that runs one installs its own.
+      - name: Run every test under coverage
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --features tierstore/s3 --locked --branch --no-report --no-fail-fast
+      - name: Report
+        env:
+          LLVM_COV_FLAGS: -skip-functions
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov report --branch --lcov --output-path target/coverage/lcov.info
+      # Fails when a crate is under 99.00% of its lines or of its branches.
+      - name: Per-crate table and 99% gate
+        run: cargo "+$COVERAGE_TOOLCHAIN" run -p coverage-gate --locked -- --lcov target/coverage/lcov.info --root "$GITHUB_WORKSPACE" --exclude xtask --exclude coverage-gate --exclude tierstore-testkit --summary-file "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: coverage
+          path: target/coverage/lcov.info
+          if-no-files-found: error
+      # The instrumented build is cleaned before the cache is saved, so the cache holds none of
+      # this run's workspace coverage artifacts.
+      - if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov clean --workspace
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
