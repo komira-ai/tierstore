@@ -112,6 +112,7 @@ test('the pages say what they say about the cache and metrics, so the code check
   // (that they are printed by the program, not only named in a comment, is staleClaims' check.)
   for (const name of ['tierstore_build_info', 'tierstore_drain_late_requests_total']) assert.match(page('why'), new RegExp(`<code>${name}</code>`));
   assert.match(page('demo'), /<code>Connection: close<\/code>.*lingering close.*not answered 503/);
+  assert.match(page('demo'), /reads until the client closes, for at most the header timeout, 60 seconds by default/);
 });
 
 test('the code still matches those statements', () => {
