@@ -409,7 +409,7 @@ async fn a_listing_resumed_after_a_key_lists_only_the_rest_over_s3() {
 /// Catches: a listing failure mapped to the wrong error, or to an empty page (a rebuild
 /// would take an unreadable bucket for an empty one): an S3 error is `Service` with its
 /// status and code; an answer that is not a ListObjectsV2 result, or that lists a key
-/// kbf cannot name (non-ASCII here: an object kbf did not write), is `Protocol`.
+/// the crate cannot name (non-ASCII here: an object it did not write), is `Protocol`.
 #[tokio::test]
 async fn listing_failures_are_typed() {
     let denied = "<Error><Code>AccessDenied</Code><Message>no</Message></Error>";

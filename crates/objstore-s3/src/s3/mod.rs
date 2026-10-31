@@ -65,7 +65,7 @@ use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
 pub const WAIT_RETRY: Duration = Duration::from_millis(250);
 
 /// How many times a ranged read is sent again after its transport failed (not timed
-/// out by kbf or by a limit of the client): a connection the store, or the path to it,
+/// out by the store's caller or by a limit of the client): a connection the store, or the path to it,
 /// closed after the request went out ("connection closed before message completed")
 /// says nothing of the next one, a pooled connection closed while idle fails this way,
 /// and so does one the kernel gave up on after the request went out (`ETIMEDOUT`,
@@ -446,7 +446,7 @@ impl Conn {
 
 impl S3Store {
     /// Creates the bucket, with Object Lock if the store claims it. Succeeds if this
-    /// key pair already owns the bucket. For setup and tests; kbf itself never calls it.
+    /// key pair already owns the bucket. For setup and tests; the store's users never call it.
     pub async fn create_bucket(&self) -> Result<(), ObjectStoreError> {
         let mut headers = Vec::new();
         if self.conn.capabilities.object_lock {
@@ -472,7 +472,7 @@ impl S3Store {
     /// `GET /` with an error such as 403. Only a request that fails to complete (refused,
     /// reset, timed out) is retried, every [`WAIT_RETRY`]. On the deadline it returns
     /// the last attempt's error. For setup and tests, to wait for a store that is
-    /// starting; kbf itself never calls it.
+    /// starting; the store's users never call it.
     pub async fn wait_answering(&self, within: Duration) -> Result<(), ObjectStoreError> {
         let deadline = Instant::now() + within;
         loop {
@@ -1175,7 +1175,14 @@ mod tests {
                 "{bad}"
             );
         }
-        for bad in ["ab", "Kbf", "-kbf", "kbf-", "kbf_cas", &"a".repeat(64)] {
+        for bad in [
+            "ab",
+            "Bucket",
+            "-bucket",
+            "bucket-",
+            "my_bucket",
+            &"a".repeat(64),
+        ] {
             assert!(
                 matches!(
                     S3Store::new(config("http://127.0.0.1", bad)),
@@ -1213,16 +1220,16 @@ mod tests {
     /// length limits (3 and 63) refused or accepted wrongly.
     #[test]
     fn bucket_names_allow_dots_digits_and_the_length_limits() {
-        for ok in ["kbf.cas1", "1kbf", "kbf1", "abc", &"a".repeat(63)] {
+        for ok in ["my.bucket1", "1bucket", "bucket1", "abc", &"a".repeat(63)] {
             assert!(valid_bucket(ok), "{ok}");
         }
         for bad in [
             "",
             "ab",
-            "kbf.cas.",
-            ".kbf",
-            "kbf cas",
-            "kbf/cas",
+            "my.bucket.",
+            ".bucket",
+            "my bucket",
+            "my/bucket",
             &"a".repeat(64),
         ] {
             assert!(!valid_bucket(bad), "{bad}");

@@ -8,9 +8,9 @@ const MAX_KEY_BYTES: usize = 1024;
 
 /// The key of one object inside one bucket.
 ///
-/// kbf names every key itself, so keys are restricted to characters that need no
+/// The caller names every key itself, so keys are restricted to characters that need no
 /// escaping anywhere: ASCII letters, digits, `-`, `_`, `.`, `~` and `/` as a separator.
-/// Segments may not be empty, `.` or `..`, so no URL normalisation between kbf and the
+/// Segments may not be empty, `.` or `..`, so no URL normalisation between the caller and the
 /// store can turn one key into another. That rules out a whole class of signing and
 /// encoding mismatches with S3 servers.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -283,7 +283,7 @@ pub struct ListPage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Capabilities {
     /// `put_new` refuses to replace an existing key ([`ObjectStoreError::AlreadyExists`]).
-    /// Without it, `put_new` on an existing key replaces it; kbf names keys so that this
+    /// Without it, `put_new` on an existing key replaces it; callers name keys so that this
     /// never changes the bytes, but the claim is checked when made.
     pub conditional_put: bool,
     /// Object Lock: `put_new` with a retention date makes an object that `delete`
@@ -326,7 +326,7 @@ pub enum ObjectStoreError {
         /// The store's message.
         message: String,
     },
-    /// The store answered something that breaks the S3 contract kbf relies on, such as
+    /// The store answered something that breaks the S3 contract the crate relies on, such as
     /// the whole object for a ranged read. Never retried into success.
     #[error("store broke the protocol: {0}")]
     Protocol(String),
@@ -363,7 +363,7 @@ mod tests {
     use super::*;
 
     /// Catches: a key check that lets through a character needing URL escaping, an
-    /// empty or dot segment, or an over-long key; any of these lets kbf's key and the
+    /// empty or dot segment, or an over-long key; any of these lets the caller's key and the
     /// key the store signs or stores drift apart.
     #[test]
     fn keys_refuse_what_needs_escaping_or_normalising() {
