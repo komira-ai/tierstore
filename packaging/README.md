@@ -229,8 +229,9 @@ header, `x-tierstore-grant`, on `GET` and `HEAD`. It works on a storage node and
 The grant key (`--grant-key-file`, once per key; mode 0600, not a symbolic link, owned by the
 server's user) is a file like the other credentials files: JSON of exactly `access_key_id` and
 `secret_access_key`, or the id and secret on two lines. The secret is at least 32 bytes (the
-server refuses a shorter one at start, and `mint_grant` refuses to sign with one): make it 32 random
-bytes as hex, for example the output of `openssl rand -hex 32`. It signs no request (a SigV4 request naming
+server refuses a shorter one at start, and `mint_grant` refuses to sign with one): the length is counted
+in the characters as written, so 32 hex characters carry only 16 random bytes. Make it 32 random
+bytes as hex (64 characters), for example the output of `openssl rand -hex 32`. It signs no request (a SigV4 request naming
 its id is `InvalidAccessKeyId`); its id differs from all other key ids (exit status 2 otherwise).
 A grant is a bearer token: whoever holds it can replay it until it expires, and on plain HTTP
 anyone on the path can read it, so use TLS where that matters. The server refuses a grant that ends
