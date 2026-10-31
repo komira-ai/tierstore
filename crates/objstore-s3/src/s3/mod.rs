@@ -364,11 +364,24 @@ impl Conn {
             .map_err(|_| ObjectStoreError::Transport(Arc::new(Stalled)))
     }
 
-    /// The whole body of a 2xx answer, read a piece at a time: it may take as long as
-    /// it needs while a piece arrives within `request_timeout` of the one before.
-    async fn read_body(&self, mut resp: Response) -> Result<Bytes, ObjectStoreError> {
+    /// The body of a 2xx answer that may be at most `limit` bytes, read a piece at a time: it
+    /// may take as long as it needs while a piece arrives within `request_timeout` of the one
+    /// before. An answer whose `Content-Length` is past `limit` fails before any of its body is
+    /// read, and a body that goes past `limit` (one with no length, or one that lies about it)
+    /// fails at the piece that takes it there, with the rest unread.
+    async fn read_body_within(
+        &self,
+        mut resp: Response,
+        limit: u64,
+    ) -> Result<Bytes, ObjectStoreError> {
+        if resp.content_length().is_some_and(|length| length > limit) {
+            return Err(too_long(limit));
+        }
         let mut body = BytesMut::new();
         while let Some(piece) = self.within(resp.chunk()).await?.map_err(transport)? {
+            if body.len() as u64 + piece.len() as u64 > limit {
+                return Err(too_long(limit));
+            }
             body.extend_from_slice(&piece);
         }
         Ok(body.freeze())
@@ -528,7 +541,7 @@ impl S3Store {
             .get(CONTENT_RANGE)
             .and_then(|v| v.to_str().ok())
             .map(str::to_owned);
-        let body = self.conn.read_body(resp).await?;
+        let body = self.conn.read_body_within(resp, range.size()).await?;
         check_partial(content_range.as_deref(), range, body.len())
             .map_err(|why| ObjectStoreError::Protocol(format!("ranged read of {key}: {why}")))?;
         Ok(body)
@@ -714,6 +727,13 @@ async fn failure(resp: Response) -> ObjectStoreError {
         code,
         message,
     }
+}
+
+/// The protocol error of a body that is longer than the `limit` bytes asked for.
+fn too_long(limit: u64) -> ObjectStoreError {
+    ObjectStoreError::Protocol(format!(
+        "the body is longer than the {limit} bytes asked for"
+    ))
 }
 
 /// Checks a 206 answer: `Content-Range` must name exactly the bytes asked for (cut at
