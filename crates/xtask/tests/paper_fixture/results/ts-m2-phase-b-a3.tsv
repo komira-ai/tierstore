@@ -1,0 +1,62 @@
+# Results behind the local_cache cells of the tierstore paper (one machine, one attempt, three
+# repetitions per cell, medians). Columns: kind, id, value, unit, how the value was taken. Only the
+# value column is read by tests/paper.rs: every number a measured cell prints must be a value here.
+# raw: a median as recorded. derived: arithmetic on raw values, named in the last column.
+# A stream count is the number of requests in flight.
+meta	reps	3	count	repetitions of every cell
+meta	keys_per_size	4	count	keys read first and second for each size in the first-read table
+meta	hit_small_object	33	KiB	object size of the small hit cells
+meta	hit_range_object	8	MiB	range size of the large-range hit cells
+meta	hit_whole_object	64	MiB	whole-object hit cells; the whole-fill limit of the cache
+meta	pass_whole_object	128	MiB	whole-object pass-through cells (about 128 MiB)
+meta	first_read_small	64	KiB	object size of the smallest first-read cell
+meta	streams_low	1	count	requests in flight
+meta	streams_mid	16	count	requests in flight
+meta	streams_high	64	count	requests in flight
+raw	hit.8MiB-range.s1.mib_s	701	MiB/s	median
+raw	hit.8MiB-range.s16.mib_s	9915	MiB/s	median
+raw	hit.8MiB-range.s64.mib_s	9826	MiB/s	median
+raw	hit.8MiB-range.s1.p50_us	11263	us	median
+raw	hit.8MiB-range.s16.p50_us	12799	us	median
+raw	hit.8MiB-range.s64.p50_us	49151	us	median
+raw	hit.8MiB-range.s1.p99_us	14335	us	p99
+raw	hit.8MiB-range.s16.p99_us	20479	us	p99
+raw	hit.8MiB-range.s64.p99_us	102399	us	p99
+raw	hit.64MiB-whole.s1.mib_s	565	MiB/s	median
+raw	hit.64MiB-whole.s16.mib_s	3860	MiB/s	median
+raw	hit.64MiB-whole.s64.mib_s	5039	MiB/s	median
+raw	hit.64MiB-whole.s1.p50_us	114687	us	median
+raw	hit.64MiB-whole.s16.p50_us	278527	us	median
+raw	hit.64MiB-whole.s64.p50_us	819199	us	median
+raw	hit.64MiB-whole.s1.p99_us	133565	us	p99
+raw	hit.64MiB-whole.s16.p99_us	305046	us	p99
+raw	hit.64MiB-whole.s64.p99_us	1310719	us	p99
+raw	hit.33KiB.s1.mib_s	53	MiB/s	median
+raw	hit.33KiB.s16.mib_s	987	MiB/s	median
+raw	hit.33KiB.s64.mib_s	4175	MiB/s	median
+raw	hit.33KiB.s1.p50_us	607	us	median
+raw	hit.33KiB.s16.p50_us	511	us	median
+raw	hit.33KiB.s64.p50_us	447	us	median
+raw	hit.33KiB.s1.p99_us	735	us	p99
+raw	hit.33KiB.s16.p99_us	735	us	p99
+raw	hit.33KiB.s64.p99_us	1151	us	p99
+raw	first_read.64KiB.first_ms	29.1	ms	first read of a key, a miss that fills the cache
+raw	first_read.64KiB.second_ms	0.70	ms	second read, a hit
+raw	first_read.8MiB.first_ms_min	259	ms	lowest of 4 keys
+raw	first_read.8MiB.first_ms_max	558	ms	highest of 4 keys
+raw	first_read.8MiB.first_ms_mean	419	ms	mean of 4 keys
+raw	first_read.8MiB.second_ms_min	12.8	ms	lowest of 4 keys
+raw	first_read.8MiB.second_ms_max	35.9	ms	highest of 4 keys
+raw	first_read.8MiB.second_ms_mean	17.8	ms	mean of 4 keys
+raw	first_read.64MiB.first_ms	1754	ms	first read
+raw	first_read.64MiB.second_ms	139	ms	second read, a hit
+derived	saving.64KiB_ms	28	ms	29.1 - 0.70, rounded
+derived	saving.8MiB_ms	400	ms	419 - 17.8, rounded
+derived	saving.64MiB_s	1.6	s	1754 - 139 ms, rounded
+derived	hit.8MiB-range.s1.gb_s	0.74	GB/s	701 MiB/s x 1.048576 / 1000
+derived	hit.8MiB-range.s16.gb_s	10.4	GB/s	9915 MiB/s x 1.048576 / 1000
+derived	hit.8MiB-range.s16.gib_s	9.7	GiB/s	9915 / 1024
+derived	hit.8MiB-range.s64.gib_s	9.6	GiB/s	9826 / 1024
+derived	hit.8MiB-range.s16.p50_ms	12.8	ms	12799 us
+derived	hit.8MiB-range.s64.p50_ms	49.2	ms	49151 us
+derived	share_of_loopback.8MiB.s16	19	percent	9.68 GiB/s over the 50.8 GiB/s bare TCP loopback figure of the transport table
