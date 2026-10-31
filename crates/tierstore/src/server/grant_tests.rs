@@ -554,7 +554,7 @@ fn the_token_in_the_readme_is_the_one_the_documented_inputs_make() {
     let documented = line
         .expect("the example header")
         .trim_start_matches("x-tierstore-grant: ");
-    let key = AccessKey::new("build-grant", "grant-secret-0123456789");
+    let key = AccessKey::new("build-grant", "grant-secret-0123456789-abcdefghij");
     let names = ["cas/l/blob-1", "cas/b/lease-7/pack-a"];
     let made = mint_grant(&key, "tierstore", 1_800_000_600, names).unwrap();
     assert_eq!(made, documented);

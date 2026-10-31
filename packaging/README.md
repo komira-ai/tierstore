@@ -276,7 +276,7 @@ body   = "tierstore-grant-v1" LF key-id LF bucket LF expires LF name { LF name }
 - The header value is at most 65536 bytes. The server compares the tag in constant time over the
   body as received, and trusts no field but `key-id` (it names the key) until the tag matches.
 
-An example: key id `build-grant`, secret `grant-secret-0123456789`, bucket `tierstore`, ending at
+An example: key id `build-grant`, secret `grant-secret-0123456789-abcdefghij`, bucket `tierstore`, ending at
 1800000600 and listing `cas/b/lease-7/pack-a` and `cas/l/blob-1`. The body is these lines joined by
 line feeds:
 
@@ -289,10 +289,10 @@ cas/b/lease-7/pack-a
 cas/l/blob-1
 ```
 
-Its tag in hex is `89a5a69f31086eda88d1f54a6403013bd55156c18d8904ccbc31c870b3975c39`; the header is
+Its tag in hex is `85d2170ef2cefc4ea1e7a4943c41e26202cf38533b8f9ea12b315d9882552b8b`; the header is
 
 ```text
-x-tierstore-grant: dGllcnN0b3JlLWdyYW50LXYxCmJ1aWxkLWdyYW50CnRpZXJzdG9yZQoxODAwMDAwNjAwCmNhcy9iL2xlYXNlLTcvcGFjay1hCmNhcy9sL2Jsb2ItMQ.iaWmnzEIbtqI0fVKZAMBO9VRVsGNiQTMvDHIcLOXXDk
+x-tierstore-grant: dGllcnN0b3JlLWdyYW50LXYxCmJ1aWxkLWdyYW50CnRpZXJzdG9yZQoxODAwMDAwNjAwCmNhcy9iL2xlYXNlLTcvcGFjay1hCmNhcy9sL2Jsb2ItMQ.hdIXDvLO_E6h56SUPEHiYgLPOFM7j56hKzFdmIJVK4s
 ```
 
 A program in Rust that links the `tierstore` library with its `server` feature makes the token with
