@@ -6,8 +6,8 @@
 # `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
 # `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
 # every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
-# (crates/coverage-gate). The tooling crates and the test helper are tested and listed, and not
-# judged (`--exclude` below). The workspace is two library crates, so one job holds the whole
+# (crates/coverage-gate). The tooling crates are tested and listed, and not judged (`--exclude`
+# below). The workspace is small, so one job holds the whole
 # run; a workspace that outgrows a runner would split it into parts of the tests (nextest's
 # `--partition`) whose raw profiles one job merges.
 #
