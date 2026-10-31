@@ -395,7 +395,7 @@ fn publish_creates_a_draft_with_every_file_reads_it_back_and_publishes_it() {
     assert_eq!(
         create
             .iter()
-            .filter(|a| a.starts_with(dir.to_str().expect("utf8")))
+            .filter(|a| Path::new(a).starts_with(&*dir))
             .count(),
         7
     );

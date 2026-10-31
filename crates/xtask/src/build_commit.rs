@@ -4,7 +4,7 @@
 //! lowercase hex digits `build.rs` embeds (`unknown` where the build had no git checkout). The
 //! check runs the binary, so it is made on a runner of the binary's own architecture, and
 //! refuses a binary that says another commit, `unknown`, or nothing it can read. A control
-//! follows: the same output must not pass for a commit whose last digit differs, so a check that
+//! follows: the same output must not pass for a commit whose twelfth digit differs, so a check that
 //! accepts any text fails instead of passing.
 
 use std::path::Path;
@@ -31,6 +31,16 @@ pub fn full_commit(flag: &str, commit: &str) -> Result<(), Error> {
 pub fn other_commit(commit: &str) -> String {
     let (head, last) = commit.split_at(commit.len().saturating_sub(1));
     format!("{head}{}", if last == "0" { "1" } else { "0" })
+}
+
+/// `commit` with the last of its first 12 hex digits changed: the digits `--version` carries,
+/// so a commit the binary names differently. (`other_commit` changes the 40th digit, which
+/// `--version` does not carry, so it cannot serve as a control for this check.)
+pub fn other_short_commit(commit: &str) -> String {
+    let mut digits = commit.to_owned();
+    let last = if &commit[11..12] == "0" { "1" } else { "0" };
+    digits.replace_range(11..12, last);
+    digits
 }
 
 /// Whether the `--version` text `said` ends with `+<first 12 digits of commit>`.
@@ -85,7 +95,7 @@ pub fn check_with(
             commit: commit.to_owned(),
         });
     }
-    let other = other_commit(commit);
+    let other = other_short_commit(commit);
     if names_commit(&text, &other) {
         return Err(Error::ControlPassed {
             version: text,

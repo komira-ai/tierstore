@@ -48,6 +48,19 @@ fn the_other_commit_differs_in_the_last_digit_only() {
     assert!(other_commit("0000000000000000000000000000000000000000").ends_with('1'));
 }
 
+#[test]
+fn the_short_control_differs_inside_the_twelve_digits_the_version_carries() {
+    // Catches: a control that changes a digit `--version` does not print, so it can never fail.
+    let other = other_short_commit(COMMIT);
+    assert_eq!(other.len(), COMMIT.len());
+    assert_eq!(&other[..11], &COMMIT[..11]);
+    assert_eq!(&other[12..], &COMMIT[12..]);
+    assert_ne!(&other[11..12], &COMMIT[11..12]);
+    assert!(other_short_commit("000000000000").ends_with('1'));
+    assert!(names_commit("tierstore 0.2.0+0123456789ab", COMMIT));
+    assert!(!names_commit("tierstore 0.2.0+0123456789ab", &other));
+}
+
 fn says(text: &'static str) -> fn(&Path) -> Result<Said, Error> {
     // A fn pointer cannot capture, so each text the tests need has its own.
     match text {

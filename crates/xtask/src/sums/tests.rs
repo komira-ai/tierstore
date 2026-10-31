@@ -243,7 +243,7 @@ fn assemble_merges_the_platform_files_sorted_by_name_and_removes_them() {
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
     left.sort();
-    assert_eq!(left, [SUMS, A, "summary.md"]);
+    assert_eq!(left, [SUMS, "summary.md", A]);
 }
 
 #[test]
