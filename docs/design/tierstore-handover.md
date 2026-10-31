@@ -2,8 +2,8 @@
 
 Moved from komira-ai/kbf's `docs/design` when tierstore moved to this repository. The generic host updater it plugs into stays in kbf; it is linked below as [host-updates.md][hu].
 
-Status: DESIGN, for the maintainers. Nothing here is built. Checked against `main` at the commit this branch starts
-from; each claim about today's code names the file and function.
+Status: DESIGN, for the maintainers. Nothing here is built. Its claims about today's code were checked against the
+code this repository was imported from (komira-ai/kbf at 8cd3077aa); each names the file and function.
 
 tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by the generic host
 updater under [`host-updates.md`][hu] 3.2: steps `prepare`, `cutover`, `verify`, `rollback`, `cleanup`; exit `0`, `1`, `75`
