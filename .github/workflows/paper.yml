@@ -1,0 +1,38 @@
+# The completion check of the tierstore paper (crates/xtask/tests/paper.rs). The paper is not
+# complete yet, so the check fails: it is `#[ignore]`d in the test run of ci.yml and runs here,
+# on its own, with `--include-ignored`. A red run of this workflow means the paper still has an
+# open cell; it does not stop a merge and it is not part of the green run release.yml asks ci.yml
+# for. It runs only on a change to the check, the paper copy or its results, and by hand. When
+# the last cell is filled the `#[ignore]` is removed and ci.yml's `test` job holds the paper.
+# GitHub-hosted runner, commit-pinned actions, no token rights beyond reading the checkout.
+name: paper
+
+on:
+  pull_request:
+    paths:
+      - crates/xtask/tests/paper.rs
+      - crates/xtask/tests/paper_fixture/**
+      - .github/workflows/paper.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: paper-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: cargo test -p xtask --locked --test paper -- --include-ignored

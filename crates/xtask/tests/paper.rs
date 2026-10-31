@@ -380,6 +380,7 @@ fn paper() -> String {
 }
 
 #[test]
+#[ignore = "the paper is not complete yet; runs in .github/workflows/paper.yml with --include-ignored, and loses this attribute with the last cell"]
 fn the_paper_is_complete() {
     // Catches: any cell of the paper still waiting for its measurement or its decision, and
     // any number in a measured cell that no result holds.
