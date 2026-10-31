@@ -15,10 +15,6 @@ code lands on `main` here before the plan is agreed.
 
 ## What stays in kbf
 
-- **tierstore-bench, for now.** It talks to the tierstore binary over HTTP and links no tierstore code, only
-  `objstore-s3`. A benchmark campaign is running on it, and moving it mid-campaign would stop that campaign. After
-  the switch it takes `objstore-s3` by the same tag. Moving it here, with `tierstore-bench.yml`, is a later
-  change of its own.
 - **The site infrastructure program** (`infra/site`). It serves kbf.dev and tierstore.dev from one program, so it
   stays. Only the repository that tierstore.dev's publish role trusts changes (see "The site").
 - **kbf's own crates.** kbf-front and kbf-task use tierstore (for example the presigning of a PUT and the S3
@@ -26,6 +22,7 @@ code lands on `main` here before the plan is agreed.
   "vX.Y.Z" }`, until the crate is published to crates.io. kbf's root `Cargo.toml` names the tag once.
 - **objstore-s3.** It moves here, because tierstore must not depend on anything in kbf. kbf depends on it by
   the same tag. `kbf-objstore` keeps re-exporting it, so kbf code does not change.
+- **tierstore-bench.** It stays in kbf for this move, with its workflow, so benchmark campaigns in progress are not interrupted. It depends only on objstore-s3, which it then gets by the same tag. Moving it is a separate step later.
 - **The layering test.** kbf's `kbf-integration-test/tests/layering.rs` checks that tierstore names no kbf
   crate. It is deleted with the move: here, the workspace itself enforces that, because no kbf crate exists
   here.
@@ -78,7 +75,7 @@ and refuses the push on any match. It looks for:
 5. **Switch kbf.** One kbf pull request does all of this:
    - repoints `tierstore` and `objstore-s3` to the tag;
    - deletes `crates/tierstore`, `crates/objstore-s3`, `packaging/tierstore` and the
-     tierstore workflows;
+     tierstore site workflows;
    - stops building and releasing the tierstore asset in kbf's release;
    - keeps kbf's CI green.
 6. **The site.** `tierstore.dev` is built and published from this repository. Its publish workflow and its
@@ -124,7 +121,7 @@ through the generic host updater, with tierstore's own update hook (planned work
 - **Landing before the freeze.** The drain, listen-address and cache-lock changes (#2129, #2130, #2133) are
   verified and green; they land in kbf before step 2.
 - **Planned work.** The update hook is the next piece of planned work. It starts here, after the import.
-- **Everything else.** Any other open tierstore pull request in kbf either lands before the freeze or is
+- **Everything else.** Any other open tierstore pull request in kbf, for example the cache scrub and the streaming read path, either lands before the freeze or is
   re-opened here by its owner.
 
 ## Settled in review
