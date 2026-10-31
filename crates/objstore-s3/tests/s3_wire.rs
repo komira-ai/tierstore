@@ -74,7 +74,7 @@ fn store(endpoint: String, capabilities: Capabilities) -> S3Store {
     S3Store::new(S3Config {
         endpoint,
         region: "us-east-1".into(),
-        bucket: "kbf-test".into(),
+        bucket: "test-bucket".into(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities,
         connect_timeout: Duration::from_secs(5),
@@ -121,7 +121,7 @@ async fn a_server_ignoring_range_is_refused() {
     let heads = seen.lock().unwrap();
     let first = heads[0].to_ascii_lowercase();
     assert!(
-        first.starts_with("get /kbf-test/cas/seg-1 http/1.1\r\n"),
+        first.starts_with("get /test-bucket/cas/seg-1 http/1.1\r\n"),
         "path-style: {first}"
     );
     assert!(first.contains("\r\nrange: bytes=2-5\r\n"), "{first}");
@@ -218,12 +218,12 @@ async fn delete_on_a_locked_store_targets_the_version() {
 
     let heads = seen.lock().unwrap();
     assert!(
-        heads[0].starts_with("HEAD /kbf-test/cas/seg-1 HTTP/1.1"),
+        heads[0].starts_with("HEAD /test-bucket/cas/seg-1 HTTP/1.1"),
         "{}",
         heads[0]
     );
     assert!(
-        heads[1].starts_with("DELETE /kbf-test/cas/seg-1?versionId=v%2B1%2Fx HTTP/1.1"),
+        heads[1].starts_with("DELETE /test-bucket/cas/seg-1?versionId=v%2B1%2Fx HTTP/1.1"),
         "{}",
         heads[1]
     );
@@ -255,13 +255,13 @@ async fn list_sends_the_token_and_reads_the_next_one() {
 
     let heads = seen.lock().unwrap();
     assert!(
-        heads[0].starts_with("GET /kbf-test?list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"),
+        heads[0].starts_with("GET /test-bucket?list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"),
         "{}",
         heads[0]
     );
     assert!(
         heads[1].starts_with(
-            "GET /kbf-test?continuation-token=t2&list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"
+            "GET /test-bucket?continuation-token=t2&list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"
         ),
         "{}",
         heads[1]
@@ -295,14 +295,14 @@ async fn list_after_a_key_sends_start_after_then_the_token() {
     let heads = seen.lock().unwrap();
     assert!(
         heads[0].starts_with(
-            "GET /kbf-test?list-type=2&max-keys=3&prefix=p%2F&start-after=p%2Fb HTTP/1.1"
+            "GET /test-bucket?list-type=2&max-keys=3&prefix=p%2F&start-after=p%2Fb HTTP/1.1"
         ),
         "{}",
         heads[0]
     );
     assert!(
         heads[1].starts_with(
-            "GET /kbf-test?continuation-token=t2&list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"
+            "GET /test-bucket?continuation-token=t2&list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"
         ),
         "{}",
         heads[1]
@@ -340,7 +340,7 @@ async fn the_listing_stream_follows_continuation_tokens() {
     assert_eq!(heads.len(), 2);
     assert!(
         heads[1].starts_with(
-            "GET /kbf-test?continuation-token=t2&list-type=2&max-keys=2&prefix=p%2F HTTP/1.1"
+            "GET /test-bucket?continuation-token=t2&list-type=2&max-keys=2&prefix=p%2F HTTP/1.1"
         ),
         "{}",
         heads[1]
@@ -384,14 +384,14 @@ async fn a_listing_resumed_after_a_key_lists_only_the_rest_over_s3() {
         let heads = seen.lock().unwrap();
         assert!(
             heads[0].starts_with(
-                "GET /kbf-test?list-type=2&max-keys=2&prefix=p%2F&start-after=p%2Fb HTTP/1.1"
+                "GET /test-bucket?list-type=2&max-keys=2&prefix=p%2F&start-after=p%2Fb HTTP/1.1"
             ),
             "{}",
             heads[0]
         );
         assert!(
             heads[1].starts_with(
-                "GET /kbf-test?continuation-token=t2&list-type=2&max-keys=2&prefix=p%2F HTTP/1.1"
+                "GET /test-bucket?continuation-token=t2&list-type=2&max-keys=2&prefix=p%2F HTTP/1.1"
             ),
             "{}",
             heads[1]
@@ -483,13 +483,19 @@ async fn create_bucket_asks_for_object_lock_and_accepts_its_own_bucket() {
 
     let heads = seen.lock().unwrap();
     let first = heads[0].to_ascii_lowercase();
-    assert!(first.starts_with("put /kbf-test http/1.1\r\n"), "{first}");
+    assert!(
+        first.starts_with("put /test-bucket http/1.1\r\n"),
+        "{first}"
+    );
     assert!(
         first.contains("\r\nx-amz-bucket-object-lock-enabled: true\r\n"),
         "{first}"
     );
     let second = heads[1].to_ascii_lowercase();
-    assert!(second.starts_with("put /kbf-test http/1.1\r\n"), "{second}");
+    assert!(
+        second.starts_with("put /test-bucket http/1.1\r\n"),
+        "{second}"
+    );
     assert!(!second.contains("object-lock"), "{second}");
 }
 
@@ -596,7 +602,7 @@ async fn a_put_the_store_never_answers_fails_saying_it_timed_out() {
     let s = S3Store::new(S3Config {
         endpoint,
         region: "us-east-1".into(),
-        bucket: "kbf-test".into(),
+        bucket: "test-bucket".into(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -617,7 +623,7 @@ async fn a_put_the_store_never_answers_fails_saying_it_timed_out() {
         text.starts_with("request to the store failed: ") && text.contains("timed out"),
         "{text}"
     );
-    for private in [addr.as_str(), "kbf-test", "cas/seg-1", "url"] {
+    for private in [addr.as_str(), "test-bucket", "cas/seg-1", "url"] {
         assert!(!text.contains(private), "{private:?} in {text}");
     }
 }
@@ -669,7 +675,7 @@ fn timed_store(endpoint: String, base: Duration, rate: Option<u64>) -> S3Store {
     S3Store::new(S3Config {
         endpoint,
         region: "us-east-1".into(),
-        bucket: "kbf-test".into(),
+        bucket: "test-bucket".into(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -874,7 +880,7 @@ async fn a_locked_delete_of_a_null_or_empty_version_sends_no_version_id() {
     let heads = seen.lock().unwrap();
     for i in [1, 3, 5] {
         assert!(
-            heads[i].starts_with("DELETE /kbf-test/cas/seg-1 HTTP/1.1"),
+            heads[i].starts_with("DELETE /test-bucket/cas/seg-1 HTTP/1.1"),
             "{}",
             heads[i]
         );
@@ -1146,7 +1152,7 @@ async fn len_sends_a_head_and_only_a_404_is_none() {
     );
     let heads = seen.lock().unwrap();
     assert!(
-        heads[0].starts_with("HEAD /kbf-test/cas/seg-1 HTTP/1.1"),
+        heads[0].starts_with("HEAD /test-bucket/cas/seg-1 HTTP/1.1"),
         "{}",
         heads[0]
     );

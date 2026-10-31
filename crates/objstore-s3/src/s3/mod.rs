@@ -788,7 +788,7 @@ mod tests {
     /// overflows on a huge body or a rate of one byte a second.
     #[test]
     fn the_timeout_grows_with_the_body_at_the_floor_rate() {
-        let mut c = config("http://127.0.0.1:9000", "kbf-test");
+        let mut c = config("http://127.0.0.1:9000", "test-bucket");
         c.request_timeout = Duration::from_secs(60);
         let flat = S3Store::new(c.clone()).unwrap();
         assert_eq!(flat.conn.timeout_for(128 << 20), Duration::from_secs(60));
@@ -939,7 +939,7 @@ mod tests {
     }
 
     fn short_limit_store(endpoint: &str) -> S3Store {
-        let mut c = config(endpoint, "kbf-test");
+        let mut c = config(endpoint, "test-bucket");
         c.request_timeout = Duration::from_millis(200);
         S3Store::new(c).unwrap()
     }
@@ -1156,7 +1156,7 @@ mod tests {
     /// request differ from the one sent, and bucket names S3 refuses.
     #[test]
     fn config_is_checked() {
-        assert!(S3Store::new(config("http://127.0.0.1:9000", "kbf-cas")).is_ok());
+        assert!(S3Store::new(config("http://127.0.0.1:9000", "example-bucket")).is_ok());
         for bad in [
             "https://127.0.0.1:9000",
             "ftp://127.0.0.1",
@@ -1169,7 +1169,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    S3Store::new(config(bad, "kbf-cas")),
+                    S3Store::new(config(bad, "example-bucket")),
                     Err(S3ConfigError::Endpoint { .. })
                 ),
                 "{bad}"
@@ -1189,7 +1189,7 @@ mod tests {
     /// Catches: a secret printed by `Debug` into a log.
     #[test]
     fn debug_hides_the_secret() {
-        let text = format!("{:?}", config("http://127.0.0.1", "kbf-cas"));
+        let text = format!("{:?}", config("http://127.0.0.1", "example-bucket"));
         assert!(text.contains("<redacted>"), "{text}");
         assert!(!text.contains("\"s\""), "{text}");
     }
@@ -1198,12 +1198,12 @@ mod tests {
     /// out which endpoint, bucket and capabilities it addresses.
     #[test]
     fn the_store_debug_names_its_bucket_and_hides_its_credentials() {
-        let mut c = config("http://127.0.0.1:9000", "kbf-cas");
+        let mut c = config("http://127.0.0.1:9000", "example-bucket");
         c.credentials = Credentials::new("AKIDSECRETISH", "hunter2");
         let text = format!("{:?}", S3Store::new(c).unwrap());
         assert!(text.starts_with("S3Store {"), "{text}");
         assert!(text.contains("base: \"http://127.0.0.1:9000/\""), "{text}");
-        assert!(text.contains("bucket: \"kbf-cas\""), "{text}");
+        assert!(text.contains("bucket: \"example-bucket\""), "{text}");
         assert!(text.contains("capabilities:"), "{text}");
         assert!(!text.contains("hunter2"), "{text}");
         assert!(!text.contains("AKIDSECRETISH"), "{text}");
