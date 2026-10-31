@@ -951,6 +951,8 @@ impl Server {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
         let late = self.late.load(Ordering::SeqCst);
+        text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
+        text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
         text.push_str(&build_info::gauge(build_info::VERSION, build_info::COMMIT));
         text
     }
