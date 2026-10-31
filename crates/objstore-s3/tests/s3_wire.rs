@@ -131,6 +131,62 @@ async fn a_server_ignoring_range_is_refused() {
     );
 }
 
+/// Serves `head_and_body` to the first connection and then keeps the connection open without
+/// ending the body, so that a client that waits for more of the body does not get an answer.
+async fn script_open(head_and_body: String) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let mut seen = Vec::new();
+        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0, "client closed before sending a request");
+            seen.extend_from_slice(&buf[..n]);
+        }
+        sock.write_all(head_and_body.as_bytes()).await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    endpoint
+}
+
+/// Catches: a ranged read whose answer says it has more bytes than were asked for being read
+/// anyway (the answer here gives 4 of the 40 bytes it announces and holds the connection, so a
+/// client that reads the body waits for the rest): the read fails on the head, as a protocol
+/// error that names the length.
+#[tokio::test]
+async fn a_content_length_past_the_range_is_refused_before_the_body() {
+    let head = "HTTP/1.1 206 Partial Content\r\ncontent-length: 40\r\n\
+                content-range: bytes 0-3/100\r\n\r\n0123";
+    let endpoint = script_open(head.to_owned()).await;
+    let s = store(endpoint, Capabilities::default());
+    let r = ByteRange::new(0, 4).unwrap();
+    let err = s.get_range(&key(), r).await.unwrap_err();
+    assert!(
+        matches!(&err, ObjectStoreError::Protocol(m) if m.contains("longer than")),
+        "{err}"
+    );
+}
+
+/// Catches: a ranged read whose body has no length (chunked) and goes on past the bytes asked for
+/// being read to its end: the answer here sends 5 bytes of a range of 4 and holds the connection
+/// without ending the body, so the read fails as soon as the fifth byte arrives, as a protocol
+/// error that names the length.
+#[tokio::test]
+async fn a_chunked_body_past_the_range_is_refused_at_the_byte_past_it() {
+    let head = "HTTP/1.1 206 Partial Content\r\ntransfer-encoding: chunked\r\n\
+                content-range: bytes 0-3/100\r\n\r\n5\r\n01234\r\n";
+    let endpoint = script_open(head.to_owned()).await;
+    let s = store(endpoint, Capabilities::default());
+    let r = ByteRange::new(0, 4).unwrap();
+    let err = s.get_range(&key(), r).await.unwrap_err();
+    assert!(
+        matches!(&err, ObjectStoreError::Protocol(m) if m.contains("longer than")),
+        "{err}"
+    );
+}
+
 /// Catches: a put that does not ask for a conditional write when the store claims it,
 /// or reads 412 as anything but `AlreadyExists`; and a retained put without the lock
 /// headers and the checksum S3 requires.

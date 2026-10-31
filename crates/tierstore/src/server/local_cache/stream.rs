@@ -75,6 +75,15 @@ pub(super) async fn eager(mut body: ReadBody) -> Result<ReadBody, Error> {
     }
 }
 
+/// The bytes of `body`, whole.
+pub(super) async fn read_within(mut body: ReadBody, _want: u64) -> Result<Bytes, Error> {
+    let mut pieces = Vec::new();
+    while let Some(piece) = body.next().await {
+        pieces.push(piece?);
+    }
+    Ok(Bytes::from(pieces.concat()))
+}
+
 impl Inner {
     /// The bytes a read holds at a time.
     fn chunk(&self) -> u64 {
@@ -407,7 +416,12 @@ impl Chunks {
             return Ok(None);
         }
         let range = ByteRange::new(self.at, want);
-        let bytes = self.inner.upstream.get(&self.key, Some(range)).await?;
+        let body = self
+            .inner
+            .upstream
+            .get_stream(&self.key, Some(range))
+            .await?;
+        let bytes = read_within(body, want).await?;
         let got = bytes.len() as u64;
         if got > want {
             return Err(Error::Other(

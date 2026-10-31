@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     Backend, ByteRange, Error, FaultyBackend, Listed, MemoryBackend, Meta, Op, OpenUpload,
-    PartBody, TestClock, UploadsAfter,
+    PartBody, ReadBody, TestClock, UploadsAfter,
 };
 
 use super::layout::{data_path, name_of};
@@ -127,6 +127,11 @@ pub(in crate::server) struct Tamper {
     pub(in crate::server) short: AtomicBool,
     /// Every read gives one byte more than it was asked for.
     pub(in crate::server) long: AtomicBool,
+    /// Every streamed read gives ten times the bytes it was asked for, a byte at a time, and
+    /// counts in `consumed` each byte that is taken from it.
+    pub(in crate::server) flood: AtomicBool,
+    /// The bytes taken from the bodies of a flood.
+    pub(in crate::server) consumed: Arc<AtomicU64>,
     /// Every HEAD gives an empty content tag.
     pub(in crate::server) blank_tags: AtomicBool,
     /// The next read, once the gate lets it go, is an `Unavailable` error.
@@ -168,6 +173,8 @@ impl Tamper {
             memory: MemoryBackend::new(),
             short: AtomicBool::new(false),
             long: AtomicBool::new(false),
+            flood: AtomicBool::new(false),
+            consumed: Arc::new(AtomicU64::new(0)),
             blank_tags: AtomicBool::new(false),
             fail_once: AtomicBool::new(false),
             panic_once: AtomicBool::new(false),
@@ -318,6 +325,20 @@ impl Backend for Tamper {
             return Ok(Bytes::from(more));
         }
         Ok(body)
+    }
+
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        if !self.flood.load(Ordering::SeqCst) {
+            let whole = self.get(key, range).await?;
+            return Ok(futures::stream::once(std::future::ready(Ok(whole))).boxed());
+        }
+        let asked = range.map_or(0, ByteRange::size);
+        let consumed = Arc::clone(&self.consumed);
+        let bytes = futures::stream::iter(0..asked * 10).map(move |_| {
+            let _ = consumed.fetch_add(1, Ordering::SeqCst);
+            Ok(Bytes::from_static(&[7]))
+        });
+        Ok(bytes.boxed())
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
