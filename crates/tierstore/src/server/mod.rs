@@ -101,6 +101,9 @@
 //! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
 //! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
 //! binary).
+//! A request that carries no key at all but a read grant (`x-tierstore-grant`), a token signed by a
+//! grant key, may `GET` and `HEAD` the objects the token lists and nothing else: see [`grant`], and
+//! [`ServerConfig::grant_keys`] (`--grant-key-file` in the binary).
 //!
 //! # Checksums
 //!
@@ -191,6 +194,7 @@ mod config_cache;
 mod config_print;
 mod front;
 pub mod gc;
+pub mod grant;
 mod handover;
 mod idle;
 mod keys;
@@ -230,6 +234,8 @@ mod drain_tests;
 mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
+#[cfg(test)]
+mod grant_server_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
@@ -298,6 +304,7 @@ use tokio::sync::{Notify, Semaphore, watch};
 use crate::{Backend, Clock, MonotonicClock, Proxy};
 
 pub use gc::GcKey;
+pub use grant::{GRANT_HEADER, GrantError, mint_grant};
 pub use keys::AccessKey;
 use keys::Role;
 pub use local_cache::LocalCache;
@@ -336,8 +343,16 @@ pub struct ServerConfig {
     /// the prefixes of three lists. None by default. Their ids differ from each other's and from
     /// the other keys'.
     pub scoped_keys: Vec<ScopedKey>,
+    /// The grant keys (see [`grant`]): the keys whose signature on a read grant the server
+    /// accepts. None by default. Their ids differ from each other's and from the other keys'; a
+    /// grant key signs no request.
+    pub grant_keys: Vec<AccessKey>,
     /// The longest `X-Amz-Expires` a presigned URL may have, whatever the ceiling of its key says.
     pub presign_max_expires: Duration,
+    /// The longest a read grant may still have to live when the server checks it: a grant that
+    /// ends more than this after the server's clock is refused as any bad grant is. 15 minutes by
+    /// default.
+    pub grant_max_lifetime: Duration,
     /// The most bytes of a request body: the longest object that one put takes, and the
     /// longest part of an upload. It is an upper bound on a length, not on memory: the body of
     /// a put or of a part is streamed to the backend and is never held whole. (The body of a
@@ -434,7 +449,9 @@ impl ServerConfig {
             presign_keys: Vec::new(),
             gc_keys: Vec::new(),
             scoped_keys: Vec::new(),
+            grant_keys: Vec::new(),
             presign_max_expires: Duration::from_secs(900),
+            grant_max_lifetime: Duration::from_secs(900),
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
             max_concurrent_puts: 32,
@@ -866,6 +883,9 @@ impl Server {
         }
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
+        }
+        if let Role::Grant(names) = &signed.role {
+            grant::permit(names, &target, &query)?;
         }
         let limit = self.config.max_request_bytes;
         let limit = signed.presign.as_ref().map_or(limit, |grant| {

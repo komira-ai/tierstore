@@ -290,10 +290,21 @@ pub struct Cli {
     /// all key ids must differ. Only its owner may read it (mode 0600).
     #[arg(long)]
     pub scoped_key_file: Vec<PathBuf>,
+    /// A file that holds a grant key: the id and the secret, JSON of exactly `access_key_id` and
+    /// `secret_access_key` or two lines. The key signs no request. It is the key whose signature
+    /// on a read grant (the `x-tierstore-grant` header) the server accepts, and a request with a
+    /// grant that lists an object may get and head that object and nothing else. Give the flag
+    /// once for each such key; all key ids must differ. Only its owner may read it (mode 0600).
+    #[arg(long)]
+    pub grant_key_file: Vec<PathBuf>,
     /// The longest `X-Amz-Expires` that a presigned URL may have, whatever the ceiling of its key
     /// says: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub presign_max_expires: Duration,
+    /// The longest a read grant may have left to live when the server checks it: a grant that
+    /// ends later than this from now is refused. A number and `ms`, `s`, `m` or `h`.
+    #[arg(long, default_value = "15m", value_parser = parse_duration)]
+    pub grant_max_lifetime: Duration,
     /// How long, after the drain began, the server goes on serving everything, so that the
     /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
