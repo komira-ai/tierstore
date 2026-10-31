@@ -1,10 +1,18 @@
 # Install
 
-tierstore ships as a Linux tarball attached to every kbf release, with its SBOM and a provenance bundle. There is no package and no container image, and nothing updates the binary afterwards: to move to a new release, place the new binary the same way and restart the unit.
+tierstore ships as a Linux tarball attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in kbf; from 0.3.0 on, releases are built and signed here. There is no package and no container image, and nothing updates the binary afterwards: to move to a new release, place the new binary the same way and restart the unit.
 
 ## Take and verify the tarball
 
-A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>-linux-arm64.tar.gz`, each with a `.sigstore.json` bundle, and all of them in `SHA256SUMS`. Take the tarball of the host's architecture by its digest and verify it as every kbf tarball is verified: [docs/artifacts.md](https://github.com/komira-ai/kbf/blob/main/docs/artifacts.md), "Provenance bundles: verifying a tarball offline".
+A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>-linux-arm64.tar.gz`, each with a `.sigstore.json` bundle, and all of them in `SHA256SUMS`. Take the tarball of the host's architecture by its digest and verify it against this repository's signer workflow:
+
+```sh
+gh attestation verify tierstore-<commit>-linux-x86_64.tar.gz --repo komira-ai/tierstore \
+  --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+  --source-ref refs/heads/main
+```
+
+For an offline check, use the `.sigstore.json` bundle of the tarball (`--bundle`). [docs/ci-and-release.md](https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md) lists the files of a release and what each attests.
 
 ## Place the binary
 
