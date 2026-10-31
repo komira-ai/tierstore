@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { DOCS, read, REPO, SITE } from './support';
 
 const SIGNER = 'komira-ai/tierstore/.github/workflows/artifacts.yml';
-const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main'];
+const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>'];
 
 const pages: Array<[string, string]> = [
   ['site install page', read(SITE, 'content', 'install.html')],
@@ -27,7 +27,7 @@ test('the signer named in the release document is a workflow of this repository'
 
 test('the install page and the install guide give the verify command with this repository as signer', () => {
   for (const [name, text] of pages.slice(0, 1).concat(pages.slice(2, 3))) {
-    for (const flag of VERIFY_FLAGS) assert.ok(text.includes(flag), `${name} lacks ${flag}`);
+    for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").includes(flag), `${name} lacks ${flag}`);
     assert.match(text, /gh attestation verify/, `${name} lacks the command`);
   }
 });
