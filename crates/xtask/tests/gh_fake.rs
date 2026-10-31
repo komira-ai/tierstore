@@ -59,6 +59,7 @@ fn api_answers_with_the_prepared_file_and_saves_a_body() {
         .arg(&path)
         .args(["--input", "-"])
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .spawn()
         .and_then(|mut child| {
             use std::io::Write as _;
@@ -188,4 +189,27 @@ fn a_verification_of_nothing_or_of_an_unreadable_file_fails() {
     let o = run(&["attestation", "verify", "/nonexistent/file", "--repo", "x"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("cannot read"), "{}", stderr(&o));
+}
+
+#[test]
+fn a_line_that_names_a_bundle_is_found_with_that_bundle_only() {
+    // Catches: an attestation bound to a bundle and a commit satisfying a check made without
+    // them, and a bundle given without its commit being accepted.
+    let flags = [
+        "--source-ref",
+        "refs/heads/main",
+        "--deny-self-hosted-runners",
+        "--signer-workflow",
+        SIGNER,
+    ];
+    let ledger = format!("*|{SIGNER}|https://slsa.dev/provenance/v1|abc|0123\n");
+    let o = verify("bundled-online", &ledger, &flags);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    let mut with_bundle = flags.to_vec();
+    with_bundle.extend([
+        "--bundle",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+    ]);
+    let o = verify("bundle-no-commit", &ledger, &with_bundle);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
 }

@@ -11,7 +11,8 @@
 //!
 //! `*` in the subject, bundle or commit field matches anything (a deliberately sloppy
 //! attestation, to see the controls of the verb refuse it); `-` in the bundle field means the
-//! attestation is checked online only. The verification must name the branch `refs/heads/main`
+//! attestation is checked online only (and is what a verification without a bundle finds: a
+//! line that names a bundle is not found without it). The verification must name the branch `refs/heads/main`
 //! and deny self-hosted runners. Without `--predicate-type` the predicate is build provenance.
 
 //! The other things the tests ask of a `gh` (or of a `cargo`), all driven by files:
@@ -161,7 +162,7 @@ fn attestation(args: &[String]) -> ExitCode {
             && *p == predicate
             && match (&bundle, commit) {
                 (Some(bundle), Some(commit)) => same(b, bundle) && same(c, commit),
-                (None, None) => true,
+                (None, None) => *b == "-",
                 _ => false,
             }
     });
