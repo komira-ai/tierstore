@@ -519,19 +519,20 @@ async fn a_part_is_on_the_wire_before_its_stream_has_ended() {
 /// `src/s3/parts.rs` (`the_watchdog_sees_progress_in_a_poll_or_a_wait_for_the_source`).
 #[tokio::test]
 async fn a_request_that_makes_no_progress_is_cut_as_a_timeout() {
-    let heard = Arc::new(Notify::new());
+    let silent_heard = Arc::new(Notify::new());
     let silent = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let silent_at = format!("http://{}", silent.local_addr().unwrap());
-    let told = Arc::clone(&heard);
+    let told = Arc::clone(&silent_heard);
     tokio::spawn(async move {
         let (mut sock, _) = silent.accept().await.unwrap();
         read_request(&mut sock).await;
         told.notify_one();
         std::future::pending::<()>().await;
     });
+    let hung_heard = Arc::new(Notify::new());
     let hung = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let hung_at = format!("http://{}", hung.local_addr().unwrap());
-    let told = Arc::clone(&heard);
+    let told = Arc::clone(&hung_heard);
     tokio::spawn(async move {
         let (mut sock, _) = hung.accept().await.unwrap();
         read_request(&mut sock).await;
@@ -540,7 +541,8 @@ async fn a_request_that_makes_no_progress_is_cut_as_a_timeout() {
         told.notify_one();
         std::future::pending::<()>().await;
     });
-    for endpoint in [silent_at, hung_at] {
+    // One Notify per leg: a stale permit of one leg must not wake the other early.
+    for (endpoint, heard) in [(silent_at, silent_heard), (hung_at, hung_heard)] {
         let store = store(&endpoint, CONDITIONAL, Duration::from_secs(30));
         let sending = tokio::spawn(async move {
             let k = key("k");

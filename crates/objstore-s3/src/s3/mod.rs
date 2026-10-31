@@ -921,27 +921,32 @@ mod tests {
                             }
                         }
                         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        told.notify_one();
                         let head = format!(
                             "HTTP/1.1 206 Partial Content\r\ncontent-length: {len}\r\n\
                              content-range: bytes 0-{}/{len}\r\n\r\n",
                             len - 1
                         );
                         match script {
-                            Script::Silent => std::future::pending::<()>().await,
+                            Script::Silent => {
+                                told.notify_one();
+                                std::future::pending::<()>().await
+                            }
                             Script::StallsInError => {
                                 let _ = sock
                                     .write_all(b"HTTP/1.1 500 Oops\r\ncontent-length: 100\r\n\r\n")
                                     .await;
+                                told.notify_one();
                                 std::future::pending::<()>().await;
                             }
                             Script::StallsInBody => {
                                 let _ = sock.write_all(head.as_bytes()).await;
                                 let _ = sock.write_all(&vec![7u8; len / 2]).await;
+                                told.notify_one();
                                 std::future::pending::<()>().await;
                             }
                             Script::Steady { pieces, every } => {
                                 let _ = sock.write_all(head.as_bytes()).await;
+                                told.notify_one();
                                 for _ in 0..pieces {
                                     tokio::time::sleep(every).await;
                                     let _ = sock.write_all(&vec![7u8; len / pieces]).await;

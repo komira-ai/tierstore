@@ -713,6 +713,8 @@ fn timed_store(endpoint: String, base: Duration, rate: Option<u64>) -> S3Store {
 const BASE: Duration = Duration::from_secs(40);
 const RATE: u64 = 1024;
 const SLOW: Duration = Duration::from_secs(120);
+/// A base limit above [`SLOW`] by itself, for the test where only the base can cover the jump.
+const LONG_BASE: Duration = Duration::from_secs(200);
 
 /// Moves tokio's clock forward by `by` in one jump, and lets it run again. A request whose
 /// limit is less than `by` has timed out afterwards; one whose limit is more has not, and
@@ -744,6 +746,26 @@ async fn a_slow_put_within_the_floor_rate_is_not_cut() {
         .await
         .unwrap()
         .expect("a PUT inside body/rate + base was cut");
+}
+
+/// Catches: the base limit dropped from a PUT's allowance (leaving body/rate alone). A 1 KiB
+/// body at the floor rate adds one second only, so only [`LONG_BASE`] (above [`SLOW`]) covers
+/// the jump: the PUT is not cut, and meets its answer.
+#[tokio::test]
+async fn a_small_put_is_given_the_base_timeout() {
+    let (endpoint, read, release) = gated_store().await;
+    let s = timed_store(endpoint, LONG_BASE, Some(RATE));
+    let putting = tokio::spawn(async move {
+        s.put_new(&key(), Bytes::from(vec![7u8; 1 << 10]), None)
+            .await
+    });
+    read.notified().await;
+    jump(SLOW).await;
+    release.notify_one();
+    putting
+        .await
+        .unwrap()
+        .expect("a PUT inside its base limit was cut");
 }
 
 /// Catches: the allowance scaled by something other than the body (a fixed bonus, or a
