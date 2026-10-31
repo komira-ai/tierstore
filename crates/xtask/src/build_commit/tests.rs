@@ -152,5 +152,8 @@ fn the_check_verb_runs_the_binary() {
     // Catches: `check` not reaching the real runner. `false` exits 1 whatever it is given, so
     // the verb reports a failed `--version`.
     let result = check(Path::new("false"), COMMIT);
-    assert!(matches!(result, Err(Error::Failed(_))), "{result:?}");
+    assert_eq!(
+        result,
+        Err(Error::Failed("false --version failed: ".to_owned()))
+    );
 }

@@ -316,12 +316,41 @@ fn a_download_returns_the_body_and_a_status_error_is_a_download_error() {
     );
 }
 
+/// A listener on the loopback address that nobody serves, and the plain-HTTP URL of it. A
+/// connection made to it waits in the kernel's queue until `accept`, so `nothing_connected`
+/// can tell, without waiting, whether anything connected.
+fn watched() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/tool", listener.local_addr().expect("addr"));
+    (listener, url)
+}
+
+fn nothing_connected(listener: &std::net::TcpListener) -> bool {
+    listener.set_nonblocking(true).expect("nonblocking");
+    matches!(
+        listener.accept(),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+    )
+}
+
 #[test]
-fn a_download_over_plain_http_is_refused() {
-    // Catches: `download` fetching a tool over a connection anyone can alter. The refusal
-    // comes before any connection, so the address needs no server.
-    let e = download("http://127.0.0.1:9/tool", &[]).expect_err("http");
-    assert!(matches!(e, Error::Download { .. }), "{e}");
+fn a_download_over_plain_http_is_refused_before_any_connection() {
+    // Catches: `download` fetching a tool over a connection anyone can alter. The URL is a live
+    // server's, so a download that went ahead would connect, and the refusal must name the
+    // rule (an unreachable address would fail whatever the rule was).
+    let (listener, url) = watched();
+    let e = download(&url, &[]).expect_err("http");
+    assert_eq!(
+        e,
+        Error::Download {
+            url: url.clone(),
+            why: PLAIN_HTTP.to_owned()
+        }
+    );
+    assert!(
+        nothing_connected(&listener),
+        "the refused download connected"
+    );
 }
 
 #[test]
@@ -374,19 +403,26 @@ fn fetch_downloads_checks_and_installs_and_prints_what_it_did() {
 }
 
 #[test]
-fn fetch_over_http_fails_in_the_download_and_the_host_roots_build_a_client() {
-    // Catches: `fetch` not going through `download`, and a TLS client the host's roots cannot
-    // build (the roots may be none on a machine with no store).
+fn fetch_over_plain_http_is_refused_before_any_connection_and_installs_nothing() {
+    // Catches: `fetch` going around `download`'s rule, and the host's roots building no client
+    // (the roots may be none on a machine with no store).
     let dir = scratch("fetch-http");
     let roots = host_roots();
     let _ = tls_config(&roots);
+    let (listener, url) = watched();
+    let out = dir.join("never");
     let e = fetch(
-        "http://127.0.0.1:9/tool",
+        &url,
         &Sha256::of(TOOL),
         &Unpack::new(None, None).expect("unpack"),
-        &dir.join("never"),
+        &out,
         &roots,
     )
     .expect_err("http");
-    assert!(matches!(e, Error::Download { .. }), "{e}");
+    assert!(
+        matches!(&e, Error::Download { why, .. } if why == PLAIN_HTTP),
+        "{e}"
+    );
+    assert!(nothing_connected(&listener), "the refused fetch connected");
+    assert!(!out.exists());
 }

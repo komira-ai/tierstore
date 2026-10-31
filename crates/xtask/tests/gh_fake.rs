@@ -115,18 +115,31 @@ fn deny_exits_with_the_prepared_code_and_prints_the_prepared_stderr() {
     assert_eq!(stderr(&o), "{\"type\":\"log\"}\n");
 }
 
-/// A verification of a file `name` in a directory whose ledger is `ledger`.
-fn verify(name: &str, ledger: &str, flags: &[&str]) -> Output {
+/// A verification of a file in a directory of its own whose ledger is `ledger` and whose
+/// `expect.txt` is `expect`, run with `env` added to the environment.
+fn verify_expecting(
+    name: &str,
+    ledger: &str,
+    expect: &str,
+    flags: &[&str],
+    env: &[(&str, &str)],
+) -> Output {
     let d = dir(name);
     let file: &Path = &d.join("asset");
     std::fs::write(file, "bytes").expect("asset");
     std::fs::write(d.join("ledger.txt"), ledger).expect("ledger");
+    std::fs::write(d.join("expect.txt"), expect).expect("expect");
     fake()
         .args(["attestation", "verify"])
         .arg(file)
         .args(flags)
+        .envs(env.iter().copied())
         .output()
         .expect("run")
+}
+
+fn verify(name: &str, ledger: &str, flags: &[&str]) -> Output {
+    verify_expecting(name, ledger, "", flags, &[])
 }
 
 const BYTES_SHA: &str = "bb2a1d4b0e45c9a0a3a55c5e1c1b9d8f0e1d1c0f6f0c8a7d2e6b1a9c4d3e2f10";
@@ -212,4 +225,170 @@ fn a_line_that_names_a_bundle_is_found_with_that_bundle_only() {
     ]);
     let o = verify("bundle-no-commit", &ledger, &with_bundle);
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+}
+
+const BUNDLED: &str =
+    "*|example/tierstore/.github/workflows/artifacts.yml|https://slsa.dev/provenance/v1|*|*\n";
+
+/// The flags of a good verification of a bundle, then `more`.
+fn bundle_flags<'a>(more: &[&'a str]) -> Vec<&'a str> {
+    let mut flags = vec![
+        "--source-ref",
+        "refs/heads/main",
+        "--deny-self-hosted-runners",
+        "--signer-workflow",
+        SIGNER,
+        "--repo",
+        "example/tierstore",
+        "--source-digest",
+        "0123",
+        "--bundle",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+    ];
+    flags.extend_from_slice(more);
+    flags
+}
+
+fn refused_for(o: &Output, why: &str) {
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(o));
+    assert!(stderr(o).contains(why), "{}", stderr(o));
+}
+
+#[test]
+fn the_repository_the_branch_and_the_issuer_are_held_to_the_expectation() {
+    // Catches: a stand-in that ignores `--repo`, `--cert-oidc-issuer` or `--source-ref`, so a
+    // verb that drops or alters them goes unnoticed.
+    let expect =
+        "repo=example/tierstore\nissuer=https://issuer.example\nsource-ref=refs/heads/dev\n";
+    let flags = |repo: &'static str, issuer: &'static str, branch: &'static str| {
+        let mut f = vec![
+            "--source-ref",
+            branch,
+            "--deny-self-hosted-runners",
+            "--signer-workflow",
+            SIGNER,
+        ];
+        f.extend(["--repo", repo, "--source-digest", "0123", "--bundle"]);
+        f.push(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        f.extend(["--cert-oidc-issuer", issuer]);
+        f
+    };
+    let good = flags(
+        "example/tierstore",
+        "https://issuer.example",
+        "refs/heads/dev",
+    );
+    let o = verify_expecting("exp-good", BUNDLED, expect, &good, &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let o = verify_expecting(
+        "exp-repo",
+        BUNDLED,
+        expect,
+        &flags("example/other", "https://issuer.example", "refs/heads/dev"),
+        &[],
+    );
+    refused_for(&o, "wrong --repo");
+    let o = verify_expecting(
+        "exp-issuer",
+        BUNDLED,
+        expect,
+        &flags(
+            "example/tierstore",
+            "https://other.example",
+            "refs/heads/dev",
+        ),
+        &[],
+    );
+    refused_for(&o, "wrong --cert-oidc-issuer");
+    let o = verify_expecting(
+        "exp-branch",
+        BUNDLED,
+        expect,
+        &flags(
+            "example/tierstore",
+            "https://issuer.example",
+            "refs/heads/main",
+        ),
+        &[],
+    );
+    refused_for(&o, "wrong --source-ref");
+    // A bundle verification that names no issuer at all, and one with no repository.
+    let mut no_issuer = bundle_flags(&[]);
+    let o = verify_expecting("exp-no-issuer", BUNDLED, expect, &no_issuer, &[]);
+    refused_for(&o, "wrong --cert-oidc-issuer");
+    no_issuer.drain(5..7);
+    let o = verify_expecting(
+        "exp-no-repo",
+        BUNDLED,
+        "repo=example/tierstore\n",
+        &no_issuer,
+        &[],
+    );
+    refused_for(&o, "wrong --repo");
+}
+
+#[test]
+fn the_trusted_root_and_the_proxies_are_held_to_the_expectation_for_bundles_only() {
+    // Catches: a stand-in that does not look at `--custom-trusted-root` or at the environment,
+    // so a verb that drops the root or leaves a bypass list in place goes unnoticed; and
+    // expectations applied to a verification without a bundle, which has no root.
+    let proxies = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]
+    .map(|name| (name, "http://127.0.0.1:9"));
+    let expect = "root=/some/root.jsonl\nproxy=http://127.0.0.1:9\n";
+    let with_root = bundle_flags(&["--custom-trusted-root", "/some/root.jsonl"]);
+    let o = verify_expecting("root-good", BUNDLED, expect, &with_root, &proxies);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let o = verify_expecting(
+        "root-missing",
+        BUNDLED,
+        expect,
+        &bundle_flags(&[]),
+        &proxies,
+    );
+    refused_for(&o, "wrong --custom-trusted-root");
+    let other = bundle_flags(&["--custom-trusted-root", "/other/root.jsonl"]);
+    let o = verify_expecting("root-other", BUNDLED, expect, &other, &proxies);
+    refused_for(&o, "wrong --custom-trusted-root");
+    let o = verify_expecting("root-unwanted", BUNDLED, "root=-\n", &with_root, &[]);
+    refused_for(&o, "wrong --custom-trusted-root");
+    let o = verify_expecting("root-none", BUNDLED, "root=-\n", &bundle_flags(&[]), &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+
+    let o = verify_expecting("proxy-unset", BUNDLED, expect, &with_root, &[]);
+    refused_for(&o, "wrong proxy environment");
+    let mut bypass = proxies.to_vec();
+    bypass.push(("NO_PROXY", "localhost"));
+    let o = verify_expecting("proxy-bypass", BUNDLED, expect, &with_root, &bypass);
+    refused_for(&o, "wrong proxy environment");
+    let mut lower = proxies.to_vec();
+    lower.push(("no_proxy", "localhost"));
+    let o = verify_expecting("proxy-bypass-lower", BUNDLED, expect, &with_root, &lower);
+    refused_for(&o, "wrong proxy environment");
+
+    // Without a bundle, nothing about a root is held.
+    let online =
+        "*|example/tierstore/.github/workflows/artifacts.yml|https://slsa.dev/provenance/v1|-|-\n";
+    let flags = [
+        "--source-ref",
+        "refs/heads/main",
+        "--deny-self-hosted-runners",
+        "--signer-workflow",
+        SIGNER,
+    ];
+    let o = verify_expecting(
+        "online",
+        online,
+        "root=/some/root.jsonl\nissuer=x\n",
+        &flags,
+        &[],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }

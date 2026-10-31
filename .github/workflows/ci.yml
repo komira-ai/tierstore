@@ -6,10 +6,10 @@
 # `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
 # `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
 # every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
-# (crates/coverage-gate). The tooling crates (xtask, coverage-gate) are judged like the rest; the test
-# helper is tested and listed, and not judged (`--exclude` below). The workspace is two library crates, so one job holds the whole
-# run; a workspace that outgrows a runner would split it into parts of the tests (nextest's
-# `--partition`) whose raw profiles one job merges.
+# (crates/coverage-gate). The tooling crates (xtask, coverage-gate) are judged like the rest;
+# the test helper is tested and listed, and not judged (`--exclude` below). The workspace is
+# two library crates, so one job holds the whole run; a workspace that outgrows a runner would
+# split it into parts of the tests (nextest's `--partition`) whose raw profiles one job merges.
 #
 # The pull request and the push to main run the same jobs. A push to main also saves the Cargo
 # cache; a pull request only restores it. Artifacts.yml builds and signs the release files on

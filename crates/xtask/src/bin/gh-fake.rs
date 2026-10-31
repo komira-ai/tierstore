@@ -12,9 +12,21 @@
 //! `*` in the subject, bundle or commit field matches anything (a deliberately sloppy
 //! attestation, to see the controls of the verb refuse it); `-` in the bundle field means the
 //! attestation is checked online only (and is what a verification without a bundle finds: a
-//! line that names a bundle is not found without it). The verification must name the branch `refs/heads/main`
-//! and deny self-hosted runners. Without `--predicate-type` the predicate is build provenance.
-
+//! line that names a bundle is not found without it). The verification must deny self-hosted
+//! runners and name the branch `refs/heads/main` (or the one `expect.txt` names). Without
+//! `--predicate-type` the predicate is build provenance.
+//!
+//! The command line is held to what the verb is to pass by `expect.txt` (beside the ledger),
+//! lines `key=value`; a key that is not there is not checked:
+//!
+//! - `repo`: `--repo` is this;
+//! - `source-ref`: `--source-ref` is this (default `refs/heads/main`);
+//! - `issuer`: a verification with `--bundle` has `--cert-oidc-issuer` this;
+//! - `root`: a verification with `--bundle` has `--custom-trusted-root` this path, or none
+//!   when the value is `-`;
+//! - `proxy`: a verification with `--bundle` runs with all six proxy variables set to this and
+//!   neither bypass list (`NO_PROXY`, `no_proxy`) in its environment.
+//!
 //! The other things the tests ask of a `gh` (or of a `cargo`), all driven by files:
 //!
 //! - `--version` prints `gh-fake 0.1.0+0123456789ab` (the form of `tierstore --version`);
@@ -116,6 +128,65 @@ fn deny() -> ExitCode {
     ExitCode::from(code)
 }
 
+/// The file `name` in the directory of `file` or the one above it, or nothing.
+fn find_beside(file: &str, name: &str) -> String {
+    Path::new(file)
+        .ancestors()
+        .skip(1)
+        .take(2)
+        .find_map(|dir| std::fs::read_to_string(dir.join(name)).ok())
+        .unwrap_or_default()
+}
+
+/// The proxy variables a verification with a trusted root runs under.
+const PROXIES: [&str; 6] = [
+    "HTTPS_PROXY",
+    "https_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+];
+
+/// How the command line departs from what `expect.txt` says, if it does.
+fn departure(expect: &str, flags: &BTreeMap<&str, &str>) -> Option<String> {
+    let want: BTreeMap<&str, &str> = expect.lines().filter_map(|l| l.split_once('=')).collect();
+    let flag = |name: &str| flags.get(name).copied();
+    let source_ref = want.get("source-ref").copied().unwrap_or("refs/heads/main");
+    if flag("--source-ref") != Some(source_ref) || flag("--deny-self-hosted-runners").is_none() {
+        return Some("wrong --source-ref or no --deny-self-hosted-runners".to_owned());
+    }
+    if want.get("repo").is_some_and(|r| flag("--repo") != Some(r)) {
+        return Some("wrong --repo".to_owned());
+    }
+    // The rest holds a verification of a bundle only.
+    flag("--bundle")?;
+    if want
+        .get("issuer")
+        .is_some_and(|i| flag("--cert-oidc-issuer") != Some(i))
+    {
+        return Some("wrong --cert-oidc-issuer".to_owned());
+    }
+    if let Some(root) = want.get("root") {
+        let wanted = (*root != "-").then_some(*root);
+        if flag("--custom-trusted-root") != wanted {
+            return Some("wrong --custom-trusted-root".to_owned());
+        }
+    }
+    if let Some(proxy) = want.get("proxy") {
+        let dead = PROXIES
+            .iter()
+            .any(|v| std::env::var(v).ok().as_deref() != Some(*proxy));
+        let bypass = ["NO_PROXY", "no_proxy"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some());
+        if dead || bypass {
+            return Some("wrong proxy environment".to_owned());
+        }
+    }
+    None
+}
+
 /// `attestation verify <file> ...`: see the header.
 fn attestation(args: &[String]) -> ExitCode {
     if args.len() < 3 || args[0] != "attestation" || args[1] != "verify" {
@@ -136,16 +207,10 @@ fn attestation(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
     let bundle = flags.get("--bundle").and_then(|b| digest(b));
-    let ledger = Path::new(&args[2])
-        .ancestors()
-        .skip(1)
-        .take(2)
-        .find_map(|dir| std::fs::read_to_string(dir.join("ledger.txt")).ok())
-        .unwrap_or_default();
-    if flags.get("--source-ref").copied() != Some("refs/heads/main")
-        || !flags.contains_key("--deny-self-hosted-runners")
-    {
-        eprintln!("gh-fake: wrong --source-ref or no --deny-self-hosted-runners: {flags:?}");
+    let ledger = find_beside(&args[2], "ledger.txt");
+    let expect = find_beside(&args[2], "expect.txt");
+    if let Some(problem) = departure(&expect, &flags) {
+        eprintln!("gh-fake: {problem}: {flags:?}");
         return ExitCode::FAILURE;
     }
     let signer = flags.get("--signer-workflow").copied().unwrap_or_default();

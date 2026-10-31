@@ -88,15 +88,18 @@ fn a_failure_is_status_1_with_the_words_and_a_usage_error_is_status_2() {
 }
 
 #[test]
-fn fetch_over_http_is_refused() {
-    // Catches: the verb downloading over a connection that is not HTTPS.
+fn fetch_over_http_is_refused_before_any_connection() {
+    // Catches: the verb downloading over a connection that is not HTTPS. The URL is a live
+    // listener's, so a download that went ahead would connect to it.
     let d = dir("fetch");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/tool", listener.local_addr().expect("addr"));
     let o = run(
         &d,
         &[
             "fetch",
             "--url",
-            "http://127.0.0.1:9/tool",
+            &url,
             "--sha256",
             &"0".repeat(64),
             "--out",
@@ -105,10 +108,17 @@ fn fetch_over_http_is_refused() {
     );
     assert_eq!(o.status.code(), Some(1));
     assert!(
-        stderr(&o).contains("download http://127.0.0.1:9/tool"),
+        stderr(&o).contains(xtask::fetch::PLAIN_HTTP),
         "{}",
         stderr(&o)
     );
+    listener.set_nonblocking(true).expect("nonblocking");
+    let accepted = listener.accept();
+    assert!(
+        matches!(&accepted, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the refused fetch connected"
+    );
+    assert!(!d.join("tool").exists());
 }
 
 #[test]

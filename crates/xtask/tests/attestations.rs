@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use xtask::Error;
+use xtask::bundles::{DEAD_PROXY, ISSUER};
 use xtask::sums::{Attestations, verify_attestations};
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -123,6 +124,23 @@ impl Release {
 
     /// Runs the verb with the ledger as it is now, and `trusted_root` for the bundles.
     fn verify_with(&self, trusted_root: Option<&Path>) -> Result<Vec<String>, Error> {
+        // What the verb is to pass `gh`, held by the stand-in: the repository, the issuer, the
+        // branch, and the trusted root with the dead proxies around it, or no root at all.
+        let root = match trusted_root {
+            Some(root) => format!("root={}\nproxy={DEAD_PROXY}\n", root.display()),
+            None => "root=-\n".to_owned(),
+        };
+        let expect = format!("repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\n{root}");
+        self.verify_expecting(trusted_root, &expect)
+    }
+
+    /// Runs the verb with `trusted_root`, the stand-in holding the command line to `expect`.
+    fn verify_expecting(
+        &self,
+        trusted_root: Option<&Path>,
+        expect: &str,
+    ) -> Result<Vec<String>, Error> {
+        std::fs::write(self.dir.join("expect.txt"), expect).expect("expect");
         std::fs::write(self.dir.join("ledger.txt"), self.ledger.join("\n")).expect("ledger");
         let scratch = self.dir.join("scratch");
         let _ = std::fs::remove_dir_all(&scratch);
@@ -335,14 +353,63 @@ fn a_workflow_or_branch_that_does_not_fit_is_a_usage_error() {
 }
 
 #[test]
-fn a_trusted_root_is_passed_to_every_bundle_check() {
-    // Catches: the offline check dropping its trusted root (the call would then go to the
-    // network), by a release that verifies with one.
+fn a_trusted_root_and_the_dead_proxies_reach_every_bundle_check() {
+    // Catches: the offline check dropping its trusted root or its proxies (the call would then
+    // go to the network). The stand-in refuses any bundle verification whose command line or
+    // environment departs from `expect.txt`, so the release verifies only when every one of
+    // them carried both; it also refuses a root where none is expected, and the other way.
     let release = Release::good("trusted-root");
     let root = release.dir.join("trusted_root.jsonl");
     std::fs::write(&root, "{}").expect("root");
     let printed = release.verify_with(Some(&root)).expect("verify");
     assert_eq!(printed.len(), 5, "{printed:?}");
+
+    let base = format!("repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\n");
+    let proxy = format!("proxy={DEAD_PROXY}\n");
+    let failed = failure(release.verify_expecting(Some(&root), &format!("{base}root=-\n")));
+    assert!(
+        failed.contains("its bundle"),
+        "a root where none is expected: {failed}"
+    );
+    let failed =
+        failure(release.verify_expecting(None, &format!("{base}root={}\n", root.display())));
+    assert!(
+        failed.contains("its bundle"),
+        "no root where one is expected: {failed}"
+    );
+    let failed = failure(release.verify_expecting(
+        Some(&root),
+        &format!("{base}root={}\nproxy=http://127.0.0.1:1\n", root.display()),
+    ));
+    assert!(failed.contains("its bundle"), "other proxies: {failed}");
+    let failed = failure(release.verify_expecting(None, &format!("{base}root=-\n{proxy}")));
+    assert!(
+        failed.contains("its bundle"),
+        "proxies without a root: {failed}"
+    );
+}
+
+#[test]
+fn the_repository_the_issuer_and_the_branch_are_passed_as_given() {
+    // Catches: `--repo`, `--cert-oidc-issuer` or `--source-ref` dropped or changed. The
+    // stand-in refuses a command line that departs from `expect.txt`, so each wrong
+    // expectation below fails the release as a dropped or altered flag would.
+    let release = Release::good("expectations");
+    let root = "root=-\n";
+    for (wrong, what) in [
+        (format!("repo=example/other\n{root}"), "the repository"),
+        (
+            format!("issuer=https://issuer.example\n{root}"),
+            "the issuer",
+        ),
+        (format!("source-ref=refs/heads/other\n{root}"), "the branch"),
+    ] {
+        let failed = failure(release.verify_expecting(None, &wrong));
+        assert!(
+            failed.contains("verifies") || failed.contains("its bundle"),
+            "{what}: {failed}"
+        );
+    }
 }
 
 #[test]

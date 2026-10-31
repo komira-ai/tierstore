@@ -541,3 +541,10 @@ fn publish_leaves_the_releases_of_other_tags_alone() {
         .collect();
     assert_eq!(kept, ["v0.2.0", "v0.2.1", "v0.3.0"]);
 }
+
+#[test]
+fn locate_without_an_output_file_only_prints() {
+    // Catches: a locate that needs `--output`, and one that prints the run id wrongly without.
+    let printed = locate(&good_repo(), REPO, COMMIT, None).expect("locate");
+    assert_eq!(printed.last().map(String::as_str), Some("run-id=11"));
+}

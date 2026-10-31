@@ -24,6 +24,9 @@ use std::time::Duration;
 use rustls::pki_types::CertificateDer;
 use sha2::Digest;
 
+/// What a download of a URL that is not `https://` says: no connection is made for it.
+pub const PLAIN_HTTP: &str = "refused: only https:// URLs are fetched";
+
 /// The largest download read: well above the biggest pinned tool (about 60 MB), and a
 /// bound on the memory a wrong URL can take.
 pub const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
@@ -182,6 +185,12 @@ pub fn download_from(
     roots: &[CertificateDer<'static>],
     https_only: bool,
 ) -> Result<Vec<u8>, Error> {
+    if https_only && !url.starts_with("https://") {
+        return Err(Error::Download {
+            url: url.to_owned(),
+            why: PLAIN_HTTP.to_owned(),
+        });
+    }
     let tls = tls_config(roots);
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .https_only(https_only)

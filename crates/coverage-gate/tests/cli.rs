@@ -161,6 +161,18 @@ fn a_relative_root_is_resolved_from_the_working_directory() {
         .output()
         .expect("run coverage-gate");
     assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+    assert!(out(&o).contains("| a | 10/10 |"), "{}", out(&o));
+    assert!(out(&o).contains("coverage gate: PASS"), "{}", out(&o));
+}
+
+#[test]
+fn a_root_that_is_not_a_workspace_is_status_2() {
+    // Catches: a workspace that cannot be listed read as an empty one, which passes.
+    let root = workspace("no-crates", &["a"]);
+    let tracefile = lcov(&root, &[("crates/a/src/lib.rs", 10, 10, 0, 0)]);
+    let o = gate(&root.join("absent"), &tracefile, &[]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("list crates under"));
 }
 
 #[test]
