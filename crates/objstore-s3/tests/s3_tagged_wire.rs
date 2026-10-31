@@ -80,7 +80,7 @@ fn store(endpoint: String) -> S3Store {
     S3Store::new(S3Config {
         endpoint,
         region: "us-east-1".into(),
-        bucket: "kbf-test".into(),
+        bucket: "test-bucket".into(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities: Capabilities::default(),
         connect_timeout: Duration::from_secs(5),
@@ -124,7 +124,7 @@ async fn a_put_if_match_sends_the_tag_and_reads_the_new_one() {
     let heads = seen.lock().unwrap();
     let put = heads[0].to_ascii_lowercase();
     assert!(
-        put.starts_with("put /kbf-test/cas/seg-1 http/1.1\r\n"),
+        put.starts_with("put /test-bucket/cas/seg-1 http/1.1\r\n"),
         "{put}"
     );
     assert!(put.contains("\r\nif-match: \"old\"\r\n"), "{put}");
@@ -184,7 +184,7 @@ async fn a_head_reads_the_size_the_tag_and_the_time_from_the_headers() {
     assert_eq!(head, want);
     let heads = seen.lock().unwrap();
     assert!(
-        heads[0].starts_with("HEAD /kbf-test/cas/seg-1 HTTP/1.1\r\n"),
+        heads[0].starts_with("HEAD /test-bucket/cas/seg-1 HTTP/1.1\r\n"),
         "{}",
         heads[0]
     );
@@ -308,7 +308,7 @@ async fn a_whole_object_read_sends_no_range_and_is_typed_when_it_fails() {
     let heads = seen.lock().unwrap();
     let first = heads[0].to_ascii_lowercase();
     assert!(
-        first.starts_with("get /kbf-test/cas/seg-1 http/1.1\r\n"),
+        first.starts_with("get /test-bucket/cas/seg-1 http/1.1\r\n"),
         "{first}"
     );
     assert!(!first.contains("\r\nrange:"), "{first}");
@@ -344,7 +344,7 @@ async fn a_stamped_listing_sends_a_list_request_and_reads_the_times() {
 
     let heads = seen.lock().unwrap();
     assert!(
-        heads[0].starts_with("GET /kbf-test?list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"),
+        heads[0].starts_with("GET /test-bucket?list-type=2&max-keys=3&prefix=p%2F HTTP/1.1"),
         "{}",
         heads[0]
     );

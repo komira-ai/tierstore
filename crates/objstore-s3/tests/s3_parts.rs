@@ -47,7 +47,7 @@ fn store(endpoint: &str, capabilities: Capabilities, request_timeout: Duration) 
     S3Store::new(S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
-        bucket: "kbf-test".to_owned(),
+        bucket: "test-bucket".to_owned(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
         capabilities,
         connect_timeout: Duration::from_secs(5),
@@ -389,9 +389,9 @@ async fn each_call_sends_the_request_of_its_name() {
 
     let seen = seen.lock().unwrap();
     let heads: Vec<String> = seen.iter().map(|s| s.head.to_ascii_lowercase()).collect();
-    let create = "post /kbf-test/cas/k?uploads= http/1.1\r\n";
+    let create = "post /test-bucket/cas/k?uploads= http/1.1\r\n";
     assert!(heads[0].starts_with(create), "{}", heads[0]);
-    let put = "put /kbf-test/cas/k?partnumber=2&uploadid=u-1 http/1.1\r\n";
+    let put = "put /test-bucket/cas/k?partnumber=2&uploadid=u-1 http/1.1\r\n";
     assert!(heads[1].starts_with(put), "{}", heads[1]);
     let length = "\r\ncontent-length: 11\r\n";
     assert!(heads[1].contains(length), "{}", heads[1]);
@@ -401,7 +401,7 @@ async fn each_call_sends_the_request_of_its_name() {
     let signed = "signedheaders=host;x-amz-content-sha256;x-amz-date";
     assert!(heads[1].contains(signed), "{}", heads[1]);
     assert_eq!(seen[1].body, b"hello world");
-    let post = "post /kbf-test/cas/k?uploadid=u-1 http/1.1\r\n";
+    let post = "post /test-bucket/cas/k?uploadid=u-1 http/1.1\r\n";
     assert!(heads[2].starts_with(post), "{}", heads[2]);
     let condition = "\r\nif-none-match: *\r\n";
     assert!(heads[2].contains(condition), "{}", heads[2]);
@@ -411,7 +411,7 @@ async fn each_call_sends_the_request_of_its_name() {
     let named = "<Part><PartNumber>2</PartNumber><ETag>\"p2\"</ETag></Part>\
                  <Part><PartNumber>5</PartNumber><ETag>\"p5\"</ETag></Part>";
     assert!(listed.contains(named), "{listed}");
-    let delete = "delete /kbf-test/cas/k?uploadid=u-1 http/1.1\r\n";
+    let delete = "delete /test-bucket/cas/k?uploadid=u-1 http/1.1\r\n";
     assert!(heads[3].starts_with(delete), "{}", heads[3]);
 }
 
@@ -610,7 +610,7 @@ async fn a_listing_of_uploads_sends_the_request_of_its_name() {
     let next = listed.next.unwrap();
     assert_eq!((next.0.as_str(), next.1.as_str()), ("cas/b", "u-9"));
     let head = seen.lock().unwrap()[0].head.to_ascii_lowercase();
-    assert!(head.starts_with("get /kbf-test?"), "{head}");
+    assert!(head.starts_with("get /test-bucket?"), "{head}");
     for piece in [
         "uploads=",
         "prefix=cas%2f",
