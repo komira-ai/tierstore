@@ -328,6 +328,7 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     front.presign_key_file = Vec::new();
     front.gc_key_file = Vec::new();
     front.scoped_key_file = Vec::new();
+    front.grant_key_file = Vec::new();
     let server = crate::server::front::server_config(&front, Arc::new(crate::SystemClock))
         .expect("a server");
     assert_eq!(server.put_permit_wait, Duration::from_secs(25));
