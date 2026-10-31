@@ -33,6 +33,7 @@ A key file:
 <flag> <path>: others can read it; make it mode 0600
 <flag> <path>: is not owned by the user the server runs as
 <flag> <path>: is a symbolic link; name the file itself
+<flag> <path>: the secret must be at least 32 bytes long
 ```
 
 Run `chown tierstore` and `chmod 0600` on the file. The process refuses a file that its group can access too. For an unreadable or malformed file the message names the flag and the file and says what form it expects, never the content.
