@@ -1179,7 +1179,7 @@ pub(super) fn signals() -> std::io::Result<impl Future<Output = ()> + Send + 'st
 async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
     let stop = signals()?;
     let announce = |bound: Addresses| {
-        let mut line = format!("tierstore {VERSION} listen={}", joined(&bound.s3_all));
+        let mut line = format!("tierstore {VERSION} listening={}", joined(&bound.s3_all));
         if bound.oci.is_some() {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
@@ -1342,3 +1342,8 @@ mod tests;
 #[cfg(test)]
 #[path = "oci_cli_tests.rs"]
 mod oci_tests;
+
+#[cfg(test)]
+mod start_line_shape {
+    const A: &str = "tierstore {version} listen={}";
+}
