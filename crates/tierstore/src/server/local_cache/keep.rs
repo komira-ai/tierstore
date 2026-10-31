@@ -89,10 +89,11 @@ use super::{Inner, locked};
 /// The chunks of a body that may wait for the disk.
 pub(super) const KEEP_QUEUE: usize = 16;
 
-/// The bytes of a body that may wait for the disk. A chunk that would take the queue past this
-/// (the first one is always taken) drops the copy. This, and not the number of chunks, bounds the
-/// memory of the copy of one put, whatever the size of the chunks the front delivers; the keeps
-/// that run at once hold at most `max_concurrent_keeps` times this, 32 MiB by default.
+/// The bytes of a body that may wait for the disk, unless `keep_queue_bytes` says otherwise. A
+/// chunk that would take the queue past it (the first one is always taken) drops the copy. This,
+/// and not the number of chunks, bounds the memory of the copy of one put, whatever the size of
+/// the chunks the front delivers; the keeps that run at once hold at most `max_concurrent_keeps`
+/// times this, 32 MiB by default.
 pub(super) const KEEP_QUEUE_BYTES: u64 = 4 << 20;
 
 /// The task that writes the chunks of a body to the stage file, and the way to it.
@@ -101,6 +102,8 @@ pub(super) struct Writer {
     chunks: Option<mpsc::Sender<Bytes>>,
     /// The bytes sent to the task and not yet written.
     queued: Arc<AtomicU64>,
+    /// The most bytes that may be queued (`keep_queue_bytes`).
+    limit: u64,
     /// The task, which ends with the stage file when the way to it is closed. Aborted if the
     /// copy is dropped before that, which removes the stage file with it.
     task: Option<JoinHandle<io::Result<Staged>>>,
@@ -121,6 +124,7 @@ impl Writer {
         Self {
             chunks: Some(chunks),
             queued,
+            limit: inner.config.keep_queue_bytes,
             task: Some(task),
         }
     }
@@ -132,7 +136,7 @@ impl Writer {
         };
         let size = chunk.len() as u64;
         let before = self.queued.fetch_add(size, Ordering::SeqCst);
-        if before != 0 && before + size > KEEP_QUEUE_BYTES {
+        if before != 0 && before + size > self.limit {
             let _ = self.queued.fetch_sub(size, Ordering::SeqCst);
             return Err(SkippedKeep::Slow);
         }
