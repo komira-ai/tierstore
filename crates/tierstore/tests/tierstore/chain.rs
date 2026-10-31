@@ -17,6 +17,7 @@ use tierstore::server::{Grant, PresignKey, Server, ServerConfig};
 use tierstore::{Backend, MemoryBackend, Proxy, ProxyConfig, S3Backend, SystemClock, TestClock};
 use tokio::net::TcpListener;
 
+use crate::hold::Gate;
 use crate::recheck::{BUCKET, SECRET, answered, put_request};
 use crate::support::{assert_absent, body, read};
 
@@ -24,6 +25,7 @@ const KEY_ID: &str = "AKIDSTORAGE";
 const KEY_SECRET: &str = "storage-secret-0123456789";
 const HOT_AT_BUDGET: &str = r#"{"hot_bytes":1000,"copy_lag":0,"time":0}"#;
 const WRITERS: usize = 8;
+const KEY: &str = "cas/b/contended";
 
 /// A storage tier on a loopback port, with the tiers behind it.
 struct Storage {
@@ -127,11 +129,11 @@ fn the_winner(done: &[(Bytes, StatusCode, String)]) -> Bytes {
 async fn eight_presigned_puts_through_a_hop_have_one_winner_in_the_storage_hot_tier() {
     let storage = storage(false).await;
     let node = build_node(&storage);
-    let done = eight_puts(&node, "cas/b/contended").await;
+    let done = eight_puts(&node, KEY).await;
 
     let winner = the_winner(&done);
-    assert_eq!(read(&*storage.hot, "cas/b/contended").await, winner);
-    assert_absent(&*storage.cold, "cas/b/contended").await;
+    assert_eq!(read(&*storage.hot, KEY).await, winner);
+    assert_absent(&*storage.cold, KEY).await;
 }
 
 /// Asserts what the code does through the hop when the storage tier's hot tier is full, which
@@ -149,9 +151,9 @@ async fn eight_presigned_puts_through_a_hop_have_one_winner_in_the_storage_hot_t
 async fn through_a_hop_a_presigned_put_is_not_presigned_at_a_storage_tier_whose_hot_tier_is_full() {
     let storage = storage(true).await;
     let node = build_node(&storage);
-    let done = eight_puts(&node, "cas/b/contended").await;
+    let done = eight_puts(&node, KEY).await;
 
     let winner = the_winner(&done);
-    assert_eq!(read(&*storage.cold, "cas/b/contended").await, winner);
-    assert_absent(&*storage.hot, "cas/b/contended").await;
+    assert_eq!(read(&*storage.cold, KEY).await, winner);
+    assert_absent(&*storage.hot, KEY).await;
 }

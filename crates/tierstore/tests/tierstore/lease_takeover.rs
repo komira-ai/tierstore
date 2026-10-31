@@ -6,8 +6,8 @@
 //! contender's own clock. Nothing here sleeps: every clock is set by hand.
 //!
 //! Gap: these tests run over the in-memory backend only, whose replace-on-tag is a mutex-held
-//! check and write. The directory backend also has `put_if_match` (serialised by a lock of its
-//! own); a race of reconcilers over it is not exercised here.
+//! check and write. `put_if_match` over the directory backend (atomic only within one process,
+//! through its `replacing` lock) and over a real S3 store (an `If-Match` PUT) is not exercised.
 
 use std::sync::Arc;
 

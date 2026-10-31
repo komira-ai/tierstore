@@ -1,5 +1,9 @@
 //! Backends that hold a call for a test, so that a race or a kill happens at a point the test
 //! names and not at a point the scheduler happens to pick.
+//!
+//! The waits here are unbounded on purpose: the repository's nextest configuration is the hang
+//! guard and says no test carries a timeout of its own. A change to the code under test that
+//! skips a gate's stall point therefore fails the test by nextest's slow-timeout, not at once.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
