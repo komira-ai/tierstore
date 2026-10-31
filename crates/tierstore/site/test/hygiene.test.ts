@@ -7,6 +7,7 @@
 // The repository lints (crates/kbf-integration-test/tests/repo_lints.rs) scan the sources; this scans what is deployed.
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -21,8 +22,21 @@ const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1', 'frontend', 'FR
 /** The only 40-hex string a page may carry: the example SHA of the install page and docs/artifacts.md. */
 const EXAMPLE_SHA = '0123456789abcdef0123456789abcdef01234567';
 
-function scanText(text: string, code = false): string[] {
-  const found: string[] = [];
+/**
+ * SHA-256 digests (lowercase hex) of the names a page may not carry: the machine names of the project's own fleet.
+ * The names are kept as digests so that this public file does not spell them.
+ */
+const INTERNAL_NAME_DIGESTS: ReadonlySet<string> = new Set<string>();
+
+const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
+
+/** The tokens of `text` (runs of letters, digits and hyphens) one of whose candidates has its digest in `deny`. */
+function hashedNames(text: string, deny: ReadonlySet<string>): string[] {
+  return [];
+}
+
+function scanText(text: string, code = false, deny: ReadonlySet<string> = INTERNAL_NAME_DIGESTS): string[] {
+  const found: string[] = hashedNames(text, deny);
   for (const m of text.matchAll(/\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b/g)) {
     const parts = [m[1], m[2], m[3], m[4]].map(Number);
     if (parts.every((p) => p <= 255)) {
@@ -49,7 +63,7 @@ function scanText(text: string, code = false): string[] {
 }
 
 const dist = buildReal('hygiene');
-const scanTree = (dir: string): string[] => listFiles(dir).flatMap((f) => scanText(readFileSync(join(dir, f), 'utf8'), /^assets\/[0-9a-f]+\/[a-z]+\.js$/.test(f)).map((p) => `${f}: ${p}`));
+const scanTree = (dir: string, deny: ReadonlySet<string> = INTERNAL_NAME_DIGESTS): string[] => listFiles(dir).flatMap((f) => scanText(readFileSync(join(dir, f), 'utf8'), /^assets\/[0-9a-f]+\/[a-z]+\.js$/.test(f), deny).map((p) => `${f}: ${p}`));
 
 test('no built file carries an address, a home path, a non-public host, an internal name or an early date', () => {
   assert.deepEqual(scanTree(dist), []);
@@ -83,4 +97,33 @@ test('a leak in the recorded data or in the page copy is found in the built tree
   const t = copyTree(dist, 'hygiene-planted');
   plant(t, 'index.html', '<h1', `<p>${['10', '9', '8', '7'].join('.')}</p><h1`);
   assert.match(scanTree(t).join('\n'), /index\.html: an address/);
+});
+
+/** A deny set of made-up names (never the real set), one for each form a candidate takes. */
+const TEST_DENY: ReadonlySet<string> = new Set(['zebra-07', 'quokka', 'narwhal'].map(sha256));
+
+test('a name in a deny set is refused on a page by its whole form, by its form without trailing digits and by its first segment', () => {
+  const refused = (page: string): string => scanText(page, false, TEST_DENY).join('\n');
+  assert.match(refused('<p>run it on zebra-07 today</p>'), /internal host name/);
+  assert.match(refused('<p>run it on ZEBRA-07 today</p>'), /internal host name/);
+  assert.match(refused('<p>run it on quokka9 today</p>'), /internal host name/);
+  assert.match(refused('<p>run it on narwhal-edge-3 today</p>'), /internal host name/);
+  assert.match(refused('<code>narwhal-4</code>'), /internal host name/);
+  assert.deepEqual(scanText('<p>zebra-08, quokkas and narwhals</p>', false, TEST_DENY), []);
+});
+
+test('a name in a deny set that a built page carries is found by the tree scan', () => {
+  const t = copyTree(dist, 'hygiene-planted-name');
+  plant(t, 'index.html', '<h1', '<p>on zebra-07 only</p><h1');
+  assert.match(scanTree(t, TEST_DENY).join('\n'), /index\.html: .*internal host name/);
+  assert.deepEqual(scanTree(dist, TEST_DENY), []);
+});
+
+test('the real deny set is not empty and holds only SHA-256 digests in lowercase hex', () => {
+  assert.ok(INTERNAL_NAME_DIGESTS.size > 0);
+  for (const d of INTERNAL_NAME_DIGESTS) assert.match(d, /^[0-9a-f]{64}$/);
+});
+
+test('the words node, nodes and node.js are not refused', () => {
+  assert.deepEqual(scanText('<p>a node, three nodes, node.js, Node and the nodes-per-rack setting</p>'), []);
 });
