@@ -1,0 +1,18 @@
+[package]
+name = "tierstore-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Test support only: a dev-dependency of `tierstore` and `objstore-s3`, and of nothing else.
+# rustix makes the socket calls of `port`; libc is for the signals, `close_range` and
+# `prctl` of `reaped`.
+[dependencies]
+libc.workspace = true
+rustix = { workspace = true, features = ["net", "process"] }
+
+[lints]
+workspace = true

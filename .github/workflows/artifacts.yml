@@ -1,0 +1,315 @@
+# The release files: the `tierstore` binary (built with its `server` feature) for linux-x86_64
+# and linux-arm64, built once per commit, each as a tarball with a CycloneDX SBOM, one SHA256SUMS
+# over the commit's files, and the build-provenance and SBOM attestations of this repository.
+# The files are named `tierstore-<commit>-<platform>.tar.gz`, `tierstore-<commit>-<platform>.cdx.json`
+# and `tierstore-<commit>-<platform>.tar.gz.sigstore.json` (the bundle of that tarball's own
+# provenance attestation, for an offline check with `gh attestation verify --bundle`), where
+# `<commit>` is the full commit SHA and `<platform>` is `linux-x86_64` or `linux-arm64`.
+#
+# A pull request builds, packages and sums everything and attests nothing. A push to main also
+# signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does.
+# The attest job is in THIS file for one reason: the signer identity of an attestation is the
+# workflow file that ran the signing step, and the host installer verifies exactly
+# `.github/workflows/artifacts.yml`. Do not move or rename it. Only `attest` may hold
+# `id-token: write` and `attestations: write`, and only under its exact `if:` (the workflow
+# lint, crates/xtask/tests/workflows, requires both): no pull request holds a token that can
+# sign, and every attestation this repository signs names refs/heads/main.
+#
+# The attest job signs and does nothing else: while it holds `id-token: write` no repository code
+# runs and nothing is built, only the pinned actions below, two `sha256sum --check` commands that
+# run first (bash-specific: the workflow pins its shell) and a `cp` that names each bundle. The
+# files it signs come from the build jobs through the run's artifact store, where a job that runs
+# repository code could have replaced them, so the first step refuses sums other than the ones
+# the sums job published (its digest is passed in as a job output), and the second refuses a
+# file that differs from the sums.
+#
+# The files are kept as workflow artifacts for 90 days, GitHub's limit. release.yml, started by
+# hand, attaches these exact files for a commit on main to a GitHub release, checked again against
+# these attestations, and never rebuilds.
+name: artifacts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# A pull request's newer run replaces its older one; a push to main always runs to its end,
+# so a commit that is signed is never left half checked.
+concurrency:
+  group: artifacts-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # cargo-cyclonedx makes the SBOMs. Its release binaries, checked against their SHA-256 before
+  # use (the values the project publishes with them, recomputed when pinned).
+  CYCLONEDX_VERSION: 0.5.9
+  CYCLONEDX_SHA256_X86_64_LINUX: fb8dbee9f182173e062a64a387b21a0badc6fab8b2abf9294973f012972bf6d8
+  CYCLONEDX_SHA256_AARCH64_LINUX: 7bf131ca5389b07a4f10c182bcf8a5ad339d64408b6f0d8f6834a0bd6120a06a
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # glibc: the binary needs the glibc of the runner image it was built on (Ubuntu 24.04) or newer.
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          # On a push (to main: the build the attest job signs) nothing is restored: the signed
+          # binary is built from a clean target/, never on a cached one. The lookup still tells
+          # the save step below whether this key exists.
+          lookup-only: ${{ github.event_name == 'push' }}
+      - name: Install cargo-cyclonedx (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_X86_64_LINUX" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
+      - run: cargo cyclonedx --version
+      # `tierstore` is built by itself: its binary needs the crate's `server` feature
+      # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
+      # nothing.
+      - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
+      # The binary runs here (a runner of its own architecture built it) and says the commit.
+      - name: tierstore names the commit
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA"
+      - name: SBOM
+        run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
+      - name: The SBOM step left Cargo.lock unchanged
+        run: git diff --exit-code -- Cargo.lock
+      - name: Package tierstore
+        run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-x86_64 --commit "$GITHUB_SHA" --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: assets-linux-x86_64
+          path: dist/
+          retention-days: 90
+          if-no-files-found: error
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      TARGET: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+          # On a push (to main: the build the attest job signs) nothing is restored: the signed
+          # binary is built from a clean target/, never on a cached one. The lookup still tells
+          # the save step below whether this key exists.
+          lookup-only: ${{ github.event_name == 'push' }}
+      - name: Install cargo-cyclonedx (pinned version and checksum)
+        run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
+      - run: cargo cyclonedx --version
+      # `tierstore` is built by itself: its binary needs the crate's `server` feature
+      # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
+      # nothing.
+      - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
+      # The binary runs here (a runner of its own architecture built it) and says the commit.
+      - name: tierstore names the commit
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA"
+      - name: SBOM
+        run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
+      - name: The SBOM step left Cargo.lock unchanged
+        run: git diff --exit-code -- Cargo.lock
+      - name: Package tierstore
+        run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-arm64 --commit "$GITHUB_SHA" --out dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: assets-linux-arm64
+          path: dist/
+          retention-days: 90
+          if-no-files-found: error
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # SHA256SUMS over both platforms' files, checked against the files and a flipped copy. The
+  # attest job signs these sums, so they are the one list of what a release holds.
+  sums:
+    needs: [linux-x86_64, linux-arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # The SHA-256 of the SHA256SUMS this job uploads, for the attest job to hold the sums it
+    # downloads to.
+    outputs:
+      sha256: ${{ steps.assemble.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: assets-linux-*
+          path: dist
+          merge-multiple: true
+      - run: rustup toolchain install
+      - name: Assemble SHA256SUMS
+        id: assemble
+        run: cargo xtask sums assemble dist --summary "$GITHUB_STEP_SUMMARY" --digest-output "$GITHUB_OUTPUT"
+      - run: cargo xtask verify-assets sums dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sha256sums
+          path: dist/SHA256SUMS
+          retention-days: 90
+          if-no-files-found: error
+
+  # Push to main only: build provenance for every file, an SBOM attestation for every tarball, and
+  # a provenance attestation (and its bundle) of each tarball alone. See the top of this file.
+  attest:
+    needs: [sums]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: assets-linux-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sha256sums
+          path: dist
+      - name: Refuse sums other than the build's
+        env:
+          SUMS_SHA256: ${{ needs.sums.outputs.sha256 }}
+        run: /usr/bin/sha256sum --check --strict <<< "$SUMS_SHA256  dist/SHA256SUMS"
+      - name: Refuse listed files that differ from the sums
+        working-directory: dist
+        run: /usr/bin/sha256sum --check --strict SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/tierstore-${{ github.sha }}-linux-x86_64.tar.gz
+          sbom-path: dist/tierstore-${{ github.sha }}-linux-x86_64.cdx.json
+      - uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-path: dist/tierstore-${{ github.sha }}-linux-arm64.tar.gz
+          sbom-path: dist/tierstore-${{ github.sha }}-linux-arm64.cdx.json
+      # Each tarball is also attested as its own subject, and the bundle of that attestation (the
+      # file `gh attestation verify --bundle` takes offline) is copied beside the tarball as
+      # `<tarball>.sigstore.json`, for the release and for a host that verifies without GitHub.
+      - id: provenance-tierstore-linux-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ github.sha }}-linux-x86_64.tar.gz
+      - name: Name the bundle of tierstore for linux-x86_64
+        env:
+          BUNDLE: ${{ steps.provenance-tierstore-linux-x86_64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/tierstore-${GITHUB_SHA}-linux-x86_64.tar.gz.sigstore.json"
+      - id: provenance-tierstore-linux-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ github.sha }}-linux-arm64.tar.gz
+      - name: Name the bundle of tierstore for linux-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-tierstore-linux-arm64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/tierstore-${GITHUB_SHA}-linux-arm64.tar.gz.sigstore.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundles-linux
+          path: dist/*.sigstore.json
+          retention-days: 90
+          if-no-files-found: error
+
+  # Push to main only, after attest: the checks a deployment makes (cargo xtask verify-assets,
+  # crates/xtask/src/sums.rs), for the branch that was pushed (`--source-ref "$GITHUB_REF"`),
+  # with read-only scopes. The files are assembled again into a SHA256SUMS that must be byte for
+  # byte the one the sums job published and the attest job signed, then checked against it, then
+  # each verified; the set must be exactly the assets of this commit (cargo xtask release check).
+  verify:
+    needs: [attest]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: assets-linux-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sha256sums
+          path: published
+      # The bundles go in beside the files; the sums do not list them (the attestation that made
+      # them signed the files the sums list), and the check below holds them to one per tarball.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles-linux
+          path: dist
+      - name: Assemble SHA256SUMS, which must be the published one
+        run: cargo xtask sums assemble dist --expect published/SHA256SUMS
+      - name: Check the files against SHA256SUMS
+        run: cargo xtask verify-assets sums dist
+      - name: Fetch the Sigstore trusted root, for the offline check of the bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation trusted-root > "$RUNNER_TEMP/trusted_root.jsonl"
+      - name: Verify as a deployment does
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask verify-assets attestations dist --repo "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/artifacts.yml" --source-ref "$GITHUB_REF" --commit "$GITHUB_SHA" --trusted-root "$RUNNER_TEMP/trusted_root.jsonl"
+      - name: The files are exactly the assets of this commit, each tarball with its bundle
+        run: cargo xtask release check dist --commit "$GITHUB_SHA"
