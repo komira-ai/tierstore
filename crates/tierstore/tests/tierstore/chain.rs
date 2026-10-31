@@ -45,9 +45,11 @@ async fn storage(hot_full: bool) -> Storage {
     let mut config = ProxyConfig::new("storage", 1000, Arc::new(TestClock::new()));
     config.linger = Duration::from_millis(1);
     config.usage_refresh = Duration::ZERO;
-    let proxy = Proxy::open(hot.clone(), cold.clone(), config)
-        .await
-        .unwrap();
+    // All eight puts are inside the storage tier's create (hot, or cold when hot is full) before
+    // any of them goes on, so the create-only write there is what decides.
+    let gated_hot: Arc<dyn Backend> = Arc::new(Gate::new(hot.clone(), KEY, WRITERS));
+    let gated_cold: Arc<dyn Backend> = Arc::new(Gate::new(cold.clone(), KEY, WRITERS));
+    let proxy = Proxy::open(gated_hot, gated_cold, config).await.unwrap();
     let served = ServerConfig::new(BUCKET, KEY_ID, KEY_SECRET, Arc::new(SystemClock));
     let server = Server::new(Arc::new(proxy), served);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
