@@ -78,3 +78,90 @@ impl Drop for TestDir {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The root of the directories these tests make.
+    fn root() -> PathBuf {
+        std::env::temp_dir()
+    }
+
+    /// Catches a directory that is not made by `under`, or that the `Deref` and `AsRef` views
+    /// do not name: all three are the one path, and it exists.
+    #[test]
+    fn a_new_dir_exists_and_every_view_names_it() {
+        let dir = TestDir::under(root(), "testkit-views");
+        assert!(dir.path().is_dir());
+        assert_eq!(&*dir, dir.path());
+        assert_eq!(dir.as_ref(), dir.path());
+    }
+
+    /// Catches a drop that leaves the directory, or one that fails on a directory that is
+    /// already gone: the first is removed, the second drops quietly.
+    #[test]
+    fn a_dropped_dir_is_removed_and_a_missing_one_drops_quietly() {
+        let dir = TestDir::under(root(), "testkit-drop");
+        let path = dir.path().to_owned();
+        drop(dir);
+        assert!(!path.exists());
+
+        let gone = TestDir::under(root(), "testkit-gone");
+        std::fs::remove_dir_all(gone.path()).unwrap();
+        drop(gone);
+    }
+
+    /// Catches a drop that panics when the path cannot be removed as a directory: a file put
+    /// in its place makes the removal fail, and the drop only reports it.
+    #[test]
+    fn a_dir_that_cannot_be_removed_is_reported_not_panicked_on() {
+        let dir = TestDir::under(root(), "testkit-file");
+        let path = dir.path().to_owned();
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, b"not a directory").unwrap();
+        drop(dir);
+        assert!(path.is_file());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /// Catches an `under` that goes on without its directory: under a root that is a file the
+    /// directory cannot be made, and `under` panics naming it.
+    #[test]
+    #[should_panic(expected = "make test dir")]
+    fn a_dir_that_cannot_be_made_panics() {
+        let file = TestDir::under(root(), "testkit-root");
+        let not_a_dir = file.path().join("plain");
+        std::fs::write(&not_a_dir, b"").unwrap();
+        let _ = TestDir::under(&not_a_dir, "inside");
+    }
+
+    /// Catches a drop during a panic that keeps the directory without the variable, or
+    /// removes it with the variable set: a thread that panics while it holds a directory
+    /// leaves it only when `KEEP_ENV` is set.
+    #[test]
+    fn a_panic_keeps_the_dir_only_when_asked() {
+        let in_panic = |name: &'static str| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let joined = std::thread::spawn(move || {
+                let dir = TestDir::under(root(), name);
+                sender.send(dir.path().to_owned()).unwrap();
+                panic!("the test panics while it holds {name}");
+            })
+            .join();
+            assert!(joined.is_err());
+            receiver.recv().unwrap()
+        };
+        let removed = in_panic("testkit-panic-removed");
+        assert!(!removed.exists());
+
+        // SAFETY: the tests run under nextest (`ci.yml`), each in a process of its own, so no
+        // other thread reads or writes the environment while this test changes it.
+        unsafe { std::env::set_var(KEEP_ENV, "1") };
+        let kept = in_panic("testkit-panic-kept");
+        // SAFETY: as above.
+        unsafe { std::env::remove_var(KEEP_ENV) };
+        assert!(kept.is_dir());
+        std::fs::remove_dir_all(&kept).unwrap();
+    }
+}
