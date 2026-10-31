@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, DuplexStream};
 use tokio::sync::mpsc;
 
 use crate::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta, ReadBody, TestClock};
@@ -171,15 +171,14 @@ impl Backend for Fed {
     }
 }
 
-/// Asserts that a drain whose settle has ended leaves a streamed answer that is still being sent
-/// alone, and closes the connection only once the body is over. A body of 1000 bytes is fed in
-/// pieces; after the client has read the first piece, the settle is ended and the request is
-/// still on the wire (one answer unsent), and the connection is open; the rest of the body is
-/// fed and the body ends, and the client reads all 1000 bytes, after which the request is off
-/// the wire. The pieces are driven by the test and nothing waits for a time. A mark that cleared at
-/// the first flush would have the connection shut at the end of the settle, with the body cut.
-#[tokio::test]
-async fn a_drain_waits_for_a_streamed_body_that_is_still_being_sent() {
+/// The sender of the pieces of a [`Fed`] backend's body.
+type Feed = mpsc::UnboundedSender<Result<Bytes, Error>>;
+
+/// A GET of the one object of a [`Fed`] backend whose body is in the middle of being sent when
+/// the drain's settle ends: the first piece has reached the client, the request is still on the
+/// wire, and the connection is open. Gives the server, the client end of the connection, what it
+/// has read so far, and the sender of the rest of the body.
+async fn mid_answer_at_the_end_of_the_settle() -> (Arc<Server>, DuplexStream, Vec<u8>, Feed) {
     let memory = MemoryBackend::new();
     memory
         .put("obj", Bytes::from(vec![5_u8; SIZE]))
@@ -213,6 +212,19 @@ async fn a_drain_waits_for_a_streamed_body_that_is_still_being_sent() {
     // The settle is over: the request is on the wire, so the connection is not closed.
     let _ = server.settled.send_replace(true);
     assert_eq!(server.open_connections(), 1);
+    (server, client, answer, feed)
+}
+
+/// Asserts that a drain whose settle has ended leaves a streamed answer that is still being sent
+/// alone, and closes the connection only once the body is over. A body of 1000 bytes is fed in
+/// pieces; after the client has read the first piece, the settle is ended and the request is
+/// still on the wire (one answer unsent), and the connection is open; the rest of the body is
+/// fed and the body ends, and the client reads all 1000 bytes, after which the request is off
+/// the wire. The pieces are driven by the test and nothing waits for a time. A mark that cleared at
+/// the first flush would have the connection shut at the end of the settle, with the body cut.
+#[tokio::test]
+async fn a_drain_waits_for_a_streamed_body_that_is_still_being_sent() {
+    let (server, mut client, mut answer, feed) = mid_answer_at_the_end_of_the_settle().await;
 
     // The rest of the body is fed and ends; the client reads every byte.
     for _ in 0..8 {
@@ -225,4 +237,43 @@ async fn a_drain_waits_for_a_streamed_body_that_is_still_being_sent() {
     assert_eq!(length, Some(SIZE));
     assert_eq!(body.len(), SIZE);
     until(&server, |server| server.unsent() == 0).await;
+}
+
+/// Asserts that a streamed body that fails in the middle of a drain does not hold the drain: after
+/// the settle one more piece is fed and then an error; the client sees the answer cut (fewer
+/// bytes than its length), and no answer is left unsent and no connection is open, which are what
+/// the drain waits for. The drain itself is not run: the test ends the settle and reads those
+/// counts. The wire is released here when hyper ends the connection on the error (the stream's
+/// own drop clears it), so the test guards that outcome, not the release by the body's claim on
+/// the wire alone.
+#[tokio::test]
+async fn a_streamed_body_that_fails_during_a_drain_releases_the_wire() {
+    let (server, mut client, mut answer, feed) = mid_answer_at_the_end_of_the_settle().await;
+    feed.send(Ok(Bytes::from(vec![5_u8; 100]))).unwrap();
+    feed.send(Err(Error::Unavailable("the upstream went away".to_owned())))
+        .unwrap();
+    read_rest(&mut client, &mut answer).await;
+    assert!(is_cut(&answer), "the failed body was not cut");
+    until(&server, |server| {
+        server.unsent() == 0 && server.open_connections() == 0
+    })
+    .await;
+    drop(feed);
+}
+
+/// Asserts that a client that goes away in the middle of a streamed answer during a drain does
+/// not hold the drain either: once its end of the connection is gone, no answer is left unsent
+/// and no connection is open, though the body was never fed to its end. As above, the drain is
+/// not run; the test reads what it waits for.
+#[tokio::test]
+async fn a_client_that_leaves_during_a_drained_stream_releases_the_wire() {
+    let (server, client, _answer, feed) = mid_answer_at_the_end_of_the_settle().await;
+    drop(client);
+    // A piece the server tries to write finds the connection gone.
+    feed.send(Ok(Bytes::from(vec![5_u8; 100]))).unwrap();
+    until(&server, |server| {
+        server.unsent() == 0 && server.open_connections() == 0
+    })
+    .await;
+    drop(feed);
 }
