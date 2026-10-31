@@ -9,9 +9,8 @@ code lands on `main` here before the plan is agreed.
 |---|---|---|
 | `crates/tierstore/` (213 files: the library, the `tierstore` binary, `docs/`, `site/`) | `crates/tierstore/` | with its history |
 | `crates/objstore-s3/` | `crates/objstore-s3/` | the S3 client tierstore uses. kbf keeps using it too (see below) |
-| `crates/tierstore-bench/` | `crates/tierstore-bench/` | the benchmark tool, which depends on tierstore |
 | `packaging/tierstore/` | `packaging/` | the systemd unit, the README of the package, the sample configuration |
-| `.github/workflows/tierstore-site.yml`, `tierstore-site-publish.yml`, `tierstore-bench.yml` | `.github/workflows/` | rewritten for this repository (CI, release, site) |
+| `.github/workflows/tierstore-site.yml`, `tierstore-site-publish.yml` | `.github/workflows/` | rewritten for this repository (CI, release, site) |
 | the tierstore sections of `.config/nextest.toml` | `.config/nextest.toml` | with the per-test overrides that guard against hangs |
 
 ## What stays in kbf
@@ -21,6 +20,7 @@ code lands on `main` here before the plan is agreed.
   "vX.Y.Z" }`, until the crate is published to crates.io. kbf's root `Cargo.toml` names the tag once.
 - **objstore-s3.** It moves here, because tierstore must not depend on anything in kbf. kbf depends on it by
   the same tag. `kbf-objstore` keeps re-exporting it, so kbf code does not change.
+- **tierstore-bench.** It stays in kbf for this move, with its workflow, so benchmark campaigns in progress are not interrupted. It depends only on objstore-s3, which it then gets by the same tag. Moving it is a separate step later.
 - **The layering test.** kbf's `kbf-integration-test/tests/layering.rs` checks that tierstore names no kbf
   crate. It is deleted with the move: here, the workspace itself enforces that, because no kbf crate exists
   here.
@@ -58,7 +58,7 @@ and refuses the push on any match. It looks for:
 1. **Land what is in flight.** In kbf, land the open tierstore pull requests that are already verified, in
    order: the drain (#2129), the listen addresses (#2130), the cache lock (#2133) and the test fix (#2142), then
    kbf#2094.
-2. **Freeze.** From the import on, no tierstore change merges in kbf. A change that is not landed by then is
+2. **Freeze.** The freeze starts when the import pull request opens here. Work that is done lands in kbf before it and comes across with the history. From then on, no tierstore change merges in kbf. A change that is not landed by then is
    re-opened here as a pull request from its patch.
 3. **Import.** Run `filter-repo`, scan, push `import/from-kbf`, open the pull request. Then add the new root
    `Cargo.toml`, the test helper and the CI workflows. CI here must be green on the import before it merges.
@@ -66,8 +66,8 @@ and refuses the push on any match. It looks for:
    and checksums the way kbf's release did. The release notes say where tierstore came from.
 5. **Switch kbf.** One kbf pull request does all of this:
    - repoints `tierstore` and `objstore-s3` to the tag;
-   - deletes `crates/tierstore`, `crates/tierstore-bench`, `crates/objstore-s3`, `packaging/tierstore` and the
-     tierstore workflows;
+   - deletes `crates/tierstore`, `crates/objstore-s3`, `packaging/tierstore` and the
+     tierstore site workflows;
    - keeps kbf's CI green.
 6. **The site.** `tierstore.dev` is built and published from this repository. Its publish workflow and its
    hosting move here; the domain does not change.
@@ -77,7 +77,7 @@ and refuses the push on any match. It looks for:
 - **Landing before the freeze.** The drain, listen-address and cache-lock changes (#2129, #2130, #2133) are
   verified and green; they land in kbf before step 2.
 - **Planned work.** The update hook is the next piece of planned work. It starts here, after the import.
-- **Everything else.** Any other open tierstore pull request in kbf either lands before the freeze or is
+- **Everything else.** Any other open tierstore pull request in kbf, for example the cache scrub and the streaming read path, either lands before the freeze or is
   re-opened here by its owner.
 
 ## Questions to settle in review
