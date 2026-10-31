@@ -40,16 +40,20 @@ code lands on `main` here before the plan is agreed.
 
 ## History
 
-The history of the moved paths comes along, without rewriting kbf's:
+The import is one commit, with no history rewritten anywhere:
 
-1. In a fresh clone of kbf (never in a working checkout), run `git filter-repo` keeping only the paths in the
-   table above, and renaming `packaging/tierstore/` to `packaging/`.
-2. Push the result to a branch here, `import/from-kbf`, and open it as a pull request against `main`.
-3. Each commit keeps its message, its author and its date. The oldest commit that touches these paths is from
-   2026-10-24.
+1. Copy the paths in the table above from kbf `main` at the cut commit, renaming `packaging/tierstore/` to
+   `packaging/`.
+2. Commit them as one commit with this message: `Import tierstore from komira-ai/kbf at <full sha>`, and the
+   body `History before this commit: komira-ai/kbf, paths crates/tierstore, crates/objstore-s3,
+   packaging/tierstore.`
+3. Push it to a branch here, `import/from-kbf`, and open it as a pull request against `main`.
 
-**Scan before the first push.** A script runs over every commit message and every file of the filtered history,
-and refuses the push on any match. It looks for:
+Nothing is lost: kbf is public and keeps the full history of these paths. No history-rewriting tool is used, on
+kbf or on a copy of it.
+
+**Scan before the first push.** A script runs over every file of the imported tree and the import commit's
+message, and refuses the push on any match. It looks for:
 - host names and private addresses;
 - account or session names;
 - endpoints other than loopback or documentation examples;
@@ -59,13 +63,14 @@ and refuses the push on any match. It looks for:
 
 1. **Land what is in flight.** In kbf, land the open tierstore pull requests that are already verified, in
    order: the drain (#2129), the listen addresses (#2130), the cache lock (#2133) and the test fix (#2142), then
-   kbf#2094, then the cache scrub (#2047) and streamed cache reads (#2050). They come across with the history.
+   kbf#2094, then the cache scrub (#2047) and streamed cache reads (#2050). They come across in the import.
 2. **The cut.** The import is cut from one named kbf commit, which is announced. After the cut, no tierstore
    change merges in kbf, and new tierstore work opens here. A kbf pull request still open at the cut is
    re-opened here by its owner, as a cherry-pick of its commits (the paths are the same, so most apply
    cleanly), and the kbf pull request is closed with a link to the new one. The cut waits for the work in
    step 1 to land.
-3. **Import.** Run `filter-repo`, scan, push `import/from-kbf`, open the pull request. Then add the new root
+3. **Import.** Copy the paths at the cut commit as one commit (see History), scan, push `import/from-kbf`, open the
+   pull request. Then add the new root
    `Cargo.toml`, the test helper and the CI workflows. CI here must be green on the import before it merges.
 4. **First release here.** Tag `vX.Y.Z` (the next version after kbf's last tierstore release). Build the binaries
    and checksums the way kbf's release did. The release notes say where tierstore came from.
