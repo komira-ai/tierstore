@@ -329,3 +329,15 @@ fn the_pairing_is_one_bundle_per_listed_tarball_and_nothing_else() {
         )]
     );
 }
+
+/// The two constants the attestation tests import are asserted here against literals: a test that
+/// compares a value with the constant it was built from passes whatever the constant says.
+#[test]
+fn the_issuer_and_the_dead_proxy_are_the_values_the_verifier_depends_on() {
+    // `gh attestation verify --cert-oidc-issuer` takes it: a bundle signed by any other issuer
+    // must be refused, so a changed URL here would accept or reject the wrong certificates.
+    assert_eq!(ISSUER, "https://token.actions.githubusercontent.com");
+    // The discard port on loopback, so a verification that succeeds under it used no network:
+    // another port could be a live service and the offline proof would mean nothing.
+    assert_eq!(DEAD_PROXY, "http://127.0.0.1:9");
+}

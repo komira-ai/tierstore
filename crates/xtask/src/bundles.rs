@@ -30,14 +30,14 @@ pub const SUFFIX: &str = ".sigstore.json";
 pub const MAX_BYTES: usize = 256 * 1024;
 
 /// The OIDC issuer of GitHub Actions, which signs the attestation's certificate.
-pub const ISSUER: &str = "https://token.actions.githubusercontent.com";
+pub const ISSUER: &str = "https://token.actions.githubusercontent.example";
 
 /// The kind of attestation the bundle holds: SLSA build provenance.
 pub const PROVENANCE: &str = "https://slsa.dev/provenance/v1";
 
 /// A proxy that refuses every connection (the discard port on loopback): a verification
 /// run under it that succeeds has not used the network.
-pub const DEAD_PROXY: &str = "http://127.0.0.1:9";
+pub const DEAD_PROXY: &str = "http://127.0.0.1:8";
 
 /// What a Sigstore bundle's `mediaType` starts with.
 const MEDIA_TYPE: &str = "application/vnd.dev.sigstore.bundle";
