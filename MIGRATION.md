@@ -80,6 +80,7 @@ message, and refuses the push on any match. It looks for:
    - A kbf pull request still open at the cut is re-opened here by its owner, as a cherry-pick of its commits.
      The paths are the same, so most apply cleanly. The kbf pull request is closed with a link to the new one.
    - The cut waits for the work in step 1 to land.
+   - From the cut to the import, a required check in kbf refuses any pull request that touches the moved paths, so the freeze is enforced, not only detected by the guard in step 3.
 3. **Import.**
    - Before copying, the importer runs `git diff <cut>..origin/main -- crates/tierstore crates/objstore-s3
      packaging/tierstore` in kbf, and refuses to go on if it is not empty. A change that landed after the cut
@@ -92,7 +93,7 @@ message, and refuses the push on any match. It looks for:
    and checksums the way kbf's release did. The release notes say where tierstore came from.
 
    **4b. Hosts accept releases from here.** This is a kbf pull request (code, with tests). It makes kbf's
-   installer accept this repository's `artifacts.yml` signer for the tierstore asset only, alongside kbf's. The
+   installer accept this repository's `artifacts.yml` signer for the tierstore asset only, alongside kbf's, in both places that verify a download (the installer's attestation check and the host install path). The
    signer is fixed in the installer's code today. That change is released and rolled out to hosts before any
    host installs the first release from here. kbf's signer stays accepted until the rollback window closes
    (step 5).
@@ -104,6 +105,7 @@ message, and refuses the push on any match. It looks for:
    - stops building and releasing the tierstore asset in kbf's release;
    - updates the kbf docs that name those paths (for example `docs/artifacts.md`, `docs/deploy/kbf-modes.md`,
      `ARCHITECTURE.md` and the design docs) to point here;
+   - removes the tierstore parts of kbf's CI: the `--features tierstore/s3` test shards in `ci.yml`, their assertions in the coverage wiring rules, and the objstore-s3 entry of the release stages, keeping the kbf-task PUT test override in `.config/nextest.toml`;
    - keeps kbf's CI green.
 
    **Rollback.** The last tierstore asset released from kbf stays on its release and is the rollback target.
