@@ -201,3 +201,32 @@ async fn a_fill_in_flight_across_a_lost_lock_publishes_nothing_and_leaves_the_ne
     assert_eq!(second.held(), (40, 1));
     assert_eq!(rig.staged_files(), 0);
 }
+
+/// Asserts that a fill whose read of a chunk comes back after the cache lost its lock writes
+/// that chunk nowhere and ends skipped: the fill is started on its own (no reader that could
+/// give up on it first), its first chunk is held at the upstream until the lock is lost, and then
+/// it is counted as skipped, not as a fill, and leaves no object. It would catch a fill that asks
+/// about the lock only before it makes its stage file.
+#[tokio::test]
+async fn a_chunk_that_arrives_after_the_lock_was_lost_is_written_nowhere() {
+    let rig = Rig::new("tscache-lost-mid-fetch");
+    rig.put("cas/b/obj", &pattern(30)).await;
+    let first = rig.locked();
+    let gate = rig.tamper.hold();
+    let name = name_of("cas/b/obj");
+    let Ok(pending) = first.inner.join_or_start("cas/b/obj", &name) else {
+        panic!("the miss starts a fill");
+    };
+    wait_until("the fill made its stage file", || {
+        read(&first.counters().staging_files) >= 1
+    })
+    .await;
+    std::fs::remove_file(rig.config.path.join(".lock")).unwrap();
+    assert_eq!(first.tick().unwrap(), Tick::Lost);
+    gate.add_permits(1000);
+    assert_eq!(pending.await, Ok(super::fill::Filled::Skipped));
+    assert!(!rig.has_file("cas/b/obj"));
+    assert_eq!(read(&first.counters().fills), 0);
+    assert_eq!(read(&first.counters().fills_skipped), 1);
+    assert_eq!(first.held(), (0, 0));
+}

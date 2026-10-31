@@ -642,6 +642,37 @@ async fn a_fill_that_starts_before_the_drop_keeps_the_object() {
     assert_eq!(read(&rig.cache.counters().scrub_mismatches), 0);
 }
 
+/// Asserts that a scrub that finds, between its hash and its drop, that the cache lost the lock
+/// of its directory drops nothing: the rotten object is left for the cache that holds the
+/// directory now, and the entry stays in the index. It would catch a drop that asks about the
+/// lock only when the pass starts.
+#[tokio::test]
+async fn a_scrub_that_loses_the_lock_before_the_drop_leaves_the_object() {
+    let rig = Rig::new("tscache-scrub-lost-lock");
+    let first = rig.locked();
+    let key = "cas/b/0";
+    rig.put(key, &pattern(100)).await;
+    first.get(key, None).await.unwrap();
+    assert_eq!(first.held(), (100, 1));
+    rot(&rig, key);
+    let hex = name_of(key).hex;
+    let mut second = None;
+    let verdict = first
+        .inner
+        .scrub_object_between(&hex, &Scrubber::new(1 << 20), || {
+            // The lock file is replaced and another cache makes the new one and holds it.
+            std::fs::remove_file(rig.config.path.join(".lock")).unwrap();
+            let holder = rig.locked();
+            assert_eq!(holder.mode(), super::Mode::ReadWrite);
+            assert_eq!(first.tick().unwrap(), super::Tick::Lost);
+            second = Some(holder);
+        });
+    assert_eq!(verdict, Verdict::Left);
+    assert!(rig.has_file(key));
+    assert_eq!(first.held(), (100, 1));
+    assert!(second.is_some());
+}
+
 /// Asserts that a walk that was told to stop reads nothing.
 #[tokio::test]
 async fn a_walk_that_is_told_to_stop_reads_nothing() {
