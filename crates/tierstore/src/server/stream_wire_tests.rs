@@ -239,12 +239,13 @@ async fn a_drain_waits_for_a_streamed_body_that_is_still_being_sent() {
     until(&server, |server| server.unsent() == 0).await;
 }
 
-/// Asserts that a streamed body that fails in the middle of a drain does not hold the drain: the
-/// request leaves the wire and the connection closes, so the drain can end. After the settle
-/// one more piece is fed and then an error; the client sees the answer cut (fewer bytes than its
-/// length), no answer is left unsent and no connection is open. It would catch a claim on the
-/// wire that only the end of a body releases, which would keep the drain waiting until its
-/// deadline for a body that will never end.
+/// Asserts that a streamed body that fails in the middle of a drain does not hold the drain: after
+/// the settle one more piece is fed and then an error; the client sees the answer cut (fewer
+/// bytes than its length), and no answer is left unsent and no connection is open, which are what
+/// the drain waits for. The drain itself is not run: the test ends the settle and reads those
+/// counts. The wire is released here when hyper ends the connection on the error (the stream's
+/// own drop clears it), so the test guards that outcome, not the release by the body's claim on
+/// the wire alone.
 #[tokio::test]
 async fn a_streamed_body_that_fails_during_a_drain_releases_the_wire() {
     let (server, mut client, mut answer, feed) = mid_answer_at_the_end_of_the_settle().await;
@@ -261,8 +262,9 @@ async fn a_streamed_body_that_fails_during_a_drain_releases_the_wire() {
 }
 
 /// Asserts that a client that goes away in the middle of a streamed answer during a drain does
-/// not hold the drain either: once its end of the connection is gone, the request leaves the
-/// wire and the server closes the connection, though the body was never fed to its end.
+/// not hold the drain either: once its end of the connection is gone, no answer is left unsent
+/// and no connection is open, though the body was never fed to its end. As above, the drain is
+/// not run; the test reads what it waits for.
 #[tokio::test]
 async fn a_client_that_leaves_during_a_drained_stream_releases_the_wire() {
     let (server, client, _answer, feed) = mid_answer_at_the_end_of_the_settle().await;
