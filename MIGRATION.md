@@ -9,13 +9,18 @@ code lands on `main` here before the plan is agreed.
 |---|---|---|
 | `crates/tierstore/` (213 files: the library, the `tierstore` binary, `docs/`, `site/`) | `crates/tierstore/` | with its history |
 | `crates/objstore-s3/` | `crates/objstore-s3/` | the S3 client tierstore uses. kbf keeps using it too (see below) |
-| `crates/tierstore-bench/` | `crates/tierstore-bench/` | the benchmark tool, which depends on tierstore |
 | `packaging/tierstore/` | `packaging/` | the systemd unit, the README of the package, the sample configuration |
-| `.github/workflows/tierstore-site.yml`, `tierstore-site-publish.yml`, `tierstore-bench.yml` | `.github/workflows/` | rewritten for this repository (CI, release, site) |
+| `.github/workflows/tierstore-site.yml`, `tierstore-site-publish.yml` | `.github/workflows/` | rewritten for this repository (CI, release, site) |
 | the tierstore sections of `.config/nextest.toml` | `.config/nextest.toml` | with the per-test overrides that guard against hangs |
 
 ## What stays in kbf
 
+- **tierstore-bench, for now.** It talks to the tierstore binary over HTTP and links no tierstore code, only
+  `objstore-s3`. A benchmark campaign is running on it, and moving it mid-campaign would stop that campaign. After
+  the switch it takes `objstore-s3` by the same tag. Moving it here, with `tierstore-bench.yml`, is a later
+  change of its own.
+- **The site infrastructure program** (`infra/site`). It serves kbf.dev and tierstore.dev from one program, so it
+  stays. Only the repository that tierstore.dev's publish role trusts changes (see "The site").
 - **kbf's own crates.** kbf-front and kbf-task use tierstore (for example the presigning of a PUT and the S3
   front in tests). After the move they depend on this repository by git tag, `tierstore = { git = ..., tag =
   "vX.Y.Z" }`, until the crate is published to crates.io. kbf's root `Cargo.toml` names the tag once.
@@ -57,20 +62,62 @@ and refuses the push on any match. It looks for:
 
 1. **Land what is in flight.** In kbf, land the open tierstore pull requests that are already verified, in
    order: the drain (#2129), the listen addresses (#2130), the cache lock (#2133) and the test fix (#2142), then
-   kbf#2094.
-2. **Freeze.** From the import on, no tierstore change merges in kbf. A change that is not landed by then is
-   re-opened here as a pull request from its patch.
+   kbf#2094, then the cache scrub (#2047) and streamed cache reads (#2050). They come across with the history.
+2. **The cut.** The import is cut from one named kbf commit, which is announced. After the cut, no tierstore
+   change merges in kbf, and new tierstore work opens here. A kbf pull request still open at the cut is
+   re-opened here by its owner, as a cherry-pick of its commits (the paths are the same, so most apply
+   cleanly), and the kbf pull request is closed with a link to the new one. The cut waits for the work in
+   step 1 to land.
 3. **Import.** Run `filter-repo`, scan, push `import/from-kbf`, open the pull request. Then add the new root
    `Cargo.toml`, the test helper and the CI workflows. CI here must be green on the import before it merges.
 4. **First release here.** Tag `vX.Y.Z` (the next version after kbf's last tierstore release). Build the binaries
    and checksums the way kbf's release did. The release notes say where tierstore came from.
+4b. **Hosts accept releases from here.** The script that installs tierstore on a host verifies the tarball's
+   attestation for kbf's repository today. It is changed to verify this repository's, pinned, before a host
+   installs a release from here.
 5. **Switch kbf.** One kbf pull request does all of this:
    - repoints `tierstore` and `objstore-s3` to the tag;
-   - deletes `crates/tierstore`, `crates/tierstore-bench`, `crates/objstore-s3`, `packaging/tierstore` and the
+   - deletes `crates/tierstore`, `crates/objstore-s3`, `packaging/tierstore` and the
      tierstore workflows;
+   - stops building and releasing the tierstore asset in kbf's release;
    - keeps kbf's CI green.
 6. **The site.** `tierstore.dev` is built and published from this repository. Its publish workflow and its
-   hosting move here; the domain does not change.
+   hosting move here; the domain does not change. The one-time setup (see "The site" below) is done once,
+   against this repository. The tierstore paper's link to the code is repointed here when the import merges.
+
+## CI, release, the site and the hosts
+
+**CI.** The CI here starts as a copy of the parts of kbf's CI that these crates use.
+- `ci.yml`: `cargo fmt --check`; cargo-deny (bans, licences, sources) with the same pinned release as kbf;
+  clippy with `-D warnings` on default features and on `--features server`; nextest under llvm-cov, with a 99%
+  line and 99% branch gate per crate (a copy of kbf's coverage gate tool, which links nothing of kbf).
+- Hang guards live only in `.config/nextest.toml`. No test asserts or depends on timing.
+- Repository lints: every `uses:` pinned to a commit with a version comment; a top-level `permissions: {}`;
+  `id-token: write` only on the signing jobs; no `pull_request_target`.
+- A daily advisories check that opens one issue.
+
+**Release.**
+- `artifacts.yml` builds `tierstore` (`--features server --bin tierstore`) for linux-x86_64 and linux-arm64.
+  It packages each the way kbf does: `tierstore-<commit>-<platform>.tar.gz`, a CycloneDX SBOM, and `SHA256SUMS`.
+- On `main`, a signing stage attests build provenance per file and the SBOM per tarball. The signing identity
+  is this repository's `.github/workflows/artifacts.yml`.
+- `release.yml` attaches exactly those files and verifies the attestations again. It never rebuilds.
+- Because the signing identity changes, a host that verifies a tierstore download must be told the new
+  identity before it installs a release from here (step 4b).
+
+**The site.** tierstore.dev keeps its domain. Its build and publish workflows (today in kbf) move here. A
+maintainer does the one-time setup once, against this repository, at step 6:
+- a `prod-site-tierstore` environment limited to `main`, with the bucket, distribution id and publish role
+  variables;
+- the publish role's trust pinned to this repository's numeric id.
+
+Then the publish workflow runs here. kbf's two site workflows are removed in the switch PR (step 5). kbf.dev is
+not touched.
+
+**The hosts.** Hosts that run tierstore install it with a script that verifies the release tarball's
+attestation for kbf's repository. Before the first release here is installed, that script accepts releases from
+this repository instead, with the attestation's repository changed and pinned (step 4b). Later updates go
+through the generic host updater, with tierstore's own update hook (planned work, below).
 
 ## Open pull requests in kbf
 
@@ -80,10 +127,9 @@ and refuses the push on any match. It looks for:
 - **Everything else.** Any other open tierstore pull request in kbf either lands before the freeze or is
   re-opened here by its owner.
 
-## Questions to settle in review
+## Settled in review
 
-1. **objstore-s3:** move it here (proposed), or publish it from kbf as a crate of its own?
-2. **crates.io:** publish `tierstore` and `objstore-s3` now, or use git tags until the API settles (proposed: tags
-   first)?
-3. **The binary's release channel:** releases from this repository only, or kbf's release keeps a copy for a
-   while?
+1. **objstore-s3:** settled: it moves here.
+2. **crates.io:** settled: git tags first, crates.io later.
+3. **The binary's release channel:** settled: releases from this repository only, starting with its first
+   release. kbf's release stops shipping tierstore in the switch PR (step 5).
