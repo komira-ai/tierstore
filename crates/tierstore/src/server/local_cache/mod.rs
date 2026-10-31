@@ -261,6 +261,11 @@ pub struct CacheConfig {
     /// stage file removed, its permit and room given back, its place in the table of the fills
     /// freed) and counted as `deadline`. Not below `keep_wait`.
     pub keep_deadline: Duration,
+    /// The most bytes of a put's body that may wait for the disk before its copy is dropped
+    /// (counted as `slow`), so that the upstream never waits for the disk. The first chunk is always
+    /// taken. It bounds the memory of the copy of one put: the keeps that run at once hold at most
+    /// `max_concurrent_keeps` times this.
+    pub keep_queue_bytes: u64,
     /// Whether the cache takes writes and sends them to the upstream. Off, every write call is
     /// `Unsupported`. The binary sets the front's `cache_writes` from the same setting, so that
     /// the front does not refuse the writes either.
@@ -289,6 +294,7 @@ impl CacheConfig {
             max_concurrent_keeps: MAX_CONCURRENT_KEEPS,
             keep_wait: KEEP_WAIT,
             keep_deadline: KEEP_DEADLINE,
+            keep_queue_bytes: keep::KEEP_QUEUE_BYTES,
             write_through: false,
             forget_limit: FORGET_LIMIT,
         }

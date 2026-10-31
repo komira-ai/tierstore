@@ -22,7 +22,7 @@ use crate::{Backend, FaultyBackend, Op, PartBody, S3Backend, TestClock};
 /// A body of `bytes` in pieces of a mebibyte.
 fn pieces(bytes: &[u8]) -> PartBody<'static> {
     let items: Vec<Result<Bytes, crate::Error>> = bytes
-        .chunks(1 << 20)
+        .chunks(4 << 20)
         .map(|piece| Ok(Bytes::copy_from_slice(piece)))
         .collect();
     stream::iter(items).boxed()
@@ -75,7 +75,10 @@ fn s3_backend(s3: &FakeS3) -> Arc<S3Backend> {
 /// and a put of a small one (one PUT) are each a local hit afterwards, with no call of the
 /// upstream, and that the tag in each sidecar is the tag the upstream gives in a HEAD: for the
 /// large object it is the tag of an object made of parts (it has a dash), which no hash of the
-/// bytes could give. It fails on a keep that works the tag out from the bytes.
+/// bytes could give. It fails on a keep that works the tag out from the bytes. The copy may queue
+/// the whole body (`keep_queue_bytes`, and pieces of 4 MiB, fewer than the chunks the queue takes),
+/// so a disk slower than the loopback upstream does not drop it as `slow`, which the test is not
+/// about.
 #[tokio::test]
 async fn a_put_over_s3_is_kept_with_the_upstreams_tag_also_when_sent_as_parts() {
     let s3 = FakeS3::start().await;
@@ -85,6 +88,7 @@ async fn a_put_over_s3_is_kept_with_the_upstreams_tag_also_when_sent_as_parts() 
     let policies = vec![("cas/".to_owned(), true)];
     let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
     config.write_through = true;
+    config.keep_queue_bytes = 64 << 20;
     never_expires(&mut config);
     let clock = Arc::new(TestClock::new());
     let cache = LocalCache::open(
