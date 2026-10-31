@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tierstore::{
     Backend, Error, MemoryBackend, PassReport, Reconciler, ReconcilerConfig, TestClock,
 };
@@ -17,23 +18,18 @@ use crate::support::{Rig, body, read, text};
 
 const TAKERS: usize = 8;
 
-/// Eight reconcilers with names of their own over `hot`, each running one pass on a thread of its
-/// own. Gives the number of each with what its pass reported.
+/// Eight reconcilers with names of their own over `hot`, each running one pass, all polled
+/// together: a pass that waits at the gate lets the others run. Gives the number of each with what
+/// its pass reported.
 async fn passes(rig: &Rig, hot: Arc<dyn Backend>) -> Vec<(usize, PassReport)> {
-    let mut tasks = Vec::new();
-    for number in 0..TAKERS {
-        let config = rig.reconciler_config(&format!("taker-{number}"), 1 << 20);
-        let mut reconciler = Reconciler::new(hot.clone(), rig.cold.clone(), config);
-        tasks.push(tokio::spawn(async move {
-            let report = reconciler.pass().await;
-            (number, report)
-        }));
-    }
-    let mut done = Vec::new();
-    for task in tasks {
-        done.push(task.await.unwrap());
-    }
-    done
+    let mut reconcilers: Vec<Reconciler> = (0..TAKERS)
+        .map(|number| {
+            let config = rig.reconciler_config(&format!("taker-{number}"), 1 << 20);
+            Reconciler::new(hot.clone(), rig.cold.clone(), config)
+        })
+        .collect();
+    let reports = join_all(reconcilers.iter_mut().map(|reconciler| reconciler.pass())).await;
+    reports.into_iter().enumerate().collect()
 }
 
 /// Asserts that exactly one of the takers holds the lease, that the lease object names it, that
@@ -62,7 +58,7 @@ async fn assert_one_holder(rig: &Rig, done: &[(usize, PassReport)]) {
 /// read) before any of them goes on. One passes and holds; the lease object names it; the other
 /// seven report nothing done. Defects it catches: a take over that is not conditional on the
 /// tag it read, which gives more than one holder; a take over that gives the lease to nobody.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn eight_reconcilers_that_find_the_lease_expired_at_once_have_one_holder() {
     let rig = Rig::new();
     assert!(rig.reconciler("old", 1 << 20).pass().await.held);
@@ -77,7 +73,7 @@ async fn eight_reconcilers_that_find_the_lease_expired_at_once_have_one_holder()
 /// create-only put of the lease before any goes on. One creates it and holds it; the other seven
 /// find it taken and not yet expired, and do nothing. Defect it catches: a first take of the
 /// lease that is not create-only.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
     let rig = Rig::new();
     let hot: Arc<dyn Backend> = Arc::new(Gate::new(rig.hot.clone(), "_tiering/lease", TAKERS));
