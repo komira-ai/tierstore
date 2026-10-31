@@ -11,6 +11,10 @@
 //! that the proxy neither turns a failed create into a second winner nor leaves a partial object;
 //! it does not show that a real distributed store keeps `If-None-Match: *` atomic with part of
 //! its members down, which only a run against the store can.
+//!
+//! The memory rounds only show that the proxy adds no second path to the create: the memory
+//! backend's create is a check and insert under one mutex, so it is atomic by construction. The
+//! directory rounds are the real primitive (a hard link that fails where the name is taken).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -404,8 +408,7 @@ async fn with_the_hot_tier_full_eight_unsigned_puts_have_one_winner_in_the_cold_
     }
 }
 
-/// Asserts the documented weaker path, which "a write that is not presigned" refers
-/// to: a put that goes to the cold tier because its node sees the hot tier full, and a put that
+/// Pins the documented weaker path, the one a write that is not presigned takes: a put that goes to the cold tier because its node sees the hot tier full, and a put that
 /// creates the object in the hot tier, can both succeed, leaving the key in both tiers with
 /// different bodies. The node that sees the hot tier full has passed its check that the hot tier
 /// lacks the key when the other node's put is made and acknowledged. This test PINS A KNOWN LIMIT
@@ -413,7 +416,7 @@ async fn with_the_hot_tier_full_eight_unsigned_puts_have_one_winner_in_the_cold_
 /// assert one winner. Defect it catches the other way: nothing; it shows the claim of one winner
 /// does not cover this path.
 #[tokio::test(start_paused = true)]
-async fn an_unsigned_put_to_the_cold_tier_and_a_put_to_the_hot_tier_can_both_succeed() {
+async fn pins_a_known_limit_an_unsigned_cold_put_and_a_hot_put_can_both_succeed() {
     let tiers = Tiers::memory();
     tiers
         .hot

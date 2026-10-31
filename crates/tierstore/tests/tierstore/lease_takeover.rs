@@ -4,6 +4,10 @@
 //! The lease is the object `_tiering/lease` of the hot tier. It is taken create-only, renewed and
 //! taken over with `If-Match`, and it expires when the object was last written `ttl` ago by the
 //! contender's own clock. Nothing here sleeps: every clock is set by hand.
+//!
+//! Gap: these tests run over the in-memory backend only, whose replace-on-tag is a mutex-held
+//! check and write. The directory backend also has `put_if_match` (serialised by a lock of its
+//! own); a race of reconcilers over it is not exercised here.
 
 use std::sync::Arc;
 
@@ -89,7 +93,10 @@ async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
 /// WHAT THE CODE DOES NOT DO: there is no fencing token, and the old holder learns it lost the
 /// lease only when it renews. Defects it catches: a take over while the old holder's lease is
 /// young; an old holder that renews a lease another holder replaced; an overlap that loses an
-/// object.
+/// object. It also pins the old holder's own work: its resumed pass copies all four objects
+/// and reports no failure (its copies are create-only and find the new holder's, and its
+/// checkpoint write is not conditioned on the lease). A fencing fix that makes the stale pass's
+/// copy or checkpoint fail turns this test red, and the test is then to be changed to say so.
 #[tokio::test(start_paused = true)]
 async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_next_renewal() {
     let rig = Rig::new();
@@ -119,6 +126,9 @@ async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_n
 
     assert!(first.held && second.held, "{first:?} {second:?}");
     assert_eq!(second.failed, Vec::<Error>::new());
+    // PINS A KNOWN LIMIT: nothing fences the stale pass.
+    assert_eq!(first.failed, Vec::<Error>::new(), "{first:?}");
+    assert_eq!(first.copied, names.len(), "{first:?}");
     for name in names {
         assert_eq!(read(&*rig.cold_mem, name).await, body(name), "{name}");
         assert_eq!(read(&*rig.hot_mem, name).await, body(name), "{name}");
