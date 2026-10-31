@@ -153,3 +153,12 @@ test('the real deny set is not empty and holds only SHA-256 digests in lowercase
 test('the words node, nodes and node.js are not refused', () => {
   assert.deepEqual(scanText('<p>a node, three nodes, node.js, Node and the nodes-per-rack setting</p>'), []);
 });
+
+test('a name in a deny set followed by more hyphenated words is refused, and a longer name that only starts like it is not', () => {
+  const refused = (page: string): string => scanText(page, false, TEST_DENY).join('\n');
+  assert.match(refused('<p>on zebra-07-edge</p>'), /internal host name/);
+  assert.match(refused('<p>on Zebra-07-a-b.</p>'), /internal host name/);
+  assert.match(refused('<p>on quokka9-x-y</p>'), /internal host name/);
+  assert.match(refused('<p>on narwhal-a-b-c</p>'), /internal host name/);
+  assert.deepEqual(scanText('<p>zebra-070-edge, quokkas-per-rack, narwhals-a-b, zebra-0-b</p>', false, TEST_DENY), []);
+});
