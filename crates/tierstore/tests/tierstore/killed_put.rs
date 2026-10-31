@@ -157,8 +157,8 @@ async fn a_temporary_file_left_by_a_crashed_process_is_not_an_object() {
     let dirs = Dirs::new();
     std::fs::write(dirs.hot_dir.path().join(".tmp-dead-0"), b"half of an obj").unwrap();
 
-    let proxy = dirs.proxy("p1").await;
     assert_eq!(keys(&*dirs.hot).await, Vec::<String>::new());
+    let proxy = dirs.proxy("p1").await;
     assert_eq!(keys(&*proxy).await, Vec::<String>::new());
     assert_absent(&*proxy, ".tmp-dead-0").await;
     proxy.put("k", body("whole")).await.unwrap();
