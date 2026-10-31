@@ -21,13 +21,14 @@ the repository root by looking for `.github/workflows` above them, and compute t
 (`test/support.ts`); `.github/workflows/tierstore-site.yml` names the directory in three places (the `paths:` filters,
 `working-directory` and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact
 path and in the two files its deploy job checks out, and `test/supply-chain.test.ts` checks that the
-workflows and the site agree. The test `csp.test.ts` reads the Content-Security-Policy from `infra/site/lib/site-stack.ts`, so the new
-repository needs that file too, or the policy copied beside the site.
+workflows and the site agree. The test `csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy that
+`infra/site/lib/site-stack.ts` in komira-ai/kbf serves; a change to it there is made here in the same step.
 
 | Path | What |
 |---|---|
 | `../docs/*.md` | the operator guide, rendered by `tools/docs.ts` into `/docs/` and `/docs/<name>/` (a page for each file, so a new file is a new page; `Not in a release yet` sections are marked). The crate's test `src/server/docs_tests.rs` holds the guide to the code, so the pages cannot say what the code does not. A minimal renderer for the subset the guide uses, no dependency; it refuses what it does not read |
 | `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/tierstore/README.md` or the code; a page says where |
+| `served-policy.ts` | the Content-Security-Policy the site is served under, copied from `infra/site/lib/site-stack.ts` in komira-ai/kbf, which sets the header |
 | `static/theme.css` | the shared theme (kbf.dev, mopm.dev, ucdk.dev, tierstore.dev), copied byte for byte; `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
 | `src/copy.ts` | copy buttons on command blocks |

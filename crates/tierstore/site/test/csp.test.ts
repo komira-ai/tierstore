@@ -12,10 +12,10 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { checkDist } from '../tools/check-dist';
 import { parsePolicy, policyFromSource, policyViolations } from '../tools/csp';
-import { assetDir, buildReal, copyTree, plant, read, REPO } from './support';
+import { assetDir, buildReal, copyTree, plant, read, SITE } from './support';
 
 const dist = buildReal('csp');
-const POLICY = policyFromSource(read(REPO, 'infra', 'site', 'lib', 'site-stack.ts'));
+const POLICY = policyFromSource(read(SITE, 'served-policy.ts'));
 
 function refused(name: string, file: string, find: string | RegExp, replace: string, why: RegExp): void {
   test(`check-dist refuses ${name}`, () => {
@@ -50,7 +50,7 @@ test('check-dist refuses a file type that is not published', () => {
   assert.throws(() => checkDist(t), /robots\.txt: only \.html, \.js and \.css files are published/);
 });
 
-test('the policy parsed from infra/site is the one the pages are checked against', () => {
+test('the policy parsed from served-policy.ts is the one the pages are checked against', () => {
   assert.equal(
     POLICY,
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
