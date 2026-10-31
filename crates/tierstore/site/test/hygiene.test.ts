@@ -46,11 +46,13 @@ const INTERNAL_NAME_DIGESTS: ReadonlySet<string> = new Set<string>([
 
 const sha256 = (s: string): string => createHash('sha256').update(s).digest('hex');
 
-/** What a token is looked up as: lowercase whole, without its trailing digits, and its first hyphen-separated segment without them. */
+/** What a token is looked up as: lowercase, for each hyphen-prefix of it (one segment, two, ... the whole), that prefix whole and without its trailing digits. */
 function nameCandidates(token: string): string[] {
-  const t = token.toLowerCase();
-  const stripped = (x: string): string => x.replace(/\d+$/, '');
-  return [t, stripped(t), stripped(t.split('-')[0])];
+  const segments = token.toLowerCase().split('-');
+  return segments.flatMap((_, i) => {
+    const prefix = segments.slice(0, i + 1).join('-');
+    return [prefix, prefix.replace(/\d+$/, '')];
+  });
 }
 
 /** The findings for `text`: each token (a run of letters, digits and hyphens) one of whose candidates has its digest in `deny`. The finding gives the line and the digest, not the name. */
