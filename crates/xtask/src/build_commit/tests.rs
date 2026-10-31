@@ -1,0 +1,115 @@
+use super::*;
+use std::path::Path;
+
+const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn a_commit_is_twelve_to_forty_lowercase_hex_digits() {
+    // Catches: a short, long, upper-case or non-hex value accepted as a commit.
+    assert!(is_commit("0123456789ab"));
+    assert!(is_commit(COMMIT));
+    for bad in [
+        "",
+        "0123456789a",
+        "0123456789AB",
+        "0123456789xy",
+        &"a".repeat(41),
+    ] {
+        assert!(!is_commit(bad), "{bad}");
+    }
+    assert!(full_commit("--commit", COMMIT).is_ok());
+    assert!(matches!(
+        full_commit("--commit", "0123456789ab"),
+        Err(Error::Usage(_))
+    ));
+}
+
+#[test]
+fn the_version_text_must_end_with_the_commit() {
+    // Catches: a check that looks for the commit anywhere (the version number may hold the
+    // same digits) or accepts `unknown`.
+    assert!(names_commit("tierstore 0.2.0+0123456789ab\n", COMMIT));
+    assert!(!names_commit("tierstore 0.2.0+unknown\n", COMMIT));
+    assert!(!names_commit("tierstore 0.2.0+0123456789ac\n", COMMIT));
+    assert!(!names_commit("tierstore 0123456789ab\n", COMMIT));
+    assert!(!names_commit(
+        "tierstore 0.2.0+0123456789ab extra\n",
+        COMMIT
+    ));
+}
+
+#[test]
+fn the_other_commit_differs_in_the_last_digit_only() {
+    // Catches: a control commit that equals the real one, or that moves a digit inside the
+    // twelve the version text carries only by accident (the last of 40 is outside them).
+    let other = other_commit(COMMIT);
+    assert_ne!(other, COMMIT);
+    assert_eq!(&other[..39], &COMMIT[..39]);
+    assert!(other_commit("0000000000000000000000000000000000000000").ends_with('1'));
+}
+
+fn says(text: &'static str) -> fn(&Path) -> Result<Said, Error> {
+    // A fn pointer cannot capture, so each text the tests need has its own.
+    match text {
+        "ok" => |_| Ok(said(true, "tierstore 0.2.0+0123456789ab\n", "")),
+        "other" => |_| Ok(said(true, "tierstore 0.2.0+ffffffffffff\n", "")),
+        "unknown" => |_| Ok(said(true, "tierstore 0.2.0+unknown\n", "")),
+        "fails" => |_| Ok(said(false, "", "boom\n")),
+        _ => |_| {
+            Err(Error::Spawn {
+                what: "x".into(),
+                why: "missing".into(),
+            })
+        },
+    }
+}
+
+fn said(success: bool, stdout: &str, stderr: &str) -> Said {
+    Said {
+        success,
+        stdout: stdout.to_owned(),
+        stderr: stderr.to_owned(),
+    }
+}
+
+#[test]
+fn a_binary_that_names_the_commit_passes() {
+    // Catches: the check refusing the form `--version` really prints.
+    let line = check_with(Path::new("tierstore"), COMMIT, says("ok")).expect("check");
+    assert_eq!(
+        line,
+        "tierstore: tierstore 0.2.0+0123456789ab names commit 0123456789ab"
+    );
+}
+
+#[test]
+fn a_binary_that_names_another_commit_or_none_is_refused() {
+    // Catches: a binary built from another commit, or without a git checkout, released.
+    for which in ["other", "unknown"] {
+        let result = check_with(Path::new("tierstore"), COMMIT, says(which));
+        assert!(matches!(result, Err(Error::WrongCommit { .. })), "{which}");
+    }
+}
+
+#[test]
+fn a_binary_that_fails_or_cannot_run_is_an_error_and_a_bad_commit_is_refused() {
+    // Catches: a failing `--version` read as a pass, or a missing binary skipped.
+    let bin = Path::new("tierstore");
+    let failed = check_with(bin, COMMIT, says("fails")).expect_err("fails");
+    assert_eq!(failed.to_string(), "tierstore --version failed: boom");
+    assert!(matches!(
+        check_with(bin, COMMIT, says("missing")),
+        Err(Error::Spawn { .. })
+    ));
+    assert!(matches!(
+        check_with(bin, "not a commit", says("ok")),
+        Err(Error::NotACommit(_))
+    ));
+}
+
+#[test]
+fn the_real_runner_reports_a_program_that_is_not_there() {
+    // Catches: `run_version` turning a missing program into a success.
+    let result = run_version(Path::new("/nonexistent/tierstore"));
+    assert!(matches!(result, Err(Error::Spawn { .. })));
+}

@@ -1,0 +1,43 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+publish = false
+description = "The CI and release steps of this repository (cargo xtask <verb>)."
+# `cargo xtask` runs this bin.
+default-run = "xtask"
+
+# `gh-fake`, the program tests/attestations.rs runs in place of `gh attestation verify`. Never
+# run by CI itself.
+[[bin]]
+name = "gh-fake"
+path = "src/bin/gh-fake.rs"
+test = false
+
+[dependencies]
+# The statement a provenance bundle's DSSE envelope carries (`bundles`): its subject is
+# compared with the tarball's digest.
+base64 = "0.23.1"
+clap = { version = "4.6.7", features = ["derive"] }
+# gzip for the tarballs `package` writes and `fetch` unpacks; the pure-Rust backend.
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+hex = "0.4.3"
+# xz for the tar.xz archive of cargo-cyclonedx that `fetch` unpacks.
+lzma-rs = "0.3.0"
+# The TLS client of `fetch`: the host's trusted roots and nothing else.
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.8.4"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+tar = { version = "0.4.46", default-features = false }
+thiserror = "2.0.21"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
+
+[dev-dependencies]
+# The YAML parser the workflow lint (tests/workflows.rs) reads each workflow with.
+saphyr-parser = "0.1.0"
+
+[lints]
+workspace = true
