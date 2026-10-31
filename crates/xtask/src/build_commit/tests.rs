@@ -126,3 +126,31 @@ fn the_real_runner_reports_a_program_that_is_not_there() {
     let result = run_version(Path::new("/nonexistent/tierstore"));
     assert!(matches!(result, Err(Error::Spawn { .. })));
 }
+
+#[test]
+fn a_check_that_accepts_any_text_fails_its_control() {
+    // Catches: a check that cannot fail. A reader that accepts every text passes the real
+    // commit, and the control (a commit the binary was not built from) must then refuse it.
+    let result = check_naming(Path::new("tierstore"), COMMIT, says("ok"), |_, _| true);
+    assert!(
+        matches!(result, Err(Error::ControlPassed { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_full_length_text_that_is_not_hex_is_not_a_full_commit() {
+    // Catches: the length alone taken for a commit.
+    assert!(matches!(
+        full_commit("--commit", &"z".repeat(40)),
+        Err(Error::Usage(_))
+    ));
+}
+
+#[test]
+fn the_check_verb_runs_the_binary() {
+    // Catches: `check` not reaching the real runner. `false` exits 1 whatever it is given, so
+    // the verb reports a failed `--version`.
+    let result = check(Path::new("false"), COMMIT);
+    assert!(matches!(result, Err(Error::Failed(_))), "{result:?}");
+}

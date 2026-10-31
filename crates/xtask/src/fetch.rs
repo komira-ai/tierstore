@@ -172,9 +172,19 @@ pub fn tls_config(roots: &[CertificateDer<'static>]) -> ureq::tls::TlsConfig {
 
 /// The body of `url`, over HTTPS only, trusting `roots`.
 pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>, Error> {
+    download_from(url, roots, true)
+}
+
+/// [`download`], with the HTTPS-only rule as `https_only` says (the tests of the transfer
+/// itself serve plain HTTP from the loopback address; `download` never does).
+pub fn download_from(
+    url: &str,
+    roots: &[CertificateDer<'static>],
+    https_only: bool,
+) -> Result<Vec<u8>, Error> {
     let tls = tls_config(roots);
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .https_only(true)
+        .https_only(https_only)
         .timeout_global(Some(DOWNLOAD_TIMEOUT))
         .tls_config(tls)
         .build()
@@ -212,7 +222,18 @@ pub fn fetch(
     out: &Path,
     roots: &[CertificateDer<'static>],
 ) -> Result<String, Error> {
-    let bytes = download(url, roots)?;
+    fetch_with(url, sha256, unpack, out, |url| download(url, roots))
+}
+
+/// [`fetch`] with the way the bytes are downloaded (the tests pass a stand-in).
+pub fn fetch_with(
+    url: &str,
+    sha256: &Sha256,
+    unpack: &Unpack,
+    out: &Path,
+    download: impl FnOnce(&str) -> Result<Vec<u8>, Error>,
+) -> Result<String, Error> {
+    let bytes = download(url)?;
     install(&bytes, sha256, unpack, out)?;
     Ok(format!(
         "ok: {url} has SHA-256 {sha256}; installed {}",

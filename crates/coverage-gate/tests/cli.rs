@@ -131,3 +131,48 @@ fn unreadable_input_is_status_2() {
     let o = gate(&root, &stray, &[]);
     assert_eq!(o.status.code(), Some(2));
 }
+
+#[test]
+fn a_crate_with_no_instrumented_line_and_one_under_on_branches_are_named() {
+    // Catches: a crate that never ran passing for lack of data, and a branch shortfall
+    // reported under the wrong metric.
+    let root = workspace("nodata", &["a", "b"]);
+    let tracefile = lcov(&root, &[("crates/a/src/lib.rs", 10, 10, 100, 90)]);
+    let o = gate(&root, &tracefile, &[]);
+    assert_eq!(o.status.code(), Some(1), "{}", out(&o));
+    assert!(out(&o).contains("NOTHING MEASURED"), "{}", out(&o));
+    assert!(
+        out(&o).contains("BELOW THRESHOLD (branches)"),
+        "{}",
+        out(&o)
+    );
+}
+
+#[test]
+fn a_relative_root_is_resolved_from_the_working_directory() {
+    // Catches: a relative `--root` compared as written with the tracefile's absolute paths.
+    let root = workspace("relative", &["a"]);
+    let tracefile = lcov(&root, &[("crates/a/src/lib.rs", 10, 10, 0, 0)]);
+    let o = Command::new(env!("CARGO_BIN_EXE_coverage-gate"))
+        .current_dir(&root)
+        .args(["--lcov"])
+        .arg(&tracefile)
+        .args(["--root", "."])
+        .output()
+        .expect("run coverage-gate");
+    assert_eq!(o.status.code(), Some(0), "{}", out(&o));
+}
+
+#[test]
+fn a_summary_file_that_cannot_be_written_is_status_2() {
+    // Catches: a failed summary write ignored, so the job summary silently goes missing.
+    let root = workspace("summary-dir", &["a"]);
+    let tracefile = lcov(&root, &[("crates/a/src/lib.rs", 10, 10, 0, 0)]);
+    let o = gate(
+        &root,
+        &tracefile,
+        &["--summary-file", root.to_str().expect("utf8")],
+    );
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("append to"));
+}

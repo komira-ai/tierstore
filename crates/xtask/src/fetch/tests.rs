@@ -279,3 +279,114 @@ fn the_part_file_sits_beside_out() {
         Path::new("/a/b/tool.part")
     );
 }
+
+/// A server on the loopback address that answers its one request with `status` and `body`; the
+/// URL to ask it. (Plain HTTP: `download_from` is told not to insist on HTTPS here.)
+fn serve_once(status: &'static str, body: &'static [u8]) -> String {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("http://{}/tool", listener.local_addr().expect("addr"));
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut line = String::new();
+        while reader.read_line(&mut line).expect("request") > 2 {
+            line.clear();
+        }
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("head");
+        stream.write_all(body).expect("body");
+    });
+    url
+}
+
+#[test]
+fn a_download_returns_the_body_and_a_status_error_is_a_download_error() {
+    // Catches: a body cut short or not read, and an HTTP error page taken for the file.
+    let url = serve_once("200 OK", TOOL);
+    assert_eq!(download_from(&url, &[], false).expect("download"), TOOL);
+    let url = serve_once("404 Not Found", b"missing");
+    let e = download_from(&url, &[], false).expect_err("404");
+    assert!(
+        matches!(&e, Error::Download { url: u, .. } if *u == url),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_download_over_plain_http_is_refused() {
+    // Catches: `download` fetching a tool over a connection anyone can alter. The refusal
+    // comes before any connection, so the address needs no server.
+    let e = download("http://127.0.0.1:9/tool", &[]).expect_err("http");
+    assert!(matches!(e, Error::Download { .. }), "{e}");
+}
+
+#[test]
+fn fetch_downloads_checks_and_installs_and_prints_what_it_did() {
+    // Catches: a fetch that installs without the check, or prints nothing a log can show.
+    let dir = scratch("fetch-ok");
+    let out = dir.join("bin").join("tool");
+    let line = fetch_with(
+        "https://example.invalid/tool",
+        &Sha256::of(TOOL),
+        &Unpack::new(None, None).expect("unpack"),
+        &out,
+        |url| {
+            assert_eq!(url, "https://example.invalid/tool");
+            Ok(TOOL.to_vec())
+        },
+    )
+    .expect("fetch");
+    assert!(
+        line.starts_with("ok: https://example.invalid/tool has SHA-256 "),
+        "{line}"
+    );
+    assert_eq!(std::fs::read(&out).expect("tool"), TOOL);
+
+    let e = fetch_with(
+        "https://example.invalid/tool",
+        &Sha256::of(b"another file"),
+        &Unpack::new(None, None).expect("unpack"),
+        &dir.join("never"),
+        |_| Ok(TOOL.to_vec()),
+    )
+    .expect_err("mismatch");
+    assert!(matches!(e, Error::Mismatch { .. }), "{e}");
+    assert!(!dir.join("never").exists());
+
+    let e = fetch_with(
+        "https://example.invalid/tool",
+        &Sha256::of(TOOL),
+        &Unpack::new(None, None).expect("unpack"),
+        &dir.join("never"),
+        |url| {
+            Err(Error::Download {
+                url: url.to_owned(),
+                why: "down".into(),
+            })
+        },
+    )
+    .expect_err("download");
+    assert!(matches!(e, Error::Download { .. }), "{e}");
+}
+
+#[test]
+fn fetch_over_http_fails_in_the_download_and_the_host_roots_build_a_client() {
+    // Catches: `fetch` not going through `download`, and a TLS client the host's roots cannot
+    // build (the roots may be none on a machine with no store).
+    let dir = scratch("fetch-http");
+    let roots = host_roots();
+    let _ = tls_config(&roots);
+    let e = fetch(
+        "http://127.0.0.1:9/tool",
+        &Sha256::of(TOOL),
+        &Unpack::new(None, None).expect("unpack"),
+        &dir.join("never"),
+        &roots,
+    )
+    .expect_err("http");
+    assert!(matches!(e, Error::Download { .. }), "{e}");
+}

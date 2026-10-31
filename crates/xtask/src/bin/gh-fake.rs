@@ -14,7 +14,20 @@
 //! attestation is checked online only. The verification must name the branch `refs/heads/main`
 //! and deny self-hosted runners. Without `--predicate-type` the predicate is build provenance.
 
+//! The other things the tests ask of a `gh` (or of a `cargo`), all driven by files:
+//!
+//! - `--version` prints `gh-fake 0.1.0+0123456789ab` (the form of `tierstore --version`);
+//! - `api [-X <method>] <path> [--input -]` answers with the file `<path>` when there is one
+//!   (an empty file is an empty reply), with `(HTTP 404)` when `<path>.404` is there, with a
+//!   failure when `<path>.fail` is, and with a failure otherwise; a body on stdin
+//!   (`--input -`) is saved as `<path>.body`;
+//! - `deny ...` (the `cargo deny` of the advisories verb) exits with the number in `deny.code`
+//!   of the working directory (0 when there is none) and prints `deny.stderr` on stderr;
+//! - `print <text>` and `fail <text>` print on stdout and exit 0, and print on stderr and
+//!   exit 1.
+
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -30,6 +43,80 @@ fn digest(path: &str) -> Option<String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("--version") => {
+            println!("gh-fake 0.1.0+0123456789ab");
+            ExitCode::SUCCESS
+        }
+        Some("api") => api(&args[1..]),
+        Some("deny") => deny(),
+        Some("print") => {
+            println!("{}", args[1..].join(" "));
+            ExitCode::SUCCESS
+        }
+        Some("fail") => {
+            eprintln!("{}", args[1..].join(" "));
+            ExitCode::FAILURE
+        }
+        _ => attestation(&args),
+    }
+}
+
+/// `api [-X <method>] <path> [--input -]`: see the header.
+fn api(args: &[String]) -> ExitCode {
+    let mut path = None;
+    let mut body = false;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "-X" => {
+                rest.next();
+            }
+            "--input" => {
+                rest.next();
+                body = true;
+            }
+            _ => path = Some(arg.as_str()),
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("gh-fake: api needs a path");
+        return ExitCode::from(2);
+    };
+    if body {
+        let mut text = String::new();
+        let _ = std::io::stdin().read_to_string(&mut text);
+        let _ = std::fs::write(format!("{path}.body"), text);
+    }
+    if let Ok(reply) = std::fs::read(path) {
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), &reply);
+        return ExitCode::SUCCESS;
+    }
+    if Path::new(&format!("{path}.404")).exists() {
+        eprintln!("gh: Not Found (HTTP 404)");
+    } else if Path::new(&format!("{path}.fail")).exists() {
+        eprintln!("gh: the call failed");
+    } else {
+        eprintln!("gh-fake: no reply is prepared for {path}");
+    }
+    ExitCode::FAILURE
+}
+
+/// `deny ...`: see the header.
+fn deny() -> ExitCode {
+    let code = std::fs::read_to_string("deny.code")
+        .ok()
+        .and_then(|text| text.trim().parse::<u8>().ok())
+        .unwrap_or(0);
+    eprint!(
+        "{}",
+        std::fs::read_to_string("deny.stderr").unwrap_or_default()
+    );
+    ExitCode::from(code)
+}
+
+/// `attestation verify <file> ...`: see the header.
+fn attestation(args: &[String]) -> ExitCode {
     if args.len() < 3 || args[0] != "attestation" || args[1] != "verify" {
         eprintln!("gh-fake: only `attestation verify <file> ...` is understood: {args:?}");
         return ExitCode::from(2);
