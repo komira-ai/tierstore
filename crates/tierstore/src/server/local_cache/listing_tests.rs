@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::listing::LISTING_CALLS;
 use super::testing::{FakeDisk, Rig};

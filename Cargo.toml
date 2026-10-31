@@ -1,0 +1,94 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "Apache-2.0"
+repository = "https://github.com/komira-ai/tierstore"
+publish = false
+
+# Every external dependency is declared here once and used from a member as
+# `name.workspace = true` (members add features they need). The versions and features are
+# those of the repository this code came from, at the moment of the import.
+[workspace.dependencies]
+# The backend trait is used as `dyn Backend`, so its async methods are boxed.
+async-trait = "0.1.92"
+# A stock S3 SDK, to prove it works against the tierstore S3 front (tierstore's tests only).
+# Pinned exactly, so that the test is of one SDK version. No default features: the default
+# HTTP client brings a TLS provider (aws-lc), which the front, plain HTTP, does not need; the
+# HTTP client below has no TLS either. Apache-2.0.
+aws-sdk-s3 = { version = "=1.96.0", default-features = false, features = ["behavior-version-latest", "rt-tokio"] }
+# The SDK's own hyper-based HTTP client, built without TLS (`build_http`) for a plain-HTTP
+# endpoint. Apache-2.0.
+aws-smithy-http-client = { version = "1.1.4", default-features = false, features = ["default-client"] }
+base64 = "0.23.1"
+bytes = "1.12.1"
+clap = { version = "4.6.7", features = ["derive"] }
+# The hardware CRC-32C (SSE4.2 / ARMv8) with a portable fallback.
+crc32c = "0.6.8"
+crc32fast = "1.5.2"
+futures = "0.3.34"
+hex = "0.4.3"
+# Header maps; already in the tree through hyper.
+http = "1.5.0"
+http-body = "1.1.0"
+http-body-util = "0.1.5"
+hmac = "0.13.0"
+hyper = { version = "1.12.0", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false }
+# `kill` and the descriptor calls of the test helpers (tierstore-testkit).
+libc = "0.2.190"
+md-5 = "0.11.0"
+percent-encoding = "2.3.2"
+# Test certificates only. ring is the crypto provider the rustls below uses too.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
+# Plain HTTP only: TLS brings a crypto provider, added with the first TLS endpoint.
+reqwest = { version = "0.13.5", default-features = false }
+ring = "0.17.14"
+roxmltree = "0.21.1"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+# Directory-relative, no-follow file access, the effective uid and the free space of a file system.
+rustix = "1.1.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+thiserror = "2.0.21"
+# The `--config` file of the `tierstore` binary; no datetime or display support.
+toml = { version = "1.1.8", default-features = false, features = ["display", "parse", "serde", "std"] }
+tokio = "1.53.2"
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+tracing = "0.1.44"
+# Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
+x509-parser = "0.18.1"
+
+# The workspace's own crates.
+# The object store trait and the S3 client, with no dependency on another workspace crate.
+objstore-s3 = { path = "crates/objstore-s3" }
+# The hot/cold object store library; it depends on no other workspace crate unless its `s3`
+# feature is on.
+tierstore = { path = "crates/tierstore" }
+# Scratch directories, loopback ports and child processes for tests.
+tierstore-testkit = { path = "crates/tierstore-testkit" }
+
+[workspace.lints.rust]
+# `coverage` is set by cargo-llvm-cov.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
+[workspace.lints.clippy]
+disallowed_methods = "allow"
+disallowed_types = "allow"
+
+# Dev and test builds: a test binary with full debug info is ~0.5 GB and a target
+# directory holds thousands of them, plus incremental state. Line tables keep panic
+# backtraces and profilers at file:line; variable-level debug info is the part dropped.
+# `test` inherits `dev`; it is spelled out so the two cannot drift. Release is untouched.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false

@@ -4,7 +4,7 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 /// The access key in the key file.
 pub const BIN_KEY_ID: &str = "AKIDBIN";

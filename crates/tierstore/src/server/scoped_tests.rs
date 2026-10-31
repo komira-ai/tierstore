@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hyper::Method;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::keys::Role;
 use super::scoped::{

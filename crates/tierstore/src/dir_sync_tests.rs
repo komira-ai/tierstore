@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use crate::{Backend, DirBackend, Error, PartBody};
 

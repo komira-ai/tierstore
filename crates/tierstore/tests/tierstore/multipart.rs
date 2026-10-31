@@ -10,12 +10,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use kbf_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
 use tierstore::{
     Backend, ByteRange, CachedStore, DirBackend, Error, Listed, MemoryBackend, Meta, Op, PartBody,
     Proxy, ProxyConfig, TestClock,
 };
+use tierstore_testkit::dir::TestDir;
 
 use crate::support::{Rig, assert_absent, body, journal_keys, keys, read, text};
 

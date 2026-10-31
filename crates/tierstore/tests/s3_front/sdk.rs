@@ -1,5 +1,5 @@
 //! A stock S3 SDK (aws-sdk-rust) against the S3 front over loopback, configured as the
-//! "Using a stock SDK" section of `packaging/tierstore/README.md` says: the other tests of the
+//! "Using a stock SDK" section of `packaging/README.md` says: the other tests of the
 //! front sign their requests by hand or with the client of kbf, so these are the ones that show
 //! what a client nobody here wrote sends and gets back.
 

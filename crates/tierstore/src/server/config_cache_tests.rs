@@ -802,7 +802,7 @@ const LOCAL_CACHE_KEYS: [&str; 16] = [
 #[test]
 fn the_readme_documents_the_build_node_file() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let readme = std::fs::read_to_string(root.join("../../packaging/tierstore/README.md")).unwrap();
+    let readme = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
     let blocks: Vec<&str> = readme.split("```toml\n").skip(1).collect();
     let example = blocks[1].split_once("\n```").unwrap().0;
     let cache = cache_of(example);

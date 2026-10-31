@@ -2,9 +2,7 @@
 //! ([`s3`]: path-style SigV4 over plain HTTP, multipart, conditional writes), with a loopback
 //! S3 service for tests ([`s3::fake`], feature `testkit`).
 //!
-//! The crate depends on no other crate of its repository: `kbf-objstore` adds the local
-//! stores, the conformance suite and the segment footers on top of it and re-exports all of
-//! this, and `tierstore` adapts its S3 client. What a caller needs of a store is in
+//! The crate depends on no other crate of its repository; `tierstore` adapts its S3 client. What a caller needs of a store is in
 //! [`ObjectStore`]; what a store may additionally claim (conditional writes, Object Lock) is in
 //! [`Capabilities`].
 //!

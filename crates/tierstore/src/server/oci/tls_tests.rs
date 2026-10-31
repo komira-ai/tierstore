@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::OciError;
 use super::test_pki::{ca, dns, ip, leaf, leaf_with};

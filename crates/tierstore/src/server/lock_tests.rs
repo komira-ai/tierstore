@@ -3,7 +3,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::lock::{NETWORK, check_lock_path, check_type, try_take};
 

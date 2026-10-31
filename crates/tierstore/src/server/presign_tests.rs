@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hyper::Request;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use crate::TestClock;
 

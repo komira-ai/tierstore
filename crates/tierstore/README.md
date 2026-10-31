@@ -1,9 +1,7 @@
 # tierstore
 
-A generic hot/cold object store over S3-compatible backends. It knows nothing of kbf: its normal
-dependencies include no other crate of this workspace unless the `s3` feature is on
-(`crates/kbf-integration-test/tests/layering.rs` keeps it that way), so it can move to a repository
-of its own.
+A generic hot/cold object store over S3-compatible backends. Its normal dependencies include no
+other crate of this workspace unless the `s3` feature is on.
 
 - The library: the `Backend` trait (create-only put, `If-Match` put, ranged get, head, delete, list,
   multipart), an in-memory and a directory backend, `Proxy` (a journal per proxy, a get that copies a
@@ -12,11 +10,11 @@ of its own.
 - Feature `s3`: `S3Backend`, a bucket of an S3-compatible store as a `Backend`.
 - Feature `server` (turns `s3` on): `server`, the S3 API front of a proxy, and the `tierstore`
   binary that runs a proxy, that front and a reconciler in one process.
-  `packaging/tierstore/README.md` has the flags, the keys and the unit.
+  `packaging/README.md` has the flags, the keys and the unit.
 
 An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
 `Authorization` header (and presigned PUT URLs). The packaging notes, the flags and the key files
-are in `packaging/tierstore/README.md`; the roles of a key are in `src/server/keys.rs`.
+are in `packaging/README.md`; the roles of a key are in `src/server/keys.rs`.
 
 The operator guide (install, keys and roles, configuration, operations, troubleshooting, limits) is in `docs/`; a test of the crate (`src/server/docs_tests.rs`) holds every page of it to the code, and the site's docs pages are made from it.
 
@@ -27,7 +25,7 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/tierstore/README.md`; the flags stay accepted for one
+in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
 release along with the file.
 
 ## When the puts are at their limit
@@ -64,7 +62,7 @@ cache in front of one upstream (`src/server/local_cache/`, the file's tables in
 served from a directory of raw files (`<path>/obj/<aa>/<bb>/<hex>`), filled from the upstream on a
 miss, hashed as they are filled and evicted oldest-use first under a byte budget and a free-space
 floor; every other call is refused 403. It has no journal and no lease. The keys of the table and
-the rules are in "A build node" in `packaging/tierstore/README.md`; `GET /metricz` shows its
+the rules are in "A build node" in `packaging/README.md`; `GET /metricz` shows its
 counters.
 
 With `write_through = true` in `[local_cache]` (version 0.2.0 on; `tierstore --version` shows it)
@@ -205,7 +203,7 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
   (without the last parameter a retried chunk gets `412` for good): `read_prefixes`
   and `write_prefixes` of `["kbf-history/"]`, `delete_prefixes: []`.
 
-See "Scoped keys" in `packaging/tierstore/README.md` for the table of calls.
+See "Scoped keys" in `packaging/README.md` for the table of calls.
 
 ## The OCI read front
 
@@ -255,6 +253,6 @@ front is set only in the file; the start line ends with ` oci-listen=<address> (
   handshake to time).
 - `GET /metricz` on the S3 listener has the counters.
 
-Putting an image in, and pulling it with podman and js-oci, are in `packaging/tierstore/README.md`
+Putting an image in, and pulling it with podman and js-oci, are in `packaging/README.md`
 ("The OCI read front"); the behaviour is specified by the tests in `tests/oci_front` (over real TLS and over plain HTTP, both
 on loopback) and `src/server/oci`.

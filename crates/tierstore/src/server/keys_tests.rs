@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use hyper::Method;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use crate::TestClock;
 use crate::server::ServerConfig;

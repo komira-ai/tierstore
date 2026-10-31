@@ -7,7 +7,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::fill::{Published, publish};
 use super::hold::Trace;

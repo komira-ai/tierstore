@@ -14,8 +14,8 @@ use bytes::{Bytes, BytesMut};
 use futures::FutureExt as _;
 use futures::StreamExt as _;
 use futures::future::BoxFuture;
-use kbf_testkit::dir::TestDir;
 use sha2::{Digest, Sha256};
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::Semaphore;
 
 use crate::{

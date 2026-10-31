@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use kbf_testkit::dir::TestDir;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::{Notify, oneshot};
 
 use super::Drained;

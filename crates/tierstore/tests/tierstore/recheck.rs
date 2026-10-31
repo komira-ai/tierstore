@@ -12,7 +12,6 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode};
-use kbf_testkit::dir::TestDir;
 use tierstore::server::{
     AccessKey, Grant, PresignKey, PresignRequest, Server, ServerConfig, presign_put,
 };
@@ -20,6 +19,7 @@ use tierstore::{
     Backend, ByteRange, Clock, DirBackend, Error, Listed, MemoryBackend, Meta, PartBody, Proxy,
     ProxyConfig, SystemClock,
 };
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::Barrier;
 
 use crate::support::{Rig, assert_absent, body, chunks, journal_keys, read};

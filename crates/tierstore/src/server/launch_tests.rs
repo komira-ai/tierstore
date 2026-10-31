@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::time::Duration;
 
 use clap::Parser;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::{Launch, Refused, resolve};
 use crate::server::cli::Cli;

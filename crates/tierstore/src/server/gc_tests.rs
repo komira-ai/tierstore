@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use hyper::Request;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::gc::{GcKey, NOT_ALLOWED, OUT_OF_SCOPE, ensure_distinct, gc_keys, permit};
 use super::presign::PresignError;

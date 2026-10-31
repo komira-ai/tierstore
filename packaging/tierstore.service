@@ -25,7 +25,7 @@
 #   /etc/tierstore/cold.credentials  the key of the cold tier's store
 [Unit]
 Description=tierstore, an S3 server over a hot and a cold tier
-Documentation=https://github.com/komira-ai/kbf/blob/main/packaging/tierstore/README.md
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/tierstore/access.key

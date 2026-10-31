@@ -617,7 +617,7 @@ async fn a_kept_object_published_during_a_scrub_is_not_dropped() {
 #[test]
 fn nothing_says_the_scrub_is_not_done() {
     let cli = include_str!("../cache_cli.rs");
-    let readme = include_str!("../../../../../packaging/tierstore/README.md");
+    let readme = include_str!("../../../../../packaging/README.md");
     for text in [cli, readme] {
         assert!(!text.contains("does not scrub"));
         assert!(!text.contains("No scrub"));

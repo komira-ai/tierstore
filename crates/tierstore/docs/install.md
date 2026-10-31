@@ -18,7 +18,7 @@ install -m 0755 -o root -g root tierstore /usr/libexec/kbf/tierstore
 
 ## Create the account and the directories
 
-The example unit runs as a `tierstore` account with no login and no home. The sysusers entry and the unit are in `packaging/tierstore` of the repository.
+The example unit runs as a `tierstore` account with no login and no home. The sysusers entry and the unit are in `packaging` of the repository.
 
 ```sh
 install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf

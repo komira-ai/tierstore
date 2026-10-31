@@ -1,4 +1,4 @@
-//! The example unit of the `tierstore` binary (`packaging/tierstore`) against the binary's flags:
+//! The example unit of the `tierstore` binary (`packaging`) against the binary's flags:
 //! the command line parses as the binary parses it, no secret is on it, the stop timeout covers
 //! the drain, nothing starts the unit by itself, and it runs as the account that the sysusers.d
 //! entry makes.
@@ -15,7 +15,7 @@ const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "passwo
 
 /// The directory of the example files.
 fn dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging/tierstore")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packaging")
 }
 
 /// The text of a file of the directory.

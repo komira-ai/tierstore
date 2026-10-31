@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use kbf_testkit::dir::TestDir;
 use sha2::{Digest as _, Sha256};
 use tierstore::server::oci::OciError;
 use tierstore::server::oci::{OciFront, OciLimits, OciListener, OciMetrics, OciPrefix, acceptor};
 use tierstore::{Backend, MemoryBackend, Proxy, ProxyConfig, SystemClock};
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_rustls::{TlsAcceptor, TlsConnector};

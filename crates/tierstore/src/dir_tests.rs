@@ -9,7 +9,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 use futures::{StreamExt, future, stream};
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};

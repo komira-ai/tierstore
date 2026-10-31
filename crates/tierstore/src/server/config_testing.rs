@@ -4,7 +4,7 @@
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use clap::{CommandFactory, Parser};
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
 use crate::selftest_tests::{Flaw, Flawed};

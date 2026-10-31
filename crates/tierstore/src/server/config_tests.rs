@@ -5,7 +5,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use clap::{CommandFactory, Parser};
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::{
     ConfigError, KEYS, PER_RUN, PerRun, format_duration, from_text, keys_for_flags, load,
@@ -689,8 +689,7 @@ fn every_flag_has_one_key_or_is_a_per_run_knob() {
 #[test]
 fn the_readmes_document_every_flag_and_key() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let packaging =
-        std::fs::read_to_string(root.join("../../packaging/tierstore/README.md")).unwrap();
+    let packaging = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
     let package = std::fs::read_to_string(root.join("README.md")).unwrap();
     for text in [&packaging, &package] {
         assert!(text.contains("--config"));
@@ -736,7 +735,7 @@ fn a_message_about_flags_names_keys_for_a_file() {
 #[test]
 fn the_example_in_the_readme_loads() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let readme = std::fs::read_to_string(root.join("../../packaging/tierstore/README.md")).unwrap();
+    let readme = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
     let (_, after) = readme.split_once("```toml\n").expect("a TOML block");
     let (example, _) = after.split_once("\n```").expect("the end of the block");
     let cli = from_text(example, DEFAULTS).unwrap();

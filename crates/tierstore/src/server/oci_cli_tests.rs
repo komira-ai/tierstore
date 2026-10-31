@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::{Cli, Error, build, exit_status, oci_cut_note, run_serving};
 use crate::server::oci::plain_warning;

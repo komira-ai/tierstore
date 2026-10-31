@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 
 use clap::{CommandFactory, Parser};
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 use super::render;
 use crate::server::cli::Cli;

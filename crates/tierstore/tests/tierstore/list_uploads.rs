@@ -9,10 +9,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use kbf_testkit::dir::TestDir;
 use tierstore::{
     Backend, CachedStore, DirBackend, Error, MemoryBackend, Op, OpenUpload, TestClock,
 };
+use tierstore_testkit::dir::TestDir;
 
 use crate::support::Rig;
 

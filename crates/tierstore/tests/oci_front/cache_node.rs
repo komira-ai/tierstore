@@ -11,11 +11,11 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use bytes::Bytes;
-use kbf_testkit::dir::TestDir;
-use kbf_testkit::reaped::{Reaped, first_line, spawn};
 use objstore_s3::s3::fake::FakeS3;
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
 use rustix::process::{Pid, Signal, kill_process};
+use tierstore_testkit::dir::TestDir;
+use tierstore_testkit::reaped::{Reaped, first_line, spawn};
 
 use crate::client::Conn;
 use crate::rig::hex_of;

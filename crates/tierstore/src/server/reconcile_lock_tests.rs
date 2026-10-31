@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use kbf_testkit::dir::TestDir;
+use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
 use super::cli::{Gate, reconcile_gated};
