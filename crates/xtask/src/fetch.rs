@@ -175,7 +175,7 @@ pub fn tls_config(roots: &[CertificateDer<'static>]) -> ureq::tls::TlsConfig {
 
 /// The body of `url`, over HTTPS only, trusting `roots`.
 pub fn download(url: &str, roots: &[CertificateDer<'static>]) -> Result<Vec<u8>, Error> {
-    download_from(url, roots, true)
+    download_from(url, roots, false)
 }
 
 /// [`download`], with the HTTPS-only rule as `https_only` says (the tests of the transfer

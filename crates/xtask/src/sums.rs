@@ -310,7 +310,7 @@ impl Attestations<'_> {
         let mut gh = Command::new(self.gh);
         gh.args(["attestation", "verify"])
             .arg(file)
-            .args(["--repo", self.repo, "--signer-workflow", signer])
+            .args(["--signer-workflow", signer])
             .args([
                 "--source-ref",
                 self.source_ref,
@@ -362,7 +362,6 @@ impl Attestations<'_> {
             .arg("--bundle")
             .arg(bundle);
         if let Some(root) = self.trusted_root {
-            gh.arg("--custom-trusted-root").arg(root);
             // Both spellings of each variable (a Go program reads the upper case first),
             // and the bypass lists gone: a `NO_PROXY` the runner's environment holds
             // would let the call past the proxy to the network.
@@ -379,7 +378,7 @@ impl Attestations<'_> {
             gh.env_remove("NO_PROXY").env_remove("no_proxy");
             gh.env("GH_NO_UPDATE_NOTIFIER", "1");
         }
-        gh.args(["--repo", self.repo, "--signer-workflow", signer])
+        gh.args(["--signer-workflow", signer])
             .args(["--cert-oidc-issuer", bundles::ISSUER])
             .args(["--source-ref", self.source_ref])
             .args(["--source-digest", commit])
