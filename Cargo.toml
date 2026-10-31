@@ -58,7 +58,7 @@ sha2 = "0.11.0"
 thiserror = "2.0.21"
 # The `--config` file of the `tierstore` binary; no datetime or display support.
 toml = { version = "1.1.8", default-features = false, features = ["display", "parse", "serde", "std"] }
-tokio = "1.53.2"
+tokio = "1.53.3"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 tracing = "0.1.44"
 # Reads the fields of a client certificate (IP subjectAltNames) that the OCI front's start checks.
