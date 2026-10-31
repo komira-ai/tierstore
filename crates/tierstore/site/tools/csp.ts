@@ -1,4 +1,4 @@
-// The Content-Security-Policy the site is served under (infra/site/lib/site-stack.ts), parsed, and the check that
+// The Content-Security-Policy the site is served under (a copy in served-policy.ts), parsed, and the check that
 // every resource a built page loads is allowed by it. check-dist.ts refuses the markup the policy blocks outright
 // (inline script and style); this is the other direction: a new kind of resource (an image, a frame, a form) that the
 // policy has no directive for would be blocked in a visitor's browser, and is found here.
@@ -9,7 +9,7 @@ import { listFiles, readTags } from './check-dist';
 
 export type Policy = ReadonlyMap<string, readonly string[]>;
 
-/** The policy string of infra/site/lib/site-stack.ts: the quoted directives of CONTENT_SECURITY_POLICY, joined. */
+/** The policy string of served-policy.ts: the quoted directives of CONTENT_SECURITY_POLICY, joined. */
 export function policyFromSource(source: string): string {
   const m = /CONTENT_SECURITY_POLICY\s*=\s*\[([\s\S]*?)\]\s*\.join\(\s*'; '\s*\)/.exec(source);
   if (m === null) throw new Error('csp: CONTENT_SECURITY_POLICY = [...].join(\'; \') not found');
