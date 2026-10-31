@@ -304,7 +304,7 @@ use tokio::sync::{Notify, Semaphore, watch};
 use crate::{Backend, Clock, MonotonicClock, Proxy};
 
 pub use gc::GcKey;
-pub use grant::{GRANT_HEADER, GrantError, mint_grant};
+pub use grant::{GRANT_HEADER, GrantError, MIN_GRANT_SECRET_BYTES, mint_grant};
 pub use keys::AccessKey;
 use keys::Role;
 pub use local_cache::LocalCache;

@@ -228,11 +228,15 @@ header, `x-tierstore-grant`, on `GET` and `HEAD`. It works on a storage node and
 
 The grant key (`--grant-key-file`, once per key; mode 0600, not a symbolic link, owned by the
 server's user) is a file like the other credentials files: JSON of exactly `access_key_id` and
-`secret_access_key`, or the id and secret on two lines. It signs no request (a SigV4 request naming
+`secret_access_key`, or the id and secret on two lines. The secret is at least 32 bytes (the
+server refuses a shorter one at start, and `mint_grant` refuses to sign with one): make it 32 random
+bytes as hex, for example the output of `openssl rand -hex 32`. It signs no request (a SigV4 request naming
 its id is `InvalidAccessKeyId`); its id differs from all other key ids (exit status 2 otherwise).
 A grant is a bearer token: whoever holds it can replay it until it expires, and on plain HTTP
 anyone on the path can read it, so use TLS where that matters. The server refuses a grant that ends
-more than `--grant-max-lifetime` (default 15 minutes) after its own clock.
+more than `--grant-max-lifetime` (default 15 minutes) after its own clock, not the minting
+service's: a service whose clock runs ahead of the server's must mint grants shorter than the cap by
+at least that skew.
 
 A valid grant allows `GET` or `HEAD` of a listed object, with or without `Range`, and no query
 parameter but `x-id`. Everything else is `403 AccessDenied` before any body is read; an unlisted

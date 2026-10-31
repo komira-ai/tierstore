@@ -75,6 +75,11 @@ const MAGIC: &str = "tierstore-grant-v1";
 /// The flag whose files hold the grant keys.
 const FLAG: &str = "--grant-key-file";
 
+/// The fewest bytes of a grant key's secret. A token is an unsalted HMAC over a body of known
+/// format, so whoever sees one token can test guesses of the secret offline; 32 bytes (256 bits
+/// from a random source) puts that out of reach, and a short secret does not.
+pub const MIN_GRANT_SECRET_BYTES: usize = 32;
+
 /// What a request that carries a grant has as the hash of its body: it signs none.
 const UNSIGNED: &str = "UNSIGNED-PAYLOAD";
 
@@ -128,9 +133,10 @@ const TWO_CREDENTIALS: Refusal = Refusal {
 /// Why a grant cannot be made.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum GrantError {
-    /// The key id or the secret is empty, or the id has a `/`, `,`, `=` or a character that is
+    /// The key id or the secret is empty, the secret is shorter than [`MIN_GRANT_SECRET_BYTES`],
+    /// or the id has a `/`, `,`, `=` or a character that is
     /// not printable ASCII.
-    #[error("the grant key has an empty or odd id or secret")]
+    #[error("the grant key has an empty or odd id or secret, or a secret shorter than 32 bytes")]
     Key,
     /// The bucket name is empty or has a control character.
     #[error("the bucket name is empty or has a control character")]
@@ -192,6 +198,9 @@ fn mint_sorted(
     mut names: Vec<&str>,
 ) -> Result<String, GrantError> {
     check_credentials(&key.id, &key.secret).map_err(|_| GrantError::Key)?;
+    if key.secret.len() < MIN_GRANT_SECRET_BYTES {
+        return Err(GrantError::Key);
+    }
     check_bucket(bucket)?;
     names.sort_unstable();
     names.dedup();
@@ -369,11 +378,21 @@ pub(super) fn permit(names: &[String], target: &Target, query: &Query) -> Result
 /// by the user the server runs as.
 ///
 /// # Errors
-/// The first file that cannot be used, as the credentials files say.
+/// The first file that cannot be used, as the credentials files say, or whose secret is shorter
+/// than [`MIN_GRANT_SECRET_BYTES`].
 pub(super) fn grant_keys(paths: &[PathBuf]) -> Result<Vec<AccessKey>, String> {
-    let pairs = paths.iter().map(|path| read_credentials(FLAG, path));
-    pairs
-        .map(|pair| pair.map(|(id, secret)| AccessKey { id, secret }))
+    paths
+        .iter()
+        .map(|path| {
+            let (id, secret) = read_credentials(FLAG, path)?;
+            if secret.len() < MIN_GRANT_SECRET_BYTES {
+                return Err(format!(
+                    "{FLAG} {}: the secret must be at least 32 bytes long",
+                    path.display()
+                ));
+            }
+            Ok(AccessKey { id, secret })
+        })
         .collect()
 }
 
