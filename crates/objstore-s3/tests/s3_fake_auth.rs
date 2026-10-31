@@ -37,6 +37,7 @@ async fn send(s3: &FakeS3, method: &str, headers: &[(&str, &str)], body: &str) -
     };
     while got.len() < head_end + length {
         let n = sock.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "closed before the end of the body");
         got.extend_from_slice(&chunk[..n]);
     }
     let text = String::from_utf8_lossy(&got).into_owned();
