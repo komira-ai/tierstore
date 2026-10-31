@@ -23,7 +23,7 @@ const MEBIBYTE: u64 = 1 << 20;
 type Call<'a> = (&'a str, String, &'a [(&'a str, &'a str)]);
 
 const ID: &str = "build-grant";
-const SECRET: &str = "grant-secret-0123456789";
+const SECRET: &str = "grant-secret-0123456789-abcdefghij";
 
 /// Ten minutes after the clock of the rig.
 const EXPIRES: u64 = NOW / 1000 + 600;
@@ -284,7 +284,7 @@ async fn a_tampered_or_foreign_grant_reads_nothing() {
     let (body, tag) = own.split_once('.').unwrap();
     let elsewhere = mint_grant(&key(), "other-bucket", EXPIRES, ["cas/b/pack-a"]).unwrap();
     let foreign = mint_grant(
-        &AccessKey::new(ID, "another-secret-0123456789"),
+        &AccessKey::new(ID, "another-secret-0123456789-abcdefgh"),
         BUCKET,
         EXPIRES,
         ["cas/b/pack-a"],

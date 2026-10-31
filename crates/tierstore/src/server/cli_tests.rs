@@ -565,8 +565,10 @@ fn scoped_key_files_are_built_into_the_server_and_their_ids_must_differ() {
 #[test]
 fn grant_key_files_are_built_into_the_server_and_their_ids_must_differ() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-flag");
-    let text =
-        |id: &str| format!("{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"s3cret\"}}");
+    const GRANT_SECRET: &str = "grant-secret-0123456789-abcdefghij";
+    let text = |id: &str| {
+        format!("{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"{GRANT_SECRET}\"}}")
+    };
     let one = key_file(&dir, "one", &text("GR1"), 0o600);
     let two = key_file(&dir, "two", &text("GR2"), 0o600);
     let mut ok = cli(&dir);
@@ -610,7 +612,7 @@ fn grant_key_files_are_built_into_the_server_and_their_ids_must_differ() {
         assert!(why.downcast_ref::<InvalidFlags>().is_some(), "{why}");
         let text = why.to_string();
         assert!(text.contains("used twice"), "{text}");
-        assert!(!text.contains("s3cret"), "{text}");
+        assert!(!text.contains(GRANT_SECRET), "{text}");
     }
 }
 

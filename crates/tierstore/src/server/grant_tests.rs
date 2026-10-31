@@ -18,7 +18,7 @@ use crate::server::testing::{BUCKET, NOW};
 use super::*;
 
 const ID: &str = "build-grant";
-const SECRET: &str = "grant-secret-0123456789";
+const SECRET: &str = "grant-secret-0123456789-abcdefghij";
 const FLAG_TEXT: &str = "--grant-key-file";
 
 /// Ten minutes after the clock of the tests.
@@ -264,7 +264,10 @@ fn a_grant_with_an_unknown_key_or_a_bad_signature_is_untrusted() {
     let good = signed(&body_of("cas/a"));
     let (body, tag) = good.split_once('.').unwrap();
     let other_id = format!("{MAGIC}\nother\n{BUCKET}\n{EXPIRES}\ncas/a");
-    let wrong_secret = seal("another-secret-0123456789", body_of("cas/a").as_bytes());
+    let wrong_secret = seal(
+        "another-secret-0123456789-abcdefgh",
+        body_of("cas/a").as_bytes(),
+    );
     let short = URL_SAFE_NO_PAD.encode([0_u8; 16]);
     let edit = |body: String| format!("{}.{tag}", URL_SAFE_NO_PAD.encode(body));
     for token in [
@@ -486,6 +489,40 @@ fn a_grant_key_file_is_a_private_file_with_an_id_and_a_secret() {
     assert!(refused.contains("symbolic link"), "{refused}");
     let missing = dir.path().join("missing");
     assert!(grant_keys(&[missing]).unwrap_err().starts_with(FLAG_TEXT));
+}
+
+/// Asserts that a grant key file whose secret is 31 bytes is refused at load, with a message that
+/// names the flag and the file and never the secret, and that a secret of 32 bytes is accepted:
+/// one token would let anyone guess a shorter secret offline.
+#[test]
+fn a_grant_key_file_with_a_secret_shorter_than_32_bytes_is_refused() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-short");
+    let (short, exact) = (&SECRET[..31], &SECRET[..32]);
+    assert_eq!((short.len(), exact.len()), (31, 32));
+    let refused_files = [
+        file(&dir, "short-json", &json(ID, short), 0o600),
+        file(&dir, "short-lines", &format!("{ID}\n{short}\n"), 0o600),
+    ];
+    for path in refused_files {
+        let refused = grant_keys(std::slice::from_ref(&path)).unwrap_err();
+        assert!(refused.starts_with(FLAG_TEXT), "{refused}");
+        assert!(refused.contains(&path.display().to_string()), "{refused}");
+        assert!(!refused.contains(short), "{refused}");
+    }
+    let accepted = file(&dir, "exact", &json(ID, exact), 0o600);
+    assert_eq!(
+        grant_keys(&[accepted]).unwrap(),
+        [AccessKey::new(ID, exact)]
+    );
+}
+
+/// Asserts that a grant is not made with a secret of 31 bytes (`GrantError::Key`) and is made with
+/// one of 32 bytes.
+#[test]
+fn a_grant_is_not_minted_with_a_secret_shorter_than_32_bytes() {
+    let mint = |secret: &str| mint_grant(&AccessKey::new(ID, secret), BUCKET, EXPIRES, ["a"]);
+    assert_eq!(mint(&SECRET[..31]), Err(GrantError::Key));
+    assert!(mint(&SECRET[..32]).is_ok());
 }
 
 /// Asserts that the id of a grant key must differ from the ids of the other keys and of the other
