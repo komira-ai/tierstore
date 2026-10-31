@@ -56,34 +56,43 @@ and refuses the push on any match. It looks for:
 ## Order
 
 1. **Land what is in flight.** In kbf, land the open tierstore pull requests that are already verified, in
-   order: the drain (#2129), the listen addresses (#2130), the cache lock (#2133) and the test fix (#2142), then
-   kbf#2094.
-2. **Freeze.** The freeze starts when the import pull request opens here. Work that is done lands in kbf before it and comes across with the history. From then on, no tierstore change merges in kbf. A change that is not landed by then is
-   re-opened here as a pull request from its patch.
+   order: the drain (#2129), the listen addresses (#2130), the cache lock (#2133), the test fix (#2142), the
+   cache scrub (#2047) and the streaming read path (#2050), then kbf#2094 (tierstore's S3 client becomes
+   objstore-s3, which the move needs anyway).
+2. **The cut.** The cut is the moment the import copies the moved paths from kbf `main`. The kbf commit it was
+   taken at is announced with the import. From the cut on, no tierstore change merges in kbf; new work opens
+   here. A tierstore pull request still open in kbf at the cut is re-opened here by its owner, as a cherry-pick of
+   its commits, and the kbf one is closed with a pointer to it. The cut waits for step 1.
 3. **Import.** Run `filter-repo`, scan, push `import/from-kbf`, open the pull request. Then add the new root
    `Cargo.toml`, the test helper and the CI workflows. CI here must be green on the import before it merges.
 4. **First release here.** Tag `vX.Y.Z` (the next version after kbf's last tierstore release). Build the binaries
-   and checksums the way kbf's release did. The release notes say where tierstore came from.
+   and checksums the way kbf's release did, with build attestations from this repository. The release notes
+   say where tierstore came from. From this release on, tierstore is released from this repository only.
+   - **4b. Farm deploys.** The deploy scripts that install tierstore verify a release tarball's attestation
+     against the repository that built it. After step 4 they accept releases of this repository, with the
+     attestation repository changed and pinned.
 5. **Switch kbf.** One kbf pull request does all of this:
    - repoints `tierstore` and `objstore-s3` to the tag;
-   - deletes `crates/tierstore`, `crates/objstore-s3`, `packaging/tierstore` and the
-     tierstore site workflows;
+   - deletes `crates/tierstore`, `crates/objstore-s3`, `packaging/tierstore` and the tierstore site workflows;
+   - stops kbf's release from shipping tierstore;
    - keeps kbf's CI green.
-6. **The site.** `tierstore.dev` is built and published from this repository. Its publish workflow and its
-   hosting move here; the domain does not change.
+6. **The site.** `tierstore.dev` is built and published from this repository. The publish workflow moves here.
+   The one-time setup of the publish identity (the deploy environment and the cloud role whose trust is pinned to
+   a repository id) is done once, against this repository, after this step. The domain does not change.
+7. **Links.** Pages that link to the code in kbf (for example the tierstore white paper) are repointed here when
+   the import merges.
 
 ## Open pull requests in kbf
 
-- **Landing before the freeze.** The drain, listen-address and cache-lock changes (#2129, #2130, #2133) are
-  verified and green; they land in kbf before step 2.
+- **Landing before the cut.** The changes in step 1 are verified, or nearly; they land in kbf and come across
+  with the history.
 - **Planned work.** The update hook is the next piece of planned work. It starts here, after the import.
-- **Everything else.** Any other open tierstore pull request in kbf, for example the cache scrub and the streaming read path, either lands before the freeze or is
-  re-opened here by its owner.
+- **Everything else.** Any other tierstore pull request still open in kbf at the cut is re-opened here by its
+  owner (step 2).
 
-## Questions to settle in review
+## Settled in review
 
-1. **objstore-s3:** move it here (proposed), or publish it from kbf as a crate of its own?
-2. **crates.io:** publish `tierstore` and `objstore-s3` now, or use git tags until the API settles (proposed: tags
-   first)?
-3. **The binary's release channel:** releases from this repository only, or kbf's release keeps a copy for a
-   while?
+1. **objstore-s3** moves here.
+2. **Git tags first**; crates.io later.
+3. **Releases come from this repository only**, starting with its first release. kbf's release stops shipping
+   tierstore in the step-5 switch.
