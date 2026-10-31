@@ -199,6 +199,8 @@ fn a_verification_of_nothing_or_of_an_unreadable_file_fails() {
     );
     let o = run(&["list", "all", "of", "it"]);
     assert_eq!(o.status.code(), Some(2));
+    let o = run(&["attestation", "list", "file"]);
+    assert_eq!(o.status.code(), Some(2));
     let o = run(&["attestation", "verify", "/nonexistent/file", "--repo", "x"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("cannot read"), "{}", stderr(&o));
@@ -396,5 +398,21 @@ fn the_trusted_root_and_the_proxies_are_held_to_the_expectation_for_bundles_only
         &flags,
         &[],
     );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+}
+
+#[test]
+fn a_flag_with_no_value_at_the_end_is_ignored() {
+    // Catches: a stand-in that panics on, or invents a value for, a trailing flag.
+    let ledger = format!("*|{SIGNER}|https://slsa.dev/provenance/v1|-|-\n");
+    let flags = [
+        "--source-ref",
+        "refs/heads/main",
+        "--deny-self-hosted-runners",
+        "--signer-workflow",
+        SIGNER,
+        "--repo",
+    ];
+    let o = verify("trailing", &ledger, &flags);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }

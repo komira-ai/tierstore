@@ -316,21 +316,53 @@ fn a_download_returns_the_body_and_a_status_error_is_a_download_error() {
     );
 }
 
-/// A listener on the loopback address that nobody serves, and the plain-HTTP URL of it. A
-/// connection made to it waits in the kernel's queue until `accept`, so `nothing_connected`
-/// can tell, without waiting, whether anything connected.
-fn watched() -> (std::net::TcpListener, String) {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let url = format!("http://{}/tool", listener.local_addr().expect("addr"));
-    (listener, url)
+/// A server on the loopback address that answers every request with `200 OK` and records the
+/// first line of each. `requests` ends it: it sends one request of its own, which the server
+/// recognises and stops at, and returns what the server was asked before it, so a test knows
+/// without waiting that a refused download connected to nothing.
+struct Watched {
+    url: String,
+    addr: std::net::SocketAddr,
+    thread: std::thread::JoinHandle<Vec<String>>,
 }
 
-fn nothing_connected(listener: &std::net::TcpListener) -> bool {
-    listener.set_nonblocking(true).expect("nonblocking");
-    matches!(
-        listener.accept(),
-        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-    )
+fn watched() -> Watched {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let thread = std::thread::spawn(move || {
+        let mut asked = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut first = String::new();
+            reader.read_line(&mut first).expect("request line");
+            let mut line = String::new();
+            while reader.read_line(&mut line).expect("header") > 2 {
+                line.clear();
+            }
+            if first.starts_with("SENTINEL") {
+                return asked;
+            }
+            asked.push(first.trim_end().to_owned());
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            stream.write_all(head.as_bytes()).expect("reply");
+        }
+    });
+    Watched {
+        url: format!("http://{addr}/tool"),
+        addr,
+        thread,
+    }
+}
+
+impl Watched {
+    /// What the server was asked.
+    fn requests(self) -> Vec<String> {
+        let mut stream = std::net::TcpStream::connect(self.addr).expect("connect");
+        stream.write_all(b"SENTINEL\r\n\r\n").expect("sentinel");
+        self.thread.join().expect("server")
+    }
 }
 
 #[test]
@@ -338,19 +370,16 @@ fn a_download_over_plain_http_is_refused_before_any_connection() {
     // Catches: `download` fetching a tool over a connection anyone can alter. The URL is a live
     // server's, so a download that went ahead would connect, and the refusal must name the
     // rule (an unreachable address would fail whatever the rule was).
-    let (listener, url) = watched();
-    let e = download(&url, &[]).expect_err("http");
+    let server = watched();
+    let e = download(&server.url, &[]).expect_err("http");
     assert_eq!(
         e,
         Error::Download {
-            url: url.clone(),
+            url: server.url.clone(),
             why: PLAIN_HTTP.to_owned()
         }
     );
-    assert!(
-        nothing_connected(&listener),
-        "the refused download connected"
-    );
+    assert_eq!(server.requests(), Vec::<String>::new());
 }
 
 #[test]
@@ -409,10 +438,10 @@ fn fetch_over_plain_http_is_refused_before_any_connection_and_installs_nothing()
     let dir = scratch("fetch-http");
     let roots = host_roots();
     let _ = tls_config(&roots);
-    let (listener, url) = watched();
+    let server = watched();
     let out = dir.join("never");
     let e = fetch(
-        &url,
+        &server.url,
         &Sha256::of(TOOL),
         &Unpack::new(None, None).expect("unpack"),
         &out,
@@ -423,6 +452,22 @@ fn fetch_over_plain_http_is_refused_before_any_connection_and_installs_nothing()
         matches!(&e, Error::Download { why, .. } if why == PLAIN_HTTP),
         "{e}"
     );
-    assert!(nothing_connected(&listener), "the refused fetch connected");
+    assert_eq!(server.requests(), Vec::<String>::new());
     assert!(!out.exists());
+}
+
+#[test]
+fn an_https_url_is_connected_to_and_a_refused_connection_is_a_download_error() {
+    // Catches: the HTTPS rule refusing an `https://` URL, which `download` is for. A port nothing
+    // listens on refuses the connection, so the error is the transfer's, not the rule's.
+    let addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind")
+        .local_addr()
+        .expect("addr");
+    let url = format!("https://{addr}/tool");
+    let e = download(&url, &[]).expect_err("closed port");
+    assert!(
+        matches!(&e, Error::Download { why, .. } if why != PLAIN_HTTP),
+        "{e}"
+    );
 }

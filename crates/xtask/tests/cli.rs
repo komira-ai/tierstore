@@ -90,10 +90,31 @@ fn a_failure_is_status_1_with_the_words_and_a_usage_error_is_status_2() {
 #[test]
 fn fetch_over_http_is_refused_before_any_connection() {
     // Catches: the verb downloading over a connection that is not HTTPS. The URL is a live
-    // listener's, so a download that went ahead would connect to it.
+    // server's, which records what it is asked: a download that went ahead would show.
+    use std::io::{BufRead, BufReader, Write};
     let d = dir("fetch");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let url = format!("http://{}/tool", listener.local_addr().expect("addr"));
+    let addr = listener.local_addr().expect("addr");
+    let server = std::thread::spawn(move || {
+        let mut asked = Vec::new();
+        loop {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut first = String::new();
+            reader.read_line(&mut first).expect("request line");
+            let mut line = String::new();
+            while reader.read_line(&mut line).expect("header") > 2 {
+                line.clear();
+            }
+            if first.starts_with("SENTINEL") {
+                return asked;
+            }
+            asked.push(first);
+            let head = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            stream.write_all(head.as_bytes()).expect("reply");
+        }
+    });
+    let url = format!("http://{addr}/tool");
     let o = run(
         &d,
         &[
@@ -112,10 +133,10 @@ fn fetch_over_http_is_refused_before_any_connection() {
         "{}",
         stderr(&o)
     );
-    listener.set_nonblocking(true).expect("nonblocking");
-    let accepted = listener.accept();
+    let mut stream = std::net::TcpStream::connect(addr).expect("connect");
+    stream.write_all(b"SENTINEL\r\n\r\n").expect("sentinel");
     assert!(
-        matches!(&accepted, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        server.join().expect("server").is_empty(),
         "the refused fetch connected"
     );
     assert!(!d.join("tool").exists());
