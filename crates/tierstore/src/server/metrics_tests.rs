@@ -479,7 +479,11 @@ async fn no_series_is_emitted_twice() {
         "the series beyond SERIES is {}, not tierstore_build_info",
         extra[0]
     );
-    assert_eq!(seen.len(), SERIES.len() + 1, "a series of SERIES is missing");
+    assert_eq!(
+        seen.len(),
+        SERIES.len() + 1,
+        "a series of SERIES is missing"
+    );
 }
 
 /// Asserts that a ranged GET of a cold object while the hot tier is above its critical mark
