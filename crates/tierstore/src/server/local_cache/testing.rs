@@ -67,6 +67,32 @@ pub(in crate::server) fn tree(root: &Path) -> BTreeMap<PathBuf, Seen> {
     listing
 }
 
+/// Stamps every entry under `root`, and `root` itself, with one time long past (access and
+/// change of contents), so that a [`tree`] taken after shows a write since as another time
+/// however coarse the clock the file system stamps with: a file made and removed again in the
+/// same tick of that clock leaves its directory with the time it had.
+pub(in crate::server) fn age(root: &Path) {
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let times = std::fs::FileTimes::new()
+        .set_accessed(past)
+        .set_modified(past);
+    for below in tree(root).into_keys() {
+        let entry = std::fs::File::open(root.join(below)).expect("an entry of the tree");
+        entry.set_times(times).expect("the times of an entry");
+    }
+}
+
+/// Sets `mode` on every directory under `root` (not `root` itself): the modes a holder's umask
+/// may have given them, which only the holder may change.
+pub(in crate::server) fn set_dir_modes(root: &Path, mode: u32) {
+    for (below, seen) in tree(root) {
+        if seen.dir && !below.as_os_str().is_empty() {
+            let permissions = std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(root.join(below), permissions).expect("a mode set");
+        }
+    }
+}
+
 /// The wait and the deadline of a keep in tests that do not test them: an hour, so that no test
 /// that runs on the real clock can reach either, whatever the load on the disk. The tests of the
 /// two settings run on a paused clock and set small values themselves.
