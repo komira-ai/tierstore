@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { DOCS, read, REPO, SITE } from './support';
 
 const SIGNER = 'komira-ai/tierstore/.github/workflows/artifacts.yml';
-const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>'];
+const VERIFY_FLAGS = ['--repo komira-ai/tierstore', `--signer-workflow ${SIGNER}`, '--source-ref refs/heads/main', '--source-digest <commit>', '--deny-self-hosted-runners'];
 
 const pages: Array<[string, string]> = [
   ['site install page', read(SITE, 'content', 'install.html')],
@@ -23,6 +23,11 @@ const pages: Array<[string, string]> = [
 test('the signer named in the release document is a workflow of this repository', () => {
   assert.ok(existsSync(`${REPO}/.github/workflows/artifacts.yml`));
   assert.ok(read(REPO, 'docs', 'ci-and-release.md').includes(`--signer-workflow ${SIGNER}`));
+});
+
+test('the release document gives the verify command with the flags of the install guide', () => {
+  const doc = read(REPO, 'docs', 'ci-and-release.md');
+  for (const flag of VERIFY_FLAGS) assert.ok(doc.includes(flag), `docs/ci-and-release.md lacks ${flag}`);
 });
 
 test('the install page and the install guide give the verify command with this repository as signer', () => {

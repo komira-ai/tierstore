@@ -86,7 +86,8 @@ pub fn notes(repo: &str, tag: &str, commit: &str, run_id: u64, extra: &[String])
         "\nVerify a file before running it:\n\n```\n\
          gh attestation verify <file> --repo {repo} \\\n  \
          --signer-workflow {repo}/.github/workflows/artifacts.yml \\\n  \
-         --source-ref refs/heads/main --source-digest {commit}\n```\n\n\
+         --source-ref refs/heads/main --source-digest {commit} \
+         --deny-self-hosted-runners\n```\n\n\
          `{SUMS}` lists the SHA-256 of every file; each tarball also has its provenance bundle \
          (`<tarball>.sigstore.json`) for an offline check with `--bundle`.\n"
     ));

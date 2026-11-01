@@ -9,7 +9,7 @@ A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>
 ```sh
 gh attestation verify tierstore-<commit>-linux-x86_64.tar.gz --repo komira-ai/tierstore \
   --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-  --source-ref refs/heads/main --source-digest <commit>
+  --source-ref refs/heads/main --source-digest <commit> --deny-self-hosted-runners
 ```
 
 `<commit>` is the full SHA in the tarball's name; `--source-digest` makes the check prove the build came from that commit, not only from the main workflow.

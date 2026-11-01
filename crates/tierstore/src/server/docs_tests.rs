@@ -39,6 +39,7 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--signer-workflow",
     "--source-ref",
     "--source-digest",
+    "--deny-self-hosted-runners",
     "--bundle",
 ];
 

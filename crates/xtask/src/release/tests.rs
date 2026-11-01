@@ -356,7 +356,7 @@ fn the_notes_name_the_commit_the_run_the_signer_and_the_extra_paragraphs() {
         "tierstore v0.3.0, built from commit 0123456789abcdef0123456789abcdef01234567 by run 11",
         "Moved from another repository.",
         "--signer-workflow example/tierstore/.github/workflows/artifacts.yml",
-        "--source-ref refs/heads/main",
+        "--source-ref refs/heads/main --source-digest 0123456789abcdef0123456789abcdef01234567 --deny-self-hosted-runners\n```",
         "SHA256SUMS",
     ] {
         assert!(text.contains(part), "{part}\n{text}");
