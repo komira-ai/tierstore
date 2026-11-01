@@ -421,7 +421,9 @@ pub struct ServerConfig {
     /// The counters of the OCI read front, which `GET /metricz` shows; none by default, and then
     /// `/metricz` has no block of it. The binary sets them when it runs the front.
     pub oci_metrics: Option<Arc<oci::OciMetrics>>,
-    /// The slot port this instance runs as.
+    /// The slot port this instance runs as (`--slot`), which `tierstore_build_info` carries as its
+    /// `slot` label so that the update hook can tell which instance answered through the public
+    /// port. None for a process that is not a slot, and then the gauge has no such label.
     pub slot: Option<u16>,
     /// The time, for the age of a signature and of the usage object.
     pub clock: Arc<dyn Clock>,

@@ -129,6 +129,7 @@ pub(super) fn server_config(
     server.grant_keys = grant;
     server.presign_max_expires = front.presign_max_expires;
     server.grant_max_lifetime = front.grant_max_lifetime;
+    server.slot = front.slot;
     server.region = front.region.clone();
     server.max_request_bytes = usize::try_from(front.max_request_bytes).unwrap_or(usize::MAX);
     server.body_idle_timeout = front.body_idle_timeout;

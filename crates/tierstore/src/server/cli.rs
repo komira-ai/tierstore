@@ -190,8 +190,16 @@ pub struct Cli {
     /// across restarts, and give each process over the same tiers one of its own.
     #[arg(long)]
     pub proxy_id: String,
-    /// The slot port this instance runs as.
-    #[arg(long)]
+    /// The slot port this instance runs as, 1 to 65535: the private port of one of the two slots
+    /// of a hand-over, which the slot unit passes as `--slot %i`. It is the `slot` label of
+    /// `tierstore_build_info` on `/metricz`, by which the update hook's probe through the public
+    /// port knows which instance answered. It binds nothing (`--listen` does); without it the
+    /// gauge has no such label.
+    #[arg(
+        long,
+        value_name = "PORT",
+        value_parser = clap::value_parser!(u16).range(1..)
+    )]
     pub slot: Option<u16>,
     /// The hot tier: `memory` (its objects are lost when the process stops), `dir:<path>` (a
     /// directory, made if it does not exist) or `s3:<bucket>` (a bucket of an S3-compatible

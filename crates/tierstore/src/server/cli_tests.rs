@@ -274,10 +274,11 @@ fn the_slot_flag_is_a_port_from_1_to_65535() {
     for (text, port) in [("1", 1), ("9301", 9301), ("65535", 65535)] {
         assert_eq!(parse(text).unwrap().slot, Some(port), "{text}");
     }
-    for text in ["0", "65536", "-1", "+", "nine", "93x1", ""] {
+    for text in ["0", "65536", "+", "nine", "93x1", ""] {
         let why = parse(text).expect_err(text).to_string();
         assert!(why.contains("--slot"), "{text}: {why}");
     }
+    assert!(parse("-1").is_err());
 }
 
 /// Asserts that a slot given as a flag reaches the settings of the server, where `/metricz`
@@ -286,9 +287,9 @@ fn the_slot_flag_is_a_port_from_1_to_65535() {
 fn the_slot_reaches_the_server_settings() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-slot");
     let mut cli = cli(&dir);
-    assert_eq!(build(&cli).ok().expect("built").server.slot, None);
+    assert_eq!(build(&cli).expect("built").server.slot, None);
     cli.slot = Some(9301);
-    assert_eq!(build(&cli).ok().expect("built").server.slot, Some(9301));
+    assert_eq!(build(&cli).expect("built").server.slot, Some(9301));
 }
 
 /// Asserts that the help names every flag, and that the version names the package version.

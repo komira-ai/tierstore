@@ -652,6 +652,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 |---|---|---|
 | `--listen` | `server.listen` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses, served by one server (see Filling in the flags) |
 | `--proxy-id` | `server.proxy_id` | names the journal and the lease of this process |
+| `--slot` | `server.slot` | on main, not in v0.0.41: the private port of a hand-over slot (1 to 65535), the `slot` label of `tierstore_build_info`; the slot unit passes `--slot %i` |
 | `--hot` | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | the hot tier: `kind` is `memory`, `dir` (with `path`) or `s3` (with `bucket`, `endpoint` and `credentials_file`); in a flag, `memory`, `dir:<path>` or `s3:<bucket>` |
 | `--cold` | `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | the cold tier, in the same three kinds |
 | `--hot-endpoint` | `hot_store.endpoint` | `http://host[:port]` of an `s3` hot tier |

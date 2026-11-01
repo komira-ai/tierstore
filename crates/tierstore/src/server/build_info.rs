@@ -35,13 +35,17 @@ pub fn capabilities_text(names: &[&str]) -> String {
 }
 
 /// The `tierstore_build_info` block of `/metricz`: the type line and one sample of value 1 that
-/// carries the version and the commit as labels. Neither can hold a quote or a backslash: one is
-/// a Cargo version, the other hex digits or `unknown`.
+/// carries the version and the commit as labels, and after them the `slot` (the port `--slot`
+/// names) when there is one. Without a slot the text has no `slot` label at all, so that a node
+/// that is not a slot renders what it always did. None of them can hold a quote or a backslash:
+/// one is a Cargo version, the other hex digits or `unknown`, the third a number. The hook's
+/// probe reads the slot back with `update_hook::build_of`.
 #[must_use]
-pub fn gauge(version: &str, commit: &str, _slot: Option<u16>) -> String {
+pub fn gauge(version: &str, commit: &str, slot: Option<u16>) -> String {
+    let slot = slot.map_or_else(String::new, |port| format!(",slot=\"{port}\""));
     format!(
         "# TYPE tierstore_build_info gauge\n\
-         tierstore_build_info{{version=\"{version}\",commit=\"{commit}\"}} 1\n"
+         tierstore_build_info{{version=\"{version}\",commit=\"{commit}\"{slot}}} 1\n"
     )
 }
 
