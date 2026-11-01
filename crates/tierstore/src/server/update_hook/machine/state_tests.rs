@@ -340,3 +340,67 @@ fn the_files_are_reached_through_the_directory_that_was_checked() {
     assert_eq!(fs::read(moved.join(STATE_FILE)).unwrap(), b"newer");
     assert!(moved.join(LOCK_FILE).exists());
 }
+
+/// Writes the passwd file next to the group file of `scratch_state` and refuses or accepts the
+/// service on it. The group file lists nobody.
+fn membership(group: &str, passwd: &str) -> Result<(), String> {
+    let (guard, dir) = scratch_state("state-passwd");
+    fs::write(guard.path().join("group"), group).unwrap();
+    fs::write(guard.path().join("passwd"), passwd).unwrap();
+    let state = files(&dir);
+    match state.lock() {
+        Ok(_held) => Ok(()),
+        Err(error) => Err(message(error)),
+    }
+}
+
+/// Asserts that a service account whose primary group is the directory's group is accepted
+/// though the group file lists no member (a sysusers account made with that primary group is in
+/// no member list). It would catch a check that reads the member lists only.
+#[test]
+fn a_service_whose_primary_group_is_the_directorys_is_a_member() {
+    let gid = my_group();
+    let group = format!("tests:x:{gid}:\n");
+    let passwd = format!("root:x:0:0::/root:/bin/sh\n{SERVICE}:x:4242:{gid}::/:/usr/sbin/nologin\n");
+    assert_eq!(membership(&group, &passwd), Ok(()));
+}
+
+/// Asserts that a service listed in the group's member list is accepted though its primary group
+/// is another one.
+#[test]
+fn a_service_listed_in_the_group_is_a_member() {
+    let gid = my_group();
+    let group = format!("tests:x:{gid}:a,{SERVICE}\n");
+    let passwd = format!("{SERVICE}:x:4242:{}::/:/usr/sbin/nologin\n", gid + 1);
+    assert_eq!(membership(&group, &passwd), Ok(()));
+}
+
+/// Asserts that a service that is neither listed nor has the group as its primary group is
+/// refused, and that the message names the account and the group.
+#[test]
+fn a_service_that_is_neither_listed_nor_in_the_primary_group_is_refused() {
+    let gid = my_group();
+    let group = format!("tests:x:{gid}:a\n");
+    let passwd = format!("{SERVICE}:x:4242:{}::/:/usr/sbin/nologin\n", gid + 1);
+    let text = membership(&group, &passwd).unwrap_err();
+    assert!(text.contains("is not a member of group"), "{text}");
+    assert!(text.contains(SERVICE), "{text}");
+}
+
+/// Asserts that a service with no passwd entry (and not listed) is refused, as are an entry of
+/// another account whose primary group matches, a service name that is only a prefix of an
+/// entry's, and a passwd file with malformed lines.
+#[test]
+fn a_service_with_no_passwd_entry_is_refused() {
+    let gid = my_group();
+    let group = format!("tests:x:{gid}:a\n");
+    for passwd in [
+        String::new(),
+        format!("other:x:4242:{gid}::/:/bin/sh\n"),
+        format!("{SERVICE}x:x:4242:{gid}::/:/bin/sh\n"),
+        format!("junk\n{SERVICE}:x:4242:notanumber::/:/bin/sh\n"),
+    ] {
+        let text = membership(&group, &passwd).unwrap_err();
+        assert!(text.contains("is not a member of group"), "{passwd}: {text}");
+    }
+}

@@ -247,3 +247,96 @@ fn a_binary_that_is_a_link_a_directory_or_missing_is_not_run() {
     assert!(message(host.capabilities(&release).unwrap_err()).ends_with("is not a regular file"));
     assert!(runner.calls().is_empty());
 }
+
+fn declared(root: &Path) {
+    write(root, "etc/updater.d/tierstore.toml", "state_dir = \"/x\"\n");
+}
+
+/// Asserts that a declaration under `/etc` and `/etc/updater.d` that are root's (here, the
+/// tests' user's) with no group or other write bit is read, whatever other bits they have.
+#[test]
+fn a_declaration_in_trusted_directories_is_read() {
+    let (_guard, root) = scratch("host-parents-good");
+    declared(&root);
+    let runner = FakeRunner::replying(vec![]);
+    for bits in [0o755, 0o700, 0o750] {
+        fs::set_permissions(root.join("etc"), fs::Permissions::from_mode(bits)).unwrap();
+        fs::set_permissions(
+            root.join("etc/updater.d"),
+            fs::Permissions::from_mode(bits),
+        )
+        .unwrap();
+        assert!(host(&root, &runner).declaration().is_ok(), "{bits:o}");
+    }
+}
+
+/// Asserts that a declaration is refused when `/etc` or `/etc/updater.d` can be written by a
+/// group or by others, with a message that names the directory (a directory a non-root account
+/// can write lets it replace the declaration).
+#[test]
+fn a_declaration_in_a_directory_others_can_write_is_refused() {
+    for (dir, bits) in [
+        ("etc/updater.d", 0o775),
+        ("etc/updater.d", 0o757),
+        ("etc", 0o775),
+        ("etc", 0o757),
+    ] {
+        let (_guard, root) = scratch("host-parents-writable");
+        declared(&root);
+        fs::set_permissions(root.join(dir), fs::Permissions::from_mode(bits)).unwrap();
+        let runner = FakeRunner::replying(vec![]);
+        let text = message(host(&root, &runner).declaration().unwrap_err());
+        assert!(text.contains("not trusted"), "{dir} {bits:o}: {text}");
+        assert!(
+            text.contains(&format!(
+                "{} can be written by a group or others",
+                root.join(dir).display()
+            )),
+            "{dir} {bits:o}: {text}"
+        );
+    }
+}
+
+/// Asserts that a symbolic link in place of `/etc/updater.d`, or of `/etc`, is not followed even
+/// when its target is a good directory holding the declaration.
+#[test]
+fn a_declaration_behind_a_linked_directory_is_refused() {
+    for dir in ["etc/updater.d", "etc"] {
+        let (_guard, root) = scratch("host-parents-link");
+        write(&root, "real/etc/updater.d/tierstore.toml", "state_dir = \"/x\"\n");
+        match dir {
+            "etc" => symlink(root.join("real/etc"), root.join("etc")).unwrap(),
+            _ => {
+                fs::create_dir(root.join("etc")).unwrap();
+                symlink(root.join("real/etc/updater.d"), root.join(dir)).unwrap();
+            }
+        }
+        let runner = FakeRunner::replying(vec![]);
+        let text = message(host(&root, &runner).declaration().unwrap_err());
+        assert!(text.contains("not trusted"), "{dir}: {text}");
+        assert!(
+            text.contains(&format!("{} is a symbolic link", root.join(dir).display())),
+            "{dir}: {text}"
+        );
+    }
+}
+
+/// Asserts that a parent directory owned by another user than the declaration's owner is refused
+/// and the message names the directory (the declaration file itself is the same user's).
+#[test]
+fn a_declaration_in_a_directory_of_another_owner_is_refused() {
+    let (_guard, root) = scratch("host-parents-owner");
+    declared(&root);
+    let runner = FakeRunner::replying(vec![]);
+    let strange = SystemHost::new(root.clone(), &runner, LIMIT).with_declaration_owner(me() + 1);
+    let text = message(strange.declaration().unwrap_err());
+    assert!(
+        text.contains(&format!(
+            "{} is owned by user {}, not {}",
+            root.join("etc").display(),
+            me(),
+            me() + 1
+        )),
+        "{text}"
+    );
+}
