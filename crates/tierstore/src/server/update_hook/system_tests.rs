@@ -243,12 +243,12 @@ fn declaration_file(host: &Scratch) -> PathBuf {
 }
 
 /// Asserts that a declaration that is a symbolic link (even to a good file), one a group can
-/// write, one others can write, and one owned by another user are each refused as `host_failed`
+/// write, one others can write, one owned by another user and a directory are each refused as `host_failed`
 /// ("not trusted"), with no program run and no lock file made. It would catch a declaration read
 /// that a non-root account could have written or replaced.
 #[test]
 fn a_declaration_that_another_account_could_have_written_is_refused() {
-    for case in ["link", "group", "others", "owner"] {
+    for case in ["link", "group", "others", "owner", "directory"] {
         let host = scratch(&format!("tierstore-hook-system-untrusted-{case}"));
         let path = declaration_file(&host);
         let mut config_owner = host.owner();
@@ -263,6 +263,10 @@ fn a_declaration_that_another_account_could_have_written_is_refused() {
             }
             "others" => {
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o646)).unwrap();
+            }
+            "directory" => {
+                std::fs::remove_file(&path).unwrap();
+                std::fs::create_dir(&path).unwrap();
             }
             _ => config_owner += 1,
         }

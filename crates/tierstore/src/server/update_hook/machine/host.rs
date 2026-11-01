@@ -4,10 +4,14 @@
 //! The files are read under a root (`/` on a host) so that a test can give the host a root of
 //! its own.
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use rustix::fs::{Mode, OFlags, open};
+use rustix::io::Errno;
 
 use super::super::declaration::DECLARATION_PATH;
 use super::super::ports::{Conntrack, Host, PortError, PortKind};
@@ -98,8 +102,55 @@ impl<'a> SystemHost<'a> {
 }
 
 impl Host for SystemHost<'_> {
+    /// Reads the declaration, which names what a privileged account acts on, and so must be one
+    /// that only the declaration owner (root, unless set otherwise) could have written: the file
+    /// is opened with `O_NOFOLLOW` (a link is refused) and the opened descriptor, not the path,
+    /// must be a regular file of that owner with no group or other write bit.
     fn declaration(&self) -> Result<String, PortError> {
-        self.read(DECLARATION_PATH)
+        let path = self.root.join(DECLARATION_PATH.trim_start_matches('/'));
+        let shown = path.display();
+        let fd = open(
+            path.as_path(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| {
+            let why = if errno == Errno::LOOP {
+                "is not trusted: it is a symbolic link".to_owned()
+            } else {
+                format!("cannot be read: {errno}")
+            };
+            PortError::failed(KIND, format!("the declaration {shown} {why}"))
+        })?;
+        let mut file = File::from(fd);
+        let untrusted = |why: String| {
+            PortError::failed(
+                KIND,
+                format!("the declaration {shown} is not trusted: {why}"),
+            )
+        };
+        let meta = file
+            .metadata()
+            .map_err(|error| PortError::failed(KIND, format!("read {shown}: {error}")))?;
+        if !meta.file_type().is_file() {
+            return Err(untrusted("it is not a regular file".to_owned()));
+        }
+        if meta.uid() != self.declaration_owner {
+            return Err(untrusted(format!(
+                "it is owned by user {}, not {}",
+                meta.uid(),
+                self.declaration_owner
+            )));
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err(untrusted(
+                "it can be written by a group or others".to_owned(),
+            ));
+        }
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|error| PortError::failed(KIND, format!("read {shown}: {error}")))?;
+        Ok(text)
     }
 
     fn boot_id(&self) -> Result<String, PortError> {
