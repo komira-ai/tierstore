@@ -42,6 +42,12 @@
 #          only then publishes it, which is when GitHub creates the tag (cargo xtask release
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
+# gamma    the last stage. Sets the published release as the desired version of the service
+#          `tierstore` on the farm's update coordinator and waits for the farm to converge
+#          (kbf's `cargo xtask deploy-farm --service tierstore`); it passes with a notice when
+#          the repository variable KBF_COORDINATOR_URL is unset. The one job that holds
+#          `id-token: write`, and no write scope; the lint pins its needs, `if:`, environment
+#          and permissions.
 #
 # verify also runs the downloaded linux-x86_64 binary with `--version` and refuses to go on
 # unless it says exactly the tag (without the v) and the first 12 digits of the commit
@@ -266,3 +272,75 @@ jobs:
           RUN_ID: ${{ needs.verify.outputs.run-id }}
           NOTE: ${{ needs.plan.outputs.note }}
         run: cargo xtask release publish dist --repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --run-id "$RUN_ID" --notes-file "$RUNNER_TEMP/release-notes.md" --note "$NOTE"
+
+  # The gamma stage, the last step of a release: tell the farm's update coordinator "the desired
+  # version of the service `tierstore` is this release" and wait until the farm converges
+  # (docs/ci-and-release.md, "The gamma stage"). It runs only after the release is published,
+  # under the same `if:` as verify and publish, in this workflow's non-cancelling `release-main`
+  # group. It holds no write scope and no secret, and holds the run's OIDC token (`id-token:
+  # write`) for the one thing it is for: the coordinator accepts a token of this workflow on
+  # main, for the `release` environment, for the service `tierstore` and nothing else. The
+  # coordinator's address is a repository variable, never written here: unset, the job prints a
+  # notice and passes without fetching or compiling anything, so a fork, or a repository whose
+  # coordinator does not know tierstore yet, is unaffected. The verb is kbf's `cargo xtask
+  # deploy-farm` (komira-ai/kbf, main). It is bounded (its `--deadline-min`, 60 by default,
+  # under this job's timeout), and a farm that is blocked, stalled or out of time fails the job;
+  # the release stays published whatever this job says. No kbf minimums are passed: for a
+  # service other than kbf the coordinator's services file holds them.
+  gamma:
+    needs: [plan, publish]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: The deploy step is off
+        if: ${{ vars.KBF_COORDINATOR_URL == '' }}
+        run: echo "::notice::the gamma stage is off (the repository variable KBF_COORDINATOR_URL is unset): no farm was told about this release"
+      # The verb is kbf's. It is checked out and built before the token is used, and the token
+      # service's address and key are in the environment of every step of this job, the build's
+      # scripts included: kbf builds from its locked dependency set, and the coordinator's
+      # allow-list (this workflow, on main, for `release`, for `tierstore`) and the hosts' own
+      # signature and hash checks bound what a token can do.
+      - name: Check out kbf, for the deploy verb
+        if: ${{ vars.KBF_COORDINATOR_URL != '' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: komira-ai/kbf
+          ref: main
+          path: kbf
+          persist-credentials: false
+      - name: Build the deploy verb
+        if: ${{ vars.KBF_COORDINATOR_URL != '' }}
+        working-directory: kbf
+        run: |
+          rustup toolchain install
+          cargo xtask --help
+          echo "kbf commit: $(git rev-parse HEAD)"
+      # When the coordinator is reachable only on a Tailscale network: join it, after the build
+      # (its scripts never see that network), as an ephemeral node. Tailscale's workload identity
+      # federation takes this run's OIDC token, so the job still holds no secret. The client id
+      # and the audience are the variables TS_CLIENT_ID and TS_AUDIENCE, as in kbf's release.
+      - name: Join the farm's Tailscale network
+        if: ${{ vars.KBF_COORDINATOR_URL != '' && vars.TS_CLIENT_ID != '' }}
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ vars.TS_CLIENT_ID }}
+          audience: ${{ vars.TS_AUDIENCE }}
+          tags: tag:ci
+      # The version is the one tierstore's hosts report (`tierstore --version` and the build
+      # gauge's `version` label): the tag without its `v`, `+`, the first 12 digits of the
+      # commit, which verify checked the published binary says.
+      - name: Set this release as tierstore's desired version, and wait for the farm to converge
+        if: ${{ vars.KBF_COORDINATOR_URL != '' }}
+        working-directory: kbf
+        env:
+          COORDINATOR_URL: ${{ vars.KBF_COORDINATOR_URL }}
+          # The farm CA's certificate (public), which the coordinator's certificate chains to.
+          COORDINATOR_CA: ${{ vars.KBF_COORDINATOR_CA }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          COMMIT: ${{ needs.plan.outputs.commit }}
+        run: cargo xtask deploy-farm --service tierstore --url "$COORDINATOR_URL" --ca-pem "$COORDINATOR_CA" --version "${TAG#v}+${COMMIT:0:12}"

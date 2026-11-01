@@ -8,7 +8,7 @@
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
 | `artifacts.yml` | pull request, push to `main` | builds `tierstore` (`--features server`) for linux-x86_64 and linux-arm64, packages it with its SBOM, makes `SHA256SUMS`. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `paper.yml` | pull request that changes the paper check, its copy of the paper or its results; by hand | runs `crates/xtask/tests/paper.rs`: its tests block, and the ignored completion check runs as its own step, printing the open places and passing until the file `crates/xtask/tests/paper_fixture/FINAL` is committed, after which it fails on any open place. It reads a copy of the paper kept in the repository, so a run speaks for the copy and not for the published page; refreshing the copy is the only guard. Not part of `ci.yml`, so it does not count for a release. |
-| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing. |
+| `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again; `gamma` then sets that release as the farm coordinator's desired version for the service `tierstore` and waits for convergence (see The gamma stage). Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
 
@@ -55,7 +55,7 @@ displace a real release. A newer push waits behind a running release. GitHub kee
 waiting run, so a push that is replaced while it waits is not released by itself; that loses
 nothing, because the plan measures from the highest tag and the next release carries the skipped
 commits. A manual run is in a group of its own (publish refuses a tag or a release that exists).
-The farm deploy job, when it is added, joins the same group.
+The farm deploy job, `gamma`, is in the same group (the group is the workflow's, so every job of `release.yml` is).
 
 The workflow lint (`crates/xtask/tests/workflows`) finds these workflows by what they do, not by a
 list of names: any workflow with `contents: write`, `gh release`, a `git tag` or tag push, or a
@@ -100,6 +100,58 @@ The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
 The release notes list the titles of the commits since the previous tag (the first twenty), then
 how to verify the files. The `verify` and `publish` jobs are those of the manual release below, run
 with the plan's tag and commit.
+
+### The gamma stage
+
+The last job of `release.yml`, `gamma`, runs after `publish`, under the same `if:` as `verify` and
+`publish` (the plan said release, on a run of `main`), in the `release` environment, with
+`contents: read` and `id-token: write` and no other scope. It checks out `komira-ai/kbf` at `main`
+(the deploy verb is kbf's; the coordinator does not report its build commit without a token, so
+the job cannot read it beforehand), builds kbf's `xtask`, and runs
+
+```
+cargo xtask deploy-farm --service tierstore --url <coordinator> --ca-pem <farm CA> --version <X.Y.Z>+<12 hex>
+```
+
+The version is the one tierstore's hosts report (`tierstore --version`, the `version` label of
+`tierstore_build_info`): the tag without its `v`, then the first 12 digits of the commit, which
+`verify` checked the published binary says. The verb sets that as the desired version of the
+service `tierstore` and waits, up to 60 minutes, until the coordinator says the farm converged on
+it; a host that fails its update, a farm that stalls or runs out of time, or a refused token fails
+the job. The release stays published whatever the job says. No `--min-up-*` flag is passed: for a
+service other than `kbf`, the coordinator's services file holds the minimums.
+
+The job needs these, set once by an operator (nothing in this repository does it):
+
+- Repository (or `release` environment) variables: `KBF_COORDINATOR_URL`, the coordinator's control
+  address, and `KBF_COORDINATOR_CA`, the farm CA certificate (public) its certificate chains to.
+  When the coordinator is reachable only on a Tailscale network, also `TS_CLIENT_ID` and
+  `TS_AUDIENCE`: the job joins that network as an ephemeral node with this run's OIDC token, so it
+  holds no secret.
+- On the coordinator, an entry in the file its `--oidc-config` names, one `[[remote_operator]]`
+  for this repository (several entries are read together; never mixed with the single table):
+
+  ```toml
+  [[remote_operator]]
+  issuer = "https://token.actions.githubusercontent.com"
+  audience = "<the coordinator's control address, as written in KBF_COORDINATOR_URL>"
+  repository_id = "<the numeric id of komira-ai/tierstore>"
+  repository = "komira-ai/tierstore"
+  job_workflow_ref = ["komira-ai/tierstore/.github/workflows/release.yml@refs/heads/main"]
+  refs = ["refs/heads/main"]
+  environments = ["release"]
+  event_names = ["workflow_run"]
+  services = ["tierstore"]
+  ```
+
+- On the coordinator, the service `tierstore` defined in the file its `--services-file` names
+  (its roles and minimums), and the tierstore hosts enrolled so that their updaters heartbeat to it.
+
+Until `KBF_COORDINATOR_URL` is set the job prints `::notice::the gamma stage is off` and passes
+without fetching or building anything, so a fork, or a repository whose coordinator does not know
+tierstore yet, releases as before. Set but not configured on the coordinator, it fails (a 403
+`forbidden`) and changes nothing there. `deploy-farm --service` needs kbf's support for services
+other than `kbf`; until that is on kbf's `main` a configured job fails at the verb's arguments.
 
 ### The version the binary reports
 
