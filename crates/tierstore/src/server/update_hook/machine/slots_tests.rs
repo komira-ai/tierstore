@@ -231,8 +231,8 @@ fn the_links_are_reached_through_the_directory_that_was_checked() {
         Some(PathBuf::from("/releases/mine"))
     );
     slots.point(9302, Path::new("/releases/next")).unwrap();
-    assert!(!root.join("slots/9302").exists());
-    assert!(moved.join("slots/9302").exists());
+    assert!(fs::symlink_metadata(root.join("slots/9302")).is_err());
+    assert!(fs::symlink_metadata(moved.join("slots/9302")).is_ok());
 }
 
 /// Asserts that a `slots` that is a symbolic link to a directory is not followed: `target`,

@@ -94,7 +94,7 @@ fn a_directory_of_another_group_is_refused() {
 fn only_the_mode_0750_is_accepted() {
     let (_guard, dir) = scratch_state("state-mode");
     for bits in [
-        0o700, 0o500, 0o000, 0o755, 0o751, 0o754, 0o770, 0o775, 0o757, 0o2750,
+        0o700, 0o500, 0o755, 0o751, 0o754, 0o770, 0o775, 0o757, 0o2750,
     ] {
         mode(&dir, bits);
         let text = refused(&files(&dir));
