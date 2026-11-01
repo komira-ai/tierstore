@@ -6,7 +6,7 @@ use tierstore::{Backend, Error, Op, encode_journal};
 use tokio::time::Instant;
 
 use crate::support::{
-    Rig, assert_absent, body, journal_entry_keys, journal_key, journal_keys, keys_under,
+    Rig, assert_absent, body, journal_entry_keys, journal_key, journal_keys, keys_under, read, text,
 };
 
 /// Asserts that a batch that reaches `batch_entries` is written at once, without waiting for
@@ -212,4 +212,55 @@ async fn two_proxies_keep_separate_journals() {
     assert_eq!(journal_entry_keys(&*rig.hot_mem, "p2", 2).await, ["c"]);
     let announced = keys_under(&*rig.hot_mem, "_tiering/proxies/").await;
     assert_eq!(announced, ["_tiering/proxies/p1", "_tiering/proxies/p2"]);
+}
+
+/// Asserts that the two proxies of a hand-over, with the ids their slots give them
+/// (`tierstore-9301` and `tierstore-9302`), over one hot tier, write separate journals while they
+/// run side by side: each journal holds only its own proxy's puts, numbered from 1 in the order
+/// of those puts, however the puts of the two interleave. One reconciler then applies both as two
+/// streams, with a checkpoint for each, and copies every object; and the slot of v-current,
+/// started again for the next hand-over, goes on after its own number. It would catch a proxy
+/// that writes its entries anywhere but under its own id (two writers in one stream, which the
+/// reconciler reads as one), and a reconciler that keeps one checkpoint for the two.
+#[tokio::test(start_paused = true)]
+async fn two_slot_proxies_over_one_hot_tier_keep_separate_journals_through_a_hand_over() {
+    let (old, new) = ("tierstore-9301", "tierstore-9302");
+    let rig = Rig::new();
+    let current = rig.proxy(old, 1000).await;
+    current.put("a", body("1")).await.unwrap();
+    let next = rig.proxy(new, 1000).await;
+    next.put("b", body("2")).await.unwrap();
+    current.put("c", body("3")).await.unwrap();
+    next.put("d", body("4")).await.unwrap();
+    drop(current);
+
+    let hot = &*rig.hot_mem;
+    assert_eq!(
+        journal_keys(hot, old).await,
+        [journal_key(old, 1), journal_key(old, 2)]
+    );
+    assert_eq!(
+        journal_keys(hot, new).await,
+        [journal_key(new, 1), journal_key(new, 2)]
+    );
+    assert_eq!(journal_entry_keys(hot, old, 1).await, ["a"]);
+    assert_eq!(journal_entry_keys(hot, old, 2).await, ["c"]);
+    assert_eq!(journal_entry_keys(hot, new, 1).await, ["b"]);
+    assert_eq!(journal_entry_keys(hot, new, 2).await, ["d"]);
+
+    let mut reconciler = rig.reconciler(new, 1000);
+    let report = reconciler.pass().await;
+    assert!(report.held, "{report:?}");
+    assert_eq!(report.copied, 4, "{report:?}");
+    for (key, value) in [("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")] {
+        assert_eq!(read(&*rig.cold_mem, key).await, body(value), "{key}");
+    }
+    for id in [old, new] {
+        let stored = text(hot, &format!("_tiering/checkpoint/{id}")).await;
+        assert_eq!(stored, r#"{"seq":2,"evict_seq":0,"evict_idx":0}"#, "{id}");
+    }
+
+    let again = rig.proxy(old, 1000).await;
+    again.put("e", body("5")).await.unwrap();
+    assert_eq!(journal_entry_keys(hot, old, 3).await, ["e"]);
 }
