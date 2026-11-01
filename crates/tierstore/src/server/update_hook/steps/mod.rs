@@ -20,7 +20,7 @@ use super::declaration::{Declaration, PUBLIC_PORT, unit_name};
 use super::params::Params;
 use super::ports::{PortError, Ports};
 use super::probe::{CacheMode, build_of, readiness};
-use super::record::Record;
+use super::record::{Mode, Record};
 use super::report::{Done, Reason};
 use super::ruleset::{FORWARD_TABLE, redirect_ruleset};
 use super::validate::{check_params, validate};
@@ -114,9 +114,13 @@ impl Ctx<'_, '_> {
     }
 
     /// Puts v-current back in front: starts its unit (a no-op when it runs) and points the
-    /// redirect at it.
+    /// redirect at it. In restart mode the release that runs has no lock, so v-next is stopped
+    /// first: two instances of it must never run side by side, whatever the outage costs.
     fn back_to_current(&self, record: &Record) -> Result<(), PortError> {
         let current = record.current();
+        if record.mode == Mode::Restart {
+            self.ports.units.stop(&unit_name(record.serving))?;
+        }
         self.ports.units.start(&unit_name(current))?;
         self.redirect(current)
     }
@@ -157,11 +161,11 @@ fn attempt(step: Step, params: Option<&Params>, ports: &Ports<'_>) -> Result<(Do
             "there is no record: the first install lays it down",
         )),
         (Step::Rollback, _, Some(record)) => rollback::run(&ctx, record),
-        (Step::Cleanup, _, Some(record)) => cleanup::run(&ctx, record),
         (_, None, Some(_)) => Err(Done::fail(
             Reason::BadParams,
             "this step needs the params file",
         )),
+        (Step::Cleanup, Some(params), Some(record)) => cleanup::run(&ctx, params, record),
         (Step::Prepare, Some(params), Some(record)) => prepare::run(&ctx, params, record),
         (Step::Cutover, Some(params), Some(record)) => cutover::run(&ctx, params, record),
         (Step::Verify, Some(params), Some(record)) => verify::run(&ctx, params, record),
