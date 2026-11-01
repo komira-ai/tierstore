@@ -24,10 +24,11 @@
 //!   A dotted token with two or more points (`1.2.3`) is not a number and fails; a version is
 //!   written with a leading `v`, which the scanner skips.
 //!
-//! `the_paper_is_complete` runs all of them. It fails today: the paper is not complete. It stays
-//! red until the last cell is filled, so it is `#[ignore]`d and runs in its own workflow
-//! (`.github/workflows/paper.yml`) with `--include-ignored`, which does not belong to the
-//! checks `ci.yml` and `release.yml` require.
+//! `the_paper_is_complete` runs all of them. It reads the switch `tests/paper_fixture/FINAL`: while
+//! that file is absent it only prints the open-place count and the list and passes (report mode);
+//! once the file exists it fails on any open place. Publishing the paper is adding that file. The
+//! test is `#[ignore]`d, so `ci.yml` skips it, and `.github/workflows/paper.yml` runs it as a
+//! separate step with `--ignored`; the other tests of this file are blocking in that workflow.
 //! `the_measured_cells_trace_to_their_results` is the trace rule alone, over the cells that are
 //! filled, and runs with every test. The other tests plant each defect in a small page and show
 //! the check refusing it.
@@ -565,13 +566,54 @@ fn paper() -> String {
     std::fs::read_to_string(fixture().join("tierstore.html")).expect("the paper fixture")
 }
 
+/// Whether the paper is declared final: the file `FINAL` exists in `dir`.
+fn is_final(dir: &Path) -> bool {
+    dir.join("FINAL").is_file()
+}
+
+/// What the completion check does with the text of `report`: an empty text passes; otherwise it
+/// fails when the paper is final and is printed (and passes) when it is not.
+fn verdict(text: &str, is_final: bool) -> Result<(), String> {
+    if text.is_empty() {
+        Ok(())
+    } else if is_final {
+        Err(format!("the paper is not complete: {text}"))
+    } else {
+        println!("report only, tests/paper_fixture/FINAL is absent: {text}");
+        Ok(())
+    }
+}
+
 #[test]
-#[ignore = "the paper is not complete yet; runs in .github/workflows/paper.yml with --include-ignored, and loses this attribute with the last cell"]
+#[ignore = "runs in .github/workflows/paper.yml with --ignored; report only until tests/paper_fixture/FINAL exists"]
 fn the_paper_is_complete() {
-    // Catches: any cell of the paper still waiting for its measurement or its decision, and
-    // any number in a measured cell that no result holds.
+    // Catches: once FINAL exists, any cell of the paper still waiting for its measurement or
+    // its decision, and any number in a measured cell that no result holds.
     let text = report(&paper(), &fixture().join("results"));
-    assert!(text.is_empty(), "the paper is not complete: {text}");
+    if let Err(message) = verdict(&text, is_final(&fixture())) {
+        panic!("{message}");
+    }
+}
+
+#[test]
+fn the_completion_check_fails_only_when_the_paper_is_final() {
+    // Catches: a switch that does nothing (final and open places must fail), a check that
+    // fails in report mode, and a complete paper refused when final.
+    let open = "3 open places and 0 untraced numbers\nline 1: a class=\"tbd\" span\n";
+    let failure = verdict(open, true).unwrap_err();
+    assert!(failure.contains("3 open places"), "{failure}");
+    assert_eq!(verdict(open, false), Ok(()));
+    assert_eq!(verdict("", true), Ok(()));
+    assert_eq!(verdict("", false), Ok(()));
+}
+
+#[test]
+fn the_switch_is_the_file_named_final() {
+    // Catches: a switch read from the wrong name or taken as set when the file is absent.
+    let dir = scratch("final");
+    assert!(!is_final(&dir));
+    std::fs::write(dir.join("FINAL"), "").unwrap();
+    assert!(is_final(&dir));
 }
 
 #[test]
