@@ -190,6 +190,9 @@ pub struct Cli {
     /// across restarts, and give each process over the same tiers one of its own.
     #[arg(long)]
     pub proxy_id: String,
+    /// The slot port this instance runs as.
+    #[arg(long)]
+    pub slot: Option<u16>,
     /// The hot tier: `memory` (its objects are lost when the process stops), `dir:<path>` (a
     /// directory, made if it does not exist) or `s3:<bucket>` (a bucket of an S3-compatible
     /// store, which needs `--hot-endpoint` and `--hot-credentials-file`).

@@ -421,6 +421,8 @@ pub struct ServerConfig {
     /// The counters of the OCI read front, which `GET /metricz` shows; none by default, and then
     /// `/metricz` has no block of it. The binary sets them when it runs the front.
     pub oci_metrics: Option<Arc<oci::OciMetrics>>,
+    /// The slot port this instance runs as.
+    pub slot: Option<u16>,
     /// The time, for the age of a signature and of the usage object.
     pub clock: Arc<dyn Clock>,
     /// The time, for the rate of a request body (`put_min_bytes_per_sec`). It is a clock that
@@ -468,6 +470,7 @@ impl ServerConfig {
             cache_writes: false,
             usage_stale_after: Duration::from_secs(120),
             oci_metrics: None,
+            slot: None,
             clock,
             rate_clock: Arc::new(MonotonicClock::new()),
         }
@@ -955,7 +958,8 @@ impl Server {
         let late = self.late.load(Ordering::SeqCst);
         text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
         text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
-        text.push_str(&build_info::gauge(build_info::VERSION, build_info::COMMIT));
+        let (version, commit) = (build_info::VERSION, build_info::COMMIT);
+        text.push_str(&build_info::gauge(version, commit, self.config.slot));
         text
     }
 

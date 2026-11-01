@@ -38,7 +38,7 @@ pub fn capabilities_text(names: &[&str]) -> String {
 /// carries the version and the commit as labels. Neither can hold a quote or a backslash: one is
 /// a Cargo version, the other hex digits or `unknown`.
 #[must_use]
-pub fn gauge(version: &str, commit: &str) -> String {
+pub fn gauge(version: &str, commit: &str, _slot: Option<u16>) -> String {
     format!(
         "# TYPE tierstore_build_info gauge\n\
          tierstore_build_info{{version=\"{version}\",commit=\"{commit}\"}} 1\n"

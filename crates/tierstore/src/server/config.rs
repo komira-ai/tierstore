@@ -923,6 +923,7 @@ fn storage(
         capabilities: false,
         listen: front.listen,
         proxy_id: front.proxy_id,
+        slot: None,
         hot: hot_parts.spec,
         cold: cold_parts.spec,
         hot_endpoint: hot_parts.endpoint,

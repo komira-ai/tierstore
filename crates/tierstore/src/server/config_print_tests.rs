@@ -265,3 +265,26 @@ fn flags_that_no_file_can_say_are_refused() {
         "{why}"
     );
 }
+
+/// Asserts that `--slot` is printed as the integer `server.slot` and loads back to the settings
+/// of the flags, and that flags without it print no such key, so that a file printed for a node
+/// that is not a slot is the file it always was.
+#[test]
+fn the_slot_is_printed_as_a_key_and_loads_back() {
+    let mut flags = dir_flags();
+    flags.push("--slot=9301");
+    let (cli, per_run) = parse(flags);
+    assert_eq!(cli.slot, Some(9301));
+    let text = render(&cli).unwrap();
+    let table: toml::Table = toml::from_str(&text).unwrap();
+    assert_eq!(table["server"]["slot"].as_integer(), Some(9301), "{text}");
+    let expected = Cli {
+        print_config: false,
+        ..cli
+    };
+    assert_eq!(from_text(&text, per_run).unwrap(), expected);
+
+    let (cli, _) = parse(dir_flags());
+    let table: toml::Table = toml::from_str(&render(&cli).unwrap()).unwrap();
+    assert!(!table["server"].as_table().unwrap().contains_key("slot"));
+}

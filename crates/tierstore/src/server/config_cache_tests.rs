@@ -146,6 +146,17 @@ fn cache_with(from: &str, to: &str) -> String {
     CACHE.replacen(from, to, 1)
 }
 
+/// Asserts that a build node's `server.slot` reaches the settings of its front, as a storage
+/// node's does, with none when the key is left out, and that zero is refused naming the key: the
+/// hand-over's slot units run both shapes.
+#[test]
+fn a_build_node_file_takes_a_slot() {
+    let with = |value: &str| cache_with("[server]", &format!("[server]\nslot = {value}"));
+    assert_eq!(cache_of(&with("9302")).front.slot, Some(9302));
+    assert_eq!(cache_of(CACHE).front.slot, None);
+    assert!(refusal(&with("0")).contains("server.slot"));
+}
+
 /// Asserts that a build node's file makes the settings it says, every key to its field, and that
 /// a storage node's loader (`from_text`, the flags' form) says a build node has no flag form.
 #[test]

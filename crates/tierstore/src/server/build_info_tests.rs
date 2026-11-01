@@ -46,10 +46,24 @@ fn the_capability_names_are_plain_and_unique() {
 #[test]
 fn the_gauge_is_one_sample_with_version_and_commit() {
     assert_eq!(
-        gauge("1.2.3", "0123456789ab"),
+        gauge("1.2.3", "0123456789ab", None),
         "# TYPE tierstore_build_info gauge\n\
          tierstore_build_info{version=\"1.2.3\",commit=\"0123456789ab\"} 1\n"
     );
+}
+
+/// Asserts that a slot is the third label, after the version and the commit, as a decimal port
+/// with no padding, and that a gauge without a slot has no `slot` text at all, not an empty
+/// label: the scrapes of a node that does not run as a slot read the text they always did.
+#[test]
+fn the_gauge_has_a_slot_label_only_when_there_is_a_slot() {
+    assert_eq!(
+        gauge("1.2.3", "0123456789ab", Some(9301)),
+        "# TYPE tierstore_build_info gauge\n\
+         tierstore_build_info{version=\"1.2.3\",commit=\"0123456789ab\",slot=\"9301\"} 1\n"
+    );
+    assert!(gauge("1.2.3", "0123456789ab", Some(65535)).contains(",slot=\"65535\"}"));
+    assert!(!gauge("1.2.3", "0123456789ab", None).contains("slot"));
 }
 
 /// Asserts that the commit the build embeds is twelve lowercase hex digits or `unknown`, and that

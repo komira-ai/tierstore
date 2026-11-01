@@ -828,3 +828,22 @@ fn a_listen_list_that_cannot_work_is_refused_by_its_key() {
         assert!(!why.contains("secret-word"), "{why}");
     }
 }
+
+/// Asserts that `server.slot` makes the setting `--slot` makes (a port, 1 to 65535), that a file
+/// without it has none, as the flag left out has, and that zero, a number past a port, a string
+/// and a negative number are refused with the key named.
+#[test]
+fn the_slot_key_makes_the_slot_flag_and_is_a_port() {
+    let with = |value: &str| minimal_with("[server]", &format!("[server]\nslot = {value}"));
+    let cli = from_text(&with("9301"), DEFAULTS).unwrap();
+    assert_eq!(cli.slot, Some(9301));
+    let flags = [MINIMAL_FLAGS.to_vec(), vec!["--slot=9301"]].concat();
+    assert_eq!(cli, Cli::try_parse_from(flags).unwrap());
+    assert_eq!(from_text(MINIMAL, DEFAULTS).unwrap().slot, None);
+    assert_eq!(from_text(&with("65535"), DEFAULTS).unwrap().slot, Some(65535));
+    for bad in ["0", "65536", "-1", "\"9301\"", "true"] {
+        let why = refusal(&with(bad));
+        assert!(why.contains("slot"), "{bad}: {why}");
+    }
+    assert!(refusal(&with("0")).contains("server.slot"));
+}
