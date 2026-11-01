@@ -154,6 +154,13 @@ The job needs these, set once by an operator (nothing in this repository does it
 - On the coordinator, the service `tierstore` defined in the file its `--services-file` names
   (its roles and minimums), and the tierstore hosts enrolled so that their updaters heartbeat to it.
 
+Keep `KBF_COORDINATOR_URL` unset until the farm can answer this job. Two things must exist first:
+the host updater's service registration, and tierstore registering its release version
+(`X.Y.Z+<12 hex>`, the text above) on it, so that each host's heartbeat for the service
+`tierstore` carries that version. While no host reports one, the coordinator has nothing to
+converge on and the wait can only run out its 60 minutes and fail the job (after the release is
+published).
+
 Until `KBF_COORDINATOR_URL` is set the job prints `::notice::the gamma stage is off` and passes
 without fetching or building anything, so a fork, or a repository whose coordinator does not know
 tierstore yet, releases as before. Set but not configured on the coordinator, it fails (a 403
