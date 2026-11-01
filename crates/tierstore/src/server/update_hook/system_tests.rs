@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use tierstore_testkit::dir::TestDir;
 
 use super::machine::SystemRunner;
-use super::machine::testing::{FakeRunner, exit};
-use super::machine::{STATE_FILE, StateFiles};
+use super::machine::testing::{FakeRunner, SERVICE, exit, my_group};
+use super::machine::{Account, STATE_FILE, StateFiles};
 use super::system::{Config, NFT_TIMEOUT, RELEASE_OWNER, START_TIMEOUT, run_on, system_config};
 use super::{
     DECLARATION_PATH, Done, FORWARD_TABLE, GUARD_TABLE, Invocation, Machine, Outcome, Reason,
@@ -24,7 +24,7 @@ struct Scratch {
 
 fn declaration_text(state: &Path) -> String {
     format!(
-        "state_dir = \"{}\"\nhealth_ports = [9301, 9302]\n\n[hook]\nunits = [\"tierstore@9301.service\", \"tierstore@9302.service\"]\n",
+        "uid = \"{SERVICE}\"\nstate_dir = \"{}\"\nhealth_ports = [9301, 9302]\n\n[hook]\nunits = [\"tierstore@9301.service\", \"tierstore@9302.service\"]\n",
         state.display()
     )
 }
@@ -34,7 +34,10 @@ fn scratch(name: &str) -> Scratch {
     let root = dir.path().to_path_buf();
     let state = root.join("var-state");
     std::fs::create_dir(&state).unwrap();
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let group = root.join("etc/group");
+    std::fs::create_dir_all(group.parent().unwrap()).unwrap();
+    std::fs::write(&group, format!("hook:x:{}:{SERVICE}\n", my_group())).unwrap();
     let declaration = root.join(DECLARATION_PATH.trim_start_matches('/'));
     std::fs::create_dir_all(declaration.parent().unwrap()).unwrap();
     std::fs::write(&declaration, declaration_text(&state)).unwrap();
@@ -55,6 +58,7 @@ impl Scratch {
         Config {
             root: self.root.clone(),
             owner: self.owner(),
+            group: my_group(),
             release_owner: self.owner(),
             declaration_owner: self.owner(),
             runner,
@@ -62,7 +66,9 @@ impl Scratch {
     }
 
     fn record(&self, record: &Record) {
-        std::fs::write(self.state.join(STATE_FILE), record.encode()).unwrap();
+        let file = self.state.join(STATE_FILE);
+        std::fs::write(&file, record.encode()).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
 
     fn link(&self, port: u16) {
@@ -171,9 +177,13 @@ fn a_held_lock_is_locked() {
     let host = scratch("tierstore-hook-system-locked");
     host.record(&Record::idle(9301));
     host.link(9301);
-    let _held = StateFiles::new(host.state.clone(), host.owner())
-        .lock()
-        .unwrap();
+    let account = Account {
+        owner: host.owner(),
+        group: my_group(),
+        service: SERVICE.to_owned(),
+        group_file: host.root.join("etc/group"),
+    };
+    let _held = StateFiles::new(host.state.clone(), account).lock().unwrap();
     let runner = FakeRunner::replying(vec![]);
     let done = host.run(Step::Restore, &runner);
     assert_eq!(done.report.reason, Some(Reason::Locked), "{done:?}");
@@ -232,6 +242,7 @@ fn the_system_machine_reads_the_declaration_of_the_host() {
 fn the_system_config_expects_the_hooks_own_user_to_own_the_state_directory() {
     let config = system_config(&SystemRunner);
     assert_eq!(config.owner, rustix::process::geteuid().as_raw());
+    assert_eq!(config.group, rustix::process::getegid().as_raw());
     assert_eq!(config.release_owner, RELEASE_OWNER);
     assert_eq!(config.declaration_owner, 0);
     assert_eq!(RELEASE_OWNER, 0);
@@ -301,4 +312,83 @@ fn a_declaration_owned_by_the_configured_user_with_mode_0644_is_read() {
     let runner = FakeRunner::replying(vec![]);
     let done = host.run(Step::Restore, &runner);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+}
+
+/// Runs `restore` on `host` configured by `change` and returns what it said and the programs it
+/// ran.
+fn refused_by(host: &Scratch, change: impl FnOnce(&mut Config<'_>)) -> (Done, usize) {
+    let runner = FakeRunner::replying(vec![]);
+    let mut config = host.config(&runner);
+    change(&mut config);
+    let invocation = Invocation::parse([std::ffi::OsString::from("restore")]).unwrap();
+    let done = run_on(&config, &invocation, None);
+    (done, runner.calls().len())
+}
+
+/// Asserts that a state directory that is not owned by the hook's group, one that is not mode
+/// 0750 and one whose group does not list the service account are each refused as `state_io`
+/// with the state port's words, and no program runs. It would catch a wiring that leaves the
+/// group, the mode or the membership unchecked.
+#[test]
+fn a_state_directory_the_service_cannot_reach_or_could_write_is_refused() {
+    let host = scratch("tierstore-hook-system-dir");
+    host.record(&Record::idle(9301));
+    host.link(9301);
+    let (done, calls) = refused_by(&host, |config| config.group = my_group() + 1);
+    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
+    assert!(done.report.detail.unwrap().contains("belongs to group"));
+    assert_eq!(calls, 0);
+    std::fs::set_permissions(&host.state, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let (done, calls) = refused_by(&host, |_| {});
+    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
+    assert!(done.report.detail.unwrap().contains("not 0750"));
+    assert_eq!(calls, 0);
+    std::fs::set_permissions(&host.state, std::fs::Permissions::from_mode(0o750)).unwrap();
+    std::fs::write(host.root.join("etc/group"), "hook:x:1:other\n").unwrap();
+    let (done, calls) = refused_by(&host, |_| {});
+    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
+    assert!(
+        done.report
+            .detail
+            .unwrap()
+            .contains("is not a member of group")
+    );
+    assert_eq!(calls, 0);
+}
+
+/// Asserts that a declaration with no `uid` (no service account to look for in the group) is
+/// refused as `state_invalid` before anything is made. It would catch a wiring that goes on
+/// without knowing who must be able to reach the directory.
+#[test]
+fn a_declaration_without_a_service_account_is_refused() {
+    let host = scratch("tierstore-hook-system-nouid");
+    let path = declaration_file(&host);
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, text.replace(&format!("uid = \"{SERVICE}\"\n"), "")).unwrap();
+    let (done, calls) = refused_by(&host, |_| {});
+    assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{done:?}");
+    assert!(done.report.detail.unwrap().contains("uid"));
+    assert_eq!(calls, 0);
+    assert!(!host.state.join("lock").exists());
+}
+
+/// Asserts that a record that a group or others can write (a forged one) is refused as `state_io`
+/// by a step, and no program runs. It would catch a step that acts on a record the service could
+/// have written.
+#[test]
+fn a_record_the_service_could_have_written_stops_the_step() {
+    let host = scratch("tierstore-hook-system-forged");
+    host.record(&Record::idle(9301));
+    host.link(9301);
+    let file = host.state.join(STATE_FILE);
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o660)).unwrap();
+    let (done, calls) = refused_by(&host, |_| {});
+    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
+    assert!(
+        done.report
+            .detail
+            .unwrap()
+            .contains("can be written by a group or others")
+    );
+    assert_eq!(calls, 0);
 }

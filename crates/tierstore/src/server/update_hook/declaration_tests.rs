@@ -61,3 +61,74 @@ fn the_units_may_be_listed_in_either_order() {
     );
     assert!(Declaration::parse(&swapped).is_ok());
 }
+
+/// Asserts that the service account is read from the top-level `uid`, and is none when the
+/// declaration has no such key.
+#[test]
+fn the_service_account_is_read_from_uid() {
+    let named = format!("uid = \"tierstore\"\n{DECLARATION}");
+    assert_eq!(
+        Declaration::parse(&named).unwrap().service.as_deref(),
+        Some("tierstore")
+    );
+    assert_eq!(Declaration::parse(DECLARATION).unwrap().service, None);
+}
+
+/// Asserts that a `uid` that is not an account name (empty, leading hyphen, a space, a slash, a
+/// colon, non-ASCII, 33 characters) is refused: it is matched against the lines of `/etc/group`.
+#[test]
+fn a_uid_that_is_not_an_account_name_is_refused() {
+    for uid in ["", "-x", "a b", "a/b", "a:b", "tierstoré", &"a".repeat(33)] {
+        let text = format!("uid = \"{uid}\"\n{DECLARATION}");
+        let err = Declaration::parse(&text).unwrap_err();
+        assert!(matches!(err, DeclarationError::Service), "{uid:?}");
+        assert!(err.to_string().contains("account name"));
+    }
+    let longest = format!("uid = \"{}\"\n{DECLARATION}", "a".repeat(32));
+    assert!(Declaration::parse(&longest).is_ok());
+}
+
+/// Asserts that a record directory that is a reserved path, or under a reserved tree (the root,
+/// system directories, the service's cache and state), is refused, and
+/// that its neighbours are not (the match is by whole components). It would catch a declaration
+/// that makes the hook use `/etc` or the service's own state as its record directory.
+#[test]
+fn a_reserved_state_directory_is_refused() {
+    let with = |dir: &str| {
+        Declaration::parse(&DECLARATION.replace("/var/lib/updater/hooks/tierstore", dir))
+    };
+    for dir in [
+        "/",
+        "/var",
+        "/var/lib",
+        "/etc",
+        "/etc/updater.d",
+        "/usr",
+        "/usr/lib/x",
+        "/proc",
+        "/sys/x",
+        "/dev/shm",
+        "/run/x",
+        "/boot",
+        "/var/cache/tierstore",
+        "/var/lib/tierstore",
+        "/var/lib/tierstore/state",
+        "/bin",
+        "/sbin",
+        "/lib64/x",
+    ] {
+        let err = with(dir).unwrap_err();
+        assert!(matches!(err, DeclarationError::Reserved(_)), "{dir}");
+        assert!(err.to_string().contains(dir), "{dir}");
+    }
+    for dir in [
+        "/var/lib/updater/hooks/tierstore",
+        "/var/lib/tierstore-update",
+        "/var/lib/tierstorex",
+        "/srv/hook",
+        "/etcetera",
+        "/var/libx/y",
+    ] {
+        assert!(with(dir).is_ok(), "{dir}");
+    }
+}

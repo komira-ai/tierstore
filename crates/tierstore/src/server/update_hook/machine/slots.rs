@@ -16,11 +16,11 @@ pub struct SlotLinks {
 }
 
 impl SlotLinks {
-    /// The links under `<state_dir>/slots`.
+    /// The links under `<state_dir>/slots` of `state`.
     #[must_use]
-    pub fn new(state_dir: &Path) -> SlotLinks {
+    pub fn new(state: &super::StateFiles) -> SlotLinks {
         SlotLinks {
-            dir: state_dir.join("slots"),
+            dir: state.path().join("slots"),
         }
     }
 

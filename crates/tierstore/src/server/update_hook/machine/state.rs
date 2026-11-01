@@ -29,7 +29,20 @@ const TEMP_FILE: &str = "state.json.tmp";
 /// others.
 const FORBIDDEN: u32 = 0o027;
 
-/// The state directory `dir`, which `owner` (a user id) must own.
+/// Who the state directory belongs to and who must be able to reach it.
+#[allow(dead_code)]
+pub struct Account {
+    /// The user id that must own the directory and the record: the hook's.
+    pub owner: u32,
+    /// The group id that must own the directory: the hook's.
+    pub group: u32,
+    /// The name of the service account, which must be a member of `group`.
+    pub service: String,
+    /// The file that lists the groups' members (`/etc/group`, under the host's root).
+    pub group_file: PathBuf,
+}
+
+/// The state directory `dir`.
 pub struct StateFiles {
     dir: PathBuf,
     owner: u32,
@@ -64,8 +77,16 @@ pub(super) fn try_lock(fd: BorrowedFd<'_>) -> Result<(), PortError> {
 impl StateFiles {
     /// The directory `dir`, owned by the user id `owner`.
     #[must_use]
-    pub fn new(dir: PathBuf, owner: u32) -> StateFiles {
-        StateFiles { dir, owner }
+    pub fn new(dir: PathBuf, account: Account) -> StateFiles {
+        StateFiles {
+            dir,
+            owner: account.owner,
+        }
+    }
+
+    /// The path of the directory, for messages.
+    pub(super) fn path(&self) -> &Path {
+        &self.dir
     }
 
     fn check(&self) -> Result<(), Fault> {

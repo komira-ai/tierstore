@@ -9,7 +9,7 @@ use rustix::process::geteuid;
 use super::args::Invocation;
 use super::declaration::Declaration;
 use super::machine::{
-    LoopbackInstances, MonotonicClock, NftTool, Runner, SlotLinks, StateFiles, SystemHost,
+    Account, LoopbackInstances, MonotonicClock, NftTool, Runner, SlotLinks, StateFiles, SystemHost,
     SystemRunner, SystemdUnits,
 };
 use super::params::Params;
@@ -38,8 +38,10 @@ pub(super) const DECLARATION_OWNER: u32 = 0;
 pub(super) struct Config<'a> {
     /// The root the host's files are read under (`/` on a host).
     pub root: PathBuf,
-    /// The user id that must own the state directory.
+    /// The user id that must own the state directory and the record.
     pub owner: u32,
+    /// The group id that must own the state directory.
+    pub group: u32,
     /// The user id that must own the binary of a staged release.
     pub release_owner: u32,
     /// The user id that must own the declaration.
@@ -72,10 +74,16 @@ pub(super) fn run_on(
     };
     let nft = NftTool::new(runner, NFT_TIMEOUT);
     let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT);
-    let slots = SlotLinks::new(&decl.state_dir);
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
     let clock = MonotonicClock::new();
-    let state = StateFiles::new(decl.state_dir.clone(), config.owner);
+    let account = Account {
+        owner: config.owner,
+        group: config.group,
+        service: decl.service.clone().unwrap_or_default(),
+        group_file: config.root.join("etc/group"),
+    };
+    let state = StateFiles::new(decl.state_dir.clone(), account);
+    let slots = SlotLinks::new(&state);
     let ports = Ports {
         nft: &nft,
         units: &units,
@@ -95,6 +103,7 @@ pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
     Config {
         root: PathBuf::from("/"),
         owner: geteuid().as_raw(),
+        group: 0,
         release_owner: RELEASE_OWNER,
         declaration_owner: DECLARATION_OWNER,
         runner,

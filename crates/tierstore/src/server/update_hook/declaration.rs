@@ -45,6 +45,12 @@ pub enum DeclarationError {
     /// `state_dir` is not an absolute path of plain components.
     #[error("state_dir must be an absolute path of plain components")]
     NotPlain,
+    /// `state_dir` is a path the hook must never use as its record directory.
+    #[error("state_dir {0:?} is a reserved path")]
+    Reserved(PathBuf),
+    /// `uid`, the service account, is not an account name.
+    #[error("uid must be an account name of letters, digits and _ . - (at most 32)")]
+    Service,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +58,8 @@ struct Wire {
     state_dir: PathBuf,
     health_ports: Vec<u16>,
     hook: WireHook,
+    #[serde(default)]
+    uid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +74,9 @@ pub struct Declaration {
     pub state_dir: PathBuf,
     /// The two private ports, in the declared order.
     pub ports: [u16; 2],
+    /// The service account (`uid`), which must be a member of the state directory's group;
+    /// `None` when the declaration names none.
+    pub service: Option<String>,
 }
 
 impl Declaration {
@@ -94,6 +105,7 @@ impl Declaration {
         Ok(Declaration {
             state_dir: wire.state_dir,
             ports: [first, second],
+            service: wire.uid,
         })
     }
 

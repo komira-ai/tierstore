@@ -28,7 +28,7 @@ pub use instances::LoopbackInstances;
 pub use nft::NftTool;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use slots::SlotLinks;
-pub use state::{LOCK_FILE, STATE_FILE, StateFiles};
+pub use state::{Account, LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::SystemdUnits;
 
 /// What went wrong, as text, before the port that saw it says which port that is.
