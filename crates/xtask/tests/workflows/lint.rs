@@ -448,6 +448,36 @@ pub fn release_problems(text: &str) -> Vec<String> {
             "gamma: environment is {environment:?}, not \"release\""
         ));
     }
+    // The kbf checkout whose verb gamma runs is pinned in the file, as a commit, so a change of
+    // it is a reviewed change and a kbf main that moves or breaks does not move the release.
+    let pin = gamma
+        .and_then(|j| entry(j, "env"))
+        .and_then(|e| entry(e, "KBF_DEPLOY_REF"))
+        .and_then(Node::as_str);
+    if !pin
+        .is_some_and(|p| p.len() == 40 && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    {
+        problems.push(format!(
+            "gamma: env KBF_DEPLOY_REF is {pin:?}, not 40 lowercase hex digits"
+        ));
+    }
+    let checkout_ref = gamma
+        .and_then(|j| entry(j, "steps"))
+        .and_then(|s| match &s.value {
+            Value::Seq(items) => items.iter().find(|i| {
+                entry(i, "with")
+                    .and_then(|w| entry(w, "repository"))
+                    .and_then(Node::as_str)
+                    == Some("komira-ai/kbf")
+            }),
+            _ => None,
+        })
+        .and_then(|i| entry(i, "with"))
+        .and_then(|w| entry(w, "ref"))
+        .and_then(Node::as_str);
+    if checkout_ref != Some("${{ env.KBF_DEPLOY_REF }}") {
+        problems.push("gamma: the kbf checkout ref is not ${{ env.KBF_DEPLOY_REF }}".to_owned());
+    }
     // The command: tierstore's own service and the version its hosts report, and none of kbf's
     // minimums (for another service the services file of the coordinator holds them).
     match runs(gamma)
@@ -496,6 +526,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
     problems
 }
 
+/// The rule is about the release FILES: nothing in release.yml builds or signs what is
+/// published. The `gamma` job does build kbf's xtask (`cargo xtask --help`, then `deploy-farm`),
+/// which is a tool that talks to the coordinator and produces no release file; do not tighten
+/// this rule to forbid it.
 /// A line of `text` that builds, fetches or signs: a `cargo` that is not `cargo xtask <verb>`
 /// of [`XTASK_VERBS`], or the attest actions.
 fn build_problems(text: &str) -> Vec<String> {

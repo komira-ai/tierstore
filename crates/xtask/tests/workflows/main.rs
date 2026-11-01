@@ -786,3 +786,29 @@ fn every_exempt_workflow_exists_and_says_why() {
         assert!(!reason.trim().is_empty(), "{file}");
     }
 }
+
+#[test]
+fn gamma_checks_out_kbf_at_a_pinned_commit() {
+    // Catches: the kbf checkout moving to a branch or a short hash (every release would build
+    // whatever kbf's main is at that minute, with the OIDC token in the environment), or the
+    // checkout no longer using the pin.
+    let text = text_of("release.yml");
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("KBF_DEPLOY_REF: "))
+        .expect("KBF_DEPLOY_REF is in release.yml");
+    let pin = line.trim_start().trim_start_matches("KBF_DEPLOY_REF: ");
+    for with in ["main", &pin[..12], &pin.to_uppercase(), ""] {
+        let problems =
+            release_problems(&text.replace(line, &format!("      KBF_DEPLOY_REF: {with}")));
+        assert!(
+            problems.iter().any(|p| p.contains("KBF_DEPLOY_REF")),
+            "{with:?}: {problems:?}"
+        );
+    }
+    let problems = release_problems(&text.replace("ref: ${{ env.KBF_DEPLOY_REF }}", "ref: main"));
+    assert!(
+        problems.iter().any(|p| p.contains("the kbf checkout ref")),
+        "{problems:?}"
+    );
+}
