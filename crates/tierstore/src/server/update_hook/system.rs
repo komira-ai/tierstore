@@ -27,16 +27,18 @@ pub(super) const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest an instance may leave a request unanswered.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// The user that must own the state directory and the binary of a staged release: the
-/// updater's, root.
-pub(super) const UPDATER_UID: u32 = 0;
+/// The user that must own the binary of a staged release: the updater's tree is root's.
+pub(super) const RELEASE_OWNER: u32 = 0;
+const UPDATER_UID: u32 = 0;
 
 /// Where the machine is and who may own its state directory.
 pub(super) struct Config<'a> {
     /// The root the host's files are read under (`/` on a host).
     pub root: PathBuf,
-    /// The user id that must own the state directory and the binary of a staged release.
+    /// The user id that must own the state directory.
     pub owner: u32,
+    /// The user id that must own the binary of a staged release.
+    pub release_owner: u32,
     /// What runs the programs.
     pub runner: &'a dyn Runner,
 }
@@ -57,7 +59,7 @@ pub(super) fn run_on(
 ) -> Done {
     let runner = config.runner;
     let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
-        .with_release_owner(config.owner);
+        .with_release_owner(config.release_owner);
     let decl = match declaration(&host) {
         Ok(decl) => decl,
         Err(done) => return done,
@@ -80,12 +82,19 @@ pub(super) fn run_on(
     run_step(invocation.step, params, &ports)
 }
 
-/// Runs the step on the host the process is running on.
-pub(super) fn on_this_machine(invocation: &Invocation, params: Option<&Params>) -> Done {
-    let config = Config {
+/// The machine this process runs on: the host's own files, the state directory owned by the
+/// user the hook runs as (its own account, which owns the directory), and a staged release owned
+/// by root.
+pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
+    Config {
         root: PathBuf::from("/"),
         owner: UPDATER_UID,
-        runner: &SystemRunner,
-    };
-    run_on(&config, invocation, params)
+        release_owner: RELEASE_OWNER,
+        runner,
+    }
+}
+
+/// Runs the step on the host the process is running on.
+pub(super) fn on_this_machine(invocation: &Invocation, params: Option<&Params>) -> Done {
+    run_on(&system_config(&SystemRunner), invocation, params)
 }

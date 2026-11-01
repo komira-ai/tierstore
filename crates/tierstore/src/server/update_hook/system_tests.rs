@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 
 use tierstore_testkit::dir::TestDir;
 
+use super::machine::SystemRunner;
 use super::machine::testing::{FakeRunner, exit};
 use super::machine::{STATE_FILE, StateFiles};
-use super::system::{Config, NFT_TIMEOUT, START_TIMEOUT, run_on};
+use super::system::{Config, NFT_TIMEOUT, RELEASE_OWNER, START_TIMEOUT, run_on, system_config};
 use super::{
     DECLARATION_PATH, Done, FORWARD_TABLE, GUARD_TABLE, Invocation, Machine, Outcome, Reason,
     Record, StateDir, Step,
@@ -53,6 +54,7 @@ impl Scratch {
         Config {
             root: self.root.clone(),
             owner: self.owner(),
+            release_owner: self.owner(),
             runner,
         }
     }
@@ -218,4 +220,17 @@ fn the_system_machine_reads_the_declaration_of_the_host() {
     let done = (Machine::system().step)(&invocation, None);
     assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
     assert!(done.report.detail.unwrap().contains("tierstore.toml"));
+}
+
+/// Asserts that the machine's configuration expects the state directory to be owned by the user
+/// the hook runs as (its effective user id, since the hook has an account of its own and does
+/// not run as root), a staged release to be owned by root, and the files of the host to be under
+/// `/`. It would catch a wiring that expects root to own the state directory.
+#[test]
+fn the_system_config_expects_the_hooks_own_user_to_own_the_state_directory() {
+    let config = system_config(&SystemRunner);
+    assert_eq!(config.owner, rustix::process::geteuid().as_raw());
+    assert_eq!(config.release_owner, RELEASE_OWNER);
+    assert_eq!(RELEASE_OWNER, 0);
+    assert_eq!(config.root, Path::new("/"));
 }

@@ -41,12 +41,12 @@ fn refused(state: &StateFiles) -> String {
     message(state.lock().err().expect("the directory is refused"))
 }
 
-/// Asserts that a directory owned by the expected user, with no group or other write bit,
-/// takes the lock, for the modes 0755 and 0700; and that the lock file is made.
+/// Asserts that a directory owned by the expected user, with no group write bit and no access
+/// for others, takes the lock, for the modes 0750 and 0700; and that the lock file is made.
 #[test]
 fn a_directory_that_is_as_it_must_be_takes_the_lock() {
     let (_guard, dir) = scratch("state-ok");
-    for bits in [0o755, 0o700] {
+    for bits in [0o750, 0o700] {
         mode(&dir, bits);
         assert!(files(&dir).lock().is_ok());
     }
@@ -60,7 +60,7 @@ fn a_directory_that_is_as_it_must_be_takes_the_lock() {
 #[test]
 fn the_lock_is_exclusive_and_released_on_drop() {
     let (_guard, dir) = scratch("state-busy");
-    mode(&dir, 0o755);
+    mode(&dir, 0o750);
     let state = files(&dir);
     let first = state.lock().expect("the first lock");
     assert!(matches!(state.lock().err(), Some(PortError::Busy)));
@@ -81,17 +81,17 @@ fn a_directory_of_another_owner_is_refused() {
     );
 }
 
-/// Asserts that a directory a group can write, and one others can write, are refused: the
-/// service could rewrite the record.
+/// Asserts that a directory a group can write, and one others can read, write or search, are
+/// refused: the service could rewrite the record, and anyone could read it.
 #[test]
-fn a_directory_that_a_group_or_others_can_write_is_refused() {
+fn a_directory_that_a_group_can_write_or_others_can_reach_is_refused() {
     let (_guard, dir) = scratch("state-mode");
-    for bits in [0o775, 0o757] {
+    for bits in [0o775, 0o770, 0o757, 0o755, 0o754, 0o752, 0o751] {
         mode(&dir, bits);
         let text = refused(&files(&dir));
         assert!(
-            text.contains("can be written by a group or others"),
-            "{text}"
+            text.contains("can be written by a group or reached by others"),
+            "{bits:o}: {text}"
         );
     }
 }
@@ -103,7 +103,7 @@ fn a_link_a_file_and_a_missing_path_are_refused() {
     let (_guard, root) = scratch("state-kinds");
     let real = root.join("real");
     fs::create_dir(&real).unwrap();
-    mode(&real, 0o755);
+    mode(&real, 0o750);
     let link = root.join("link");
     symlink(&real, &link).unwrap();
     assert!(refused(&files(&link)).contains("is a symbolic link"));
@@ -117,7 +117,7 @@ fn a_link_a_file_and_a_missing_path_are_refused() {
 #[test]
 fn a_lock_file_that_is_a_link_is_refused() {
     let (_guard, dir) = scratch("state-lock-link");
-    mode(&dir, 0o755);
+    mode(&dir, 0o750);
     symlink(dir.join("elsewhere"), dir.join(LOCK_FILE)).unwrap();
     let text = refused(&files(&dir));
     assert!(text.starts_with("open "), "{text}");
@@ -183,7 +183,7 @@ fn a_save_that_cannot_write_leaves_the_old_record() {
     state.save(b"old").unwrap();
     mode(&dir, 0o500);
     let result = state.save(b"new");
-    mode(&dir, 0o755);
+    mode(&dir, 0o750);
     assert!(message(result.unwrap_err()).starts_with("write "));
     assert_eq!(state.load().unwrap().as_deref(), Some(&b"old"[..]));
 }
