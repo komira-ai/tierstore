@@ -3,11 +3,10 @@
 //! Each port of [`super::ports`] has one implementation here, over the real thing: programs
 //! run through a [`Runner`] (an argument vector, never a shell), files under a root that tests
 //! point at a scratch directory, and a loopback socket. Nothing here reads an environment
-//! variable, and nothing is wired to [`super::Machine::system`] yet: the steps still answer
-//! `not_implemented` until a later change builds a [`super::Ports`] from these.
+//! variable. [`super::Machine::system`] builds a [`super::Ports`] from these.
 //!
-//! Programs are named, not given by absolute path (`nft`, `systemctl`), and found through the
-//! `PATH` the updater runs the hook with; the repository has no fixed program path to follow.
+//! Programs are called by absolute path (`/usr/sbin/nft`, `/usr/bin/systemctl`, the Debian and
+//! Ubuntu locations); a caller may name another.
 
 mod clock;
 mod host;
@@ -19,9 +18,7 @@ mod state;
 mod units;
 
 use std::fmt;
-use std::fs::File;
 use std::io;
-use std::path::Path;
 
 pub use clock::MonotonicClock;
 pub use host::{RELEASE_BINARY, SystemHost};
@@ -29,7 +26,7 @@ pub use instances::LoopbackInstances;
 pub use nft::NftTool;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use slots::SlotLinks;
-pub use state::{LOCK_FILE, STATE_FILE, StateFiles};
+pub use state::{Account, LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::SystemdUnits;
 
 /// What went wrong, as text, before the port that saw it says which port that is.
@@ -59,11 +56,6 @@ impl From<String> for Fault {
     }
 }
 
-/// Makes the changes in directory `dir` (a rename, a new link) durable.
-pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
 #[cfg(test)]
 mod clock_tests;
 #[cfg(test)]
@@ -79,6 +71,6 @@ mod slots_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
-mod testing;
+pub(super) mod testing;
 #[cfg(test)]
 mod units_tests;
