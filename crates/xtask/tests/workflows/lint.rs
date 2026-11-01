@@ -63,6 +63,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         condition: RELEASE_IF,
     },
     Allowed {
+        file: "release.yml",
+        job: "gamma",
+        scope: "id-token",
+        condition: GAMMA_IF,
+    },
+    Allowed {
         file: "advisories.yml",
         job: "advisories",
         scope: "issues",
@@ -240,6 +246,12 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
 pub const RELEASE_IF: &str =
     "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}";
 
+/// The condition of `gamma`: [`RELEASE_IF`] and a configured coordinator. An unconfigured
+/// repository skips the job, so the `release` environment is never resolved for it (a reviewer
+/// or wait rule added to the environment later must not hold every release while the stage is
+/// off), and the job-level condition is the whole of the off switch: no step carries one.
+pub const GAMMA_IF: &str = "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && vars.KBF_COORDINATOR_URL != '' }}";
+
 /// What the `if:` of the plan job must say of the run that started it: it is a completed
 /// run that succeeded, for a push to `main` of this repository.
 const PLAN_GUARDS: [&str; 4] = [
@@ -257,7 +269,7 @@ const PLAN_IF: &str = "${{ github.ref == 'refs/heads/main' && (github.event_name
 const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}";
 
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
-const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
+const XTASK_VERBS: [&str; 5] = ["--help", "release", "sums", "verify-assets", "deploy-farm"];
 
 fn names(node: Option<&Node>) -> Vec<String> {
     let mut found = node.map(triggers).unwrap_or_default();
@@ -268,8 +280,8 @@ fn names(node: Option<&Node>) -> Vec<String> {
 /// One line per way the text of `release.yml` is not the automatic release chain: started by
 /// the completion of `ci` and `artifacts` on `main` and by hand and by nothing else, one run at
 /// a time and none cancelled, a read-only `plan` job that answers whether and as which tag,
-/// `verify` and `publish` after it (the write scope in `publish` alone), and no step that
-/// builds or signs.
+/// `verify` and `publish` after it (the write scope in `publish` alone), `gamma` after them
+/// (the OIDC token and nothing else that is not read), and no step that builds or signs.
 pub fn release_problems(text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -303,8 +315,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
     };
     let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     listed.sort_unstable();
-    if listed != ["plan", "publish", "verify"] {
-        problems.push(format!("jobs are {listed:?}, not plan, verify and publish"));
+    if listed != ["gamma", "plan", "publish", "verify"] {
+        problems.push(format!(
+            "jobs are {listed:?}, not plan, verify, publish and gamma"
+        ));
     }
     for (name, job) in jobs {
         let name = name.as_str().unwrap_or_default();
@@ -312,10 +326,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
         for (scope, level) in permissions {
             let level = level.as_str().unwrap_or_default();
             let writes = level != "read" && level != "none";
-            if writes && name != "publish" {
+            let scope = scope.as_str().unwrap_or_default();
+            if writes && name != "publish" && !(name == "gamma" && scope == "id-token") {
                 problems.push(format!(
-                    "{name}: permissions grant `{}: {level}`; only publish writes",
-                    scope.as_str().unwrap_or_default()
+                    "{name}: permissions grant `{scope}: {level}`; only publish writes (and gamma, the OIDC token)"
                 ));
             }
         }
@@ -398,6 +412,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     for (name, needs) in [
         ("verify", vec!["plan"]),
         ("publish", vec!["plan", "verify"]),
+        ("gamma", vec!["plan", "publish"]),
     ] {
         let got = names(job(name).and_then(|j| entry(j, "needs")));
         if got != needs {
@@ -406,8 +421,138 @@ pub fn release_problems(text: &str) -> Vec<String> {
         let condition = job(name)
             .and_then(|j| entry(j, "if"))
             .and_then(Node::as_str);
-        if condition != Some(RELEASE_IF) {
-            problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
+        let want = if name == "gamma" {
+            GAMMA_IF
+        } else {
+            RELEASE_IF
+        };
+        if condition != Some(want) {
+            problems.push(format!("{name}: `if` is not {want}"));
+        }
+    }
+    // The gamma stage holds the run's OIDC token and nothing else that is not read, and runs
+    // in the `release` environment, the one the coordinator's allow-list names.
+    let gamma = job("gamma");
+    let mut held: Vec<String> = gamma
+        .and_then(|j| entry(j, "permissions"))
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}: {}",
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    held.sort();
+    if held != ["contents: read", "id-token: write"] {
+        problems.push(format!(
+            "gamma: permissions are {held:?}, not contents: read and id-token: write"
+        ));
+    }
+    let environment = gamma
+        .and_then(|j| entry(j, "environment"))
+        .and_then(Node::as_str);
+    if environment != Some("release") {
+        problems.push(format!(
+            "gamma: environment is {environment:?}, not \"release\""
+        ));
+    }
+    // The kbf checkout whose verb gamma runs is pinned in the file, as a commit, so a change of
+    // it is a reviewed change and a kbf main that moves or breaks does not move the release.
+    let pin = gamma
+        .and_then(|j| entry(j, "env"))
+        .and_then(|e| entry(e, "KBF_DEPLOY_REF"))
+        .and_then(Node::as_str);
+    if !pin
+        .is_some_and(|p| p.len() == 40 && p.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
+    {
+        problems.push(format!(
+            "gamma: env KBF_DEPLOY_REF is {pin:?}, not 40 lowercase hex digits"
+        ));
+    }
+    let checkout_ref = gamma
+        .and_then(|j| entry(j, "steps"))
+        .and_then(|s| match &s.value {
+            Value::Seq(items) => items.iter().find(|i| {
+                entry(i, "with")
+                    .and_then(|w| entry(w, "repository"))
+                    .and_then(Node::as_str)
+                    == Some("komira-ai/kbf")
+            }),
+            _ => None,
+        })
+        .and_then(|i| entry(i, "with"))
+        .and_then(|w| entry(w, "ref"))
+        .and_then(Node::as_str);
+    if checkout_ref != Some("${{ env.KBF_DEPLOY_REF }}") {
+        problems.push("gamma: the kbf checkout ref is not ${{ env.KBF_DEPLOY_REF }}".to_owned());
+    }
+    let persist = gamma
+        .and_then(|j| entry(j, "steps"))
+        .and_then(|s| match &s.value {
+            Value::Seq(items) => items.iter().find(|i| {
+                entry(i, "with")
+                    .and_then(|w| entry(w, "repository"))
+                    .and_then(Node::as_str)
+                    == Some("komira-ai/kbf")
+            }),
+            _ => None,
+        })
+        .and_then(|i| entry(i, "with"))
+        .and_then(|w| entry(w, "persist-credentials"))
+        .and_then(Node::as_str);
+    if persist != Some("false") {
+        problems.push(format!(
+            "gamma: the kbf checkout persists credentials ({persist:?}, not \"false\")"
+        ));
+    }
+    // The command: tierstore's own service and the version its hosts report, and none of kbf's
+    // minimums (for another service the services file of the coordinator holds them).
+    match runs(gamma)
+        .into_iter()
+        .find(|r| r.contains("cargo xtask deploy-farm"))
+    {
+        None => problems.push("gamma: no step runs `cargo xtask deploy-farm`".to_owned()),
+        Some(run) => {
+            if !run.contains("--service tierstore") {
+                problems.push("gamma: deploy-farm is not run with --service tierstore".to_owned());
+            }
+            if !run.contains("--version \"${TAG#v}+${COMMIT:0:12}\"") {
+                problems.push(
+                    "gamma: deploy-farm is not passed --version \"${TAG#v}+${COMMIT:0:12}\""
+                        .to_owned(),
+                );
+            }
+            for flag in ["--min-up", "--require-coordinator-current"] {
+                if run.contains(flag) {
+                    problems.push(format!("gamma: deploy-farm is passed {flag}, a kbf flag"));
+                }
+            }
+        }
+    }
+    // The text of `--version` is built from the plan's tag and commit, in the step's own env.
+    let deploy = gamma
+        .and_then(|j| entry(j, "steps"))
+        .and_then(|s| match &s.value {
+            Value::Seq(items) => items.iter().find(|i| {
+                entry(i, "run")
+                    .and_then(Node::as_str)
+                    .is_some_and(|r| r.contains("cargo xtask deploy-farm"))
+            }),
+            _ => None,
+        });
+    for (var, source) in [
+        ("TAG", "${{ needs.plan.outputs.tag }}"),
+        ("COMMIT", "${{ needs.plan.outputs.commit }}"),
+    ] {
+        let got = deploy
+            .and_then(|d| entry(d, "env"))
+            .and_then(|e| entry(e, var))
+            .and_then(Node::as_str);
+        if got != Some(source) {
+            problems.push(format!("gamma: env {var} is {got:?}, not {source}"));
         }
     }
     // The binary of the files about to be published says the tag and the commit, checked in
@@ -442,6 +587,11 @@ pub fn release_problems(text: &str) -> Vec<String> {
 
 /// A line of `text` that builds, fetches or signs: a `cargo` that is not `cargo xtask <verb>`
 /// of [`XTASK_VERBS`], or the attest actions.
+///
+/// The rule is about the release FILES: nothing in release.yml builds or signs what is
+/// published. The `gamma` job does build kbf's xtask (`cargo xtask --help`, then `deploy-farm`),
+/// which is a tool that talks to the coordinator and produces no release file; do not tighten
+/// this rule to forbid it.
 fn build_problems(text: &str) -> Vec<String> {
     let mut problems = Vec::new();
     for (n, line) in text.lines().enumerate() {

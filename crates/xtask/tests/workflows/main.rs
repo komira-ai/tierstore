@@ -375,6 +375,74 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
     ),
     ("needs: [plan]\n", "needs: []\n", "verify: needs"),
     ("needs: [plan, verify]", "needs: [verify]", "publish: needs"),
+    ("needs: [plan, publish]", "needs: [plan]", "gamma: needs"),
+    (
+        "needs: [plan, publish]\n    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && vars",
+        "needs: [plan, publish]\n    if: ${{ github.ref == 'refs/heads/main' && vars",
+        "gamma: `if` is not",
+    ),
+    (
+        "--service tierstore",
+        "--service kbf",
+        "gamma: deploy-farm is not run with --service tierstore",
+    ),
+    (
+        "deploy-farm --service",
+        "deploy-farm --min-up-storage 1 --service",
+        "gamma: deploy-farm is passed --min-up",
+    ),
+    (
+        "cargo xtask deploy-farm",
+        "cargo xtask deploy",
+        "gamma: no step runs `cargo xtask deploy-farm`",
+    ),
+    (
+        " && vars.KBF_COORDINATOR_URL != '' }}\n    runs-on",
+        " }}\n    runs-on",
+        "gamma: `if` is not",
+    ),
+    (
+        "vars.KBF_COORDINATOR_URL != ''",
+        "vars.KBF_COORDINATOR_URL == ''",
+        "gamma: `if` is not",
+    ),
+    (
+        "path: kbf\n          persist-credentials: false",
+        "path: kbf\n          persist-credentials: true",
+        "gamma: the kbf checkout persists credentials",
+    ),
+    (
+        "--version \"${TAG#v}+${COMMIT:0:12}\"",
+        "--version \"${TAG#v}\"",
+        "gamma: deploy-farm is not passed --version",
+    ),
+    (
+        "TAG: ${{ needs.plan.outputs.tag }}\n          COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "TAG: ${{ github.ref_name }}\n          COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "gamma: env TAG",
+    ),
+    (
+        "COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "COMMIT: ${{ github.sha }}\n        run: cargo xtask deploy-farm",
+        "gamma: env COMMIT",
+    ),
+    // Pins what the lint already held (kbf's flag is refused); this row is green on arrival.
+    (
+        "deploy-farm --service",
+        "deploy-farm --require-coordinator-current --service",
+        "gamma: deploy-farm is passed --require-coordinator-current",
+    ),
+    ("    environment: release\n", "", "gamma: environment"),
+    (
+        "      contents: read\n      id-token: write\n",
+        "      contents: write\n      id-token: write\n",
+        "gamma: permissions",
+    ),
+    (
+        "      contents: read\n      id-token: write\n",
+        "      contents: read\n      id-token: write\n      packages: write\n",
+        "gamma: permissions",
+    ),
     (
         "needs.plan.outputs.release == 'true'",
         "true",
@@ -753,4 +821,30 @@ fn every_exempt_workflow_exists_and_says_why() {
         text_of(file);
         assert!(!reason.trim().is_empty(), "{file}");
     }
+}
+
+#[test]
+fn gamma_checks_out_kbf_at_a_pinned_commit() {
+    // Catches: the kbf checkout moving to a branch or a short hash (every release would build
+    // whatever kbf's main is at that minute, with the OIDC token in the environment), or the
+    // checkout no longer using the pin.
+    let text = text_of("release.yml");
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("KBF_DEPLOY_REF: "))
+        .expect("KBF_DEPLOY_REF is in release.yml");
+    let pin = line.trim_start().trim_start_matches("KBF_DEPLOY_REF: ");
+    for with in ["main", &pin[..12], &pin.to_uppercase(), ""] {
+        let problems =
+            release_problems(&text.replace(line, &format!("      KBF_DEPLOY_REF: {with}")));
+        assert!(
+            problems.iter().any(|p| p.contains("KBF_DEPLOY_REF")),
+            "{with:?}: {problems:?}"
+        );
+    }
+    let problems = release_problems(&text.replace("ref: ${{ env.KBF_DEPLOY_REF }}", "ref: main"));
+    assert!(
+        problems.iter().any(|p| p.contains("the kbf checkout ref")),
+        "{problems:?}"
+    );
 }
