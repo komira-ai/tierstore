@@ -158,7 +158,10 @@ async fn the_start_line_names_every_address() {
 /// which refuses the redirected connections of the other.
 #[tokio::test]
 async fn a_start_that_cannot_bind_both_wildcards_is_refused() {
-    if !has_v6() {
+    // A host without IPv6 cannot have the two wildcards of a port: the test says so on stderr,
+    // with the reason the system gave, and asserts nothing.
+    if let Err(why) = std::net::TcpListener::bind("[::1]:0") {
+        eprintln!("skipped: this host has no IPv6 loopback ({why}); there is no [::]:P to bind");
         return;
     }
     let files = Files::new("listeners-both");

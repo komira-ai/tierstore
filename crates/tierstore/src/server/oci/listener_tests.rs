@@ -260,7 +260,10 @@ async fn refused_at(addrs: &[SocketAddr]) -> SocketAddr {
 /// port too.
 #[tokio::test]
 async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither() {
-    if std::net::TcpListener::bind("[::1]:0").is_err() {
+    // A host without IPv6 cannot have the two wildcards of a port: the test says so on stderr,
+    // with the reason the system gave, and asserts nothing.
+    if let Err(why) = std::net::TcpListener::bind("[::1]:0") {
+        eprintln!("skipped: this host has no IPv6 loopback ({why}); there is no [::]:P to bind");
         return;
     }
     let at = |text: String| -> SocketAddr { text.parse().expect("an address") };

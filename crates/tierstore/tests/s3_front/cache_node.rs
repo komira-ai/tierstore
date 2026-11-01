@@ -2,7 +2,6 @@
 //! upstream that wants its own key, in a process.
 
 use std::path::Path;
-use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
@@ -12,10 +11,6 @@ use rustix::process::Signal;
 
 use crate::binary::{run, start};
 use crate::files::Files;
-
-/// The longest a test waits for the binary to do what it was asked to. It only stops a test whose
-/// process hangs, and then the test fails: no test asserts how long the binary takes.
-const SAFETY: Duration = Duration::from_secs(60);
 
 /// The file of a build node whose upstream is `endpoint`, read with the key file `upstream_key`,
 /// with its cache in `cache_dir`.
@@ -446,9 +441,9 @@ async fn a_second_build_node_takes_the_lock_when_the_first_is_killed() {
 
     first.signal(Signal::KILL);
     assert_eq!(first.exit_code().await, None);
-    let asking = async { while readyz(&client, second.addr()).await != "ready read-write" {} };
-    let taken = tokio::time::timeout(SAFETY, asking).await;
-    assert!(taken.is_ok(), "the second never took the lock");
+    // The event is the answer `ready read-write`; nothing here bounds the wait. A second that
+    // never takes the lock is ended by nextest's slow-timeout (`.config/nextest.toml`), and fails.
+    while readyz(&client, second.addr()).await != "ready read-write" {}
     assert!(!sidecar.exists());
     assert!(!staged.exists());
 

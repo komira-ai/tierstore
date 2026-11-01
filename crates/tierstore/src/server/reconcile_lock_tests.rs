@@ -301,7 +301,7 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
             current_hot.calls(Op::Delete) > deletes,
             "the lease was never given up"
         );
-        assert!(lease_lines(&hot).await.first().is_some());
+        assert!(!lease_lines(&hot).await.is_empty());
         let free = try_take(&path).unwrap();
         assert!(free.is_none(), "the lock was let go before the lease");
         drop(free);
@@ -316,4 +316,104 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
     };
     tokio::join!(current, next, watching);
     assert!(hot.get(LEASE, None).await.is_err());
+}
+
+/// How the release of v-current's lease goes wrong in [`hand_over_after_a_spoiled_release`].
+#[derive(Clone, Copy, Debug)]
+enum Spoiled {
+    /// The delete of the lease fails.
+    Fails,
+    /// The delete of the lease takes longer than the stop waits for it (`STOP_WAIT`, 5 s).
+    Hangs,
+}
+
+/// v-current (`tierstore-9301`) holds the lock file and the lease, and v-next
+/// (`tierstore-9302`) waits for the lock; v-current is halted and its release of the lease goes
+/// wrong as `how` says. Asserts that v-current ends all the same and lets the lock go, with its
+/// lease still in the hot tier; that v-next takes the lock and asks for the lease but does not
+/// take it while it has not expired, through intervals of its passes; and that once the clock of
+/// the lease passes its ttl (30 s) v-next takes it over.
+async fn hand_over_after_a_spoiled_release(how: Spoiled) {
+    let clock = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    let cold = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::with_clock(
+        clock.clone(),
+    ))));
+    let mut config = ProxyConfig::new("tierstore-9301", MEBIBYTE, clock.clone());
+    config.linger = Duration::from_millis(1);
+    let proxy = Proxy::open(hot.clone(), cold.clone(), config)
+        .await
+        .unwrap();
+    proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
+    let current_hot = Arc::new(FaultyBackend::new(hot.clone()));
+    let next_hot = Arc::new(FaultyBackend::new(hot.clone()));
+    let reconciler = |seen: &Arc<FaultyBackend>, holder: &str| {
+        let settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
+        Reconciler::new(seen.clone(), cold.clone(), settings)
+    };
+    let dir = TestDir::under(std::env::temp_dir(), &format!("tierstore-gate-{how:?}"));
+    let path = dir.path().join("instance.lock");
+    let current_gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
+    let next_gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
+    let current_halt = Arc::new(Notify::new());
+    let next_halt = Arc::new(Notify::new());
+    let every = Duration::from_secs(5);
+    let current = reconcile_gated(
+        reconciler(&current_hot, "tierstore-9301"),
+        every,
+        Arc::clone(&current_halt),
+        current_gate,
+    );
+    let next = reconcile_gated(
+        reconciler(&next_hot, "tierstore-9302"),
+        every,
+        Arc::clone(&next_halt),
+        next_gate,
+    );
+    let watching = async {
+        let _ = held_by(&hot, "tierstore-9301", Duration::ZERO).await;
+        match how {
+            Spoiled::Fails => current_hot.fail_next(Op::Delete, 1),
+            Spoiled::Hangs => current_hot.set_delay(Op::Delete, Some(Duration::from_secs(60))),
+        }
+        current_halt.notify_one();
+        // v-current ends and lets the lock go: v-next takes it and asks for the lease.
+        for _ in 0..100_000 {
+            if calls_of(&next_hot) > 0 {
+                break;
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(calls_of(&next_hot) > 0, "v-next never took the lock");
+        assert!(try_take(&path).unwrap().is_none(), "v-next holds the lock");
+        for _ in 0..12 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        assert_eq!(lease_lines(&hot).await[0], "tierstore-9301");
+        clock.set(30_000);
+        let _ = held_by(&hot, "tierstore-9302", Duration::from_secs(1)).await;
+        next_halt.notify_one();
+    };
+    // Each of the three ends: v-current's run among them, whatever its release did.
+    tokio::join!(current, next, watching);
+    assert!(hot.get(LEASE, None).await.is_err());
+}
+
+/// Asserts the hand-over when v-current's delete of its lease fails (see
+/// [`hand_over_after_a_spoiled_release`]). It would catch a reconciler that keeps the lock after
+/// a failed release, which leaves the node with no reconciler at all, and a v-next that takes a
+/// lease that has not expired.
+#[tokio::test(start_paused = true)]
+async fn a_failed_release_lets_the_lock_go_and_v_next_takes_the_lease_when_it_expires() {
+    hand_over_after_a_spoiled_release(Spoiled::Fails).await;
+}
+
+/// Asserts the hand-over when v-current's delete of its lease does not answer within the wait of
+/// the stop (see [`hand_over_after_a_spoiled_release`]). It would catch a stop that waits for
+/// ever on a release that hangs, which keeps the lock and the process from ending, and a v-next
+/// that takes a lease that has not expired.
+#[tokio::test(start_paused = true)]
+async fn a_release_that_hangs_lets_the_lock_go_and_v_next_takes_the_lease_when_it_expires() {
+    hand_over_after_a_spoiled_release(Spoiled::Hangs).await;
 }

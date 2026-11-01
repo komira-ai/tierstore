@@ -67,12 +67,16 @@ pub(in crate::server) fn tree(root: &Path) -> BTreeMap<PathBuf, Seen> {
     listing
 }
 
-/// Stamps every entry under `root`, and `root` itself, with one time long past (access and
-/// change of contents), so that a [`tree`] taken after shows a write since as another time
-/// however coarse the clock the file system stamps with: a file made and removed again in the
-/// same tick of that clock leaves its directory with the time it had.
+/// The time [`age`] stamps a tree with, in seconds since the epoch: midnight UTC at the start of
+/// 2026-09-01. A write in a test happens later, so it stamps another time.
+const STAMP_SECS: u64 = 1_788_220_800;
+
+/// Stamps every entry under `root`, and `root` itself, with one fixed time before the test runs
+/// (access and change of contents), so that a [`tree`] taken after shows a write since as
+/// another time however coarse the clock the file system stamps with: a file made and removed
+/// again in the same tick of that clock leaves its directory with the time it had.
 pub(in crate::server) fn age(root: &Path) {
-    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(STAMP_SECS);
     let times = std::fs::FileTimes::new()
         .set_accessed(past)
         .set_modified(past);
