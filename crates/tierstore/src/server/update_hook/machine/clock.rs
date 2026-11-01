@@ -30,7 +30,7 @@ impl MonotonicClock {
 
     /// What a pause asked for `span` waits: the clock's own pause when it has one.
     #[must_use]
-    pub fn waited(&self, span: Duration) -> Duration {
+    pub(crate) fn waited(&self, span: Duration) -> Duration {
         self.pause.unwrap_or(span)
     }
 }

@@ -38,7 +38,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-pub use args::{ArgsError, HostArgs, Invocation, ROOT_UID, Step, host_flags};
+pub use args::{ArgsError, HostArgs, Invocation, ROOT_UID, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, PUBLIC_PORT, unit_name};
 pub use params::{
     CONNTRACK_PERCENT_KEY, DEFER_RETRY_KEY, MODE_KEY, PROMOTION_BOUND_KEY, PROMOTION_CEILING_KEY,

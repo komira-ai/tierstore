@@ -5,7 +5,8 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ArgsError, HostArgs, Invocation, Step, host_flags};
+use super::args::host_flags;
+use super::{ArgsError, HostArgs, Invocation, Step};
 
 fn parse(words: &[&str]) -> Result<Invocation, ArgsError> {
     Invocation::parse(words.iter().map(OsString::from))

@@ -141,9 +141,10 @@ const ALL_HOST_FLAGS: [&str; 6] = [
     POLL_FLAG,
 ];
 
-/// The flags of the host a build takes: all six in a conformance build, none in a release.
+/// The flags of the host a build takes: all six in a conformance build, none in a release. Only
+/// these two sets are ever parsed with: the parser is not given a list from outside the hook.
 #[must_use]
-pub const fn host_flags(conformance: bool) -> &'static [&'static str] {
+pub(super) const fn host_flags(conformance: bool) -> &'static [&'static str] {
     if conformance { &ALL_HOST_FLAGS } else { &[] }
 }
 
@@ -258,7 +259,7 @@ impl Invocation {
     /// # Errors
     /// As [`Invocation::parse`]; a flag of the host not in `flags` is an unknown step or an
     /// unexpected argument, like any other word.
-    pub fn parse_taking<I>(args: I, flags: &[&'static str]) -> Result<Invocation, ArgsError>
+    pub(super) fn parse_taking<I>(args: I, flags: &[&'static str]) -> Result<Invocation, ArgsError>
     where
         I: IntoIterator<Item = OsString>,
     {
