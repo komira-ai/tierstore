@@ -180,7 +180,8 @@ test('every document of the repository that the install pages, the packaging not
 //
 // Catches: an online gh command that loses --source-digest or --deny-self-hosted-runners while the offline command
 // below it still has them (a page-wide search would pass), an offline gh command without the tarball to check, and an
-// integrity check moved after an authenticity check, or the cosign check moved before the gh one.
+// integrity check moved after an authenticity check, the cosign check moved before the gh one, and the trusted root
+// fetched after the offline command that reads it.
 
 /** The online gh command's file: the x86_64 tarball of a commit, as the release document gives it. */
 const ONLINE_FILE = 'tierstore-<commit>-linux-x86_64.tar.gz';
@@ -196,7 +197,8 @@ function verifyProblems(cmds: string[]): string[] {
   const online = at((c) => c.startsWith('gh attestation verify') && !c.includes('--bundle'));
   const cosign = at((c) => c.startsWith('cosign verify-blob-attestation'));
   const offline = at((c) => c.startsWith('gh attestation verify') && c.includes('--bundle'));
-  for (const [what, found] of [['sha256sum', sums], ['online gh', online], ['cosign', cosign], ['offline gh', offline]] as const) {
+  const root = at((c) => c.startsWith('gh attestation trusted-root'));
+  for (const [what, found] of [['sha256sum', sums], ['online gh', online], ['cosign', cosign], ['offline gh', offline], ['trusted-root', root]] as const) {
     if (found.length !== 1) problems.push(`${found.length} ${what} commands, not one`);
   }
   if (problems.length > 0) return problems;
@@ -210,6 +212,7 @@ function verifyProblems(cmds: string[]): string[] {
   if (!(sums[0] < online[0] && online[0] < cosign[0] && cosign[0] < offline[0])) {
     problems.push('the checks are not in the order: integrity, authenticity with gh, authenticity without gh');
   }
+  if (!(root[0] < offline[0])) problems.push('the trusted root is fetched after the offline gh command that reads it');
   return problems;
 }
 
@@ -217,7 +220,7 @@ test('the install page and the install guide give each verify command whole, and
   for (const [name, text] of INSTALL) assert.deepEqual(verifyProblems(commands(text)), [], name);
 });
 
-test('the verify block check can fail: a flag dropped from one gh command, a missing tarball, a check out of order', () => {
+test('the verify block check can fail: a flag dropped from one gh command, a missing tarball, a check or the trusted root out of order', () => {
   for (const [name, text] of INSTALL) {
     const cmds = commands(text);
     const isOnline = (c: string): boolean => c.startsWith('gh attestation verify') && !c.includes('--bundle');
@@ -234,5 +237,8 @@ test('the verify block check can fail: a flag dropped from one gh command, a mis
     assert.ok(said(late, 'not in the order'), `${name}: the integrity check last passes`);
     const swapped = cmds.map((c) => (isOnline(c) ? cmds.find((d) => d.startsWith('cosign')) ?? c : c.startsWith('cosign') ? cmds.find(isOnline) ?? c : c));
     assert.ok(said(swapped, 'not in the order'), `${name}: the cosign check before the gh check passes`);
+    const fetch = cmds.findIndex((c) => c.startsWith('gh attestation trusted-root'));
+    const reversed = [...cmds.slice(0, fetch), ...cmds.slice(fetch + 1), cmds[fetch]];
+    assert.ok(said(reversed, 'the trusted root is fetched after'), `${name}: the trusted root fetched after its use passes`);
   }
 });

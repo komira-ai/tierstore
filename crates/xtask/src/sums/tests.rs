@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use super::*;
@@ -369,50 +367,4 @@ fn assemble_appends_the_digest_of_the_sums_it_wrote_to_the_output_file() {
     parts(&dir, &[("linux-x86_64", &a)]);
     assemble(&dir, None, None, None).expect("assemble");
     assert!(!dir.join("output").exists());
-}
-
-#[test]
-fn the_offline_gh_check_of_the_install_pages_gives_only_flags_the_verifier_passes() {
-    // Catches: an install page whose offline command gives a flag that the bundle check of a
-    // release does not pass to `gh`, or lacks `--bundle` or `--custom-trusted-root` (a reader's
-    // offline check would then not be the one every release passed). The verifier runs a
-    // stand-in `gh` that writes down its arguments, so what is compared is what it passes.
-    let dir = scratch("install-pages-offline");
-    let gh = dir.join("gh");
-    std::fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.args\"\n").expect("gh");
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("mode");
-    let root = dir.join("trusted_root.jsonl");
-    let commit = "0123456789abcdef0123456789abcdef01234567";
-    let signer = "komira-ai/tierstore/.github/workflows/artifacts.yml";
-    let workflow_ref = format!("{signer}@refs/heads/main");
-    let a = Attestations {
-        repo: "komira-ai/tierstore",
-        workflow_ref: &workflow_ref,
-        source_ref: "refs/heads/main",
-        commit,
-        trusted_root: Some(root.as_path()),
-        gh: &gh,
-        scratch: &dir,
-    };
-    let (file, bundle) = (dir.join(A), dir.join(bundles::name_of(A)));
-    let (accepted, said) = a.bundle_run(&file, &bundle, signer, commit).expect("run");
-    assert!(accepted, "{said}");
-    let args = std::fs::read_to_string(dir.join("gh.args")).expect("the arguments");
-    let passed: BTreeSet<&str> = args.lines().filter(|w| w.starts_with("--")).collect();
-    assert!(passed.contains("--bundle"), "{args}");
-    assert!(passed.contains("--custom-trusted-root"), "{args}");
-    for (name, page) in crate::install_pages::pages() {
-        let lines =
-            crate::install_pages::commands(&page, "gh attestation verify", "--custom-trusted-root");
-        assert_eq!(lines.len(), 1, "{name}: one offline gh command");
-        let flags = crate::install_pages::flags(&lines[0]);
-        assert!(flags.contains(&"--bundle"), "{name}");
-        assert!(flags.contains(&"--custom-trusted-root"), "{name}");
-        for flag in flags {
-            assert!(
-                passed.contains(flag),
-                "{name}: the verifier does not pass {flag}"
-            );
-        }
-    }
 }

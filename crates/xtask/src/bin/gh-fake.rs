@@ -25,7 +25,9 @@
 //! - `root`: a verification with `--bundle` has `--custom-trusted-root` this path, or none
 //!   when the value is `-`;
 //! - `proxy`: a verification with `--bundle` runs with all six proxy variables set to this and
-//!   neither bypass list (`NO_PROXY`, `no_proxy`) in its environment.
+//!   neither bypass list (`NO_PROXY`, `no_proxy`) in its environment;
+//! - `record`: not a check: every verification appends its arguments to the file this names,
+//!   one per line, with an empty line after them, so a test can read what the verb passed.
 //!
 //! The other things the tests ask of a `gh` (or of a `cargo`), all driven by files:
 //!
@@ -40,7 +42,7 @@
 //!   exit 1.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -187,6 +189,21 @@ fn departure(expect: &str, flags: &BTreeMap<&str, &str>) -> Option<String> {
     None
 }
 
+/// Appends `args` to the file that the `record` line of `expect.txt` names, if there is one:
+/// one argument per line, an empty line after them, in one write.
+fn record(expect: &str, args: &[String]) {
+    let Some(path) = expect.lines().find_map(|l| l.strip_prefix("record=")) else {
+        return;
+    };
+    let block: String = args.iter().map(|a| format!("{a}\n")).collect();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut f| f.write_all(format!("{block}\n").as_bytes()))
+        .expect("gh-fake: the record file");
+}
+
 /// `attestation verify <file> ...`: see the header.
 fn attestation(args: &[String]) -> ExitCode {
     if args.len() < 3 || args[0] != "attestation" || args[1] != "verify" {
@@ -209,6 +226,7 @@ fn attestation(args: &[String]) -> ExitCode {
     let bundle = flags.get("--bundle").and_then(|b| digest(b));
     let ledger = find_beside(&args[2], "ledger.txt");
     let expect = find_beside(&args[2], "expect.txt");
+    record(&expect, args);
     if let Some(problem) = departure(&expect, &flags) {
         eprintln!("gh-fake: {problem}: {flags:?}");
         return ExitCode::FAILURE;

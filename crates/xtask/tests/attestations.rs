@@ -2,6 +2,7 @@
 //! the attestations that exist. Each test builds the ledger of a good release, then spoils one
 //! thing, and the verb must refuse exactly that.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -11,6 +12,11 @@ use sha2::{Digest, Sha256};
 use xtask::Error;
 use xtask::bundles::{DEAD_PROXY, ISSUER};
 use xtask::sums::{Attestations, verify_attestations};
+
+/// The reader of the install pages' commands, shared with the unit tests of the crate.
+#[allow(dead_code)]
+#[path = "../src/install_pages.rs"]
+mod install_pages;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const REPO: &str = "example/tierstore";
@@ -460,4 +466,52 @@ fn a_sums_file_that_lists_neither_a_tarball_nor_an_sbom_is_refused() {
     std::fs::write(&sums, text).expect("sums");
     let failed = failure(release.verify());
     assert!(failed.contains("neither a tarball nor an SBOM"), "{failed}");
+}
+
+#[test]
+fn the_offline_gh_check_of_the_install_pages_gives_only_flags_the_verifier_passes() {
+    // Catches: an install page whose offline command gives a flag that the bundle check of a
+    // release does not pass to `gh`, or lacks `--bundle` or `--custom-trusted-root` (a reader's
+    // offline check would then not be the one every release passed). The stand-in records the
+    // arguments of each verification, so what is compared is what the verb passed.
+    let release = Release::good("install-pages-offline");
+    let root = release.dir.join("trusted_root.jsonl");
+    std::fs::write(&root, "{}").expect("root");
+    let record = release.dir.join("args.txt");
+    let expect = format!(
+        "repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\nroot={}\nproxy={DEAD_PROXY}\nrecord={}\n",
+        root.display(),
+        record.display()
+    );
+    release
+        .verify_expecting(Some(&root), &expect)
+        .expect("verify");
+    let recorded = std::fs::read_to_string(&record).expect("the record");
+    let bundled: Vec<Vec<&str>> = recorded
+        .split("\n\n")
+        .map(|block| block.lines().collect::<Vec<_>>())
+        .filter(|args| args.contains(&"--bundle"))
+        .collect();
+    assert!(!bundled.is_empty(), "no bundle verification: {recorded}");
+    let passed: BTreeSet<&str> = bundled
+        .iter()
+        .flatten()
+        .copied()
+        .filter(|w| w.starts_with("--"))
+        .collect();
+    assert!(passed.contains("--custom-trusted-root"), "{recorded}");
+    for (name, page) in install_pages::pages() {
+        let lines =
+            install_pages::commands(&page, "gh attestation verify", "--custom-trusted-root");
+        assert_eq!(lines.len(), 1, "{name}: one offline gh command");
+        let flags = install_pages::flags(&lines[0]);
+        assert!(flags.contains(&"--bundle"), "{name}");
+        assert!(flags.contains(&"--custom-trusted-root"), "{name}");
+        for flag in flags {
+            assert!(
+                passed.contains(flag),
+                "{name}: the verifier does not pass {flag}"
+            );
+        }
+    }
 }

@@ -416,3 +416,30 @@ fn a_flag_with_no_value_at_the_end_is_ignored() {
     let o = verify("trailing", &ledger, &flags);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
 }
+
+#[test]
+fn a_verification_writes_its_arguments_to_the_record_file_when_one_is_named() {
+    // Catches: a record that misses or reorders an argument, splits a value from its flag, or
+    // is written when no test asked for one.
+    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("gh-fake-record")
+        .join("args.txt");
+    let expect = format!("record={}\n", path.display());
+    let flags = bundle_flags(&["--custom-trusted-root", "/some/root.jsonl"]);
+    let o = verify_expecting("record", BUNDLED, &expect, &flags, &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let asset = path.with_file_name("asset");
+    let mut want = vec!["attestation", "verify", asset.to_str().expect("utf8")];
+    want.extend_from_slice(&flags);
+    let recorded = std::fs::read_to_string(&path).expect("the record");
+    assert_eq!(recorded, format!("{}\n\n", want.join("\n")));
+
+    let o = verify_expecting("record-none", BUNDLED, "", &flags, &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let none = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gh-fake-record-none");
+    assert_eq!(
+        std::fs::read_dir(&none).expect("dir").count(),
+        3,
+        "only the asset, the ledger and the expectation"
+    );
+}
