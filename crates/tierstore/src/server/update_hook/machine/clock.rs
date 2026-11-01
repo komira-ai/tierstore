@@ -27,6 +27,12 @@ impl MonotonicClock {
         self.pause = Some(pause);
         self
     }
+
+    /// What a pause asked for `span` waits: the clock's own pause when it has one.
+    #[must_use]
+    pub fn waited(&self, span: Duration) -> Duration {
+        self.pause.unwrap_or(span)
+    }
 }
 
 impl Default for MonotonicClock {
@@ -41,6 +47,6 @@ impl Clock for MonotonicClock {
     }
 
     fn pause(&self, span: Duration) {
-        std::thread::sleep(self.pause.unwrap_or(span));
+        std::thread::sleep(self.waited(span));
     }
 }

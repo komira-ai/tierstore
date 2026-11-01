@@ -7,7 +7,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use tierstore::server::update_hook::{Mode, Record};
 
 use crate::flows::kinds;
-use crate::rig::{APPLY, DECLARED_STATE, LIST_GUARD, Rig, Setup, start, uid};
+use crate::rig::{APPLY, DECLARED_STATE, LIST_GUARD, Rig, Setup, start, stop, uid};
 use crate::stub::SlotScript;
 
 /// Every step and the boot entry.
@@ -159,6 +159,44 @@ fn a_start_whose_condition_fails_is_not_taken_for_a_running_instance() {
     assert_eq!(rig.redirect(), Some(a));
     assert_eq!(rig.running(), [a]);
     assert_eq!(kinds(&rig.effects()), ["set kbf_guard_tierstore"]);
+}
+
+/// Asserts the same in a restart (forced by `mode = "restart"`), where `cutover` stops the old
+/// unit before it starts the new one: a start of the new slot that systemd skips (its condition
+/// fails, for that slot only) exits 0, `/readyz` never answers, and `cutover` fails with
+/// `not_ready`, stopping the new unit and starting the old one again behind the redirect, with no
+/// `swapped` on record; once the condition holds, `cutover` run again goes through. It would catch
+/// a restart that leaves no instance running when the new one did not start.
+#[test]
+fn a_skipped_start_in_a_restart_puts_the_old_slot_back() {
+    let rig = Rig::new("hook-conformance-condition-restart", Setup::handover());
+    let (a, b) = (rig.a, rig.b);
+    let conditions = rig.root.join("conditions");
+    std::fs::create_dir_all(&conditions).unwrap();
+    std::fs::write(conditions.join(a.to_string()), "").unwrap();
+    rig.world
+        .set_condition(&format!("{}/%i", conditions.display()));
+    rig.step_with("prepare", "mode = \"restart\"\n").ok();
+    let mark = rig.calls().len();
+    let ran = rig.step("cutover");
+    ran.fails("not_ready");
+    assert_eq!(
+        rig.calls_since(mark),
+        [
+            stop(a).as_str(),
+            start(b).as_str(),
+            stop(b).as_str(),
+            start(a).as_str(),
+            APPLY
+        ]
+    );
+    assert_eq!(rig.running(), [a]);
+    assert_eq!(rig.redirect(), Some(a));
+    assert!(rig.record().markers.is_empty());
+    std::fs::write(conditions.join(b.to_string()), "").unwrap();
+    rig.step("cutover").ok();
+    assert_eq!(rig.running(), [b]);
+    assert_eq!(rig.redirect(), Some(b));
 }
 
 /// Asserts, through the real binary, that `mode = "restart"` in the params makes `prepare` choose

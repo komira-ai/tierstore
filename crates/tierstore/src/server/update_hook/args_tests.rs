@@ -5,7 +5,7 @@ use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ArgsError, HostArgs, Invocation, Step};
+use super::{ArgsError, HostArgs, Invocation, Step, host_flags};
 
 fn parse(words: &[&str]) -> Result<Invocation, ArgsError> {
     Invocation::parse(words.iter().map(OsString::from))
@@ -232,4 +232,47 @@ fn a_wrong_flag_of_the_host_is_refused() {
         ArgsError::NotNumber("--public-port").to_string(),
         "--public-port must be a whole number in its range"
     );
+}
+
+/// Asserts the command line of a release, which is built without `hook-conformance`: it takes
+/// none of the six flags of the host, so each is refused, before the step as an unknown step and
+/// after it as an unexpected argument, and the host is always the defaults. Parsing comes before
+/// the declaration, the record and any program (a refused command line runs no step), so a
+/// release cannot be pointed at another root, owner, program, port or poll. It would catch the
+/// overrides leaking into a release.
+#[test]
+fn a_release_takes_no_flag_of_the_host() {
+    assert!(host_flags(false).is_empty());
+    assert_eq!(
+        host_flags(true),
+        [
+            "--root",
+            "--root-uid",
+            "--nft",
+            "--systemctl",
+            "--public-port",
+            "--poll-interval-ms"
+        ]
+    );
+    let release = |words: &[&str]| {
+        Invocation::parse_taking(words.iter().map(OsString::from), host_flags(false))
+    };
+    for &flag in host_flags(true) {
+        assert_eq!(
+            release(&[flag, "/x", "restore"]),
+            Err(ArgsError::UnknownStep(flag.to_owned())),
+            "{flag}"
+        );
+        assert_eq!(
+            release(&["restore", flag, "/x"]),
+            Err(ArgsError::Unexpected(OsString::from(flag))),
+            "{flag}"
+        );
+        assert_eq!(
+            release(&["verify", "--params", "/p.toml", flag, "/x"]),
+            Err(ArgsError::Unexpected(OsString::from(flag))),
+            "{flag}"
+        );
+    }
+    assert_eq!(release(&["restore"]).unwrap().host, HostArgs::default());
 }

@@ -146,10 +146,10 @@ fn the_fake_systemctl_answers_as_systemd_does() {
     assert_eq!(start("tierstore@9301.service").code, 0);
     assert!(world.units().is_empty(), "no link: skipped");
     symlink(&release, dir.path().join("slots/9301")).unwrap();
-    world.set_condition("/nonexistent/%i");
+    world.set_condition(&format!("{}/missing/%i", dir.path().display()));
     assert_eq!(start("tierstore@9301.service").code, 0);
     assert!(world.units().is_empty(), "the condition fails: skipped");
-    world.set_condition("/");
+    world.set_condition(&dir.path().display().to_string());
     assert_eq!(start("tierstore@9301.service").code, 0);
     assert_eq!(start("tierstore@9301.service").code, 0);
     let units = world.units();

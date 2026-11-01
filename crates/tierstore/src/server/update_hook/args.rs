@@ -125,16 +125,14 @@ pub const ROOT_FLAG: &str = "--root";
 pub const ROOT_UID_FLAG: &str = "--root-uid";
 /// The `nft` program.
 pub const NFT_FLAG: &str = "--nft";
-/// The `systemctl` program. A release reads it in no list: it takes none of these flags.
-#[cfg_attr(not(feature = "hook-conformance"), allow(dead_code))]
+/// The `systemctl` program.
 pub const SYSTEMCTL_FLAG: &str = "--systemctl";
 /// The public port.
 pub const PUBLIC_PORT_FLAG: &str = "--public-port";
 /// The time between two looks at an instance, in milliseconds.
 pub const POLL_FLAG: &str = "--poll-interval-ms";
-/// The flags of the host this build takes: all six in a conformance build, none in a release.
-#[cfg(feature = "hook-conformance")]
-const HOST_FLAGS: [&str; 6] = [
+/// Every flag of the host.
+const ALL_HOST_FLAGS: [&str; 6] = [
     ROOT_FLAG,
     ROOT_UID_FLAG,
     NFT_FLAG,
@@ -142,8 +140,13 @@ const HOST_FLAGS: [&str; 6] = [
     PUBLIC_PORT_FLAG,
     POLL_FLAG,
 ];
-#[cfg(not(feature = "hook-conformance"))]
-const HOST_FLAGS: [&str; 0] = [];
+
+/// The flags of the host a build takes: all six in a conformance build, none in a release.
+#[must_use]
+pub const fn host_flags(conformance: bool) -> &'static [&'static str] {
+    if conformance { &ALL_HOST_FLAGS } else { &[] }
+}
+
 /// The user that must own the declaration and a staged release's binary unless `--root-uid`
 /// says otherwise: root, since both are the updater's.
 pub const ROOT_UID: u32 = 0;
@@ -192,7 +195,7 @@ fn number<T: FromStr>(flag: &'static str, value: &OsString) -> Result<T, ArgsErr
 }
 
 impl HostArgs {
-    /// Sets the value of `flag`, one of [`HOST_FLAGS`].
+    /// Sets the value of `flag`, one of [`host_flags`].
     fn set(&mut self, flag: &'static str, value: OsString) -> Result<(), ArgsError> {
         match flag {
             ROOT_UID_FLAG => self.root_uid = number(flag, &value)?,
@@ -246,11 +249,24 @@ impl Invocation {
     where
         I: IntoIterator<Item = OsString>,
     {
+        Invocation::parse_taking(args, host_flags(cfg!(feature = "hook-conformance")))
+    }
+
+    /// Parses as [`Invocation::parse`] does, taking the flags of the host in `flags` only: what
+    /// a build with them takes, or what a release takes (none), whichever this build is.
+    ///
+    /// # Errors
+    /// As [`Invocation::parse`]; a flag of the host not in `flags` is an unknown step or an
+    /// unexpected argument, like any other word.
+    pub fn parse_taking<I>(args: I, flags: &[&'static str]) -> Result<Invocation, ArgsError>
+    where
+        I: IntoIterator<Item = OsString>,
+    {
         let mut args = args.into_iter();
         let (mut step, mut artifact, mut params) = (None, None, None);
         let (mut host, mut given) = (HostArgs::default(), Vec::new());
         while let Some(arg) = args.next() {
-            if let Some(flag) = HOST_FLAGS.into_iter().find(|flag| arg == *flag) {
+            if let Some(&flag) = flags.iter().find(|flag| arg == **flag) {
                 let value = args.next().ok_or(ArgsError::MissingValue(flag))?;
                 if given.contains(&flag) {
                     return Err(ArgsError::DuplicateFlag(flag));
