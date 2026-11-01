@@ -288,6 +288,10 @@ async fn a_lingering_connection_holds_its_slot() {
     // The only slot is taken; that the lingering connection is what holds it, and not the accept
     // loop waiting to accept, is `a_lingering_connection_task_keeps_its_permit` below.
     assert_eq!(front.shared.slots.available_permits(), 0);
+    assert_eq!(
+        front.shared.held.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 
     let mut second = TcpStream::connect(front.addr).await.expect("connected");
     second.write_all(PING).await.expect("sent");
@@ -308,6 +312,10 @@ async fn a_lingering_connection_holds_its_slot() {
     drop(second);
     front.settle().await;
     front.slots_free().await;
+    assert_eq!(
+        front.shared.held.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
     assert_eq!(front.cut().await, 0);
 }
 
