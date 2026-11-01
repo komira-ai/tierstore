@@ -264,6 +264,34 @@ fn flags_that_are_not_valid_are_refused() {
     assert!(Cli::try_parse_from(args).is_err());
 }
 
+/// Asserts that `--slot` is a port: absent it is none, and given it is the number, 1 to 65535;
+/// zero, a number past a port, a sign, a word and an empty value are refused at the parse (the
+/// exit status 2 of a flag that is not valid) with a message that names `--slot`.
+#[test]
+fn the_slot_flag_is_a_port_from_1_to_65535() {
+    let parse = |value: &str| Cli::try_parse_from(flags("key", &[("--slot", value)]));
+    assert_eq!(Cli::try_parse_from(flags("key", &[])).unwrap().slot, None);
+    for (text, port) in [("1", 1), ("9301", 9301), ("65535", 65535)] {
+        assert_eq!(parse(text).unwrap().slot, Some(port), "{text}");
+    }
+    for text in ["0", "65536", "+", "nine", "93x1", ""] {
+        let why = parse(text).expect_err(text).to_string();
+        assert!(why.contains("--slot"), "{text}: {why}");
+    }
+    assert!(parse("-1").is_err());
+}
+
+/// Asserts that a slot given as a flag reaches the settings of the server, where `/metricz`
+/// reads it, and that a start without one leaves them without.
+#[test]
+fn the_slot_reaches_the_server_settings() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-slot");
+    let mut cli = cli(&dir);
+    assert_eq!(build(&cli).expect("built").server.slot, None);
+    cli.slot = Some(9301);
+    assert_eq!(build(&cli).expect("built").server.slot, Some(9301));
+}
+
 /// Asserts that the help names every flag, and that the version names the package version.
 #[test]
 fn the_help_names_every_flag_and_the_version_the_package() {
@@ -273,6 +301,7 @@ fn the_help_names_every_flag_and_the_version_the_package() {
         "--print-config",
         "--listen",
         "--proxy-id",
+        "--slot",
         "--hot",
         "--cold",
         "--hot-bytes",

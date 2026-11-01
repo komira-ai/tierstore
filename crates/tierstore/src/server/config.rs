@@ -71,6 +71,7 @@ pub(super) const PER_RUN: &[&str] = &[
 pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("listen", &["server.listen"]),
     ("proxy-id", &["server.proxy_id"]),
+    ("slot", &["server.slot"]),
     (
         "hot",
         &["hot_store.kind", "hot_store.path", "hot_store.bucket"],
@@ -356,6 +357,8 @@ pub(super) struct ServerTable {
     /// One address, or a list of them.
     pub listen: Addrs,
     pub proxy_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<u16>,
     pub bucket: String,
     pub region: Option<String>,
     pub access_key_file: PathBuf,
@@ -923,6 +926,7 @@ fn storage(
         capabilities: false,
         listen: front.listen,
         proxy_id: front.proxy_id,
+        slot: front.slot,
         hot: hot_parts.spec,
         cold: cold_parts.spec,
         hot_endpoint: hot_parts.endpoint,
@@ -980,6 +984,14 @@ pub(super) struct Shared {
     pub backend_check_wait: Duration,
 }
 
+/// The `server.slot` key: a port, so not zero (a number past 65535 does not parse as one).
+fn slot_of(slot: Option<u16>) -> Result<Option<u16>, ConfigError> {
+    match slot {
+        Some(0) => Err(invalid("server.slot", "0 is not between 1 and 65535")),
+        other => Ok(other),
+    }
+}
+
 /// The settings `[server]` makes: a key that is left out has the default of its flag.
 pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, ConfigError> {
     let max_request_bytes = server
@@ -1005,6 +1017,7 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
     let front = FrontSettings {
         listen: addresses("server.listen", server.listen)?,
         proxy_id: server.proxy_id,
+        slot: slot_of(server.slot)?,
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
         access_key_file: server.access_key_file,

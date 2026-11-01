@@ -110,4 +110,4 @@ None of these values is set by the declaration or the params file; they are fixe
 
 ## Not in a release yet
 
-No release carries the hook as a step the updater calls: `tierstore --capabilities` does not yet list `handover-v1`, so an updater that asks does not hand over. The build gauge of `/metricz` does not yet carry the slot label the probe through the public port needs, and `/readyz` of a storage node says no mode. The holder of the cache lock is not yet named when `verify` reports a pending promotion.
+No release carries the hook as a step the updater calls: `tierstore --capabilities` does not yet list `handover-v1`, so an updater that asks does not hand over. The probe through the public port reads the `slot` label of the build gauge of `/metricz`, which an instance has when it is started with `--slot <port>` (the slot unit passes its own port); an instance started without it names no slot, and the probe takes it for no instance. `/readyz` of a storage node says no mode. The holder of the cache lock is not yet named when `verify` reports a pending promotion.

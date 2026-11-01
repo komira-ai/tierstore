@@ -254,7 +254,7 @@ Every `/metricz`, with or without the front, ends with one more series, on main 
 
 | name | type | labels | what it says |
 |---|---|---|---|
-| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout | always 1; says which build answered |
+| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `--slot` names, on main and only when the flag is given (otherwise the gauge has no such label) | always 1; says which build answered |
 
 ## Not in a release yet
 

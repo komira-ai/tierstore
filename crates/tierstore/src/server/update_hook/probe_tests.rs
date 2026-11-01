@@ -79,3 +79,23 @@ fn a_build_is_an_instance_only_if_slot_and_version_agree() {
     assert!(!no_slot.is(9302, "0.4.0"));
     assert!(!no_slot.is(9302, "0.4.0+abc123"));
 }
+
+/// Asserts that the reader of the hook reads the gauge the server renders, as the server renders
+/// it ([`gauge`], the function `/metricz` calls), with a slot and without: with `--slot` the
+/// build is the instance on that slot and no other, and without it no instance at all. It would
+/// catch a server and a hook that no longer agree on the label, which no hand-written text in
+/// these tests shows.
+#[test]
+fn the_reader_reads_the_gauge_the_server_renders() {
+    use crate::server::build_info::{COMMIT, VERSION, gauge};
+    let with = build_of(&gauge(VERSION, COMMIT, Some(9301))).unwrap();
+    assert_eq!(with.slot, Some(9301));
+    assert_eq!(with.version, VERSION);
+    assert_eq!(with.commit.as_deref(), Some(COMMIT));
+    assert!(with.is(9301, VERSION));
+    assert!(with.is(9301, &format!("{VERSION}+{COMMIT}")));
+    assert!(!with.is(9302, VERSION));
+    let without = build_of(&gauge(VERSION, COMMIT, None)).unwrap();
+    assert_eq!(without.slot, None);
+    assert!(!without.is(9301, VERSION));
+}

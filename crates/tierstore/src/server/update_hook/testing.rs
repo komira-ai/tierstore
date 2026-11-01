@@ -575,15 +575,9 @@ impl Instances for Fake {
                     .get(&target)
                     .cloned()
                     .unwrap_or_else(|| w.releases[&running].0.clone());
-                let slot = if w.slot_label {
-                    format!(",slot=\"{target}\"")
-                } else {
-                    String::new()
-                };
-                format!(
-                    "# TYPE tierstore_build_info gauge\n\
-                     tierstore_build_info{{version=\"{version}\",commit=\"abc\"{slot}}} 1\n"
-                )
+                // The text the server renders, so that the fake and the server cannot drift.
+                let slot = w.slot_label.then_some(target);
+                crate::server::build_info::gauge(&version, "abc", slot)
             }
             _ => {
                 return Ok(Reply {

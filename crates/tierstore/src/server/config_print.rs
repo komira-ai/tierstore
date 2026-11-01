@@ -97,6 +97,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
     let server = ServerTable {
         listen: Addrs(cli.listen.clone()),
         proxy_id: cli.proxy_id.clone(),
+        slot: cli.slot,
         bucket: cli.bucket.clone(),
         region: Some(cli.region.clone()),
         access_key_file: cli.access_key_file.clone(),

@@ -140,6 +140,40 @@ async fn metricz_has_the_build_gauge_with_version_and_commit() {
     }
 }
 
+/// Asserts that a server given a slot renders it as the `slot` label of the build gauge, on a
+/// storage shape and on one with no proxy, in a text the hook's reader finds the slot, version and
+/// commit in, and that a server given none renders no `slot` text anywhere. It would catch a
+/// gauge that never names its slot (the hook's probe through the public port then never sees the
+/// new instance), and a label added to every scrape.
+#[tokio::test]
+async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
+    use super::build_info::{COMMIT, VERSION};
+    use super::update_hook::build_of;
+    for rig in [
+        Rig::with(BUDGET, |config| config.slot = Some(9301)).await,
+        Rig::with(BUDGET, |config| {
+            config.proxy = None;
+            config.slot = Some(9301);
+        })
+        .await,
+    ] {
+        let body = metricz(&rig).await.body;
+        let labels = format!("version=\"{VERSION}\",commit=\"{COMMIT}\",slot=\"9301\"");
+        let expected = format!("tierstore_build_info{{{labels}}} 1");
+        assert_eq!(
+            body.lines().filter(|l| **l == expected).count(),
+            1,
+            "{body}"
+        );
+        let build = build_of(&body).expect("a gauge");
+        assert!(build.is(9301, VERSION), "{body}");
+        assert!(!build.is(9302, VERSION), "{body}");
+    }
+    let plain = metricz(&Rig::new(BUDGET).await).await.body;
+    assert!(!plain.contains("slot"), "{plain}");
+    assert_eq!(build_of(&plain).expect("a gauge").slot, None);
+}
+
 /// Asserts that a server with no proxy and no OCI front answers `/metricz` 200 with one comment
 /// line that names the sources, and then the server's own series, the late requests of the drain,
 /// at zero, and (left out here) the build gauge, and nothing else. It would catch a probe that
