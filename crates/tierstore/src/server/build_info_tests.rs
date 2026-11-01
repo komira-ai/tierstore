@@ -91,5 +91,5 @@ fn the_version_override_reaches_the_version_and_the_gauge() {
     assert_eq!(parts.len(), 3, "{VERSION}");
     assert!(parts.iter().all(|p| p.parse::<u64>().is_ok()), "{VERSION}");
     assert!(RELEASE_VERSION.starts_with(&format!("{VERSION}+")));
-    assert!(gauge(VERSION, COMMIT).contains(&format!("version=\"{VERSION}\"")));
+    assert!(gauge(VERSION, COMMIT, None).contains(&format!("version=\"{VERSION}\"")));
 }
