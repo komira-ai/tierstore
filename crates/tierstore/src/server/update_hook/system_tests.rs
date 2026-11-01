@@ -97,10 +97,8 @@ fn restore_runs_the_step_over_the_machine_ports() {
     assert_eq!(done.report.reason, None);
     let calls = runner.calls();
     assert_eq!(calls.len(), 3, "{calls:?}");
-    assert_eq!(
-        (calls[0].program.as_str(), calls[0].args.clone()),
-        ("nft", vec!["-f", "-"])
-    );
+    assert_eq!(calls[0].program, "nft");
+    assert_eq!(calls[0].args, ["-f", "-"]);
     let guard = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
     assert!(guard.contains(GUARD_TABLE), "{guard}");
     assert_eq!(calls[0].timeout, NFT_TIMEOUT);
