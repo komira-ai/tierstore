@@ -4,6 +4,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use rustix::process::geteuid;
+
 use super::args::Invocation;
 use super::declaration::Declaration;
 use super::machine::{
@@ -29,7 +31,6 @@ pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The user that must own the binary of a staged release: the updater's tree is root's.
 pub(super) const RELEASE_OWNER: u32 = 0;
-const UPDATER_UID: u32 = 0;
 
 /// Where the machine is and who may own its state directory.
 pub(super) struct Config<'a> {
@@ -88,7 +89,7 @@ pub(super) fn run_on(
 pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
     Config {
         root: PathBuf::from("/"),
-        owner: UPDATER_UID,
+        owner: geteuid().as_raw(),
         release_owner: RELEASE_OWNER,
         runner,
     }

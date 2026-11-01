@@ -1,8 +1,9 @@
 //! The state directory: the checks that make it trustworthy, the lock, and `state.json`.
 //!
-//! The directory must be a real directory (not a link), owned by the expected user (the
-//! updater's, root on a host), and writable by that user alone: with no group or other write
-//! bit, the service, which runs as another user, cannot write there. The lock is `flock` on a
+//! The directory must be a real directory (not a link), owned by the expected user (the hook's
+//! own account on a host), writable by that user alone and closed to others: with no group
+//! write bit the service, which runs as another user, cannot write there, and with no bit for
+//! others it cannot read there either (a group may read). The lock is `flock` on a
 //! file of the directory, taken without waiting; it is held as long as the descriptor lives,
 //! and the kernel drops it when the process ends, so a crashed step leaves none behind.
 
@@ -24,8 +25,9 @@ pub const LOCK_FILE: &str = "lock";
 /// The record, in the state directory.
 pub const STATE_FILE: &str = "state.json";
 const TEMP_FILE: &str = "state.json.tmp";
-/// The mode bits that let a group or others write.
-const OTHERS_WRITE: u32 = 0o022;
+/// The mode bits a group or others must not have: the group's write bit and every bit of
+/// others.
+const FORBIDDEN: u32 = 0o027;
 
 /// The state directory `dir`, which `owner` (a user id) must own.
 pub struct StateFiles {
@@ -83,8 +85,8 @@ impl StateFiles {
             )
             .into());
         }
-        if meta.mode() & OTHERS_WRITE != 0 {
-            return Err(format!("{shown} can be written by a group or others").into());
+        if meta.mode() & FORBIDDEN != 0 {
+            return Err(format!("{shown} can be written by a group or reached by others").into());
         }
         Ok(())
     }
