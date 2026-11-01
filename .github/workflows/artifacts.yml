@@ -23,9 +23,18 @@
 # the sums job published (its digest is passed in as a job output), and the second refuses a
 # file that differs from the sums.
 #
+# The version the binary reports. The `version` job computes the version the next release has
+# (`cargo xtask release version`: the patch after the highest vX.Y.Z tag, or the VERSION file at
+# the root when that is higher), before anything is built, and both build jobs give it to the
+# build (TIERSTORE_BUILD_VERSION_OVERRIDE), so `tierstore --version` prints `X.Y.Z+<12 hex>`. The
+# release plan (release.yml) names its tag with the same computation, and the release is refused
+# unless the downloaded binary says that tag. File names carry the commit, not the version, and
+# are unchanged. A pull request builds under the version its base would release next.
+#
 # The files are kept as workflow artifacts for 90 days, GitHub's limit. release.yml, started by
-# hand, attaches these exact files for a commit on main to a GitHub release, checked again against
-# these attestations, and never rebuilds.
+# the completion of this workflow and ci.yml on a push to main (or by hand), attaches these exact
+# files for a commit on main to a GitHub release, checked again against these attestations, and
+# never rebuilds.
 name: artifacts
 
 on:
@@ -36,9 +45,12 @@ on:
 permissions: {}
 
 # A pull request's newer run replaces its older one; a push to main always runs to its end,
-# so a commit that is signed is never left half checked.
+# so a commit that is signed is never left half checked. A push has a group per commit: two
+# runs for one commit (a re-run) queue behind each other, and different commits do not wait for
+# each other. This workflow only builds and attests; it never tags, publishes or deploys, so it
+# is outside the release group of release.yml (the workflow lint lists it as exempt).
 concurrency:
-  group: artifacts-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: artifacts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -55,14 +67,38 @@ defaults:
     shell: bash
 
 jobs:
+  # The one computation of the version both builds give the binary (see the header). It reads the
+  # tags and the VERSION file only; xtask is compiled before the step that holds the token.
+  version:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: The version of the next release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: cargo xtask release version --repo "$GITHUB_REPOSITORY" --version-file VERSION --output "$GITHUB_OUTPUT"
+
   # glibc: the binary needs the glibc of the runner image it was built on (Ubuntu 24.04) or newer.
   linux-x86_64:
+    needs: [version]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
     env:
       TARGET: x86_64-unknown-linux-gnu
+      TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,8 +125,8 @@ jobs:
       # nothing.
       - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
       # The binary runs here (a runner of its own architecture built it) and says the commit.
-      - name: tierstore names the commit
-        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA"
+      - name: tierstore names the commit and the version
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
       - name: SBOM
         run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
       - name: The SBOM step left Cargo.lock unchanged
@@ -113,12 +149,14 @@ jobs:
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   linux-arm64:
+    needs: [version]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     permissions:
       contents: read
     env:
       TARGET: aarch64-unknown-linux-gnu
+      TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,8 +183,8 @@ jobs:
       # nothing.
       - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
       # The binary runs here (a runner of its own architecture built it) and says the commit.
-      - name: tierstore names the commit
-        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA"
+      - name: tierstore names the commit and the version
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
       - name: SBOM
         run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
       - name: The SBOM step left Cargo.lock unchanged

@@ -58,8 +58,6 @@ impl Class {
 /// too long; a test checks every one against [`is_reason_token`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
-    /// The step exists on the command line and the machine's ports are not wired yet.
-    NotImplemented,
     /// The command line was refused.
     BadArgs,
     /// The `--params` file was unreadable or wrong.
@@ -107,8 +105,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 22] = [
-        Reason::NotImplemented,
+    pub const ALL: [Reason; 21] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -136,7 +133,6 @@ impl Reason {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Reason::NotImplemented => "not_implemented",
             Reason::BadArgs => "bad_args",
             Reason::BadParams => "bad_params",
             Reason::Locked => "locked",

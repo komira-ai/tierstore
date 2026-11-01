@@ -336,7 +336,10 @@ fn the_help_names_every_flag_and_the_version_the_package() {
     }
     let version = Cli::try_parse_from(["tierstore", "--version"]);
     let shown = version.unwrap_err().to_string();
-    assert!(shown.contains(env!("CARGO_PKG_VERSION")), "{shown}");
+    assert!(
+        shown.contains(crate::server::build_info::RELEASE_VERSION),
+        "{shown}"
+    );
 }
 
 /// Asserts that a storage node's file reaches the built server settings: the front of the file

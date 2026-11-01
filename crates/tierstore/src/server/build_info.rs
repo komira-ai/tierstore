@@ -1,18 +1,20 @@
 //! What this build says of itself: its version, the commit it was built from, and the
 //! capabilities a host updater may ask for with `tierstore --capabilities`.
 
-/// The crate version, which `--version`, the start line and `tierstore_build_info` name.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The version of this build, which `--version`, the start line and `tierstore_build_info` name:
+/// the crate's version, or the one the build was given (`TIERSTORE_BUILD_VERSION_OVERRIDE`, which
+/// the release workflow sets to the version of the tag). `build.rs` embeds it.
+pub const VERSION: &str = env!("TIERSTORE_BUILD_VERSION");
 
 /// The commit this binary was built from: twelve hex digits, or `unknown` where the build had no
 /// git checkout. `build.rs` embeds it.
 pub const COMMIT: &str = env!("TIERSTORE_BUILD_COMMIT");
 
-/// What `--version` prints after the program's name: the crate version, `+`, and the commit, the
-/// form `cargo xtask build-commit check` reads (`unknown` after the `+` for a build that has no
-/// commit).
+/// What `--version` prints after the program's name: the build's version, `+`, and the commit, the
+/// form `cargo xtask build-commit` and `release check-binary` read (`unknown` after the `+` for a
+/// build that has no commit).
 pub const RELEASE_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
+    env!("TIERSTORE_BUILD_VERSION"),
     "+",
     env!("TIERSTORE_BUILD_COMMIT")
 );

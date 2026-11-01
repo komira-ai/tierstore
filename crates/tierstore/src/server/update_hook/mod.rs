@@ -13,9 +13,9 @@
 //! Two instances run side by side during an update, on the private ports of the two slots
 //! (`tierstore@9301`, `tierstore@9302`); the public port 9300 is redirected to the serving slot
 //! by one nftables rule. The steps keep a record ([`Record`]), set state rather than do things
-//! once, and reach the machine only through the ports of [`Ports`]. This change has the logic
-//! and its fakes; the machine's ports (nft, systemd, the links, HTTP, the state directory) are
-//! not wired yet, so [`Machine::system`] answers every step with the reason `not_implemented`.
+//! once, and reach the machine only through the ports of [`Ports`]. [`Machine::system`] builds
+//! those ports from the machine's implementations ([`machine`]): the declaration it reads gives
+//! the state directory and the slot links, and the step runs over them.
 
 mod args;
 mod declaration;
@@ -28,6 +28,7 @@ mod record;
 mod report;
 mod ruleset;
 mod steps;
+mod system;
 mod validate;
 
 use std::ffi::OsString;
@@ -61,20 +62,12 @@ pub struct Machine<'a> {
     pub step: &'a dyn Fn(&Invocation, Option<&Params>) -> Done,
 }
 
-/// A step with no machine behind it yet: exit 1, reason `not_implemented`.
-fn not_implemented(invocation: &Invocation, _params: Option<&Params>) -> Done {
-    Done::fail(
-        Reason::NotImplemented,
-        format!("{} is not wired to this machine yet", invocation.step),
-    )
-}
-
 impl Machine<'static> {
     /// This machine.
     #[must_use]
     pub fn system() -> Self {
         Self {
-            step: &not_implemented,
+            step: &system::on_this_machine,
         }
     }
 }
@@ -182,6 +175,8 @@ mod steps_restore_tests;
 mod steps_rollback_tests;
 #[cfg(test)]
 mod steps_verify_tests;
+#[cfg(test)]
+mod system_tests;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]

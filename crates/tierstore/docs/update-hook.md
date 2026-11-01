@@ -1,6 +1,6 @@
 # The update hook
 
-`tierstore update-hook` is the part of the binary that a host updater runs to put a new release in place without a gap. This page is for the person who writes the updater's declaration for tierstore or reads what a step said. The verb is Linux only. In this build the steps are written and tested over fakes of the machine; the machine's side is not wired, so every step answers `not_implemented` (see [What a step prints today](update-hook.md#what-a-step-prints-today)).
+`tierstore update-hook` is the part of the binary that a host updater runs to put a new release in place without a gap. This page is for the person who writes the updater's declaration for tierstore or reads what a step said. The verb is Linux only. The steps run on the machine through its programs and files (see [On the machine](update-hook.md#on-the-machine)); no release carries the hook yet (see [Not in a release yet](update-hook.md#not-in-a-release-yet)).
 
 ## The shape of an update
 
@@ -75,7 +75,6 @@ The exit status is 0 for success, 1 for failure and 75 for deferred (nothing was
 
 | `reason` | when |
 |---|---|
-| `not_implemented` | the step has no machine behind it (all steps, in this build) |
 | `bad_args`, `bad_params` | the command line or the params file was refused |
 | `locked` | another step holds the lock of the state directory |
 | `state_invalid` | the declaration, the record or the params are not as required |
@@ -96,17 +95,19 @@ no verify has succeeded
 there is no record
 ```
 
+## On the machine
+
+A step reads `/etc/updater.d/tierstore.toml` first. Its `state_dir` is where the lock, `state.json` and the slot links are; a declaration that is missing, cannot be read or is not trusted (opened without following a link, it must be a regular file owned by root with no group or other write bit) is `host_failed`, one that is refused is `state_invalid`, and in both nothing else has been touched. The step then takes the lock of that directory, reads the declaration again, and goes on as described above. Each port of the steps has an implementation in `update_hook::machine`: The declaration's `uid` names the service account (required); `state_dir` is refused when it is the root, `/var`, `/var/lib`, or `/etc`, `/usr`, `/proc`, `/sys`, `/dev`, `/run`, `/boot` or another system directory, the service's `/var/lib/tierstore` or a cache under `/var/cache`, or anything under them.
+
+- `nft` is run with an argument vector and no shell, never `sh -c`. The program is `/usr/sbin/nft`. `nft -f -` is fed the rule text on standard input. A table is absent when `nft list table inet <name>` or `nft delete table inet <name>` exits non-zero with `No such file or directory` on standard error; absence is `None` for the listing and fine for the delete, and any other failure is an error. A call is killed after 10 seconds.
+- `/usr/bin/systemctl start -- <unit>` (killed after 60 seconds) and `/usr/bin/systemctl stop -- <unit>` (after 300 seconds, since it returns when the drain is over); a non-zero exit, a signal or a timeout is an error. systemd.unit(5) says that a failing `ConditionPathExists=` skips the start and does not fail the unit; it does not state the exit status of `systemctl start` then, which is 0 on the systemd versions it was written against.
+- The slot links are `<state_dir>/slots/<port>`, replaced by renaming a new link over the old one. A path there that is not a link is an error.
+- The instances are asked with a blocking `GET` on `127.0.0.1`, with a connect timeout of 2 seconds and a read timeout of 5. A status other than 200 is an answer. A chunked answer is refused.
+- The boot id is read from `/proc/sys/kernel/random/boot_id` and the connection-tracking values from `/proc/sys/net/netfilter/nf_conntrack_*`. The capabilities of a staged release are the lines that `<release>/tierstore --capabilities` prints, asked for at most 10 seconds; the binary is refused unless it is a regular file, not a link, owned by root (the updater's verified tree) and not writable by a group or others. A program the hook runs gets an empty environment but for a fixed `PATH` and `LC_ALL=C`. A binary that exits with status 2, the status of an argument it does not know, has none; any other failure to ask is an error.
+- The state directory is opened once, without following a link, and checked on that descriptor: a directory owned by the user and group the hook runs as (its own account, `tierstore-update`), with mode exactly 0750, and the declaration's `uid` (the service account) must be listed among the members of that group in `/etc/group`, since the service reaches the slot links through the group. Every later open (the lock file, `state.json`, its temporary file, the `slots` directory, the renames and the syncs) is made relative to that descriptor. `state.json` is opened without following a link and must be a regular file owned by the hook's user that no group or others can write (0600 or 0640), on load and before a save replaces it. The lock is `flock` on the `lock` file, taken without waiting; `state.json` is written to a temporary file, synced, renamed over, and the directory synced. A mode is never repaired: what is not as required is refused (`state_io`).
+
+None of these values is set by the declaration or the params file; they are fixed in the hook. Nothing is read from the environment.
+
 ## Not in a release yet
 
-The machine's side of the steps is written and tested, and not yet joined to the verb, so every step still answers `not_implemented`. Each port of the steps has an implementation in `update_hook::machine`:
-
-- `nft` is run with an argument vector and no shell, never `sh -c`. The program is found by name, through the `PATH` the updater gives the hook. `nft -f -` is fed the rule text on standard input. A table is absent when `nft list table inet <name>` or `nft delete table inet <name>` exits non-zero with `No such file or directory` on standard error; absence is `None` for the listing and fine for the delete, and any other failure is an error.
-- `systemctl start <unit>` and `systemctl stop <unit>`; a non-zero exit, a signal or a timeout is an error. systemd.unit(5) says that a failing `ConditionPathExists=` skips the start and does not fail the unit; it does not state the exit status of `systemctl start` then, which is 0 on the systemd versions it was written against.
-- The slot links are `<state_dir>/slots/<port>`, replaced by renaming a new link over the old one. A path there that is not a link is an error.
-- The instances are asked with a blocking `GET` on `127.0.0.1` with a connect timeout and a read timeout. A status other than 200 is an answer. A chunked answer is refused.
-- The declaration is read from `/etc/updater.d/tierstore.toml`, the boot id from `/proc/sys/kernel/random/boot_id` and the connection-tracking values from `/proc/sys/net/netfilter/nf_conntrack_*`, under a root that tests replace. The capabilities of a staged release are the lines that `<release>/tierstore --capabilities` prints. A binary that exits with status 2, the status of an argument it does not know, has none; any other failure to ask is an error.
-- The state directory must be a directory (not a link) owned by the expected user, with no group or other write bit. The lock is `flock` on its `lock` file, taken without waiting; `state.json` is written to a temporary file, synced, renamed over, and the directory synced.
-
-The probe through the public port reads the `slot` label of the build gauge of `/metricz`, which an instance has when it is started with `--slot <port>` (the slot unit passes its own port); an instance started without it names no slot, and the probe takes it for no instance.
-
-What is left: the declaration's `state_dir` and the user ids to build them from, and the call of the steps over them. `/readyz` of a storage node says no mode. The holder of the cache lock is not yet named when `verify` reports a pending promotion.
+No release carries the hook as a step the updater calls: `tierstore --capabilities` does not yet list `handover-v1`, so an updater that asks does not hand over. The probe through the public port reads the `slot` label of the build gauge of `/metricz`, which an instance has when it is started with `--slot <port>` (the slot unit passes its own port); an instance started without it names no slot, and the probe takes it for no instance. `/readyz` of a storage node says no mode. The holder of the cache lock is not yet named when `verify` reports a pending promotion.

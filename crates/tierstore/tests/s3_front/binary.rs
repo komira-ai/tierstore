@@ -14,7 +14,7 @@ use objstore_s3::s3::{Credentials, MULTIPART_THRESHOLD, S3Config, S3Store};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use reqwest::Client;
 use rustix::process::{Pid, Signal, kill_process};
-use tierstore::server::build_info::{CAPABILITIES, COMMIT};
+use tierstore::server::build_info::{CAPABILITIES, COMMIT, VERSION};
 use tierstore_testkit::reaped::{Reaped, first_line, spawn};
 
 use crate::client::assert_refused;
@@ -59,7 +59,7 @@ pub(crate) fn start(flags: &[String]) -> Running {
     let (line, reader) = first_line(stdout, Duration::from_secs(30)).unwrap();
     let words: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(words[0], "tierstore", "{line}");
-    assert_eq!(words[1], env!("CARGO_PKG_VERSION"), "{line}");
+    assert_eq!(words[1], VERSION, "{line}");
     let listen = words[2].strip_prefix("listen=").expect("listen=");
     let pid = Pid::from_raw(i32::try_from(child.id()).unwrap()).unwrap();
     Running {
@@ -205,8 +205,9 @@ fn the_flags_are_parsed_and_refused_as_the_usage_says() {
     }
     let (code, out, _) = run(&["--version".to_owned()]);
     assert_eq!(code, 0);
-    // The form the release check reads: the name, the package version, `+`, the commit.
-    let version = format!("tierstore {}+{COMMIT}", env!("CARGO_PKG_VERSION"));
+    // The form the release check reads: the name, the build's version (the crate's, or the one
+    // the release workflow gave the build), `+`, the commit.
+    let version = format!("tierstore {VERSION}+{COMMIT}");
     assert_eq!(out.trim_end(), version);
     let (code, _, err) = run(&[]);
     assert_eq!(code, 2);
@@ -302,10 +303,7 @@ async fn the_start_line_and_the_gauge_name_the_commit() {
         .text()
         .await
         .unwrap();
-    let gauge = format!(
-        "tierstore_build_info{{version=\"{}\",commit=\"{COMMIT}\"}} 1\n",
-        env!("CARGO_PKG_VERSION")
-    );
+    let gauge = format!("tierstore_build_info{{version=\"{VERSION}\",commit=\"{COMMIT}\"}} 1\n");
     assert!(body.contains(&gauge), "{body}");
     running.signal(Signal::TERM);
     assert_eq!(running.exit_code().await, Some(0));

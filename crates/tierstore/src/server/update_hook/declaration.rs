@@ -1,7 +1,9 @@
 //! The part of the declaration (`/etc/updater.d/tierstore.toml`) the hook checks its record
-//! against: the two private ports, the two slot units and the record directory.
+//! against: the two private ports, the two slot units, the record directory and the service
+//! account.
 //!
 //! ```toml
+//! uid          = "tierstore"
 //! state_dir    = "/var/lib/updater/hooks/tierstore"
 //! health_ports = [9301, 9302]
 //!
@@ -12,7 +14,7 @@
 //! Keys the hook does not read are ignored: the file is the updater's. A unit name is built
 //! from a validated port by [`unit_name`], never read from the record.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -30,6 +32,47 @@ pub fn unit_name(port: u16) -> String {
     format!("tierstore@{port}.service")
 }
 
+/// Paths that are never a record directory, whole: the root and the directories every other
+/// path of the host sits under.
+const RESERVED: [&str; 3] = ["/", "/var", "/var/lib"];
+
+/// Trees that are never a record directory, nor anything under them: system and virtual
+/// directories and the service's own cache and state.
+const RESERVED_TREES: [&str; 14] = [
+    "/bin",
+    "/boot",
+    "/dev",
+    "/etc",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/proc",
+    "/run",
+    "/sbin",
+    "/sys",
+    "/usr",
+    "/var/cache",
+    "/var/lib/tierstore",
+];
+
+/// Whether `path` (already plain) is one the hook must not use as its record directory.
+fn is_reserved(path: &Path) -> bool {
+    RESERVED.iter().any(|reserved| path == Path::new(reserved))
+        || RESERVED_TREES
+            .iter()
+            .any(|tree| path.starts_with(Path::new(tree)))
+}
+
+/// Whether `name` is an account name: 1 to 32 letters, digits, `_`, `.` and `-`, not starting
+/// with `-`.
+fn is_account(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
 /// Why a declaration was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum DeclarationError {
@@ -45,6 +88,12 @@ pub enum DeclarationError {
     /// `state_dir` is not an absolute path of plain components.
     #[error("state_dir must be an absolute path of plain components")]
     NotPlain,
+    /// `state_dir` is a path the hook must never use as its record directory.
+    #[error("state_dir {0:?} is a reserved path")]
+    Reserved(PathBuf),
+    /// `uid`, the service account, is not an account name.
+    #[error("uid must be an account name of letters, digits and _ . - (at most 32)")]
+    Service,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +101,8 @@ struct Wire {
     state_dir: PathBuf,
     health_ports: Vec<u16>,
     hook: WireHook,
+    #[serde(default)]
+    uid: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +117,9 @@ pub struct Declaration {
     pub state_dir: PathBuf,
     /// The two private ports, in the declared order.
     pub ports: [u16; 2],
+    /// The service account (`uid`), which must be a member of the state directory's group;
+    /// `None` when the declaration names none.
+    pub service: Option<String>,
 }
 
 impl Declaration {
@@ -91,9 +145,16 @@ impl Declaration {
         if !is_plain(&wire.state_dir) {
             return Err(DeclarationError::NotPlain);
         }
+        if is_reserved(&wire.state_dir) {
+            return Err(DeclarationError::Reserved(wire.state_dir));
+        }
+        if wire.uid.as_deref().is_some_and(|name| !is_account(name)) {
+            return Err(DeclarationError::Service);
+        }
         Ok(Declaration {
             state_dir: wire.state_dir,
             ports: [first, second],
+            service: wire.uid,
         })
     }
 

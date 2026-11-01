@@ -79,6 +79,8 @@
 mod backend;
 #[cfg(test)]
 mod build_commit;
+#[cfg(test)]
+mod build_version;
 mod cache;
 mod clock;
 mod dir;

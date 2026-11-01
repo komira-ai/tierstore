@@ -22,7 +22,9 @@ fn me() -> u32 {
 }
 
 fn host<'a>(root: &Path, runner: &'a FakeRunner) -> SystemHost<'a> {
-    SystemHost::new(root.to_path_buf(), runner, LIMIT).with_release_owner(me())
+    SystemHost::new(root.to_path_buf(), runner, LIMIT)
+        .with_release_owner(me())
+        .with_declaration_owner(me())
 }
 
 fn message(error: PortError) -> String {

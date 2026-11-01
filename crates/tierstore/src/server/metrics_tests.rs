@@ -122,11 +122,8 @@ async fn metricz_lists_every_series_with_its_labels() {
 /// exported, one that names another version or no commit, and one on only some shapes.
 #[tokio::test]
 async fn metricz_has_the_build_gauge_with_version_and_commit() {
-    use super::build_info::COMMIT;
-    let expected = format!(
-        "tierstore_build_info{{version=\"{}\",commit=\"{COMMIT}\"}} 1",
-        env!("CARGO_PKG_VERSION")
-    );
+    use super::build_info::{COMMIT, VERSION};
+    let expected = format!("tierstore_build_info{{version=\"{VERSION}\",commit=\"{COMMIT}\"}} 1");
     for rig in [
         Rig::new(BUDGET).await,
         Rig::with(BUDGET, |config| config.proxy = None).await,
