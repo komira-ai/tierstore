@@ -24,8 +24,8 @@ use tokio::sync::Barrier;
 
 use crate::support::{Rig, assert_absent, body, chunks, journal_keys, read};
 
-const SECRET: &str = "presign-secret-0123456789";
-const BUCKET: &str = "tier-bucket";
+pub(crate) const SECRET: &str = "presign-secret-0123456789";
+pub(crate) const BUCKET: &str = "tier-bucket";
 
 /// A backend over another that can be told to misbehave in one way each.
 struct Fake {
@@ -142,7 +142,7 @@ async fn a_key_demoted_between_the_first_ask_and_the_create_is_refused() {
 
 /// A server over `proxy` with one presigning key limited to `cap` bytes of body, on the clock of
 /// the machine.
-fn server_over(proxy: Proxy, cap: u64) -> Arc<Server> {
+pub(crate) fn server_over(proxy: Proxy, cap: u64) -> Arc<Server> {
     let grant = Grant {
         prefix: "cas/b/".to_owned(),
         max_expires_secs: 600,
@@ -155,7 +155,11 @@ fn server_over(proxy: Proxy, cap: u64) -> Arc<Server> {
 }
 
 /// A presigned `PUT` request for `key`, with a body and headers.
-fn put_request(key: &str, headers: &[(&str, &str)], data: Vec<u8>) -> Request<Full<Bytes>> {
+pub(crate) fn put_request(
+    key: &str,
+    headers: &[(&str, &str)],
+    data: Vec<u8>,
+) -> Request<Full<Bytes>> {
     let access = AccessKey::new("pack-presign", SECRET);
     let wanted = PresignRequest {
         endpoint: "http://tier.test",
@@ -178,7 +182,10 @@ fn put_request(key: &str, headers: &[(&str, &str)], data: Vec<u8>) -> Request<Fu
 }
 
 /// What an answer was: its status, the `Retry-After` header and its body.
-async fn answered(server: &Server, request: Request<Full<Bytes>>) -> (StatusCode, String, String) {
+pub(crate) async fn answered(
+    server: &Server,
+    request: Request<Full<Bytes>>,
+) -> (StatusCode, String, String) {
     let response = server.handle(request).await;
     let (parts, body) = response.into_parts();
     let retry = parts.headers.get("retry-after");
