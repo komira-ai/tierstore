@@ -28,6 +28,7 @@ mod record;
 mod report;
 mod ruleset;
 mod steps;
+mod system;
 mod validate;
 
 use std::ffi::OsString;
@@ -61,20 +62,12 @@ pub struct Machine<'a> {
     pub step: &'a dyn Fn(&Invocation, Option<&Params>) -> Done,
 }
 
-/// A step with no machine behind it yet: exit 1, reason `not_implemented`.
-fn not_implemented(invocation: &Invocation, _params: Option<&Params>) -> Done {
-    Done::fail(
-        Reason::NotImplemented,
-        format!("{} is not wired to this machine yet", invocation.step),
-    )
-}
-
 impl Machine<'static> {
     /// This machine.
     #[must_use]
     pub fn system() -> Self {
         Self {
-            step: &not_implemented,
+            step: &system::on_this_machine,
         }
     }
 }
@@ -182,6 +175,8 @@ mod steps_restore_tests;
 mod steps_rollback_tests;
 #[cfg(test)]
 mod steps_verify_tests;
+#[cfg(test)]
+mod system_tests;
 #[cfg(test)]
 mod testing;
 #[cfg(test)]

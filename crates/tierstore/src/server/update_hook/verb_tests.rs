@@ -97,15 +97,10 @@ fn a_refusal_runs_no_step() {
     assert!(other.err.contains("is not the staged release"));
 }
 
-/// Asserts that the machine this build runs on answers every step `not_implemented` for now, and
-/// that the binary's entry reaches the verb before its own flags. It would catch a verb that
-/// falls through to the server's flags, which would start a server or print its usage.
+/// Asserts that the binary's entry reaches the verb before its own flags. It would catch a verb
+/// that falls through to the server's flags, which would start a server or print its usage.
 #[test]
 fn the_binary_answers_the_verb_before_its_flags() {
-    let got = ran(&["restore"], &Machine::system());
-    assert_eq!(got.status, status(1));
-    assert_eq!(got.line["reason"], "not_implemented");
-    assert!(got.line["detail"].as_str().unwrap().contains("restore"));
     let through_main = cli::main(args(&["bounce"]));
     assert_eq!(format!("{through_main:?}"), status(1));
 }

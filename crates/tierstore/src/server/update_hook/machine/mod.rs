@@ -79,6 +79,6 @@ mod slots_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
-mod testing;
+pub(super) mod testing;
 #[cfg(test)]
 mod units_tests;
