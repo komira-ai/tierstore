@@ -53,6 +53,14 @@ impl<'a> SystemHost<'a> {
     }
 }
 
+impl SystemHost<'_> {
+    /// Not yet: no owner is checked.
+    #[must_use]
+    pub fn with_release_owner(self, _uid: u32) -> Self {
+        self
+    }
+}
+
 impl Host for SystemHost<'_> {
     fn declaration(&self) -> Result<String, PortError> {
         self.read(DECLARATION_PATH)

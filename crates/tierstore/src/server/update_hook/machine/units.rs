@@ -38,6 +38,14 @@ impl<'a> SystemdUnits<'a> {
     }
 }
 
+impl<'a> SystemdUnits<'a> {
+    /// Not yet: the program is still found by name.
+    #[must_use]
+    pub fn with_program(self, _program: &str) -> SystemdUnits<'a> {
+        self
+    }
+}
+
 impl Units for SystemdUnits<'_> {
     fn start(&self, unit: &str) -> Result<(), PortError> {
         let call = Call::new(PROGRAM, &["start", unit], self.start_timeout);

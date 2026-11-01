@@ -24,6 +24,12 @@ impl<'a> NftTool<'a> {
         NftTool { runner, timeout }
     }
 
+    /// Not yet: the program is still found by name.
+    #[must_use]
+    pub fn with_program(self, _program: &str) -> NftTool<'a> {
+        self
+    }
+
     fn call(&self, args: &[&str]) -> Call {
         Call::new(PROGRAM, args, self.timeout)
     }

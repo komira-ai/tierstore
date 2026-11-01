@@ -2,7 +2,8 @@
 //! real runner never involves a shell.
 
 use std::io::{self, Read, Write};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -106,9 +107,38 @@ impl Runner for SystemRunner {
     }
 }
 
+/// The most of each output stream that is to be kept.
+pub const MAX_OUTPUT: usize = 1 << 20;
+
+pub(super) struct Group {
+    pub(super) child: Child,
+}
+
+impl Group {
+    pub(super) fn spawn(command: &mut Command) -> io::Result<Group> {
+        Ok(Group {
+            child: command.spawn()?,
+        })
+    }
+}
+
+pub(super) fn drain(pipe: Option<Box<dyn Read + Send>>) -> Receiver<Vec<u8>> {
+    let (send, receive) = mpsc::channel();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.map(|mut pipe| pipe.read_to_end(&mut bytes));
+        let _ = send.send(bytes);
+    });
+    receive
+}
+
+pub(super) fn collect(drained: &Receiver<Vec<u8>>, _deadline: Instant) -> io::Result<Vec<u8>> {
+    Ok(drained.recv().unwrap_or_default())
+}
+
 /// Reads a pipe to its end on a thread of its own, so that a program that writes more than a
 /// pipe holds is not stuck while this one waits for it to exit.
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+fn drain_old<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = pipe.map(|mut pipe| pipe.read_to_end(&mut bytes));
@@ -131,8 +161,8 @@ fn execute(call: &Call) -> io::Result<Output> {
     let writer = thread::spawn(move || {
         let _ = pipe.map(|mut pipe| pipe.write_all(&input));
     });
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let stdout = drain_old(child.stdout.take());
+    let stderr = drain_old(child.stderr.take());
     let deadline = Instant::now() + call.timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
