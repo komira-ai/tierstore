@@ -378,17 +378,49 @@ fn a_truncated_file_list_is_treated_as_code() {
 
 #[test]
 fn the_freeze_stops_the_plan_before_it_asks_anything() {
-    // Catches: RELEASE_FREEZE=true releasing, a freeze that still calls GitHub, and any other
-    // value (empty, false, a typo) freezing.
+    // Catches: RELEASE_FREEZE set releasing, a freeze that still calls GitHub, a freeze that
+    // fails open on a value other than exactly `true` (TRUE, yes, 1, on, any word), and an
+    // unset, empty or `false` (any case) variable freezing.
     let gh = repo(&["v0.3.1"], "ahead", &["Cargo.lock"], &["fix"]);
-    let printed = plan(&gh, &request(None, "true", None)).expect("plan");
-    assert!(printed.contains(&"release=false".to_owned()), "{printed:?}");
-    assert!(printed[0].contains("RELEASE_FREEZE"), "{printed:?}");
-    assert!(gh.asked.borrow().is_empty(), "{:?}", gh.asked.borrow());
-    for value in ["", "false", "True", "1"] {
+    for value in ["true", "TRUE", "True", "yes", "1", "on", "freeze", " true "] {
+        let gh = repo(&["v0.3.1"], "ahead", &["Cargo.lock"], &["fix"]);
         let printed = plan(&gh, &request(None, value, None)).expect("plan");
-        assert!(printed.contains(&"release=true".to_owned()), "{value}");
+        assert!(printed.contains(&"release=false".to_owned()), "{value}");
+        assert!(printed[0].contains("RELEASE_FREEZE"), "{printed:?}");
+        assert!(
+            gh.asked.borrow().is_empty(),
+            "{value}: {:?}",
+            gh.asked.borrow()
+        );
     }
+    for value in ["", "false", "FALSE", "False", "  ", " false "] {
+        let printed = plan(&gh, &request(None, value, None)).expect("plan");
+        assert!(printed.contains(&"release=true".to_owned()), "{value:?}");
+    }
+}
+
+#[test]
+fn a_rename_into_docs_is_a_change_of_the_file_it_was() {
+    // Catches: a source file moved into docs/ reading as a docs-only push because only the new
+    // name is looked at, and a move between docs paths being released.
+    let renamed = |from: &str, to: &str| {
+        let mut gh = repo(&["v0.3.1"], "ahead", &[], &["move"]);
+        let path = compare_path("v0.3.1");
+        for (p, v) in &mut gh.api {
+            if *p == path {
+                v["files"] = json!([{
+                    "filename": to, "previous_filename": from, "status": "renamed"
+                }]);
+            }
+        }
+        gh
+    };
+    let gh = renamed("crates/tierstore/src/lib.rs", "docs/lib.md");
+    assert!(plan_of(&gh, None).contains(&"release=true".to_owned()));
+    let gh = renamed("docs/a.md", "docs/b.md");
+    assert!(plan_of(&gh, None).contains(&"release=false".to_owned()));
+    let gh = renamed("docs/a.md", "crates/tierstore/src/a.rs");
+    assert!(plan_of(&gh, None).contains(&"release=true".to_owned()));
 }
 
 #[test]
@@ -488,21 +520,48 @@ fn a_manual_release_passes_its_tag_commit_and_note_on() {
     // with a line break ending its output line early, and a bad tag or commit accepted.
     let dir = scratch("manual");
     let out = dir.join("out");
-    let printed = manual("v1.2.3", COMMIT, "first\nsecond", Some(&out)).expect("manual");
+    let none = FakeGh::default();
+    let printed =
+        manual(&none, REPO, "v1.2.3", COMMIT, "first\nsecond", Some(&out)).expect("manual");
     assert!(printed.contains(&"tag=v1.2.3".to_owned()), "{printed:?}");
     assert_eq!(
         std::fs::read_to_string(&out).expect("out"),
         format!("release=true\ntag=v1.2.3\ncommit={COMMIT}\nnote=first second\n")
     );
-    assert!(manual("v1.2.3", COMMIT, "", None).is_ok());
+    assert!(manual(&none, REPO, "v1.2.3", COMMIT, "", None).is_ok());
     assert!(matches!(
-        manual("1.2", COMMIT, "", None),
+        manual(&none, REPO, "1.2", COMMIT, "", None),
         Err(Error::Usage(_))
     ));
     assert!(matches!(
-        manual("v1.2.3", "abc", "", None),
+        manual(&none, REPO, "v1.2.3", "abc", "", None),
         Err(Error::Usage(_))
     ));
+}
+
+#[test]
+fn a_manual_release_of_a_commit_a_tag_already_covers_is_refused() {
+    // Catches: a second tag name made for a commit that is already released (the commit is the
+    // highest tag's, or older), while a commit after the tag, a tag line the commit is not on,
+    // and a commit GitHub does not know (verify refuses it later) are not stopped here.
+    for status in ["identical", "behind"] {
+        let gh = repo(&["v0.3.1"], status, &["Cargo.lock"], &["fix"]);
+        let e = manual(&gh, REPO, "v0.3.2", COMMIT, "", None).expect_err(status);
+        assert!(
+            e.to_string().contains("v0.3.1 already covers"),
+            "{status}: {e}"
+        );
+    }
+    for status in ["ahead", "diverged"] {
+        let gh = repo(&["v0.3.1"], status, &["Cargo.lock"], &["fix"]);
+        assert!(
+            manual(&gh, REPO, "v0.3.2", COMMIT, "", None).is_ok(),
+            "{status}"
+        );
+    }
+    let mut gh = repo(&["v0.3.1"], "ahead", &[], &[]);
+    gh.api.retain(|(p, _)| *p != compare_path("v0.3.1"));
+    assert!(manual(&gh, REPO, "v0.3.2", COMMIT, "", None).is_ok());
 }
 
 #[test]

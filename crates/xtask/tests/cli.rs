@@ -444,11 +444,18 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
     // Catches: the flags of `release manual` not reaching it, and a bad tag not being a
     // usage error.
     let d = dir("manual");
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[]",
+    );
     let o = run(
         &d,
         &[
             "release",
             "manual",
+            "--repo",
+            REPO,
             "--tag",
             "v1.2.3",
             "--commit",
@@ -457,6 +464,8 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
             "by hand",
             "--output",
             "github-output",
+            "--gh",
+            FAKE,
         ],
     );
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
@@ -466,9 +475,35 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
     );
     let o = run(
         &d,
-        &["release", "manual", "--tag", "1.2", "--commit", COMMIT],
+        &[
+            "release", "manual", "--repo", REPO, "--tag", "1.2", "--commit", COMMIT, "--gh", FAKE,
+        ],
     );
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    // A tag already covers the commit: refused, exit status 1, naming the tag.
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v1.2.0\"}]",
+    );
+    put(
+        &d,
+        &format!("repos/{REPO}/compare/v1.2.0...{COMMIT}"),
+        "{\"status\":\"identical\"}",
+    );
+    let o = run(
+        &d,
+        &[
+            "release", "manual", "--repo", REPO, "--tag", "v1.2.1", "--commit", COMMIT, "--gh",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("v1.2.0 already covers"),
+        "{}",
+        stderr(&o)
+    );
 }
 
 #[test]

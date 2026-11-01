@@ -320,6 +320,8 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
 
 /// The `release manual` verb: the lines to print.
 pub fn manual(
+    _gh: &dyn Gh,
+    _repo: &str,
     tag: &str,
     commit: &str,
     note: &str,

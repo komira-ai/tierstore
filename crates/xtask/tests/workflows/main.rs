@@ -10,8 +10,8 @@ mod yaml;
 use std::path::PathBuf;
 
 use lint::{
-    RELEASE_GROUP, RELEASE_PATH_WORKFLOWS, SIGN_IF, artifacts_problems, concurrency_problems, lint,
-    release_problems,
+    ARTIFACTS_GROUP, RELEASE_EXEMPT, RELEASE_GROUP, SIGN_IF, artifacts_problems,
+    concurrency_problems, discovery_problems, lint, release_problems,
 };
 
 /// The directory of the workflows of this repository.
@@ -522,16 +522,185 @@ fn each_defect_in_the_version_chain_of_artifacts_yml_is_named_by_the_lint() {
 }
 
 #[test]
-fn every_release_path_workflow_is_in_the_one_release_group_and_never_cancels() {
-    // Catches: a release-path workflow (release.yml now; the farm deploy once it is listed in
-    // RELEASE_PATH_WORKFLOWS) outside the shared group, so that two release actions overlap, or
-    // one that cancels a running release action.
-    assert!(!RELEASE_PATH_WORKFLOWS.is_empty());
-    for file in RELEASE_PATH_WORKFLOWS {
-        assert_eq!(
-            concurrency_problems(file, &text_of(file)),
-            Vec::<String>::new(),
-            "{file}"
+fn every_workflow_that_tags_publishes_or_deploys_is_in_the_one_release_group() {
+    // Catches: a workflow that can tag, publish or deploy (found by what it does, not by a
+    // list of names) outside the shared group, so that two release actions overlap, or one
+    // that cancels a running release action.
+    assert_eq!(
+        discovery_problems(&workflows(), RELEASE_EXEMPT),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        concurrency_problems("release.yml", &text_of("release.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// A workflow with `step` in a job of its own, and no concurrency block.
+fn with_step(step: &str) -> (String, String) {
+    (
+        "new.yml".to_owned(),
+        format!(
+            "name: new\non:\n  workflow_dispatch:\npermissions: {{}}\njobs:\n  go:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - run: {step}\n"
+        ),
+    )
+}
+
+#[test]
+fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
+    // Catches: discovery that finds only the files it was told about. Each of these must be
+    // named, by file, when it has no group; `id-token` with attest alone is the artifacts
+    // workflow and must not be.
+    for step in [
+        "gh release create v1 --repo x/y",
+        "git tag v1 && git push origin v1",
+        "git push origin refs/tags/v1",
+        "cargo xtask deploy-farm --service tierstore",
+        "./farm-deploy.sh",
+    ] {
+        let problems = discovery_problems(&[with_step(step)], RELEASE_EXEMPT);
+        assert!(
+            problems.iter().any(|p| p.contains("new.yml")),
+            "{step}: {problems:?}"
+        );
+    }
+    let (name, text) = with_step("gh release create v1");
+    let write = text
+        .replace("contents: read", "contents: write")
+        .replace("gh release create v1", "echo");
+    let problems = discovery_problems(&[(name, write)], RELEASE_EXEMPT);
+    assert!(
+        problems.iter().any(|p| p.contains("new.yml")),
+        "{problems:?}"
+    );
+    let (name, text) = with_step("echo build");
+    let attest = text.replace(
+        "contents: read",
+        "contents: read\n      id-token: write\n      attestations: write",
+    );
+    assert_eq!(
+        discovery_problems(&[(name, attest)], RELEASE_EXEMPT),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_release_path_workflow_in_the_group_or_exempt_with_a_reason_is_accepted_and_the_rest_not() {
+    // Catches: a group that is not checked once the workflow is found, an exempt entry that
+    // needs no reason, and one that names a file that is not there.
+    let (name, text) = with_step("gh release create v1");
+    let grouped = format!(
+        "{}concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\njobs:",
+        text.split("jobs:").next().expect("head")
+    ) + text.split("jobs:").nth(1).expect("jobs");
+    assert_eq!(
+        discovery_problems(&[(name.clone(), grouped.clone())], RELEASE_EXEMPT),
+        Vec::<String>::new()
+    );
+    let cancelling = grouped.replace("cancel-in-progress: false", "cancel-in-progress: true");
+    let problems = discovery_problems(&[(name.clone(), cancelling)], RELEASE_EXEMPT);
+    assert!(
+        problems.iter().any(|p| p.contains("cancel-in-progress")),
+        "{problems:?}"
+    );
+    let files = [(name.clone(), text.clone())];
+    assert_eq!(
+        discovery_problems(&files, &[("new.yml", "it only reads, and says why")]),
+        Vec::<String>::new()
+    );
+    for reason in ["", "  "] {
+        let problems = discovery_problems(&files, &[("new.yml", reason)]);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("new.yml") && p.contains("reason")),
+            "{reason:?}: {problems:?}"
+        );
+    }
+    let problems = discovery_problems(&files, &[("gone.yml", "was removed")]);
+    assert!(
+        problems.iter().any(|p| p.contains("gone.yml")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn artifacts_yml_has_its_own_non_cancelling_group_per_commit() {
+    // Catches: artifacts.yml moving into the release group (it only builds and attests, so it
+    // must not wait for a release), a group not keyed on the commit (two pushes would share
+    // it), and a push run that cancels (a commit that is signed is never left half checked).
+    let text = text_of("artifacts.yml");
+    let block = format!(
+        "concurrency:\n  group: {ARTIFACTS_GROUP}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n"
+    );
+    assert!(text.contains(&block), "artifacts.yml carries its group");
+    for (with, names) in [
+        (
+            "concurrency:\n  group: artifacts-${{ github.run_id }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+            "concurrency group",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\n"),
+            "concurrency group",
+        ),
+        (
+            &format!("concurrency:\n  group: {ARTIFACTS_GROUP}\n  cancel-in-progress: true\n"),
+            "cancel-in-progress",
+        ),
+    ] {
+        let problems = artifacts_problems(&text.replace(&block, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_plan_job_if_is_pinned_whole_and_its_inputs_are_pinned() {
+    // Catches: one `&&` turned into `||` (every substring of the condition stays in the text),
+    // the plan reading another commit than the run built, a freeze that is not passed on or
+    // not read from the repository variable, and a group that does not need a push from this
+    // repository.
+    let text = text_of("release.yml");
+    for (replace, with, names) in [
+        (
+            "event == 'push' && github.event.workflow_run.head_branch == 'main'",
+            "event == 'push' || github.event.workflow_run.head_branch == 'main'",
+            "plan: `if` is not",
+        ),
+        (
+            "github.event_name == 'workflow_run' && github.event.workflow_run.conclusion",
+            "github.event_name == 'workflow_run' || github.event.workflow_run.conclusion",
+            "plan: `if` is not",
+        ),
+        (
+            "ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}",
+            "ref: ${{ inputs.commit }}",
+            "plan: checkout ref",
+        ),
+        (
+            "COMMIT: ${{ github.event.workflow_run.head_sha }}",
+            "COMMIT: ${{ github.sha }}",
+            "plan: env COMMIT",
+        ),
+        (" --freeze \"$FREEZE\"", "", "plan: --freeze"),
+        (
+            "FREEZE: ${{ vars.RELEASE_FREEZE }}",
+            "FREEZE: ''",
+            "plan: env FREEZE",
+        ),
+        (
+            " && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) && 'main'",
+            ") && 'main'",
+            "concurrency group",
+        ),
+    ] {
+        assert!(text.contains(replace), "{replace:?} is not in release.yml");
+        let problems = release_problems(&text.replace(replace, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} must name {names:?}: {problems:?}"
         );
     }
 }
@@ -574,10 +743,10 @@ fn a_release_path_workflow_without_the_group_or_that_cancels_is_named_by_the_lin
 }
 
 #[test]
-fn the_release_path_workflows_listed_exist() {
-    // Catches: a name in the list that matches no file, which would make the check above
-    // vacuous for it.
-    for file in RELEASE_PATH_WORKFLOWS {
+fn every_exempt_workflow_exists_and_says_why() {
+    // Catches: an exemption left behind by a deleted file, and one without a reason.
+    for (file, reason) in RELEASE_EXEMPT {
         text_of(file);
+        assert!(!reason.trim().is_empty(), "{file}");
     }
 }

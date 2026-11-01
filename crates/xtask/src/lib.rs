@@ -241,6 +241,8 @@ enum ReleaseVerb {
     },
     /// The same answer for a run started by hand, with its own tag and commit.
     Manual {
+        #[arg(long)]
+        repo: String,
         /// `v<major>.<minor>.<patch>`.
         #[arg(long)]
         tag: String,
@@ -251,6 +253,8 @@ enum ReleaseVerb {
         note: String,
         #[arg(long)]
         output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
     },
     /// `dir` holds exactly the assets of the commit, each tarball with its bundle.
     Check {
@@ -443,11 +447,20 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             scratch,
         }) => release::check_binary(&dir, &tag, &commit, &scratch, build_commit::run_version),
         Verb::Release(ReleaseVerb::Manual {
+            repo,
             tag,
             commit,
             note,
             output,
-        }) => release::manual(&tag, &commit, &note, output.as_deref()),
+            gh,
+        }) => release::manual(
+            &release::RealGh(gh),
+            &repo,
+            &tag,
+            &commit,
+            &note,
+            output.as_deref(),
+        ),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {
             dir,

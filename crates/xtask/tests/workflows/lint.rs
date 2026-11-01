@@ -489,18 +489,39 @@ fn runs(job: Option<&Node>) -> Vec<&str> {
     }
 }
 
-/// The workflows on the release path, each of which must sit in the one release group: the
-/// release now, and the farm deploy when it is added to this list.
-pub const RELEASE_PATH_WORKFLOWS: &[&str] = &["release.yml"];
+/// Workflows that look like the release path to [`discovery_problems`] (or are named for it)
+/// and are outside the release group on purpose: the file and the reason. A reason is required.
+pub const RELEASE_EXEMPT: &[(&str, &str)] = &[(
+    "artifacts.yml",
+    "builds and attests one commit and never tags, publishes or deploys; its own per-commit group",
+)];
 
-/// The group every release-path workflow is in (the expression kbf's release.yml uses): a run
-/// that succeeded joins `release-main`; any other takes a group of its own, so it cannot
-/// replace the release that is waiting.
-pub const RELEASE_GROUP: &str =
-    "release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}";
+/// The group every release-path workflow is in: a run that succeeded for a push to this
+/// repository joins `release-main`; any other takes a group of its own, so it cannot replace
+/// the release that is waiting. kbf's expression is
+/// `release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}`;
+/// this one is stricter: a pull request from a fork's branch named main also matches
+/// `branches: [main]` of `workflow_run`, and would take the one pending slot.
+pub const RELEASE_GROUP: &str = "release-${{ (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) && 'main' || github.run_id }}";
 
-/// One line per way the workflow `file` (of [`RELEASE_PATH_WORKFLOWS`]) is not in the shared
-/// release group without cancelling.
+/// The group of artifacts.yml: one per commit (a pull request: per ref), outside the release
+/// group because it only builds and attests.
+pub const ARTIFACTS_GROUP: &str =
+    "artifacts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}";
+
+/// A push run of artifacts.yml is never cancelled; a pull request's newer run replaces its older.
+pub const ARTIFACTS_CANCEL: &str = "${{ github.event_name == 'pull_request' }}";
+
+/// One line per release-path workflow of `files` (name, text) that is neither in the release
+/// group without cancelling nor on `exempt` with a reason, and per exempt entry that has no
+/// reason or names no file. A workflow is on the release path when it can tag, publish or
+/// deploy: `contents: write`, `gh release`, a `git tag` or a tag push, a farm deploy.
+/// `id-token: write` with attest actions alone is not.
+pub fn discovery_problems(_files: &[(String, String)], _exempt: &[(&str, &str)]) -> Vec<String> {
+    vec!["not written".to_owned()]
+}
+
+/// One line per way the workflow `file` is not in the shared release group without cancelling.
 pub fn concurrency_problems(file: &str, text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
