@@ -32,7 +32,7 @@ rename or move that file. Verify a file with:
 ```
 gh attestation verify <file> --repo komira-ai/tierstore \
   --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-  --source-ref refs/heads/main --source-digest <commit>
+  --source-ref refs/heads/main --source-digest <commit> --deny-self-hosted-runners
 ```
 
 ## Cutting a release

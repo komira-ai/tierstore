@@ -16,7 +16,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
     <p>Check the tarball against the workflow of this repository that signed it:</p>
     <div class="code"><pre><span class="p">$</span> gh attestation verify tierstore-&lt;commit&gt;-linux-x86_64.tar.gz --repo komira-ai/tierstore \
     --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-    --source-ref refs/heads/main --source-digest &lt;commit&gt;</pre></div>
+    --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
     <p><code>&lt;commit&gt;</code> is the full SHA in the tarball's name; <code>--source-digest</code> makes the check prove the build came from that commit, not only from the main workflow. For an offline check use the <code>.sigstore.json</code> bundle of the tarball. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
   </li>
   <li>
