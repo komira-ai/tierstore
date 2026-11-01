@@ -3,7 +3,7 @@
 //! The directory is opened once, with `O_DIRECTORY | O_NOFOLLOW`, and every check is made on
 //! that descriptor: it must be a directory owned by the hook's own user and group with mode
 //! exactly 0750 (the group, which holds the service account, may read and search it, and nobody
-//! may write to it but the hook), and the service account must be listed in that group. Every
+//! may write to it but the hook), and the service account must be in that group: its primary group, or listed in it. Every
 //! later open, the lock file, `state.json` and its temporary file, the rename and the sync, is
 //! made relative to that descriptor, so a swap of the path after the check changes nothing.
 //! The record must be a regular file of the hook's user that no group or others can write. The
@@ -46,7 +46,8 @@ pub struct Account {
     pub group: u32,
     /// The name of the service account, which must be a member of `group`.
     pub service: String,
-    /// The file that lists the groups' members (`/etc/group`, under the host's root).
+    /// The file that lists the groups' members (`/etc/group`, under the host's root); the
+    /// `passwd` file that gives the primary groups is read beside it.
     pub group_file: PathBuf,
 }
 
@@ -85,6 +86,17 @@ fn members_of(text: &str, gid: u32) -> impl Iterator<Item = &str> {
             (id.parse() == Ok(gid)).then_some(members)
         })
         .flat_map(|members| members.split(','))
+}
+
+/// The primary group of the account `name` in the text of a passwd file
+/// (`name:password:uid:gid:...`).
+fn primary_group(text: &str, name: &str) -> Option<u32> {
+    text.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next() == Some(name))
+            .then(|| fields.nth(2)?.parse().ok())
+            .flatten()
+    })
 }
 
 impl StateFiles {
@@ -160,7 +172,9 @@ impl StateFiles {
     }
 
     /// Whether the service account is a member of the directory's group: the service reaches the
-    /// slot links through that membership.
+    /// slot links through that membership. It is a member when the group is its primary group
+    /// (the `gid` field of its line in `passwd`, next to the group file) or when the group's
+    /// member list names it. Only those two files are read, not the name service switch.
     fn check_service(&self) -> Result<(), Fault> {
         let file = &self.account.group_file;
         let text = fs::read_to_string(file)
@@ -169,10 +183,18 @@ impl StateFiles {
         if members_of(&text, self.account.group).any(|member| member == service) {
             return Ok(());
         }
+        let passwd = file.with_file_name("passwd");
+        let primary = fs::read_to_string(&passwd)
+            .ok()
+            .and_then(|lines| primary_group(&lines, service));
+        if primary == Some(self.account.group) {
+            return Ok(());
+        }
         Err(format!(
-            "the service account {service} is not a member of group {} in {}",
+            "the service account {service} is not a member of group {} in {} and its primary group in {} is not that group",
             self.account.group,
-            file.display()
+            file.display(),
+            passwd.display()
         )
         .into())
     }

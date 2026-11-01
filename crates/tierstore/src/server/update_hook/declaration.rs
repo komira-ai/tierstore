@@ -34,26 +34,49 @@ pub fn unit_name(port: u16) -> String {
 
 /// Paths that are never a record directory, whole: the root and the directories every other
 /// path of the host sits under.
-const RESERVED: [&str; 3] = ["/", "/var", "/var/lib"];
+/// The updater's own directories, whole (what it keeps under them is its and the hooks').
+const RESERVED: [&str; 5] = [
+    "/",
+    "/var",
+    "/var/lib",
+    "/var/lib/updater",
+    "/var/lib/updater/hooks",
+];
 
 /// Trees that are never a record directory, nor anything under them: system and virtual
 /// directories and the service's own cache and state.
-const RESERVED_TREES: [&str; 14] = [
+const RESERVED_TREES: [&str; 20] = [
     "/bin",
     "/boot",
     "/dev",
     "/etc",
+    "/home",
     "/lib",
     "/lib32",
     "/lib64",
+    "/opt",
     "/proc",
+    "/root",
     "/run",
     "/sbin",
     "/sys",
+    "/tmp",
     "/usr",
     "/var/cache",
     "/var/lib/tierstore",
+    "/var/log",
+    "/var/tmp",
 ];
+
+/// Whether every component of `path` (already plain) is one a service manager reads as a path
+/// and not as a prefix (`-`, `+`, `!`), and nothing in it is whitespace or a control character.
+fn is_clean(path: &Path) -> bool {
+    let text = path.to_string_lossy();
+    !text.chars().any(|c| c.is_whitespace() || c.is_control())
+        && text
+            .split('/')
+            .all(|part| !part.starts_with(['-', '+', '!']))
+}
 
 /// Whether `path` (already plain) is one the hook must not use as its record directory.
 fn is_reserved(path: &Path) -> bool {
@@ -86,7 +109,9 @@ pub enum DeclarationError {
     #[error("hook.units must be exactly the slot units of the two health ports")]
     Units,
     /// `state_dir` is not an absolute path of plain components.
-    #[error("state_dir must be an absolute path of plain components")]
+    #[error(
+        "state_dir must be an absolute path of plain components: no whitespace, and no component starting with - + or !"
+    )]
     NotPlain,
     /// `state_dir` is a path the hook must never use as its record directory.
     #[error("state_dir {0:?} is a reserved path")]
@@ -142,7 +167,7 @@ impl Declaration {
         if listed != wanted {
             return Err(DeclarationError::Units);
         }
-        if !is_plain(&wire.state_dir) {
+        if !is_plain(&wire.state_dir) || !is_clean(&wire.state_dir) {
             return Err(DeclarationError::NotPlain);
         }
         if is_reserved(&wire.state_dir) {

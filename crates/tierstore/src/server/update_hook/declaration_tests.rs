@@ -132,3 +132,76 @@ fn a_reserved_state_directory_is_refused() {
         assert!(with(dir).is_ok(), "{dir}");
     }
 }
+
+/// Asserts that a record directory with whitespace anywhere in it, or with a component that
+/// starts with `-`, `+` or `!` (which systemd reads as a prefix of a path), is refused as not
+/// plain, and that a hyphen, plus or bang inside a component is not.
+#[test]
+fn a_state_directory_with_whitespace_or_a_prefix_character_is_refused() {
+    let with = |dir: &str| {
+        Declaration::parse(&DECLARATION.replace("/var/lib/updater/hooks/tierstore", dir))
+    };
+    for dir in [
+        "/srv/a b",
+        "/srv/ab ",
+        "/ srv/ab",
+        "/srv/a\\tb",
+        "/srv/a\\nb",
+        "/srv/-hook",
+        "/srv/+hook",
+        "/srv/!hook",
+        "/-srv/hook",
+        "/srv/ok/-x/y",
+        "/srv/ok/+x",
+        "/srv/ok/!x/y",
+        "/srv/./hook",
+        "/srv/hook/",
+        "/srv//hook",
+    ] {
+        let err = with(dir).unwrap_err();
+        assert!(matches!(err, DeclarationError::NotPlain), "{dir}");
+    }
+    for dir in ["/srv/a-b", "/srv/a+b", "/srv/a!b", "/srv/a.b"] {
+        assert!(with(dir).is_ok(), "{dir}");
+    }
+}
+
+/// Asserts that the user's and the system's data directories and logs (`/root`, `/home`, `/tmp`,
+/// `/var/tmp`, `/var/log`, `/opt`), the updater's own directories, and a directory that holds a
+/// reserved one are refused, and that their neighbours are not.
+#[test]
+fn the_home_temporary_log_and_updater_directories_are_reserved() {
+    let with = |dir: &str| {
+        Declaration::parse(&DECLARATION.replace("/var/lib/updater/hooks/tierstore", dir))
+    };
+    for dir in [
+        "/root",
+        "/root/x",
+        "/home",
+        "/home/u/x",
+        "/tmp",
+        "/tmp/x",
+        "/var/tmp",
+        "/var/tmp/x",
+        "/var/log",
+        "/var/log/x",
+        "/opt",
+        "/opt/x",
+        "/var/lib/updater",
+        "/var/lib/updater/hooks",
+    ] {
+        let err = with(dir).unwrap_err();
+        assert!(matches!(err, DeclarationError::Reserved(_)), "{dir}");
+    }
+    for dir in [
+        "/var/lib/updater/hooks/tierstore",
+        "/rootx",
+        "/homes/x",
+        "/tmpx",
+        "/optional",
+        "/var/tmpx",
+        "/var/logs/x",
+    ] {
+        assert!(with(dir).is_ok(), "{dir}");
+    }
+}
