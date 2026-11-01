@@ -117,7 +117,7 @@ How the cache behaves is in [operations](operations.md#a-build-node). The file i
 
 | Key | Flag | Type, default | What |
 |---|---|---|---|
-| `server.listen` | `--listen` | address or list of addresses, required | where the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz` are served. On main, not in v0.0.41: a list (the flag given again for each address) is served on every address by one server, with one drain and one limit on connections, and a start that cannot bind every address is refused. To listen on the wildcard of both families give `0.0.0.0:<port>` and `[::]:<port>`: an IPv6 address is bound for IPv6 only, so the two do not clash. An address given twice is refused, naming the key |
+| `server.listen` | `--listen` | address or list of addresses, required | where the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz` are served. On main, not in v0.0.41: when the file has a `[local_cache]` table (a build node), the server also binds 127.0.0.1 on the port of each listen address, once for each distinct port, so that processes on the node reach it at `http://127.0.0.1:<port>`; the start is refused, naming loopback and the port, if that cannot be bound. Nothing is added for a port that already has `127.0.0.1` or the IPv4 wildcard `0.0.0.0` on it (the wildcard covers loopback, and a second bind would be refused), and an IPv6 address adds IPv4 loopback only, never `::1`. Without `[local_cache]` exactly the listed addresses are bound On main, not in v0.0.41: a list (the flag given again for each address) is served on every address by one server, with one drain and one limit on connections, and a start that cannot bind every address is refused. To listen on the wildcard of both families give `0.0.0.0:<port>` and `[::]:<port>`: an IPv6 address is bound for IPv6 only, so the two do not clash. An address given twice is refused, naming the key |
 | `server.proxy_id` | `--proxy-id` | string, required | names this process's journal and lease in the hot tier; keep it across restarts and give each process over the same tiers its own |
 | `server.bucket` | `--bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
 | `server.region` | `--region` | string, `us-east-1` | the region in the credential scope of a request's signature (not the tiers' regions) |
@@ -174,7 +174,7 @@ The water marks are percents from 1 to 100. The start refuses `low_water` at or 
 
 ## `[local_cache]`
 
-The read cache of a build node. A GET or HEAD of a key that a `[[policy]]` with `cache = true` holds is answered from the directory and filled from the upstream on a miss; every other call to the front but GET and HEAD is refused 403, unless `write_through` is `true`. The table has no flag.
+The read cache of a build node. On main, not in v0.0.41, a build node also serves its S3 port on 127.0.0.1 (see `server.listen`). A GET or HEAD of a key that a `[[policy]]` with `cache = true` holds is answered from the directory and filled from the upstream on a miss; every other call to the front but GET and HEAD is refused 403, unless `write_through` is `true`. The table has no flag.
 
 | Key | Type, default | What |
 |---|---|---|
