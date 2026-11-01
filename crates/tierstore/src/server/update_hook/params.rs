@@ -11,7 +11,13 @@
 //!   `nf_conntrack_count` may reach before `prepare` defers;
 //! - `updater.staged_release` and `updater.target_version` (required, written by the updater);
 //! - `updater.promotion_ceiling_secs` (optional): read, and never a reason to fail: the updater
-//!   applies the ceiling itself.
+//!   applies the ceiling itself;
+//! - `mode` (optional): a string, and `"restart"` is the one value accepted: `prepare` then
+//!   chooses a plain restart even when both releases could hand over. Any other string, and any
+//!   other type, is refused.
+//!   Packaging sets it on a storage node whose hot tier is a `dir:` tier, where the lease's
+//!   compare-and-swap is atomic within one process only, so two instances must never run side
+//!   by side.
 //!
 //! Any other key is ignored when it is a scalar, so an older hook keeps working when the updater
 //! adds a reserved key. The reserved keys contain a dot, so in the file they are quoted keys.
@@ -20,6 +26,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::plain::is_plain;
+use super::record::Mode;
 
 /// The key of the wait for the new instance to take the cache lock.
 pub const PROMOTION_BOUND_KEY: &str = "promotion_bound_secs";
@@ -33,6 +40,10 @@ pub const PROMOTION_CEILING_KEY: &str = "updater.promotion_ceiling_secs";
 pub const STAGED_RELEASE_KEY: &str = "updater.staged_release";
 /// The reserved key of the version being installed.
 pub const TARGET_VERSION_KEY: &str = "updater.target_version";
+/// The key that forces a plain restart.
+pub const MODE_KEY: &str = "mode";
+/// The one value [`MODE_KEY`] takes.
+pub const RESTART_MODE: &str = "restart";
 
 /// The longest wait or retry delay a key may name, in seconds: a day.
 pub const MAX_SECS: u64 = 86_400;
@@ -80,6 +91,9 @@ pub enum ParamsError {
     /// The target version holds a character a version does not.
     #[error("params key {0:?} is not a version of letters, digits and . _ + ~ -")]
     BadVersion(&'static str),
+    /// `mode` is not the string `"restart"`.
+    #[error("params key {0:?} must be the string \"restart\", the one mode it can force")]
+    BadMode(&'static str),
 }
 
 /// What the hook reads of its params file.
@@ -97,6 +111,9 @@ pub struct Params {
     pub staged_release: PathBuf,
     /// The version being installed.
     pub target_version: String,
+    /// The mode the declaration forces: [`Mode::Restart`], or `None` when `prepare` chooses by
+    /// the capabilities of the two releases.
+    pub mode: Option<Mode>,
 }
 
 impl Params {
@@ -145,6 +162,11 @@ impl Params {
         if !is_version(&target_version) {
             return Err(ParamsError::BadVersion(TARGET_VERSION_KEY));
         }
+        let mode = match table.get(MODE_KEY) {
+            None => None,
+            Some(toml::Value::String(text)) if text == RESTART_MODE => Some(Mode::Restart),
+            Some(_) => return Err(ParamsError::BadMode(MODE_KEY)),
+        };
         Ok(Params {
             promotion_bound_secs: bound,
             defer_retry_secs: defer,
@@ -152,6 +174,7 @@ impl Params {
             promotion_ceiling_secs: number(&table, PROMOTION_CEILING_KEY)?,
             staged_release,
             target_version,
+            mode,
         })
     }
 }

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{Params, ParamsError};
+use super::{Mode, Params, ParamsError};
 
 const GOOD: &str = "promotion_bound_secs = 900\n\
 \"updater.staged_release\" = \"/var/lib/updater/releases/tierstore/abc\"\n\
@@ -33,6 +33,7 @@ fn the_required_keys_are_read_and_the_rest_default() {
         PathBuf::from("/var/lib/updater/releases/tierstore/abc")
     );
     assert_eq!(params.target_version, "0.4.0");
+    assert_eq!(params.mode, None);
 }
 
 /// Asserts that the optional keys are read when given. It would catch a default that wins over
@@ -90,4 +91,30 @@ fn a_params_file_is_read_from_disk() {
     assert_eq!(Params::read(&path).unwrap().target_version, "0.4.0");
     let missing = Params::read(&dir.path().join("none.toml")).unwrap_err();
     assert!(matches!(missing, ParamsError::Read(_)));
+}
+
+/// Asserts that `mode = "restart"` is read as a forced restart, and that the key is the one string
+/// a declaration may set: another word, another case, a number, a boolean and an array are each
+/// refused with a message that names the key. It would catch a hook that hands over on a host
+/// whose packaging asked for a restart because a typo was read as "no preference".
+#[test]
+fn mode_restart_is_the_one_value_of_the_mode_key() {
+    let params = Params::parse(&with("mode = \"restart\"\n")).unwrap();
+    assert_eq!(params.mode, Some(Mode::Restart));
+    for bad in [
+        "mode = \"handover\"\n",
+        "mode = \"Restart\"\n",
+        "mode = \"\"\n",
+        "mode = 1\n",
+        "mode = true\n",
+    ] {
+        let why = refused(&with(bad));
+        assert!(why.contains("params key \"mode\""), "{bad}: {why}");
+        assert!(
+            why.contains("must be the string \"restart\""),
+            "{bad}: {why}"
+        );
+    }
+    let why = refused(&with("mode = [\"restart\"]\n"));
+    assert!(why.contains("\"mode\" is not a scalar"), "{why}");
 }

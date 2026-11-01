@@ -32,8 +32,8 @@ use super::config_testing::DEFAULTS;
 const NOT_YET: &str = "Not in a release yet";
 
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
-/// `gh attestation verify` command of the install guide), and the flag of the `update-hook` verb,
-/// which is read before the server's flags and is not one of them.
+/// `gh attestation verify` command of the install guide), and the flags of the `update-hook` verb,
+/// which are read before the server's flags and are not among them.
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
     "--repo",
@@ -43,6 +43,10 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--deny-self-hosted-runners",
     "--bundle",
     "--params",
+    "--root",
+    "--root-uid",
+    "--nft",
+    "--systemctl",
 ];
 
 /// Flags of the binary the pages need not name.

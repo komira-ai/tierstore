@@ -1,8 +1,9 @@
 //! The command line of the hook.
 
 use std::ffi::OsString;
+use std::path::Path;
 
-use super::{ArgsError, Invocation, Step};
+use super::{ArgsError, HostArgs, Invocation, Step};
 
 fn parse(words: &[&str]) -> Result<Invocation, ArgsError> {
     Invocation::parse(words.iter().map(OsString::from))
@@ -83,4 +84,103 @@ fn a_wrong_command_line_is_refused() {
     for (words, why) in cases {
         assert_eq!(parse(words), Err(why), "{words:?}");
     }
+}
+
+/// Asserts that without a flag of the host the host's own defaults hold (the root `/`, root's
+/// uid, `/usr/sbin/nft`, `/usr/bin/systemctl`), and that the four flags are read before the step
+/// (where the updater's `hook_args` go), after it, and with `restore`, whose other arguments are
+/// refused. It would catch a flag taken for the step or the artifact, or a default that is not
+/// the host's.
+#[test]
+fn the_flags_of_the_host_are_read_around_the_step() {
+    let bare = parse(&["restore"]).unwrap();
+    assert_eq!(bare.host, HostArgs::default());
+    assert_eq!(bare.host.root, Path::new("/"));
+    assert_eq!(bare.host.root_uid, 0);
+    assert_eq!(bare.host.nft, Path::new("/usr/sbin/nft"));
+    assert_eq!(bare.host.systemctl, Path::new("/usr/bin/systemctl"));
+    let given = parse(&[
+        "--root",
+        "/scratch",
+        "--root-uid",
+        "1000",
+        "verify",
+        "--params",
+        "/p.toml",
+        "--nft",
+        "/fake/nft",
+        "--systemctl",
+        "/fake/systemctl",
+    ])
+    .unwrap();
+    assert_eq!(given.step, Step::Verify);
+    assert_eq!(given.params.as_deref(), Some(Path::new("/p.toml")));
+    assert_eq!(
+        given.host,
+        HostArgs {
+            root: "/scratch".into(),
+            root_uid: 1000,
+            nft: "/fake/nft".into(),
+            systemctl: "/fake/systemctl".into(),
+        }
+    );
+    let restore = parse(&["restore", "--root", "/scratch"]).unwrap();
+    assert_eq!(restore.host.root, Path::new("/scratch"));
+    let prepare = parse(&[
+        "prepare",
+        "--nft",
+        "/fake/nft",
+        "/releases/new",
+        "--params",
+        "/p.toml",
+    ])
+    .unwrap();
+    assert_eq!(
+        prepare.artifact.as_deref(),
+        Some(Path::new("/releases/new"))
+    );
+    assert_eq!(prepare.host.nft, Path::new("/fake/nft"));
+}
+
+/// Asserts each refusal of a flag of the host, and its words. It would catch a hook that runs
+/// with a relative program (found through a search path), a root spelt with `..`, or a flag given
+/// twice of which one silently wins.
+#[test]
+fn a_wrong_flag_of_the_host_is_refused() {
+    let cases: [(&[&str], ArgsError); 9] = [
+        (&["restore", "--root"], ArgsError::MissingValue("--root")),
+        (&["--root", "/a"], ArgsError::MissingStep),
+        (
+            &["restore", "--root", "/a", "--root", "/b"],
+            ArgsError::DuplicateFlag("--root"),
+        ),
+        (&["restore", "--nft", "nft"], ArgsError::NotPlain("--nft")),
+        (
+            &["restore", "--systemctl", "/usr/bin/../bin/systemctl"],
+            ArgsError::NotPlain("--systemctl"),
+        ),
+        (&["restore", "--root", "/a/"], ArgsError::NotPlain("--root")),
+        (&["restore", "--root-uid", "-1"], ArgsError::BadUid),
+        (&["restore", "--root-uid", "root"], ArgsError::BadUid),
+        (
+            &["restore", "--root-uid", "0", "--root-uid", "0"],
+            ArgsError::DuplicateFlag("--root-uid"),
+        ),
+    ];
+    for (words, why) in cases {
+        assert_eq!(parse(words), Err(why), "{words:?}");
+    }
+    assert_eq!(
+        ArgsError::MissingValue("--nft").to_string(),
+        "--nft needs a value"
+    );
+    assert_eq!(
+        ArgsError::NotPlain("--root").to_string(),
+        "--root must be an absolute path of plain components"
+    );
+    assert_eq!(
+        ArgsError::DuplicateFlag("--root").to_string(),
+        "--root given twice"
+    );
+    assert!(ArgsError::BadUid.to_string().contains("--root-uid"));
 }

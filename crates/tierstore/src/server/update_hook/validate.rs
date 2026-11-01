@@ -37,6 +37,14 @@ pub enum Invalid {
     /// The staged release lies in the state directory.
     #[error("the staged release lies in the state directory")]
     Staged,
+    /// `mode_reason` names the other mode than `mode`.
+    #[error("mode_reason {reason} does not go with mode {mode}")]
+    ModeReason {
+        /// The record's reason.
+        reason: &'static str,
+        /// The record's mode.
+        mode: &'static str,
+    },
 }
 
 fn is_boot_id(id: &str) -> bool {
@@ -95,6 +103,14 @@ pub fn validate(record: &Record, declaration: &Declaration) -> Result<(), Invali
     }
     if record.boot_id.as_deref().is_some_and(|id| !is_boot_id(id)) {
         return Err(Invalid::BootId);
+    }
+    if let Some(reason) = record.mode_reason
+        && reason.mode() != record.mode
+    {
+        return Err(Invalid::ModeReason {
+            reason: reason.as_str(),
+            mode: record.mode.as_str(),
+        });
     }
     Ok(())
 }

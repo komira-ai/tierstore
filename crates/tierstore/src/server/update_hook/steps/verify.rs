@@ -39,12 +39,14 @@ fn wait_promoted(c: &Ctx<'_, '_>, port: u16, bound_secs: u64) -> Result<bool, Do
     }
 }
 
-/// A success that says whether the promotion is still pending.
+/// A success that says whether the promotion is still pending. The detail says that it is, and
+/// not who holds the cache lock: no instance says that, and after the commit the previous one
+/// may be gone while the lock is still not taken.
 fn observed(promoted: bool, port: u16) -> Done {
     let mut done = Done::ok(if promoted {
         format!("{port} is read-write")
     } else {
-        format!("{port} serves read-only: the previous instance holds the cache lock")
+        format!("{port} serves read-only: the promotion is pending")
     });
     done.report.promotion_pending = !promoted;
     done

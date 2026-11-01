@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use rustix::process::{getegid, geteuid};
 
-use super::args::Invocation;
+use super::args::{HostArgs, Invocation};
 use super::declaration::Declaration;
 use super::machine::{
     Account, LoopbackInstances, MonotonicClock, NftTool, Runner, SlotLinks, StateFiles, SystemHost,
@@ -29,10 +29,6 @@ pub(super) const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest an instance may leave a request unanswered.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// The user that must own the binary of a staged release: the updater's tree is root's.
-pub(super) const RELEASE_OWNER: u32 = 0;
-/// The user that must own the declaration: the updater's file is root's.
-pub(super) const DECLARATION_OWNER: u32 = 0;
 
 /// Where the machine is and who owns its state directory.
 pub(super) struct Config<'a> {
@@ -46,6 +42,10 @@ pub(super) struct Config<'a> {
     pub release_owner: u32,
     /// The user id that must own the declaration.
     pub declaration_owner: u32,
+    /// The `nft` program.
+    pub nft: PathBuf,
+    /// The `systemctl` program.
+    pub systemctl: PathBuf,
     /// What runs the programs.
     pub runner: &'a dyn Runner,
 }
@@ -78,8 +78,9 @@ pub(super) fn run_on(
             "the declaration names no service account (uid)",
         );
     };
-    let nft = NftTool::new(runner, NFT_TIMEOUT);
-    let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT);
+    let nft = NftTool::new(runner, NFT_TIMEOUT).with_program(&config.nft.to_string_lossy());
+    let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT)
+        .with_program(&config.systemctl.to_string_lossy());
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
     let clock = MonotonicClock::new();
     let account = Account {
@@ -102,21 +103,29 @@ pub(super) fn run_on(
     run_step(invocation.step, params, &ports)
 }
 
-/// The machine this process runs on: the host's own files, the state directory owned by the
-/// user the hook runs as (its own account, which owns the directory), and a staged release owned
-/// by root.
-pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
+/// The machine this process runs on: the host's own files under the root the command line
+/// names (`/` unless `--root` says otherwise), the state directory owned by the user the hook runs
+/// as (its own account, which owns the directory), a declaration and a staged release owned by
+/// root (or the user `--root-uid` names), and the programs `--nft` and `--systemctl` name (the
+/// host's own unless they say otherwise).
+pub(super) fn system_config<'a>(runner: &'a dyn Runner, host: &HostArgs) -> Config<'a> {
     Config {
-        root: PathBuf::from("/"),
+        root: host.root.clone(),
         owner: geteuid().as_raw(),
         group: getegid().as_raw(),
-        release_owner: RELEASE_OWNER,
-        declaration_owner: DECLARATION_OWNER,
+        release_owner: host.root_uid,
+        declaration_owner: host.root_uid,
+        nft: host.nft.clone(),
+        systemctl: host.systemctl.clone(),
         runner,
     }
 }
 
 /// Runs the step on the host the process is running on.
 pub(super) fn on_this_machine(invocation: &Invocation, params: Option<&Params>) -> Done {
-    run_on(&system_config(&SystemRunner), invocation, params)
+    run_on(
+        &system_config(&SystemRunner, &invocation.host),
+        invocation,
+        params,
+    )
 }

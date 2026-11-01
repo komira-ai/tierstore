@@ -32,6 +32,7 @@ pub(super) fn run(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
     // The record is cleared last: a crash before it re-runs every part above.
     let mut back = Record::idle(current);
     back.mode = record.mode;
+    back.mode_reason = record.mode_reason;
     c.save(&back)?;
     *record = back;
     Ok(Done::ok(format!(

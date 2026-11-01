@@ -1,7 +1,7 @@
 //! `cleanup`.
 
 use super::testing::{Fake, NEWER};
-use super::{Class, Marker, Outcome, Reason, Record, Step, redirect_ruleset};
+use super::{Class, Marker, ModeReason, Outcome, Reason, Record, Step, redirect_ruleset};
 
 const PRIOR: [Step; 3] = [Step::Prepare, Step::Cutover, Step::Verify];
 
@@ -163,7 +163,14 @@ fn cleanup_after_a_reboot_refuses_and_changes_nothing() {
         [9301]
     );
     fake.advance(&[Step::Rollback]);
-    assert_eq!(fake.record(), Record::idle(9301));
+    // Back to no update in flight; the record still says why the last update chose its mode.
+    assert_eq!(
+        fake.record(),
+        Record {
+            mode_reason: Some(ModeReason::HandoverCapable),
+            ..Record::idle(9301)
+        }
+    );
 }
 
 /// Asserts each thing `cleanup` looks at again, one at a time, with everything else as `verify`

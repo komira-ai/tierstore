@@ -1,7 +1,7 @@
 //! A record, a declaration or a params file that cannot be trusted changes nothing.
 
 use super::testing::{DECLARATION, Fake, NEW};
-use super::{Class, Marker, Outcome, Params, Reason, Record, Step, run_step};
+use super::{Class, Marker, ModeReason, Outcome, Params, Reason, Record, Step, run_step};
 
 const ALL: [Step; 6] = Step::ALL;
 
@@ -146,7 +146,14 @@ fn a_step_that_needs_the_params_file_refuses_without_it() {
         run_step(Step::Rollback, None, &fake.ports()).outcome,
         Outcome::Success
     );
-    assert_eq!(fake.record(), Record::idle(9301));
+    // Back to no update in flight; the record still says why the last update chose its mode.
+    assert_eq!(
+        fake.record(),
+        Record {
+            mode_reason: Some(ModeReason::HandoverCapable),
+            ..Record::idle(9301)
+        }
+    );
     assert!(!fake.record().markers.contains(&Marker::Swapped));
 }
 
