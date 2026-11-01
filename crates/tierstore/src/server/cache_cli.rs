@@ -70,7 +70,6 @@ const PASS_INTERVAL: Duration = Duration::from_secs(10);
 /// holds it checks that the lock file is still the file at the path.
 const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Asks the upstream a HEAD of a key that is not there: any answer but 404 is a problem.
 /// Binds the S3 front of a build node: every configured address, then the loopback sockets that
 /// [`bind_set`] adds because a local cache is defined.
 ///
@@ -87,6 +86,7 @@ fn bind_cache_s3(
     Ok(listeners)
 }
 
+/// Asks the upstream a HEAD of a key that is not there: any answer but 404 is a problem.
 async fn reach(upstream: &dyn Backend, run: &str, spec: &str) -> Result<(), Error> {
     match upstream.head(&format!("cache-probe/{run}")).await {
         Ok(_) | Err(BackendError::NotFound(_)) => Ok(()),
