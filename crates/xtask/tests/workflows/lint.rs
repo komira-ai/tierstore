@@ -63,6 +63,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         condition: RELEASE_IF,
     },
     Allowed {
+        file: "release.yml",
+        job: "gamma",
+        scope: "id-token",
+        condition: RELEASE_IF,
+    },
+    Allowed {
         file: "advisories.yml",
         job: "advisories",
         scope: "issues",
@@ -257,7 +263,7 @@ const PLAN_IF: &str = "${{ github.ref == 'refs/heads/main' && (github.event_name
 const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}";
 
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
-const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
+const XTASK_VERBS: [&str; 5] = ["--help", "release", "sums", "verify-assets", "deploy-farm"];
 
 fn names(node: Option<&Node>) -> Vec<String> {
     let mut found = node.map(triggers).unwrap_or_default();
@@ -268,8 +274,8 @@ fn names(node: Option<&Node>) -> Vec<String> {
 /// One line per way the text of `release.yml` is not the automatic release chain: started by
 /// the completion of `ci` and `artifacts` on `main` and by hand and by nothing else, one run at
 /// a time and none cancelled, a read-only `plan` job that answers whether and as which tag,
-/// `verify` and `publish` after it (the write scope in `publish` alone), and no step that
-/// builds or signs.
+/// `verify` and `publish` after it (the write scope in `publish` alone), `gamma` after them
+/// (the OIDC token and nothing else that is not read), and no step that builds or signs.
 pub fn release_problems(text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
@@ -303,8 +309,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
     };
     let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
     listed.sort_unstable();
-    if listed != ["plan", "publish", "verify"] {
-        problems.push(format!("jobs are {listed:?}, not plan, verify and publish"));
+    if listed != ["gamma", "plan", "publish", "verify"] {
+        problems.push(format!(
+            "jobs are {listed:?}, not plan, verify, publish and gamma"
+        ));
     }
     for (name, job) in jobs {
         let name = name.as_str().unwrap_or_default();
@@ -312,10 +320,10 @@ pub fn release_problems(text: &str) -> Vec<String> {
         for (scope, level) in permissions {
             let level = level.as_str().unwrap_or_default();
             let writes = level != "read" && level != "none";
-            if writes && name != "publish" {
+            let scope = scope.as_str().unwrap_or_default();
+            if writes && name != "publish" && !(name == "gamma" && scope == "id-token") {
                 problems.push(format!(
-                    "{name}: permissions grant `{}: {level}`; only publish writes",
-                    scope.as_str().unwrap_or_default()
+                    "{name}: permissions grant `{scope}: {level}`; only publish writes (and gamma, the OIDC token)"
                 ));
             }
         }
@@ -398,6 +406,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
     for (name, needs) in [
         ("verify", vec!["plan"]),
         ("publish", vec!["plan", "verify"]),
+        ("gamma", vec!["plan", "publish"]),
     ] {
         let got = names(job(name).and_then(|j| entry(j, "needs")));
         if got != needs {
@@ -408,6 +417,53 @@ pub fn release_problems(text: &str) -> Vec<String> {
             .and_then(Node::as_str);
         if condition != Some(RELEASE_IF) {
             problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
+        }
+    }
+    // The gamma stage holds the run's OIDC token and nothing else that is not read, and runs
+    // in the `release` environment, the one the coordinator's allow-list names.
+    let gamma = job("gamma");
+    let mut held: Vec<String> = gamma
+        .and_then(|j| entry(j, "permissions"))
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}: {}",
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    held.sort();
+    if held != ["contents: read", "id-token: write"] {
+        problems.push(format!(
+            "gamma: permissions are {held:?}, not contents: read and id-token: write"
+        ));
+    }
+    let environment = gamma
+        .and_then(|j| entry(j, "environment"))
+        .and_then(Node::as_str);
+    if environment != Some("release") {
+        problems.push(format!(
+            "gamma: environment is {environment:?}, not \"release\""
+        ));
+    }
+    // The command: tierstore's own service and the version its hosts report, and none of kbf's
+    // minimums (for another service the services file of the coordinator holds them).
+    match runs(gamma)
+        .into_iter()
+        .find(|r| r.contains("cargo xtask deploy-farm"))
+    {
+        None => problems.push("gamma: no step runs `cargo xtask deploy-farm`".to_owned()),
+        Some(run) => {
+            if !run.contains("--service tierstore") {
+                problems.push("gamma: deploy-farm is not run with --service tierstore".to_owned());
+            }
+            for flag in ["--min-up", "--require-coordinator-current"] {
+                if run.contains(flag) {
+                    problems.push(format!("gamma: deploy-farm is passed {flag}, a kbf flag"));
+                }
+            }
         }
     }
     // The binary of the files about to be published says the tag and the commit, checked in

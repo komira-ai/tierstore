@@ -375,6 +375,38 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
     ),
     ("needs: [plan]\n", "needs: []\n", "verify: needs"),
     ("needs: [plan, verify]", "needs: [verify]", "publish: needs"),
+    ("needs: [plan, publish]", "needs: [plan]", "gamma: needs"),
+    (
+        "needs: [plan, publish]\n    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}",
+        "needs: [plan, publish]\n    if: ${{ github.ref == 'refs/heads/main' }}",
+        "gamma: `if` is not",
+    ),
+    (
+        "--service tierstore",
+        "--service kbf",
+        "gamma: deploy-farm is not run with --service tierstore",
+    ),
+    (
+        "deploy-farm --url",
+        "deploy-farm --min-up-storage 1 --url",
+        "gamma: deploy-farm is passed --min-up",
+    ),
+    (
+        "cargo xtask deploy-farm",
+        "cargo xtask deploy",
+        "gamma: no step runs `cargo xtask deploy-farm`",
+    ),
+    ("    environment: release\n", "", "gamma: environment"),
+    (
+        "      contents: read\n      id-token: write\n",
+        "      contents: write\n      id-token: write\n",
+        "gamma: permissions",
+    ),
+    (
+        "      contents: read\n      id-token: write\n",
+        "      contents: read\n      id-token: write\n      packages: write\n",
+        "gamma: permissions",
+    ),
     (
         "needs.plan.outputs.release == 'true'",
         "true",
