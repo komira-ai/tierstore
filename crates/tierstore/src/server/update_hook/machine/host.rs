@@ -4,13 +4,15 @@
 //! The files are read under a root (`/` on a host) so that a test can give the host a root of
 //! its own.
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use rustix::fs::{Mode, OFlags, open};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, fstat, open, openat, statat};
 use rustix::io::Errno;
 
 use super::super::declaration::DECLARATION_PATH;
@@ -26,6 +28,14 @@ const CONNTRACK: &str = "proc/sys/net/netfilter";
 /// The exit status of a binary that does not know `--capabilities`: the usage error of its
 /// argument parser.
 const UNKNOWN_FLAG: i32 = 2;
+
+/// Why a directory above the declaration was refused.
+enum Parent {
+    /// It is one a non-root account could have changed.
+    Untrusted(String),
+    /// It could not be read.
+    Failed(String),
+}
 
 /// The host, read under `root`.
 pub struct SystemHost<'a> {
@@ -87,6 +97,45 @@ impl<'a> SystemHost<'a> {
         Ok(())
     }
 
+    /// The directory `name` of `parent`, opened without following a link and checked: owned by
+    /// the declaration owner, no group or other write bit. `at` is its path, for messages.
+    fn open_parent(
+        &self,
+        parent: BorrowedFd<'_>,
+        name: &OsStr,
+        at: &Path,
+    ) -> Result<OwnedFd, Parent> {
+        let shown = at.display();
+        let fd = openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| {
+            let link = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Symlink);
+            if link {
+                Parent::Untrusted(format!("{shown} is a symbolic link"))
+            } else {
+                Parent::Failed(format!("{shown}: {errno}"))
+            }
+        })?;
+        let stat = fstat(&fd).map_err(|errno| Parent::Failed(errno.to_string()))?;
+        if stat.st_uid != self.declaration_owner {
+            return Err(Parent::Untrusted(format!(
+                "{shown} is owned by user {}, not {}",
+                stat.st_uid, self.declaration_owner
+            )));
+        }
+        if stat.st_mode & 0o022 != 0 {
+            return Err(Parent::Untrusted(format!(
+                "{shown} can be written by a group or others"
+            )));
+        }
+        Ok(fd)
+    }
+
     fn read(&self, relative: &str) -> Result<String, PortError> {
         let path = self.root.join(relative.trim_start_matches('/'));
         std::fs::read_to_string(&path)
@@ -103,14 +152,51 @@ impl<'a> SystemHost<'a> {
 
 impl Host for SystemHost<'_> {
     /// Reads the declaration, which names what a privileged account acts on, and so must be one
-    /// that only the declaration owner (root, unless set otherwise) could have written: the file
-    /// is opened with `O_NOFOLLOW` (a link is refused) and the opened descriptor, not the path,
-    /// must be a regular file of that owner with no group or other write bit.
+    /// that only the declaration owner (root, unless set otherwise) could have written. Each
+    /// directory above it under the root (`/etc`, `/etc/updater.d`) is opened relative to the
+    /// one before with `O_DIRECTORY | O_NOFOLLOW` and must be owned by that owner with no group
+    /// or other write bit; then the file is opened relative to the last of them with
+    /// `O_NOFOLLOW` (a link is refused) and the opened descriptor, not the path, must be a
+    /// regular file of that owner with no group or other write bit. The root itself is the
+    /// host's own and is not checked.
     fn declaration(&self) -> Result<String, PortError> {
         let path = self.root.join(DECLARATION_PATH.trim_start_matches('/'));
         let shown = path.display();
-        let fd = open(
-            path.as_path(),
+        let untrusted = |why: String| {
+            PortError::failed(
+                KIND,
+                format!("the declaration {shown} is not trusted: {why}"),
+            )
+        };
+        let declared = Path::new(DECLARATION_PATH);
+        let mut at = self.root.clone();
+        let mut dir = open(
+            self.root.as_path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| {
+            PortError::failed(KIND, format!("the host root {}: {errno}", at.display()))
+        })?;
+        for part in declared.parent().into_iter().flat_map(Path::components) {
+            let Component::Normal(name) = part else {
+                continue;
+            };
+            at.push(name);
+            dir = self
+                .open_parent(dir.as_fd(), name, &at)
+                .map_err(|why| match why {
+                    Parent::Untrusted(why) => untrusted(why),
+                    Parent::Failed(text) => PortError::failed(
+                        KIND,
+                        format!("the declaration {shown} cannot be read: {text}"),
+                    ),
+                })?;
+        }
+        let file = declared.file_name().unwrap_or_default();
+        let fd = openat(
+            dir.as_fd(),
+            file,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
@@ -123,12 +209,6 @@ impl Host for SystemHost<'_> {
             PortError::failed(KIND, format!("the declaration {shown} {why}"))
         })?;
         let mut file = File::from(fd);
-        let untrusted = |why: String| {
-            PortError::failed(
-                KIND,
-                format!("the declaration {shown} is not trusted: {why}"),
-            )
-        };
         let meta = file
             .metadata()
             .map_err(|error| PortError::failed(KIND, format!("read {shown}: {error}")))?;

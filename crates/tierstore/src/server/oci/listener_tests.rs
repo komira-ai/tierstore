@@ -15,8 +15,11 @@ use tokio::sync::watch;
 
 use super::listener::{OciLimits, accept_loop};
 use super::test_pki::{ca, ip, leaf};
-use super::{OciFront, OciListener, OciMetrics, OciMode, OciPrefix, acceptor, plain_warning};
+use super::{
+    OciError, OciFront, OciListener, OciMetrics, OciMode, OciPrefix, acceptor, plain_warning,
+};
 use crate::MemoryBackend;
+use crate::server::listen::bind;
 use crate::server::{ACCEPT_PAUSE, Incoming};
 
 /// A source whose first accept fails and whose others never complete; it counts the asks.
@@ -233,4 +236,48 @@ async fn a_plain_listener_binds_off_loopback_and_serves() {
     assert_eq!(secure.mode(), OciMode::Https);
     assert_eq!(OciMode::Http.as_str(), "http");
     assert_eq!(OciMode::Https.as_str(), "https");
+}
+
+/// The address the bind of `addrs` was refused for; the test fails if it was not refused, or for
+/// another reason than a bind.
+async fn refused_at(addrs: &[SocketAddr]) -> SocketAddr {
+    let (front, limits) = plain_front();
+    let bound = OciListener::bind_all(addrs, None, front, limits).await;
+    let Err(OciError::Bind { addr, source }) = bound else {
+        panic!("the bind of {addrs:?} was not refused for a bind");
+    };
+    assert_eq!(source.kind(), io::ErrorKind::AddrInUse, "{addr}");
+    addr
+}
+
+/// Asserts that a front asked for the wildcard of both families on one port, as a hand-over
+/// needs, is refused when one of the two is taken, names the one that is, and keeps neither
+/// socket: with `[::]:P` taken (by a socket that is IPv6 only, so `0.0.0.0:P` is free), and with
+/// `0.0.0.0:P` taken and `[::]:P` asked first. In the second case the IPv6 socket of the front is
+/// bound before the refusal only because it is `IPV6_V6ONLY`: without it the refusal would name
+/// `[::]:P`. It would catch a front that serves on one family when the other cannot be bound
+/// (the redirected connections of the other refused), and an IPv6 socket that holds the IPv4
+/// port too.
+#[tokio::test]
+async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither() {
+    // A host without IPv6 cannot have the two wildcards of a port: the test says so on stderr,
+    // with the reason the system gave, and asserts nothing.
+    if let Err(why) = std::net::TcpListener::bind("[::1]:0") {
+        eprintln!("skipped: this host has no IPv6 loopback ({why}); there is no [::]:P to bind");
+        return;
+    }
+    let at = |text: String| -> SocketAddr { text.parse().expect("an address") };
+
+    let taken = bind(at("[::]:0".to_owned())).expect("the v6 wildcard");
+    let port = taken.local_addr().expect("an address").port();
+    let (v4, v6) = (at(format!("0.0.0.0:{port}")), at(format!("[::]:{port}")));
+    assert_eq!(refused_at(&[v4, v6]).await, v6);
+    drop(bind(v4).expect("the v4 wildcard is free again"));
+    drop(taken);
+
+    let taken = bind(at("0.0.0.0:0".to_owned())).expect("the v4 wildcard");
+    let port = taken.local_addr().expect("an address").port();
+    let (v4, v6) = (at(format!("0.0.0.0:{port}")), at(format!("[::]:{port}")));
+    assert_eq!(refused_at(&[v6, v4]).await, v4);
+    drop(bind(v6).expect("the v6 wildcard is free again"));
 }

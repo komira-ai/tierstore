@@ -89,7 +89,12 @@ pub(super) fn run_on(
         service,
         group_file: config.root.join("etc/group"),
     };
-    let state = StateFiles::new(decl.state_dir.clone(), account);
+    let state = StateFiles::new(
+        config
+            .root
+            .join(decl.state_dir.strip_prefix("/").unwrap_or(&decl.state_dir)),
+        account,
+    );
     let slots = SlotLinks::new(&state);
     let ports = Ports {
         nft: &nft,

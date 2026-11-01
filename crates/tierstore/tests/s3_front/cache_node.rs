@@ -1,16 +1,22 @@
 //! The `tierstore` binary started from the file of a build node: a read cache over an S3
 //! upstream that wants its own key, in a process.
 
+use std::io::{BufRead as _, BufReader};
+use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
+use std::process::{ChildStdout, Command, ExitStatus, Stdio};
+use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
+use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
 use reqwest::Client;
-use rustix::process::Signal;
+use rustix::process::{Pid, Signal, kill_process};
+use tierstore_testkit::reaped::{Reaped, spawn};
 
 use crate::binary::{run, start};
-use crate::files::Files;
+use crate::files::{BIN_KEY_ID, BIN_SECRET, Files};
 
 /// The file of a build node whose upstream is `endpoint`, read with the key file `upstream_key`,
 /// with its cache in `cache_dir`.
@@ -392,4 +398,145 @@ fn check_config_checks_the_oci_table_of_a_build_node() {
         assert_eq!(code, started_status, "{oci}");
         assert_eq!(said, started, "{oci}");
     }
+}
+
+/// A build node started by [`started`]: waited on only by events, its start line and its exit,
+/// with no deadline of the test's own. A node that never prints or never exits is ended by
+/// nextest's slow-timeout (`.config/nextest.toml`), and the guard stops the process.
+struct Started {
+    child: Reaped,
+    addr: String,
+    /// Keeps the pipe of the node's stdout open.
+    _stdout: BufReader<ChildStdout>,
+}
+
+/// Starts the binary with `config` and reads its start line: the read returns when the node
+/// prints it (or exits).
+fn started(config: &str) -> Started {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tierstore"));
+    command
+        .args(args(config))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = spawn(&mut command, 3).unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let listen = line
+        .split_whitespace()
+        .find_map(|word| word.strip_prefix("listen="));
+    let addr = listen.expect("a start line with listen=").to_owned();
+    Started {
+        child,
+        addr,
+        _stdout: stdout,
+    }
+}
+
+impl Started {
+    fn signal(&self, signal: Signal) {
+        let pid = Pid::from_raw(i32::try_from(self.child.id()).unwrap()).unwrap();
+        kill_process(pid, signal).unwrap();
+    }
+
+    /// How the process ended, once it has: a thread of the blocking pool waits for it.
+    async fn exit(mut self) -> ExitStatus {
+        let waiting = tokio::task::spawn_blocking(move || self.child.wait());
+        waiting.await.unwrap().unwrap()
+    }
+
+    /// The client of kbf with the key of the key file.
+    fn store(&self) -> S3Store {
+        let config = S3Config {
+            endpoint: format!("http://{}", self.addr),
+            region: "us-east-1".to_owned(),
+            bucket: "tier-bucket".to_owned(),
+            credentials: Credentials::new(BIN_KEY_ID, BIN_SECRET),
+            capabilities: Capabilities {
+                conditional_put: true,
+                object_lock: false,
+            },
+            connect_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(30),
+            min_body_rate: None,
+        };
+        S3Store::new(config).unwrap()
+    }
+}
+
+/// What `/readyz` of the binary at `addr` says.
+async fn readyz(client: &Client, addr: &str) -> String {
+    let answer = client.get(format!("http://{addr}/readyz")).send().await;
+    answer.unwrap().text().await.unwrap()
+}
+
+/// Asserts that of two build nodes started on one cache directory the second is read-only while
+/// the first runs, and that once the first is killed (SIGKILL: no drain, and no code of its own
+/// runs on the way out) the second takes the lock by itself: it empties `.stage/` and discards a
+/// sidecar the first left without its data file (the middle of a publish), counted as discarded,
+/// then says `ready read-write`, and fills its next miss, counted, and serves it again as a hit.
+/// The second is asked again as soon as it has answered, and nothing is asserted about how long
+/// it takes. It would catch a lock that only an orderly exit lets go (a lock file that the process
+/// removes, or a process id written in it), which leaves the second read-only for good after the
+/// first crashed, and a take that keeps what the first left half done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_build_node_takes_the_lock_when_the_first_is_killed() {
+    let fake = FakeS3::start().await;
+    let upstream = fake.store(Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    });
+    let key = ObjectKey::new("cas/after").unwrap();
+    let body = Bytes::from((0..3000u32).map(|n| (n % 251) as u8).collect::<Vec<u8>>());
+    upstream.put_new(&key, body.clone(), None).await.unwrap();
+    fake.require_credentials("UPKEY", "up-secret");
+
+    let files = Files::new("bin-cache-killed");
+    let upstream_key = files.secret("upstream.key", "UPKEY\nup-secret\n");
+    let cache_dir = files.key.with_file_name("cache");
+    let config = node_file(&files, fake.endpoint(), &upstream_key, &cache_dir);
+    let first = started(&config);
+    let second = started(&config);
+    let client = Client::new();
+    assert_eq!(readyz(&client, &first.addr).await, "ready read-write");
+    assert_eq!(readyz(&client, &second.addr).await, "ready read-only");
+    // What the first leaves when it dies in the middle of its work: a sidecar whose data file is
+    // not linked yet, and a fill in `.stage/`.
+    let hex = format!("aabb{}", "0".repeat(60));
+    let sidecar = cache_dir.join("obj/aa/bb").join(format!("{hex}.meta"));
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::write(&sidecar, b"{}").unwrap();
+    let staged = cache_dir.join(".stage/0000000000000009");
+    std::fs::write(&staged, b"half a fill").unwrap();
+
+    first.signal(Signal::KILL);
+    assert_eq!(first.exit().await.signal(), Some(9));
+    // The event is the answer `ready read-write`; nothing here bounds the wait. A second that
+    // never takes the lock is ended by nextest's slow-timeout (`.config/nextest.toml`), and fails.
+    while readyz(&client, &second.addr).await != "ready read-write" {}
+    assert!(!sidecar.exists());
+    assert!(!staged.exists());
+
+    let store = second.store();
+    let all = ByteRange::new(0, 3000).unwrap();
+    assert_eq!(store.get_range(&key, all).await.unwrap(), body);
+    assert_eq!(store.get_range(&key, all).await.unwrap(), body);
+    let metrics = client
+        .get(format!("http://{}/metricz", second.addr))
+        .send()
+        .await
+        .unwrap();
+    let text = metrics.text().await.unwrap();
+    for line in [
+        "tierstore_cache_mode{mode=\"read_write\"} 1\n",
+        "tierstore_cache_discarded_at_start_total 2\n",
+        "tierstore_cache_misses_total 1\n",
+        "tierstore_cache_fills_total 1\n",
+        "tierstore_cache_hits_total 1\n",
+    ] {
+        assert!(text.contains(line), "{line} in {text}");
+    }
+    assert!(cache_dir.join("obj").is_dir());
+    second.signal(Signal::TERM);
+    assert_eq!(second.exit().await.code(), Some(0));
 }

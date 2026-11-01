@@ -22,25 +22,28 @@ struct Scratch {
     state: PathBuf,
 }
 
-fn declaration_text(state: &Path) -> String {
+/// The state directory the declaration names: a path under the host's root, which is the scratch
+/// directory (a scratch under `/tmp` could not be declared, `/tmp` being a reserved path).
+const DECLARED_STATE: &str = "/var/lib/updater/hooks/tierstore";
+
+fn declaration_text() -> String {
     format!(
-        "uid = \"{SERVICE}\"\nstate_dir = \"{}\"\nhealth_ports = [9301, 9302]\n\n[hook]\nunits = [\"tierstore@9301.service\", \"tierstore@9302.service\"]\n",
-        state.display()
+        "uid = \"{SERVICE}\"\nstate_dir = \"{DECLARED_STATE}\"\nhealth_ports = [9301, 9302]\n\n[hook]\nunits = [\"tierstore@9301.service\", \"tierstore@9302.service\"]\n",
     )
 }
 
 fn scratch(name: &str) -> Scratch {
     let dir = TestDir::under(std::env::temp_dir(), name);
     let root = dir.path().to_path_buf();
-    let state = root.join("var-state");
-    std::fs::create_dir(&state).unwrap();
+    let state = root.join(DECLARED_STATE.trim_start_matches('/'));
+    std::fs::create_dir_all(&state).unwrap();
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o750)).unwrap();
     let group = root.join("etc/group");
     std::fs::create_dir_all(group.parent().unwrap()).unwrap();
     std::fs::write(&group, format!("hook:x:{}:{SERVICE}\n", my_group())).unwrap();
     let declaration = root.join(DECLARATION_PATH.trim_start_matches('/'));
     std::fs::create_dir_all(declaration.parent().unwrap()).unwrap();
-    std::fs::write(&declaration, declaration_text(&state)).unwrap();
+    std::fs::write(&declaration, declaration_text()).unwrap();
     std::fs::set_permissions(&declaration, std::fs::Permissions::from_mode(0o644)).unwrap();
     Scratch {
         _dir: dir,
