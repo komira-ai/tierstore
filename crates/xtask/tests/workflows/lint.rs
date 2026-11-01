@@ -249,6 +249,13 @@ const PLAN_GUARDS: [&str; 4] = [
     "github.event.workflow_run.head_repository.full_name == github.repository",
 ];
 
+/// The `if:` of the plan job, whole: a manual run of `main`, or a finished run that succeeded
+/// for a push to `main` of this repository.
+const PLAN_IF: &str = "${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
+
+/// The checkout of the plan job: the commit the run built, or the one a manual run names.
+const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}";
+
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
 const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
 
@@ -325,6 +332,50 @@ pub fn release_problems(text: &str) -> Vec<String> {
     }
     if !plan_if.contains("github.event_name == 'workflow_dispatch'") {
         problems.push("plan: `if` lacks github.event_name == 'workflow_dispatch'".to_owned());
+    }
+    // Pinned whole: every part above can be present while an `&&` has become an `||`.
+    if plan_if != PLAN_IF {
+        problems.push(format!("plan: `if` is not {PLAN_IF}"));
+    }
+    let steps: &[Node] = match plan.and_then(|j| entry(j, "steps")).map(|s| &s.value) {
+        Some(Value::Seq(items)) => items,
+        _ => &[],
+    };
+    let checkout = steps.iter().find(|s| {
+        entry(s, "uses")
+            .and_then(Node::as_str)
+            .is_some_and(|u| u.starts_with("actions/checkout@"))
+    });
+    let reference = checkout
+        .and_then(|s| entry(s, "with"))
+        .and_then(|w| entry(w, "ref"))
+        .and_then(Node::as_str);
+    if reference != Some(PLAN_REF) {
+        problems.push(format!("plan: checkout ref is not {PLAN_REF}"));
+    }
+    let auto = steps
+        .iter()
+        .find(|s| entry(s, "id").and_then(Node::as_str) == Some("auto"));
+    let auto_env = |key: &str| {
+        auto.and_then(|s| entry(s, "env"))
+            .and_then(|e| entry(e, key))
+            .and_then(Node::as_str)
+    };
+    if auto_env("COMMIT") != Some("${{ github.event.workflow_run.head_sha }}") {
+        problems
+            .push("plan: env COMMIT is not ${{ github.event.workflow_run.head_sha }}".to_owned());
+    }
+    if auto_env("FREEZE") != Some("${{ vars.RELEASE_FREEZE }}") {
+        problems.push("plan: env FREEZE is not ${{ vars.RELEASE_FREEZE }}".to_owned());
+    }
+    let auto_run = auto
+        .and_then(|s| entry(s, "run"))
+        .and_then(Node::as_str)
+        .unwrap_or_default();
+    for argument in ["--freeze \"$FREEZE\"", "--commit \"$COMMIT\""] {
+        if !auto_run.contains(argument) {
+            problems.push(format!("plan: {argument} is not passed to release plan"));
+        }
     }
     let mut held: Vec<String> = plan
         .and_then(|j| entry(j, "permissions"))
@@ -431,6 +482,23 @@ pub fn artifacts_problems(text: &str) -> Vec<String> {
             .map(|(_, v)| v)
     };
     let mut problems = Vec::new();
+    let concurrency = entry(&doc, "concurrency");
+    let group = concurrency
+        .and_then(|c| entry(c, "group"))
+        .and_then(Node::as_str);
+    if group != Some(ARTIFACTS_GROUP) {
+        problems.push(format!(
+            "artifacts.yml: concurrency group is {group:?}, not {ARTIFACTS_GROUP}"
+        ));
+    }
+    let cancel = concurrency
+        .and_then(|c| entry(c, "cancel-in-progress"))
+        .and_then(Node::as_str);
+    if cancel != Some(ARTIFACTS_CANCEL) {
+        problems.push(format!(
+            "artifacts.yml: concurrency cancel-in-progress is {cancel:?}, not {ARTIFACTS_CANCEL}"
+        ));
+    }
     let version = job("version");
     let version_runs = runs(version);
     if !version_runs.iter().any(|r| r.contains("release version")) {
@@ -517,8 +585,49 @@ pub const ARTIFACTS_CANCEL: &str = "${{ github.event_name == 'pull_request' }}";
 /// reason or names no file. A workflow is on the release path when it can tag, publish or
 /// deploy: `contents: write`, `gh release`, a `git tag` or a tag push, a farm deploy.
 /// `id-token: write` with attest actions alone is not.
-pub fn discovery_problems(_files: &[(String, String)], _exempt: &[(&str, &str)]) -> Vec<String> {
-    vec!["not written".to_owned()]
+pub fn discovery_problems(files: &[(String, String)], exempt: &[(&str, &str)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (file, reason) in exempt {
+        if reason.trim().is_empty() {
+            problems.push(format!(
+                "{file}: exempt from the release group without a reason"
+            ));
+        }
+        if !files.iter().any(|(name, _)| name == file) {
+            problems.push(format!("{file}: exempt, but there is no such workflow"));
+        }
+    }
+    for (file, text) in files {
+        if !on_release_path(text) || exempt.iter().any(|(name, _)| name == file) {
+            continue;
+        }
+        let found = concurrency_problems(file, text);
+        if !found.is_empty() {
+            problems.push(format!(
+                "{file}: tags, publishes or deploys, so it must be in the release group (or exempt, with a reason):"
+            ));
+            problems.extend(found);
+        }
+    }
+    problems
+}
+
+/// What marks a step or permission as tagging, publishing or deploying.
+const RELEASE_MARKS: [&str; 6] = [
+    "contents: write",
+    "gh release",
+    "git tag",
+    "refs/tags",
+    "deploy-farm",
+    "farm-deploy",
+];
+
+/// Whether the workflow `text` can tag, publish or deploy: a line that is not a comment holds
+/// one of [`RELEASE_MARKS`]. Signing alone (`id-token`, the attest actions) is not.
+fn on_release_path(text: &str) -> bool {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| RELEASE_MARKS.iter().any(|m| l.contains(m)))
 }
 
 /// One line per way the workflow `file` is not in the shared release group without cancelling.

@@ -23,7 +23,7 @@
 #
 # plan     read-only. Decides whether this commit is released and as which tag, and prints it
 #          (cargo xtask release plan; by hand, cargo xtask release manual). No release when the
-#          repository variable RELEASE_FREEZE is `true`; when ci or artifacts has no successful
+#          repository variable RELEASE_FREEZE is set to anything but empty or `false`; when ci or artifacts has no successful
 #          push run for the commit yet; when an existing release already covers it; or when
 #          everything since the highest release tag is documentation (the paths are listed in
 #          docs/ci-and-release.md and held by a test). Otherwise the tag is the patch after the
@@ -50,10 +50,13 @@
 # so they differ only when a tag appeared between the build and the release, and then nothing
 # is published.
 #
-# One release action at a time, never cancelled: the group is the one kbf's release.yml uses
-# (`release-main` for a run that succeeded, a group of its own for any other, so that it cannot
-# replace the release that is waiting). Every workflow on the release path is in that group, the
-# farm deploy included when it is added; the workflow lint holds each listed workflow to it.
+# One release action at a time, never cancelled: the group is kbf's release.yml group with two
+# more conditions (`release-main` for a run that succeeded for a push to this repository, a group
+# of its own for any other, so that it cannot replace the release that is waiting: a pull request
+# from a fork's branch named main also matches `branches: [main]` above). Every workflow that
+# tags, publishes or deploys is in that group, the farm deploy included when it is added; the
+# workflow lint finds them by what they do and holds each to it (artifacts.yml, which only
+# builds and attests, is exempt and has a group per commit).
 # GitHub keeps one waiting run per group, so a third replaces the second; nothing is lost by
 # that, since the plan measures from the highest tag. A manual run of this workflow takes a group
 # of its own (publish refuses a tag or release that exists). The lint also holds `contents: write`
@@ -85,7 +88,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}
+  group: release-${{ (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -135,10 +138,11 @@ jobs:
         id: manual
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           COMMIT: ${{ inputs.commit }}
           NOTE: ${{ inputs.note }}
-        run: cargo xtask release manual --tag "$TAG" --commit "$COMMIT" --note "$NOTE" --output "$GITHUB_OUTPUT"
+        run: cargo xtask release manual --repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --note "$NOTE" --output "$GITHUB_OUTPUT"
 
   verify:
     needs: [plan]

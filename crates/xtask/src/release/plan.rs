@@ -6,8 +6,9 @@
 //! reports the tag it is released under.
 //!
 //! - `release plan --repo <owner/repo> --commit <sha> [--version-file <path>] [--freeze <value>]
-//!   [--output <file>] [--gh <program>]` ([`plan`]): no release when `--freeze` is `true`
-//!   (the repository variable `RELEASE_FREEZE`); when the commit does not have a successful
+//!   [--output <file>] [--gh <program>]` ([`plan`]): no release when `--freeze`
+//!   (the repository variable `RELEASE_FREEZE`) is anything but empty or `false` in any case;
+//!   when the commit does not have a successful
 //!   push run of both [`BUILD_WORKFLOW`] and [`CI_WORKFLOW`] yet (release.yml starts when
 //!   either finishes, and the one that finishes last releases); when a release already covers
 //!   the commit; or when everything since the highest release tag is under [`DOCS_PATHS`].
@@ -17,9 +18,11 @@
 //!   so a file nobody updated never makes a push fail on a tag that exists. The change is
 //!   measured from the highest tag, not from the push, so the code of a push whose run was
 //!   replaced or failed goes out with the next release.
-//! - `release manual --tag <tag> --commit <sha> [--note <text>] [--output <file>]`
-//!   ([`manual`]): the same outputs for a run started by hand, which names its own tag and
-//!   commit and is not held by the freeze.
+//! - `release manual --repo <owner/repo> --tag <tag> --commit <sha> [--note <text>]
+//!   [--output <file>] [--gh <program>]` ([`manual`]): the same outputs for a run started by
+//!   hand, which names its own tag and commit and is not held by the freeze. It refuses a
+//!   commit the highest release tag already covers, so no second tag is made for it. A change
+//!   that renames a file is judged by the old path as well as the new.
 
 use std::path::Path;
 
@@ -58,6 +61,14 @@ pub struct Request<'a> {
     pub freeze: &'a str,
     /// Where `key=value` lines are appended (on Actions, `GITHUB_OUTPUT`).
     pub output: Option<&'a Path>,
+}
+
+/// Whether `RELEASE_FREEZE` freezes releases: any value except an empty one (the variable is
+/// not set) and `false`, in any case. A value that is not understood freezes, so that a typo
+/// stops a release instead of letting one through.
+fn frozen(value: &str) -> bool {
+    let value = value.trim();
+    !(value.is_empty() || value.eq_ignore_ascii_case("false"))
 }
 
 /// Whether `pattern` (one of [`DOCS_PATHS`]) covers `path`.
@@ -182,7 +193,8 @@ fn changes_since(gh: &dyn Gh, repo: &str, tag: &str, commit: &str) -> Result<Cha
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|f| f["filename"].as_str().map(str::to_owned))
+        .flat_map(|f| [&f["filename"], &f["previous_filename"]])
+        .filter_map(|name| name.as_str().map(str::to_owned))
         .collect();
     if files.len() < FILES_LIMIT && docs_only(&files) {
         return Ok(Changes::Docs);
@@ -285,8 +297,8 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
         output,
     } = *request;
     full_commit("--commit", commit)?;
-    if freeze == "true" {
-        return skip(output, "RELEASE_FREEZE is true".to_owned());
+    if frozen(freeze) {
+        return skip(output, "RELEASE_FREEZE is set".to_owned());
     }
     for workflow in [BUILD_WORKFLOW, CI_WORKFLOW] {
         if push_run(gh, repo, workflow, commit)?.is_none() {
@@ -320,8 +332,8 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
 
 /// The `release manual` verb: the lines to print.
 pub fn manual(
-    _gh: &dyn Gh,
-    _repo: &str,
+    gh: &dyn Gh,
+    repo: &str,
     tag: &str,
     commit: &str,
     note: &str,
@@ -332,6 +344,17 @@ pub fn manual(
         return Err(Error::Usage(format!(
             "--tag {tag:?} is not v<major>.<minor>.<patch>"
         )));
+    }
+    // A commit the highest tag already covers has its release: a second tag name for it is not
+    // made. (A commit GitHub does not know, or off the tag's history, is left to verify.)
+    if let Some(latest) = latest_tag(gh, repo)? {
+        let compared = gh.api(&format!("repos/{repo}/compare/{latest}...{commit}"))?;
+        let status = compared.as_ref().and_then(|c| c["status"].as_str());
+        if matches!(status, Some("identical" | "behind")) {
+            return Err(Error::Failed(format!(
+                "{latest} already covers {commit}: no second tag is made for a released commit"
+            )));
+        }
     }
     release(output, tag, commit, note)
 }

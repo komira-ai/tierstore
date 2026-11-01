@@ -44,23 +44,43 @@ finishes, and it acts only on a run that succeeded for a push to `main` of this 
 workflows finish on every push, so it starts twice for a commit; the plan job lets the run that
 finishes last go on, because it looks for a successful push run of both.
 
-Release actions are made one at a time and none is ever cancelled. Every workflow on the release
-path is in one concurrency group, the one kbf's `release.yml` uses: `release-main` for a run that
-succeeded, a group of its own (the run id) for any other run, so that a run that does nothing
-cannot replace a release that is waiting; and `cancel-in-progress: false`. A newer push waits
-behind a running release. GitHub keeps only the newest waiting run, so a push that is replaced
-while it waits is not released by itself; that loses nothing, because the plan measures from the
-highest tag and the next release carries the skipped commits. A manual run is in a group of its own
-(publish refuses a tag or a release that exists). The farm deploy job, when it is added, joins the
-same group and is added to `RELEASE_PATH_WORKFLOWS` in `crates/xtask/tests/workflows/lint.rs`,
-which fails the build of any listed workflow that lacks the group or sets `cancel-in-progress` to
-`true`.
+Release actions are made one at a time and none is ever cancelled. Every workflow that tags,
+publishes or deploys is in one concurrency group, `release-main` for a run that succeeded for a
+push to this repository and a group of its own (the run id) for any other run, with
+`cancel-in-progress: false`. kbf's `release.yml` uses the same group with a shorter condition
+(`conclusion == 'success'` alone); tierstore's also requires the event to be a push and the head
+repository to be this one, because a pull request from a fork's branch named `main` matches the
+`branches: [main]` of `workflow_run` and, if it counted, could take the one waiting place and
+displace a real release. A newer push waits behind a running release. GitHub keeps only the newest
+waiting run, so a push that is replaced while it waits is not released by itself; that loses
+nothing, because the plan measures from the highest tag and the next release carries the skipped
+commits. A manual run is in a group of its own (publish refuses a tag or a release that exists).
+The farm deploy job, when it is added, joins the same group.
+
+The workflow lint (`crates/xtask/tests/workflows`) finds these workflows by what they do, not by a
+list of names: any workflow with `contents: write`, `gh release`, a `git tag` or tag push, or a
+farm deploy step must be in the group with `cancel-in-progress: false`, or be listed in
+`RELEASE_EXEMPT` with a reason. `artifacts.yml` is the one exempt workflow: it only builds and
+attests a commit and never tags, publishes or deploys (signing alone, `id-token` with the attest
+actions, does not make a workflow release path). It has a group of its own, one per commit
+(`artifacts-<sha>`, or per ref for a pull request, whose newer run replaces its older); a push run
+is never cancelled, so a commit that is signed is never left half checked, and the build of one
+push does not wait for the release of another.
+
+Pushes made before an earlier push has been released all build with the same computed version (the
+next number after the tag that exists when they build). Whichever is released first takes it; the
+release runs of the others then stop at `check-binary`, because their binary says a version that
+is no longer the tag, and publish nothing. That is the safe direction: nothing wrong is published.
+The next push builds under the new number and is released, and a re-run of `artifacts.yml` for a
+stopped commit does the same for it.
 
 The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
 
-1. The repository variable `RELEASE_FREEZE` is `true`: no release. This is the stop switch; set
-   it to `true` to hold releases and clear it (or set anything else) to resume. A push made while
-   it was set is released with the next one, since a plan measures from the highest tag.
+1. The repository variable `RELEASE_FREEZE` is set to anything except empty or `false` (any
+   case): no release. This is the stop switch; set it to `true` to hold releases and clear it (or
+   set it to `false`) to resume. Any other value, a typo included, also freezes: the switch fails
+   closed. A push made while it was set is released with the next one, since a plan measures from
+   the highest tag.
 2. `ci.yml` or `artifacts.yml` has no successful push run for the commit yet: no release from
    this run.
 3. The highest release tag already covers the commit (this is how the second of two runs for one
@@ -69,7 +89,8 @@ The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
    `docs/`, `**/*.md`, `crates/*/docs/` and `crates/*/site/` (the list is `DOCS_PATHS` in
    `crates/xtask/src/release/plan.rs`, and a test holds this list to the code). The site is not
    in the release files, which are the `tierstore` binary and its SBOM. A change of any other
-   path, `.github/workflows` included, is released.
+   path, `.github/workflows` included, is released. A renamed file counts under both its old and
+   its new path, so moving a source file into `docs/` is a code change.
 5. Otherwise the tag is the patch after the highest `vX.Y.Z` tag. To release a minor or major
    version, commit a file `VERSION` at the root holding `X.Y.Z`: when it is above the highest tag
    the next release is that tag. A `VERSION` at or below the highest tag is ignored (the patch
@@ -107,7 +128,8 @@ neither held by `RELEASE_FREEZE` nor limited to code changes); the rest is the s
 job refuses a commit that is not on `main`, that lacks a successful push run of `artifacts.yml`
 and of `ci.yml`, or whose files or attestations do not check. The `publish` job creates the
 release as a draft at the commit, reads its assets back and publishes it, which creates the tag.
-A tag or release that exists is refused. The binary must say the tag you give, so a release by hand
+A tag or release that exists is refused, and so is a commit that the highest release tag already
+covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
 
 ## One-time setup for the site (a maintainer)

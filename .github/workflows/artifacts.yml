@@ -45,9 +45,12 @@ on:
 permissions: {}
 
 # A pull request's newer run replaces its older one; a push to main always runs to its end,
-# so a commit that is signed is never left half checked.
+# so a commit that is signed is never left half checked. A push has a group per commit: two
+# runs for one commit (a re-run) queue behind each other, and different commits do not wait for
+# each other. This workflow only builds and attests; it never tags, publishes or deploys, so it
+# is outside the release group of release.yml (the workflow lint lists it as exempt).
 concurrency:
-  group: artifacts-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: artifacts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
