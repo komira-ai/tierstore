@@ -19,6 +19,7 @@
 
 mod args;
 mod declaration;
+pub mod machine;
 mod params;
 mod plain;
 mod ports;
