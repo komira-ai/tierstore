@@ -1,0 +1,43 @@
+# The paper checks (crates/xtask/tests/paper.rs). They read a COPY of the paper kept in the
+# repository (crates/xtask/tests/paper_fixture), so a run speaks for the copy, not for the
+# published page: refreshing the copy from the page is the only guard, and a stale copy can be
+# green while the page is not. The first step runs every test of the file except the completion
+# check and is blocking. The second step runs the completion check, which is `#[ignore]`d in
+# ci.yml: it prints the open-place count and the list and passes while the file
+# crates/xtask/tests/paper_fixture/FINAL is absent, and fails on any open place once that file is
+# committed. It runs only on a change to the check, the paper copy or its results, and by hand.
+# GitHub-hosted runner, commit-pinned actions, no token rights beyond reading the checkout.
+name: paper
+
+on:
+  pull_request:
+    paths:
+      - crates/xtask/tests/paper.rs
+      - crates/xtask/tests/paper_fixture/**
+      - .github/workflows/paper.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: paper-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: paper tests (blocking)
+        run: cargo test -p xtask --locked --test paper
+      - name: completion check (report only until paper_fixture/FINAL exists)
+        run: cargo test -p xtask --locked --test paper the_paper_is_complete -- --ignored --nocapture
