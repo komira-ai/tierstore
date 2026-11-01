@@ -210,6 +210,8 @@ mod reply;
 mod request;
 pub mod scoped;
 mod time;
+#[cfg(target_os = "linux")]
+pub mod update_hook;
 mod xml;
 
 #[cfg(test)]

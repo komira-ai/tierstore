@@ -118,6 +118,8 @@ use super::lock::{self, LockFile, check_lock_path};
 use super::oci::{
     self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
 };
+#[cfg(target_os = "linux")]
+use super::update_hook;
 use super::{Drained, Server, ServerConfig};
 
 /// A start-up error, for the operator.
@@ -1217,6 +1219,11 @@ fn capabilities(args: &[OsString]) -> ExitCode {
 /// The binary: flags in, exit status out.
 #[must_use]
 pub fn main(args: Vec<OsString>) -> ExitCode {
+    // The host updater's hook: a verb of its own, answered before any flag is parsed.
+    #[cfg(target_os = "linux")]
+    if args.get(1).is_some_and(|verb| verb == update_hook::VERB) {
+        return update_hook::main(&args);
+    }
     // Before the flags are parsed: it needs none of the flags a start requires.
     if args.iter().skip(1).any(|arg| arg == "--capabilities") {
         return capabilities(&args);
