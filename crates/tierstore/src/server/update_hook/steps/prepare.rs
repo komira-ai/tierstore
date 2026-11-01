@@ -15,7 +15,7 @@ use crate::server::update_hook::params::Params;
 use crate::server::update_hook::probe::CacheMode;
 use crate::server::update_hook::record::{Mode, Record, SCHEMA};
 use crate::server::update_hook::report::{Done, Reason};
-use crate::server::update_hook::ruleset::guard_ruleset;
+use crate::server::update_hook::ruleset::{GUARD_TABLE, guard_ruleset};
 
 /// The release the link of `port` points at.
 fn release_of(c: &Ctx<'_, '_>, port: u16) -> Result<PathBuf, Done> {
@@ -47,21 +47,10 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
         Mode::Restart
     };
     let retry = params.defer_retry_secs;
-    let ct = c.ports.host.conntrack()?;
-    if ct.tcp_timeout_established_secs <= IDLE_BOUND_SECS + IDLE_MARGIN_SECS {
-        return Err(Done::deferred(
-            Reason::HostNotReady,
-            "nf_conntrack_tcp_timeout_established is not longer than the idle bound plus a margin",
-            retry,
-        ));
-    }
-    if ct.count.saturating_mul(100) >= ct.max.saturating_mul(params.conntrack_percent) {
-        return Err(Done::deferred(
-            Reason::HostNotReady,
-            "the conntrack table is nearly full",
-            retry,
-        ));
-    }
+    // Nothing is applied before the guard is in place: up to here the step has only looked. What
+    // the guard does not cover is the private port of an instance, which starts after it.
+    let existed = c.ports.nft.list_table(GUARD_TABLE)?.is_some();
+    let ours = !existed || (record.previous.is_some() && record.guard_placed);
     if let Err(why) = c.ports.nft.apply(&guard_ruleset(PUBLIC_PORT, c.decl.ports)) {
         return Err(Done::deferred(
             Reason::HostNotReady,
@@ -69,6 +58,23 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
             retry,
         ));
     }
+    let ct = c.ports.host.conntrack()?;
+    let refusal = if ct.tcp_timeout_established_secs <= IDLE_BOUND_SECS + IDLE_MARGIN_SECS {
+        Some("nf_conntrack_tcp_timeout_established is not longer than the idle bound plus a margin")
+    } else if ct.count.saturating_mul(100) >= ct.max.saturating_mul(params.conntrack_percent) {
+        Some("the conntrack table is nearly full")
+    } else {
+        None
+    };
+    if let Some(why) = refusal {
+        // A deferral leaves the host as it was: what this update placed is removed, what was
+        // there before stays.
+        if ours {
+            c.ports.nft.delete_table(GUARD_TABLE)?;
+        }
+        return Err(Done::deferred(Reason::HostNotReady, why, retry));
+    }
+    // `guard_placed` follows the loading of the guard, and is written with the record.
     let next = Record {
         schema: SCHEMA,
         serving: idle,
@@ -76,7 +82,7 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
         mode,
         markers: BTreeSet::new(),
         boot_id: None,
-        guard_placed: false,
+        guard_placed: ours,
     };
     c.save(&next)?;
     *record = next;

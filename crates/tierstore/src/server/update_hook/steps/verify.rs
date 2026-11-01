@@ -96,9 +96,15 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
     } else {
         wait_promoted(c, next, params.promotion_bound_secs)?
     };
-    if !record.markers.contains(&Marker::Verified) {
+    // `verified` follows its act: everything above was observed in this boot, which is recorded
+    // with it. A later boot voids it until a `verify` looks again.
+    let boot = c.ports.host.boot_id()?;
+    if record.boot_id.as_deref() != Some(boot.as_str())
+        || !record.markers.contains(&Marker::Verified)
+    {
         let mut verified = record.clone();
         verified.markers.insert(Marker::Verified);
+        verified.boot_id = Some(boot);
         c.save(&verified)?;
         *record = verified;
     }

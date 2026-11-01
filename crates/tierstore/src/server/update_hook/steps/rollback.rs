@@ -1,13 +1,16 @@
 //! `rollback`: valid only before `cleanup` has written `stopping`.
 //!
-//! v-current is started if it is not running and the redirect is pointed at it; then the
-//! instance the restored rule does not name is stopped and its slot link removed; the record
-//! goes back to no update in flight. After `stopping` the step changes nothing and exits 1.
+//! v-current is started if it is not running (in restart mode v-next is stopped first, since the
+//! release that runs has no lock) and the redirect is pointed at it; then the instance the
+//! restored rule does not name is stopped and its slot link removed; the guard table is removed
+//! if this update placed it; the record goes back to no update in flight. After `stopping` the
+//! step changes nothing and exits 1.
 
 use super::Ctx;
 use crate::server::update_hook::declaration::unit_name;
 use crate::server::update_hook::record::Record;
 use crate::server::update_hook::report::{Done, Reason};
+use crate::server::update_hook::ruleset::GUARD_TABLE;
 
 pub(super) fn run(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
     if record.committed() {
@@ -23,6 +26,10 @@ pub(super) fn run(c: &Ctx<'_, '_>, record: &mut Record) -> Result<Done, Done> {
     c.back_to_current(record)?;
     c.ports.units.stop(&unit_name(idle))?;
     c.ports.slots.remove(idle)?;
+    if record.guard_placed {
+        c.ports.nft.delete_table(GUARD_TABLE)?;
+    }
+    // The record is cleared last: a crash before it re-runs every part above.
     let mut back = Record::idle(current);
     back.mode = record.mode;
     c.save(&back)?;
