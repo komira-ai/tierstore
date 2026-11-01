@@ -1,4 +1,7 @@
-# The completion check of the tierstore paper (crates/xtask/tests/paper.rs). The paper is not
+# The completion check of the tierstore paper (crates/xtask/tests/paper.rs). It reads a COPY of
+# the paper kept in the repository (crates/xtask/tests/paper_fixture), so a run speaks for the
+# copy, not for the published page: refreshing the copy from the page is the only guard, and a
+# stale copy can be green while the page is not. The paper is not
 # complete yet, so the check fails: it is `#[ignore]`d in the test run of ci.yml and runs here,
 # on its own, with `--include-ignored`. A red run of this workflow means the paper still has an
 # open cell; it does not stop a merge and it is not part of the green run release.yml asks ci.yml

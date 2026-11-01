@@ -1,30 +1,46 @@
 //! The completion check of the tierstore paper.
 //!
 //! The paper is written with places that wait for a measurement or a decision. This test says
-//! when none is left. It reads `tests/paper_fixture/tierstore.html`, a copy of the paper (the
-//! paper itself is not in a repository yet; refresh the copy from the published page, and when
-//! the paper moves here this path is the only thing that changes), and holds it to these rules:
+//! when none is left. It reads `tests/paper_fixture/tierstore.html`, a COPY of the paper, and
+//! holds it to these rules:
 //!
-//! - no `class="tbd"` span, no `[to measure]` and no `[to decide]` anywhere in the text;
+//! - no `class="tbd"` span, no `[to measure]` and no `[to decide]` (in any letter case) anywhere
+//!   in the text;
 //! - no `data-blocked` attribute: a cell that carries a reason is a cell that is still waiting;
+//! - every attribute value is written in double quotes. A value in single quotes or in none, or a
+//!   `class`, `data-cell`, `data-result`, `data-basis` or `data-blocked` with no value, would
+//!   hide the attribute from every other rule, so it is refused;
 //! - every `data-cell` element carries `data-result`, the name of a file in
 //!   `tests/paper_fixture/results/` that holds the measurement, or `data-basis` (`design`,
 //!   `code-reading` or `decision`) when the cell states what the design is or how the code
 //!   works and claims no measurement;
-//! - every number printed inside an element with `data-result` is a value of its result file
-//!   (the `value` column, third of the tab-separated columns; lines starting with `#` are
-//!   comments). A number that no result holds is a number made up or mistyped.
+//! - every number printed inside an element with `data-result` is a value of a row of that
+//!   result file that names the cell. A result row has the columns kind, id, value, unit, how and
+//!   cells (tab-separated; lines starting with `#` are comments); `cells` lists, separated by
+//!   commas, every cell id that prints the row's value, and a row no cell prints has no sixth
+//!   column. A cell that legitimately quotes another cell's value is named on that row as well:
+//!   that is the one escape, and it is visible in the result file. A number that no row holds is
+//!   made up or mistyped; a number that only another cell's row holds is a wrong row's value.
+//!   A dotted token with two or more points (`1.2.3`) is not a number and fails; a version is
+//!   written with a leading `v`, which the scanner skips.
 //!
-//! `the_paper_is_complete` runs all four. It fails today: the paper is not complete. It stays
+//! `the_paper_is_complete` runs all of them. It fails today: the paper is not complete. It stays
 //! red until the last cell is filled, so it is `#[ignore]`d and runs in its own workflow
 //! (`.github/workflows/paper.yml`) with `--include-ignored`, which does not belong to the
 //! checks `ci.yml` and `release.yml` require.
-//! `the_measured_cells_trace_to_their_results` is the last rule alone, over the cells that are
+//! `the_measured_cells_trace_to_their_results` is the trace rule alone, over the cells that are
 //! filled, and runs with every test. The other tests plant each defect in a small page and show
 //! the check refusing it.
 //!
-//! What the trace does not check: that a derived value (the `derived` rows) was computed as its
-//! last column says. The rows name the arithmetic; nothing here redoes it.
+//! The fixture is a copy and a run speaks for the copy, not for the published page. Nothing here
+//! compares the copy with the page: refreshing the copy from the published page is the only guard,
+//! and a copy that is not refreshed can be green while the page is not. When the paper moves into
+//! this repository the path above is the only thing that changes.
+//!
+//! What stays out of scope: units (a `ms` printed where the row says `us` passes), signs (`-5`
+//! reads as 5), numbers written as words ("three"), numbers in `data-basis` cells (they claim no
+//! measurement, so nothing traces them), and whether a derived value (the `derived` rows) was
+//! computed as its `how` column says: the rows name the arithmetic, nothing here redoes it.
 
 use std::path::{Path, PathBuf};
 
@@ -105,19 +121,104 @@ fn tags(html: &str) -> Vec<Tag<'_>> {
     out
 }
 
-/// The value of attribute `name` in the attribute text of a tag.
-fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
-    let needle = format!("{name}=\"");
-    let mut from = 0;
-    while let Some(found) = attrs[from..].find(&needle) {
-        let at = from + found;
-        if at == 0 || attrs.as_bytes()[at - 1].is_ascii_whitespace() {
-            let rest = &attrs[at + needle.len()..];
-            return rest.find('"').map(|end| &rest[..end]);
+/// The attributes the rules read: each must carry a double-quoted value.
+const WATCHED: &[&str] = &[
+    "class",
+    "data-blocked",
+    "data-cell",
+    "data-result",
+    "data-basis",
+];
+
+/// How an attribute is written in a start tag.
+enum Value<'a> {
+    Double(&'a str),
+    Single,
+    Bare,
+    Missing,
+}
+
+struct Attr<'a> {
+    name: &'a str,
+    value: Value<'a>,
+}
+
+/// `s` cut at the first `end`, the text before it and the text after it.
+fn cut(s: &str, end: char) -> (&str, &str) {
+    let at = s.find(end).unwrap_or(s.len());
+    (&s[..at], s.get(at + 1..).unwrap_or(""))
+}
+
+/// The attributes of the attribute text of a tag, in order.
+fn attributes(attrs: &str) -> Vec<Attr<'_>> {
+    let mut out = Vec::new();
+    let mut rest = attrs;
+    loop {
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
+        if rest.is_empty() {
+            return out;
         }
-        from = at + needle.len();
+        let name_end = rest
+            .find(|c: char| c.is_whitespace() || c == '=' || c == '/')
+            .unwrap_or(rest.len());
+        let (name, after) = rest.split_at(name_end);
+        let after = after.trim_start();
+        let Some(raw) = after.strip_prefix('=') else {
+            out.push(Attr {
+                name,
+                value: Value::Missing,
+            });
+            rest = after;
+            continue;
+        };
+        let raw = raw.trim_start();
+        let (value, tail) = if let Some(quoted) = raw.strip_prefix('"') {
+            let (text, tail) = cut(quoted, '"');
+            (Value::Double(text), tail)
+        } else if let Some(quoted) = raw.strip_prefix('\'') {
+            (Value::Single, cut(quoted, '\'').1)
+        } else {
+            let (_, tail) = raw.split_at(raw.find(char::is_whitespace).unwrap_or(raw.len()));
+            (Value::Bare, tail)
+        };
+        out.push(Attr { name, value });
+        rest = tail;
     }
-    None
+}
+
+/// The double-quoted value of attribute `name` (in any letter case) in the attribute text of a
+/// tag. A value in single quotes or in none is not read here; `quote_problems` refuses it.
+fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    attributes(attrs).into_iter().find_map(|a| match a.value {
+        Value::Double(text) if a.name.eq_ignore_ascii_case(name) => Some(text),
+        _ => None,
+    })
+}
+
+/// One line per attribute of the opening tags that is not written in double quotes, and per
+/// watched attribute that has no value.
+fn quote_problems(html: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for tag in tags(html).iter().filter(|t| !t.closing) {
+        let line = line_of(html, tag.start);
+        for a in attributes(tag.attrs) {
+            let watched = WATCHED.iter().any(|w| a.name.eq_ignore_ascii_case(w));
+            match a.value {
+                Value::Double(_) => {}
+                Value::Single | Value::Bare => {
+                    found.push(format!(
+                        "line {line}: attribute {} is not double-quoted",
+                        a.name
+                    ));
+                }
+                Value::Missing if watched => {
+                    found.push(format!("line {line}: attribute {} has no value", a.name));
+                }
+                Value::Missing => {}
+            }
+        }
+    }
+    found
 }
 
 /// The 1-based line of a byte offset.
@@ -195,29 +296,29 @@ fn strip_entities(text: &str) -> String {
     out
 }
 
-/// The numbers printed in `text`. A number starts at a digit that does not follow a letter, a
-/// digit or a point (so `p50`, `S3`, `SigV4` and `x86_64` hold none), and is digits with an
-/// optional fraction; a comma followed by three digits is a thousands separator.
-fn numbers(text: &str) -> Vec<f64> {
+/// The number-like tokens printed in `text`, as printed (a thousands separator removed). A
+/// token starts at a digit, or at a point followed by a digit, that does not follow a letter, a
+/// digit, a point or an underscore (so `p50`, `S3`, `SigV4` and `x86_64` hold none), and is
+/// digits with points between them; a comma followed by three digits is a thousands separator.
+fn tokens(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
+    let digit_at = |k: usize| chars.get(k).is_some_and(char::is_ascii_digit);
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        let starts = chars[i].is_ascii_digit()
-            && (i == 0
-                || !(chars[i - 1].is_ascii_alphanumeric()
-                    || chars[i - 1] == '.'
-                    || chars[i - 1] == '_'));
+        let after_word = i > 0
+            && (chars[i - 1].is_ascii_alphanumeric() || chars[i - 1] == '.' || chars[i - 1] == '_');
+        let starts =
+            !after_word && (chars[i].is_ascii_digit() || (chars[i] == '.' && digit_at(i + 1)));
         if !starts {
             i += 1;
             continue;
         }
-        let mut digits = String::new();
+        let mut token = String::new();
         while i < chars.len() {
             let c = chars[i];
-            let digit_at = |k: usize| chars.get(k).is_some_and(char::is_ascii_digit);
             if c.is_ascii_digit() || (c == '.' && digit_at(i + 1)) {
-                digits.push(c);
+                token.push(c);
                 i += 1;
             } else if c == ','
                 && digit_at(i + 1)
@@ -230,27 +331,65 @@ fn numbers(text: &str) -> Vec<f64> {
                 break;
             }
         }
-        out.push(digits.parse().expect("digits with one fraction parse"));
+        out.push(token);
     }
     out
 }
 
-/// The `value` column of a result file. Lines starting with `#` and blank lines are skipped.
-fn result_values(text: &str) -> Result<Vec<f64>, String> {
+/// Whether a token is version-like: two or more points, so not a number.
+fn is_version(token: &str) -> bool {
+    token.matches('.').count() > 1
+}
+
+/// The numbers printed in `text` (`.5` is 0.5). A version-like token (`1.2.3`) is not one; see
+/// `versions`.
+fn numbers(text: &str) -> Vec<f64> {
+    tokens(text)
+        .iter()
+        .filter(|t| !is_version(t))
+        .map(|t| t.parse().expect("digits with one fraction parse"))
+        .collect()
+}
+
+/// The version-like tokens (two or more points) printed in `text`.
+fn versions(text: &str) -> Vec<String> {
+    tokens(text).into_iter().filter(|t| is_version(t)).collect()
+}
+
+/// One row of a result file.
+struct Row {
+    id: String,
+    value: f64,
+    /// The cell ids that print the value.
+    cells: Vec<String>,
+}
+
+/// The rows of a result file. Lines starting with `#` and blank lines are skipped.
+fn result_rows(text: &str) -> Result<Vec<Row>, String> {
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let value = line
-            .split('\t')
-            .nth(2)
-            .ok_or_else(|| format!("line {}: fewer than 3 tab-separated columns", n + 1))?;
-        out.push(
-            value
-                .parse::<f64>()
-                .map_err(|_| format!("line {}: value {value:?} is not a number", n + 1))?,
-        );
+        let columns: Vec<&str> = line.split('\t').collect();
+        if columns.len() < 3 {
+            return Err(format!(
+                "line {}: fewer than 3 tab-separated columns",
+                n + 1
+            ));
+        }
+        let value = columns[2]
+            .parse::<f64>()
+            .map_err(|_| format!("line {}: value {:?} is not a number", n + 1, columns[2]))?;
+        let cells = columns
+            .get(5)
+            .map(|c| c.split(',').map(|id| id.trim().to_owned()).collect())
+            .unwrap_or_default();
+        out.push(Row {
+            id: columns[1].to_owned(),
+            value,
+            cells,
+        });
     }
     Ok(out)
 }
@@ -265,8 +404,9 @@ fn result_name_ok(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
 }
 
-/// One line per number, in a cell with `data-result`, that its result file does not hold, per
-/// result name that is unusable, and per cell that is never closed.
+/// One line per number, in a cell with `data-result`, that no row of its result file naming the
+/// cell holds, per version-like token in such a cell, per result name that is unusable, and per
+/// cell that is never closed.
 fn trace_problems(html: &str, results: &Path) -> Vec<String> {
     let all = tags(html);
     let mut problems = Vec::new();
@@ -287,9 +427,9 @@ fn trace_problems(html: &str, results: &Path) -> Vec<String> {
             ));
             continue;
         }
-        let values = match std::fs::read_to_string(results.join(name)) {
-            Ok(text) => match result_values(&text) {
-                Ok(values) => values,
+        let rows = match std::fs::read_to_string(results.join(name)) {
+            Ok(text) => match result_rows(&text) {
+                Ok(rows) => rows,
                 Err(why) => {
                     problems.push(format!("line {line}: {cell}: {name}: {why}"));
                     continue;
@@ -306,10 +446,25 @@ fn trace_problems(html: &str, results: &Path) -> Vec<String> {
             problems.push(format!("line {line}: {cell}: the element is never closed"));
             continue;
         };
+        for token in versions(&text) {
+            problems.push(format!(
+                "line {line}: {cell}: {token} is a dotted version, not a number"
+            ));
+        }
         for number in numbers(&text) {
-            if !values.iter().any(|v| (v - number).abs() < 1e-9) {
+            let holders: Vec<&Row> = rows
+                .iter()
+                .filter(|r| (r.value - number).abs() < 1e-9)
+                .collect();
+            if holders.is_empty() {
                 problems.push(format!(
                     "line {line}: {cell}: the number {number} is not a value of {name}"
+                ));
+            } else if !holders.iter().any(|r| r.cells.iter().any(|c| c == cell)) {
+                let ids: Vec<&str> = holders.iter().map(|r| r.id.as_str()).collect();
+                problems.push(format!(
+                    "line {line}: {cell}: the number {number} is not a value of {name} for this cell; the rows holding it ({}) do not name {cell}",
+                    ids.join(", ")
                 ));
             }
         }
@@ -340,9 +495,11 @@ fn open_places(html: &str) -> Vec<String> {
             }
         }
     }
+    found.extend(quote_problems(html));
     for (n, text) in html.lines().enumerate() {
+        let lower = text.to_ascii_lowercase();
         for marker in ["[to measure]", "[to decide]"] {
-            for _ in text.matches(marker) {
+            for _ in lower.matches(marker) {
                 found.push(format!("line {}: {marker}", n + 1));
             }
         }
@@ -390,11 +547,15 @@ fn the_paper_is_complete() {
 
 #[test]
 fn the_measured_cells_trace_to_their_results() {
-    // Catches: a number edited in a filled cell without its result file, a data-result that
-    // names a missing file, and a filled cell that lost its element. Holds today.
+    // Catches: a number edited in a filled cell without its result file, a number a cell took
+    // from another cell's row, a data-result that names a missing file, an attribute the other
+    // rules cannot see because it is not double-quoted, and a filled cell that lost its element.
+    // Holds today.
     let html = paper();
     let problems = trace_problems(&html, &fixture().join("results"));
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+    let quotes = quote_problems(&html);
+    assert!(quotes.is_empty(), "{}", quotes.join("\n"));
     let measured = tags(&html)
         .iter()
         .filter(|t| attr(t.attrs, "data-result").is_some())
