@@ -1,0 +1,94 @@
+# tierstore (crates/tierstore) as one slot of the update hook's hand-over: the template of
+# tierstore@9301.service and tierstore@9302.service, where %i is the slot's private port. Clients
+# call the public port 9300; one nftables redirect, which the hook owns, sends it to the slot that
+# serves (crates/tierstore/docs/update-hook.md). The single-instance example is tierstore.service.
+#
+# The binary is the slot's link: <state_dir>/slots/%i points at a staged release, a directory the
+# host updater owns, and the unit runs the tierstore in it. A slot with no link does not start
+# (ConditionPathExists= below), so the hook retires a slot by removing its link first.
+#
+# Nothing enables this template, and it has no [Install] section: at boot the updater runs
+# `tierstore update-hook restore` (the declaration's boot = "restore"), which starts the one slot
+# the hook's record names. The other slot is not started. The hook starts and stops the two units
+# through the polkit rule of packaging/polkit, and never enables or masks them.
+#
+# Edit before use, as for tierstore.service: the bucket, the endpoints (http://host[:port], no
+# path) and --hot-bytes. Keep the listen addresses, the proxy id and --slot as they are: the hook
+# probes the slot on 127.0.0.1:%i, reads the slot label of the build gauge, and the proxy id gives
+# each slot its own journal in the hot tier. Both slots run this one file, so they settle for the
+# same --drain-lb-wait.
+#
+# The key files are those of tierstore.service, owned by the account of User=, mode 0600; the flags
+# that name them are the only way the process is given a secret (it reads no environment variable).
+[Unit]
+Description=tierstore slot %i, an S3 server over a hot and a cold tier
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/updater/hooks/tierstore/slots/%i/tierstore
+# As tierstore.service: a start that fails is tried again after 30 s, five times in an hour.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tierstore
+# The slot links are under the hook's state directory (mode 0750, owner and group
+# tierstore-update): the service reaches them through this group, and can read them, not change
+# them. packaging/tierstore-update.conf also lists tierstore in the group, which is what the hook
+# checks.
+SupplementaryGroups=tierstore-update
+# The lock of the node's reconciler, the same file for both slots: the slot that starts beside a
+# running one serves at once and reconciles once the other has exited.
+StateDirectory=tierstore
+StateDirectoryMode=0700
+ExecStart=/var/lib/updater/hooks/tierstore/slots/%i/tierstore \
+  --listen 0.0.0.0:%i \
+  --listen [::]:%i \
+  --proxy-id tierstore-%i \
+  --slot %i \
+  --lock-file /var/lib/tierstore/instance.lock \
+  --bucket tierstore \
+  --access-key-file /etc/tierstore/access.key \
+  --read-only-key-file /etc/tierstore/daemons.key \
+  --hot s3:tierstore-hot \
+  --hot-endpoint http://s3-hot.example:9000 \
+  --hot-credentials-file /etc/tierstore/hot.credentials \
+  --hot-bytes 1099511627776 \
+  --cold s3:tierstore-cold \
+  --cold-endpoint http://s3-cold.example:9000 \
+  --cold-credentials-file /etc/tierstore/cold.credentials \
+  --drain-lb-wait 70s \
+  --drain-deadline 15m
+# On SIGTERM the process drains: /readyz says 503 and it serves for --drain-lb-wait (70 s, the
+# last SYN retransmit of a default client, so a connection the redirect sent before the swap is
+# still answered), then stops accepting and waits for those in flight for at most
+# --drain-deadline, gives up the reconciler's lease (5 s at most) and exits 0. Seconds: 1100 is
+# the 70 s, the 15 m and the 5 s with a margin, so that systemd never sends SIGKILL to a drain in
+# progress. The hook's cleanup timeout (1300 s) is above it.
+KillSignal=SIGTERM
+TimeoutStopSec=1100
+# As tierstore.service: exit 2 (a refused command line) and 3 (a tier that failed the start-up
+# self-test) are not tried again.
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
