@@ -1,5 +1,11 @@
-//! Embeds the commit the binary is built from as `TIERSTORE_BUILD_COMMIT`, which `--version`, the
-//! start line and `tierstore_build_info` name (`src/server/build_info.rs`).
+//! Embeds the commit the binary is built from as `TIERSTORE_BUILD_COMMIT` and its version as
+//! `TIERSTORE_BUILD_VERSION`, which `--version`, the start line and `tierstore_build_info` name
+//! (`src/server/build_info.rs`).
+//!
+//! The version is `TIERSTORE_BUILD_VERSION_OVERRIDE` when set (`<major>.<minor>.<patch>`; anything
+//! else, an empty value included, fails the build), else the crate's version. The release
+//! workflow sets it to the version of the tag it is about to publish. The rule is in
+//! `src/build_version.rs`.
 //!
 //! The commit is `TIERSTORE_BUILD_COMMIT_OVERRIDE` when set (12 lowercase hex digits, for a build
 //! without a `.git` that knows its commit; anything else, an empty value included, fails the
@@ -13,6 +19,8 @@ use std::process::Command;
 
 #[path = "src/build_commit.rs"]
 mod build_commit;
+#[path = "src/build_version.rs"]
+mod build_version;
 
 /// `git` with `args` in this crate's directory: its trimmed stdout, if it succeeded.
 fn git(args: &[&str]) -> Option<String> {
@@ -36,6 +44,14 @@ fn main() {
         Err(e) => panic!("{e}"),
     };
     println!("cargo:rustc-env=TIERSTORE_BUILD_COMMIT={commit}");
+    println!("cargo:rerun-if-env-changed={}", build_version::OVERRIDE);
+    let given = std::env::var_os(build_version::OVERRIDE);
+    let package = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let version = match build_version::choose(given.as_deref(), &package) {
+        Ok(version) => version,
+        Err(e) => panic!("{e}"),
+    };
+    println!("cargo:rustc-env=TIERSTORE_BUILD_VERSION={version}");
     // Watched: HEAD (a checkout), the ref it names (a commit), and packed-refs (where that ref
     // lives once packed).
     let branch = git(&["symbolic-ref", "-q", "HEAD"]);

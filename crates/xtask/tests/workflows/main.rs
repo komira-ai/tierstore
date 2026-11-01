@@ -9,7 +9,10 @@ mod yaml;
 
 use std::path::PathBuf;
 
-use lint::{SIGN_IF, lint};
+use lint::{
+    ARTIFACTS_GROUP, RELEASE_EXEMPT, RELEASE_GROUP, SIGN_IF, artifacts_problems,
+    concurrency_problems, discovery_problems, lint, release_problems,
+};
 
 /// The directory of the workflows of this repository.
 fn workflows_dir() -> PathBuf {
@@ -292,5 +295,462 @@ fn a_document_the_lint_cannot_evaluate_is_refused() {
         "",
     ] {
         assert!(!lint("t.yml", text).is_empty(), "{text:?}");
+    }
+}
+
+#[test]
+fn release_yml_is_started_by_the_two_workflows_and_by_hand_and_nothing_else() {
+    // Catches: any change to release.yml that breaks the chain below: a trigger added or lost,
+    // a guard dropped, the group made cancelling, a write scope or a build step where it must
+    // not be, the plan job given more than read access.
+    assert_eq!(
+        release_problems(&text_of("release.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// `(text to replace once, its replacement, what the problem must name)`.
+const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
+    (
+        "on:\n  workflow_run:",
+        "on:\n  push:\n  workflow_run:",
+        "triggers",
+    ),
+    ("  workflow_dispatch:", "  workflow_call:", "triggers"),
+    (
+        "workflows: [ci, artifacts]",
+        "workflows: [ci]",
+        "workflow_run.workflows",
+    ),
+    (
+        "workflows: [ci, artifacts]",
+        "workflows: [artifacts]",
+        "workflow_run.workflows",
+    ),
+    (
+        "types: [completed]",
+        "types: [requested]",
+        "workflow_run.types",
+    ),
+    (
+        "branches: [main]",
+        "branches: [main, dev]",
+        "workflow_run.branches",
+    ),
+    (
+        "cancel-in-progress: false",
+        "cancel-in-progress: true",
+        "cancel-in-progress",
+    ),
+    ("group: release-", "group: rel-", "group"),
+    (
+        "github.event.workflow_run.conclusion == 'success'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.conclusion == 'success'",
+    ),
+    (
+        "github.event.workflow_run.event == 'push'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.event == 'push'",
+    ),
+    (
+        "github.event.workflow_run.head_branch == 'main'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.head_branch == 'main'",
+    ),
+    (
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.head_repository.full_name == github.repository",
+    ),
+    (
+        "actions: read\n    outputs:",
+        "actions: write\n    outputs:",
+        "plan: permissions",
+    ),
+    (
+        "    permissions:\n      contents: read\n      actions: read\n    outputs:",
+        "    permissions:\n      contents: write\n      actions: read\n    outputs:",
+        "plan: permissions",
+    ),
+    ("needs: [plan]\n", "needs: []\n", "verify: needs"),
+    ("needs: [plan, verify]", "needs: [verify]", "publish: needs"),
+    (
+        "needs.plan.outputs.release == 'true'",
+        "true",
+        "release == 'true'",
+    ),
+    ("vars.RELEASE_FREEZE", "vars.OTHER", "RELEASE_FREEZE"),
+    (
+        "jobs:\n  plan:",
+        "jobs:\n  tag:\n    runs-on: ubuntu-24.04\n  plan:",
+        "jobs",
+    ),
+    (
+        "release check-binary",
+        "release check-bin",
+        "verify: no step runs `cargo xtask release check-binary`",
+    ),
+    (
+        "      TAG: ${{ needs.plan.outputs.tag }}\n    outputs:",
+        "    outputs:",
+        "verify: env TAG",
+    ),
+    (
+        "--tag \"$TAG\" --commit \"$COMMIT\" --scratch",
+        "--scratch",
+        "verify: the check-binary step",
+    ),
+];
+
+#[test]
+fn each_defect_in_the_release_chain_is_named_by_the_lint() {
+    // Catches: a pin of release.yml that holds nothing, because the file passes whether or
+    // not the thing it pins is there.
+    let text = text_of("release.yml");
+    for (replace, with, names) in RELEASE_DEFECTS {
+        assert!(text.contains(replace), "{replace:?} is not in release.yml");
+        let problems = release_problems(&text.replace(replace, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn a_build_or_a_signing_step_in_release_yml_is_named_by_the_lint() {
+    // Catches: release.yml compiling the product, installing a tool or signing: every `cargo`
+    // there must be `cargo xtask`, and the attest actions are not used.
+    let text = text_of("release.yml");
+    for step in [
+        "run: cargo build --release",
+        "run: cargo xtask package && cargo build",
+        "run: cargo xtask package",
+        "run: cargo install cargo-deny",
+        "uses: actions/attest-build-provenance@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
+        "uses: actions/attest-sbom@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
+    ] {
+        let spoiled = format!("{text}      - {step}\n");
+        let problems = release_problems(&spoiled);
+        assert!(
+            problems.iter().any(|p| p.contains("builds or signs")),
+            "{step}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn contents_write_is_held_by_publish_and_only_under_the_release_condition() {
+    // Catches: the write scope moving to another job of release.yml, or publish holding it
+    // under a condition that lets a run without a plan through.
+    let text = text_of("release.yml");
+    let spoiled = text.replacen(
+        "    permissions:\n      contents: read\n      actions: read\n    outputs:",
+        "    permissions:\n      contents: write\n      actions: read\n    outputs:",
+        1,
+    );
+    assert!(
+        lint("release.yml", &spoiled)
+            .iter()
+            .any(|p| p.contains("job plan: `contents: write` is not allowed")),
+        "plan with contents: write"
+    );
+    let spoiled = text.replace("needs.plan.outputs.release == 'true' && ", "");
+    assert!(
+        lint("release.yml", &spoiled)
+            .iter()
+            .any(|p| p.contains("job publish: `contents: write` needs the exact `if:")),
+        "publish without the plan's answer in its condition"
+    );
+}
+
+#[test]
+fn artifacts_yml_builds_under_the_version_the_release_will_tag() {
+    // Catches: any change to artifacts.yml that lets a binary be built without the version
+    // computed for it (the v0.3.1 binary said 0.3.0): the `version` job gone or no longer the
+    // `cargo xtask release version` the release plan shares, a build job that does not wait for
+    // it or does not pass it to the build, a build-commit step that does not check it.
+    assert_eq!(
+        artifacts_problems(&text_of("artifacts.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// `(text to replace, its replacement, what the problem must name)`.
+const ARTIFACTS_DEFECTS: &[(&str, &str, &str)] = &[
+    ("needs: [version]", "needs: []", "needs"),
+    (
+        "TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}",
+        "TIERSTORE_BUILD_VERSION_OVERRIDE: ''",
+        "TIERSTORE_BUILD_VERSION_OVERRIDE",
+    ),
+    (
+        " --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"",
+        "",
+        "build-commit",
+    ),
+    (
+        "release version --repo",
+        "release plan --repo",
+        "release version",
+    ),
+    (" --version-file VERSION", "", "--version-file"),
+    (
+        "version: ${{ steps.version.outputs.version }}",
+        "version: ''",
+        "output version",
+    ),
+];
+
+#[test]
+fn each_defect_in_the_version_chain_of_artifacts_yml_is_named_by_the_lint() {
+    // Catches: a pin of artifacts.yml that holds nothing, because the file passes whether or
+    // not the thing it pins is there.
+    let text = text_of("artifacts.yml");
+    for (replace, with, names) in ARTIFACTS_DEFECTS {
+        assert!(
+            text.contains(replace),
+            "{replace:?} is not in artifacts.yml"
+        );
+        let problems = artifacts_problems(&text.replace(replace, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn every_workflow_that_tags_publishes_or_deploys_is_in_the_one_release_group() {
+    // Catches: a workflow that can tag, publish or deploy (found by what it does, not by a
+    // list of names) outside the shared group, so that two release actions overlap, or one
+    // that cancels a running release action.
+    assert_eq!(
+        discovery_problems(&workflows(), RELEASE_EXEMPT),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        concurrency_problems("release.yml", &text_of("release.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// A workflow with `step` in a job of its own, and no concurrency block.
+fn with_step(step: &str) -> (String, String) {
+    (
+        "new.yml".to_owned(),
+        format!(
+            "name: new\non:\n  workflow_dispatch:\npermissions: {{}}\njobs:\n  go:\n    runs-on: ubuntu-24.04\n    permissions:\n      contents: read\n    steps:\n      - run: {step}\n"
+        ),
+    )
+}
+
+/// An empty exempt list, for checks on a single made-up workflow: the real list names
+/// artifacts.yml, which such a set does not hold.
+const NO_EXEMPT: &[(&str, &str)] = &[];
+
+#[test]
+fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
+    // Catches: discovery that finds only the files it was told about. Each of these must be
+    // named, by file, when it has no group; `id-token` with attest alone is the artifacts
+    // workflow and must not be.
+    for step in [
+        "gh release create v1 --repo x/y",
+        "git tag v1 && git push origin v1",
+        "git push origin refs/tags/v1",
+        "cargo xtask deploy-farm --service tierstore",
+        "./farm-deploy.sh",
+    ] {
+        let problems = discovery_problems(&[with_step(step)], NO_EXEMPT);
+        assert!(
+            problems.iter().any(|p| p.contains("new.yml")),
+            "{step}: {problems:?}"
+        );
+    }
+    let (name, text) = with_step("gh release create v1");
+    let write = text
+        .replace("contents: read", "contents: write")
+        .replace("gh release create v1", "echo");
+    let problems = discovery_problems(&[(name, write)], NO_EXEMPT);
+    assert!(
+        problems.iter().any(|p| p.contains("new.yml")),
+        "{problems:?}"
+    );
+    let (name, text) = with_step("echo build");
+    let attest = text.replace(
+        "contents: read",
+        "contents: read\n      id-token: write\n      attestations: write",
+    );
+    assert_eq!(
+        discovery_problems(&[(name, attest)], NO_EXEMPT),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn a_release_path_workflow_in_the_group_or_exempt_with_a_reason_is_accepted_and_the_rest_not() {
+    // Catches: a group that is not checked once the workflow is found, an exempt entry that
+    // needs no reason, and one that names a file that is not there.
+    let (name, text) = with_step("gh release create v1");
+    let grouped = format!(
+        "{}concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\njobs:",
+        text.split("jobs:").next().expect("head")
+    ) + text.split("jobs:").nth(1).expect("jobs");
+    assert_eq!(
+        discovery_problems(&[(name.clone(), grouped.clone())], NO_EXEMPT),
+        Vec::<String>::new()
+    );
+    let cancelling = grouped.replace("cancel-in-progress: false", "cancel-in-progress: true");
+    let problems = discovery_problems(&[(name.clone(), cancelling)], NO_EXEMPT);
+    assert!(
+        problems.iter().any(|p| p.contains("cancel-in-progress")),
+        "{problems:?}"
+    );
+    let files = [(name.clone(), text.clone())];
+    assert_eq!(
+        discovery_problems(&files, &[("new.yml", "it only reads, and says why")]),
+        Vec::<String>::new()
+    );
+    for reason in ["", "  "] {
+        let problems = discovery_problems(&files, &[("new.yml", reason)]);
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("new.yml") && p.contains("reason")),
+            "{reason:?}: {problems:?}"
+        );
+    }
+    let problems = discovery_problems(&files, &[("gone.yml", "was removed")]);
+    assert!(
+        problems.iter().any(|p| p.contains("gone.yml")),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn artifacts_yml_has_its_own_non_cancelling_group_per_commit() {
+    // Catches: artifacts.yml moving into the release group (it only builds and attests, so it
+    // must not wait for a release), a group not keyed on the commit (two pushes would share
+    // it), and a push run that cancels (a commit that is signed is never left half checked).
+    let text = text_of("artifacts.yml");
+    let block = format!(
+        "concurrency:\n  group: {ARTIFACTS_GROUP}\n  cancel-in-progress: ${{{{ github.event_name == 'pull_request' }}}}\n"
+    );
+    assert!(text.contains(&block), "artifacts.yml carries its group");
+    for (with, names) in [
+        (
+            "concurrency:\n  group: artifacts-${{ github.run_id }}\n  cancel-in-progress: ${{ github.event_name == 'pull_request' }}\n",
+            "concurrency group",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\n"),
+            "concurrency group",
+        ),
+        (
+            &format!("concurrency:\n  group: {ARTIFACTS_GROUP}\n  cancel-in-progress: true\n"),
+            "cancel-in-progress",
+        ),
+    ] {
+        let problems = artifacts_problems(&text.replace(&block, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_plan_job_if_is_pinned_whole_and_its_inputs_are_pinned() {
+    // Catches: one `&&` turned into `||` (every substring of the condition stays in the text),
+    // the plan reading another commit than the run built, a freeze that is not passed on or
+    // not read from the repository variable, and a group that does not need a push from this
+    // repository.
+    let text = text_of("release.yml");
+    for (replace, with, names) in [
+        (
+            "event == 'push' && github.event.workflow_run.head_branch == 'main'",
+            "event == 'push' || github.event.workflow_run.head_branch == 'main'",
+            "plan: `if` is not",
+        ),
+        (
+            "github.event_name == 'workflow_run' && github.event.workflow_run.conclusion",
+            "github.event_name == 'workflow_run' || github.event.workflow_run.conclusion",
+            "plan: `if` is not",
+        ),
+        (
+            "ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}",
+            "ref: ${{ inputs.commit }}",
+            "plan: checkout ref",
+        ),
+        (
+            "COMMIT: ${{ github.event.workflow_run.head_sha }}",
+            "COMMIT: ${{ github.sha }}",
+            "plan: env COMMIT",
+        ),
+        (" --freeze \"$FREEZE\"", "", "plan: --freeze"),
+        (
+            "FREEZE: ${{ vars.RELEASE_FREEZE }}",
+            "FREEZE: ''",
+            "plan: env FREEZE",
+        ),
+        (
+            " && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) && 'main'",
+            ") && 'main'",
+            "concurrency group",
+        ),
+    ] {
+        assert!(text.contains(replace), "{replace:?} is not in release.yml");
+        let problems = release_problems(&text.replace(replace, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn a_release_path_workflow_without_the_group_or_that_cancels_is_named_by_the_lint() {
+    // Catches: a check that holds nothing: a copy with no concurrency block, one with another
+    // group, one that cancels, and one that does not say, must each be named.
+    let text = text_of("release.yml");
+    let block = format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\n");
+    assert!(
+        text.contains(&block),
+        "release.yml carries the shared block"
+    );
+    for (with, names) in [
+        ("", "concurrency"),
+        (
+            "concurrency:\n  group: release\n  cancel-in-progress: false\n",
+            "group",
+        ),
+        (
+            "concurrency:\n  group: release-${{ github.run_id }}\n  cancel-in-progress: false\n",
+            "group",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: true\n"),
+            "cancel-in-progress",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n"),
+            "cancel-in-progress",
+        ),
+    ] {
+        let problems = concurrency_problems("release.yml", &text.replace(&block, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn every_exempt_workflow_exists_and_says_why() {
+    // Catches: an exemption left behind by a deleted file, and one without a reason.
+    for (file, reason) in RELEASE_EXEMPT {
+        text_of(file);
+        assert!(!reason.trim().is_empty(), "{file}");
     }
 }

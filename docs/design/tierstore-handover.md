@@ -38,7 +38,7 @@ listeners and the lingering drain".
 | item | value | note |
 |---|---|---|
 | hook | `tierstore update-hook <step>`, `hook.user` and `hook.group` `tierstore-update` | the staged release's own binary; Rust, no shell. A **hook-only account** that differs from the service's `uid = "tierstore"` ([`host-updates.md`][hu] 3.4.1): the service must not be able to write what the hook trusts. The polkit rule for the units attaches to this account |
-| `CAP_NET_ADMIN` | steps that touch nft: `prepare`, `cutover`, `rollback` | the updater's root part launches the step as a transient unit with the capability ambient ([`host-updates.md`][hu] 3.4); the hook is never root. Declared as `hook.step_capabilities.prepare`, `.cutover` and `.rollback`; `hook.capabilities`, the fallback for `verify` and `cleanup`, is empty. (`prepare` needs it to read and load the guard table: nftables netlink requests need it even to list) |
+| `CAP_NET_ADMIN` | every step (`prepare`, `cutover`, `verify`, `rollback`, `cleanup`) and the boot entry (`restore`) | the updater's root part launches the step as a transient unit with the capability ambient ([`host-updates.md`][hu] 3.4); the hook is never root. Declared hook-wide, `hook.capabilities = ["CAP_NET_ADMIN"]`, with no `hook.step_capabilities` table: listing nftables rules over netlink needs `CAP_NET_ADMIN` too, so `verify` and `cleanup` need it as well, and the boot entry, which is not one of the five steps, runs with the hook-wide set ([`host-updates.md`][hu] 3.5) |
 | units, families | `tierstore@9301.service`, `tierstore@9302.service` (one template, `%i` is the port, below); `AF_UNIX AF_INET AF_INET6 AF_NETLINK` | the only units it may start or stop (never mask or enable: polkit grants the hook only `org.freedesktop.systemd1.manage-units`, for these two units); netlink for nft |
 | record directory | `state_dir = "/var/lib/updater/hooks/tierstore"`, created by the updater, owned by `tierstore-update` ([`host-updates.md`][hu] 2.4, 3.4.1) | holds `state.json` (temporary file, fsync, rename), an exclusive lock for the hook's own steps, and `slots/<port>`. **Outside every path the service may write**; never under `/run` |
 | slot links | `<state_dir>/slots/<port>` points at a staged release (`/var/lib/updater/releases/tierstore/<digest>/`, root-owned, read-only), or is absent | a retired slot has none; the service executes it and cannot change it. **Conflict to settle**: the service must traverse `state_dir`, which 3.4.1 allows "through group membership" (mode 0750, the service in the group, read only) and the 2.4 example's `0700` does not |
@@ -339,18 +339,18 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
 1-3. *Settled in [`host-updates.md`][hu] 3.2 and 3.4*: a failed `cleanup` after the stop is re-run forward up to
    `cleanup_retries`, then `Failed(after_commit)`, never rolled back; after a failed `prepare` or `cutover` the updater
    runs `rollback`, and `cleanup` runs only after a successful `verify` (the hook still refuses without `verified`);
-   capabilities are per step.
-4. **Listeners** (the wildcard decision is [host-updates.md][hu] Question 6). A repeatable `--listen` with explicit
+   capabilities may be given per step; tierstore gives one hook-wide grant (section 2).
+4. *Decided (accepted 2026-11-01).* **Listeners** (the wildcard decision is [host-updates.md][hu] Question 6). A repeatable `--listen` with explicit
    `IPV6_V6ONLY`, and the same for `--oci-listen`. Recommendation: both in the first tierstore change, or the OCI front's
    clients see a gap at every update.
-5. **P1 and P2** ([host-updates.md][hu] Question 14) change the plain restart's drain too (a connection is closed, never
+5. *Decided (accepted 2026-11-01).* **P1 and P2** ([host-updates.md][hu] Question 14) change the plain restart's drain too (a connection is closed, never
    answered 503). Recommendation: the only behaviour, not a flag.
-6. **The residual race** (a request within one round trip of the FIN on a connection idle since before the drain).
+6. *Decided (accepted 2026-11-01).* **The residual race** (a request within one round trip of the FIN on a connection idle since before the drain).
    Recommendation: accept it as the stated limit, counted, and do not ask clients to retry a create-only put.
-7. **First lock release** goes in by `mode=restart` ([host-updates.md][hu] Question 15), and so does a `dir:` hot tier.
+7. *Decided (accepted 2026-11-01).* **First lock release** goes in by `mode=restart` ([host-updates.md][hu] Question 15), and so does a `dir:` hot tier.
    Recommendation: accept.
-8. **Version source.** Recommendation: the build gauge, with the commit baked into the binary rather than the crate version.
-9. **`state_dir` mode.** The slot links must be executable by the service, so `state_dir` cannot be `0700`
+8. *Decided (accepted 2026-11-01).* **Version source.** Recommendation: the build gauge, with the commit baked into the binary rather than the crate version.
+9. *Decided (accepted 2026-11-01).* **`state_dir` mode.** The slot links must be executable by the service, so `state_dir` cannot be `0700`
    ([host-updates.md][hu] 3.4.1 says read access "through group membership", the 2.4 example says `0700`). Recommendation: mode
    `0750`, group `tierstore-update`, the service account a member, read only; the record stays unwritable by the service.
 

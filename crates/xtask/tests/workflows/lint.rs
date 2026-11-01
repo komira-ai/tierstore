@@ -60,7 +60,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "publish",
         scope: "contents",
-        condition: MAIN_ONLY,
+        condition: RELEASE_IF,
     },
     Allowed {
         file: "advisories.yml",
@@ -232,6 +232,427 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
                 level.unwrap_or("(none)")
             )),
         }
+    }
+    problems
+}
+
+/// The condition of the jobs after the plan: the plan said to release, on a run of `main`.
+pub const RELEASE_IF: &str =
+    "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}";
+
+/// What the `if:` of the plan job must say of the run that started it: it is a completed
+/// run that succeeded, for a push to `main` of this repository.
+const PLAN_GUARDS: [&str; 4] = [
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_branch == 'main'",
+    "github.event.workflow_run.head_repository.full_name == github.repository",
+];
+
+/// The `if:` of the plan job, whole: a manual run of `main`, or a finished run that succeeded
+/// for a push to `main` of this repository.
+const PLAN_IF: &str = "${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}";
+
+/// The checkout of the plan job: the commit the run built, or the one a manual run names.
+const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}";
+
+/// The `cargo xtask` verbs release.yml may run; the others build or fetch.
+const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
+
+fn names(node: Option<&Node>) -> Vec<String> {
+    let mut found = node.map(triggers).unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// One line per way the text of `release.yml` is not the automatic release chain: started by
+/// the completion of `ci` and `artifacts` on `main` and by hand and by nothing else, one run at
+/// a time and none cancelled, a read-only `plan` job that answers whether and as which tag,
+/// `verify` and `publish` after it (the write scope in `publish` alone), and no step that
+/// builds or signs.
+pub fn release_problems(text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![e],
+    };
+    let mut problems = Vec::new();
+    let on = entry(&doc, "on");
+    let found = names(on);
+    if found != ["workflow_dispatch", "workflow_run"] {
+        problems.push(format!(
+            "triggers are {found:?}, not workflow_dispatch and workflow_run"
+        ));
+    }
+    let run = on.and_then(|o| entry(o, "workflow_run"));
+    for (key, want) in [
+        ("workflows", vec!["artifacts", "ci"]),
+        ("types", vec!["completed"]),
+        ("branches", vec!["main"]),
+    ] {
+        let got = names(run.and_then(|r| entry(r, key)));
+        if got != want {
+            problems.push(format!("workflow_run.{key} is {got:?}, not {want:?}"));
+        }
+    }
+    problems.extend(concurrency_problems("release.yml", text));
+    let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
+    let job = |name: &str| {
+        jobs.iter()
+            .find(|(k, _)| k.as_str() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
+    listed.sort_unstable();
+    if listed != ["plan", "publish", "verify"] {
+        problems.push(format!("jobs are {listed:?}, not plan, verify and publish"));
+    }
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        let permissions = entry(job, "permissions").map_or(&[][..], entries);
+        for (scope, level) in permissions {
+            let level = level.as_str().unwrap_or_default();
+            let writes = level != "read" && level != "none";
+            if writes && name != "publish" {
+                problems.push(format!(
+                    "{name}: permissions grant `{}: {level}`; only publish writes",
+                    scope.as_str().unwrap_or_default()
+                ));
+            }
+        }
+    }
+    let plan = job("plan");
+    let plan_if = plan
+        .and_then(|j| entry(j, "if"))
+        .and_then(Node::as_str)
+        .unwrap_or_default();
+    for guard in PLAN_GUARDS {
+        if !plan_if.contains(guard) {
+            problems.push(format!("plan: `if` lacks {guard}"));
+        }
+    }
+    if !plan_if.contains("github.event_name == 'workflow_dispatch'") {
+        problems.push("plan: `if` lacks github.event_name == 'workflow_dispatch'".to_owned());
+    }
+    // Pinned whole: every part above can be present while an `&&` has become an `||`.
+    if plan_if != PLAN_IF {
+        problems.push(format!("plan: `if` is not {PLAN_IF}"));
+    }
+    let steps: &[Node] = match plan.and_then(|j| entry(j, "steps")).map(|s| &s.value) {
+        Some(Value::Seq(items)) => items,
+        _ => &[],
+    };
+    let checkout = steps.iter().find(|s| {
+        entry(s, "uses")
+            .and_then(Node::as_str)
+            .is_some_and(|u| u.starts_with("actions/checkout@"))
+    });
+    let reference = checkout
+        .and_then(|s| entry(s, "with"))
+        .and_then(|w| entry(w, "ref"))
+        .and_then(Node::as_str);
+    if reference != Some(PLAN_REF) {
+        problems.push(format!("plan: checkout ref is not {PLAN_REF}"));
+    }
+    let auto = steps
+        .iter()
+        .find(|s| entry(s, "id").and_then(Node::as_str) == Some("auto"));
+    let auto_env = |key: &str| {
+        auto.and_then(|s| entry(s, "env"))
+            .and_then(|e| entry(e, key))
+            .and_then(Node::as_str)
+    };
+    if auto_env("COMMIT") != Some("${{ github.event.workflow_run.head_sha }}") {
+        problems
+            .push("plan: env COMMIT is not ${{ github.event.workflow_run.head_sha }}".to_owned());
+    }
+    if auto_env("FREEZE") != Some("${{ vars.RELEASE_FREEZE }}") {
+        problems.push("plan: env FREEZE is not ${{ vars.RELEASE_FREEZE }}".to_owned());
+    }
+    let auto_run = auto
+        .and_then(|s| entry(s, "run"))
+        .and_then(Node::as_str)
+        .unwrap_or_default();
+    for argument in ["--freeze \"$FREEZE\"", "--commit \"$COMMIT\""] {
+        if !auto_run.contains(argument) {
+            problems.push(format!("plan: {argument} is not passed to release plan"));
+        }
+    }
+    let mut held: Vec<String> = plan
+        .and_then(|j| entry(j, "permissions"))
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}: {}",
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    held.sort();
+    if held != ["actions: read", "contents: read"] {
+        problems.push(format!(
+            "plan: permissions are {held:?}, not contents: read and actions: read"
+        ));
+    }
+    for (name, needs) in [
+        ("verify", vec!["plan"]),
+        ("publish", vec!["plan", "verify"]),
+    ] {
+        let got = names(job(name).and_then(|j| entry(j, "needs")));
+        if got != needs {
+            problems.push(format!("{name}: needs are {got:?}, not {needs:?}"));
+        }
+        let condition = job(name)
+            .and_then(|j| entry(j, "if"))
+            .and_then(Node::as_str);
+        if condition != Some(RELEASE_IF) {
+            problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
+        }
+    }
+    // The binary of the files about to be published says the tag and the commit, checked in
+    // verify, before the publish job (which needs verify) can run.
+    let verify = job("verify");
+    let env_tag = verify
+        .and_then(|j| entry(j, "env"))
+        .and_then(|e| entry(e, "TAG"))
+        .and_then(Node::as_str);
+    if env_tag != Some("${{ needs.plan.outputs.tag }}") {
+        problems.push("verify: env TAG is not ${{ needs.plan.outputs.tag }}".to_owned());
+    }
+    let check = runs(verify)
+        .into_iter()
+        .find(|r| r.contains("release check-binary"));
+    match check {
+        None => problems.push("verify: no step runs `cargo xtask release check-binary`".to_owned()),
+        Some(run) if !(run.contains("--tag \"$TAG\"") && run.contains("--commit \"$COMMIT\"")) => {
+            problems.push(
+                "verify: the check-binary step must pass --tag \"$TAG\" and --commit \"$COMMIT\""
+                    .to_owned(),
+            );
+        }
+        Some(_) => {}
+    }
+    if !text.contains("vars.RELEASE_FREEZE") {
+        problems.push("plan does not read vars.RELEASE_FREEZE".to_owned());
+    }
+    problems.extend(build_problems(text));
+    problems
+}
+
+/// A line of `text` that builds, fetches or signs: a `cargo` that is not `cargo xtask <verb>`
+/// of [`XTASK_VERBS`], or the attest actions.
+fn build_problems(text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut words = line.split_whitespace().peekable();
+        while let Some(word) = words.next() {
+            let next = words.peek().copied().unwrap_or_default();
+            let after = line
+                .split_once("cargo xtask ")
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .unwrap_or_default();
+            let bad = match word {
+                "cargo" => next != "xtask" || !XTASK_VERBS.contains(&after),
+                _ => word.contains("attest-") || word == "--release",
+            };
+            if bad {
+                problems.push(format!("line {}: release.yml builds or signs", n + 1));
+                break;
+            }
+        }
+    }
+    problems
+}
+
+/// One line per way the text of `artifacts.yml` does not build under the version the release
+/// will tag.
+pub fn artifacts_problems(text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![e],
+    };
+    let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
+    let job = |name: &str| {
+        jobs.iter()
+            .find(|(k, _)| k.as_str() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let mut problems = Vec::new();
+    let concurrency = entry(&doc, "concurrency");
+    let group = concurrency
+        .and_then(|c| entry(c, "group"))
+        .and_then(Node::as_str);
+    if group != Some(ARTIFACTS_GROUP) {
+        problems.push(format!(
+            "artifacts.yml: concurrency group is {group:?}, not {ARTIFACTS_GROUP}"
+        ));
+    }
+    let cancel = concurrency
+        .and_then(|c| entry(c, "cancel-in-progress"))
+        .and_then(Node::as_str);
+    if cancel != Some(ARTIFACTS_CANCEL) {
+        problems.push(format!(
+            "artifacts.yml: concurrency cancel-in-progress is {cancel:?}, not {ARTIFACTS_CANCEL}"
+        ));
+    }
+    let version = job("version");
+    let version_runs = runs(version);
+    if !version_runs.iter().any(|r| r.contains("release version")) {
+        problems.push("version job: no step runs `cargo xtask release version`".to_owned());
+    }
+    if !version_runs
+        .iter()
+        .any(|r| r.contains("--version-file VERSION"))
+    {
+        problems.push("version job: release version lacks --version-file VERSION".to_owned());
+    }
+    let output = version
+        .and_then(|j| entry(j, "outputs"))
+        .and_then(|o| entry(o, "version"))
+        .and_then(Node::as_str);
+    if output != Some("${{ steps.version.outputs.version }}") {
+        problems.push("version job: output version is not the version step's".to_owned());
+    }
+    for name in ["linux-x86_64", "linux-arm64"] {
+        let build = job(name);
+        let needs = names(build.and_then(|j| entry(j, "needs")));
+        if needs != ["version"] {
+            problems.push(format!("{name}: needs are {needs:?}, not [\"version\"]"));
+        }
+        let given = build
+            .and_then(|j| entry(j, "env"))
+            .and_then(|e| entry(e, "TIERSTORE_BUILD_VERSION_OVERRIDE"))
+            .and_then(Node::as_str);
+        if given != Some("${{ needs.version.outputs.version }}") {
+            problems.push(format!(
+                "{name}: env TIERSTORE_BUILD_VERSION_OVERRIDE is not ${{{{ needs.version.outputs.version }}}}"
+            ));
+        }
+        let checked = runs(build).into_iter().any(|r| {
+            r.contains("build-commit")
+                && r.contains("--version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"")
+        });
+        if !checked {
+            problems.push(format!(
+                "{name}: the build-commit step does not check --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\""
+            ));
+        }
+    }
+    problems
+}
+
+/// The `run:` text of each step of `job`.
+fn runs(job: Option<&Node>) -> Vec<&str> {
+    let steps = job.and_then(|j| entry(j, "steps"));
+    match steps.map(|s| &s.value) {
+        Some(Value::Seq(items)) => items
+            .iter()
+            .filter_map(|s| entry(s, "run").and_then(Node::as_str))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Workflows that look like the release path to [`discovery_problems`] (or are named for it)
+/// and are outside the release group on purpose: the file and the reason. A reason is required.
+pub const RELEASE_EXEMPT: &[(&str, &str)] = &[(
+    "artifacts.yml",
+    "builds and attests one commit and never tags, publishes or deploys; its own per-commit group",
+)];
+
+/// The group every release-path workflow is in: a run that succeeded for a push to this
+/// repository joins `release-main`; any other takes a group of its own, so it cannot replace
+/// the release that is waiting. kbf's expression is
+/// `release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}`;
+/// this one is stricter: a pull request from a fork's branch named main also matches
+/// `branches: [main]` of `workflow_run`, and would take the one pending slot.
+pub const RELEASE_GROUP: &str = "release-${{ (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository) && 'main' || github.run_id }}";
+
+/// The group of artifacts.yml: one per commit (a pull request: per ref), outside the release
+/// group because it only builds and attests.
+pub const ARTIFACTS_GROUP: &str =
+    "artifacts-${{ github.event_name == 'pull_request' && github.ref || github.sha }}";
+
+/// A push run of artifacts.yml is never cancelled; a pull request's newer run replaces its older.
+pub const ARTIFACTS_CANCEL: &str = "${{ github.event_name == 'pull_request' }}";
+
+/// One line per release-path workflow of `files` (name, text) that is neither in the release
+/// group without cancelling nor on `exempt` with a reason, and per exempt entry that has no
+/// reason or names no file. A workflow is on the release path when it can tag, publish or
+/// deploy: `contents: write`, `gh release`, a `git tag` or a tag push, a farm deploy.
+/// `id-token: write` with attest actions alone is not.
+pub fn discovery_problems(files: &[(String, String)], exempt: &[(&str, &str)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (file, reason) in exempt {
+        if reason.trim().is_empty() {
+            problems.push(format!(
+                "{file}: exempt from the release group without a reason"
+            ));
+        }
+        if !files.iter().any(|(name, _)| name == file) {
+            problems.push(format!("{file}: exempt, but there is no such workflow"));
+        }
+    }
+    for (file, text) in files {
+        if !on_release_path(text) || exempt.iter().any(|(name, _)| name == file) {
+            continue;
+        }
+        let found = concurrency_problems(file, text);
+        if !found.is_empty() {
+            problems.push(format!(
+                "{file}: tags, publishes or deploys, so it must be in the release group (or exempt, with a reason):"
+            ));
+            problems.extend(found);
+        }
+    }
+    problems
+}
+
+/// What marks a step or permission as tagging, publishing or deploying.
+const RELEASE_MARKS: [&str; 6] = [
+    "contents: write",
+    "gh release",
+    "git tag",
+    "refs/tags",
+    "deploy-farm",
+    "farm-deploy",
+];
+
+/// Whether the workflow `text` can tag, publish or deploy: a line that is not a comment holds
+/// one of [`RELEASE_MARKS`]. Signing alone (`id-token`, the attest actions) is not.
+fn on_release_path(text: &str) -> bool {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .any(|l| RELEASE_MARKS.iter().any(|m| l.contains(m)))
+}
+
+/// One line per way the workflow `file` is not in the shared release group without cancelling.
+pub fn concurrency_problems(file: &str, text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![format!("{file}: {e}")],
+    };
+    let Some(concurrency) = entry(&doc, "concurrency") else {
+        return vec![format!(
+            "{file}: no top-level `concurrency` (group: {RELEASE_GROUP})"
+        )];
+    };
+    let mut problems = Vec::new();
+    let group = entry(concurrency, "group").and_then(Node::as_str);
+    if group != Some(RELEASE_GROUP) {
+        problems.push(format!(
+            "{file}: concurrency group is {group:?}, not {RELEASE_GROUP}"
+        ));
+    }
+    let cancel = entry(concurrency, "cancel-in-progress").and_then(Node::as_str);
+    if cancel != Some("false") {
+        problems.push(format!(
+            "{file}: concurrency cancel-in-progress is {cancel:?}, not false"
+        ));
     }
     problems
 }

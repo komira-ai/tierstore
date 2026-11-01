@@ -82,6 +82,9 @@ enum Verb {
         binary: PathBuf,
         /// The commit, 12 to 40 lowercase hex digits.
         commit: String,
+        /// Also require the binary to say this version, `<major>.<minor>.<patch>`.
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Keep the advisories `cargo deny` reports in one GitHub issue.
     Advisories(advisories::Args),
@@ -192,6 +195,67 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// The version the next release has (`X.Y.Z`): what the build is given and the plan tags by.
+    Version {
+        #[arg(long)]
+        repo: String,
+        /// The `VERSION` file: a version above the highest release tag is the next version.
+        #[arg(long)]
+        version_file: Option<PathBuf>,
+        /// Append `version=<X.Y.Z>` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
+    /// The linux-x86_64 binary in `dir` says the tag and the commit it is released under.
+    CheckBinary {
+        dir: PathBuf,
+        /// `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        commit: String,
+        /// Where the binary is unpacked.
+        #[arg(long)]
+        scratch: PathBuf,
+    },
+    /// Whether a push to main is released and as which tag; appends the answer to `--output`.
+    Plan {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        commit: String,
+        /// The `VERSION` file: a version above the highest release tag is the next tag.
+        #[arg(long)]
+        version_file: Option<PathBuf>,
+        /// The value of the repository variable `RELEASE_FREEZE`; `true` stops the release.
+        #[arg(long, default_value = "")]
+        freeze: String,
+        /// Append `release=`, `tag=`, `commit=` and `note=` (or `reason=`) to this file
+        /// (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
+    /// The same answer for a run started by hand, with its own tag and commit.
+    Manual {
+        #[arg(long)]
+        repo: String,
+        /// `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        commit: String,
+        /// A paragraph for the release notes.
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
     /// `dir` holds exactly the assets of the commit, each tarball with its bundle.
     Check {
         dir: PathBuf,
@@ -256,7 +320,22 @@ fn cargo_program() -> OsString {
 fn run(cli: Cli) -> Result<Vec<String>, Error> {
     let root = cli.root.unwrap_or_else(default_root);
     match cli.verb {
-        Verb::BuildCommit { binary, commit } => Ok(vec![build_commit::check(&binary, &commit)?]),
+        Verb::BuildCommit {
+            binary,
+            commit,
+            version,
+        } => {
+            let mut printed = vec![build_commit::check(&binary, &commit)?];
+            if let Some(version) = version {
+                printed.push(release::check_built(
+                    &binary,
+                    &version,
+                    &commit,
+                    build_commit::run_version,
+                )?);
+            }
+            Ok(printed)
+        }
         Verb::Advisories(args) => advisories::run(&args, &root, &cargo_program()),
         Verb::Fetch {
             url,
@@ -319,6 +398,69 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             output,
             gh,
         }) => release::locate(&release::RealGh(gh), &repo, &commit, output.as_deref()),
+        Verb::Release(ReleaseVerb::Plan {
+            repo,
+            commit,
+            version_file,
+            freeze,
+            output,
+            gh,
+        }) => {
+            let version = version_file
+                .as_deref()
+                .map(release::read_version)
+                .transpose()?
+                .flatten();
+            release::plan(
+                &release::RealGh(gh),
+                &release::Request {
+                    repo: &repo,
+                    commit: &commit,
+                    version: version.as_deref(),
+                    freeze: &freeze,
+                    output: output.as_deref(),
+                },
+            )
+        }
+        Verb::Release(ReleaseVerb::Version {
+            repo,
+            version_file,
+            output,
+            gh,
+        }) => {
+            let text = version_file
+                .as_deref()
+                .map(release::read_version)
+                .transpose()?
+                .flatten();
+            release::version(
+                &release::RealGh(gh),
+                &repo,
+                text.as_deref(),
+                output.as_deref(),
+            )
+        }
+        Verb::Release(ReleaseVerb::CheckBinary {
+            dir,
+            tag,
+            commit,
+            scratch,
+        }) => release::check_binary(&dir, &tag, &commit, &scratch, build_commit::run_version),
+        Verb::Release(ReleaseVerb::Manual {
+            repo,
+            tag,
+            commit,
+            note,
+            output,
+            gh,
+        }) => release::manual(
+            &release::RealGh(gh),
+            &repo,
+            &tag,
+            &commit,
+            &note,
+            output.as_deref(),
+        ),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {
             dir,
