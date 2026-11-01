@@ -6,11 +6,11 @@
 //! file of the directory, taken without waiting; it is held as long as the descriptor lives,
 //! and the kernel drops it when the process ends, so a crashed step leaves none behind.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 
 use rustix::fs::{FlockOperation, Mode, OFlags, flock, open};
 use rustix::io::Errno;
@@ -35,6 +35,19 @@ pub struct StateFiles {
 
 fn failed(what: &str, fault: &str) -> PortError {
     PortError::failed(KIND, format!("{what}: {fault}"))
+}
+
+/// The bytes of the record, read through a descriptor opened with `O_NOFOLLOW`: a link at the
+/// record's name is not followed.
+fn read_record(path: &Path) -> io::Result<Vec<u8>> {
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let mut bytes = Vec::new();
+    File::from(fd).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Takes the exclusive lock of `fd` without waiting: `Busy` when another descriptor holds it.
@@ -76,13 +89,17 @@ impl StateFiles {
         Ok(())
     }
 
-    fn write_temp(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(self.dir.join(TEMP_FILE))?;
+    /// Writes the temporary file anew: one a crash left, or a link put there, is removed (the
+    /// link itself, not what it points at) and the file is made with `O_EXCL | O_NOFOLLOW`.
+    fn write_temp(&self, bytes: &[u8]) -> io::Result<()> {
+        let path = self.dir.join(TEMP_FILE);
+        let _ = fs::remove_file(&path);
+        let fd = open(
+            path.as_path(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_bits_truncate(0o600),
+        )?;
+        let mut file = File::from(fd);
         file.write_all(bytes)?;
         file.sync_all()
     }
@@ -105,9 +122,9 @@ impl StateDir for StateFiles {
 
     fn load(&self) -> Result<Option<Vec<u8>>, PortError> {
         let path = self.dir.join(STATE_FILE);
-        match fs::read(&path) {
+        match read_record(&path) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(failed(
                 &format!("read {}", path.display()),
                 &error.to_string(),
