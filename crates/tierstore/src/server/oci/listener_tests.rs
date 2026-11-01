@@ -70,10 +70,7 @@ async fn a_failed_accept_is_followed_by_another_ask() {
         asked: Arc::clone(&asked),
     };
     let (stop, stopped) = watch::channel(false);
-    let shared = Shared {
-        drain: Arc::new(drain_of(&front, limits)),
-        slots: Arc::new(tokio::sync::Semaphore::new(limits.max_connections)),
-    };
+    let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
     let looping = tokio::spawn(accept_loop(
         incoming,
         Some(tls),

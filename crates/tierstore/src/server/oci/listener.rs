@@ -6,6 +6,7 @@ use std::convert::Infallible;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use http_body_util::BodyExt as _;
@@ -64,9 +65,7 @@ pub struct OciListener {
     acceptor: Option<TlsAcceptor>,
     front: Arc<OciFront>,
     limits: OciLimits,
-    drain: Arc<Drain>,
-    /// One permit for each connection that may be open at once, lingering ones included.
-    slots: Arc<Semaphore>,
+    shared: Shared,
 }
 
 /// The start of the drain of an [`OciListener`], which the S3 front's drain begins at the same
@@ -139,21 +138,20 @@ impl OciListener {
     ) -> Result<Self, OciError> {
         let bound = listen::bind_all(addrs);
         let bound = bound.map_err(|(addr, source)| OciError::Bind { addr, source })?;
-        let drain = Arc::new(drain_of(&front, limits));
+        let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
         Ok(Self {
             listeners: Listeners::new(bound),
             acceptor,
             front,
             limits,
-            drain,
-            slots: Arc::new(Semaphore::new(limits.max_connections)),
+            shared,
         })
     }
 
     /// The handle that begins the listener's drain (see [`OciDrain`]).
     #[must_use]
     pub(crate) fn drain(&self) -> OciDrain {
-        OciDrain(Arc::clone(&self.drain))
+        OciDrain(Arc::clone(&self.shared.drain))
     }
 
     /// How the listener carries its connections.
@@ -195,28 +193,62 @@ impl OciListener {
             acceptor,
             front,
             limits,
-            drain,
-            slots,
+            shared,
         } = self;
-        let shared = Shared { drain, slots };
         accept_loop(listeners, acceptor, front, limits, stop, shared).await
     }
 
     /// The drain and the connection slots of the listener, for a test to watch.
     #[cfg(test)]
     pub(super) fn shared(&self) -> Shared {
-        Shared {
-            drain: Arc::clone(&self.drain),
-            slots: Arc::clone(&self.slots),
+        self.shared.clone()
+    }
+}
+
+/// What the accept loop shares with its connections: the drain, the connection slots, and the
+/// count of connections that hold one.
+#[derive(Clone)]
+pub(super) struct Shared {
+    pub(super) drain: Arc<Drain>,
+    /// One permit for each connection that may be open at once, lingering ones included. The
+    /// accept loop takes one before each accept, and gives it to the connection it accepts.
+    pub(super) slots: Arc<Semaphore>,
+    /// The connections that hold a slot: given one by the accept loop and not ended, their
+    /// lingering close included. Not the permit the accept loop holds while it waits to accept.
+    pub(super) held: Arc<AtomicUsize>,
+}
+
+impl Shared {
+    /// What a listener with `drain` and room for `max_connections` shares.
+    pub(super) fn new(drain: Drain, max_connections: usize) -> Self {
+        Self {
+            drain: Arc::new(drain),
+            slots: Arc::new(Semaphore::new(max_connections)),
+            held: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
 
-/// What the accept loop shares with its connections: the drain, and the connection slots.
-#[derive(Clone)]
-pub(super) struct Shared {
-    pub(super) drain: Arc<Drain>,
-    pub(super) slots: Arc<Semaphore>,
+/// A connection's slot: its permit, counted in [`Shared::held`] until the connection's task ends.
+struct Slot {
+    _permit: Result<OwnedSemaphorePermit, AcquireError>,
+    held: Arc<AtomicUsize>,
+}
+
+impl Slot {
+    fn give(permit: Result<OwnedSemaphorePermit, AcquireError>, held: &Arc<AtomicUsize>) -> Self {
+        held.fetch_add(1, Ordering::SeqCst);
+        Self {
+            _permit: permit,
+            held: Arc::clone(held),
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.held.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The drain of a listener of `front`: its lingering closes wait for the header timeout, and it
@@ -238,7 +270,7 @@ pub(super) async fn accept_loop<I>(
 where
     I: Incoming<Stream = TcpStream> + Send,
 {
-    let Shared { drain, slots } = shared;
+    let Shared { drain, slots, held } = shared;
     let mut connections = JoinSet::new();
     loop {
         // A slot is taken before the next accept, so a flood waits in the backlog and not
@@ -256,6 +288,7 @@ where
                         limits,
                         drain: Arc::clone(&drain),
                     };
+                    let slot = Slot::give(slot, &held);
                     connections.spawn(serving.connection(tcp, peer, slot));
                 }
                 Err(error) => {
@@ -280,6 +313,29 @@ where
     let cut = connections.len();
     connections.abort_all();
     cut
+}
+
+/// One plain connection served as the accept loop serves one, holding `permit`, for a test that
+/// watches the permit with no accept loop to take it.
+#[cfg(test)]
+pub(super) async fn one_connection(
+    front: Arc<OciFront>,
+    limits: OciLimits,
+    drain: Arc<Drain>,
+    tcp: TcpStream,
+    permit: OwnedSemaphorePermit,
+) {
+    let peer = tcp.peer_addr().expect("a peer");
+    let serving = Serving {
+        acceptor: None,
+        front,
+        limits,
+        drain,
+    };
+    let held = Arc::new(AtomicUsize::new(0));
+    serving
+        .connection(tcp, peer, Slot::give(Ok(permit), &held))
+        .await;
 }
 
 /// Resolves once `stop` is true, or its sender is gone.
@@ -321,12 +377,7 @@ impl Serving {
     /// over, and then its lingering close, if the drain gave it one; the slot is held throughout,
     /// so that a connection that lingers counts against [`OciLimits::max_connections`], and the
     /// listener cuts it at the drain deadline as it cuts any other.
-    async fn connection(
-        self,
-        tcp: TcpStream,
-        peer: SocketAddr,
-        _slot: Result<OwnedSemaphorePermit, AcquireError>,
-    ) {
+    async fn connection(self, tcp: TcpStream, peer: SocketAddr, _slot: Slot) {
         let limits = self.limits;
         let Some(stream) = self.open(tcp, peer).await else {
             return;

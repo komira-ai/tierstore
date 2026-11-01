@@ -33,6 +33,9 @@ pub(crate) struct Drain {
     pub(super) unanswered: AtomicUsize,
     /// The connections the drain has shut for writing that are waiting for their peer to close.
     pub(super) lingering: AtomicUsize,
+    /// The lingering closes that have begun to read: the connection's HTTP is over, and its stream
+    /// is being read to the peer's end.
+    pub(super) reading: AtomicUsize,
     /// The connections whose peer wrote after the front shut its end, in the drain. Shared, so
     /// that the counters of a front can show it.
     late: Arc<AtomicU64>,
@@ -55,6 +58,7 @@ impl Drain {
             phase: AtomicU8::new(SERVING),
             unanswered: AtomicUsize::new(0),
             lingering: AtomicUsize::new(0),
+            reading: AtomicUsize::new(0),
             late,
             idle: Notify::new(),
             settled: watch::channel(false).0,

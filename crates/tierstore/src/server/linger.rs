@@ -333,6 +333,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Drop for Lingering<T> {
 /// wire is clear once its answer is out.
 async fn linger<T: AsyncRead + Unpin>(mut io: T, hold: Hold) {
     let drain = Arc::clone(&hold.0);
+    drain.reading.fetch_add(1, Ordering::SeqCst);
     let bound = tokio::time::sleep(drain.linger_bound());
     tokio::pin!(bound);
     let mut late = false;

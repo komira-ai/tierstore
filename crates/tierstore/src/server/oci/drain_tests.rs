@@ -12,12 +12,12 @@ use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpSocket, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 
-use super::listener::{OciLimits, Shared};
+use super::listener::{OciLimits, Shared, drain_of, one_connection};
 use super::{OciFront, OciListener, OciMetrics, OciPrefix};
-use crate::server::drain::SETTLED;
+use crate::server::drain::{Drain, SETTLED};
 use crate::{Backend as _, MemoryBackend};
 
 /// The longest a test waits for the listener to do what it waits for. It only stops a test that
@@ -285,7 +285,8 @@ async fn a_lingering_connection_holds_its_slot() {
     let mut piece = [0_u8; 64];
     assert_eq!(first.read(&mut piece).await.expect("a clean end"), 0);
     front.until("lingering", |s| s.drain.lingering() == 1).await;
-    // The only slot is the lingering connection's: the accept loop waits for it.
+    // The only slot is taken; that the lingering connection is what holds it, and not the accept
+    // loop waiting to accept, is `a_lingering_connection_task_keeps_its_permit` below.
     assert_eq!(front.shared.slots.available_permits(), 0);
 
     let mut second = TcpStream::connect(front.addr).await.expect("connected");
@@ -383,4 +384,87 @@ async fn a_lingering_close_ends_at_its_bound_before_the_deadline() {
     assert_eq!(front.shared.drain.lingering(), 0);
     assert_eq!(front.cut().await, 0);
     drop(tcp);
+}
+
+/// Asserts that the task of a connection keeps its permit through its lingering close, with no
+/// accept loop that could take a permit meanwhile: the test holds the only other handle on a
+/// semaphore of one permit and serves one connection with it. Once the connection's HTTP is over
+/// and its lingering close is reading (seen as the drain's count of lingering closes that have
+/// begun), the permit is still taken and the task still runs, a late write included; once the
+/// client closes, the task ends and the permit is free again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lingering_connection_task_keeps_its_permit() {
+    let long = Duration::from_secs(3600);
+    let limits = OciLimits {
+        max_connections: 1,
+        handshake_timeout: long,
+        header_timeout: long,
+        write_idle: long,
+        lifetime: long,
+        drain_deadline: long,
+    };
+    let backend = Arc::new(MemoryBackend::new());
+    let metrics = Arc::new(OciMetrics::default());
+    let prefix = OciPrefix::new("oci/").expect("a prefix");
+    let front = Arc::new(OciFront::new(backend, prefix, metrics));
+    let drain = Arc::new(drain_of(&front, limits));
+    let slots = Arc::new(Semaphore::new(1));
+    let permit = Arc::clone(&slots).acquire_owned().await.expect("a permit");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bound");
+    let mut client = TcpStream::connect(listener.local_addr().expect("an address"))
+        .await
+        .expect("connected");
+    let (tcp, _) = listener.accept().await.expect("accepted");
+    let task = tokio::spawn(one_connection(
+        front,
+        limits,
+        Arc::clone(&drain),
+        tcp,
+        permit,
+    ));
+    client.write_all(PING).await.expect("sent");
+    read_answer(&mut client).await;
+
+    drain.begin();
+    drain.settle();
+    let mut piece = [0_u8; 64];
+    assert_eq!(client.read(&mut piece).await.expect("a clean end"), 0);
+    until_drain(&drain, "the lingering close reading", |d| {
+        d.reading.load(std::sync::atomic::Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "the lingering connection gave its permit back"
+    );
+    assert!(
+        !task.is_finished(),
+        "the connection's task ended while it lingers"
+    );
+    client
+        .write_all(PING)
+        .await
+        .expect("the late request is taken");
+    until_drain(&drain, "the late request read", |d| d.late() == 1).await;
+    assert_eq!(slots.available_permits(), 0);
+
+    client.shutdown().await.expect("closed");
+    let ended = tokio::time::timeout(SAFETY, task).await;
+    ended.expect("the task never ended").expect("joined");
+    assert_eq!(slots.available_permits(), 1);
+    assert_eq!(drain.lingering(), 0);
+}
+
+/// Resolves once `holds` is true of `drain`; `what` names it in the failure.
+async fn until_drain(drain: &Drain, what: &str, holds: impl Fn(&Drain) -> bool) {
+    let waiting = async {
+        while !holds(drain) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    };
+    let seen = tokio::time::timeout(SAFETY, waiting).await;
+    seen.unwrap_or_else(|_| panic!("never seen: {what}"));
 }
