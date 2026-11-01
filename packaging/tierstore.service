@@ -3,7 +3,7 @@
 # from the hot one when it fills.
 #
 # An example, not a package: nothing installs or enables it. The binary is the release asset
-# tierstore-<commit>-<platform>.tar.gz (docs/artifacts.md), placed by digest at the path of
+# tierstore-<commit>-<platform>.tar.gz (docs/ci-and-release.md), placed by digest at the path of
 # ExecStart= (README.md says how). The unit has no [Install] section, so placing it starts
 # nothing and `systemctl enable` has nothing to link; start it with `systemctl start tierstore`
 # once the files below are in place.

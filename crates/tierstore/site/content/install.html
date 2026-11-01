@@ -13,11 +13,30 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
   </li>
   <li>
     <h3>Verify it <span class="tag tag-ok">works today</span></h3>
-    <p>Check the tarball against the workflow of this repository that signed it:</p>
+    <p>Three checks, in this order: the first proves the download is intact, the second or the third that this repository built and signed it. The second needs <code>gh</code>; the third needs only cosign, for a host whose <code>gh</code> has no <code>gh attestation</code> command. Take the tarball's <code>.sigstore.json</code> bundle and <code>SHA256SUMS</code> from the same release; below, <code>&lt;tarball&gt;</code> is the tarball's file name.</p>
+    <p><strong>Integrity.</strong> <code>SHA256SUMS</code> lists the tarballs and SBOMs of both platforms, so <code>--ignore-missing</code> skips the ones you did not take:</p>
+    <div class="code"><pre><span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS</pre></div>
+    <p><code>SHA256SUMS</code> is not itself an attestation subject, so this check proves integrity, not authenticity: who built the file is what the next check proves.</p>
+    <p><strong>Authenticity with gh.</strong> This needs a <code>gh</code> that has the <code>gh attestation</code> command (Ubuntu 24.04's packaged <code>gh</code>, 2.46.0, does not: use the check without <code>gh</code> there). Check the tarball against the workflow of this repository that signed it:</p>
     <div class="code"><pre><span class="p">$</span> gh attestation verify tierstore-&lt;commit&gt;-linux-x86_64.tar.gz --repo komira-ai/tierstore \
     --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
     --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
-    <p><code>&lt;commit&gt;</code> is the full SHA in the tarball's name; <code>--source-digest</code> makes the check prove the build came from that commit, not only from the main workflow. For an offline check use the <code>.sigstore.json</code> bundle of the tarball. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
+    <p><code>&lt;commit&gt;</code> is the full SHA in the tarball's name; <code>--source-digest</code> makes the check prove the build came from that commit, not only from the main workflow.</p>
+    <p><strong>Authenticity without gh.</strong> This needs only cosign, and checks the tarball against its <code>.sigstore.json</code> bundle; it prints <code>Verified OK</code>.</p>
+    <div class="code"><pre><span class="p">$</span> cosign verify-blob-attestation \
+    --bundle &lt;tarball&gt;.sigstore.json \
+    --type slsaprovenance1 \
+    --certificate-identity-regexp '^https://github.com/komira-ai/tierstore/\.github/workflows/artifacts\.yml@refs/heads/main$' \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    &lt;tarball&gt;</pre></div>
+    <p><code>--type slsaprovenance1</code> is required: the bundle holds SLSA provenance v1, and with cosign's default type the check fails with "invalid predicate type".</p>
+    <p>With a <code>gh</code> that has <code>gh attestation</code> on a host with no network, verify against the bundle and a trusted root fetched beforehand on a host that has one, and copied over with the tarball:</p>
+    <div class="code"><pre><span class="p">$</span> gh attestation trusted-root &gt; trusted_root.jsonl
+<span class="p">$</span> gh attestation verify &lt;tarball&gt; --repo komira-ai/tierstore \
+    --bundle &lt;tarball&gt;.sigstore.json --custom-trusted-root trusted_root.jsonl \
+    --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+    --source-ref refs/heads/main --source-digest &lt;commit&gt; --deny-self-hosted-runners</pre></div>
+    <p>Every check names one signer: the workflow file <code>.github/workflows/artifacts.yml</code> of this repository, run on <code>refs/heads/main</code>. That identity is part of what a release promises: if the file were renamed or moved, every command here would fail. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
   </li>
   <li>
     <h3>Place the binary <span class="tag tag-ok">works today</span></h3>

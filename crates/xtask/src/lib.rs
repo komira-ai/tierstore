@@ -20,6 +20,8 @@ pub mod release;
 pub mod sums;
 
 #[cfg(test)]
+mod install_pages;
+#[cfg(test)]
 mod testdir;
 
 use std::ffi::OsString;

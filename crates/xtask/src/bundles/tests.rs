@@ -341,3 +341,25 @@ fn the_issuer_and_the_dead_proxy_are_the_values_the_verifier_depends_on() {
     // another port could be a live service and the offline proof would mean nothing.
     assert_eq!(DEAD_PROXY, "http://127.0.0.1:9");
 }
+
+#[test]
+fn the_install_pages_give_the_issuer_and_the_predicate_type_the_verifier_checks() {
+    // Catches: the cosign command of the install guide or of the site's install page naming
+    // another OIDC issuer than the one every release's bundles are verified with, or a predicate
+    // type that is not SLSA provenance of the version the bundles hold (cosign refuses the
+    // bundle then, or checks the wrong statement).
+    let version = PROVENANCE
+        .strip_prefix("https://slsa.dev/provenance/v")
+        .expect("SLSA provenance");
+    for (name, page) in crate::install_pages::pages() {
+        let lines = crate::install_pages::commands(&page, "cosign verify-blob-attestation", "");
+        assert_eq!(lines.len(), 1, "{name}: one cosign command");
+        let value_of = |flag| crate::install_pages::value_of(&lines[0], flag);
+        assert_eq!(value_of("--certificate-oidc-issuer"), ISSUER, "{name}");
+        assert_eq!(
+            value_of("--type"),
+            format!("slsaprovenance{version}"),
+            "{name}"
+        );
+    }
+}

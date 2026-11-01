@@ -3,7 +3,7 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux only, as a tarball with its
-SBOM and its provenance bundle (`docs/artifacts.md`); there is no package and no container image.
+SBOM and its provenance bundle (`docs/ci-and-release.md`); there is no package and no container image.
 These files go beside the binary.
 
 | file | what |
@@ -22,7 +22,7 @@ starts the unit by itself.
 The release carries `tierstore-<commit>-linux-x86_64.tar.gz` and
 `tierstore-<commit>-linux-arm64.tar.gz`, each with `<tarball>.sigstore.json` and listed in
 `SHA256SUMS`. Take the tarball of the host's architecture by its digest, and verify it as every
-tarball is verified (`docs/artifacts.md`, "Provenance bundles: verifying a tarball offline").
+tarball is verified (`docs/ci-and-release.md`).
 The tarball holds one member, the binary under its own name:
 
 ```sh

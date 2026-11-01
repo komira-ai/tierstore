@@ -32,8 +32,9 @@ use super::config_testing::DEFAULTS;
 const NOT_YET: &str = "Not in a release yet";
 
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
-/// `gh attestation verify` command of the install guide), and the flag of the `update-hook` verb,
-/// which is read before the server's flags and is not one of them.
+/// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
+/// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flag of the
+/// `update-hook` verb, which is read before the server's flags and is not one of them.
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
     "--repo",
@@ -42,6 +43,11 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--source-digest",
     "--deny-self-hosted-runners",
     "--bundle",
+    "--custom-trusted-root",
+    "--ignore-missing",
+    "--type",
+    "--certificate-identity-regexp",
+    "--certificate-oidc-issuer",
     "--params",
 ];
 
@@ -623,6 +629,23 @@ fn a_flag_that_is_not_the_binarys_is_found() {
         &check(&block, &code()),
         "--no-such-flag is not a flag"
     ));
+}
+
+/// Asserts that the flags of the install guide's verify commands are let stand only as they are
+/// spelled in the list of other programs' flags: cosign's `--certificate-identity` (the exact
+/// identity, not the regexp the guide gives) is not one of them, nor a misspelled `--bundle`.
+#[test]
+fn a_flag_that_only_resembles_another_programs_is_found() {
+    let block = "\n```sh\ncosign verify-blob-attestation --type slsaprovenance1 \\\n  \
+                 --certificate-identity x --bundles y --ignore-missing z\n```\n";
+    let problems = check(&with_appended("install.md", block), &code());
+    assert!(
+        said(&problems, "--certificate-identity is not a flag"),
+        "{problems:?}"
+    );
+    assert!(said(&problems, "--bundles is not a flag"), "{problems:?}");
+    assert!(!said(&problems, "--type"), "{problems:?}");
+    assert!(!said(&problems, "--ignore-missing"), "{problems:?}");
 }
 
 /// Asserts that the keys of a table are read from its struct: a struct that takes a field has the
