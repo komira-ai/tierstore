@@ -778,6 +778,26 @@ fn a_dotted_version_in_a_measured_cell_is_refused() {
     );
 }
 
+#[test]
+fn an_encoded_digit_in_a_measured_cell_is_read_as_the_digit() {
+    // Catches: a numeric character reference dropped whole, so `&#53;0 ms` reads as 0 and the
+    // digit it encodes is never traced. Decimal and hex forms are decoded before the scan.
+    let dir = scratch("encoded");
+    std::fs::write(dir.join("r.tsv"), "raw\tx\t50\tms\tm\ta\n").unwrap();
+    let ok = "<span data-cell=\"a\" data-result=\"r.tsv\">&#53;0 ms, &#x35;0 ms, &#X35;0 ms</span>";
+    assert_eq!(trace_problems(ok, &dir), Vec::<String>::new());
+    let wrong = "<span data-cell=\"a\" data-result=\"r.tsv\">&#54;0 ms</span>";
+    assert_eq!(
+        trace_problems(wrong, &dir),
+        vec!["line 1: a: the number 60 is not a value of r.tsv".to_owned()]
+    );
+    let hex = "<span data-cell=\"a\" data-result=\"r.tsv\">&#x36;0 ms</span>";
+    assert_eq!(
+        trace_problems(hex, &dir),
+        vec!["line 1: a: the number 60 is not a value of r.tsv".to_owned()]
+    );
+}
+
 fn scratch(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("paper-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
