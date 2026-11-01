@@ -14,8 +14,11 @@ import { test } from 'node:test';
 import { listFiles } from '../tools/check-dist';
 import { buildReal, copyTree, plant } from './support';
 
-/** The hosts a page may name in a URL: the project's own, GitHub, the two build tools it serves, the SVG namespace. */
-const PUBLIC_HOSTS = new Set(['tierstore.dev', 'kbf.dev', 'github.com', 'buck2.build', 'bazel.build', 'www.w3.org']);
+/**
+ * The hosts a page may name in a URL: the project's own, GitHub, the two build tools it serves, the SVG namespace, and
+ * GitHub Actions' OIDC issuer, which the cosign check of the install pages names as the signer's issuer.
+ */
+const PUBLIC_HOSTS = new Set(['tierstore.dev', 'kbf.dev', 'github.com', 'buck2.build', 'bazel.build', 'www.w3.org', 'token.actions.githubusercontent.com']);
 /** Placeholders and loopback the configuration reference uses as examples. */
 const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1', 'frontend', 'FRONTEND', 'bucket', 's3-hot.example', 's3-cold.example', 'tierstore.example']);
 
@@ -119,6 +122,14 @@ test('the scan finds each kind of leak (it can fail)', () => {
   ];
   for (const [text, why] of cases) assert.match(scanText(text).join('\n'), why, text);
   assert.deepEqual(scanText('https://github.com/komira-ai/kbf and http://127.0.0.1:8990 and 2026-10-01 and ' + EXAMPLE_SHA), []);
+});
+
+test('the Actions issuer is the one githubusercontent.com host a page may name', () => {
+  const cosign = "--certificate-identity-regexp '^https://github.com/komira-ai/tierstore/\\.github/workflows/artifacts\\.yml@refs/heads/main$' --certificate-oidc-issuer https://token.actions.githubusercontent.com";
+  assert.deepEqual(scanText(cosign), []);
+  for (const host of ['objects.githubusercontent.com', 'actions.githubusercontent.com', 'evil.token.actions.githubusercontent.com', 'token.actions.githubusercontent.com.example']) {
+    assert.match(scanText(`see https://${host}/x`).join('\n'), new RegExp(`a host, ${host.replace(/\./g, '\\.')}`), host);
+  }
 });
 
 test('a leak in the recorded data or in the page copy is found in the built tree', () => {
