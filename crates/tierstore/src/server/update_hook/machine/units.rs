@@ -11,7 +11,8 @@ use std::time::Duration;
 use super::super::ports::{PortError, PortKind, Units};
 use super::runner::{Call, Runner, checked, run};
 
-const PROGRAM: &str = "systemctl";
+/// Where the Debian and Ubuntu package puts `systemctl`.
+pub const DEFAULT_PROGRAM: &str = "/usr/bin/systemctl";
 const KIND: PortKind = PortKind::Units;
 
 /// `systemctl`, called through a [`Runner`].
@@ -19,6 +20,7 @@ pub struct SystemdUnits<'a> {
     runner: &'a dyn Runner,
     start_timeout: Duration,
     stop_timeout: Duration,
+    program: String,
 }
 
 impl<'a> SystemdUnits<'a> {
@@ -34,18 +36,48 @@ impl<'a> SystemdUnits<'a> {
             runner,
             start_timeout,
             stop_timeout,
+            program: DEFAULT_PROGRAM.to_owned(),
         }
     }
+
+    /// The same, calling `program` (an absolute path) instead of the default.
+    #[must_use]
+    pub fn with_program(mut self, program: &str) -> SystemdUnits<'a> {
+        program.clone_into(&mut self.program);
+        self
+    }
+}
+
+/// Whether `unit` is a name the port will pass on: 1 to 255 characters of letters, digits and
+/// `: _ . @ -`, starting with a letter or digit. Anything else is refused before a program runs.
+fn check_unit(unit: &str) -> Result<(), PortError> {
+    let name = unit.len() <= 255
+        && unit
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && unit
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":_.@-".contains(c));
+    if name {
+        return Ok(());
+    }
+    Err(PortError::failed(
+        KIND,
+        format!("{unit:?} is not a unit name"),
+    ))
 }
 
 impl Units for SystemdUnits<'_> {
     fn start(&self, unit: &str) -> Result<(), PortError> {
-        let call = Call::new(PROGRAM, &["start", unit], self.start_timeout);
+        check_unit(unit)?;
+        let call = Call::new(&self.program, &["start", "--", unit], self.start_timeout);
         checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 
     fn stop(&self, unit: &str) -> Result<(), PortError> {
-        let call = Call::new(PROGRAM, &["stop", unit], self.stop_timeout);
+        check_unit(unit)?;
+        let call = Call::new(&self.program, &["stop", "--", unit], self.stop_timeout);
         checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 }

@@ -208,3 +208,38 @@ fn a_record_that_cannot_be_read_is_an_error_not_an_absent_record() {
     fs::create_dir(dir.join(STATE_FILE)).unwrap();
     assert!(message(files(&dir).load().unwrap_err()).starts_with("read "));
 }
+
+/// Asserts that a record that is a symbolic link is not read through: loading it is an error and
+/// does not return what the link points at.
+#[test]
+fn a_symlinked_record_is_not_followed_when_loaded() {
+    let (_guard, dir) = scratch("state-link-load");
+    fs::write(dir.join("elsewhere"), "secret").unwrap();
+    symlink(dir.join("elsewhere"), dir.join(STATE_FILE)).unwrap();
+    assert!(message(files(&dir).load().unwrap_err()).starts_with("read "));
+}
+
+/// Asserts that saving over a symbolic link replaces the link and writes nothing through it.
+#[test]
+fn a_symlinked_record_is_replaced_not_written_through_on_save() {
+    let (_guard, dir) = scratch("state-link-save");
+    let victim = dir.join("victim");
+    fs::write(&victim, "keep").unwrap();
+    symlink(&victim, dir.join(STATE_FILE)).unwrap();
+    files(&dir).save(b"new").unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    assert_eq!(files(&dir).load().unwrap().as_deref(), Some(&b"new"[..]));
+}
+
+/// Asserts that a symbolic link at the temporary file's name is removed and not written
+/// through: what it pointed at is as it was, and the record is the new bytes.
+#[test]
+fn a_symlinked_temporary_file_is_not_written_through() {
+    let (_guard, dir) = scratch("state-link-temp");
+    let victim = dir.join("victim");
+    fs::write(&victim, "keep").unwrap();
+    symlink(&victim, dir.join("state.json.tmp")).unwrap();
+    files(&dir).save(b"new").unwrap();
+    assert_eq!(fs::read(&victim).unwrap(), b"keep");
+    assert_eq!(files(&dir).load().unwrap().as_deref(), Some(&b"new"[..]));
+}

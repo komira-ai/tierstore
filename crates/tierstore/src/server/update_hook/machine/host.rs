@@ -4,11 +4,14 @@
 //! The files are read under a root (`/` on a host) so that a test can give the host a root of
 //! its own.
 
+use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::super::declaration::DECLARATION_PATH;
 use super::super::ports::{Conntrack, Host, PortError, PortKind};
+use super::Fault;
 use super::runner::{Call, Runner, checked, run};
 
 const KIND: PortKind = PortKind::Host;
@@ -25,6 +28,7 @@ pub struct SystemHost<'a> {
     root: PathBuf,
     runner: &'a dyn Runner,
     timeout: Duration,
+    release_owner: u32,
 }
 
 impl<'a> SystemHost<'a> {
@@ -36,7 +40,37 @@ impl<'a> SystemHost<'a> {
             root,
             runner,
             timeout,
+            release_owner: 0,
         }
+    }
+
+    /// The same, with `uid` as the user that must own the binary of a release (root, 0, unless
+    /// this says otherwise; tests say who they are).
+    #[must_use]
+    pub fn with_release_owner(mut self, uid: u32) -> SystemHost<'a> {
+        self.release_owner = uid;
+        self
+    }
+
+    /// Whether `binary` is what may be run: a regular file (not a link) owned by the release
+    /// owner and not writable by a group or others.
+    fn check_binary(&self, binary: &Path) -> Result<(), Fault> {
+        let meta = fs::symlink_metadata(binary)?;
+        if !meta.file_type().is_file() {
+            return Err("is not a regular file".into());
+        }
+        if meta.uid() != self.release_owner {
+            return Err(format!(
+                "is owned by user {}, not {}",
+                meta.uid(),
+                self.release_owner
+            )
+            .into());
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Err("can be written by a group or others".into());
+        }
+        Ok(())
     }
 
     fn read(&self, relative: &str) -> Result<String, PortError> {
@@ -74,8 +108,16 @@ impl Host for SystemHost<'_> {
     /// Runs `<release>/tierstore --capabilities`: exit 0 and one capability per line. Exit 2,
     /// the status of an unknown flag, means a release that predates the flag: no capabilities.
     /// Any other status, a binary that cannot be started and one that does not end are errors.
+    ///
+    /// The binary runs as the user the hook runs as; nothing here changes that. It must be the
+    /// verified staged tree that the updater names in `updater.staged_release`, and so the
+    /// binary is refused unless it is a regular file owned by the release owner (root, unless
+    /// set otherwise) that no group or others can write. Its environment is empty but for a
+    /// fixed `PATH` and `LC_ALL=C`.
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError> {
         let binary = release.join(RELEASE_BINARY);
+        self.check_binary(&binary)
+            .map_err(|fault| PortError::failed(KIND, format!("{}: {fault}", binary.display())))?;
         let program = binary.to_string_lossy();
         let call = Call::new(&program, &["--capabilities"], self.timeout);
         let output = run(self.runner, &call, KIND)?;
