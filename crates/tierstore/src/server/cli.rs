@@ -898,8 +898,9 @@ async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<Lo
 /// [`reconcile`], but only while this process holds the lock file of `gate`: it does not touch
 /// the tiers (no lease, no pass) until it holds the lock, takes it by trying every
 /// `gate.retry` while another process holds it, and stops (giving the lease up) and waits for the
-/// lock again if the lock file is replaced. The process that held the lock gives its lease up
-/// when it exits (see [`reconcile`]), so the first pass after the lock is taken finds it free.
+/// lock again if the lock file is replaced. It gives the lease up before it lets the lock go,
+/// when it is halted as when the file was replaced, so the process that takes the lock next finds
+/// the lease free at its first pass.
 pub(crate) async fn reconcile_gated(
     mut reconciler: Reconciler,
     interval: Duration,
@@ -911,20 +912,27 @@ pub(crate) async fn reconcile_gated(
             Some(file) => file,
             None => match wait_for_lock(&gate.path, gate.retry, &halt).await {
                 Some(file) => file,
-                None => break,
+                // Halted before the lock was taken: no lease is held, none was taken since the
+                // last stop.
+                None => return,
             },
         };
-        if run_passes(&mut reconciler, interval, &halt, Some(&file)).await == Ended::Halted {
-            break;
+        let ended = run_passes(&mut reconciler, interval, &halt, Some(&file)).await;
+        if ended == Ended::Lost {
+            eprintln!(
+                "tierstore: lock file {}: the file was replaced; the reconciler stops until the \
+                 lock is taken again",
+                gate.path.display()
+            );
         }
-        eprintln!(
-            "tierstore: lock file {}: the file was replaced; the reconciler stops until the lock \
-             is taken again",
-            gate.path.display()
-        );
+        // The lease first, then the lock: a process waiting for the lock must not get it while
+        // the lease is still held, or its first pass finds the lease taken and does nothing.
         let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
+        drop(file);
+        if ended == Ended::Halted {
+            return;
+        }
     }
-    let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
 }
 
 /// The id of a start for the probe keys of its self-test: the proxy id (with any character a
