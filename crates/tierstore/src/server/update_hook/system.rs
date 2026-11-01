@@ -5,9 +5,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::args::Invocation;
-use super::machine::Runner;
+use super::declaration::Declaration;
+use super::machine::{
+    LoopbackInstances, MonotonicClock, NftTool, Runner, SlotLinks, StateFiles, SystemHost,
+    SystemRunner, SystemdUnits,
+};
 use super::params::Params;
-use super::report::{Done, Reason};
+use super::ports::{Host, Ports};
+use super::report::Done;
+use super::steps::run_step;
 
 /// The longest an `nft` call may run.
 pub(super) const NFT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -21,37 +27,57 @@ pub(super) const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest an instance may leave a request unanswered.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
-/// The user that must own the state directory: the updater's, root.
+/// The user that must own the state directory and the binary of a staged release: the
+/// updater's, root.
 pub(super) const UPDATER_UID: u32 = 0;
 
 /// Where the machine is and who may own its state directory.
 pub(super) struct Config<'a> {
     /// The root the host's files are read under (`/` on a host).
     pub root: PathBuf,
-    /// The user id that must own the state directory.
+    /// The user id that must own the state directory and the binary of a staged release.
     pub owner: u32,
     /// What runs the programs.
     pub runner: &'a dyn Runner,
 }
 
-/// Runs the step on the machine described by `config`.
+/// The declaration of the host, read through the host port. It names the state directory, so it
+/// is read before the state port exists; the steps read it again, under the lock, and check
+/// the record against that reading.
+fn declaration(host: &SystemHost<'_>) -> Result<Declaration, Done> {
+    Ok(Declaration::parse(&host.declaration()?)?)
+}
+
+/// Runs the step on the machine described by `config`: the ports are the machine's, with the
+/// state directory and the links taken from the declaration, and the step is run over them.
 pub(super) fn run_on(
-    _config: &Config<'_>,
+    config: &Config<'_>,
     invocation: &Invocation,
-    _params: Option<&Params>,
+    params: Option<&Params>,
 ) -> Done {
-    let _ = (
-        NFT_TIMEOUT,
-        START_TIMEOUT,
-        STOP_TIMEOUT,
-        CAPABILITIES_TIMEOUT,
-        CONNECT_TIMEOUT,
-        READ_TIMEOUT,
-    );
-    Done::fail(
-        Reason::NotImplemented,
-        format!("{} is not wired to this machine yet", invocation.step),
-    )
+    let runner = config.runner;
+    let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
+        .with_release_owner(config.owner);
+    let decl = match declaration(&host) {
+        Ok(decl) => decl,
+        Err(done) => return done,
+    };
+    let nft = NftTool::new(runner, NFT_TIMEOUT);
+    let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT);
+    let slots = SlotLinks::new(&decl.state_dir);
+    let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
+    let clock = MonotonicClock::new();
+    let state = StateFiles::new(decl.state_dir.clone(), config.owner);
+    let ports = Ports {
+        nft: &nft,
+        units: &units,
+        slots: &slots,
+        instances: &instances,
+        host: &host,
+        clock: &clock,
+        state: &state,
+    };
+    run_step(invocation.step, params, &ports)
 }
 
 /// Runs the step on the host the process is running on.
@@ -59,7 +85,7 @@ pub(super) fn on_this_machine(invocation: &Invocation, params: Option<&Params>) 
     let config = Config {
         root: PathBuf::from("/"),
         owner: UPDATER_UID,
-        runner: &super::machine::SystemRunner,
+        runner: &SystemRunner,
     };
     run_on(&config, invocation, params)
 }

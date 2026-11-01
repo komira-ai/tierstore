@@ -3,11 +3,10 @@
 //! Each port of [`super::ports`] has one implementation here, over the real thing: programs
 //! run through a [`Runner`] (an argument vector, never a shell), files under a root that tests
 //! point at a scratch directory, and a loopback socket. Nothing here reads an environment
-//! variable, and nothing is wired to [`super::Machine::system`] yet: the steps still answer
-//! `not_implemented` until a later change builds a [`super::Ports`] from these.
+//! variable. [`super::Machine::system`] builds a [`super::Ports`] from these.
 //!
-//! Programs are named, not given by absolute path (`nft`, `systemctl`), and found through the
-//! `PATH` the updater runs the hook with; the repository has no fixed program path to follow.
+//! Programs are called by absolute path (`/usr/sbin/nft`, `/usr/bin/systemctl`, the Debian and
+//! Ubuntu locations); a caller may name another.
 
 mod clock;
 mod host;

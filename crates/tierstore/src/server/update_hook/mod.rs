@@ -13,9 +13,9 @@
 //! Two instances run side by side during an update, on the private ports of the two slots
 //! (`tierstore@9301`, `tierstore@9302`); the public port 9300 is redirected to the serving slot
 //! by one nftables rule. The steps keep a record ([`Record`]), set state rather than do things
-//! once, and reach the machine only through the ports of [`Ports`]. This change has the logic
-//! and its fakes; the machine's ports (nft, systemd, the links, HTTP, the state directory) are
-//! not wired yet, so [`Machine::system`] answers every step with the reason `not_implemented`.
+//! once, and reach the machine only through the ports of [`Ports`]. [`Machine::system`] builds
+//! those ports from the machine's implementations ([`machine`]): the declaration it reads gives
+//! the state directory and the slot links, and the step runs over them.
 
 mod args;
 mod declaration;

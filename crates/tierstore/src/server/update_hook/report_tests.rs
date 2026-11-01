@@ -55,7 +55,6 @@ fn the_class_follows_the_reason() {
         assert_eq!(reason.class(), Class::Environment, "{reason:?}");
     }
     for reason in [
-        NotImplemented,
         OutOfOrder,
         NotVerified,
         Committed,
