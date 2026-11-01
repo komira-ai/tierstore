@@ -33,8 +33,8 @@ const NOT_YET: &str = "Not in a release yet";
 
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
 /// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
-/// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flag of the
-/// `update-hook` verb, which is read before the server's flags and is not one of them.
+/// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flags of the
+/// `update-hook` verb, which are read before the server's flags and are not among them.
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
     "--repo",
@@ -49,6 +49,12 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--certificate-identity-regexp",
     "--certificate-oidc-issuer",
     "--params",
+    "--root",
+    "--root-uid",
+    "--nft",
+    "--systemctl",
+    "--public-port",
+    "--poll-interval-ms",
 ];
 
 /// Flags of the binary the pages need not name.

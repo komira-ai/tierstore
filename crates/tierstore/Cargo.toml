@@ -49,11 +49,28 @@ server = [
     "tokio/rt-multi-thread",
     "tokio/signal",
 ]
+# `hook-conformance`: what the update hook's conformance test needs of the build, and no release
+# has: the `tierstore-hook-fake` binary and its library (`server::update_hook::fake`), and the
+# hook's flags that point it at a scratch host (`--root`, `--root-uid`, `--nft`, `--systemctl`,
+# `--public-port`, `--poll-interval-ms`). The crate's own tests turn it on through the
+# dev-dependency on itself.
+hook-conformance = ["server"]
 
 [[bin]]
 name = "tierstore"
 path = "src/main.rs"
 required-features = ["server"]
+
+# The stand-in `nft`, `systemctl` and staged release binary that the update hook's conformance
+# test (tests/update_hook) runs the real `tierstore update-hook` against: one program, which is
+# each of them by the name it is run as. Its main only forwards to
+# `server::update_hook::fake`, which is measured and tested in the library. Built only with
+# `hook-conformance`, which only the crate's own tests turn on (the dev-dependency on itself), so
+# no release and no `cargo install` has it.
+[[bin]]
+name = "tierstore-hook-fake"
+path = "tests/update_hook/fake/main.rs"
+required-features = ["hook-conformance"]
 
 [dependencies]
 # The backend trait is used as `dyn Backend`, so its async methods are boxed.
@@ -134,8 +151,9 @@ tokio-rustls.workspace = true
 # SIGTERM to the binary.
 rustix = { workspace = true, features = ["process"] }
 # Turns the `server` feature on for this crate's own tests, and for the clippy and coverage
-# runs over the workspace that build them.
-tierstore = { workspace = true, features = ["server"] }
+# runs over the workspace that build them, and `hook-conformance`, the stand-in programs and the
+# hook's flags that tests/update_hook runs the update hook with.
+tierstore = { workspace = true, features = ["server", "hook-conformance"] }
 tokio = { workspace = true, features = ["io-util", "macros", "test-util"] }
 
 [lints]

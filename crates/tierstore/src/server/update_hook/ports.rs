@@ -250,4 +250,8 @@ pub struct Ports<'a> {
     pub clock: &'a dyn Clock,
     /// The state directory.
     pub state: &'a dyn StateDir,
+    /// The public port the redirect sends to the serving slot ([`PUBLIC_PORT`] on a host).
+    ///
+    /// [`PUBLIC_PORT`]: super::PUBLIC_PORT
+    pub public_port: u16,
 }

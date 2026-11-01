@@ -6,7 +6,7 @@
 //! variable. [`super::Machine::system`] builds a [`super::Ports`] from these.
 //!
 //! Programs are called by absolute path (`/usr/sbin/nft`, `/usr/bin/systemctl`, the Debian and
-//! Ubuntu locations); a caller may name another.
+//! Ubuntu locations); the command line may name others (`--nft`, `--systemctl`).
 
 mod clock;
 mod host;
@@ -23,11 +23,11 @@ use std::io;
 pub use clock::MonotonicClock;
 pub use host::{RELEASE_BINARY, SystemHost};
 pub use instances::LoopbackInstances;
-pub use nft::NftTool;
+pub use nft::{DEFAULT_PROGRAM as NFT_PROGRAM, NftTool};
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
 pub use slots::SlotLinks;
 pub use state::{Account, LOCK_FILE, STATE_FILE, StateFiles};
-pub use units::SystemdUnits;
+pub use units::{DEFAULT_PROGRAM as SYSTEMCTL_PROGRAM, SystemdUnits};
 
 /// What went wrong, as text, before the port that saw it says which port that is.
 pub(super) struct Fault(pub(super) String);

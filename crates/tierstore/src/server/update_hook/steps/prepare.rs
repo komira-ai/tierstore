@@ -1,21 +1,51 @@
 //! `prepare <artifact>`: everything before anything visible.
 //!
-//! Chooses the mode from the capabilities of the staged release and of the one the current slot
-//! links to; defers (75) if the host cannot take the update; records the update; points the idle
-//! slot's link at the staged release; and, in handover mode, starts the idle slot and waits for
-//! it to answer `/readyz` read-only. In restart mode nothing is started: the old instance has no
-//! lock, and a second one would write beside it.
+//! Chooses the mode: `restart` when the params say `mode = "restart"`, and otherwise from the
+//! capabilities of the staged release and of the one the current slot links to (its detail says
+//! which mode and why); defers (75) if the host cannot take the update; records the update;
+//! points the idle slot's link at the staged release; and, in handover mode, starts the idle slot
+//! and waits for it to answer `/readyz` read-only. In restart mode nothing is started: the old
+//! instance has no lock, and a second one would write beside it.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use super::{Ctx, HANDOVER_CAPABILITY, IDLE_BOUND_SECS, IDLE_MARGIN_SECS, READY_ATTEMPTS};
-use crate::server::update_hook::declaration::{PUBLIC_PORT, unit_name};
+use crate::server::update_hook::declaration::unit_name;
 use crate::server::update_hook::params::Params;
 use crate::server::update_hook::probe::CacheMode;
 use crate::server::update_hook::record::{Mode, Record, SCHEMA};
 use crate::server::update_hook::report::{Done, Reason};
 use crate::server::update_hook::ruleset::{GUARD_TABLE, guard_ruleset};
+
+/// Why `prepare` chose the mode: a word in the detail of its report. The record keeps the mode
+/// only, so that a hook of an earlier release can still read it.
+#[derive(Clone, Copy)]
+enum Why {
+    /// Both releases list `handover-v1`.
+    HandoverCapable,
+    /// A release lacks `handover-v1`.
+    NotHandoverCapable,
+    /// The params say `mode = "restart"`.
+    DeclaredRestart,
+}
+
+impl Why {
+    const fn word(self) -> &'static str {
+        match self {
+            Why::HandoverCapable => "handover_capable",
+            Why::NotHandoverCapable => "not_handover_capable",
+            Why::DeclaredRestart => "declared_restart",
+        }
+    }
+
+    const fn mode(self) -> Mode {
+        match self {
+            Why::HandoverCapable => Mode::Handover,
+            Why::NotHandoverCapable | Why::DeclaredRestart => Mode::Restart,
+        }
+    }
+}
 
 /// The release the link of `port` points at.
 fn release_of(c: &Ctx<'_, '_>, port: u16) -> Result<PathBuf, Done> {
@@ -38,20 +68,29 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
         c.ports.host.capabilities(&params.staged_release)?,
         c.ports.host.capabilities(&release_of(c, current)?)?,
     ];
-    let mode = if both
+    // The declaration's word wins over the capabilities: a `dir:` hot tier cannot have two
+    // instances side by side, whatever the releases can do.
+    let why = if params.declared_restart {
+        Why::DeclaredRestart
+    } else if both
         .iter()
         .all(|caps| caps.iter().any(|cap| cap == HANDOVER_CAPABILITY))
     {
-        Mode::Handover
+        Why::HandoverCapable
     } else {
-        Mode::Restart
+        Why::NotHandoverCapable
     };
+    let mode = why.mode();
     let retry = params.defer_retry_secs;
     // Nothing is applied before the guard is in place: up to here the step has only looked. What
     // the guard does not cover is the private port of an instance, which starts after it.
     let existed = c.ports.nft.list_table(GUARD_TABLE)?.is_some();
     let ours = !existed || (record.previous.is_some() && record.guard_placed);
-    if let Err(why) = c.ports.nft.apply(&guard_ruleset(PUBLIC_PORT, c.decl.ports)) {
+    if let Err(why) = c
+        .ports
+        .nft
+        .apply(&guard_ruleset(c.ports.public_port, c.decl.ports))
+    {
         return Err(Done::deferred(
             Reason::HostNotReady,
             format!("the guard table cannot be loaded: {why}"),
@@ -106,7 +145,8 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
         }
     }
     Ok(Done::ok(format!(
-        "prepared slot {idle} beside {current}, mode {}",
-        mode.as_str()
+        "prepared slot {idle} beside {current}, mode {} ({})",
+        mode.as_str(),
+        why.word()
     )))
 }

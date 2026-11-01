@@ -79,13 +79,18 @@ cannot even be written there, and the hook still does not trust it). The valid p
 must each be one of the two ports and differ; `mode` is `handover` or `restart`; each marker is one of `swapped`,
 `verified`, `stopping`; `schema` is one the binary knows. A unit name is built from a validated port, never read. Anything
 else is refused with exit `1`, class `environment`, reason `state_invalid`, **before any `nft`, `systemctl` or file call**.
-The same goes for the params file (numbers only, within sane ranges) and the environment (empty). The updater then runs
+The same goes for the params file (a flat table of scalars: numbers within sane ranges, the updater's staged release
+and target version, and `mode`, whose only value is `"restart"`; a refused file is `bad_params`) and the environment
+(empty). The updater then runs
 `rollback`, which reads the same record, refuses the same way, and ends in `halt` ([`host-updates.md`][hu] 3.2): a record that
 cannot be trusted is an operator's. The idle port is the other one of `serving`, recomputed every time.
 
 **`prepare <artifact>`** (before anything visible). Check `tierstore --capabilities` of the staged release and of the one
 the `serving` slot links to: both must have `handover-v1`, else the hook records `mode=restart` and `cutover` does a plain
-restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Then load the guard table, before
+restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). The params key
+`mode = "restart"` records `mode=restart` whatever the capabilities say (a `dir:` hot tier, section 6). The step's
+`detail` names the mode and why (`handover_capable`, `not_handover_capable` or `declared_restart`); the record keeps
+the mode only, so that an earlier release's hook can still read it. Then load the guard table, before
 anything else is applied (it records whether the table was there before, and `guard_placed` once this update loaded it).
 Refuse with `75` (class `environment`: host not ready, nothing done) if the guard table cannot be loaded,
 `nf_conntrack_tcp_timeout_established` is not longer than the service's idle bound, or `nf_conntrack_count` is near
@@ -114,7 +119,8 @@ is answered by v-next with the staged version, the redirect names v-next, and v-
 `"promotion_pending":true`: v-current holds the lock, so v-next is read-only by design ([`host-updates.md`][hu] 3.8). After
 `cleanup` has stopped v-current (the `stopping` marker): wait for `/readyz` to say `read-write` for
 `promotion_bound_secs` (900, from the params file); if it does, `0` with no pending flag; if the bound passes, `0` with
-`"promotion_pending":true` and the holder of the lock in `detail`. **There is no ceiling in the hook**: the updater keeps
+`"promotion_pending":true`, and `detail` says the promotion is pending (it does not name who holds the lock: no instance
+reports that). **There is no ceiling in the hook**: the updater keeps
 running `verify` as its post-success watcher, outside the step table, and applies `promotion_ceiling_secs` (3600) itself,
 ending the watch as `Failed(after_commit)` for a storage node and a build node alike ([`host-updates.md`][hu] 3.2); the hook
 receives the value as `updater.promotion_ceiling_secs` in the params file and must not exit `1` for it. After the commit
@@ -214,7 +220,9 @@ create-only and skips a taken number (`Inner::write_batch`, `tiered.rs`).
   writes other bodies than the process before it, so a stale renew or release with the old tag fails. (Before the
   nonce, the body was `holder\n<generation>` and the two could collide.)
 - **A `dir:` hot tier cannot have two holders**: `DirBackend::put_if_match` is atomic among the calls of one backend only
-  (`dir.rs`). It keeps the plain restart (`mode=restart`).
+  (`dir.rs`), so the lease's compare-and-swap is not atomic across two processes. It keeps the plain restart
+  (`mode=restart`): packaging sets `mode = "restart"` in `[hook.params]` on such a host, and `prepare` then chooses a
+  restart even when both releases list `handover-v1`.
 
 **The same lock decides the reconciler.** A storage node takes `--lock-file` (new) with the same try loop. v-next serves
 reads and writes through its own proxy at once and does not run the reconcile loop until it holds the lock: v-current
@@ -348,7 +356,9 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
 6. *Decided (accepted 2026-11-01).* **The residual race** (a request within one round trip of the FIN on a connection idle since before the drain).
    Recommendation: accept it as the stated limit, counted, and do not ask clients to retry a create-only put.
 7. *Decided (accepted 2026-11-01).* **First lock release** goes in by `mode=restart` ([host-updates.md][hu] Question 15), and so does a `dir:` hot tier.
-   Recommendation: accept.
+   Recommendation: accept. The `dir:` case is declared, not detected: packaging sets `mode = "restart"` in
+   `[hook.params]` for a host whose hot tier is `dir:`, since the lease's compare-and-swap there is not atomic across
+   processes; it is the only value the key takes.
 8. *Decided (accepted 2026-11-01).* **Version source.** Recommendation: the build gauge, with the commit baked into the binary rather than the crate version.
 9. *Decided (accepted 2026-11-01).* **`state_dir` mode.** The slot links must be executable by the service, so `state_dir` cannot be `0700`
    ([host-updates.md][hu] 3.4.1 says read access "through group membership", the 2.4 example says `0700`). Recommendation: mode

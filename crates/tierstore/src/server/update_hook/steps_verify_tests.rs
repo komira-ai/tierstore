@@ -145,6 +145,26 @@ fn verify_after_the_commit_reports_a_pending_promotion_and_never_fails_for_it() 
     assert!(again.report.promotion_pending);
 }
 
+/// Asserts that a pending promotion's detail says it is pending and names no holder of the cache
+/// lock, before the commit and after it (when the previous instance is stopped and the lock may be
+/// held by nobody yet). It would catch a detail that promises the holder, which no instance
+/// reports.
+#[test]
+fn a_pending_promotion_names_no_holder_of_the_lock() {
+    let fake = Fake::new();
+    fake.advance(&[Step::Prepare, Step::Cutover]);
+    let before = fake.run(Step::Verify);
+    fake.set_promotion(Promotion::Stuck);
+    fake.advance(&[Step::Cleanup]);
+    let after = fake.run(Step::Verify);
+    for done in [before, after] {
+        assert!(done.report.promotion_pending, "{done:?}");
+        let detail = done.report.detail.unwrap();
+        assert_eq!(detail, "9302 serves read-only: the promotion is pending");
+        assert!(!detail.contains("hold"), "{detail}");
+    }
+}
+
 /// Asserts that after the commit an instance that answers wrongly through the public port is
 /// `wrong_build` (exit 1, the updater reads it as a failure after the commit), and one that stops
 /// answering `/readyz` is `not_ready`; both say they are not reversible. It would catch a
