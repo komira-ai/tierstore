@@ -376,3 +376,232 @@ fn advisories_reads_head_when_no_commit_is_given_and_reports_a_git_failure() {
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("git rev-parse HEAD"), "{}", stderr(&o));
 }
+
+#[test]
+fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() {
+    // Catches: `release plan` not passing its flags on (--version-file, --freeze, --output),
+    // a missing VERSION file being an error, and the answers not reaching the output file.
+    let d = dir("plan");
+    let run_json = format!(
+        "{{\"workflow_runs\":[{{\"id\":11,\"head_sha\":\"{COMMIT}\",\"head_branch\":\"main\",\"event\":\"push\",\"conclusion\":\"success\"}}]}}"
+    );
+    for workflow in ["artifacts.yml", "ci.yml"] {
+        put(
+            &d,
+            &format!(
+                "repos/{REPO}/actions/workflows/{workflow}/runs?head_sha={COMMIT}&event=push&branch=main&status=success&per_page=20"
+            ),
+            &run_json,
+        );
+    }
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v0.3.1\"}]",
+    );
+    put(
+        &d,
+        &format!("repos/{REPO}/compare/v0.3.1...{COMMIT}"),
+        "{\"status\":\"ahead\",\"files\":[{\"filename\":\"Cargo.lock\"}],\"commits\":[{\"commit\":{\"message\":\"fix a thing (#9)\"}}]}",
+    );
+    let plan = |extra: &[&str]| {
+        let mut args = vec![
+            "release",
+            "plan",
+            "--repo",
+            REPO,
+            "--commit",
+            COMMIT,
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ];
+        args.extend_from_slice(extra);
+        run(&d, &args)
+    };
+    let o = plan(&["--version-file", "VERSION", "--freeze", ""]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(written.contains("tag=v0.3.2\n"), "{written}");
+    put(&d, "VERSION", "0.4.0\n");
+    let o = plan(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(written.contains("tag=v0.4.0\n"), "{written}");
+    let o = plan(&["--freeze", "true"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("RELEASE_FREEZE"), "{}", stdout(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(
+        written.ends_with("release=false\nreason=RELEASE_FREEZE is set\n"),
+        "{written}"
+    );
+}
+
+#[test]
+fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_status_2() {
+    // Catches: the flags of `release manual` not reaching it, and a bad tag not being a
+    // usage error.
+    let d = dir("manual");
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[]",
+    );
+    let o = run(
+        &d,
+        &[
+            "release",
+            "manual",
+            "--repo",
+            REPO,
+            "--tag",
+            "v1.2.3",
+            "--commit",
+            COMMIT,
+            "--note",
+            "by hand",
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("out"),
+        format!("release=true\ntag=v1.2.3\ncommit={COMMIT}\nnote=by hand\n")
+    );
+    let o = run(
+        &d,
+        &[
+            "release", "manual", "--repo", REPO, "--tag", "1.2", "--commit", COMMIT, "--gh", FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    // A tag already covers the commit: refused, exit status 1, naming the tag.
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v1.2.0\"}]",
+    );
+    put(
+        &d,
+        &format!("repos/{REPO}/compare/v1.2.0...{COMMIT}"),
+        "{\"status\":\"identical\"}",
+    );
+    let o = run(
+        &d,
+        &[
+            "release", "manual", "--repo", REPO, "--tag", "v1.2.1", "--commit", COMMIT, "--gh",
+            FAKE,
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("v1.2.0 already covers"),
+        "{}",
+        stderr(&o)
+    );
+}
+
+#[test]
+fn release_version_prints_the_version_the_plan_would_tag_and_appends_it() {
+    // Catches: `release version` not passing its flags on, and the answer not reaching the
+    // output file the build job reads.
+    let d = dir("version");
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v0.3.1\"}]",
+    );
+    let version = |extra: &[&str]| {
+        let mut args = vec![
+            "release",
+            "version",
+            "--repo",
+            REPO,
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ];
+        args.extend_from_slice(extra);
+        run(&d, &args)
+    };
+    let o = version(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "version=0.3.2\n");
+    put(&d, "VERSION", "0.4.0\n");
+    let o = version(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("out"),
+        "version=0.3.2\nversion=0.4.0\n"
+    );
+}
+
+#[test]
+fn release_check_binary_runs_the_x86_64_binary_of_the_tarball_against_the_tag() {
+    // Catches: the flags of `release check-binary` not reaching it, the binary not being run
+    // from the tarball, and a binary that says another version than the tag being accepted
+    // (exit status 1 and the words naming both).
+    let d = dir("check-binary");
+    put(
+        &d,
+        "tierstore",
+        "#!/bin/sh\necho 'tierstore 0.3.2+0123456789ab'\n",
+    );
+    put(&d, "sbom.json", "{\"bomFormat\":\"CycloneDX\"}");
+    std::fs::create_dir_all(d.join("out")).expect("out");
+    let o = run(
+        &d,
+        &[
+            "package",
+            "--binary",
+            "tierstore",
+            "--sbom",
+            "sbom.json",
+            "--platform",
+            "linux-x86_64",
+            "--commit",
+            COMMIT,
+            "--out",
+            "out",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let check = |tag: &str| {
+        run(
+            &d,
+            &[
+                "release",
+                "check-binary",
+                "out",
+                "--tag",
+                tag,
+                "--commit",
+                COMMIT,
+                "--scratch",
+                "work",
+            ],
+        )
+    };
+    let o = check("v0.3.2");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("v0.3.2"), "{}", stdout(&o));
+    let o = check("v0.3.1");
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stderr(&o).contains("0.3.2"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("0.3.1"), "{}", stderr(&o));
+}
+
+#[test]
+fn build_commit_with_a_version_refuses_a_binary_that_says_another() {
+    // Catches: `--version` of the build-commit verb not reaching the check.
+    let d = dir("build-commit-version");
+    let o = run(&d, &["build-commit", FAKE, COMMIT, "--version", "9.9.9"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("9.9.9"), "{}", stderr(&o));
+}
