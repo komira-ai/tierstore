@@ -21,8 +21,12 @@
 //!   publishes it (which is when GitHub creates the tag). A tag or a published release that
 //!   exists is refused; a draft a failed run left is replaced.
 
+mod plan;
 mod publish;
 
+pub use plan::{
+    DOCS_PATHS, Request, docs_only, is_docs_path, manual, next_tag, plan, read_version,
+};
 pub use publish::{Gh, RealGh, publish};
 
 use std::io::Write;

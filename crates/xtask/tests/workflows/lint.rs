@@ -235,3 +235,8 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
     }
     problems
 }
+
+/// One line per way the text of `release.yml` is not the automatic release chain.
+pub fn release_problems(_text: &str) -> Vec<String> {
+    vec!["not written".to_owned()]
+}

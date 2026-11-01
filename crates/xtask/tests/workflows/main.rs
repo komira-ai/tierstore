@@ -9,7 +9,7 @@ mod yaml;
 
 use std::path::PathBuf;
 
-use lint::{SIGN_IF, lint};
+use lint::{SIGN_IF, lint, release_problems};
 
 /// The directory of the workflows of this repository.
 fn workflows_dir() -> PathBuf {
@@ -293,4 +293,155 @@ fn a_document_the_lint_cannot_evaluate_is_refused() {
     ] {
         assert!(!lint("t.yml", text).is_empty(), "{text:?}");
     }
+}
+
+#[test]
+fn release_yml_is_started_by_the_two_workflows_and_by_hand_and_nothing_else() {
+    // Catches: any change to release.yml that breaks the chain below: a trigger added or lost,
+    // a guard dropped, the group made cancelling, a write scope or a build step where it must
+    // not be, the plan job given more than read access.
+    assert_eq!(
+        release_problems(&text_of("release.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// `(text to replace once, its replacement, what the problem must name)`.
+const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
+    (
+        "on:\n  workflow_run:",
+        "on:\n  push:\n  workflow_run:",
+        "triggers",
+    ),
+    ("  workflow_dispatch:", "  workflow_call:", "triggers"),
+    (
+        "workflows: [ci, artifacts]",
+        "workflows: [ci]",
+        "workflow_run.workflows",
+    ),
+    (
+        "workflows: [ci, artifacts]",
+        "workflows: [artifacts]",
+        "workflow_run.workflows",
+    ),
+    (
+        "types: [completed]",
+        "types: [requested]",
+        "workflow_run.types",
+    ),
+    (
+        "branches: [main]",
+        "branches: [main, dev]",
+        "workflow_run.branches",
+    ),
+    (
+        "cancel-in-progress: false",
+        "cancel-in-progress: true",
+        "cancel-in-progress",
+    ),
+    ("group: release-", "group: rel-", "group"),
+    (
+        "github.event.workflow_run.conclusion == 'success'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.conclusion == 'success'",
+    ),
+    (
+        "github.event.workflow_run.event == 'push'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.event == 'push'",
+    ),
+    (
+        "github.event.workflow_run.head_branch == 'main'",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.head_branch == 'main'",
+    ),
+    (
+        "github.event.workflow_run.head_repository.full_name == github.repository",
+        "true",
+        "plan: `if` lacks github.event.workflow_run.head_repository.full_name == github.repository",
+    ),
+    (
+        "actions: read\n    outputs:",
+        "actions: write\n    outputs:",
+        "plan: permissions",
+    ),
+    (
+        "    permissions:\n      contents: read\n      actions: read\n    outputs:",
+        "    permissions:\n      contents: write\n      actions: read\n    outputs:",
+        "plan: permissions",
+    ),
+    ("needs: [plan]\n", "needs: []\n", "verify: needs"),
+    ("needs: [plan, verify]", "needs: [verify]", "publish: needs"),
+    (
+        "needs.plan.outputs.release == 'true'",
+        "true",
+        "release == 'true'",
+    ),
+    ("vars.RELEASE_FREEZE", "vars.OTHER", "RELEASE_FREEZE"),
+    (
+        "jobs:\n  plan:",
+        "jobs:\n  tag:\n    runs-on: ubuntu-24.04\n  plan:",
+        "jobs",
+    ),
+];
+
+#[test]
+fn each_defect_in_the_release_chain_is_named_by_the_lint() {
+    // Catches: a pin of release.yml that holds nothing, because the file passes whether or
+    // not the thing it pins is there.
+    let text = text_of("release.yml");
+    for (replace, with, names) in RELEASE_DEFECTS {
+        assert!(text.contains(replace), "{replace:?} is not in release.yml");
+        let problems = release_problems(&text.replacen(replace, with, 1));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn a_build_or_a_signing_step_in_release_yml_is_named_by_the_lint() {
+    // Catches: release.yml compiling the product, installing a tool or signing: every `cargo`
+    // there must be `cargo xtask`, and the attest actions are not used.
+    let text = text_of("release.yml");
+    for step in [
+        "cargo build --release",
+        "cargo xtask package && cargo build",
+        "cargo install cargo-deny",
+        "uses: actions/attest-build-provenance@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
+        "uses: actions/attest-sbom@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
+    ] {
+        let spoiled = format!("{text}      - run: {step}\n");
+        let problems = release_problems(&spoiled);
+        assert!(
+            problems.iter().any(|p| p.contains("builds or signs")),
+            "{step}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn contents_write_is_held_by_publish_and_only_under_the_release_condition() {
+    // Catches: the write scope moving to another job of release.yml, or publish holding it
+    // under a condition that lets a run without a plan through.
+    let text = text_of("release.yml");
+    let spoiled = text.replacen(
+        "    permissions:\n      contents: read\n      actions: read\n    outputs:",
+        "    permissions:\n      contents: write\n      actions: read\n    outputs:",
+        1,
+    );
+    assert!(
+        lint("release.yml", &spoiled)
+            .iter()
+            .any(|p| p.contains("job plan: `contents: write` is not allowed")),
+        "plan with contents: write"
+    );
+    let spoiled = text.replace("needs.plan.outputs.release == 'true' && ", "");
+    assert!(
+        lint("release.yml", &spoiled)
+            .iter()
+            .any(|p| p.contains("job publish: `contents: write` needs the exact `if:")),
+        "publish without the plan's answer in its condition"
+    );
 }

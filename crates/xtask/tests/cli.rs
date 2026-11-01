@@ -376,3 +376,97 @@ fn advisories_reads_head_when_no_commit_is_given_and_reports_a_git_failure() {
     assert_eq!(o.status.code(), Some(1));
     assert!(stderr(&o).contains("git rev-parse HEAD"), "{}", stderr(&o));
 }
+
+#[test]
+fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() {
+    // Catches: `release plan` not passing its flags on (--version-file, --freeze, --output),
+    // a missing VERSION file being an error, and the answers not reaching the output file.
+    let d = dir("plan");
+    let run_json = format!(
+        "{{\"workflow_runs\":[{{\"id\":11,\"head_sha\":\"{COMMIT}\",\"head_branch\":\"main\",\"event\":\"push\",\"conclusion\":\"success\"}}]}}"
+    );
+    for workflow in ["artifacts.yml", "ci.yml"] {
+        put(
+            &d,
+            &format!(
+                "repos/{REPO}/actions/workflows/{workflow}/runs?head_sha={COMMIT}&event=push&branch=main&status=success&per_page=20"
+            ),
+            &run_json,
+        );
+    }
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v0.3.1\"}]",
+    );
+    put(
+        &d,
+        &format!("repos/{REPO}/compare/v0.3.1...{COMMIT}"),
+        "{\"status\":\"ahead\",\"files\":[{\"filename\":\"Cargo.lock\"}],\"commits\":[{\"commit\":{\"message\":\"fix a thing (#9)\"}}]}",
+    );
+    let plan = |extra: &[&str]| {
+        let mut args = vec![
+            "release",
+            "plan",
+            "--repo",
+            REPO,
+            "--commit",
+            COMMIT,
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ];
+        args.extend_from_slice(extra);
+        run(&d, &args)
+    };
+    let o = plan(&["--version-file", "VERSION", "--freeze", ""]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(written.contains("tag=v0.3.2\n"), "{written}");
+    put(&d, "VERSION", "0.4.0\n");
+    let o = plan(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(written.contains("tag=v0.4.0\n"), "{written}");
+    let o = plan(&["--freeze", "true"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("RELEASE_FREEZE"), "{}", stdout(&o));
+    let written = std::fs::read_to_string(d.join("github-output")).expect("out");
+    assert!(
+        written.ends_with("release=false\nreason=RELEASE_FREEZE is true: no release is cut\n"),
+        "{written}"
+    );
+}
+
+#[test]
+fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_status_2() {
+    // Catches: the flags of `release manual` not reaching it, and a bad tag not being a
+    // usage error.
+    let d = dir("manual");
+    let o = run(
+        &d,
+        &[
+            "release",
+            "manual",
+            "--tag",
+            "v1.2.3",
+            "--commit",
+            COMMIT,
+            "--note",
+            "by hand",
+            "--output",
+            "github-output",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("out"),
+        format!("release=true\ntag=v1.2.3\ncommit={COMMIT}\nnote=by hand\n")
+    );
+    let o = run(
+        &d,
+        &["release", "manual", "--tag", "1.2", "--commit", COMMIT],
+    );
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+}
