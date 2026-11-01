@@ -38,6 +38,7 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--repo",
     "--signer-workflow",
     "--source-ref",
+    "--source-digest",
     "--bundle",
 ];
 

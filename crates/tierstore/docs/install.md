@@ -9,8 +9,10 @@ A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>
 ```sh
 gh attestation verify tierstore-<commit>-linux-x86_64.tar.gz --repo komira-ai/tierstore \
   --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
-  --source-ref refs/heads/main
+  --source-ref refs/heads/main --source-digest <commit>
 ```
+
+`<commit>` is the full SHA in the tarball's name; `--source-digest` makes the check prove the build came from that commit, not only from the main workflow.
 
 For an offline check, use the `.sigstore.json` bundle of the tarball (`--bundle`). [docs/ci-and-release.md](https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md) lists the files of a release and what each attests.
 
