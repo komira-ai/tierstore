@@ -299,7 +299,8 @@ jobs:
     steps:
       - name: The deploy step is off
         if: ${{ vars.KBF_COORDINATOR_URL == '' }}
-        run: echo "::notice::the gamma stage is off (the repository variable KBF_COORDINATOR_URL is unset): no farm was told about this release"
+        run: |
+          echo "::notice::the gamma stage is off, the repository variable KBF_COORDINATOR_URL is unset: no farm was told about this release"
       # The verb is kbf's. It is checked out and built before the token is used, and the token
       # service's address and key are in the environment of every step of this job, the build's
       # scripts included: kbf builds from its locked dependency set, and the coordinator's
