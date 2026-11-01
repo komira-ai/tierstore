@@ -140,9 +140,16 @@ The job needs these, set once by an operator (nothing in this repository does it
   job_workflow_ref = ["komira-ai/tierstore/.github/workflows/release.yml@refs/heads/main"]
   refs = ["refs/heads/main"]
   environments = ["release"]
-  event_names = ["workflow_run"]
+  event_names = ["workflow_run", "workflow_dispatch"]
   services = ["tierstore"]
   ```
+
+  `event_names` is a list and must name both `workflow_run` and `workflow_dispatch`: an automatic
+  release is started by the completion of `ci` and `artifacts` (token event `workflow_run`), and
+  a manual release (Releasing by hand) runs the same `gamma` job on a run whose token says
+  `workflow_dispatch`. With only `workflow_run`, a manual release would be refused with a 403
+  after it is published, and the job would fail. Both runs are of this workflow on `main`, in
+  the `release` environment, so the rest of the entry admits them alike.
 
 - On the coordinator, the service `tierstore` defined in the file its `--services-file` names
   (its roles and minimums), and the tierstore hosts enrolled so that their updaters heartbeat to it.
