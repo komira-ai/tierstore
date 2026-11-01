@@ -13,9 +13,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use clap::Parser;
 use objstore_s3::{ObjectKey, ObjectStore};
+use rustls::pki_types::ServerName;
 use tierstore::server::Drained;
 use tierstore::server::cli::{Addresses, Cli, run_serving};
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -122,7 +123,7 @@ async fn local(test: impl std::future::Future<Output = ()>) {
 }
 
 /// Reads the head of an answer from `tcp`: the head, and the bytes of the body that came with it.
-async fn read_head(tcp: &mut TcpStream) -> (String, Vec<u8>) {
+async fn read_head<S: AsyncRead + Unpin>(tcp: &mut S) -> (String, Vec<u8>) {
     let mut taken = Vec::new();
     let mut piece = [0_u8; 16 * 1024];
     loop {
@@ -242,12 +243,28 @@ const TAIL: usize = 256 << 10;
 /// with nothing cut once the client has closed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_blob_get_begun_before_the_drain_is_sent_in_full() {
-    local(a_blob_get_begun_before_the_drain_is_sent_in_full_here()).await;
+    local(async {
+        tokio::join!(
+            blob_spanning_the_settle(false),
+            blob_spanning_the_settle(true)
+        );
+    })
+    .await;
 }
 
-async fn a_blob_get_begun_before_the_drain_is_sent_in_full_here() {
-    let files = files("oci-drain-blob");
-    let mut running = Running::start(files.plain("127.0.0.1:0"), "200ms").await;
+/// The test above over plain HTTP, or over TLS, where the end of stream is the server's TLS close.
+async fn blob_spanning_the_settle(tls: bool) {
+    let files = files(if tls {
+        "oci-drain-blob-tls"
+    } else {
+        "oci-drain-blob"
+    });
+    let flags = if tls {
+        files.flags(true)
+    } else {
+        files.plain("127.0.0.1:0")
+    };
+    let mut running = Running::start(flags, "200ms").await;
     // Larger than the server's send buffer and the client's receive buffer, so that the answer is
     // still being sent when the settle ends; and no two chunks alike, so that a lost piece shows.
     let content: Vec<u8> = (0..16_u32 << 20).map(|at| (at % 251) as u8).collect();
@@ -256,12 +273,19 @@ async fn a_blob_get_begun_before_the_drain_is_sent_in_full_here() {
     // answer the server can have sent.
     let socket = TcpSocket::new_v4().expect("a socket");
     socket.set_recv_buffer_size(4096).expect("a receive buffer");
-    let mut tcp = socket.connect(running.oci()).await.expect("connected");
+    let tcp = socket.connect(running.oci()).await.expect("connected");
+    let mut stream: Box<dyn Duplex> = if tls {
+        let name = ServerName::from(running.oci().ip());
+        let connected = connector(&files.ca_pem).connect(name, tcp).await;
+        Box::new(connected.expect("a handshake"))
+    } else {
+        Box::new(tcp)
+    };
     let ask = format!("GET {blob} HTTP/1.1\r\nhost: oci.test\r\n\r\n");
-    tcp.write_all(ask.as_bytes()).await.expect("sent");
-    let (head, mut body) = read_head(&mut tcp).await;
-    assert!(head.starts_with("http/1.1 200 "), "{head}");
-    assert!(!head.contains("connection: close"), "{head}");
+    stream.write_all(ask.as_bytes()).await.expect("sent");
+    let (head, mut body) = read_head(&mut stream).await;
+    assert!(head.starts_with("http/1.1 200 "), "tls {tls}: {head}");
+    assert!(!head.contains("connection: close"), "tls {tls}: {head}");
     let length = content_length(&head);
     assert_eq!(length, content.len());
 
@@ -270,30 +294,150 @@ async fn a_blob_get_begun_before_the_drain_is_sent_in_full_here() {
     let mut piece = vec![0_u8; 64 << 10];
     while body.len() < length - TAIL {
         let want = piece.len().min(length - TAIL - body.len());
-        let read = tcp.read(&mut piece[..want]).await.expect("a read");
-        assert!(read > 0, "the connection ended at {} bytes", body.len());
+        let read = stream.read(&mut piece[..want]).await.expect("a read");
+        assert!(
+            read > 0,
+            "tls {tls}: the connection ended at {} bytes",
+            body.len()
+        );
         body.extend_from_slice(&piece[..read]);
     }
-    // The server takes the rest into its send buffer, and is done with the answer.
+    // Time for the server to take the rest into its send buffer and be done with the answer: it
+    // only makes the case that a plain close gets wrong likely (with the request read while the
+    // answer is still being written, a plain close is clean too); nothing below depends on it.
     tokio::time::sleep(SHORT).await;
-    tcp.write_all(PING)
+    stream
+        .write_all(PING)
         .await
         .expect("the next request is taken");
+    stream.flush().await.expect("sent");
     let mut rest = Vec::new();
-    let read = tcp.read_to_end(&mut rest).await;
+    let read = stream.read_to_end(&mut rest).await;
     body.extend_from_slice(&rest);
     let got = body.len().min(length);
-    assert!(read.is_ok(), "reset at {got} of {length} bytes: {read:?}");
-    assert!(got == length, "the blob was cut at {got} of {length} bytes");
+    assert!(
+        read.is_ok(),
+        "tls {tls}: reset at {got} of {length} bytes: {read:?}"
+    );
+    assert!(
+        got == length,
+        "tls {tls}: the blob was cut at {got} of {length} bytes"
+    );
     assert!(
         body[..length] == content[..],
-        "the bytes of the blob differ"
+        "tls {tls}: the bytes of the blob differ"
     );
     let after = String::from_utf8_lossy(&body[length..]).to_ascii_lowercase();
     let answered = after.starts_with("http/1.1 200 ") && after.contains("connection: close");
-    assert!(after.is_empty() || answered, "{after}");
+    assert!(after.is_empty() || answered, "tls {tls}: {after}");
+    drop(stream);
+    assert_eq!(running.drained().await, Drained { abandoned: 0 });
+}
+
+/// A byte stream of either kind, TLS or a bare socket.
+trait Duplex: AsyncRead + AsyncWrite + Unpin {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Duplex for T {}
+
+/// Asserts, as the binary runs the front, that a request whose head the front had begun to read
+/// before the settle ended, and that the client finishes after it ended, is on the wire: it is
+/// answered, with `Connection: close`, and the connection then gets a clean end of stream and the
+/// drain ends with nothing cut. A front that took such a connection for idle would close it with
+/// the request half read, and the client would get no answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_begun_before_the_settle_ended_is_answered() {
+    local(a_request_begun_before_the_settle_ended_is_answered_here()).await;
+}
+
+async fn a_request_begun_before_the_settle_ended_is_answered_here() {
+    let files = files("oci-drain-split-head");
+    let mut running = Running::start(files.plain("127.0.0.1:0"), "200ms").await;
+    let mut tcp = TcpStream::connect(running.oci()).await.expect("connected");
+    let (first, second) = PING.split_at(PING.len() / 2);
+    tcp.write_all(first).await.expect("sent");
+    running.begin_drain();
+    running.settled().await;
+    tcp.write_all(second).await.expect("sent");
+    let (head, _) = read_head(&mut tcp).await;
+    assert!(head.starts_with("http/1.1 200 "), "{head}");
+    assert!(head.contains("connection: close"), "{head}");
+    let mut rest = Vec::new();
+    let end = tcp.read_to_end(&mut rest).await;
+    assert!(end.is_ok(), "the connection was reset: {end:?}");
     drop(tcp);
     assert_eq!(running.drained().await, Drained { abandoned: 0 });
+}
+
+/// Asserts, as the binary runs the front with room for one connection, that a connection that
+/// lingers in the drain still holds its slot: a second connection made in the settle, while the
+/// first client has read its end of stream and not closed, is not served; it is served, with
+/// `Connection: close`, once the first client has closed. A front whose lingering closes held no
+/// slot would let a drain keep any number of sockets open.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lingering_connection_holds_its_slot() {
+    local(a_lingering_connection_holds_its_slot_here()).await;
+}
+
+async fn a_lingering_connection_holds_its_slot_here() {
+    let files = files("oci-drain-slot");
+    let mut flags = files.plain("127.0.0.1:0");
+    flags.extend(["--oci-max-connections", "1"].map(str::to_owned));
+    // Long enough for the requests below to be made within it.
+    let mut running = Running::start(flags, "5s").await;
+    let oci = running.oci();
+    let mut first = Conn::open_plain(oci).await.expect("a connection");
+    let ping = first.request("GET", "/v2/", &[]).await.expect("an answer");
+    assert_eq!(ping.status, 200);
+    running.begin_drain_and_see_it().await;
+    let closing = first.request("GET", "/v2/", &[]).await.expect("an answer");
+    assert_eq!(closing.header("connection"), Some("close"));
+    assert!(first.read_to_end().await.expect("a clean end").is_empty());
+
+    let second = tokio::spawn(async move {
+        let mut conn = Conn::open_plain(oci).await.expect("a connection");
+        conn.request("GET", "/v2/", &[]).await.expect("an answer")
+    });
+    // A missing bound would serve the second at once; there is no event to wait for that says it
+    // is held back, so the test gives it a moment and asserts it was not served.
+    tokio::time::sleep(SHORT).await;
+    assert!(
+        !second.is_finished(),
+        "the second connection was served while the first lingered"
+    );
+    first.shutdown().await.expect("closed");
+    drop(first);
+    let reply = tokio::time::timeout(SAFETY, second).await;
+    let reply = reply.expect("the second was never served").expect("joined");
+    assert_eq!(
+        (reply.status, reply.header("connection")),
+        (200, Some("close"))
+    );
+    assert_eq!(running.drained().await, Drained { abandoned: 0 });
+}
+
+/// Asserts that the drain deadline cuts a lingering connection too, and counts it: with a header
+/// timeout far longer than the deadline, a client that reads its end of stream and keeps the
+/// connection open is cut when the deadline passes, and the stop reports one connection cut
+/// instead of waiting for the header timeout or reporting none.
+#[tokio::test]
+async fn the_drain_deadline_cuts_a_lingering_connection() {
+    let rig = Rig::plain_with(|limits| {
+        limits.drain_deadline = SHORT;
+        limits.header_timeout = Duration::from_secs(3600);
+    })
+    .await;
+    let mut conn = rig.conn().await;
+    let ping = conn.request("GET", "/v2/", &[]).await.expect("an answer");
+    assert_eq!(ping.status, 200);
+    let stopping = tokio::spawn(rig.stop());
+    assert!(conn.read_to_end().await.expect("a clean end").is_empty());
+    let cut = tokio::time::timeout(SAFETY, stopping).await;
+    assert_eq!(
+        cut.expect("the stop waited past its deadline")
+            .expect("joined"),
+        1
+    );
+    drop(conn);
 }
 
 /// Asserts, as the binary runs the front, that a kept-alive connection that is idle when the
@@ -327,6 +471,8 @@ async fn an_idle_connection_gets_a_lingering_close_at_the_end_of_the_settle_here
     tcp.write_all(PING)
         .await
         .expect("the late request is taken");
+    // Time for a reset to come back, if the front answers the write with one; a front that
+    // lingers never does, so the assertions below do not depend on how long this is.
     tokio::time::sleep(SHORT).await;
     let error = tcp.take_error().expect("the socket's error");
     assert!(error.is_none(), "the connection was reset: {error:?}");
@@ -360,6 +506,9 @@ async fn a_request_after_the_settle_is_counted_as_late() {
         let end = tokio::time::timeout(SAFETY, conn.read_to_end()).await;
         let end = end.expect("no end of stream");
         assert!(end.expect("a clean end").is_empty(), "tls {tls}");
+        // The count is read once the stop has ended, which is after the front has read these
+        // bytes: they come before the client's end of stream. The pause only spreads them over
+        // two reads.
         for _ in 0..2 {
             conn.write_raw(PING)
                 .await

@@ -17,7 +17,7 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, watch};
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
@@ -78,11 +78,11 @@ pub struct OciListener {
 /// writes after the end of the stream is counted in
 /// [`OciMetrics::late_requests`](super::OciMetrics::late_requests).
 #[derive(Clone)]
-pub struct OciDrain(Arc<Drain>);
+pub(crate) struct OciDrain(Arc<Drain>);
 
 impl OciDrain {
     /// Begins the drain; calling it again does nothing more.
-    pub fn begin(&self) {
+    pub(crate) fn begin(&self) {
         self.0.begin();
     }
 }
@@ -149,7 +149,7 @@ impl OciListener {
 
     /// The handle that begins the listener's drain (see [`OciDrain`]).
     #[must_use]
-    pub fn drain(&self) -> OciDrain {
+    pub(crate) fn drain(&self) -> OciDrain {
         OciDrain(Arc::clone(&self.drain))
     }
 
@@ -182,9 +182,10 @@ impl OciListener {
 
     /// Serves connections until `stop` turns true, the end of the settle: then it takes no more,
     /// lets the connections that are open finish the request they are answering and closes them
-    /// with a lingering close (see [`OciDrain`]), waits for them and for the lingering closes for
-    /// [`OciLimits::drain_deadline`], and cuts the connections that are left. Returns how many
-    /// were cut.
+    /// with a lingering close (its write half shut, then what the client sends read and dropped
+    /// until it closes, for [`OciLimits::header_timeout`] at most), waits for all of that for
+    /// [`OciLimits::drain_deadline`], and cuts the connections that are left, lingering ones
+    /// included. Returns how many were cut.
     pub async fn serve(self, stop: watch::Receiver<bool>) -> usize {
         let Self {
             listeners,
@@ -247,12 +248,8 @@ where
     }
     drop(incoming);
     drain.settle();
-    let finished = async {
-        while connections.join_next().await.is_some() {}
-        // A connection's task ends when its stream is dropped, and a lingering close goes on
-        // after that, on a task of its own.
-        drain.wait_for_zero(&drain.lingering).await;
-    };
+    // A connection's task runs its lingering close too, so that the deadline cuts it.
+    let finished = async { while connections.join_next().await.is_some() {} };
     if tokio::time::timeout(limits.drain_deadline, finished)
         .await
         .is_ok()
@@ -300,7 +297,9 @@ impl Serving {
     }
 
     /// One connection, until its client leaves, it breaks, its lifetime ends or the settle is
-    /// over; the slot is held throughout.
+    /// over, and then its lingering close, if the drain gave it one; the slot is held throughout,
+    /// so that a connection that lingers counts against [`OciLimits::max_connections`], and the
+    /// listener cuts it at the drain deadline as it cuts any other.
     async fn connection(
         self,
         tcp: TcpStream,
@@ -312,7 +311,8 @@ impl Serving {
             return;
         };
         let watched = Watched::new(stream, limits.write_idle, peer);
-        let (stream, wire) = Lingering::new(watched, &self.drain);
+        let (handoff, lingered) = oneshot::channel();
+        let (stream, wire) = Lingering::handing_over(watched, &self.drain, handoff);
         let (front, drain, on_wire) = (
             Arc::clone(&self.front),
             Arc::clone(&self.drain),
@@ -333,30 +333,39 @@ impl Serving {
                 Ok::<_, Infallible>(answer)
             }
         });
-        let serving = http1::Builder::new()
-            .timer(TokioTimer::new())
-            .header_read_timeout(limits.header_timeout)
-            .serve_connection(TokioIo::new(stream), service);
-        tokio::pin!(serving);
-        let lifetime = tokio::time::sleep(limits.lifetime);
-        tokio::pin!(lifetime);
         let settled = self.drain.settled.subscribe();
-        let lifetime_ended = tokio::select! {
-            // A connection that ends badly has nothing to tell the other side.
-            _ = serving.as_mut() => return,
-            () = &mut lifetime => true,
-            // The settle is over, and the connection has no request on the wire, or has just
-            // answered it: it closes, and its stream lingers (see `OciDrain`).
-            () = drain::time_to_close(&wire, settled) => false,
+        // The HTTP connection, which owns the stream: when it ends, the stream is dropped, and a
+        // stream that the drain shut hands its lingering close over.
+        let http = async move {
+            let serving = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(limits.header_timeout)
+                .serve_connection(TokioIo::new(stream), service);
+            tokio::pin!(serving);
+            let lifetime = tokio::time::sleep(limits.lifetime);
+            tokio::pin!(lifetime);
+            let lifetime_ended = tokio::select! {
+                // A connection that ends badly has nothing to tell the other side.
+                _ = serving.as_mut() => return,
+                () = &mut lifetime => true,
+                // The settle is over, and the connection has no request on the wire, or has just
+                // answered it: it closes, and its stream lingers (see `OciDrain`).
+                () = drain::time_to_close(&wire, settled) => false,
+            };
+            // The request being answered is finished, and then the connection closes.
+            serving.as_mut().graceful_shutdown();
+            if lifetime_ended {
+                // A client that takes the answer a few bytes at a time must not keep the slot past
+                // the lifetime for ever. (After the settle, the listener cuts what is left.)
+                let _ = tokio::time::timeout(limits.drain_deadline, serving).await;
+            } else {
+                let _ = serving.await;
+            }
         };
-        // The request being answered is finished, and then the connection closes.
-        serving.as_mut().graceful_shutdown();
-        if lifetime_ended {
-            // A client that takes the answer a few bytes at a time must not keep the slot past
-            // the lifetime for ever. (After the settle, the listener cuts what is left.)
-            let _ = tokio::time::timeout(limits.drain_deadline, serving).await;
-        } else {
-            let _ = serving.await;
+        http.await;
+        // Nothing is handed over when the drain did not shut the stream.
+        if let Ok(lingered) = lingered.await {
+            lingered.run().await;
         }
     }
 }

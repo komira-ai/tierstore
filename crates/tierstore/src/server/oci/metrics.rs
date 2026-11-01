@@ -113,7 +113,7 @@ impl OciMetrics {
     /// The connections whose client wrote after the front had shut its end in a drain: the
     /// requests that came too late to be answered (see [`OciDrain`](super::OciDrain)).
     #[must_use]
-    pub fn late_requests(&self) -> u64 {
+    pub(crate) fn late_requests(&self) -> u64 {
         self.late.load(Ordering::SeqCst)
     }
 

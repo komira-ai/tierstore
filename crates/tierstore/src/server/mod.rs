@@ -186,7 +186,7 @@
 //! with the number of requests that the deadline cut: those still running, or still being sent.
 //!
 //! The OCI read front drains the same way, with the same code (`drain` and `linger`) and a drain
-//! of its own: see [`oci::OciDrain`]. Its late requests are counted in
+//! of its own (`OciDrain`, which the binary begins with this one). Its late requests are counted in
 //! `tierstore_oci_drain_late_requests_total`.
 
 mod auth;

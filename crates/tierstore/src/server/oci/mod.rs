@@ -103,7 +103,8 @@ use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
 use crate::{Backend, ByteRange, Error};
 
 pub use body::{BodyError, OciBody};
-pub use listener::{OciDrain, OciLimits, OciListener};
+pub(crate) use listener::OciDrain;
+pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 

@@ -15,7 +15,7 @@ use std::task::{Context, Poll};
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::runtime::Handle;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, oneshot};
 
 use super::drain::Drain;
 
@@ -155,6 +155,23 @@ pub(super) struct Lingering<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> 
     wire: Arc<Wire>,
     /// Set when the shutdown begins during the drain.
     hold: Option<Hold>,
+    /// Where the lingering close goes when the stream is dropped: `None` spawns it on a task of
+    /// its own (the S3 front), `Some` hands it to the connection's task, which runs it and so
+    /// keeps the connection's slot and its place in the listener's shutdown (the OCI front).
+    handoff: Option<oneshot::Sender<Lingered<T>>>,
+}
+
+/// A stream whose lingering close is to be run: [`Lingered::run`].
+pub(super) struct Lingered<T> {
+    io: T,
+    hold: Hold,
+}
+
+impl<T: AsyncRead + Unpin> Lingered<T> {
+    /// Reads the stream to the peer's end (see [`linger`]).
+    pub(super) async fn run(self) {
+        linger(self.io, self.hold).await;
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Lingering<T> {
@@ -173,7 +190,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Lingering<T> {
             drain: Arc::clone(drain),
             wire: Arc::clone(&wire),
             hold: None,
+            handoff: None,
         };
+        (stream, wire)
+    }
+
+    /// [`Lingering::new`], whose lingering close, if the drain gives it one, is handed to
+    /// `handoff` when the stream is dropped, for the connection's task to run, instead of being
+    /// spawned.
+    pub(super) fn handing_over(
+        inner: T,
+        drain: &Arc<Drain>,
+        handoff: oneshot::Sender<Lingered<T>>,
+    ) -> (Self, Arc<Wire>) {
+        let (mut stream, wire) = Self::new(inner, drain);
+        stream.handoff = Some(handoff);
         (stream, wire)
     }
 
@@ -282,9 +313,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Drop for Lingering<T> {
     fn drop(&mut self) {
         self.wire.clear();
         let (inner, hold) = (self.inner.take(), self.hold.take());
-        if let (Some(io), Some(hold)) = (inner, hold) {
+        let Some(lingered) = inner.zip(hold).map(|(io, hold)| Lingered { io, hold }) else {
+            return;
+        };
+        match self.handoff.take() {
+            // A task that is gone has nothing to run it with: the stream is dropped.
+            Some(handoff) => drop(handoff.send(lingered)),
             // Outside a runtime there is nothing to read with: the stream and the hold are dropped.
-            let _ = Handle::try_current().map(|handle| handle.spawn(linger(io, hold)));
+            None => drop(Handle::try_current().map(|handle| handle.spawn(lingered.run()))),
         }
     }
 }
