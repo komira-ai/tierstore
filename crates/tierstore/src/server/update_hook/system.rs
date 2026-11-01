@@ -31,6 +31,8 @@ pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The user that must own the binary of a staged release: the updater's tree is root's.
 pub(super) const RELEASE_OWNER: u32 = 0;
+/// The user that must own the declaration: the updater's file is root's.
+pub(super) const DECLARATION_OWNER: u32 = 0;
 
 /// Where the machine is and who may own its state directory.
 pub(super) struct Config<'a> {
@@ -40,6 +42,8 @@ pub(super) struct Config<'a> {
     pub owner: u32,
     /// The user id that must own the binary of a staged release.
     pub release_owner: u32,
+    /// The user id that must own the declaration.
+    pub declaration_owner: u32,
     /// What runs the programs.
     pub runner: &'a dyn Runner,
 }
@@ -60,7 +64,8 @@ pub(super) fn run_on(
 ) -> Done {
     let runner = config.runner;
     let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
-        .with_release_owner(config.release_owner);
+        .with_release_owner(config.release_owner)
+        .with_declaration_owner(config.declaration_owner);
     let decl = match declaration(&host) {
         Ok(decl) => decl,
         Err(done) => return done,
@@ -91,6 +96,7 @@ pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
         root: PathBuf::from("/"),
         owner: geteuid().as_raw(),
         release_owner: RELEASE_OWNER,
+        declaration_owner: DECLARATION_OWNER,
         runner,
     }
 }

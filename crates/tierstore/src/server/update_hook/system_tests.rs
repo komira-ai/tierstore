@@ -38,6 +38,7 @@ fn scratch(name: &str) -> Scratch {
     let declaration = root.join(DECLARATION_PATH.trim_start_matches('/'));
     std::fs::create_dir_all(declaration.parent().unwrap()).unwrap();
     std::fs::write(&declaration, declaration_text(&state)).unwrap();
+    std::fs::set_permissions(&declaration, std::fs::Permissions::from_mode(0o644)).unwrap();
     Scratch {
         _dir: dir,
         root,
@@ -55,6 +56,7 @@ impl Scratch {
             root: self.root.clone(),
             owner: self.owner(),
             release_owner: self.owner(),
+            declaration_owner: self.owner(),
             runner,
         }
     }
@@ -231,6 +233,68 @@ fn the_system_config_expects_the_hooks_own_user_to_own_the_state_directory() {
     let config = system_config(&SystemRunner);
     assert_eq!(config.owner, rustix::process::geteuid().as_raw());
     assert_eq!(config.release_owner, RELEASE_OWNER);
+    assert_eq!(config.declaration_owner, 0);
     assert_eq!(RELEASE_OWNER, 0);
     assert_eq!(config.root, Path::new("/"));
+}
+
+fn declaration_file(host: &Scratch) -> PathBuf {
+    host.root.join(DECLARATION_PATH.trim_start_matches('/'))
+}
+
+/// Asserts that a declaration that is a symbolic link (even to a good file), one a group can
+/// write, one others can write, and one owned by another user are each refused as `host_failed`
+/// ("not trusted"), with no program run and no lock file made. It would catch a declaration read
+/// that a non-root account could have written or replaced.
+#[test]
+fn a_declaration_that_another_account_could_have_written_is_refused() {
+    for case in ["link", "group", "others", "owner"] {
+        let host = scratch(&format!("tierstore-hook-system-untrusted-{case}"));
+        let path = declaration_file(&host);
+        let mut config_owner = host.owner();
+        match case {
+            "link" => {
+                let real = host.root.join("real.toml");
+                std::fs::rename(&path, &real).unwrap();
+                symlink(&real, &path).unwrap();
+            }
+            "group" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+            }
+            "others" => {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o646)).unwrap();
+            }
+            _ => config_owner += 1,
+        }
+        let runner = FakeRunner::replying(vec![]);
+        let config = Config {
+            declaration_owner: config_owner,
+            ..host.config(&runner)
+        };
+        let invocation = Invocation::parse([std::ffi::OsString::from("restore")]).unwrap();
+        let done = run_on(&config, &invocation, None);
+        assert_eq!(
+            done.report.reason,
+            Some(Reason::HostFailed),
+            "{case}: {done:?}"
+        );
+        let detail = done.report.detail.unwrap();
+        assert!(detail.contains("not trusted"), "{case}: {detail}");
+        assert!(runner.calls().is_empty(), "{case}");
+        assert!(!host.state.join("lock").exists(), "{case}");
+    }
+}
+
+/// Asserts that a declaration that is a regular file owned by the configured user, mode 0644, is
+/// read and the step runs. It would catch a check that refuses every declaration.
+#[test]
+fn a_declaration_owned_by_the_configured_user_with_mode_0644_is_read() {
+    let host = scratch("tierstore-hook-system-trusted");
+    assert_eq!(
+        std::fs::metadata(declaration_file(&host)).unwrap().mode() & 0o777,
+        0o644
+    );
+    let runner = FakeRunner::replying(vec![]);
+    let done = host.run(Step::Restore, &runner);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
 }

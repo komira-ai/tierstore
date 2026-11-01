@@ -29,6 +29,7 @@ pub struct SystemHost<'a> {
     runner: &'a dyn Runner,
     timeout: Duration,
     release_owner: u32,
+    declaration_owner: u32,
 }
 
 impl<'a> SystemHost<'a> {
@@ -41,6 +42,7 @@ impl<'a> SystemHost<'a> {
             runner,
             timeout,
             release_owner: 0,
+            declaration_owner: 0,
         }
     }
 
@@ -49,6 +51,14 @@ impl<'a> SystemHost<'a> {
     #[must_use]
     pub fn with_release_owner(mut self, uid: u32) -> SystemHost<'a> {
         self.release_owner = uid;
+        self
+    }
+
+    /// The same, with `uid` as the user that must own the declaration (root, 0, unless this says
+    /// otherwise; tests say who they are).
+    #[must_use]
+    pub fn with_declaration_owner(mut self, uid: u32) -> SystemHost<'a> {
+        self.declaration_owner = uid;
         self
     }
 
