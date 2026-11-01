@@ -134,7 +134,7 @@ A host that runs `tierstore.service` moves to the slot units once, in this order
 1. Create the account and the state directory: place the sysusers.d and tmpfiles.d entries and have `systemd-sysusers` and `systemd-tmpfiles` create what they list.
 2. Place the declaration, the slot unit (with the edits of the host's `tierstore.service` and its drop-ins) and the polkit rule, and run `systemctl daemon-reload`.
 3. Place the binary as slot 9301: the release's `tierstore` in a directory that root owns, `slots/9301` a link to it, and the record `{"schema":1,"serving":9301,"mode":"handover","markers":[]}` as `state.json`, owned by `tierstore-update`, mode 0600, so that the redirect points at 9301.
-4. Have the updater run `tierstore update-hook restore`, its boot entry: it points the redirect of port 9300 at 9301 and starts `tierstore@9301.service`.
+4. Have the updater run `tierstore update-hook restore`, its boot entry: it points the redirect of port 9300 at 9301 and starts the slot unit `tierstore@9301`.
 5. Last, stop and disable `tierstore.service`.
 
 The old unit and slot 9301 run side by side between steps 4 and 5, which is safe over S3 tiers. A host with a `dir:` hot tier, or a build node, stops the old unit before step 4 and accepts the gap.
