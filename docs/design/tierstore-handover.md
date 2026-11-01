@@ -85,9 +85,13 @@ cannot be trusted is an operator's. The idle port is the other one of `serving`,
 
 **`prepare <artifact>`** (before anything visible). Check `tierstore --capabilities` of the staged release and of the one
 the `serving` slot links to: both must have `handover-v1`, else the hook records `mode=restart` and `cutover` does a plain
-restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Refuse with `75` (class `environment`: host not
-ready, nothing done) if the guard table cannot be loaded, `nf_conntrack_tcp_timeout_established` is not longer than the
-service's idle bound, or `nf_conntrack_count` is near `nf_conntrack_max` ([`host-updates.md`][hu] 4.1.3). Point the idle slot's link at the artifact,
+restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Then load the guard table, before
+anything else is applied (it records whether the table was there before, and `guard_placed` once this update loaded it).
+Refuse with `75` (class `environment`: host not ready, nothing done) if the guard table cannot be loaded,
+`nf_conntrack_tcp_timeout_established` is not longer than the service's idle bound, or `nf_conntrack_count` is near
+`nf_conntrack_max` ([`host-updates.md`][hu] 4.1.3). "Nothing done" holds for the guard too: a deferral removes the guard
+table if this update placed it and leaves one that was there; if that removal fails, the exit is `1` (class
+`environment`), and `rollback` removes it. Point the idle slot's link at the artifact,
 start `tierstore@<idle>`, and poll `/readyz` on `127.0.0.1:<idle>` until it answers 200 with `read-only` (a counted
 number of attempts; the unit starts only after its self-test). It records `previous = serving`. *Idempotent*: the link is
 replaced by rename, `systemctl start` of a started unit does nothing, the guard table is loaded by replacing it, the idle
@@ -99,7 +103,9 @@ idle port in one `nft -f -` (the ruleset on standard input, no file written), th
 and the version), a counted number of times. A probe that never succeeds swaps back and exits `1`. Records `swapped` and
 sets `serving` to the new port. *Idempotent*: the file replaces the table and names the target port, so a second apply
 changes nothing; a crash before `swapped` is re-run. *Restart mode*: stop v-current, start v-next, wait for readiness,
-then the same swap.
+then the same swap. Going back in restart mode (a failed `cutover`'s own compensation, or `rollback`) stops v-next
+**before** it starts v-current, because a release without `handover-v1` must never run beside another instance; in
+handover mode the old unit is started first.
 
 **`verify`** (the gate; run again and again). Before `cleanup`: v-next is ready, a counted series of probes through 9300
 is answered by v-next with the staged version, the redirect names v-next, and v-current still serves. It exits `0` with
@@ -112,20 +118,26 @@ ending the watch as `Failed(after_commit)` for a storage node and a build node a
 receives the value as `updater.promotion_ceiling_secs` in the params file and must not exit `1` for it. After the commit
 `verify` exits `1` only for a fault of its own observation (v-next crashed, answers wrongly), class `release`, which the
 updater also reports as `Failed(after_commit)` and never rolls back. **Exit `75` is not used**: nothing here is "not
-ready, try later with nothing done". *Idempotent*: it only observes, and sets the `verified` marker.
+ready, try later with nothing done". *Idempotent*: it only observes, and sets the `verified` marker, which records the boot id read at that moment (a
+`verify` in a later boot records the new one).
 
 **`rollback`** (before the stop of v-current only). Apply the swap file (on standard input, as in `cutover`) for the other port (the one `previous` names once
 `swapped`, else the one `serving` names), then stop the instance the restored rule does not name and remove that instance's slot link (a later `prepare` makes it
-again by rename), so that nobody starts an unvetted release by hand, and clear `previous` and the markers. *Idempotent*:
+again by rename), so that nobody starts an unvetted release by hand, remove the guard table only if `guard_placed` says this update loaded it, and clear `previous` and the markers. *Idempotent*:
 stopping a stopped unit, removing an absent link and re-applying a swap are no-ops. **It is valid only before `cleanup`
 has written its `stopping` marker.** After it, v-current is exiting or gone and a swap back would send new connections
 to a closed port, so `rollback` exits `1` with `"reversible":false`, which the updater reads as `Failed(after_commit)`,
 not `halt` ([`host-updates.md`][hu] 3.2).
 
 **`cleanup`** (the commit point of tierstore). The updater calls it only after a successful `verify`, and the hook
-refuses anyway: **unless the record says `verified`, `cleanup` does nothing and exits `1`** ([`host-updates.md`][hu] 3.2: a
-`cleanup` must not commit on its own authority). If `verified` is set: write `stopping` and from here print
-`"reversible":false` on every exit, so the updater records the commit. Then, in this order: **remove the previous
+refuses anyway: **unless the record says `verified`, `cleanup` does nothing and exits `1` with `"reversible":true`**
+([`host-updates.md`][hu] 3.2: a `cleanup` must not commit on its own authority, and a step that commits re-observes
+first). If `verified` is set and `stopping` is not yet written, `cleanup` first re-observes in its own run: the host's
+boot id equals the one the marker holds, the guard table is loaded, the redirect names `serving`, `serving` answers
+`/readyz`, and a request through 9300 is answered by `serving` with the staged version (its build gauge names the slot and
+version). A failed check, or a stale marker (another boot id), commits nothing and exits `1` with `"reversible":true`;
+the updater runs `rollback`. Then write `stopping` and from here print `"reversible":false` on every exit, so the updater
+records the commit (a re-run after `stopping` does not re-observe, so the commit goes forward in any boot). Then, in this order: **remove the previous
 slot's link first**, then `systemctl stop tierstore@<previous>`, then clear `previous`. The link goes first because it is
 the guard (section 2: the slot unit has `ConditionPathExists=` its link and no `[Install]`): with the link gone, nothing
 can start that slot again, by hand, by a dependency, or by `Restart=` if the old process crashes during its settle. The
@@ -257,6 +269,7 @@ scrapes the two private ports from the node (the guard blocks off-host); one is 
 | `cutover` | `nft -f` fails | one transaction: the old rule stays; `1` | v-current serves |
 | `cutover` | probe never answered by v-next | swap back inside the step; `1` | v-current serves |
 | `verify` (before cleanup) | v-next crashes or answers wrongly | `1`; the updater runs `rollback`: swap back, stop v-next; v-current still accepts | v-current serves |
+| `cleanup` | no `verified`, a boot id that changed since it, or v-next not serving through 9300 | commits nothing; `1`, `reversible:true`; the updater runs `rollback` | v-current serves |
 | `cleanup` | killed after `stopping`, or fails after it | re-run forward by the updater up to `cleanup_retries` (3): remove the link, stop, clear `previous`; no swap back; then `Failed(after_commit)` | v-next serves; the previous slot link is absent |
 | `cleanup` | the old process crashes during its settle, after `stopping` | its link is already absent, so `Restart=` cannot start it (`ConditionPathExists=` fails); the lock is freed by the kernel | v-next takes the lock; one instance |
 | `cleanup` | v-next crashes after `stopping` | no swap back (v-current has stopped accepting); systemd restarts v-next, read-only while v-current exits, read-write at once if gone; the coordinator rolls back by a new hand-over | a gap until v-next is up; failed |
@@ -274,15 +287,18 @@ catches and is written red before the code. **Conformance, one line per step** (
 real hook binary against a fake service and a fake `nft` and `systemctl`):
 
 - **C1 `prepare`**: twice leaves one started idle unit, one link, one guard table; killed at each boundary and re-run
-  reaches the same state; no `handover-v1` yields `mode=restart`; a bad conntrack bound is `75`.
+  reaches the same state; no `handover-v1` yields `mode=restart`; a bad conntrack bound is `75`; nothing is applied before the guard; a
+  deferral removes a guard it placed and leaves one that was there, and a failed removal is `1`.
 - **C2 `cutover`**: twice leaves one rule naming the idle port; killed between apply and `swapped` converges; a failing
   probe swaps back and exits `1`; the swap is one `nft -f` (a recording fake sees one call).
-- **C3 `verify`**: twice changes nothing; with the lock held it exits `0` with `promotion_pending`; with `read-write` it
+- **C3 `verify`**: twice changes nothing; the marker holds the boot id; with the lock held it exits `0` with `promotion_pending`; with `read-write` it
   clears the flag; a wrong version or slot through 9300 is `1`; with `updater.promotion_ceiling_secs` in the params file
   and the lock never taken it still exits `0` (red: a hook that exits `1` at the ceiling).
 - **C4 `rollback`**: after `cutover` it returns the fake to its earlier state, with the idle slot's link absent; after
-  `cleanup`'s `stopping` marker it exits `1` with `reversible:false` and changes nothing.
-- **C5 `cleanup`**: without `verified` it exits `1` and stops nothing (red: a hook that stops v-current); with it, twice and
+  `cleanup`'s `stopping` marker it exits `1` with `reversible:false` and changes nothing; in restart mode it stops v-next
+  before it starts v-current; it removes the guard only when `guard_placed` is set.
+- **C5 `cleanup`**: without `verified`, with a `verified` marker holding another boot id, or with v-next not serving
+  through 9300, it exits `1` with `reversible:true` and stops nothing (red: a hook that stops v-current); with a fresh one, twice and
   killed at each boundary, it ends with the unit stopped, link absent, `previous` cleared, and every exit
   after `stopping` carries `reversible:false`.
 - **C6 `restore`** (boot): before `stopping` it starts only the previous slot and names it in the rule; with `stopping`
