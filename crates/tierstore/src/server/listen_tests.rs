@@ -10,7 +10,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
-use super::{Addrs, bind, bind_all, has_duplicate, joined, local_addrs};
+use super::{Addrs, LoopbackBind, bind, bind_all, bind_set, has_duplicate, joined, local_addrs};
 use crate::server::Drained;
 use crate::server::testing::Rig;
 
@@ -217,4 +217,76 @@ fn a_listen_value_that_is_no_address_is_refused_without_its_text() {
         let why = toml::from_str::<Table>(text).expect_err("refused");
         assert!(!why.message().contains("secret-word"), "{}", why.message());
     }
+}
+
+fn addrs(texts: &[&str]) -> Vec<SocketAddr> {
+    texts.iter().map(|text| addr(text)).collect()
+}
+
+/// Asserts that with a local cache the bind set is the configured addresses and then 127.0.0.1 on
+/// each distinct port, once: an address of another family or host names only its port.
+#[test]
+fn a_local_cache_adds_loopback_on_each_distinct_port_after_the_configured_addresses() {
+    let one = addrs(&["192.0.2.10:9300"]);
+    assert_eq!(
+        bind_set(&one, true),
+        addrs(&["192.0.2.10:9300", "127.0.0.1:9300"])
+    );
+    let several = addrs(&["192.0.2.10:9300", "192.0.2.11:9300", "192.0.2.10:9301"]);
+    assert_eq!(
+        bind_set(&several, true),
+        addrs(&[
+            "192.0.2.10:9300",
+            "192.0.2.11:9300",
+            "192.0.2.10:9301",
+            "127.0.0.1:9300",
+            "127.0.0.1:9301"
+        ])
+    );
+    let v6 = addrs(&["[2001:db8::1]:9300", "[::]:9301"]);
+    assert_eq!(
+        bind_set(&v6, true),
+        addrs(&[
+            "[2001:db8::1]:9300",
+            "[::]:9301",
+            "127.0.0.1:9300",
+            "127.0.0.1:9301"
+        ])
+    );
+}
+
+/// Asserts that without a local cache the bind set is exactly the configured addresses.
+#[test]
+fn without_a_local_cache_loopback_is_not_added() {
+    let configured = addrs(&["192.0.2.10:9300", "[2001:db8::1]:9301"]);
+    assert_eq!(bind_set(&configured, false), configured);
+}
+
+/// Asserts that a port that already has 127.0.0.1 or the IPv4 wildcard gets nothing added, so no
+/// address is bound twice; the other ports of the same list still get loopback.
+#[test]
+fn a_port_with_loopback_or_the_wildcard_gets_nothing_added() {
+    let listed = addrs(&["127.0.0.1:9300", "192.0.2.10:9300"]);
+    assert_eq!(bind_set(&listed, true), listed);
+    let wildcard = addrs(&["0.0.0.0:9300", "[::]:9300"]);
+    assert_eq!(bind_set(&wildcard, true), wildcard);
+    let mixed = addrs(&["0.0.0.0:9300", "192.0.2.10:9301"]);
+    assert_eq!(
+        bind_set(&mixed, true),
+        addrs(&["0.0.0.0:9300", "192.0.2.10:9301", "127.0.0.1:9301"])
+    );
+}
+
+/// Asserts that the error of a loopback socket that cannot be bound says loopback, the address
+/// with its port, and the system's reason.
+#[test]
+fn a_loopback_bind_error_names_loopback_the_port_and_the_reason() {
+    let why = LoopbackBind {
+        addr: addr("127.0.0.1:9300"),
+        why: std::io::Error::other("address in use"),
+    };
+    let text = why.to_string();
+    assert!(text.contains("loopback"), "{text}");
+    assert!(text.contains("127.0.0.1:9300"), "{text}");
+    assert!(text.contains("address in use"), "{text}");
 }
