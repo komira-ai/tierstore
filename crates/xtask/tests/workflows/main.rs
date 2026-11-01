@@ -396,6 +396,42 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
         "cargo xtask deploy",
         "gamma: no step runs `cargo xtask deploy-farm`",
     ),
+    (
+        " && vars.KBF_COORDINATOR_URL != '' }}\n    runs-on",
+        " }}\n    runs-on",
+        "gamma: `if` is not",
+    ),
+    (
+        "vars.KBF_COORDINATOR_URL != ''",
+        "vars.KBF_COORDINATOR_URL == ''",
+        "gamma: `if` is not",
+    ),
+    (
+        "path: kbf\n          persist-credentials: false",
+        "path: kbf\n          persist-credentials: true",
+        "gamma: the kbf checkout persists credentials",
+    ),
+    (
+        "--version \"${TAG#v}+${COMMIT:0:12}\"",
+        "--version \"${TAG#v}\"",
+        "gamma: deploy-farm is not passed --version",
+    ),
+    (
+        "TAG: ${{ needs.plan.outputs.tag }}\n          COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "TAG: ${{ github.ref_name }}\n          COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "gamma: env TAG",
+    ),
+    (
+        "COMMIT: ${{ needs.plan.outputs.commit }}\n        run: cargo xtask deploy-farm",
+        "COMMIT: ${{ github.sha }}\n        run: cargo xtask deploy-farm",
+        "gamma: env COMMIT",
+    ),
+    // Pins what the lint already held (kbf's flag is refused); this row is green on arrival.
+    (
+        "deploy-farm --service",
+        "deploy-farm --require-coordinator-current --service",
+        "gamma: deploy-farm is passed --require-coordinator-current",
+    ),
     ("    environment: release\n", "", "gamma: environment"),
     (
         "      contents: read\n      id-token: write\n",
