@@ -434,7 +434,7 @@ fn a_page_with_every_cell_filled_and_traced_is_complete() {
     let dir = scratch("clean");
     std::fs::write(
         dir.join("r.tsv"),
-        "# c\nraw\tx\t1754\tms\tm\nraw\ty\t0.70\tms\tm\n",
+        "# c\nraw\tx\t1754\tms\tm\ta.b\nraw\ty\t0.70\tms\tm\ta.b\n",
     )
     .unwrap();
     let page = "<p><span data-cell=\"a.b\" data-result=\"r.tsv\">It took 1,754 ms and p50 of 0.7 ms (S3).</span> \
@@ -446,7 +446,7 @@ fn a_page_with_every_cell_filled_and_traced_is_complete() {
 fn a_number_no_result_holds_is_refused() {
     // Catches: a measured cell whose printed number was changed or never measured.
     let dir = scratch("number");
-    std::fs::write(dir.join("r.tsv"), "raw\tx\t12.8\tms\tm\n").unwrap();
+    std::fs::write(dir.join("r.tsv"), "raw\tx\t12.8\tms\tm\ta.b\n").unwrap();
     let page = "<p><span data-cell=\"a.b\" data-result=\"r.tsv\">12.8 ms, then 13.8 ms</span></p>";
     let problems = trace_problems(page, &dir);
     assert_eq!(
@@ -517,8 +517,103 @@ fn numbers_are_read_as_the_paper_prints_them() {
     );
     assert_eq!(numbers("v0.0.41 and 10, 20"), vec![10.0, 20.0]);
     assert_eq!(
+        numbers("took .5 ms, (.25), 1.5, a.5, x_.5, and 3"),
+        vec![0.5, 0.25, 1.5, 3.0]
+    );
+    assert_eq!(numbers("1.2.3 and 4, then 10.0.0.1."), vec![4.0]);
+    assert_eq!(
         plain("a &#39;b&#39; <b>9.7</b> &amp; 1 < 2 &x"),
         "a b 9.7  1 < 2 &x"
+    );
+}
+
+#[test]
+fn a_number_from_another_cells_row_is_refused() {
+    // Catches: a cell that quotes the value of a row that belongs to a different cell, which a
+    // match against the whole file accepts. A row may name several cells (the escape for a
+    // cell that quotes another cell's value); a row that names no cell serves none.
+    let dir = scratch("wrong-row");
+    std::fs::write(
+        dir.join("r.tsv"),
+        "raw\tfirst\t12.8\tms\tm\ta.b\n\
+         raw\tsecond\t40\tms\tm\tc.d\n\
+         raw\tshared\t7\tms\tm\ta.b, c.d\n\
+         raw\tnone\t99\tms\tm\n",
+    )
+    .unwrap();
+    let page = "<p><span data-cell=\"a.b\" data-result=\"r.tsv\">12.8 ms and 7 ms</span>\n\
+        <span data-cell=\"c.d\" data-result=\"r.tsv\">12.8 ms, 40 ms and 7 ms</span>\n\
+        <span data-cell=\"e.f\" data-result=\"r.tsv\">99 ms</span></p>";
+    assert_eq!(
+        trace_problems(page, &dir),
+        vec![
+            "line 2: c.d: the number 12.8 is not a value of r.tsv for this cell; the rows holding it (first) do not name c.d".to_owned(),
+            "line 3: e.f: the number 99 is not a value of r.tsv for this cell; the rows holding it (none) do not name e.f".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn attributes_not_in_double_quotes_are_refused() {
+    // Catches: a tbd class, a data-blocked reason or a cell id written in single quotes, with no
+    // quotes or with no value, which a reader of double-quoted values never sees; and an
+    // attribute name in capitals.
+    let page = "<p class='tbd'>a</p>\n\
+        <span data-cell='a.b' data-blocked='later'>x</span>\n\
+        <span data-blocked>y</span>\n\
+        <td colspan=2>z</td>\n\
+        <p CLASS=\"tbd\">u</p>\n\
+        <p class=\"fine\" hidden>ok</p>\n";
+    let open = open_places(page);
+    let joined = open.join("\n");
+    assert!(
+        joined.contains("line 1: attribute class is not double-quoted"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("line 2: attribute data-cell is not double-quoted"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("line 2: attribute data-blocked is not double-quoted"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("line 3: attribute data-blocked has no value"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("line 4: attribute colspan is not double-quoted"),
+        "{joined}"
+    );
+    assert!(joined.contains("line 5: a class=\"tbd\" span"), "{joined}");
+    assert!(!joined.contains("line 6"), "{joined}");
+    assert_eq!(open.len(), 6, "{joined}");
+}
+
+#[test]
+fn markers_are_found_in_any_case() {
+    // Catches: a placeholder typed [To measure] or [TO DECIDE], which an exact match misses.
+    let open = open_places("[To Measure] and [TO DECIDE]\n");
+    assert_eq!(
+        open,
+        vec![
+            "line 1: [to measure]".to_owned(),
+            "line 1: [to decide]".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn a_dotted_version_in_a_measured_cell_is_refused() {
+    // Catches: a token like 1.2.3 in a measured cell, which is no measurement and is neither
+    // 1.2 nor 3 (a version is written with a leading v, which the scanner skips).
+    let dir = scratch("version");
+    std::fs::write(dir.join("r.tsv"), "raw\tx\t12.8\tms\tm\ta\n").unwrap();
+    let page = "<span data-cell=\"a\" data-result=\"r.tsv\">release 1.2.3 took 12.8 ms, v0.0.41 too</span>";
+    assert_eq!(
+        trace_problems(page, &dir),
+        vec!["line 1: a: 1.2.3 is a dotted version, not a number".to_owned()]
     );
 }
 
