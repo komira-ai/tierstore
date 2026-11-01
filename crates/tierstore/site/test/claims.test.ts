@@ -94,8 +94,15 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
   if (!/if !self\.is_ready\(\) \{[^}]*from_static\("close"\)[^}]*insert\(CONNECTION/.test(mod)) {
     out.push('server/mod.rs no longer sets Connection: close on an answer while not ready: update content/demo.html ("Stop it: the drain")');
   }
-  if (!/^mod linger;$/m.test(mod) || !/\bLingering::new\(/.test(mod) || !/header_timeout/.test(code(src.get('server/linger.rs') ?? ''))) {
-    out.push('the lingering close (server/linger.rs, used by server/mod.rs, bounded by header_timeout) is gone: update content/demo.html ("Stop it: the drain")');
+  // The lingering close is server/linger.rs, used by server/mod.rs; its bound is the drain's (server/drain.rs), which
+  // server/mod.rs makes from the header timeout, and the lingering close sleeps for that bound.
+  const linger = code(src.get('server/linger.rs') ?? '');
+  const drain = code(src.get('server/drain.rs') ?? '');
+  const lingers = /^mod linger;$/m.test(mod) && /\bLingering::new\(/.test(mod) && /^mod drain;$/m.test(mod);
+  const bounded = /Drain::new\(config\.header_timeout\b/.test(mod) && /fn linger_bound\(&self\) -> Duration \{\s*self\.linger_bound\s*\}/.test(drain)
+    && /sleep\(drain\.linger_bound\(\)\)/.test(linger);
+  if (!lingers || !bounded) {
+    out.push('the lingering close (server/linger.rs, used by server/mod.rs, bounded by header_timeout through server/drain.rs) is gone: update content/demo.html ("Stop it: the drain")');
   }
   return out;
 }
@@ -147,6 +154,12 @@ test('the check can fail: a literal in a test or a comment does not stand for wh
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('response.headers_mut().insert(CONNECTION, close);', ''))).join('\n'), /Connection: close.*content\/demo\.html/);
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('Lingering::new(', 'Wrapped::new('))).join('\n'), /lingering close.*content\/demo\.html/);
   assert.match(staleClaims(new Map([...real].filter(([k]) => k !== 'server/linger.rs'))).join('\n'), /lingering close.*content\/demo\.html/);
+  // Its bound: the drain made from something else than the header timeout, a linger that no longer sleeps for the
+  // drain's bound, or a drain whose bound is no longer what it was made with; and a bound that is left only in a comment.
+  assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('Drain::new(config.header_timeout', 'Drain::new(config.drain_deadline'))).join('\n'), /lingering close.*content\/demo\.html/);
+  assert.match(staleClaims(with_('server/linger.rs', (s) => s.replace('sleep(drain.linger_bound())', 'sleep(Duration::MAX)'))).join('\n'), /lingering close.*content\/demo\.html/);
+  assert.match(staleClaims(with_('server/linger.rs', (s) => s.replace('sleep(drain.linger_bound())', 'sleep(Duration::MAX)') + '\n// sleep(drain.linger_bound())\n')).join('\n'), /lingering close.*content\/demo\.html/);
+  assert.match(staleClaims(with_('server/drain.rs', (s) => s.replace(/(fn linger_bound\(&self\) -> Duration \{\s*)self\.linger_bound/, '$1Duration::MAX'))).join('\n'), /lingering close.*content\/demo\.html/);
 });
 
 test('code() drops cfg(test) items and comment lines and keeps the rest', () => {
