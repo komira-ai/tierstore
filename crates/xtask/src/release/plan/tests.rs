@@ -73,17 +73,20 @@ fn repo(tags: &[&str], status: &str, files: &[&str], messages: &[&str]) -> FakeG
         (runs_path("ci.yml"), green(22)),
         (tags_path(), refs(tags)),
     ];
-    api.push((
-        compare_path("v0.3.1"),
-        json!({
-            "status": status,
-            "files": files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
-            "commits": messages
-                .iter()
-                .map(|m| json!({ "commit": { "message": m } }))
-                .collect::<Vec<_>>(),
-        }),
-    ));
+    let compared = json!({
+        "status": status,
+        "files": files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
+        "commits": messages
+            .iter()
+            .map(|m| json!({ "commit": { "message": m } }))
+            .collect::<Vec<_>>(),
+    });
+    for tag in tags.iter().chain(&["v0.3.1"]) {
+        let path = compare_path(tag);
+        if !api.iter().any(|(p, _)| *p == path) {
+            api.push((path, compared.clone()));
+        }
+    }
     FakeGh {
         api,
         ..FakeGh::default()
@@ -500,4 +503,54 @@ fn a_manual_release_passes_its_tag_commit_and_note_on() {
         manual("v1.2.3", "abc", "", None),
         Err(Error::Usage(_))
     ));
+}
+
+#[test]
+fn the_version_of_a_commit_is_the_one_the_plan_would_tag() {
+    // Catches: the build and the release computing the version two ways, so that the binary
+    // says one number and the tag another; the build's version reading anything but the tags
+    // and the VERSION file (it runs before the tests and the signing, beside them).
+    for (tags, file, want) in [
+        (vec!["v0.3.0", "v0.3.1"], None, "0.3.2"),
+        (vec!["v0.3.1"], Some("0.4.0\n"), "0.4.0"),
+        (vec!["v0.3.1"], Some("0.2.0"), "0.3.2"),
+        (vec!["v0.9.0", "v0.10.0"], None, "0.10.1"),
+        (vec![], None, "0.1.0"),
+        (vec![], Some("v0.0.7"), "0.0.7"),
+    ] {
+        let gh = repo(&tags, "ahead", &["Cargo.lock"], &["fix"]);
+        let printed = version(&gh, REPO, file, None).expect("version");
+        assert_eq!(
+            printed,
+            vec![format!("version={want}")],
+            "{tags:?} {file:?}"
+        );
+        assert_eq!(*gh.asked.borrow(), vec![tags_path()], "{tags:?}");
+        let planned = plan_of(&gh, file);
+        assert!(
+            planned.contains(&format!("tag=v{want}")),
+            "{tags:?} {file:?}: {planned:?}"
+        );
+    }
+}
+
+#[test]
+fn the_version_is_appended_to_the_output_file_and_a_bad_input_is_an_error() {
+    // Catches: the answer not reaching `GITHUB_OUTPUT`, a VERSION that is not a version being
+    // built under, and a page of tags that may hide the highest.
+    let dir = scratch("version-out");
+    let out = dir.join("out");
+    let gh = repo(&["v0.3.1"], "ahead", &[], &[]);
+    version(&gh, REPO, None, Some(&out)).expect("version");
+    version(&gh, REPO, Some("0.5.0"), Some(&out)).expect("version");
+    assert_eq!(
+        std::fs::read_to_string(&out).expect("out"),
+        "version=0.3.2\nversion=0.5.0\n"
+    );
+    let e = version(&gh, REPO, Some("soon"), None).expect_err("bad");
+    assert!(e.to_string().contains("VERSION"), "{e}");
+    let names: Vec<String> = (0..100).map(|n| format!("v0.0.{n}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let gh = repo(&names, "ahead", &[], &[]);
+    assert!(version(&gh, REPO, None, None).is_err());
 }

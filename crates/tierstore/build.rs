@@ -36,6 +36,10 @@ fn main() {
         Err(e) => panic!("{e}"),
     };
     println!("cargo:rustc-env=TIERSTORE_BUILD_COMMIT={commit}");
+    println!(
+        "cargo:rustc-env=TIERSTORE_BUILD_VERSION={}",
+        std::env::var("CARGO_PKG_VERSION").unwrap_or_default()
+    );
     // Watched: HEAD (a checkout), the ref it names (a commit), and packed-refs (where that ref
     // lives once packed).
     let branch = git(&["symbolic-ref", "-q", "HEAD"]);

@@ -401,3 +401,9 @@ fn build_problems(text: &str) -> Vec<String> {
     }
     problems
 }
+
+/// One line per way the text of `artifacts.yml` does not build under the version the release
+/// will tag.
+pub fn artifacts_problems(_text: &str) -> Vec<String> {
+    vec!["not written".to_owned()]
+}

@@ -249,6 +249,16 @@ fn release(
     Ok(printed)
 }
 
+/// The `release version` verb: the lines to print.
+pub fn version(
+    _gh: &dyn Gh,
+    _repo: &str,
+    _version_file: Option<&str>,
+    _output: Option<&Path>,
+) -> Result<Vec<String>, Error> {
+    todo!("version")
+}
+
 /// The `release plan` verb: the lines to print.
 pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
     let Request {

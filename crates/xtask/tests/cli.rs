@@ -470,3 +470,103 @@ fn release_manual_hands_the_tag_commit_and_note_on_and_refuses_a_bad_tag_with_st
     );
     assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
 }
+
+#[test]
+fn release_version_prints_the_version_the_plan_would_tag_and_appends_it() {
+    // Catches: `release version` not passing its flags on, and the answer not reaching the
+    // output file the build job reads.
+    let d = dir("version");
+    put(
+        &d,
+        &format!("repos/{REPO}/git/matching-refs/tags/v?per_page=100"),
+        "[{\"ref\":\"refs/tags/v0.3.1\"}]",
+    );
+    let version = |extra: &[&str]| {
+        let mut args = vec![
+            "release",
+            "version",
+            "--repo",
+            REPO,
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ];
+        args.extend_from_slice(extra);
+        run(&d, &args)
+    };
+    let o = version(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "version=0.3.2\n");
+    put(&d, "VERSION", "0.4.0\n");
+    let o = version(&["--version-file", "VERSION"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        std::fs::read_to_string(d.join("github-output")).expect("out"),
+        "version=0.3.2\nversion=0.4.0\n"
+    );
+}
+
+#[test]
+fn release_check_binary_runs_the_x86_64_binary_of_the_tarball_against_the_tag() {
+    // Catches: the flags of `release check-binary` not reaching it, the binary not being run
+    // from the tarball, and a binary that says another version than the tag being accepted
+    // (exit status 1 and the words naming both).
+    let d = dir("check-binary");
+    put(
+        &d,
+        "tierstore",
+        "#!/bin/sh\necho 'tierstore 0.3.2+0123456789ab'\n",
+    );
+    put(&d, "sbom.json", "{\"bomFormat\":\"CycloneDX\"}");
+    std::fs::create_dir_all(d.join("out")).expect("out");
+    let o = run(
+        &d,
+        &[
+            "package",
+            "--binary",
+            "tierstore",
+            "--sbom",
+            "sbom.json",
+            "--platform",
+            "linux-x86_64",
+            "--commit",
+            COMMIT,
+            "--out",
+            "out",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let check = |tag: &str| {
+        run(
+            &d,
+            &[
+                "release",
+                "check-binary",
+                "out",
+                "--tag",
+                tag,
+                "--commit",
+                COMMIT,
+                "--scratch",
+                "work",
+            ],
+        )
+    };
+    let o = check("v0.3.2");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(stdout(&o).contains("v0.3.2"), "{}", stdout(&o));
+    let o = check("v0.3.1");
+    assert_eq!(o.status.code(), Some(1), "{}", stdout(&o));
+    assert!(stderr(&o).contains("0.3.2"), "{}", stderr(&o));
+    assert!(stderr(&o).contains("0.3.1"), "{}", stderr(&o));
+}
+
+#[test]
+fn build_commit_with_a_version_refuses_a_binary_that_says_another() {
+    // Catches: `--version` of the build-commit verb not reaching the check.
+    let d = dir("build-commit-version");
+    let o = run(&d, &["build-commit", FAKE, COMMIT, "--version", "9.9.9"]);
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert!(stderr(&o).contains("9.9.9"), "{}", stderr(&o));
+}

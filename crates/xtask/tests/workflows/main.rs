@@ -9,7 +9,7 @@ mod yaml;
 
 use std::path::PathBuf;
 
-use lint::{SIGN_IF, lint, release_problems};
+use lint::{SIGN_IF, artifacts_problems, lint, release_problems};
 
 /// The directory of the workflows of this repository.
 fn workflows_dir() -> PathBuf {
@@ -383,6 +383,21 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
         "jobs:\n  tag:\n    runs-on: ubuntu-24.04\n  plan:",
         "jobs",
     ),
+    (
+        "release check-binary",
+        "release check-bin",
+        "verify: no step runs `cargo xtask release check-binary`",
+    ),
+    (
+        "      TAG: ${{ needs.plan.outputs.tag }}\n    outputs:",
+        "    outputs:",
+        "verify: env TAG",
+    ),
+    (
+        "--tag \"$TAG\" --commit \"$COMMIT\" --scratch",
+        "--scratch",
+        "verify: the check-binary step",
+    ),
 ];
 
 #[test]
@@ -445,4 +460,60 @@ fn contents_write_is_held_by_publish_and_only_under_the_release_condition() {
             .any(|p| p.contains("job publish: `contents: write` needs the exact `if:")),
         "publish without the plan's answer in its condition"
     );
+}
+
+#[test]
+fn artifacts_yml_builds_under_the_version_the_release_will_tag() {
+    // Catches: any change to artifacts.yml that lets a binary be built without the version
+    // computed for it (the v0.3.1 binary said 0.3.0): the `version` job gone or no longer the
+    // `cargo xtask release version` the release plan shares, a build job that does not wait for
+    // it or does not pass it to the build, a build-commit step that does not check it.
+    assert_eq!(
+        artifacts_problems(&text_of("artifacts.yml")),
+        Vec::<String>::new()
+    );
+}
+
+/// `(text to replace, its replacement, what the problem must name)`.
+const ARTIFACTS_DEFECTS: &[(&str, &str, &str)] = &[
+    ("needs: [version]", "needs: []", "needs"),
+    (
+        "TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}",
+        "TIERSTORE_BUILD_VERSION_OVERRIDE: ''",
+        "TIERSTORE_BUILD_VERSION_OVERRIDE",
+    ),
+    (
+        " --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"",
+        "",
+        "build-commit",
+    ),
+    (
+        "release version --repo",
+        "release plan --repo",
+        "release version",
+    ),
+    (" --version-file VERSION", "", "--version-file"),
+    (
+        "version: ${{ steps.version.outputs.version }}",
+        "version: ''",
+        "output version",
+    ),
+];
+
+#[test]
+fn each_defect_in_the_version_chain_of_artifacts_yml_is_named_by_the_lint() {
+    // Catches: a pin of artifacts.yml that holds nothing, because the file passes whether or
+    // not the thing it pins is there.
+    let text = text_of("artifacts.yml");
+    for (replace, with, names) in ARTIFACTS_DEFECTS {
+        assert!(
+            text.contains(replace),
+            "{replace:?} is not in artifacts.yml"
+        );
+        let problems = artifacts_problems(&text.replace(replace, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
+        );
+    }
 }
