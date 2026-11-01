@@ -546,6 +546,10 @@ fn with_step(step: &str) -> (String, String) {
     )
 }
 
+/// An empty exempt list, for checks on a single made-up workflow: the real list names
+/// artifacts.yml, which such a set does not hold.
+const NO_EXEMPT: &[(&str, &str)] = &[];
+
 #[test]
 fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
     // Catches: discovery that finds only the files it was told about. Each of these must be
@@ -558,7 +562,7 @@ fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
         "cargo xtask deploy-farm --service tierstore",
         "./farm-deploy.sh",
     ] {
-        let problems = discovery_problems(&[with_step(step)], RELEASE_EXEMPT);
+        let problems = discovery_problems(&[with_step(step)], NO_EXEMPT);
         assert!(
             problems.iter().any(|p| p.contains("new.yml")),
             "{step}: {problems:?}"
@@ -568,7 +572,7 @@ fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
     let write = text
         .replace("contents: read", "contents: write")
         .replace("gh release create v1", "echo");
-    let problems = discovery_problems(&[(name, write)], RELEASE_EXEMPT);
+    let problems = discovery_problems(&[(name, write)], NO_EXEMPT);
     assert!(
         problems.iter().any(|p| p.contains("new.yml")),
         "{problems:?}"
@@ -579,7 +583,7 @@ fn a_new_workflow_that_tags_publishes_or_deploys_outside_the_group_is_named() {
         "contents: read\n      id-token: write\n      attestations: write",
     );
     assert_eq!(
-        discovery_problems(&[(name, attest)], RELEASE_EXEMPT),
+        discovery_problems(&[(name, attest)], NO_EXEMPT),
         Vec::<String>::new()
     );
 }
@@ -594,11 +598,11 @@ fn a_release_path_workflow_in_the_group_or_exempt_with_a_reason_is_accepted_and_
         text.split("jobs:").next().expect("head")
     ) + text.split("jobs:").nth(1).expect("jobs");
     assert_eq!(
-        discovery_problems(&[(name.clone(), grouped.clone())], RELEASE_EXEMPT),
+        discovery_problems(&[(name.clone(), grouped.clone())], NO_EXEMPT),
         Vec::<String>::new()
     );
     let cancelling = grouped.replace("cancel-in-progress: false", "cancel-in-progress: true");
-    let problems = discovery_problems(&[(name.clone(), cancelling)], RELEASE_EXEMPT);
+    let problems = discovery_problems(&[(name.clone(), cancelling)], NO_EXEMPT);
     assert!(
         problems.iter().any(|p| p.contains("cancel-in-progress")),
         "{problems:?}"
