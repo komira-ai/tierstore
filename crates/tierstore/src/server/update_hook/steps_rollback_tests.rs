@@ -210,3 +210,34 @@ fn rollback_removes_the_guard_only_if_the_update_placed_it() {
     assert!(kept.snapshot().guard);
     assert!(!kept.log().iter().any(|c| c.starts_with("nft.delete")));
 }
+
+/// Asserts that a unit whose slot has no link does not start (its condition fails) and that the
+/// start is not an error, as the port promises: a rollback to an old slot whose link is gone moves
+/// the rule and stops the new instance, and nothing runs. It would catch a fake, and a port, that
+/// start a slot with no link.
+#[test]
+fn a_slot_without_a_link_does_not_start() {
+    let fake = Fake::new();
+    fake.advance(&[Step::Prepare, Step::Cutover]);
+    fake.crash(9301);
+    fake.drop_link(9301);
+    let done = fake.run(Step::Rollback);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(fake.snapshot().running.is_empty());
+}
+
+/// Asserts that the fake itself records two instances running when one of them is a release that
+/// has no lock, so that the tests that read `errors()` can fail. It would catch a fake that never
+/// notices.
+#[test]
+fn the_fake_notices_two_instances_of_a_release_with_no_lock() {
+    let fake = Fake::legacy();
+    assert!(fake.errors().is_empty());
+    let ports = fake.ports();
+    ports
+        .slots
+        .point(9302, std::path::Path::new(super::testing::NEW))
+        .unwrap();
+    ports.units.start("tierstore@9302.service").unwrap();
+    assert_eq!(fake.errors().len(), 1);
+}

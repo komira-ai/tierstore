@@ -23,6 +23,10 @@ fn every_reason_is_a_token_and_they_differ() {
         assert!(seen.insert(reason.as_str()), "{reason:?} twice");
     }
     assert!(!is_reason_token(""));
+    assert!(is_reason_token("a1_9"));
+    assert!(is_reason_token("9"));
+    assert!(is_reason_token("_"));
+    assert!(!is_reason_token("a-b"));
     assert!(!is_reason_token("Upper"));
     assert!(!is_reason_token("with space"));
     assert!(!is_reason_token(&"a".repeat(MAX_REASON_LEN + 1)));

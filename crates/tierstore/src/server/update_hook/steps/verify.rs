@@ -99,9 +99,9 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
     // `verified` follows its act: everything above was observed in this boot, which is recorded
     // with it. A later boot voids it until a `verify` looks again.
     let boot = c.ports.host.boot_id()?;
-    if record.boot_id.as_deref() != Some(boot.as_str())
-        || !record.markers.contains(&Marker::Verified)
-    {
+    // `boot_id` is only ever present with `verified` (the validator holds the record to it), so a
+    // record without `verified` has no boot id and differs from this boot too.
+    if record.boot_id.as_deref() != Some(boot.as_str()) {
         let mut verified = record.clone();
         verified.markers.insert(Marker::Verified);
         verified.boot_id = Some(boot);

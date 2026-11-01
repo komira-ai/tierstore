@@ -80,6 +80,7 @@ struct World {
     releases: BTreeMap<PathBuf, (String, Vec<String>)>,
     lies: BTreeMap<u16, String>,
     muted: BTreeSet<u16>,
+    public_503: bool,
     slot_label: bool,
     conntrack: Conntrack,
     now: u64,
@@ -171,6 +172,7 @@ impl Fake {
             releases,
             lies: BTreeMap::new(),
             muted: BTreeSet::new(),
+            public_503: false,
             slot_label: true,
             conntrack: Conntrack {
                 tcp_timeout_established_secs: 432_000,
@@ -344,6 +346,11 @@ impl Fake {
         let mut w = self.w.borrow_mut();
         let entry = w.releases.get_mut(Path::new(release)).expect("a release");
         entry.1 = caps.iter().map(|c| (*c).to_owned()).collect();
+    }
+
+    /// The public port answers 503 to everything.
+    pub fn public_busy(&self) {
+        self.w.borrow_mut().public_503 = true;
     }
 
     /// The build gauge names no slot.
@@ -522,6 +529,12 @@ impl Slots for Fake {
 impl Instances for Fake {
     fn get(&self, port: u16, path: &str) -> Result<Reply, PortError> {
         self.tick(format!("get {port} {path}"), PortKind::Instances)?;
+        if port == PUBLIC_PORT && self.w.borrow().public_503 {
+            return Ok(Reply {
+                status: 503,
+                body: "busy".to_owned(),
+            });
+        }
         let mut w = self.w.borrow_mut();
         let target = if port == PUBLIC_PORT {
             w.rules.get(FORWARD_TABLE).and_then(|t| redirect_target(t))

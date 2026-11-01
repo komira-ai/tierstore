@@ -196,3 +196,20 @@ fn verify_records_the_boot_it_observed() {
     assert_eq!(fake.record().boot_id.as_deref(), Some("boot-2"));
     assert_eq!(fake.changes().len(), mark + 1);
 }
+
+/// Asserts that after the commit a public port that answers 503, and one that does not answer at
+/// all, are each taken to mean that the new instance does not serve: `wrong_build`, exit 1, not
+/// reversible. It would catch a probe that takes any answer of the public port for the new
+/// instance's.
+#[test]
+fn verify_fails_when_the_public_port_does_not_answer_or_answers_503() {
+    for spoil in [Fake::public_busy as fn(&Fake), |f| f.crash(9302)] {
+        let fake = Fake::new();
+        fake.advance(&[Step::Prepare, Step::Cutover, Step::Verify, Step::Cleanup]);
+        spoil(&fake);
+        let done = fake.run(Step::Verify);
+        assert_eq!(done.outcome, Outcome::Failure);
+        assert_eq!(done.report.reason, Some(Reason::WrongBuild));
+        assert!(!done.report.reversible);
+    }
+}
