@@ -9,7 +9,10 @@ mod yaml;
 
 use std::path::PathBuf;
 
-use lint::{SIGN_IF, artifacts_problems, lint, release_problems};
+use lint::{
+    RELEASE_GROUP, RELEASE_PATH_WORKFLOWS, SIGN_IF, artifacts_problems, concurrency_problems, lint,
+    release_problems,
+};
 
 /// The directory of the workflows of this repository.
 fn workflows_dir() -> PathBuf {
@@ -515,5 +518,66 @@ fn each_defect_in_the_version_chain_of_artifacts_yml_is_named_by_the_lint() {
             problems.iter().any(|p| p.contains(names)),
             "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
         );
+    }
+}
+
+#[test]
+fn every_release_path_workflow_is_in_the_one_release_group_and_never_cancels() {
+    // Catches: a release-path workflow (release.yml now; the farm deploy once it is listed in
+    // RELEASE_PATH_WORKFLOWS) outside the shared group, so that two release actions overlap, or
+    // one that cancels a running release action.
+    assert!(!RELEASE_PATH_WORKFLOWS.is_empty());
+    for file in RELEASE_PATH_WORKFLOWS {
+        assert_eq!(
+            concurrency_problems(file, &text_of(file)),
+            Vec::<String>::new(),
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn a_release_path_workflow_without_the_group_or_that_cancels_is_named_by_the_lint() {
+    // Catches: a check that holds nothing: a copy with no concurrency block, one with another
+    // group, one that cancels, and one that does not say, must each be named.
+    let text = text_of("release.yml");
+    let block = format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: false\n");
+    assert!(
+        text.contains(&block),
+        "release.yml carries the shared block"
+    );
+    for (with, names) in [
+        ("", "concurrency"),
+        (
+            "concurrency:\n  group: release\n  cancel-in-progress: false\n",
+            "group",
+        ),
+        (
+            "concurrency:\n  group: release-${{ github.run_id }}\n  cancel-in-progress: false\n",
+            "group",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n  cancel-in-progress: true\n"),
+            "cancel-in-progress",
+        ),
+        (
+            &format!("concurrency:\n  group: {RELEASE_GROUP}\n"),
+            "cancel-in-progress",
+        ),
+    ] {
+        let problems = concurrency_problems("release.yml", &text.replace(&block, with));
+        assert!(
+            problems.iter().any(|p| p.contains(names)),
+            "{with:?} must name {names:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_release_path_workflows_listed_exist() {
+    // Catches: a name in the list that matches no file, which would make the check above
+    // vacuous for it.
+    for file in RELEASE_PATH_WORKFLOWS {
+        text_of(file);
     }
 }

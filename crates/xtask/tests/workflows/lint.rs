@@ -407,3 +407,19 @@ fn build_problems(text: &str) -> Vec<String> {
 pub fn artifacts_problems(_text: &str) -> Vec<String> {
     vec!["not written".to_owned()]
 }
+
+/// The workflows on the release path, each of which must sit in the one release group: the
+/// release now, and the farm deploy when it is added to this list.
+pub const RELEASE_PATH_WORKFLOWS: &[&str] = &["release.yml"];
+
+/// The group every release-path workflow is in (the expression kbf's release.yml uses): a run
+/// that succeeded joins `release-main`; any other takes a group of its own, so it cannot
+/// replace the release that is waiting.
+pub const RELEASE_GROUP: &str =
+    "release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}";
+
+/// One line per way the workflow `file` (of [`RELEASE_PATH_WORKFLOWS`]) is not in the shared
+/// release group without cancelling.
+pub fn concurrency_problems(_file: &str, _text: &str) -> Vec<String> {
+    vec!["not written".to_owned()]
+}
