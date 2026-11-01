@@ -41,6 +41,14 @@
 //! reads as 5), numbers written as words ("three"), numbers in `data-basis` cells (they claim no
 //! measurement, so nothing traces them), and whether a derived value (the `derived` rows) was
 //! computed as its `how` column says: the rows name the arithmetic, nothing here redoes it.
+//!
+//! Only a number inside an element with `data-result` is ever traced. A number outside one is
+//! not read at all: a headline sentence, the abstract, a table cell with no `data-cell`, a
+//! caption, attribute text such as `title="5 ms"`. A number that is meant to be checked must sit
+//! in an element with `data-cell` and `data-result`. A number glued to letters (`3e9`) reads as
+//! its leading digits (3) and then nothing: the `e9` is not a number. A numeric character
+//! reference (`&#53;`, `&#x35;`) is decoded to its character before the scan, so an encoded
+//! digit is traced like a written one; other `&name;` entities are dropped.
 
 use std::path::{Path, PathBuf};
 
@@ -250,7 +258,7 @@ fn element_text(html: &str, tags: &[Tag<'_>], k: usize) -> Option<String> {
     None
 }
 
-/// `inner` without its tags and without `&name;` and `&#n;` entities.
+/// `inner` without its tags and `&name;` entities, its numeric character references decoded.
 fn plain(inner: &str) -> String {
     let mut out = String::new();
     let mut rest = inner;
@@ -271,6 +279,9 @@ fn plain(inner: &str) -> String {
     strip_entities(&out)
 }
 
+/// `text` with each numeric character reference (`&#53;`, `&#x35;`) replaced by the character it
+/// names (U+FFFD when it names none) and each other `&name;` removed, so an encoded digit is
+/// read like a written one.
 fn strip_entities(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -285,7 +296,12 @@ fn strip_entities(text: &str) -> String {
         });
         out.push_str(&rest[..at]);
         match (is_entity, end) {
-            (true, Some(e)) => rest = &tail[e + 1..],
+            (true, Some(e)) => {
+                if let Some(code) = tail[..e].strip_prefix('#') {
+                    out.push(decode_reference(code));
+                }
+                rest = &tail[e + 1..];
+            }
             _ => {
                 out.push('&');
                 rest = tail;
@@ -294,6 +310,19 @@ fn strip_entities(text: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The character a numeric reference names, `code` being what follows the `#`: decimal digits,
+/// or `x`/`X` and hex digits. U+FFFD when it is neither or names no character.
+fn decode_reference(code: &str) -> char {
+    let value = match code.strip_prefix(['x', 'X']) {
+        Some(hex) => u32::from_str_radix(hex, 16),
+        None => code.parse(),
+    };
+    value
+        .ok()
+        .and_then(char::from_u32)
+        .unwrap_or(char::REPLACEMENT_CHARACTER)
 }
 
 /// The number-like tokens printed in `text`, as printed (a thousands separator removed). A
@@ -684,7 +713,7 @@ fn numbers_are_read_as_the_paper_prints_them() {
     assert_eq!(numbers("1.2.3 and 4, then 10.0.0.1."), vec![4.0]);
     assert_eq!(
         plain("a &#39;b&#39; <b>9.7</b> &amp; 1 < 2 &x"),
-        "a b 9.7  1 < 2 &x"
+        "a 'b' 9.7  1 < 2 &x"
     );
 }
 
