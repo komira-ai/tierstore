@@ -1006,6 +1006,7 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
     let front = FrontSettings {
         listen: addresses("server.listen", server.listen)?,
         proxy_id: server.proxy_id,
+        slot: None,
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
         access_key_file: server.access_key_file,

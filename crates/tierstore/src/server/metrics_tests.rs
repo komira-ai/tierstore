@@ -163,7 +163,11 @@ async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
         let body = metricz(&rig).await.body;
         let labels = format!("version=\"{VERSION}\",commit=\"{COMMIT}\",slot=\"9301\"");
         let expected = format!("tierstore_build_info{{{labels}}} 1");
-        assert_eq!(body.lines().filter(|l| **l == expected).count(), 1, "{body}");
+        assert_eq!(
+            body.lines().filter(|l| **l == expected).count(),
+            1,
+            "{body}"
+        );
         let build = build_of(&body).expect("a gauge");
         assert!(build.is(9301, VERSION), "{body}");
         assert!(!build.is(9302, VERSION), "{body}");

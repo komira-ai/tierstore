@@ -840,7 +840,10 @@ fn the_slot_key_makes_the_slot_flag_and_is_a_port() {
     let flags = [MINIMAL_FLAGS.to_vec(), vec!["--slot=9301"]].concat();
     assert_eq!(cli, Cli::try_parse_from(flags).unwrap());
     assert_eq!(from_text(MINIMAL, DEFAULTS).unwrap().slot, None);
-    assert_eq!(from_text(&with("65535"), DEFAULTS).unwrap().slot, Some(65535));
+    assert_eq!(
+        from_text(&with("65535"), DEFAULTS).unwrap().slot,
+        Some(65535)
+    );
     for bad in ["0", "65536", "-1", "\"9301\"", "true"] {
         let why = refusal(&with(bad));
         assert!(why.contains("slot"), "{bad}: {why}");

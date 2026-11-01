@@ -35,6 +35,7 @@ pub(super) struct FrontSettings {
     /// The addresses of the S3 front, which are at least one.
     pub listen: Vec<SocketAddr>,
     pub proxy_id: String,
+    pub slot: Option<u16>,
     pub bucket: String,
     pub region: String,
     pub access_key_file: PathBuf,
@@ -61,6 +62,7 @@ impl Cli {
         FrontSettings {
             listen: self.listen.clone(),
             proxy_id: self.proxy_id.clone(),
+            slot: self.slot,
             bucket: self.bucket.clone(),
             region: self.region.clone(),
             access_key_file: self.access_key_file.clone(),
