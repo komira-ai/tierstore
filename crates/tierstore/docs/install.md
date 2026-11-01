@@ -2,9 +2,25 @@
 
 tierstore ships as a Linux tarball attached to every release of [this repository](https://github.com/komira-ai/tierstore/releases), with its SBOM and a provenance bundle. Versions up to 0.2.0 were built in kbf; from 0.3.0 on, releases are built and signed here. There is no package and no container image, and nothing updates the binary afterwards: to move to a new release, place the new binary the same way and restart the unit.
 
-## Take and verify the tarball
+## Take the tarball
 
-A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>-linux-arm64.tar.gz`, each with a `.sigstore.json` bundle, and all of them in `SHA256SUMS`. Take the tarball of the host's architecture by its digest and verify it against this repository's signer workflow:
+A release lists `tierstore-<commit>-linux-x86_64.tar.gz` and `tierstore-<commit>-linux-arm64.tar.gz`, each with a `.sigstore.json` bundle, and all of them in `SHA256SUMS`. Take the tarball of the host's architecture by its digest, with its bundle and `SHA256SUMS` from the same release. `<commit>` is the full SHA in the tarball's name; below, `<tarball>` is the tarball's file name, `tierstore-<commit>-linux-x86_64.tar.gz` for instance.
+
+## Verify
+
+Three checks, in this order: the first proves the download is intact, the second or the third that this repository built and signed it. The second needs `gh`; the third needs only cosign, for a host whose `gh` has no `gh attestation` command.
+
+### Integrity
+
+```sh
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+`SHA256SUMS` lists the tarballs and SBOMs of both platforms, so `--ignore-missing` skips the ones you did not take. `SHA256SUMS` is not itself an attestation subject, so this check proves integrity, not authenticity: who built the file is what the next check proves.
+
+### Authenticity with gh
+
+This needs a `gh` that has the `gh attestation` command (Ubuntu 24.04's packaged `gh`, 2.46.0, does not: use the check without `gh` there).
 
 ```sh
 gh attestation verify tierstore-<commit>-linux-x86_64.tar.gz --repo komira-ai/tierstore \
@@ -12,9 +28,39 @@ gh attestation verify tierstore-<commit>-linux-x86_64.tar.gz --repo komira-ai/ti
   --source-ref refs/heads/main --source-digest <commit> --deny-self-hosted-runners
 ```
 
-`<commit>` is the full SHA in the tarball's name; `--source-digest` makes the check prove the build came from that commit, not only from the main workflow.
+`--source-digest` makes the check prove the build came from that commit, not only from the main workflow.
 
-For an offline check, use the `.sigstore.json` bundle of the tarball (`--bundle`). [docs/ci-and-release.md](https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md) lists the files of a release and what each attests.
+### Authenticity without gh
+
+This needs only cosign, and checks the tarball against its `.sigstore.json` bundle from the same release; it prints `Verified OK`.
+
+```sh
+cosign verify-blob-attestation \
+  --bundle <tarball>.sigstore.json \
+  --type slsaprovenance1 \
+  --certificate-identity-regexp '^https://github.com/komira-ai/tierstore/\.github/workflows/artifacts\.yml@refs/heads/main$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  <tarball>
+```
+
+`--type slsaprovenance1` is required: the bundle holds SLSA provenance v1, and with cosign's default type the check fails with "invalid predicate type".
+
+With a `gh` that has `gh attestation` on a host with no network, verify against the bundle and a trusted root fetched beforehand on a host that has one, and copied over with the tarball:
+
+```sh
+gh attestation trusted-root > trusted_root.jsonl
+```
+
+```sh
+gh attestation verify <tarball> --repo komira-ai/tierstore \
+  --bundle <tarball>.sigstore.json --custom-trusted-root trusted_root.jsonl \
+  --signer-workflow komira-ai/tierstore/.github/workflows/artifacts.yml \
+  --source-ref refs/heads/main --source-digest <commit> --deny-self-hosted-runners
+```
+
+### The signer
+
+Every check above names one signer: the workflow file `.github/workflows/artifacts.yml` of this repository, run on `refs/heads/main`. That identity is part of what a release promises: if the file were renamed or moved, every command on this page would fail. [docs/ci-and-release.md](https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md) lists the files of a release and what each attests.
 
 ## Place the binary
 
