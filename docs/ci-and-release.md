@@ -105,9 +105,9 @@ with the plan's tag and commit.
 
 The last job of `release.yml`, `gamma`, runs after `publish`, under the same `if:` as `verify` and
 `publish` (the plan said release, on a run of `main`), in the `release` environment, with
-`contents: read` and `id-token: write` and no other scope. It checks out `komira-ai/kbf` at `main`
-(the deploy verb is kbf's; the coordinator does not report its build commit without a token, so
-the job cannot read it beforehand), builds kbf's `xtask`, and runs
+`contents: read` and `id-token: write` and no other scope. It checks out `komira-ai/kbf` at the commit pinned
+in the job's `KBF_DEPLOY_REF` (the deploy verb is kbf's; the coordinator does not report its build
+commit without a token, so the job cannot read it beforehand), builds kbf's `xtask`, and runs
 
 ```
 cargo xtask deploy-farm --service tierstore --url <coordinator> --ca-pem <farm CA> --version <X.Y.Z>+<12 hex>
@@ -153,6 +153,12 @@ The job needs these, set once by an operator (nothing in this repository does it
 
 - On the coordinator, the service `tierstore` defined in the file its `--services-file` names
   (its roles and minimums), and the tierstore hosts enrolled so that their updaters heartbeat to it.
+
+The pin is a 40-digit commit, held by the workflow lint, so that every release builds the same
+verb and a kbf `main` that moves or breaks does not affect a release. It must be bumped to a kbf
+commit that contains `deploy-farm --service` (komira-ai/kbf#2218) before `KBF_COORDINATOR_URL` is
+set, and each bump is a reviewed pull request. A manual (`workflow_dispatch`) release runs `gamma`
+too, which is why the coordinator entry below lists both events.
 
 Keep `KBF_COORDINATOR_URL` unset until the farm can answer this job. Two things must exist first:
 the host updater's service registration, and tierstore registering its release version

@@ -283,7 +283,7 @@ jobs:
   # coordinator's address is a repository variable, never written here: unset, the job prints a
   # notice and passes without fetching or compiling anything, so a fork, or a repository whose
   # coordinator does not know tierstore yet, is unaffected. The verb is kbf's `cargo xtask
-  # deploy-farm` (komira-ai/kbf, main). It is bounded (its `--deadline-min`, 60 by default,
+  # deploy-farm` (komira-ai/kbf, at the commit pinned in KBF_DEPLOY_REF). It is bounded (its `--deadline-min`, 60 by default,
   # under this job's timeout), and a farm that is blocked, stalled or out of time fails the job;
   # the release stays published whatever this job says. No kbf minimums are passed: for a
   # service other than kbf the coordinator's services file holds them.
@@ -296,6 +296,12 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      # The kbf commit whose deploy verb this job builds and runs, pinned here so that a change
+      # of it is a reviewed pull request, and a kbf main that moves or breaks does not move or
+      # break a release. It must contain `deploy-farm --service` (komira-ai/kbf#2218) before
+      # KBF_COORDINATOR_URL is set. The lint holds it to 40 lowercase hex digits.
+      KBF_DEPLOY_REF: 06517a755e46e21fb540a89ef5f919746ee5c1d5
     steps:
       - name: The deploy step is off
         if: ${{ vars.KBF_COORDINATOR_URL == '' }}
@@ -311,7 +317,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: komira-ai/kbf
-          ref: main
+          ref: ${{ env.KBF_DEPLOY_REF }}
           path: kbf
           persist-credentials: false
       - name: Build the deploy verb
