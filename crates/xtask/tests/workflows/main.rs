@@ -387,8 +387,8 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
         "gamma: deploy-farm is not run with --service tierstore",
     ),
     (
-        "deploy-farm --url",
-        "deploy-farm --min-up-storage 1 --url",
+        "deploy-farm --service",
+        "deploy-farm --min-up-storage 1 --service",
         "gamma: deploy-farm is passed --min-up",
     ),
     (
