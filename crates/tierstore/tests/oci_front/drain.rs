@@ -227,20 +227,20 @@ async fn every_answer_says_close(tls: bool) {
 }
 
 /// The bytes of the blob that the client of [`a_blob_get_begun_before_the_drain_is_sent_in_full`]
-/// leaves unread when it sends its next request: more than its receive buffer holds, so that the
-/// server still has some of them to send, and few enough for the server's send buffer (on
-/// loopback it starts at a megabyte or more) to take them, so that the server has written the
-/// whole answer and is closing the connection.
+/// leaves unread when it sends its next request: more than its receive buffer holds, and few
+/// enough for the server's send buffer (on loopback it starts at a megabyte or more) to take.
 const TAIL: usize = 256 << 10;
 
-/// Asserts that a blob whose GET began before the drain, and whose answer is still being sent when
-/// the settle ends, is sent in full, and that its connection then ends with a clean end of stream:
-/// also when the client, told nothing of the drain (the head of the answer came before it), sends
-/// its next request on the connection once the server has written the whole answer and while the
-/// end of it is still in the server's send buffer. A server that closes the connection then, with
-/// that request unread, resets it, and the reset throws the end of the blob away; with a
-/// lingering close the request is read and dropped, and the blob arrives whole. The drain ends
-/// with nothing cut once the client has closed.
+/// Asserts, as the binary runs the front, over plain HTTP and over TLS, that a blob whose GET began
+/// before the drain, and whose answer is still being sent when the settle ends, is sent in full,
+/// and that its connection then ends with a clean end of stream (over TLS, the server's close),
+/// although the client, told nothing of the drain (the head of the answer came before it), sends
+/// its next request on the connection before it has read the end of the blob; and that the drain
+/// ends with nothing cut once the client has closed. Whatever the order of that request and the
+/// server's last write, the client must get the blob whole: the request is answered, or read and
+/// dropped, never met with a reset. The order that a plain close gets wrong, the whole answer
+/// written before the request arrives, is pinned in `src/server/oci/drain_tests.rs`, which can see
+/// when the server has written it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_blob_get_begun_before_the_drain_is_sent_in_full() {
     local(async {
@@ -302,10 +302,6 @@ async fn blob_spanning_the_settle(tls: bool) {
         );
         body.extend_from_slice(&piece[..read]);
     }
-    // Time for the server to take the rest into its send buffer and be done with the answer: it
-    // only makes the case that a plain close gets wrong likely (with the request read while the
-    // answer is still being written, a plain close is clean too); nothing below depends on it.
-    tokio::time::sleep(SHORT).await;
     stream
         .write_all(PING)
         .await
@@ -368,53 +364,6 @@ async fn a_request_begun_before_the_settle_ended_is_answered_here() {
     assert_eq!(running.drained().await, Drained { abandoned: 0 });
 }
 
-/// Asserts, as the binary runs the front with room for one connection, that a connection that
-/// lingers in the drain still holds its slot: a second connection made in the settle, while the
-/// first client has read its end of stream and not closed, is not served; it is served, with
-/// `Connection: close`, once the first client has closed. A front whose lingering closes held no
-/// slot would let a drain keep any number of sockets open.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_lingering_connection_holds_its_slot() {
-    local(a_lingering_connection_holds_its_slot_here()).await;
-}
-
-async fn a_lingering_connection_holds_its_slot_here() {
-    let files = files("oci-drain-slot");
-    let mut flags = files.plain("127.0.0.1:0");
-    flags.extend(["--oci-max-connections", "1"].map(str::to_owned));
-    // Long enough for the requests below to be made within it.
-    let mut running = Running::start(flags, "5s").await;
-    let oci = running.oci();
-    let mut first = Conn::open_plain(oci).await.expect("a connection");
-    let ping = first.request("GET", "/v2/", &[]).await.expect("an answer");
-    assert_eq!(ping.status, 200);
-    running.begin_drain_and_see_it().await;
-    let closing = first.request("GET", "/v2/", &[]).await.expect("an answer");
-    assert_eq!(closing.header("connection"), Some("close"));
-    assert!(first.read_to_end().await.expect("a clean end").is_empty());
-
-    let second = tokio::spawn(async move {
-        let mut conn = Conn::open_plain(oci).await.expect("a connection");
-        conn.request("GET", "/v2/", &[]).await.expect("an answer")
-    });
-    // A missing bound would serve the second at once; there is no event to wait for that says it
-    // is held back, so the test gives it a moment and asserts it was not served.
-    tokio::time::sleep(SHORT).await;
-    assert!(
-        !second.is_finished(),
-        "the second connection was served while the first lingered"
-    );
-    first.shutdown().await.expect("closed");
-    drop(first);
-    let reply = tokio::time::timeout(SAFETY, second).await;
-    let reply = reply.expect("the second was never served").expect("joined");
-    assert_eq!(
-        (reply.status, reply.header("connection")),
-        (200, Some("close"))
-    );
-    assert_eq!(running.drained().await, Drained { abandoned: 0 });
-}
-
 /// Asserts that the drain deadline cuts a lingering connection too, and counts it: with a header
 /// timeout far longer than the deadline, a client that reads its end of stream and keeps the
 /// connection open is cut when the deadline passes, and the stop reports one connection cut
@@ -443,9 +392,9 @@ async fn the_drain_deadline_cuts_a_lingering_connection() {
 /// Asserts, as the binary runs the front, that a kept-alive connection that is idle when the
 /// settle ends gets a lingering close: a clean end of stream, after which the front still reads
 /// the connection, so that a request the client writes then is taken and does not reset the
-/// connection (a reset would show as an error on the socket and on the next write); and that the
-/// drain waits for the client to close before it ends, with nothing cut. It would catch a front
-/// that closes an idle connection with a plain close, and a drain that ends without waiting.
+/// connection (a reset would show as an error on the next write); and that the drain waits for the
+/// client to close before it ends, with nothing cut. The same, with the listener seen to have read
+/// the late request before the socket is looked at, is in `src/server/oci/drain_tests.rs`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_idle_connection_gets_a_lingering_close_at_the_end_of_the_settle() {
     local(an_idle_connection_gets_a_lingering_close_at_the_end_of_the_settle_here()).await;
@@ -471,9 +420,6 @@ async fn an_idle_connection_gets_a_lingering_close_at_the_end_of_the_settle_here
     tcp.write_all(PING)
         .await
         .expect("the late request is taken");
-    // Time for a reset to come back, if the front answers the write with one; a front that
-    // lingers never does, so the assertions below do not depend on how long this is.
-    tokio::time::sleep(SHORT).await;
     let error = tcp.take_error().expect("the socket's error");
     assert!(error.is_none(), "the connection was reset: {error:?}");
     tcp.write_all(PING).await.expect("still taken: not reset");

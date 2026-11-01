@@ -78,6 +78,8 @@ mod tls;
 #[cfg(test)]
 mod body_tests;
 #[cfg(test)]
+mod drain_tests;
+#[cfg(test)]
 mod front_tests;
 #[cfg(test)]
 mod listener_tests;

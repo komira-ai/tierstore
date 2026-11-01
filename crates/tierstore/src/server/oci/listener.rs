@@ -65,6 +65,8 @@ pub struct OciListener {
     front: Arc<OciFront>,
     limits: OciLimits,
     drain: Arc<Drain>,
+    /// One permit for each connection that may be open at once, lingering ones included.
+    slots: Arc<Semaphore>,
 }
 
 /// The start of the drain of an [`OciListener`], which the S3 front's drain begins at the same
@@ -144,6 +146,7 @@ impl OciListener {
             front,
             limits,
             drain,
+            slots: Arc::new(Semaphore::new(limits.max_connections)),
         })
     }
 
@@ -193,9 +196,27 @@ impl OciListener {
             front,
             limits,
             drain,
+            slots,
         } = self;
-        accept_loop(listeners, acceptor, front, limits, stop, drain).await
+        let shared = Shared { drain, slots };
+        accept_loop(listeners, acceptor, front, limits, stop, shared).await
     }
+
+    /// The drain and the connection slots of the listener, for a test to watch.
+    #[cfg(test)]
+    pub(super) fn shared(&self) -> Shared {
+        Shared {
+            drain: Arc::clone(&self.drain),
+            slots: Arc::clone(&self.slots),
+        }
+    }
+}
+
+/// What the accept loop shares with its connections: the drain, and the connection slots.
+#[derive(Clone)]
+pub(super) struct Shared {
+    pub(super) drain: Arc<Drain>,
+    pub(super) slots: Arc<Semaphore>,
 }
 
 /// The drain of a listener of `front`: its lingering closes wait for the header timeout, and it
@@ -212,12 +233,12 @@ pub(super) async fn accept_loop<I>(
     front: Arc<OciFront>,
     limits: OciLimits,
     mut stop: watch::Receiver<bool>,
-    drain: Arc<Drain>,
+    shared: Shared,
 ) -> usize
 where
     I: Incoming<Stream = TcpStream> + Send,
 {
-    let slots = Arc::new(Semaphore::new(limits.max_connections));
+    let Shared { drain, slots } = shared;
     let mut connections = JoinSet::new();
     loop {
         // A slot is taken before the next accept, so a flood waits in the backlog and not
