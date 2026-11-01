@@ -84,7 +84,7 @@ fn a_record_that_cannot_be_trusted_makes_every_step_refuse_before_any_call() {
 fn a_declaration_that_is_not_the_two_slots_makes_every_step_refuse() {
     for step in ALL {
         let fake = Fake::new();
-        fake.set_declaration(&DECLARATION.replace("9302", "9303"));
+        fake.set_declaration(&DECLARATION.replace("[9301, 9302]", "[9301, 9303]"));
         refused(&fake, step, "declaration");
     }
 }

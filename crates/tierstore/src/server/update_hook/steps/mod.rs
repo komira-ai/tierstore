@@ -6,8 +6,6 @@
 //! called the steps in, so a re-run after a crash at any point converges. After `cleanup` has
 //! written `stopping`, every report says `"reversible":false`.
 
-#![allow(dead_code)]
-
 mod cleanup;
 mod cutover;
 mod prepare;

@@ -1,5 +1,6 @@
 //! `verify`.
 
+use super::steps::PROBE_HITS;
 use super::testing::{Fake, Promotion};
 use super::{Class, Marker, Outcome, Reason, Step, redirect_ruleset};
 
@@ -112,7 +113,8 @@ fn verify_after_the_commit_waits_for_the_promotion() {
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(!done.report.promotion_pending);
     assert!(!done.report.reversible);
-    assert_eq!(fake.pauses() - pauses, 4);
+    // The probe through the public port pauses between its answers; the wait pauses between looks.
+    assert_eq!(fake.pauses() - pauses, PROBE_HITS - 1 + 4);
     assert_eq!(fake.changes().len(), mark);
     assert_eq!(fake.snapshot().holder, Some(9302));
 }
@@ -132,7 +134,7 @@ fn verify_after_the_commit_reports_a_pending_promotion_and_never_fails_for_it() 
     let done = fake.run(Step::Verify);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
     assert!(done.report.promotion_pending && !done.report.reversible);
-    assert_eq!(fake.pauses() - pauses, 30);
+    assert_eq!(fake.pauses() - pauses, PROBE_HITS - 1 + 30);
     let readyz = fake
         .log()
         .iter()
