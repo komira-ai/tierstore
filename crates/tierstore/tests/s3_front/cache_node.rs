@@ -2,6 +2,7 @@
 //! upstream that wants its own key, in a process.
 
 use std::path::Path;
+use std::time::Duration;
 
 use bytes::Bytes;
 use objstore_s3::s3::fake::FakeS3;
@@ -11,6 +12,10 @@ use rustix::process::Signal;
 
 use crate::binary::{run, start};
 use crate::files::Files;
+
+/// The longest a test waits for the binary to do what it was asked to. It only stops a test whose
+/// process hangs, and then the test fails: no test asserts how long the binary takes.
+const SAFETY: Duration = Duration::from_secs(60);
 
 /// The file of a build node whose upstream is `endpoint`, read with the key file `upstream_key`,
 /// with its cache in `cache_dir`.
@@ -392,4 +397,81 @@ fn check_config_checks_the_oci_table_of_a_build_node() {
         assert_eq!(code, started_status, "{oci}");
         assert_eq!(said, started, "{oci}");
     }
+}
+
+/// What `/readyz` of the binary at `addr` says.
+async fn readyz(client: &Client, addr: &str) -> String {
+    let answer = client.get(format!("http://{addr}/readyz")).send().await;
+    answer.unwrap().text().await.unwrap()
+}
+
+/// Asserts that of two build nodes started on one cache directory the second is read-only while
+/// the first runs, and that once the first is killed (SIGKILL: no drain, and no code of its own
+/// runs on the way out) the second takes the lock by itself: it empties `.stage/` and discards a
+/// sidecar the first left without its data file (the middle of a publish), counted as discarded,
+/// then says `ready read-write`, and fills its next miss, counted, and serves it again as a hit.
+/// The second is asked again as soon as it has answered, and nothing is asserted about how long
+/// it takes. It would catch a lock that only an orderly exit lets go (a lock file that the process
+/// removes, or a process id written in it), which leaves the second read-only for good after the
+/// first crashed, and a take that keeps what the first left half done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_build_node_takes_the_lock_when_the_first_is_killed() {
+    let fake = FakeS3::start().await;
+    let upstream = fake.store(Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    });
+    let key = ObjectKey::new("cas/after").unwrap();
+    let body = Bytes::from((0..3000u32).map(|n| (n % 251) as u8).collect::<Vec<u8>>());
+    upstream.put_new(&key, body.clone(), None).await.unwrap();
+    fake.require_credentials("UPKEY", "up-secret");
+
+    let files = Files::new("bin-cache-killed");
+    let upstream_key = files.secret("upstream.key", "UPKEY\nup-secret\n");
+    let cache_dir = files.key.with_file_name("cache");
+    let config = node_file(&files, fake.endpoint(), &upstream_key, &cache_dir);
+    let mut first = start(&args(&config));
+    let mut second = start(&args(&config));
+    let client = Client::new();
+    assert_eq!(readyz(&client, first.addr()).await, "ready read-write");
+    assert_eq!(readyz(&client, second.addr()).await, "ready read-only");
+    // What the first leaves when it dies in the middle of its work: a sidecar whose data file is
+    // not linked yet, and a fill in `.stage/`.
+    let hex = format!("aabb{}", "0".repeat(60));
+    let sidecar = cache_dir.join("obj/aa/bb").join(format!("{hex}.meta"));
+    std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+    std::fs::write(&sidecar, b"{}").unwrap();
+    let staged = cache_dir.join(".stage/0000000000000009");
+    std::fs::write(&staged, b"half a fill").unwrap();
+
+    first.signal(Signal::KILL);
+    assert_eq!(first.exit_code().await, None);
+    let asking = async { while readyz(&client, second.addr()).await != "ready read-write" {} };
+    let taken = tokio::time::timeout(SAFETY, asking).await;
+    assert!(taken.is_ok(), "the second never took the lock");
+    assert!(!sidecar.exists());
+    assert!(!staged.exists());
+
+    let store = second.store();
+    let all = ByteRange::new(0, 3000).unwrap();
+    assert_eq!(store.get_range(&key, all).await.unwrap(), body);
+    assert_eq!(store.get_range(&key, all).await.unwrap(), body);
+    let metrics = client
+        .get(format!("http://{}/metricz", second.addr()))
+        .send()
+        .await
+        .unwrap();
+    let text = metrics.text().await.unwrap();
+    for line in [
+        "tierstore_cache_mode{mode=\"read_write\"} 1\n",
+        "tierstore_cache_discarded_at_start_total 2\n",
+        "tierstore_cache_misses_total 1\n",
+        "tierstore_cache_fills_total 1\n",
+        "tierstore_cache_hits_total 1\n",
+    ] {
+        assert!(text.contains(line), "{line} in {text}");
+    }
+    assert!(cache_dir.join("obj").is_dir());
+    second.signal(Signal::TERM);
+    assert_eq!(second.exit_code().await, Some(0));
 }
