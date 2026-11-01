@@ -178,56 +178,86 @@ fn a_stream_that_does_not_end_is_waited_for_only_until_the_deadline() {
     drop(release);
 }
 
-/// The program of the test below: it starts a sleeper that keeps the pipes it was given and
-/// ends at once. It does nothing in a run of the tests (it is ignored); the test below runs
-/// this binary with it selected.
+/// Whether no process of the number `pid` is left, asked up to 5000 times (a process that was
+/// killed stays as a zombie until whoever adopted it reaps it). No clock is compared: the
+/// answer is a count of asks.
+fn is_gone(pid: u32) -> bool {
+    let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    std::iter::repeat_with(|| {
+        let gone = test_kill_process(pid) == Err(Errno::SRCH);
+        std::thread::sleep(Duration::from_millis(1));
+        gone
+    })
+    .take(5000)
+    .any(|gone| gone)
+}
+
+const HELPER: &str = "server::update_hook::machine::runner_tests::";
+
+/// The program of the first test below: it starts a sleeper that never ends, which keeps the
+/// pipes it was given, says its number on standard output, and ends at once. It does nothing in
+/// a run of the tests (it is ignored); the test below runs this binary with it selected.
 #[test]
 #[ignore = "a helper process of a_helper_left_running_by_the_program_is_killed_with_it"]
 #[allow(clippy::zombie_processes)]
 fn leaves_a_sleeper_holding_the_pipes() {
-    Command::new("sleep").arg("30").spawn().unwrap();
+    let sleeper = Command::new("sleep").arg("infinity").spawn().unwrap();
+    println!("sleeper {}", sleeper.id());
 }
 
 /// Asserts that a program that has ended but left a process of its group holding its output
-/// pipes does not hold up the call: the group is killed, and the answer is the program's own,
-/// well before the sleeper's 30 seconds.
+/// pipes (it never ends) does not hold up the call: the group is killed, the answer is the
+/// program's own, and the sleeper, whose number the program printed, is gone. An implementation
+/// that waits for the pipes of a sleeper that never ends does not return at all.
 #[test]
 fn a_helper_left_running_by_the_program_is_killed_with_it() {
     let this = std::env::current_exe().unwrap();
-    let name = "server::update_hook::machine::runner_tests::leaves_a_sleeper_holding_the_pipes";
-    let call = Call::new(
-        this.to_str().unwrap(),
-        &["--exact", name, "--ignored"],
-        LIMIT,
-    );
-    let begun = Instant::now();
+    let name = format!("{HELPER}leaves_a_sleeper_holding_the_pipes");
+    let args = ["--exact", name.as_str(), "--ignored", "--nocapture"];
+    let call = Call::new(this.to_str().unwrap(), &args, LIMIT);
     let output = SystemRunner.run(&call).unwrap();
     assert_eq!(output.code, Some(0));
-    assert!(
-        begun.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        begun.elapsed()
-    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    let (_, rest) = text.split_once("sleeper ").unwrap();
+    let pid = rest.split_whitespace().next().unwrap().parse().unwrap();
+    assert!(is_gone(pid));
 }
 
-/// Asserts that a program that runs past its limit while it has a child of its own (`find`
-/// runs `sleep 30`) is reported as a timeout within a bound, not after the child's 30 seconds
-/// as a join on pipes the child holds would be.
+/// Where the helper below writes the number of its child.
+fn pid_file() -> std::path::PathBuf {
+    std::path::PathBuf::from(format!("/tmp/tierstore-runner-test-{}", std::process::id()))
+}
+
+/// The program of the second test below: it starts a sleeper that never ends, writes its number
+/// to a file named for the process that runs it, and then waits for ever. Ignored, like the one
+/// above.
 #[test]
-fn a_timeout_holds_while_the_program_has_a_child_holding_the_pipes() {
-    let limit = Duration::from_millis(300);
-    let call = Call::new(
-        "find",
-        &["/", "-maxdepth", "0", "-exec", "sleep", "30", ";"],
-        limit,
-    );
-    let begun = Instant::now();
+#[ignore = "a helper process of a_timeout_kills_the_program_and_the_child_that_holds_the_pipes"]
+#[allow(clippy::zombie_processes)]
+fn waits_for_ever_with_a_sleeper_holding_the_pipes() {
+    let sleeper = Command::new("sleep").arg("infinity").spawn().unwrap();
+    let parent = std::os::unix::process::parent_id();
+    let file = format!("/tmp/tierstore-runner-test-{parent}");
+    std::fs::write(file, sleeper.id().to_string()).unwrap();
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Asserts that a program that runs past its limit while its child, which never ends, holds the
+/// output pipes, is reported as a timeout, and that the child is gone afterwards. An
+/// implementation that kills only the program and then waits for the pipes does not return.
+#[test]
+fn a_timeout_kills_the_program_and_the_child_that_holds_the_pipes() {
+    let this = std::env::current_exe().unwrap();
+    let name = format!("{HELPER}waits_for_ever_with_a_sleeper_holding_the_pipes");
+    let args = ["--exact", name.as_str(), "--ignored"];
+    let limit = Duration::from_secs(3);
+    let call = Call::new(this.to_str().unwrap(), &args, limit);
     assert_eq!(SystemRunner.run(&call), Err(RunError::Timeout(limit)));
-    assert!(
-        begun.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        begun.elapsed()
-    );
+    let text = std::fs::read_to_string(pid_file()).unwrap();
+    std::fs::remove_file(pid_file()).unwrap();
+    assert!(is_gone(text.parse().unwrap()));
 }
 
 /// Asserts that dropping the guard of a child kills it and reaps it: no process of its number
