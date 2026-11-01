@@ -1,6 +1,6 @@
 //! The OCI front's socket: HTTPS connections, or plain HTTP ones, bounded in number,
 //! in the time a client has to send a request, in how long a client may leave an answer unread,
-//! and in lifetime.
+//! and in lifetime; and its drain, which is the S3 front's (see [`OciDrain`]).
 
 use std::convert::Infallible;
 use std::future::poll_fn;
@@ -8,8 +8,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use http_body_util::BodyExt as _;
 use hyper::Request;
 use hyper::body::Incoming as RequestBody;
+use hyper::header::{CONNECTION, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -20,7 +22,9 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::{OciError, OciFront, OciMode};
+use crate::server::drain::{self, Drain};
 use crate::server::idle::Watched;
+use crate::server::linger::{Lingering, OnWire};
 use crate::server::listen::{self, Listeners};
 use crate::server::{ACCEPT_PAUSE, Incoming};
 
@@ -38,7 +42,8 @@ pub struct OciLimits {
     /// speaks holds a slot until it is closed. A plain listener has no handshake to time.
     pub handshake_timeout: Duration,
     /// How long a client has to send the head of a request, and so how long a connection may
-    /// wait, idle, for its next request.
+    /// wait, idle, for its next request; and how long a lingering close in the drain waits for
+    /// the client to close its end.
     pub header_timeout: Duration,
     /// How long a client may go without taking a byte of an answer before the connection is
     /// closed.
@@ -52,13 +57,34 @@ pub struct OciLimits {
 }
 
 /// The bound sockets of the front, ready to serve it over TLS, or over plain HTTP. They share
-/// one limit on connections and one stop.
+/// one limit on connections and one drain.
 pub struct OciListener {
     listeners: Listeners,
     /// `None` serves plain HTTP.
     acceptor: Option<TlsAcceptor>,
     front: Arc<OciFront>,
     limits: OciLimits,
+    drain: Arc<Drain>,
+}
+
+/// The start of the drain of an [`OciListener`], which the S3 front's drain begins at the same
+/// time: from [`OciDrain::begin`] on, every answer carries `Connection: close`, and the listener
+/// goes on accepting and serving. The stop given to [`OciListener::serve`] ends the settle (and
+/// begins the drain, if it had not begun): the listener takes no new connection, closes each
+/// connection that has no request on the wire with a lingering close (it shuts its end for
+/// writing, so that the client reads a clean end of stream, and reads and drops what the client
+/// still sends until the client closes its end, for [`OciLimits::header_timeout`] at most), and
+/// closes each other connection in the same way once its answer is out. A connection whose client
+/// writes after the end of the stream is counted in
+/// [`OciMetrics::late_requests`](super::OciMetrics::late_requests).
+#[derive(Clone)]
+pub struct OciDrain(Arc<Drain>);
+
+impl OciDrain {
+    /// Begins the drain; calling it again does nothing more.
+    pub fn begin(&self) {
+        self.0.begin();
+    }
 }
 
 impl OciListener {
@@ -111,12 +137,20 @@ impl OciListener {
     ) -> Result<Self, OciError> {
         let bound = listen::bind_all(addrs);
         let bound = bound.map_err(|(addr, source)| OciError::Bind { addr, source })?;
+        let drain = Arc::new(drain_of(&front, limits));
         Ok(Self {
             listeners: Listeners::new(bound),
             acceptor,
             front,
             limits,
+            drain,
         })
+    }
+
+    /// The handle that begins the listener's drain (see [`OciDrain`]).
+    #[must_use]
+    pub fn drain(&self) -> OciDrain {
+        OciDrain(Arc::clone(&self.drain))
     }
 
     /// How the listener carries its connections.
@@ -146,18 +180,27 @@ impl OciListener {
         self.listeners.local_addrs()
     }
 
-    /// Serves connections until `stop` turns true: then it takes no more, lets the connections
-    /// that are open finish the request they are answering and close, waits for them for
-    /// [`OciLimits::drain_deadline`], and cuts those that are left. Returns how many were cut.
+    /// Serves connections until `stop` turns true, the end of the settle: then it takes no more,
+    /// lets the connections that are open finish the request they are answering and closes them
+    /// with a lingering close (see [`OciDrain`]), waits for them and for the lingering closes for
+    /// [`OciLimits::drain_deadline`], and cuts the connections that are left. Returns how many
+    /// were cut.
     pub async fn serve(self, stop: watch::Receiver<bool>) -> usize {
         let Self {
             listeners,
             acceptor,
             front,
             limits,
+            drain,
         } = self;
-        accept_loop(listeners, acceptor, front, limits, stop).await
+        accept_loop(listeners, acceptor, front, limits, stop, drain).await
     }
+}
+
+/// The drain of a listener of `front`: its lingering closes wait for the header timeout, and it
+/// counts the late requests into the front's counters.
+pub(super) fn drain_of(front: &OciFront, limits: OciLimits) -> Drain {
+    Drain::new(limits.header_timeout, front.metrics().late_counter())
 }
 
 /// [`OciListener::serve`] over any source of connections: the listener of a socket, and in the
@@ -168,6 +211,7 @@ pub(super) async fn accept_loop<I>(
     front: Arc<OciFront>,
     limits: OciLimits,
     mut stop: watch::Receiver<bool>,
+    drain: Arc<Drain>,
 ) -> usize
 where
     I: Incoming<Stream = TcpStream> + Send,
@@ -188,7 +232,7 @@ where
                         acceptor: acceptor.clone(),
                         front: Arc::clone(&front),
                         limits,
-                        stop: stop.clone(),
+                        drain: Arc::clone(&drain),
                     };
                     connections.spawn(serving.connection(tcp, peer, slot));
                 }
@@ -202,7 +246,13 @@ where
         }
     }
     drop(incoming);
-    let finished = async { while connections.join_next().await.is_some() {} };
+    drain.settle();
+    let finished = async {
+        while connections.join_next().await.is_some() {}
+        // A connection's task ends when its stream is dropped, and a lingering close goes on
+        // after that, on a task of its own.
+        drain.wait_for_zero(&drain.lingering).await;
+    };
     if tokio::time::timeout(limits.drain_deadline, finished)
         .await
         .is_ok()
@@ -224,7 +274,7 @@ struct Serving {
     acceptor: Option<TlsAcceptor>,
     front: Arc<OciFront>,
     limits: OciLimits,
-    stop: watch::Receiver<bool>,
+    drain: Arc<Drain>,
 }
 
 impl Serving {
@@ -249,10 +299,10 @@ impl Serving {
         }
     }
 
-    /// One connection, until its client leaves, it breaks, its lifetime ends or the listener
-    /// stops; the slot is held throughout.
+    /// One connection, until its client leaves, it breaks, its lifetime ends or the settle is
+    /// over; the slot is held throughout.
     async fn connection(
-        mut self,
+        self,
         tcp: TcpStream,
         peer: SocketAddr,
         _slot: Result<OwnedSemaphorePermit, AcquireError>,
@@ -261,34 +311,49 @@ impl Serving {
         let Some(stream) = self.open(tcp, peer).await else {
             return;
         };
-        let front = Arc::clone(&self.front);
+        let watched = Watched::new(stream, limits.write_idle, peer);
+        let (stream, wire) = Lingering::new(watched, &self.drain);
+        let (front, drain, on_wire) = (
+            Arc::clone(&self.front),
+            Arc::clone(&self.drain),
+            Arc::clone(&wire),
+        );
         let service = service_fn(move |request: Request<RequestBody>| {
-            let front = Arc::clone(&front);
+            let (front, drain, wire) =
+                (Arc::clone(&front), Arc::clone(&drain), Arc::clone(&on_wire));
             async move {
                 let (method, uri, headers) = (request.method(), request.uri(), request.headers());
-                let answer = front.handle(method, uri.path(), headers).await;
+                let mut answer = front.handle(method, uri.path(), headers).await;
+                if !drain.is_ready() {
+                    let close = HeaderValue::from_static("close");
+                    answer.headers_mut().insert(CONNECTION, close);
+                }
+                // The drain does not close the connection in the middle of a blob.
+                let answer = answer.map(|body| OnWire::new(body, &wire).boxed_unsync());
                 Ok::<_, Infallible>(answer)
             }
         });
-        let io = TokioIo::new(Watched::new(stream, limits.write_idle, peer));
         let serving = http1::Builder::new()
             .timer(TokioTimer::new())
             .header_read_timeout(limits.header_timeout)
-            .serve_connection(io, service);
+            .serve_connection(TokioIo::new(stream), service);
         tokio::pin!(serving);
         let lifetime = tokio::time::sleep(limits.lifetime);
         tokio::pin!(lifetime);
+        let settled = self.drain.settled.subscribe();
         let lifetime_ended = tokio::select! {
             // A connection that ends badly has nothing to tell the other side.
             _ = serving.as_mut() => return,
             () = &mut lifetime => true,
-            () = stopped(&mut self.stop) => false,
+            // The settle is over, and the connection has no request on the wire, or has just
+            // answered it: it closes, and its stream lingers (see `OciDrain`).
+            () = drain::time_to_close(&wire, settled) => false,
         };
         // The request being answered is finished, and then the connection closes.
         serving.as_mut().graceful_shutdown();
         if lifetime_ended {
             // A client that takes the answer a few bytes at a time must not keep the slot past
-            // the lifetime for ever. (After a stop, the listener cuts what is left.)
+            // the lifetime for ever. (After the settle, the listener cuts what is left.)
             let _ = tokio::time::timeout(limits.drain_deadline, serving).await;
         } else {
             let _ = serving.await;

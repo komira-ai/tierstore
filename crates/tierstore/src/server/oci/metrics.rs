@@ -1,6 +1,7 @@
 //! The counters of the OCI read front, shown by `GET /metricz` on the S3 listener.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::OciMode;
@@ -48,12 +49,16 @@ const OUTCOMES: [&str; 7] = [
 ];
 
 /// What the front has done since it started: requests by route and outcome, the bytes of blobs
-/// sent, and the objects whose bytes were not their digest.
+/// sent, the objects whose bytes were not their digest, and the requests that came too late in a
+/// drain.
 #[derive(Debug, Default)]
 pub struct OciMetrics {
     requests: [[AtomicU64; OUTCOMES.len()]; ROUTES.len()],
     bytes: AtomicU64,
     mismatches: AtomicU64,
+    /// The connections whose client wrote after the front shut its end in a drain: the drain of
+    /// the front's listener counts into it.
+    late: Arc<AtomicU64>,
     mode: OciMode,
 }
 
@@ -105,6 +110,18 @@ impl OciMetrics {
         self.mismatches.load(Ordering::Relaxed)
     }
 
+    /// The connections whose client wrote after the front had shut its end in a drain: the
+    /// requests that came too late to be answered (see [`OciDrain`](super::OciDrain)).
+    #[must_use]
+    pub fn late_requests(&self) -> u64 {
+        self.late.load(Ordering::SeqCst)
+    }
+
+    /// The counter of late requests, for the drain of the front's listener to count into.
+    pub(super) fn late_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.late)
+    }
+
     /// The counters in the Prometheus text format.
     #[must_use]
     pub fn render(&self) -> String {
@@ -123,6 +140,12 @@ impl OciMetrics {
         let mismatches = self.mismatches();
         let _ = writeln!(text, "# TYPE tierstore_oci_digest_mismatches_total counter");
         let _ = writeln!(text, "tierstore_oci_digest_mismatches_total {mismatches}");
+        let late = self.late_requests();
+        let _ = writeln!(
+            text,
+            "# TYPE tierstore_oci_drain_late_requests_total counter"
+        );
+        let _ = writeln!(text, "tierstore_oci_drain_late_requests_total {late}");
         let mode = self.mode.as_str();
         let _ = writeln!(text, "# TYPE tierstore_oci_front_info gauge");
         let _ = writeln!(text, "tierstore_oci_front_info{{mode=\"{mode}\"}} 1");

@@ -103,7 +103,7 @@ use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
 use crate::{Backend, ByteRange, Error};
 
 pub use body::{BodyError, OciBody};
-pub use listener::{OciLimits, OciListener};
+pub use listener::{OciDrain, OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 
@@ -184,6 +184,11 @@ impl OciFront {
             prefix,
             metrics,
         }
+    }
+
+    /// The counters the front counts into.
+    pub(super) fn metrics(&self) -> &Arc<OciMetrics> {
+        &self.metrics
     }
 
     /// Answers a request for `path`, whose body, if it has one, is not read.

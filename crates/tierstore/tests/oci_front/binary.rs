@@ -26,14 +26,14 @@ use crate::rig::hex_of;
 const KEY_ID: &str = "AKIDOCI";
 const SECRET: &str = "oci-secret";
 
-struct Files {
+pub struct Files {
     _dir: TestDir,
     key: String,
     leaf: Leaf,
-    ca_pem: String,
+    pub ca_pem: String,
 }
 
-fn files(name: &str) -> Files {
+pub fn files(name: &str) -> Files {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
     let key = dir.path().join("key");
     std::fs::write(&key, format!("{KEY_ID}\n{SECRET}\n")).expect("key file");
@@ -49,7 +49,7 @@ fn files(name: &str) -> Files {
 }
 
 impl Files {
-    fn flags(&self, oci: bool) -> Vec<String> {
+    pub fn flags(&self, oci: bool) -> Vec<String> {
         let mut flags: Vec<String> = [
             "tierstore",
             "--listen",
@@ -86,14 +86,14 @@ impl Files {
     }
 
     /// The flags of a start with the OCI front on plain HTTP at `listen`: no certificate, no key.
-    fn plain(&self, listen: &str) -> Vec<String> {
+    pub fn plain(&self, listen: &str) -> Vec<String> {
         let mut flags = self.flags(false);
         flags.extend(["--oci-listen", listen].map(str::to_owned));
         flags
     }
 }
 
-fn store(addr: SocketAddr) -> S3Store {
+pub fn store(addr: SocketAddr) -> S3Store {
     let config = S3Config {
         endpoint: format!("http://{addr}"),
         region: "us-east-1".to_owned(),

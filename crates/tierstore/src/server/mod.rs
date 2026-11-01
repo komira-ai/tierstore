@@ -184,6 +184,10 @@
 //! `tierstore_drain_late_requests_total`. The drain waits until every connection is closed, and
 //! every lingering close is over, for [`ServerConfig::drain_deadline`] at most. `serve` returns,
 //! with the number of requests that the deadline cut: those still running, or still being sent.
+//!
+//! The OCI read front drains the same way, with the same code (`drain` and `linger`) and a drain
+//! of its own: see [`oci::OciDrain`]. Its late requests are counted in
+//! `tierstore_oci_drain_late_requests_total`.
 
 mod auth;
 pub mod build_info;
@@ -192,6 +196,7 @@ pub mod cli;
 mod config;
 mod config_cache;
 mod config_print;
+mod drain;
 mod front;
 pub mod gc;
 pub mod grant;
@@ -288,7 +293,7 @@ use std::future::poll_fn;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -301,7 +306,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, Semaphore, watch};
+use tokio::sync::{Notify, Semaphore};
 
 use crate::{Backend, Clock, MonotonicClock, Proxy};
 
@@ -313,6 +318,9 @@ pub use local_cache::LocalCache;
 pub use presign::{Grant, PresignKey, PresignRequest, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 
+use drain::Drain;
+#[cfg(test)]
+use drain::SETTLED;
 use idle::Watched;
 use linger::Lingering;
 use listen::Listeners;
@@ -487,13 +495,6 @@ pub struct Drained {
     pub abandoned: usize,
 }
 
-/// The server is serving.
-const SERVING: u8 = 0;
-/// The drain began: `/readyz` says 503, and every answer says `Connection: close`.
-const NOT_READY: u8 = 1;
-/// The settle is over: the server takes no new connection and closes the idle ones.
-const SETTLED: u8 = 2;
-
 /// How long [`Server::serve`] waits after a failed accept before the next.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 
@@ -535,25 +536,16 @@ pub struct Server {
     config: ServerConfig,
     /// When the server was made, by the clock of the config.
     started: u64,
-    phase: AtomicU8,
+    /// The phase of the drain, the connections it waits for, and its count of late requests;
+    /// its `idle` is notified too whenever a request begins or ends or a connection opens or
+    /// closes.
+    drain: Arc<Drain>,
     /// Notified once, when the drain begins.
     drain_requested: Notify,
     /// The requests that have begun and not ended.
     inflight: AtomicUsize,
     /// The connections that are open.
     open: AtomicUsize,
-    /// The connections with a request on the wire: read, and not answered in full.
-    unanswered: AtomicUsize,
-    /// The connections the drain has shut for writing that are waiting for their peer to close.
-    lingering: AtomicUsize,
-    /// The connections whose peer wrote after the server shut its end, in the drain.
-    late: AtomicU64,
-    /// Notified whenever a request begins or ends or a connection opens or closes, and when a
-    /// lingering close ends or counts a late request.
-    idle: Notify,
-    /// Set once, when the settle is over: a connection with no request on the wire closes, and
-    /// one with a request on the wire closes when it is answered.
-    settled: watch::Sender<bool>,
     next_request: AtomicU64,
     /// One permit for each streamed body that may be taken at once.
     puts: Arc<Semaphore>,
@@ -565,7 +557,7 @@ struct Flight<'a>(&'a Server);
 impl<'a> Flight<'a> {
     fn enter(server: &'a Server) -> Self {
         server.inflight.fetch_add(1, Ordering::SeqCst);
-        server.idle.notify_waiters();
+        server.drain.idle.notify_waiters();
         Self(server)
     }
 }
@@ -573,7 +565,7 @@ impl<'a> Flight<'a> {
 impl Drop for Flight<'_> {
     fn drop(&mut self) {
         self.0.inflight.fetch_sub(1, Ordering::SeqCst);
-        self.0.idle.notify_waiters();
+        self.0.drain.idle.notify_waiters();
     }
 }
 
@@ -583,7 +575,7 @@ struct Connected(Arc<Server>);
 impl Connected {
     fn enter(server: &Arc<Server>) -> Self {
         server.open.fetch_add(1, Ordering::SeqCst);
-        server.idle.notify_waiters();
+        server.drain.idle.notify_waiters();
         Self(Arc::clone(server))
     }
 }
@@ -591,7 +583,7 @@ impl Connected {
 impl Drop for Connected {
     fn drop(&mut self) {
         self.0.open.fetch_sub(1, Ordering::SeqCst);
-        self.0.idle.notify_waiters();
+        self.0.drain.idle.notify_waiters();
     }
 }
 
@@ -600,32 +592,29 @@ impl Server {
     #[must_use]
     pub fn new(backend: Arc<dyn Backend>, config: ServerConfig) -> Arc<Self> {
         let puts = Arc::new(Semaphore::new(config.max_concurrent_puts));
+        let drain = Drain::new(config.header_timeout, Arc::default());
         Arc::new(Self {
             puts,
             backend,
             started: config.clock.now(),
             config,
-            phase: AtomicU8::new(SERVING),
+            drain: Arc::new(drain),
             drain_requested: Notify::new(),
             inflight: AtomicUsize::new(0),
             open: AtomicUsize::new(0),
-            unanswered: AtomicUsize::new(0),
-            lingering: AtomicUsize::new(0),
-            late: AtomicU64::new(0),
-            idle: Notify::new(),
-            settled: watch::channel(false).0,
             next_request: AtomicU64::new(1),
         })
     }
 
+    #[cfg(test)]
     fn phase(&self) -> u8 {
-        self.phase.load(Ordering::SeqCst)
+        self.drain.phase()
     }
 
     /// Whether the server is serving and `/readyz` says 200: the drain has not begun.
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.phase() == SERVING
+        self.drain.is_ready()
     }
 
     /// The requests being answered now.
@@ -651,22 +640,20 @@ impl Server {
     /// server has shut its end for writing and is reading what the peer still sends.
     #[must_use]
     pub fn lingering_connections(&self) -> usize {
-        self.lingering.load(Ordering::SeqCst)
+        self.drain.lingering()
     }
 
     /// The connections whose peer wrote after the server shut its end, in the drain: the
     /// requests that came too late to be answered.
     #[cfg(test)]
     pub(super) fn late_requests(&self) -> u64 {
-        self.late.load(Ordering::SeqCst)
+        self.drain.late()
     }
 
     /// Begins the drain: `/readyz` says 503 from now on, and [`Server::serve`] runs the rest of
     /// the sequence. Calling it again does nothing more.
     pub fn begin_drain(&self) {
-        let _ = self
-            .phase
-            .compare_exchange(SERVING, NOT_READY, Ordering::SeqCst, Ordering::SeqCst);
+        self.drain.begin();
         self.drain_requested.notify_one();
     }
 
@@ -702,9 +689,8 @@ impl Server {
                 () = &mut wait => break,
             }
         }
-        self.phase.store(SETTLED, Ordering::SeqCst);
         drop(incoming);
-        let _ = self.settled.send_replace(true);
+        self.drain.settle();
         self.finish_by_deadline().await
     }
 
@@ -736,31 +722,18 @@ impl Server {
     /// client has not yet read the end of the stream.
     async fn finish(&self) {
         self.wait_idle().await;
-        self.wait_for_zero(&self.open).await;
-        self.wait_for_zero(&self.lingering).await;
+        self.drain.wait_for_zero(&self.open).await;
+        self.drain.wait_for_zero(&self.drain.lingering).await;
     }
 
     /// The requests that were read and whose answer was not written in full.
     fn unsent(&self) -> usize {
-        self.unanswered.load(Ordering::SeqCst)
+        self.drain.unsent()
     }
 
     /// Resolves when no request is in flight.
     async fn wait_idle(&self) {
-        self.wait_for_zero(&self.inflight).await;
-    }
-
-    /// Resolves when `count`, one of the counts of this server, is zero.
-    async fn wait_for_zero(&self, count: &AtomicUsize) {
-        loop {
-            let ended = self.idle.notified();
-            tokio::pin!(ended);
-            let _ = ended.as_mut().enable();
-            if count.load(Ordering::SeqCst) == 0 {
-                return;
-            }
-            ended.await;
-        }
+        self.drain.wait_for_zero(&self.inflight).await;
     }
 
     /// Serves one connection on a task of its own, which ends with the connection, or after the
@@ -771,7 +744,7 @@ impl Server {
     {
         let server = Arc::clone(self);
         let watched = Watched::new(stream, self.config.body_idle_timeout, peer);
-        let (stream, wire) = Lingering::new(watched, self);
+        let (stream, wire) = Lingering::new(watched, &self.drain);
         let on_wire = Arc::clone(&wire);
         let service = service_fn(move |request| {
             let (server, wire) = (Arc::clone(&server), Arc::clone(&on_wire));
@@ -782,20 +755,17 @@ impl Server {
             .header_read_timeout(self.config.header_timeout)
             .serve_connection(TokioIo::new(stream), service);
         let connected = Connected::enter(self);
-        let mut settled = self.settled.subscribe();
+        let settled = self.drain.settled.subscribe();
         drop(tokio::spawn(async move {
             let _connected = connected;
             tokio::pin!(serving);
             tokio::select! {
                 // A connection that ends badly has nothing to tell the other side.
                 _ = serving.as_mut() => return,
-                _ = settled.wait_for(|settled| *settled) => {}
-            }
-            // The settle is over. A connection with a request on the wire is closed once that
-            // request is answered in full; one without is closed now, and the stream lingers.
-            tokio::select! {
-                _ = serving.as_mut() => return,
-                () = wire.wait_clear() => {}
+                // The settle is over. A connection with a request on the wire is closed once
+                // that request is answered in full; one without is closed now, and the stream
+                // lingers.
+                () = drain::time_to_close(&wire, settled) => {}
             }
             serving.as_mut().graceful_shutdown();
             let _ = serving.await;
@@ -957,7 +927,7 @@ impl Server {
         if text.is_empty() {
             text = "# this server has no proxy, no OCI read front and no local cache\n".to_owned();
         }
-        let late = self.late.load(Ordering::SeqCst);
+        let late = self.drain.late();
         text.push_str("# TYPE tierstore_drain_late_requests_total counter\n");
         text.push_str(&format!("tierstore_drain_late_requests_total {late}\n"));
         let (version, commit) = (build_info::VERSION, build_info::COMMIT);
