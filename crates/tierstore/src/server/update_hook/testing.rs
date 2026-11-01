@@ -84,6 +84,9 @@ struct World {
     conntrack: Conntrack,
     now: u64,
     pauses: u32,
+    boot: u32,
+    errors: Vec<String>,
+    halt_from: Option<usize>,
     log: Vec<String>,
     calls: usize,
     fail_at: Option<usize>,
@@ -176,6 +179,9 @@ impl Fake {
             },
             now: 0,
             pauses: 0,
+            boot: 1,
+            errors: Vec::new(),
+            halt_from: None,
             log: Vec::new(),
             calls: 0,
             fail_at: None,
@@ -271,6 +277,7 @@ impl Fake {
             .filter(|c| {
                 [
                     "nft.apply",
+                    "nft.delete",
                     "units.",
                     "slots.point",
                     "slots.remove",
@@ -384,6 +391,30 @@ impl Fake {
         w.holder = None;
         w.free_polls = 0;
         w.rules.clear();
+        w.boot += 1;
+    }
+
+    /// The world stops from the n-th call on: that call and every later one fail without effect,
+    /// so no recovery code of the step can run. `None` lets it go on.
+    pub fn halt_at(&self, n: Option<usize>) {
+        let mut w = self.w.borrow_mut();
+        w.halt_from = n.map(|n| w.calls + n);
+    }
+
+    /// The host has booted again, and nothing else has changed.
+    pub fn new_boot(&self) {
+        self.w.borrow_mut().boot += 1;
+    }
+
+    /// The guard table is not there.
+    pub fn remove_guard(&self) {
+        self.w.borrow_mut().rules.remove(GUARD_TABLE);
+    }
+
+    /// Wrong things that happened in the world, such as two instances of a release that has no
+    /// lock running together.
+    pub fn errors(&self) -> Vec<String> {
+        self.w.borrow().errors.clone()
     }
 
     /// Counts one call and fails it if it is the chosen one.
@@ -391,7 +422,7 @@ impl Fake {
         let mut w = self.w.borrow_mut();
         w.calls += 1;
         w.log.push(what);
-        if w.fail_at == Some(w.calls) {
+        if w.fail_at == Some(w.calls) || w.halt_from.is_some_and(|from| w.calls >= from) {
             Err(PortError::failed(kind, "injected failure"))
         } else {
             Ok(())
@@ -424,6 +455,12 @@ impl Nft for Fake {
         self.tick(format!("nft.list {table}"), PortKind::Nft)?;
         Ok(self.w.borrow().rules.get(table).cloned())
     }
+
+    fn delete_table(&self, table: &str) -> Result<(), PortError> {
+        self.tick(format!("nft.delete {table}"), PortKind::Nft)?;
+        self.w.borrow_mut().rules.remove(table);
+        Ok(())
+    }
 }
 
 impl Units for Fake {
@@ -436,6 +473,16 @@ impl Units for Fake {
             && !w.running.contains_key(&port)
         {
             w.running.insert(port, link);
+            let lockless = w.running.values().any(|release| {
+                !w.releases[release]
+                    .1
+                    .iter()
+                    .any(|c| c == HANDOVER_CAPABILITY)
+            });
+            if w.running.len() > 1 && lockless {
+                let note = format!("two instances run and one has no lock (started {unit})");
+                w.errors.push(note);
+            }
             if w.holder.is_none() {
                 w.holder = Some(port);
             }
@@ -542,6 +589,11 @@ impl Host for Fake {
         Ok(self.w.borrow().declaration.clone())
     }
 
+    fn boot_id(&self) -> Result<String, PortError> {
+        self.tick("host.boot_id".to_owned(), PortKind::Host)?;
+        Ok(format!("boot-{}", self.w.borrow().boot))
+    }
+
     fn conntrack(&self) -> Result<Conntrack, PortError> {
         self.tick("host.conntrack".to_owned(), PortKind::Host)?;
         Ok(self.w.borrow().conntrack)
@@ -592,5 +644,13 @@ impl StateDir for Fake {
         self.tick("state.save".to_owned(), PortKind::State)?;
         self.w.borrow_mut().record = Some(bytes.to_vec());
         Ok(())
+    }
+}
+
+impl Fake {
+    /// Runs `prepare` once, which the caller has arranged to be deferred.
+    pub fn advance_to_deferral(&self) {
+        let done = self.run(Step::Prepare);
+        assert_eq!(done.outcome.code(), 75, "{done:?}");
     }
 }

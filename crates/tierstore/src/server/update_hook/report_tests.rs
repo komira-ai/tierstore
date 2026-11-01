@@ -55,6 +55,7 @@ fn the_class_follows_the_reason() {
         OutOfOrder,
         NotVerified,
         Committed,
+        NotConfirmed,
         NotReady,
         UnexpectedMode,
         ProbeFailed,

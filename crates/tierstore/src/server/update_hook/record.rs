@@ -11,11 +11,20 @@
 //!   from `serving`.
 //! - `mode`: `handover` (two instances side by side) or `restart` (a plain restart with a gap,
 //!   when either release lacks the `handover-v1` capability).
+//! - `boot_id`: the boot of the host at the last successful `verify`; `guard_placed`: this update
+//!   placed the guard table.
 //! - `markers`: `swapped` (the redirect names v-next and v-next answers through the public
 //!   port), `verified` (a `verify` succeeded), `stopping` (`cleanup` has begun to retire
 //!   v-current: the commit; nothing is reversible from here). Each needs the one before it. After
 //!   `cleanup` has finished, `previous` is gone and the three markers stay, so that the later
 //!   `verify` knows it is watching a promotion; the next `prepare` starts them afresh.
+//!
+//! Each marker is written relative to its act as follows. `swapped` follows its act (the swap and
+//! the probe have happened; a crash before it re-runs `cutover`, which only re-applies). `verified`
+//! follows its act (the observations passed), together with `boot_id`. `stopping` precedes its act
+//! (it is written, synced, and only then is the link removed and the unit stopped), so a crash at
+//! any later point leaves the commit on record. `guard_placed` follows the loading of the guard
+//! (a crash between leaves a guard that nothing removes, which is the safe way round).
 //!
 //! The record is written whole, atomically, by the [`StateDir`](super::StateDir) port. It is
 //! read through [`validate`](super::validate) before anything else is done.
@@ -119,6 +128,14 @@ pub struct Record {
     pub mode: Mode,
     /// What has been done.
     pub markers: BTreeSet<Marker>,
+    /// The boot of the host when `verify` last observed the new instance: `cleanup` commits only
+    /// in the same boot, since a reboot sends `restore` to the previous slot.
+    #[serde(default)]
+    pub boot_id: Option<String>,
+    /// Whether this update placed the guard table (it was not there before): `rollback` and a
+    /// deferred `prepare` remove what they placed, and leave what was there.
+    #[serde(default)]
+    pub guard_placed: bool,
 }
 
 impl Record {
@@ -131,6 +148,8 @@ impl Record {
             previous: None,
             mode: Mode::Handover,
             markers: BTreeSet::new(),
+            boot_id: None,
+            guard_placed: false,
         }
     }
 
@@ -156,6 +175,8 @@ impl Record {
             "previous": self.previous,
             "mode": self.mode.as_str(),
             "markers": markers,
+            "boot_id": self.boot_id,
+            "guard_placed": self.guard_placed,
         });
         let mut text = format!("{value:#}");
         text.push('\n');

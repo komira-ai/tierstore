@@ -74,6 +74,9 @@ pub enum Reason {
     NotVerified,
     /// `rollback`, `cutover` or `prepare` after `cleanup` began to stop v-current.
     Committed,
+    /// `cleanup` could not confirm, freshly, that the new instance serves alone: nothing was
+    /// committed.
+    NotConfirmed,
     /// The host cannot take the update now (exit 75): the guard, the conntrack bounds.
     HostNotReady,
     /// An instance did not answer `/readyz` with 200.
@@ -104,7 +107,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 21] = [
+    pub const ALL: [Reason; 22] = [
         Reason::NotImplemented,
         Reason::BadArgs,
         Reason::BadParams,
@@ -113,6 +116,7 @@ impl Reason {
         Reason::OutOfOrder,
         Reason::NotVerified,
         Reason::Committed,
+        Reason::NotConfirmed,
         Reason::HostNotReady,
         Reason::NotReady,
         Reason::UnexpectedMode,
@@ -140,6 +144,7 @@ impl Reason {
             Reason::OutOfOrder => "out_of_order",
             Reason::NotVerified => "not_verified",
             Reason::Committed => "committed",
+            Reason::NotConfirmed => "not_confirmed",
             Reason::HostNotReady => "host_not_ready",
             Reason::NotReady => "not_ready",
             Reason::UnexpectedMode => "unexpected_mode",

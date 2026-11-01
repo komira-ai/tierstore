@@ -99,7 +99,8 @@ fn the_conntrack_bounds_defer_the_update() {
         assert_eq!(done.report.class, Class::Environment);
         assert_eq!(done.report.reason, Some(Reason::HostNotReady));
         assert_eq!(done.report.retry_after_secs, Some(300));
-        assert!(fake.changes().is_empty(), "{why}: {:?}", fake.changes());
+        // The guard is loaded first and the same text replaces the one that was there.
+        assert_eq!(fake.changes(), ["nft.apply kbf_guard_tierstore"], "{why}");
         assert_eq!(fake.snapshot(), before);
     };
     let passes = |ct: Conntrack, why: &str| {
@@ -214,4 +215,88 @@ fn a_current_slot_without_a_link_is_refused() {
     assert_eq!(done.report.class, Class::Environment);
     assert!(fake.changes().is_empty());
     assert_eq!(fake.record(), Record::idle(9301));
+}
+
+fn full_table() -> Conntrack {
+    Conntrack {
+        tcp_timeout_established_secs: 432_000,
+        count: 900,
+        max: 1000,
+    }
+}
+
+/// Asserts that a deferral after the guard was loaded leaves no guard when there was none before:
+/// the table is loaded, the host is found not ready, the table is removed, the exit is 75, and
+/// the host is as it was. It would catch a deferred `prepare` that leaves a table behind.
+#[test]
+fn a_deferral_removes_the_guard_it_placed() {
+    let fake = Fake::new();
+    fake.remove_guard();
+    fake.set_conntrack(full_table());
+    let before = fake.snapshot();
+    let done = fake.run(Step::Prepare);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert_eq!(
+        fake.changes(),
+        [
+            "nft.apply kbf_guard_tierstore",
+            "nft.delete kbf_guard_tierstore"
+        ]
+    );
+    assert!(!fake.snapshot().guard);
+    assert_eq!(fake.snapshot(), before);
+}
+
+/// Asserts that a deferral leaves a guard that was there before the update, and still exits 75.
+/// It would catch a deferred `prepare` that removes state it did not place, which unguards the
+/// private ports of a serving host.
+#[test]
+fn a_deferral_leaves_a_guard_that_was_there() {
+    let fake = Fake::new();
+    fake.set_conntrack(full_table());
+    let done = fake.run(Step::Prepare);
+    assert_eq!(done.outcome, Outcome::Deferred);
+    assert!(fake.snapshot().guard);
+    assert!(!fake.log().iter().any(|c| c.starts_with("nft.delete")));
+}
+
+/// Asserts that a removal that fails turns the deferral into exit 1 with the class
+/// `environment`: the host is not as it was, and the updater's `rollback` must run. It would
+/// catch a deferral that says nothing was done when a table is left.
+#[test]
+fn a_removal_that_fails_is_exit_1() {
+    let reference = Fake::new();
+    reference.remove_guard();
+    reference.set_conntrack(full_table());
+    reference.advance_to_deferral();
+    let n = reference.calls();
+    let fake = Fake::new();
+    fake.remove_guard();
+    fake.set_conntrack(full_table());
+    fake.fail_at(Some(n));
+    let done = fake.run(Step::Prepare);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::NftFailed));
+    assert_eq!(done.report.class, Class::Environment);
+}
+
+/// Asserts that after a `prepare` that placed the guard and a re-run, the record still says the
+/// update placed it, so that `rollback` removes it. It would catch a re-run that sees its own
+/// guard as one that was there before.
+#[test]
+fn a_re_run_remembers_that_the_update_placed_the_guard() {
+    let fake = Fake::new();
+    fake.remove_guard();
+    fake.advance(&[Step::Prepare, Step::Prepare]);
+    assert!(fake.record().guard_placed);
+}
+
+/// Asserts that nothing is changed before the guard is in place: the calls that precede the guard's
+/// are all reads. It would catch a `prepare` that links or starts before the private port is
+/// guarded.
+#[test]
+fn nothing_is_applied_before_the_guard() {
+    let fake = Fake::new();
+    fake.advance(&[Step::Prepare]);
+    assert_eq!(fake.changes()[0], "nft.apply kbf_guard_tierstore");
 }

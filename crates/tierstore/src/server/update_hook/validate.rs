@@ -31,9 +31,16 @@ pub enum Invalid {
     /// Markers with no update in flight and no commit.
     #[error("markers are set with no update in flight")]
     Orphan,
+    /// The boot id is empty, too long, or holds a character a boot id does not.
+    #[error("boot_id is not 1 to 64 letters, digits and -")]
+    BootId,
     /// The staged release lies in the state directory.
     #[error("the staged release lies in the state directory")]
     Staged,
+}
+
+fn is_boot_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 /// Runs every rule on `record`.
@@ -73,6 +80,21 @@ pub fn validate(record: &Record, declaration: &Declaration) -> Result<(), Invali
     }
     if record.previous.is_none() && !record.markers.is_empty() && !has(Marker::Stopping) {
         return Err(Invalid::Orphan);
+    }
+    if record.boot_id.is_some() && !has(Marker::Verified) {
+        return Err(Invalid::Marks {
+            mark: "boot_id",
+            needs: "verified",
+        });
+    }
+    if record.guard_placed && record.previous.is_none() {
+        return Err(Invalid::Marks {
+            mark: "guard_placed",
+            needs: "previous",
+        });
+    }
+    if record.boot_id.as_deref().is_some_and(|id| !is_boot_id(id)) {
+        return Err(Invalid::BootId);
     }
     Ok(())
 }

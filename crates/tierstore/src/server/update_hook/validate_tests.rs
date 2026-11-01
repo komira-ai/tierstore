@@ -16,6 +16,8 @@ fn record(serving: u16, previous: Option<u16>, markers: &[Marker]) -> Record {
         previous,
         mode: Mode::Handover,
         markers: markers.iter().copied().collect::<BTreeSet<_>>(),
+        boot_id: None,
+        guard_placed: false,
     }
 }
 
@@ -31,6 +33,11 @@ fn the_records_the_steps_write_pass() {
         record(9302, Some(9301), &[]),
         record(9302, Some(9301), &[Swapped]),
         record(9302, Some(9301), &[Swapped, Verified]),
+        Record {
+            boot_id: Some("0f3a-91".into()),
+            guard_placed: true,
+            ..record(9302, Some(9301), &[Swapped, Verified])
+        },
         record(9302, Some(9301), &[Swapped, Verified, Stopping]),
         record(9302, None, &[Swapped, Verified, Stopping]),
     ] {
@@ -83,6 +90,40 @@ fn a_record_that_breaks_a_rule_is_refused() {
             },
         ),
         (record(9301, None, &[Swapped]), Invalid::Orphan),
+        (
+            Record {
+                boot_id: Some("boot-1".into()),
+                ..record(9302, Some(9301), &[Swapped])
+            },
+            Invalid::Marks {
+                mark: "boot_id",
+                needs: "verified",
+            },
+        ),
+        (
+            Record {
+                boot_id: Some("a b".into()),
+                ..record(9302, Some(9301), &[Swapped, Verified])
+            },
+            Invalid::BootId,
+        ),
+        (
+            Record {
+                boot_id: Some(String::new()),
+                ..record(9302, Some(9301), &[Swapped, Verified])
+            },
+            Invalid::BootId,
+        ),
+        (
+            Record {
+                guard_placed: true,
+                ..record(9301, None, &[])
+            },
+            Invalid::Marks {
+                mark: "guard_placed",
+                needs: "previous",
+            },
+        ),
     ];
     for (r, why) in cases {
         assert_eq!(validate(&r, &d), Err(why), "{r:?}");

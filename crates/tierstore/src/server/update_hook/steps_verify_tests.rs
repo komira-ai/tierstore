@@ -179,3 +179,20 @@ fn verify_in_restart_mode_does_not_look_for_the_old_instance() {
     assert!(done.report.reversible);
     assert!(fake.record().markers.contains(&Marker::Verified));
 }
+
+/// Asserts that `verified` is written with the boot of the host, that a `verify` in the same boot
+/// writes nothing more, and that one in a later boot (after a `restore` the new instance was seen
+/// again) records the new boot. It would catch a `verified` that outlives a reboot.
+#[test]
+fn verify_records_the_boot_it_observed() {
+    let fake = Fake::new();
+    fake.advance(&[Step::Prepare, Step::Cutover, Step::Verify]);
+    assert_eq!(fake.record().boot_id.as_deref(), Some("boot-1"));
+    let mark = fake.changes().len();
+    fake.advance(&[Step::Verify]);
+    assert_eq!(fake.changes().len(), mark);
+    fake.new_boot();
+    fake.advance(&[Step::Verify]);
+    assert_eq!(fake.record().boot_id.as_deref(), Some("boot-2"));
+    assert_eq!(fake.changes().len(), mark + 1);
+}

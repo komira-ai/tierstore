@@ -173,16 +173,32 @@ fn in_restart_mode_the_old_instance_stops_before_the_new_one_starts() {
     assert_eq!(snap.running.get(&9302).unwrap().to_str(), Some(NEW));
 }
 
-/// Asserts that a restart whose probe fails starts the old instance again and points the rule
-/// back at it. It would catch a failed restart that leaves no instance serving.
+/// Asserts that a restart whose probe fails stops the new instance first, then starts the old one
+/// and points the rule back at it, in that order, with no moment of two instances of the release
+/// that has no lock. It would catch a failed restart that leaves no instance serving, or starts
+/// the old release beside the new: two writers.
 #[test]
 fn a_failed_restart_brings_the_old_instance_back() {
     let fake = Fake::legacy();
     fake.advance(&[Step::Prepare]);
     fake.lie(9302, "9.9.9");
+    let mark = fake.changes().len();
     let done = fake.run(Step::Cutover);
     assert_eq!(done.report.reason, Some(Reason::ProbeFailed));
+    assert_eq!(
+        fake.changes()[mark..],
+        [
+            "units.stop tierstore@9301.service",
+            "units.start tierstore@9302.service",
+            "nft.apply kbf_forward_tierstore",
+            "units.stop tierstore@9302.service",
+            "units.start tierstore@9301.service",
+            "nft.apply kbf_forward_tierstore"
+        ]
+    );
     let snap = fake.snapshot();
     assert_eq!(snap.redirect, Some(9301));
+    assert_eq!(snap.running.keys().copied().collect::<Vec<_>>(), [9301]);
     assert_eq!(snap.running.get(&9301).unwrap().to_str(), Some(OLD));
+    assert!(fake.errors().is_empty(), "{:?}", fake.errors());
 }

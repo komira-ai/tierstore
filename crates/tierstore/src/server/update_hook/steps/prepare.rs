@@ -75,6 +75,8 @@ pub(super) fn run(c: &Ctx<'_, '_>, params: &Params, record: &mut Record) -> Resu
         previous: Some(current),
         mode,
         markers: BTreeSet::new(),
+        boot_id: None,
+        guard_placed: false,
     };
     c.save(&next)?;
     *record = next;

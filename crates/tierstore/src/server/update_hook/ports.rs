@@ -84,6 +84,12 @@ pub trait Nft {
     /// # Errors
     /// The program failed.
     fn list_table(&self, table: &str) -> Result<Option<String>, PortError>;
+
+    /// Deletes the table `table` of the `inet` family; an absent table is fine.
+    ///
+    /// # Errors
+    /// The program failed.
+    fn delete_table(&self, table: &str) -> Result<(), PortError>;
 }
 
 /// The unit manager.
@@ -160,6 +166,12 @@ pub trait Host {
     /// # Errors
     /// The file cannot be read.
     fn declaration(&self) -> Result<String, PortError>;
+
+    /// The identifier of this boot of the host (`/proc/sys/kernel/random/boot_id`).
+    ///
+    /// # Errors
+    /// It cannot be read.
+    fn boot_id(&self) -> Result<String, PortError>;
 
     /// The connection tracking limits and fill.
     ///

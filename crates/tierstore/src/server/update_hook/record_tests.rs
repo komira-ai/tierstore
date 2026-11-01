@@ -11,6 +11,8 @@ fn full() -> Record {
         previous: Some(9301),
         mode: Mode::Restart,
         markers: BTreeSet::from([Marker::Swapped, Marker::Verified, Marker::Stopping]),
+        boot_id: Some("boot-1".to_owned()),
+        guard_placed: true,
     }
 }
 
@@ -20,13 +22,16 @@ fn full() -> Record {
 #[test]
 fn a_record_is_written_as_json_and_reads_back() {
     let text = String::from_utf8(full().encode()).unwrap();
-    let want = "{\n  \"markers\": [\n    \"swapped\",\n    \"verified\",\n    \"stopping\"\n  ],\n  \"mode\": \"restart\",\n  \"previous\": 9301,\n  \"schema\": 1,\n  \"serving\": 9302\n}\n";
+    let want = "{\n  \"boot_id\": \"boot-1\",\n  \"guard_placed\": true,\n  \"markers\": [\n    \"swapped\",\n    \"verified\",\n    \"stopping\"\n  ],\n  \"mode\": \"restart\",\n  \"previous\": 9301,\n  \"schema\": 1,\n  \"serving\": 9302\n}\n";
     assert_eq!(text, want);
     assert_eq!(Record::decode(text.as_bytes()).unwrap(), full());
     let idle = Record::idle(9301);
     let idle_text = String::from_utf8(idle.encode()).unwrap();
     assert!(idle_text.contains("\"previous\": null"));
     assert!(idle_text.contains("\"markers\": []"));
+    assert!(
+        idle_text.contains("\"boot_id\": null") && idle_text.contains("\"guard_placed\": false")
+    );
     assert_eq!(Record::decode(idle_text.as_bytes()).unwrap(), idle);
 }
 
@@ -80,4 +85,14 @@ fn a_record_that_is_not_one_is_refused() {
             "{bad}"
         );
     }
+}
+
+/// Asserts that a record written before `boot_id` and `guard_placed` existed still reads, with
+/// both at their defaults. It would catch a format change that the previous version's hook,
+/// which may run `rollback`, could not follow: formats change by adding fields only.
+#[test]
+fn a_record_without_the_newer_fields_reads_with_their_defaults() {
+    let old = r#"{"schema":1,"serving":9301,"previous":null,"mode":"handover","markers":[]}"#;
+    let record = Record::decode(old.as_bytes()).unwrap();
+    assert_eq!((record.boot_id, record.guard_placed), (None, false));
 }

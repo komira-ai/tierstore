@@ -1,7 +1,7 @@
 //! `cleanup`.
 
 use super::testing::{Fake, NEWER};
-use super::{Class, Marker, Outcome, Reason, Step};
+use super::{Class, Marker, Outcome, Reason, Record, Step, redirect_ruleset};
 
 const PRIOR: [Step; 3] = [Step::Prepare, Step::Cutover, Step::Verify];
 
@@ -84,6 +84,20 @@ fn cleanup_twice_changes_nothing() {
     assert_eq!(fake.changes().len(), mark);
 }
 
+/// The number (from 1, among the calls of the step) of the first call of `cleanup` that starts
+/// with `prefix`, found by a clean run on a twin host.
+fn call_number(prefix: &str) -> usize {
+    let twin = Fake::new();
+    twin.advance(&PRIOR);
+    let base = twin.log().len();
+    twin.advance(&[Step::Cleanup]);
+    twin.log()[base..]
+        .iter()
+        .position(|c| c.starts_with(prefix))
+        .unwrap_or_else(|| panic!("no {prefix}"))
+        + 1
+}
+
 /// Asserts that a stop that fails after `stopping` was written exits 1 with `"reversible":false`
 /// and the class `environment`, leaves the record committed, and that a re-run goes forward to
 /// the same end state as a clean run. It would catch a failure after the commit that reports the
@@ -96,8 +110,7 @@ fn a_stop_that_fails_after_the_commit_is_not_reversible_and_is_re_run_forward() 
     let fake = Fake::new();
     fake.advance(&PRIOR);
     let base = fake.log().len();
-    // lock, declaration, load, save, remove, then the stop.
-    fake.fail_at(Some(6));
+    fake.fail_at(Some(call_number("units.stop")));
     let done = fake.run(Step::Cleanup);
     assert!(fake.log()[base..].last().unwrap().starts_with("units.stop"));
     assert_eq!(done.outcome, Outcome::Failure);
@@ -117,12 +130,106 @@ fn a_stop_that_fails_after_the_commit_is_not_reversible_and_is_re_run_forward() 
 fn a_failure_before_stopping_is_reversible() {
     let fake = Fake::new();
     fake.advance(&PRIOR);
-    fake.fail_at(Some(4));
+    fake.fail_at(Some(call_number("state.save")));
     let done = fake.run(Step::Cleanup);
     assert_eq!(done.report.reason, Some(Reason::StateIo));
     assert!(done.report.reversible);
     assert!(!fake.record().committed());
     assert_eq!(fake.run(Step::Rollback).outcome, Outcome::Success);
+}
+
+/// Asserts that after a reboot between `verify` and `cleanup` the commit is refused: `restore`
+/// starts only the previous slot and leaves the record, still `verified`, naming the new slot, and
+/// a `cleanup` that stopped the previous unit would leave nothing serving. The step exits 1 with
+/// its own reason, `"reversible":true`, changes nothing, and a `rollback` still works. It would
+/// catch a `cleanup` that trusts `verified` over what it sees.
+#[test]
+fn cleanup_after_a_reboot_refuses_and_changes_nothing() {
+    let fake = Fake::new();
+    fake.advance(&PRIOR);
+    fake.reboot();
+    fake.advance(&[Step::Restore]);
+    let before = fake.snapshot();
+    let mark = fake.changes().len();
+    let done = fake.run(Step::Cleanup);
+    assert_eq!(done.outcome, Outcome::Failure);
+    assert_eq!(done.report.reason, Some(Reason::NotConfirmed));
+    assert_eq!(done.report.class, Class::Release);
+    assert!(done.report.reversible);
+    assert_eq!(fake.changes().len(), mark);
+    assert_eq!(fake.snapshot(), before);
+    assert_eq!(
+        fake.snapshot().running.keys().copied().collect::<Vec<_>>(),
+        [9301]
+    );
+    fake.advance(&[Step::Rollback]);
+    assert_eq!(fake.record(), Record::idle(9301));
+}
+
+/// Asserts each thing `cleanup` looks at again, one at a time, with everything else as `verify`
+/// left it: the boot of the host, the guard table, the redirect, the readiness of the new
+/// instance and the build that answers through the public port. Each gives exit 1,
+/// `not_confirmed`, `"reversible":true`, and no change. It would catch a `cleanup` that skips
+/// one of them.
+#[test]
+fn cleanup_looks_again_at_each_thing_it_depends_on() {
+    type Spoil = fn(&Fake);
+    let cases: [(&str, Spoil); 5] = [
+        ("a new boot", Fake::new_boot),
+        ("no guard", Fake::remove_guard),
+        ("the rule on the old slot", |f| {
+            f.ports().nft.apply(&redirect_ruleset(9300, 9301)).unwrap();
+        }),
+        ("a new instance that does not answer", |f| f.mute(9302)),
+        ("a wrong build", |f| f.lie(9302, "9.9.9")),
+    ];
+    for (what, spoil) in cases {
+        let fake = Fake::new();
+        fake.advance(&PRIOR);
+        spoil(&fake);
+        let before = fake.snapshot();
+        let mark = fake.changes().len();
+        let done = fake.run(Step::Cleanup);
+        assert_eq!(
+            done.report.reason,
+            Some(Reason::NotConfirmed),
+            "{what}: {done:?}"
+        );
+        assert!(done.report.reversible, "{what}");
+        assert_eq!(fake.changes().len(), mark, "{what}");
+        assert_eq!(fake.snapshot(), before, "{what}");
+    }
+}
+
+/// Asserts that a `verify` run again in the new boot records that boot, which lets `cleanup`
+/// go on, and that a re-run of `cleanup` after `stopping` does not look again (the commit is
+/// made, and a new boot must not stop it going forward). It would catch a `cleanup` retry that
+/// refuses to finish a commit.
+#[test]
+fn a_verify_in_the_new_boot_confirms_and_a_commit_goes_forward_in_any_boot() {
+    let fake = Fake::new();
+    fake.advance(&PRIOR);
+    fake.new_boot();
+    assert_eq!(
+        fake.run(Step::Cleanup).report.reason,
+        Some(Reason::NotConfirmed)
+    );
+    fake.advance(&[Step::Verify, Step::Cleanup]);
+    let fake = Fake::new();
+    fake.advance(&PRIOR);
+    let stopping = Record {
+        markers: fake
+            .record()
+            .markers
+            .into_iter()
+            .chain([Marker::Stopping])
+            .collect(),
+        ..fake.record()
+    };
+    fake.set_record(&stopping);
+    fake.new_boot();
+    fake.advance(&[Step::Cleanup]);
+    assert_eq!(fake.record().previous, None);
 }
 
 /// Asserts the cleanup of a restart: the old unit is already stopped and stopping it is no error.
