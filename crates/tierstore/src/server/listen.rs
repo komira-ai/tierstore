@@ -11,7 +11,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::task::{Context, Poll};
 
 use rustix::io::{FdFlags, fcntl_setfd};
@@ -121,6 +121,44 @@ pub(crate) fn bind_all(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, (Socket
     }
     Ok(bound)
 }
+
+/// The addresses a front with a local cache binds: `configured`, then, when `local_cache` is set,
+/// `127.0.0.1` on each distinct port of `configured` that no configured address already covers.
+/// A port is covered by `127.0.0.1` itself or by `0.0.0.0` on it (the wildcard takes loopback on
+/// Linux, and a second bind there would be refused). An IPv6 address names only its port: its
+/// socket is IPv6 only, so IPv4 loopback is still added; `::1` is not.
+pub(crate) fn bind_set(configured: &[SocketAddr], local_cache: bool) -> Vec<SocketAddr> {
+    let mut all = configured.to_vec();
+    if local_cache {
+        for addr in configured {
+            let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, addr.port()));
+            let wildcard = SocketAddr::from((Ipv4Addr::UNSPECIFIED, addr.port()));
+            if !all.contains(&loopback) && !all.contains(&wildcard) {
+                all.push(loopback);
+            }
+        }
+    }
+    all
+}
+
+/// The loopback socket of a front with a local cache that cannot be bound.
+#[derive(Debug)]
+pub(crate) struct LoopbackBind {
+    pub(crate) addr: SocketAddr,
+    pub(crate) why: io::Error,
+}
+
+impl fmt::Display for LoopbackBind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "binding loopback {}: {} (a local cache is defined, so the S3 port is also served on loopback)",
+            self.addr, self.why
+        )
+    }
+}
+
+impl std::error::Error for LoopbackBind {}
 
 /// The address of each of `listeners`, in order.
 ///

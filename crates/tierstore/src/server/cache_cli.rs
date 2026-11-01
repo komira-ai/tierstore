@@ -57,7 +57,7 @@ use super::cli::{
 };
 use super::config_cache::CacheSettings;
 use super::front::{InvalidFlags, server_config};
-use super::listen::{joined, local_addrs};
+use super::listen::{LoopbackBind, bind, bind_set, joined, local_addrs};
 use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
@@ -69,6 +69,22 @@ const PASS_INTERVAL: Duration = Duration::from_secs(10);
 /// How often a cache that does not hold the lock of its directory tries it again, and one that
 /// holds it checks that the lock file is still the file at the path.
 const LOCK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Binds the S3 front of a build node: every configured address, then the loopback sockets that
+/// [`bind_set`] adds because a local cache is defined.
+///
+/// # Errors
+/// A configured address that cannot be bound (named), or a loopback socket that cannot ([`LoopbackBind`]).
+fn bind_cache_s3(
+    configured: &[std::net::SocketAddr],
+) -> Result<Vec<tokio::net::TcpListener>, Error> {
+    let mut listeners = bind_s3(configured)?;
+    for addr in &bind_set(configured, true)[configured.len()..] {
+        let socket = bind(*addr).map_err(|why| LoopbackBind { addr: *addr, why })?;
+        listeners.push(socket);
+    }
+    Ok(listeners)
+}
 
 /// Asks the upstream a HEAD of a key that is not there: any answer but 404 is a problem.
 async fn reach(upstream: &dyn Backend, run: &str, spec: &str) -> Result<(), Error> {
@@ -227,7 +243,7 @@ pub(super) async fn serve_cache(
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    let listeners = bind_s3(&settings.front.listen)?;
+    let listeners = bind_cache_s3(&settings.front.listen)?;
     let oci = bind_oci(oci, backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     // After the ready: the sweep is the one thing of the self-test that is not a gate.
