@@ -137,6 +137,8 @@ rustix = { workspace = true, features = ["process"] }
 # runs over the workspace that build them.
 tierstore = { workspace = true, features = ["server"] }
 tokio = { workspace = true, features = ["io-util", "macros", "test-util"] }
+# Reads the updater declaration of tests/packaging.rs as a table, beside the hook's own parser.
+toml.workspace = true
 
 [lints]
 workspace = true

@@ -1,0 +1,27 @@
+// polkit: what tierstore's update hook may ask of systemd. The hook runs as tierstore-update
+// (packaging/tierstore-update.conf), never as root, and starts and stops the two slot units of
+// the declaration's hook.units and nothing else: tierstore@9301.service and
+// tierstore@9302.service. This rule grants org.freedesktop.systemd1.manage-units for those two
+// units and the verbs start and stop, and nothing more. It grants no right over unit files
+// (enable, disable, mask): systemd does not name the unit when it asks for that right, so a
+// grant of it would reach every unit of the host. The slots are never enabled; the boot entry
+// (the declaration's boot = "restore") starts the one slot the hook's record names.
+//
+// Any other request of this account is left to polkit's other rules and the action's defaults,
+// which give a system account with no session nothing.
+polkit.addRule(function (action, subject) {
+    if (subject.user !== "tierstore-update") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return polkit.Result.NOT_HANDLED;
+    }
+    var unit = action.lookup("unit");
+    var verb = action.lookup("verb");
+    var units = ["tierstore@9301.service", "tierstore@9302.service"];
+    var verbs = ["start", "stop"];
+    if (units.indexOf(unit) >= 0 && verbs.indexOf(verb) >= 0) {
+        return polkit.Result.YES;
+    }
+    return polkit.Result.NOT_HANDLED;
+});
