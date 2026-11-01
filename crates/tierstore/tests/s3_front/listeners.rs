@@ -2,6 +2,7 @@
 //! the binary.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use reqwest::Client;
@@ -147,4 +148,41 @@ async fn the_start_line_names_every_address() {
     }
     running.signal(Signal::TERM);
     assert_eq!(running.exit_code().await, Some(0));
+}
+
+/// Asserts that a start given the wildcard of both families on one port, for `--listen` and for
+/// `--oci-listen`, is refused when the IPv4 one is taken, and is never ready: the refusal names
+/// `0.0.0.0:P`, the address that is taken, so the IPv6 socket on that port, asked first, was
+/// bound (`IPV6_V6ONLY`; without it the refusal would name `[::]:P`, its socket holding the IPv4
+/// port too). It would catch a start that serves on one family when the other cannot be bound,
+/// which refuses the redirected connections of the other.
+#[tokio::test]
+async fn a_start_that_cannot_bind_both_wildcards_is_refused() {
+    // A host without IPv6 cannot have the two wildcards of a port: the test says so on stderr,
+    // with the reason the system gave, and asserts nothing.
+    if let Err(why) = std::net::TcpListener::bind("[::1]:0") {
+        eprintln!("skipped: this host has no IPv6 loopback ({why}); there is no [::]:P to bind");
+        return;
+    }
+    let files = Files::new("listeners-both");
+    let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let (v6, v4) = (format!("[::]:{port}"), format!("0.0.0.0:{port}"));
+    for flag in ["--listen", "--oci-listen"] {
+        let words = [
+            "--drain-lb-wait",
+            "50ms",
+            flag,
+            v6.as_str(),
+            flag,
+            v4.as_str(),
+        ];
+        let cli = parse(files.flags(&words));
+        let ready = AtomicBool::new(false);
+        let told = |_: Addresses| ready.store(true, Ordering::SeqCst);
+        let refused = run_serving(&cli, async {}, told).await.err();
+        let why = refused.expect("a refused start").to_string();
+        assert!(why.starts_with(&format!("binding {v4}: ")), "{flag}: {why}");
+        assert!(!ready.load(Ordering::SeqCst), "{flag}");
+    }
 }
