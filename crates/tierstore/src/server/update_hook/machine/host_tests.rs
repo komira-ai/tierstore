@@ -261,11 +261,7 @@ fn a_declaration_in_trusted_directories_is_read() {
     let runner = FakeRunner::replying(vec![]);
     for bits in [0o755, 0o700, 0o750] {
         fs::set_permissions(root.join("etc"), fs::Permissions::from_mode(bits)).unwrap();
-        fs::set_permissions(
-            root.join("etc/updater.d"),
-            fs::Permissions::from_mode(bits),
-        )
-        .unwrap();
+        fs::set_permissions(root.join("etc/updater.d"), fs::Permissions::from_mode(bits)).unwrap();
         assert!(host(&root, &runner).declaration().is_ok(), "{bits:o}");
     }
 }
@@ -303,7 +299,11 @@ fn a_declaration_in_a_directory_others_can_write_is_refused() {
 fn a_declaration_behind_a_linked_directory_is_refused() {
     for dir in ["etc/updater.d", "etc"] {
         let (_guard, root) = scratch("host-parents-link");
-        write(&root, "real/etc/updater.d/tierstore.toml", "state_dir = \"/x\"\n");
+        write(
+            &root,
+            "real/etc/updater.d/tierstore.toml",
+            "state_dir = \"/x\"\n",
+        );
         match dir {
             "etc" => symlink(root.join("real/etc"), root.join("etc")).unwrap(),
             _ => {
@@ -337,6 +337,23 @@ fn a_declaration_in_a_directory_of_another_owner_is_refused() {
             me(),
             me() + 1
         )),
+        "{text}"
+    );
+}
+
+/// Asserts that a root that is not a directory, and a `/etc` that is a file, are failures of the
+/// host port that say the declaration cannot be read, and that a missing `/etc` names the path.
+#[test]
+fn a_root_or_parent_that_cannot_be_opened_is_a_failure() {
+    let (_guard, root) = scratch("host-parents-missing");
+    let runner = FakeRunner::replying(vec![]);
+    let text = message(host(&root.join("nope"), &runner).declaration().unwrap_err());
+    assert!(text.contains("the host root"), "{text}");
+    fs::write(root.join("etc"), "").unwrap();
+    let text = message(host(&root, &runner).declaration().unwrap_err());
+    assert!(text.contains("cannot be read"), "{text}");
+    assert!(
+        text.contains(&format!("{}", root.join("etc").display())),
         "{text}"
     );
 }

@@ -361,7 +361,8 @@ fn membership(group: &str, passwd: &str) -> Result<(), String> {
 fn a_service_whose_primary_group_is_the_directorys_is_a_member() {
     let gid = my_group();
     let group = format!("tests:x:{gid}:\n");
-    let passwd = format!("root:x:0:0::/root:/bin/sh\n{SERVICE}:x:4242:{gid}::/:/usr/sbin/nologin\n");
+    let passwd =
+        format!("root:x:0:0::/root:/bin/sh\n{SERVICE}:x:4242:{gid}::/:/usr/sbin/nologin\n");
     assert_eq!(membership(&group, &passwd), Ok(()));
 }
 
@@ -401,6 +402,9 @@ fn a_service_with_no_passwd_entry_is_refused() {
         format!("junk\n{SERVICE}:x:4242:notanumber::/:/bin/sh\n"),
     ] {
         let text = membership(&group, &passwd).unwrap_err();
-        assert!(text.contains("is not a member of group"), "{passwd}: {text}");
+        assert!(
+            text.contains("is not a member of group"),
+            "{passwd}: {text}"
+        );
     }
 }
