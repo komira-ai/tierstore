@@ -3,9 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::testing::DECLARATION;
-use super::{
-    Declaration, Invalid, Marker, Mode, ModeReason, Params, Record, SCHEMA, check_params, validate,
-};
+use super::{Declaration, Invalid, Marker, Mode, Params, Record, SCHEMA, check_params, validate};
 
 fn decl() -> Declaration {
     Declaration::parse(DECLARATION).unwrap()
@@ -17,7 +15,6 @@ fn record(serving: u16, previous: Option<u16>, markers: &[Marker]) -> Record {
         serving,
         previous,
         mode: Mode::Handover,
-        mode_reason: None,
         markers: markers.iter().copied().collect::<BTreeSet<_>>(),
         boot_id: None,
         guard_placed: false,
@@ -43,20 +40,6 @@ fn the_records_the_steps_write_pass() {
         },
         record(9302, Some(9301), &[Swapped, Verified, Stopping]),
         record(9302, None, &[Swapped, Verified, Stopping]),
-        Record {
-            mode_reason: Some(ModeReason::HandoverCapable),
-            ..record(9302, Some(9301), &[])
-        },
-        Record {
-            mode: Mode::Restart,
-            mode_reason: Some(ModeReason::NotHandoverCapable),
-            ..record(9302, Some(9301), &[])
-        },
-        Record {
-            mode: Mode::Restart,
-            mode_reason: Some(ModeReason::DeclaredRestart),
-            ..record(9302, None, &[Swapped, Verified, Stopping])
-        },
     ] {
         assert_eq!(validate(&r, &d), Ok(()), "{r:?}");
     }
@@ -141,27 +124,6 @@ fn a_record_that_breaks_a_rule_is_refused() {
                 needs: "previous",
             },
         ),
-        (
-            Record {
-                mode_reason: Some(ModeReason::DeclaredRestart),
-                ..record(9302, Some(9301), &[])
-            },
-            Invalid::ModeReason {
-                reason: "declared_restart",
-                mode: "handover",
-            },
-        ),
-        (
-            Record {
-                mode: Mode::Restart,
-                mode_reason: Some(ModeReason::HandoverCapable),
-                ..record(9302, Some(9301), &[])
-            },
-            Invalid::ModeReason {
-                reason: "handover_capable",
-                mode: "restart",
-            },
-        ),
     ];
     for (r, why) in cases {
         assert_eq!(validate(&r, &d), Err(why), "{r:?}");
@@ -190,14 +152,6 @@ fn the_messages_name_what_is_wrong() {
         }
         .to_string(),
         "a is set but b is not"
-    );
-    assert_eq!(
-        Invalid::ModeReason {
-            reason: "declared_restart",
-            mode: "handover"
-        }
-        .to_string(),
-        "mode_reason declared_restart does not go with mode handover"
     );
 }
 

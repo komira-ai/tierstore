@@ -26,7 +26,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::plain::is_plain;
-use super::record::Mode;
 
 /// The key of the wait for the new instance to take the cache lock.
 pub const PROMOTION_BOUND_KEY: &str = "promotion_bound_secs";
@@ -111,9 +110,9 @@ pub struct Params {
     pub staged_release: PathBuf,
     /// The version being installed.
     pub target_version: String,
-    /// The mode the declaration forces: [`Mode::Restart`], or `None` when `prepare` chooses by
-    /// the capabilities of the two releases.
-    pub mode: Option<Mode>,
+    /// Whether the declaration says `mode = "restart"`: `prepare` then chooses a restart whatever
+    /// the capabilities of the two releases; otherwise they choose.
+    pub declared_restart: bool,
 }
 
 impl Params {
@@ -162,9 +161,9 @@ impl Params {
         if !is_version(&target_version) {
             return Err(ParamsError::BadVersion(TARGET_VERSION_KEY));
         }
-        let mode = match table.get(MODE_KEY) {
-            None => None,
-            Some(toml::Value::String(text)) if text == RESTART_MODE => Some(Mode::Restart),
+        let declared_restart = match table.get(MODE_KEY) {
+            None => false,
+            Some(toml::Value::String(text)) if text == RESTART_MODE => true,
             Some(_) => return Err(ParamsError::BadMode(MODE_KEY)),
         };
         Ok(Params {
@@ -174,7 +173,7 @@ impl Params {
             promotion_ceiling_secs: number(&table, PROMOTION_CEILING_KEY)?,
             staged_release,
             target_version,
-            mode,
+            declared_restart,
         })
     }
 }

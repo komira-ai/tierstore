@@ -15,19 +15,22 @@ fn the_pages_describe_the_mode_key() {
         "`mode = \"restart\"`",
         "`\"restart\"` is the only value",
         "hot tier is a `dir:` tier",
-        "`declared_restart`",
+        "mode restart (declared_restart)",
         "must be the string \"restart\", the one mode it can force",
         "`--root <dir>`",
         "`--nft <program>`",
         "`--systemctl <program>`",
         "`--root-uid <uid>`",
+        "`--public-port <port>`",
+        "`--poll-interval-ms <ms>`",
+        "`hook-conformance`",
     ] {
         assert!(PAGE.contains(needle), "update-hook.md lacks {needle}");
     }
     for needle in [
         "`mode = \"restart\"` records `mode=restart` whatever the capabilities say",
         "packaging sets `mode = \"restart\"` in `[hook.params]`",
-        "`mode_reason`",
+        "`declared_restart`",
     ] {
         assert!(DESIGN.contains(needle), "the design lacks {needle}");
     }

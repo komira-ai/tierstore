@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use tierstore::server::update_hook::{GUARD_TABLE, Marker, Mode, ModeReason, build_of};
+use tierstore::server::update_hook::{GUARD_TABLE, Marker, Mode, build_of};
 
 use crate::rig::{
     APPLY, BOOT, DELETE_GUARD, LIST_FORWARD, LIST_GUARD, NEW_VERSION, OLD_VERSION, Rig, Setup,
@@ -29,13 +29,15 @@ pub fn kinds(effects: &[String]) -> Vec<String> {
 /// Asserts that the public port is answered, by the build gauge of `/metricz`, by the instance
 /// on `slot` running `version`, and that it says `read-write`.
 pub fn public_answers(rig: &Rig, slot: u16, version: &str) {
-    let (status, body) = rig.get(9300, "/metricz").expect("an answer on 9300");
+    let (status, body) = rig
+        .get(rig.public, "/metricz")
+        .expect("an answer on the public port");
     assert_eq!(status, 200);
     let build = build_of(&body).expect("a build gauge");
     assert_eq!(build.slot, Some(slot), "{body}");
     assert_eq!(build.version, version, "{body}");
     assert_eq!(
-        rig.get(9300, "/readyz"),
+        rig.get(rig.public, "/readyz"),
         Some((200, "ready read-write\n".to_owned()))
     );
 }
@@ -65,18 +67,8 @@ fn a_handover_runs_its_steps_against_the_fakes_and_ends_on_the_new_slot() {
     assert_eq!(rig.calls(), [LIST_GUARD, APPLY, start(b).as_str()]);
     let record = rig.record();
     assert_eq!(
-        (
-            record.serving,
-            record.previous,
-            record.mode,
-            record.mode_reason
-        ),
-        (
-            b,
-            Some(a),
-            Mode::Handover,
-            Some(ModeReason::HandoverCapable)
-        )
+        (record.serving, record.previous, record.mode),
+        (b, Some(a), Mode::Handover)
     );
     assert!(record.markers.is_empty() && record.guard_placed);
     let machine = rig.machine();
@@ -155,13 +147,7 @@ fn a_handover_runs_its_steps_against_the_fakes_and_ends_on_the_new_slot() {
 /// instances of a release without the lock running side by side.
 #[test]
 fn a_restart_stops_the_old_unit_before_the_new_one_starts() {
-    let rig = Rig::new(
-        "hook-conformance-restart",
-        Setup {
-            old_handover: false,
-            ..Setup::handover()
-        },
-    );
+    let rig = Rig::new("hook-conformance-restart", Setup::restart());
     let (a, b) = (rig.a, rig.b);
     let ran = rig.step("prepare");
     ran.ok();
@@ -281,8 +267,6 @@ fn restore_starts_the_slot_the_record_names_after_a_reboot() {
     assert_eq!(rig.effects().len(), effects);
     rig.step("rollback").ok();
     assert_eq!(rig.machine(), before);
-    // The next host serves the public port too, whose lock this one holds until it is dropped.
-    drop(rig);
 
     let rig = Rig::new("hook-conformance-restore-after", Setup::handover());
     for step in ["prepare", "cutover", "verify", "cleanup"] {

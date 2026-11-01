@@ -83,7 +83,6 @@ fn the_probe_reads_the_slot_from_the_body_the_server_renders() {
     rig.step("cutover").ok();
     assert_eq!(rig.redirect(), Some(b));
     assert!(rig.record().markers.contains(&Marker::Swapped));
-    drop(rig);
 
     let rig = Rig::new("hook-conformance-metricz-no-slot", Setup::handover());
     let (a2, b2) = (rig.a, rig.b);

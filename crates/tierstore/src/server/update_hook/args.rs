@@ -5,15 +5,20 @@
 //! `[hook.params]` table, which the five steps need and `restore` (the boot entry, run before
 //! any update) does not take. Flags only: no value comes from the environment.
 //!
-//! Four more flags say where the host is ([`HostArgs`]): `--root`, `--root-uid`, `--nft` and
-//! `--systemctl`. A host gives none of them and gets the defaults; a test gives a scratch root
-//! and fake programs. They may come before or after the step, as `hook_args` or after it.
+//! A build with the `hook-conformance` feature, which only this crate's own tests turn on, takes
+//! six more flags that say where the host is ([`HostArgs`]): `--root`, `--root-uid`, `--nft`,
+//! `--systemctl`, `--public-port` and `--poll-interval-ms`. They let a test run the real binary
+//! against a scratch root, fake programs and its own ports. A release has none of them: there the
+//! host is always `/`, root's, `/usr/sbin/nft`, `/usr/bin/systemctl`, port 9300 and a poll a
+//! second, and the words are refused like any other unexpected argument.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
+use super::declaration::PUBLIC_PORT;
 use super::machine::{NFT_PROGRAM, SYSTEMCTL_PROGRAM};
 use super::plain::is_plain;
 
@@ -106,12 +111,12 @@ pub enum ArgsError {
     /// A flag of the host given twice.
     #[error("{0} given twice")]
     DuplicateFlag(&'static str),
-    /// `--root`, `--nft` or `--systemctl` is not an absolute path of plain components.
-    #[error("{0} must be an absolute path of plain components")]
+    /// `--root`, `--nft` or `--systemctl` is not an absolute UTF-8 path of plain components.
+    #[error("{0} must be an absolute UTF-8 path of plain components")]
     NotPlain(&'static str),
-    /// `--root-uid` is not a user id.
-    #[error("--root-uid must be a user id, a whole number")]
-    BadUid,
+    /// `--root-uid`, `--public-port` or `--poll-interval-ms` is not a number in its range.
+    #[error("{0} must be a whole number in its range")]
+    NotNumber(&'static str),
 }
 
 /// The root the host's files are read under.
@@ -120,20 +125,37 @@ pub const ROOT_FLAG: &str = "--root";
 pub const ROOT_UID_FLAG: &str = "--root-uid";
 /// The `nft` program.
 pub const NFT_FLAG: &str = "--nft";
-/// The `systemctl` program.
+/// The `systemctl` program. A release reads it in no list: it takes none of these flags.
+#[cfg_attr(not(feature = "hook-conformance"), allow(dead_code))]
 pub const SYSTEMCTL_FLAG: &str = "--systemctl";
-const HOST_FLAGS: [&str; 4] = [ROOT_FLAG, ROOT_UID_FLAG, NFT_FLAG, SYSTEMCTL_FLAG];
+/// The public port.
+pub const PUBLIC_PORT_FLAG: &str = "--public-port";
+/// The time between two looks at an instance, in milliseconds.
+pub const POLL_FLAG: &str = "--poll-interval-ms";
+/// The flags of the host this build takes: all six in a conformance build, none in a release.
+#[cfg(feature = "hook-conformance")]
+const HOST_FLAGS: [&str; 6] = [
+    ROOT_FLAG,
+    ROOT_UID_FLAG,
+    NFT_FLAG,
+    SYSTEMCTL_FLAG,
+    PUBLIC_PORT_FLAG,
+    POLL_FLAG,
+];
+#[cfg(not(feature = "hook-conformance"))]
+const HOST_FLAGS: [&str; 0] = [];
 /// The user that must own the declaration and a staged release's binary unless `--root-uid`
 /// says otherwise: root, since both are the updater's.
 pub const ROOT_UID: u32 = 0;
 
-/// Where the hook finds the host it acts on. A host gives none of the flags: the root is `/`, the
-/// declaration and a staged release's binary must be root's (uid 0), and the programs are
-/// `/usr/sbin/nft` and `/usr/bin/systemctl`. A conformance test gives a scratch root, its own
-/// user id and fake programs, and runs the real binary there.
+/// Where the hook finds the host it acts on. A release always has the defaults: the root is `/`,
+/// the declaration and a staged release's binary must be root's (uid 0), the programs are
+/// `/usr/sbin/nft` and `/usr/bin/systemctl`, the public port is 9300 and a poll waits a second.
+/// A conformance build lets a test set each, to run the real binary against a scratch host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostArgs {
-    /// `--root`: the root the declaration, `etc/group` and `proc` are read under.
+    /// `--root`: the root the declaration, `etc/group`, `etc/passwd`, `proc` and the state
+    /// directory are read under.
     pub root: PathBuf,
     /// `--root-uid`: the user that must own the declaration and the binary of a staged release.
     pub root_uid: u32,
@@ -141,6 +163,11 @@ pub struct HostArgs {
     pub nft: PathBuf,
     /// `--systemctl`: the `systemctl` program.
     pub systemctl: PathBuf,
+    /// `--public-port`: the port clients call, which the redirect sends to the serving slot.
+    pub public_port: u16,
+    /// `--poll-interval-ms`: what a step waits between two looks at an instance; `None` is the
+    /// steps' own interval, a second.
+    pub poll: Option<Duration>,
 }
 
 impl Default for HostArgs {
@@ -150,28 +177,48 @@ impl Default for HostArgs {
             root_uid: ROOT_UID,
             nft: PathBuf::from(NFT_PROGRAM),
             systemctl: PathBuf::from(SYSTEMCTL_PROGRAM),
+            public_port: PUBLIC_PORT,
+            poll: None,
         }
     }
+}
+
+/// `value` as a number of type `T`; `NotNumber(flag)` when it is not one, or out of range.
+fn number<T: FromStr>(flag: &'static str, value: &OsString) -> Result<T, ArgsError> {
+    value
+        .to_str()
+        .and_then(|text| text.parse().ok())
+        .ok_or(ArgsError::NotNumber(flag))
 }
 
 impl HostArgs {
     /// Sets the value of `flag`, one of [`HOST_FLAGS`].
     fn set(&mut self, flag: &'static str, value: OsString) -> Result<(), ArgsError> {
-        if flag == ROOT_UID_FLAG {
-            self.root_uid = value
-                .to_str()
-                .and_then(|text| text.parse().ok())
-                .ok_or(ArgsError::BadUid)?;
-            return Ok(());
-        }
-        let path = PathBuf::from(value);
-        if !is_plain(&path) {
-            return Err(ArgsError::NotPlain(flag));
-        }
         match flag {
-            ROOT_FLAG => self.root = path,
-            NFT_FLAG => self.nft = path,
-            _ => self.systemctl = path,
+            ROOT_UID_FLAG => self.root_uid = number(flag, &value)?,
+            PUBLIC_PORT_FLAG => {
+                self.public_port = number(flag, &value)?;
+                if self.public_port == 0 {
+                    return Err(ArgsError::NotNumber(flag));
+                }
+            }
+            POLL_FLAG => self.poll = Some(Duration::from_millis(number(flag, &value)?)),
+            _ => {
+                // A path that is not UTF-8 is refused rather than spelt over: the programs are
+                // run by a name that is text.
+                let Some(text) = value.to_str() else {
+                    return Err(ArgsError::NotPlain(flag));
+                };
+                let path = PathBuf::from(text);
+                if !is_plain(&path) {
+                    return Err(ArgsError::NotPlain(flag));
+                }
+                match flag {
+                    ROOT_FLAG => self.root = path,
+                    NFT_FLAG => self.nft = path,
+                    _ => self.systemctl = path,
+                }
+            }
         }
         Ok(())
     }

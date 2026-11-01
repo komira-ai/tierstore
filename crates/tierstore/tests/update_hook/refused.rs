@@ -2,12 +2,12 @@
 //! record, a refused declaration, a declaration the default owner would not trust, a unit start
 //! that systemd skipped, and the params key that forces a restart.
 
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
-use tierstore::server::update_hook::{Mode, ModeReason, Record};
+use tierstore::server::update_hook::{Mode, Record};
 
 use crate::flows::kinds;
-use crate::rig::{APPLY, LIST_GUARD, Rig, Setup, start, uid};
+use crate::rig::{APPLY, DECLARED_STATE, LIST_GUARD, Rig, Setup, start, uid};
 use crate::stub::SlotScript;
 
 /// Every step and the boot entry.
@@ -24,7 +24,7 @@ const ALL: [&str; 6] = [
 /// would catch a hook that takes a port, a unit or a mode from a record it should not trust.
 #[test]
 fn a_forged_or_foreign_record_is_refused_with_no_call() {
-    let rig = Rig::new("hook-conformance-forged", Setup::private());
+    let rig = Rig::new("hook-conformance-forged", Setup::handover());
     let (a, b) = (rig.a, rig.b);
     let before = rig.machine();
     let forged = [
@@ -36,7 +36,7 @@ fn a_forged_or_foreign_record_is_refused_with_no_call() {
         format!(r#"{{"schema":1,"serving":{a},"previous":{a},"mode":"handover","markers":[]}}"#),
         format!(r#"{{"schema":2,"serving":{a},"previous":null,"mode":"handover","markers":[]}}"#),
         format!(
-            r#"{{"schema":1,"serving":{b},"previous":{a},"mode":"handover","mode_reason":"declared_restart","markers":[]}}"#
+            r#"{{"schema":1,"serving":{b},"previous":{a},"mode":"handover","markers":[],"mode_reason":"declared_restart"}}"#
         ),
         "not json".to_owned(),
     ];
@@ -77,9 +77,9 @@ fn a_forged_or_foreign_record_is_refused_with_no_call() {
 /// a declaration it refused, or trusts the declaration's owner by default.
 #[test]
 fn a_refused_declaration_is_exit_1_with_no_call() {
-    let rig = Rig::new("hook-conformance-declaration", Setup::private());
+    let rig = Rig::new("hook-conformance-declaration", Setup::handover());
     let (a, b) = (rig.a, rig.b);
-    let good = rig.declaration_text(&rig.declared_state_dir());
+    let good = rig.declaration_text(DECLARED_STATE);
     let one_port = good.replace(&format!("[{a}, {b}]"), &format!("[{a}]"));
     let cases = [
         (
@@ -108,9 +108,34 @@ fn a_refused_declaration_is_exit_1_with_no_call() {
         let ran = rig.hook_trusting(None, &["restore"]);
         ran.fails("host_failed");
         assert!(ran.detail().contains("is not trusted"), "{ran:?}");
-        assert!(rig.calls().is_empty());
     }
+    let ran = rig.hook_trusting(Some(uid() + 1), &["restore"]);
+    ran.fails("host_failed");
+    assert!(ran.detail().contains("is not trusted"), "{ran:?}");
+    assert!(rig.calls().is_empty());
     rig.step("restore").ok();
+}
+
+/// Asserts that a staged release whose binary a group may write is refused by `prepare`
+/// (`host_failed`, the binary named) before any call to the fakes, whatever `--root-uid` says:
+/// the flag names who must own the files, it does not loosen what they must be. It would catch
+/// a hook that runs a binary the service could have replaced.
+#[test]
+fn a_release_binary_others_could_write_is_refused() {
+    let rig = Rig::new("hook-conformance-release-mode", Setup::handover());
+    let binary = rig.new.join("tierstore");
+    let copy = rig.new.join("copy");
+    std::fs::copy(&binary, &copy).unwrap();
+    std::fs::rename(&copy, &binary).unwrap();
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let ran = rig.step("prepare");
+    ran.fails("host_failed");
+    assert!(
+        ran.detail().contains("can be written by a group or others"),
+        "{ran:?}"
+    );
+    assert!(rig.calls().is_empty(), "{:?}", rig.calls());
+    assert_eq!(rig.record(), Record::idle(rig.a));
 }
 
 /// Asserts that a start of the idle slot whose `ConditionPathExists=` fails, which `systemctl`
@@ -120,9 +145,10 @@ fn a_refused_declaration_is_exit_1_with_no_call() {
 /// the old slot. It would catch a `prepare` that trusts the exit status of the start.
 #[test]
 fn a_start_whose_condition_fails_is_not_taken_for_a_running_instance() {
-    let rig = Rig::new("hook-conformance-condition", Setup::private());
+    let rig = Rig::new("hook-conformance-condition", Setup::handover());
     let (a, b) = (rig.a, rig.b);
-    rig.set_condition(&format!("{}/misdeclared/%i", rig.root.display()));
+    rig.world
+        .set_condition(&format!("{}/misdeclared/%i", rig.root.display()));
     let ran = rig.step("prepare");
     ran.fails("not_ready");
     assert_eq!(ran.line["class"], "release");
@@ -142,7 +168,7 @@ fn a_start_whose_condition_fails_is_not_taken_for_a_running_instance() {
 /// a declaration that cannot keep a `dir:` hot tier out of a handover.
 #[test]
 fn a_declared_restart_is_chosen_though_both_releases_can_hand_over() {
-    let rig = Rig::new("hook-conformance-declared", Setup::private());
+    let rig = Rig::new("hook-conformance-declared", Setup::handover());
     let (a, b) = (rig.a, rig.b);
     let ran = rig.step_with("prepare", "mode = \"restart\"\n");
     ran.ok();
@@ -152,13 +178,9 @@ fn a_declared_restart_is_chosen_though_both_releases_can_hand_over() {
     );
     assert_eq!(rig.calls(), [LIST_GUARD, APPLY]);
     assert_eq!(rig.running(), [a]);
-    let record = rig.record();
-    assert_eq!(
-        (record.mode, record.mode_reason),
-        (Mode::Restart, Some(ModeReason::DeclaredRestart))
-    );
+    assert_eq!(rig.record().mode, Mode::Restart);
 
-    let rig = Rig::new("hook-conformance-capable", Setup::private());
+    let rig = Rig::new("hook-conformance-capable", Setup::handover());
     let (a, b) = (rig.a, rig.b);
     for extra in [
         "mode = \"handover\"\n",
@@ -190,7 +212,7 @@ fn a_declared_restart_is_chosen_though_both_releases_can_hand_over() {
 /// catch a `prepare` that reads only the status of `/readyz`, not the mode.
 #[test]
 fn a_new_instance_that_says_read_write_beside_the_old_one_fails_prepare() {
-    let rig = Rig::new("hook-conformance-two-writers", Setup::private());
+    let rig = Rig::new("hook-conformance-two-writers", Setup::handover());
     rig.script(
         rig.b,
         SlotScript {

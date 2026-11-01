@@ -66,6 +66,8 @@ impl Scratch {
             declaration_owner: self.owner(),
             nft: PathBuf::from("/usr/sbin/nft"),
             systemctl: PathBuf::from("/usr/bin/systemctl"),
+            public_port: 9300,
+            poll: None,
             runner,
         }
     }
@@ -256,11 +258,12 @@ fn the_system_config_expects_the_hooks_own_user_to_own_the_state_directory() {
     assert_eq!(config.root, Path::new("/"));
     assert_eq!(config.nft, Path::new("/usr/sbin/nft"));
     assert_eq!(config.systemctl, Path::new("/usr/bin/systemctl"));
+    assert_eq!((config.public_port, config.poll), (9300, None));
 }
 
 /// Asserts that the flags of the host reach the machine's configuration: the root, the user that
-/// must own the declaration and a staged release, and the two programs, which the ports then
-/// call. It would catch a flag that is parsed and dropped, which would leave a conformance test
+/// must own the declaration and a staged release, the public port the rules name, the poll, and
+/// the two programs, which the ports then call. It would catch a flag that is parsed and dropped, which would leave a conformance test
 /// running the host's own `nft`.
 #[test]
 fn the_flags_of_the_host_reach_the_configuration_and_the_programs() {
@@ -277,6 +280,10 @@ fn the_flags_of_the_host_reach_the_configuration_and_the_programs() {
         "/opt/fake/nft",
         "--systemctl",
         "/opt/fake/systemctl",
+        "--public-port",
+        "19300",
+        "--poll-interval-ms",
+        "1",
     ]
     .map(std::ffi::OsString::from);
     let invocation = Invocation::parse(words).unwrap();
@@ -287,9 +294,21 @@ fn the_flags_of_the_host_reach_the_configuration_and_the_programs() {
         (config.release_owner, config.declaration_owner),
         (host.owner(), host.owner())
     );
+    assert_eq!(
+        (config.public_port, config.poll),
+        (19300, Some(std::time::Duration::from_millis(1)))
+    );
     let done = run_on(&config, &invocation, None);
     assert_eq!(done.outcome, Outcome::Success, "{done:?}");
-    let programs: Vec<String> = runner.calls().into_iter().map(|c| c.program).collect();
+    let calls = runner.calls();
+    let guard = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
+    assert!(guard.contains("ct original proto-dst 19300"), "{guard}");
+    let forward = String::from_utf8(calls[1].stdin.clone().unwrap()).unwrap();
+    assert!(
+        forward.contains("tcp dport 19300 redirect to :9301"),
+        "{forward}"
+    );
+    let programs: Vec<String> = calls.into_iter().map(|c| c.program).collect();
     assert_eq!(
         programs,
         ["/opt/fake/nft", "/opt/fake/nft", "/opt/fake/systemctl"]

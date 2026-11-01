@@ -21,16 +21,18 @@ tierstore update-hook restore
 
 The verb is answered before the server's flags are read. `--params` is the file the updater writes from the declaration's `[hook.params]` table and its own reserved keys. `restore` is the boot entry: it takes no file, because no update is running when it is called. The staged release given to `prepare` must be the one the params file names.
 
-Four more flags say where the host is, before or after the step, for every step and `restore`. A host gives none of them; they exist so that a test can run the real binary against a scratch root and fake programs:
+A release takes no other flag. A build with the `hook-conformance` feature, which only the crate's own tests turn on, takes six more, before or after the step, for every step and `restore`, so that a test can run the real binary against a scratch host, fake programs and ports of its own. In a release each value is the default below, and the words are refused as unexpected arguments:
 
 | flag | default | what it sets |
 |---|---|---|
-| `--root <dir>` | `/` | the root the declaration, `etc/group` and `proc/sys` are read under |
+| `--root <dir>` | `/` | the root the declaration, `etc/group`, `etc/passwd`, `proc/sys` and the state directory are read under |
 | `--root-uid <uid>` | `0` | the user that must own the declaration and the binary of a staged release |
 | `--nft <program>` | `/usr/sbin/nft` | the `nft` program |
 | `--systemctl <program>` | `/usr/bin/systemctl` | the `systemctl` program |
+| `--public-port <port>` | `9300` | the public port the redirect and the guard name and the probe asks |
+| `--poll-interval-ms <ms>` | `1000` | what a step waits between two looks at an instance |
 
-Each path must be absolute, with no `.` or `..` and no doubled or trailing slash, and each flag may be given once.
+Each path must be absolute UTF-8, with no `.` or `..` and no doubled or trailing slash; each number must be in its range (a port is not 0); each flag may be given once. A public port that is one of the declared slots is refused (`state_invalid`).
 
 ```message
 prepare needs the staged release directory
@@ -38,7 +40,8 @@ prepare needs the staged release directory
 unexpected argument <word>
 unknown step <word>
 <flag> needs a value
-<flag> must be an absolute path of plain components
+<flag> must be an absolute UTF-8 path of plain components
+<flag> must be a whole number in its range
 ```
 
 A command line or a params file that is refused runs no step; the words go to stderr, prefixed with the verb, and the step's last line is a failure.
@@ -61,7 +64,7 @@ params key <key> must be the string "restart", the one mode it can force
 
 ## The record
 
-The hook keeps one file, `state.json`, in the state directory of the declaration, and reads it through a validator before it makes any call to `nft`, `systemctl` or the slot links. It holds `schema`, `serving`, `previous`, `mode`, `mode_reason`, `markers`, `boot_id` and `guard_placed`:
+The hook keeps one file, `state.json`, in the state directory of the declaration, and reads it through a validator before it makes any call to `nft`, `systemctl` or the slot links. It holds `schema`, `serving`, `previous`, `mode`, `markers`, `boot_id` and `guard_placed`:
 
 ```json
 {"schema":1,"serving":9302,"previous":9301,"mode":"handover","markers":["swapped"]}
@@ -69,7 +72,7 @@ The hook keeps one file, `state.json`, in the state directory of the declaration
 
 - `serving` is the private port that serves once the update is through. `prepare` sets it to the idle port, so while an update is in flight it names the new instance. With no update in flight it names the one instance.
 - `previous` is the port of the old instance while an update is in flight, and absent otherwise.
-- `mode` is `handover` or `restart`, and `mode_reason` says why `prepare` chose it: `handover_capable` (both releases list `handover-v1`), `not_handover_capable` (one does not) or `declared_restart` (the params say `mode = "restart"`). A `mode_reason` that names the other mode is refused. A record written before `mode_reason` existed reads with it absent.
+- `mode` is `handover` or `restart`. Why `prepare` chose it is in that step's detail, not in the record (see `prepare` below), so that a hook of an earlier release, which refuses a field it does not know, still reads every record this one writes.
 - `boot_id` is the boot of the host at the last successful `verify`, and `guard_placed` says that this update loaded the guard table (it was not there before). A record written without them reads with `boot_id` absent and `guard_placed` false.
 - `markers` are `swapped` (the redirect names the new instance and it answers through the public port), `verified` (a `verify` succeeded) and `stopping` (`cleanup` has begun to retire the old instance). Each needs the one before it. `swapped` and `verified` are written after what they name has been done; `stopping` is written before `cleanup` removes a link or stops a unit, so a crash at any later point leaves the commit on record. After `cleanup` the three stay, with `previous` gone, so that a later `verify` knows it is watching a promotion; the next `prepare` starts afresh.
 
@@ -124,14 +127,14 @@ there is no record
 
 A step reads `/etc/updater.d/tierstore.toml` first. Its `state_dir` is where the lock, `state.json` and the slot links are; a declaration that is missing, cannot be read or is not trusted (each directory above it under the root, `/etc` and `/etc/updater.d`, is opened without following a link and must be owned by root with no group or other write bit, and the file, opened without following a link, must be a regular file owned by root with no group or other write bit) is `host_failed`, one that is refused is `state_invalid`, and in both nothing else has been touched. The step then takes the lock of that directory, reads the declaration again, and goes on as described above. Each port of the steps has an implementation in `update_hook::machine`: The declaration's `uid` names the service account (required); `state_dir` is refused when it has whitespace or a control character anywhere, is not absolute, plain and without a trailing slash, or has a component that starts with `-`, `+` or `!` (which systemd reads as a prefix), and when it is the root, `/var`, `/var/lib`, the updater's own `/var/lib/updater` or `/var/lib/updater/hooks`, or `/etc`, `/usr`, `/proc`, `/sys`, `/dev`, `/run`, `/boot` or another system directory, the service's `/var/lib/tierstore` or a cache under `/var/cache`, the places of people and temporary files and logs (`/root`, `/home`, `/tmp`, `/var/tmp`, `/var/log`, `/opt`), or anything under them. The state directory is read under the host's root, as the other files are.
 
-- `nft` is run with an argument vector and no shell, never `sh -c`. The program is `/usr/sbin/nft` unless `--nft` names another. `nft -f -` is fed the rule text on standard input. A table is absent when `nft list table inet <name>` or `nft delete table inet <name>` exits non-zero with `No such file or directory` on standard error; absence is `None` for the listing and fine for the delete, and any other failure is an error. A call is killed after 10 seconds.
-- `/usr/bin/systemctl` (or the program `--systemctl` names): `systemctl start -- <unit>` (killed after 60 seconds) and `systemctl stop -- <unit>` (after 300 seconds, since it returns when the drain is over); a non-zero exit, a signal or a timeout is an error. systemd.unit(5) says that a failing `ConditionPathExists=` skips the start and does not fail the unit; it does not state the exit status of `systemctl start` then, which is 0 on the systemd versions it was written against. A start skipped that way is therefore not taken for a running instance: `prepare` and a restart-mode `cutover` wait for `/readyz` to answer, and fail with `not_ready` when it never does.
+- `nft` is run with an argument vector and no shell, never `sh -c`. The program is `/usr/sbin/nft`. `nft -f -` is fed the rule text on standard input. A table is absent when `nft list table inet <name>` or `nft delete table inet <name>` exits non-zero with `No such file or directory` on standard error; absence is `None` for the listing and fine for the delete, and any other failure is an error. A call is killed after 10 seconds.
+- `/usr/bin/systemctl start -- <unit>` (killed after 60 seconds) and `/usr/bin/systemctl stop -- <unit>` (after 300 seconds, since it returns when the drain is over); a non-zero exit, a signal or a timeout is an error. systemd.unit(5) says that a failing `ConditionPathExists=` skips the start and does not fail the unit; it does not state the exit status of `systemctl start` then, which is 0 on the systemd versions it was written against. A start skipped that way is therefore not taken for a running instance: `prepare` and a restart-mode `cutover` wait for `/readyz` to answer, and fail with `not_ready` when it never does.
 - The slot links are `<state_dir>/slots/<port>`, replaced by renaming a new link over the old one. A path there that is not a link is an error.
 - The instances are asked with a blocking `GET` on `127.0.0.1`, with a connect timeout of 2 seconds and a read timeout of 5. A status other than 200 is an answer. A chunked answer is refused.
 - The boot id is read from `/proc/sys/kernel/random/boot_id` and the connection-tracking values from `/proc/sys/net/netfilter/nf_conntrack_*`. The capabilities of a staged release are the lines that `<release>/tierstore --capabilities` prints, asked for at most 10 seconds; the binary is refused unless it is a regular file, not a link, owned by root (the updater's verified tree) and not writable by a group or others. A program the hook runs gets an empty environment but for a fixed `PATH` and `LC_ALL=C`. A binary that exits with status 2, the status of an argument it does not know, has none; any other failure to ask is an error.
 - The state directory is opened once, without following a link, and checked on that descriptor: a directory owned by the user and group the hook runs as (its own account, `tierstore-update`), with mode exactly 0750, and the declaration's `uid` (the service account) must be in that group, since the service reaches the slot links through the group: either its primary group (the `gid` field of its line in `/etc/passwd`) is that group, or it is listed among the group's members in `/etc/group`. Membership is read from those two files only, not through the name service switch (NSS, sssd, LDAP): the packaging's `sysusers` must create the account, and the group, in `/etc/passwd` and `/etc/group`. Every later open (the lock file, `state.json`, its temporary file, the `slots` directory, the renames and the syncs) is made relative to that descriptor. `state.json` is opened without following a link and must be a regular file owned by the hook's user that no group or others can write (0600 or 0640), on load and before a save replaces it. The lock is `flock` on the `lock` file, taken without waiting; `state.json` is written to a temporary file, synced, renamed over, and the directory synced. A mode is never repaired: what is not as required is refused (`state_io`).
 
-None of these values is set by the declaration or the params file; they are fixed in the hook, but for the root and the programs, which the flags of the command line may name. Nothing is read from the environment.
+None of these values is set by the declaration or the params file; they are fixed in a release (a conformance build's flags may name the root, the programs, the public port and the poll). Nothing is read from the environment.
 
 ## Not in a release yet
 

@@ -88,8 +88,9 @@ cannot be trusted is an operator's. The idle port is the other one of `serving`,
 **`prepare <artifact>`** (before anything visible). Check `tierstore --capabilities` of the staged release and of the one
 the `serving` slot links to: both must have `handover-v1`, else the hook records `mode=restart` and `cutover` does a plain
 restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). The params key
-`mode = "restart"` records `mode=restart` whatever the capabilities say (a `dir:` hot tier, section 6). The record keeps
-why, `mode_reason`: `handover_capable`, `not_handover_capable` or `declared_restart`, and the step's `detail` names both. Then load the guard table, before
+`mode = "restart"` records `mode=restart` whatever the capabilities say (a `dir:` hot tier, section 6). The step's
+`detail` names the mode and why (`handover_capable`, `not_handover_capable` or `declared_restart`); the record keeps
+the mode only, so that an earlier release's hook can still read it. Then load the guard table, before
 anything else is applied (it records whether the table was there before, and `guard_placed` once this update loaded it).
 Refuse with `75` (class `environment`: host not ready, nothing done) if the guard table cannot be loaded,
 `nf_conntrack_tcp_timeout_established` is not longer than the service's idle bound, or `nf_conntrack_count` is near

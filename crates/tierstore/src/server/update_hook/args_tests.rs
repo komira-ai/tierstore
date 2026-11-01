@@ -1,7 +1,9 @@
 //! The command line of the hook.
 
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
+use std::time::Duration;
 
 use super::{ArgsError, HostArgs, Invocation, Step};
 
@@ -87,10 +89,10 @@ fn a_wrong_command_line_is_refused() {
 }
 
 /// Asserts that without a flag of the host the host's own defaults hold (the root `/`, root's
-/// uid, `/usr/sbin/nft`, `/usr/bin/systemctl`), and that the four flags are read before the step
-/// (where the updater's `hook_args` go), after it, and with `restore`, whose other arguments are
-/// refused. It would catch a flag taken for the step or the artifact, or a default that is not
-/// the host's.
+/// uid, `/usr/sbin/nft`, `/usr/bin/systemctl`, port 9300, the steps' own poll), and that the six
+/// flags of a conformance build are read before the step (where the updater's `hook_args` go),
+/// after it, and with `restore`, whose other arguments are refused. It would catch a flag taken
+/// for the step or the artifact, or a default that is not the host's.
 #[test]
 fn the_flags_of_the_host_are_read_around_the_step() {
     let bare = parse(&["restore"]).unwrap();
@@ -99,6 +101,8 @@ fn the_flags_of_the_host_are_read_around_the_step() {
     assert_eq!(bare.host.root_uid, 0);
     assert_eq!(bare.host.nft, Path::new("/usr/sbin/nft"));
     assert_eq!(bare.host.systemctl, Path::new("/usr/bin/systemctl"));
+    assert_eq!(bare.host.public_port, 9300);
+    assert_eq!(bare.host.poll, None);
     let given = parse(&[
         "--root",
         "/scratch",
@@ -111,6 +115,10 @@ fn the_flags_of_the_host_are_read_around_the_step() {
         "/fake/nft",
         "--systemctl",
         "/fake/systemctl",
+        "--public-port",
+        "19300",
+        "--poll-interval-ms",
+        "1",
     ])
     .unwrap();
     assert_eq!(given.step, Step::Verify);
@@ -122,6 +130,8 @@ fn the_flags_of_the_host_are_read_around_the_step() {
             root_uid: 1000,
             nft: "/fake/nft".into(),
             systemctl: "/fake/systemctl".into(),
+            public_port: 19300,
+            poll: Some(Duration::from_millis(1)),
         }
     );
     let restore = parse(&["restore", "--root", "/scratch"]).unwrap();
@@ -143,11 +153,12 @@ fn the_flags_of_the_host_are_read_around_the_step() {
 }
 
 /// Asserts each refusal of a flag of the host, and its words. It would catch a hook that runs
-/// with a relative program (found through a search path), a root spelt with `..`, or a flag given
-/// twice of which one silently wins.
+/// with a relative program (found through a search path), a root spelt with `..`, a program
+/// path whose bytes are not text (which would be run under another name), a port of 0, or a flag
+/// given twice of which one silently wins.
 #[test]
 fn a_wrong_flag_of_the_host_is_refused() {
-    let cases: [(&[&str], ArgsError); 9] = [
+    let cases: [(&[&str], ArgsError); 13] = [
         (&["restore", "--root"], ArgsError::MissingValue("--root")),
         (&["--root", "/a"], ArgsError::MissingStep),
         (
@@ -160,27 +171,65 @@ fn a_wrong_flag_of_the_host_is_refused() {
             ArgsError::NotPlain("--systemctl"),
         ),
         (&["restore", "--root", "/a/"], ArgsError::NotPlain("--root")),
-        (&["restore", "--root-uid", "-1"], ArgsError::BadUid),
-        (&["restore", "--root-uid", "root"], ArgsError::BadUid),
+        (
+            &["restore", "--root-uid", "-1"],
+            ArgsError::NotNumber("--root-uid"),
+        ),
+        (
+            &["restore", "--root-uid", "root"],
+            ArgsError::NotNumber("--root-uid"),
+        ),
         (
             &["restore", "--root-uid", "0", "--root-uid", "0"],
             ArgsError::DuplicateFlag("--root-uid"),
+        ),
+        (
+            &["restore", "--public-port", "0"],
+            ArgsError::NotNumber("--public-port"),
+        ),
+        (
+            &["restore", "--public-port", "70000"],
+            ArgsError::NotNumber("--public-port"),
+        ),
+        (
+            &["restore", "--poll-interval-ms", "soon"],
+            ArgsError::NotNumber("--poll-interval-ms"),
+        ),
+        (
+            &["restore", "--poll-interval-ms"],
+            ArgsError::MissingValue("--poll-interval-ms"),
         ),
     ];
     for (words, why) in cases {
         assert_eq!(parse(words), Err(why), "{words:?}");
     }
+    let not_text = OsString::from_vec(b"/usr/sbin/nft\xff".to_vec());
+    let words = [OsString::from("restore"), OsString::from("--nft"), not_text];
+    assert_eq!(Invocation::parse(words), Err(ArgsError::NotPlain("--nft")));
+    let not_text = OsString::from_vec(b"9\xff".to_vec());
+    let words = [
+        OsString::from("restore"),
+        OsString::from("--root-uid"),
+        not_text,
+    ];
+    assert_eq!(
+        Invocation::parse(words),
+        Err(ArgsError::NotNumber("--root-uid"))
+    );
     assert_eq!(
         ArgsError::MissingValue("--nft").to_string(),
         "--nft needs a value"
     );
     assert_eq!(
         ArgsError::NotPlain("--root").to_string(),
-        "--root must be an absolute path of plain components"
+        "--root must be an absolute UTF-8 path of plain components"
     );
     assert_eq!(
         ArgsError::DuplicateFlag("--root").to_string(),
         "--root given twice"
     );
-    assert!(ArgsError::BadUid.to_string().contains("--root-uid"));
+    assert_eq!(
+        ArgsError::NotNumber("--public-port").to_string(),
+        "--public-port must be a whole number in its range"
+    );
 }

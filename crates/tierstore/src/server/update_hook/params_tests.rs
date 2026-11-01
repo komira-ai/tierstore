@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use tierstore_testkit::dir::TestDir;
 
-use super::{Mode, Params, ParamsError};
+use super::{Params, ParamsError};
 
 const GOOD: &str = "promotion_bound_secs = 900\n\
 \"updater.staged_release\" = \"/var/lib/updater/releases/tierstore/abc\"\n\
@@ -33,7 +33,7 @@ fn the_required_keys_are_read_and_the_rest_default() {
         PathBuf::from("/var/lib/updater/releases/tierstore/abc")
     );
     assert_eq!(params.target_version, "0.4.0");
-    assert_eq!(params.mode, None);
+    assert!(!params.declared_restart);
 }
 
 /// Asserts that the optional keys are read when given. It would catch a default that wins over
@@ -100,7 +100,7 @@ fn a_params_file_is_read_from_disk() {
 #[test]
 fn mode_restart_is_the_one_value_of_the_mode_key() {
     let params = Params::parse(&with("mode = \"restart\"\n")).unwrap();
-    assert_eq!(params.mode, Some(Mode::Restart));
+    assert!(params.declared_restart);
     for bad in [
         "mode = \"handover\"\n",
         "mode = \"Restart\"\n",

@@ -46,6 +46,10 @@ pub(super) struct Config<'a> {
     pub nft: PathBuf,
     /// The `systemctl` program.
     pub systemctl: PathBuf,
+    /// The public port.
+    pub public_port: u16,
+    /// What a step waits between two looks at an instance; `None` is the steps' own interval.
+    pub poll: Option<Duration>,
     /// What runs the programs.
     pub runner: &'a dyn Runner,
 }
@@ -82,7 +86,10 @@ pub(super) fn run_on(
     let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT)
         .with_program(&config.systemctl.to_string_lossy());
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
-    let clock = MonotonicClock::new();
+    let clock = match config.poll {
+        Some(poll) => MonotonicClock::new().with_pause(poll),
+        None => MonotonicClock::new(),
+    };
     let account = Account {
         owner: config.owner,
         group: config.group,
@@ -104,6 +111,7 @@ pub(super) fn run_on(
         host: &host,
         clock: &clock,
         state: &state,
+        public_port: config.public_port,
     };
     run_step(invocation.step, params, &ports)
 }
@@ -122,6 +130,8 @@ pub(super) fn system_config<'a>(runner: &'a dyn Runner, host: &HostArgs) -> Conf
         declaration_owner: host.root_uid,
         nft: host.nft.clone(),
         systemctl: host.systemctl.clone(),
+        public_port: host.public_port,
+        poll: host.poll,
         runner,
     }
 }

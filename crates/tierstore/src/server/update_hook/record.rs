@@ -10,9 +10,7 @@
 //! - `previous`: the port of v-current while an update is in flight, else absent. It differs
 //!   from `serving`.
 //! - `mode`: `handover` (two instances side by side) or `restart` (a plain restart with a gap,
-//!   when either release lacks the `handover-v1` capability, or the params say `mode = "restart"`).
-//! - `mode_reason`: why `prepare` chose the mode ([`ModeReason`]): `handover_capable`,
-//!   `not_handover_capable` or `declared_restart`; absent in a record no `prepare` has written.
+//!   when either release lacks the `handover-v1` capability).
 //! - `boot_id`: the boot of the host at the last successful `verify`; `guard_placed`: this update
 //!   placed the guard table.
 //! - `markers`: `swapped` (the redirect names v-next and v-next answers through the public
@@ -59,46 +57,6 @@ impl Mode {
         match self {
             Mode::Handover => "handover",
             Mode::Restart => "restart",
-        }
-    }
-}
-
-/// Why `prepare` chose the mode: a token, in the spelling of the report's reasons.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModeReason {
-    /// Both releases list `handover-v1`: a handover.
-    HandoverCapable,
-    /// A release lacks `handover-v1`: a restart.
-    NotHandoverCapable,
-    /// The params say `mode = "restart"`: a restart, whatever the releases can do.
-    DeclaredRestart,
-}
-
-impl ModeReason {
-    /// Every reason.
-    pub const ALL: [ModeReason; 3] = [
-        ModeReason::HandoverCapable,
-        ModeReason::NotHandoverCapable,
-        ModeReason::DeclaredRestart,
-    ];
-
-    /// The word in the record.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            ModeReason::HandoverCapable => "handover_capable",
-            ModeReason::NotHandoverCapable => "not_handover_capable",
-            ModeReason::DeclaredRestart => "declared_restart",
-        }
-    }
-
-    /// The mode this reason chooses.
-    #[must_use]
-    pub const fn mode(self) -> Mode {
-        match self {
-            ModeReason::HandoverCapable => Mode::Handover,
-            ModeReason::NotHandoverCapable | ModeReason::DeclaredRestart => Mode::Restart,
         }
     }
 }
@@ -168,9 +126,6 @@ pub struct Record {
     pub previous: Option<u16>,
     /// How the new release takes over.
     pub mode: Mode,
-    /// Why `prepare` chose `mode`; `None` before any `prepare` has.
-    #[serde(default)]
-    pub mode_reason: Option<ModeReason>,
     /// What has been done.
     pub markers: BTreeSet<Marker>,
     /// The boot of the host when `verify` last observed the new instance: `cleanup` commits only
@@ -192,7 +147,6 @@ impl Record {
             serving,
             previous: None,
             mode: Mode::Handover,
-            mode_reason: None,
             markers: BTreeSet::new(),
             boot_id: None,
             guard_placed: false,
@@ -220,7 +174,6 @@ impl Record {
             "serving": self.serving,
             "previous": self.previous,
             "mode": self.mode.as_str(),
-            "mode_reason": self.mode_reason.map(ModeReason::as_str),
             "markers": markers,
             "boot_id": self.boot_id,
             "guard_placed": self.guard_placed,

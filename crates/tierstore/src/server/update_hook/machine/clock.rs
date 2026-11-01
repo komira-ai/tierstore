@@ -7,6 +7,7 @@ use super::super::ports::Clock;
 /// Milliseconds since this value was made, on the monotonic clock.
 pub struct MonotonicClock {
     start: Instant,
+    pause: Option<Duration>,
 }
 
 impl MonotonicClock {
@@ -15,7 +16,16 @@ impl MonotonicClock {
     pub fn new() -> MonotonicClock {
         MonotonicClock {
             start: Instant::now(),
+            pause: None,
         }
+    }
+
+    /// The same, but every pause waits `pause` instead of the span it is asked for: the poll of a
+    /// conformance run, which need not wait out a host's interval.
+    #[must_use]
+    pub fn with_pause(mut self, pause: Duration) -> MonotonicClock {
+        self.pause = Some(pause);
+        self
     }
 }
 
@@ -31,6 +41,6 @@ impl Clock for MonotonicClock {
     }
 
     fn pause(&self, span: Duration) {
-        std::thread::sleep(span);
+        std::thread::sleep(self.pause.unwrap_or(span));
     }
 }

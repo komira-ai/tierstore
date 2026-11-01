@@ -1,7 +1,7 @@
 //! A record, a declaration or a params file that cannot be trusted changes nothing.
 
 use super::testing::{DECLARATION, Fake, NEW};
-use super::{Class, Marker, ModeReason, Outcome, Params, Reason, Record, Step, run_step};
+use super::{Class, Marker, Outcome, Params, Reason, Record, Step, run_step};
 
 const ALL: [Step; 6] = Step::ALL;
 
@@ -89,6 +89,29 @@ fn a_declaration_that_is_not_the_two_slots_makes_every_step_refuse() {
     }
 }
 
+/// Asserts that a public port that is one of the declared slots (possible once the port is not
+/// the host's 9300, as in a conformance run) refuses every step with `state_invalid` before any
+/// call, and names the port. It would catch a redirect from a slot's port to itself.
+#[test]
+fn a_public_port_that_is_a_slot_makes_every_step_refuse() {
+    for step in ALL {
+        let fake = Fake::new();
+        let ports = super::Ports {
+            public_port: 9301,
+            ..fake.ports()
+        };
+        let params = fake.params();
+        let params = (step != Step::Restore).then_some(&params);
+        let done = run_step(step, params, &ports);
+        assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{step}");
+        assert!(
+            done.report.detail.unwrap().contains("public port 9301"),
+            "{step}"
+        );
+        assert!(touched(&fake).is_empty(), "{step}");
+    }
+}
+
 /// Asserts that a staged release inside the state directory is refused for every step that was
 /// given params. It would catch a release the service-writable area could swap.
 #[test]
@@ -146,14 +169,7 @@ fn a_step_that_needs_the_params_file_refuses_without_it() {
         run_step(Step::Rollback, None, &fake.ports()).outcome,
         Outcome::Success
     );
-    // Back to no update in flight; the record still says why the last update chose its mode.
-    assert_eq!(
-        fake.record(),
-        Record {
-            mode_reason: Some(ModeReason::HandoverCapable),
-            ..Record::idle(9301)
-        }
-    );
+    assert_eq!(fake.record(), Record::idle(9301));
     assert!(!fake.record().markers.contains(&Marker::Swapped));
 }
 

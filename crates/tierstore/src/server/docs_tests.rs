@@ -47,6 +47,8 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--root-uid",
     "--nft",
     "--systemctl",
+    "--public-port",
+    "--poll-interval-ms",
 ];
 
 /// Flags of the binary the pages need not name.

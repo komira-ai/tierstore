@@ -19,6 +19,8 @@
 
 mod args;
 mod declaration;
+#[cfg(feature = "hook-conformance")]
+pub mod fake;
 pub mod machine;
 mod params;
 mod plain;
@@ -47,7 +49,7 @@ pub use ports::{
     StateDir, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
-pub use record::{Marker, Mode, ModeReason, RECORD_MAX, Record, RecordError, SCHEMA};
+pub use record::{Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
 pub use report::{Class, Done, MAX_REASON_LEN, Outcome, Reason, Report, is_reason_token};
 pub use ruleset::{FORWARD_TABLE, GUARD_TABLE, guard_ruleset, redirect_ruleset, redirect_target};
 pub use steps::{HANDOVER_CAPABILITY, run_step};
@@ -151,6 +153,8 @@ mod args_tests;
 mod declaration_tests;
 #[cfg(test)]
 mod docs_tests;
+#[cfg(all(test, feature = "hook-conformance"))]
+mod fake_tests;
 #[cfg(test)]
 mod params_tests;
 #[cfg(test)]

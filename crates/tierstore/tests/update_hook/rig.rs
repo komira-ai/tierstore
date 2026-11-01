@@ -1,32 +1,34 @@
 //! A host for the real `tierstore update-hook`: a scratch root with the declaration, `etc/group`,
 //! `etc/passwd`, `proc/sys` and the state directory; two staged releases; the fake programs; and
-//! the stub instances. The hook is the binary itself, run with `--root`, `--root-uid`, `--nft`
-//! and `--systemctl` pointing at the scratch host.
+//! the stub instances on ports of their own. The hook is the binary itself, run with `--root`,
+//! `--root-uid`, `--nft`, `--systemctl`, `--public-port` and `--poll-interval-ms` pointing at the
+//! scratch host (flags of the conformance build only).
 //!
-//! At the start one slot (`a`) runs the old release, its unit active and the redirect naming it,
-//! as a host is after a first install; the other (`b`) has no link and no unit. The record says
-//! no update is in flight. No guard table is loaded yet, so an update places it.
+//! At the start one slot (`a`, the lower port) runs the old release, its unit active and the
+//! redirect naming it, as a host is after a first install; the other (`b`) has no link and no
+//! unit. The record says no update is in flight. No guard table is loaded yet, so an update
+//! places it.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
+use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
 use serde_json::Value;
+use tierstore::server::update_hook::fake::{NFT, RELEASE, SYSTEMCTL, WORLD, World};
 use tierstore::server::update_hook::machine::LoopbackInstances;
 use tierstore::server::update_hook::{
-    DECLARATION_PATH, Instances, PUBLIC_PORT, Record, redirect_ruleset, unit_name,
+    DECLARATION_PATH, Instances, Record, redirect_ruleset, unit_name,
 };
 use tierstore_testkit::dir::TestDir;
 use tierstore_testkit::port::Reserved;
 
 use crate::stub::{SlotScript, Stub};
-use crate::world::{self, Unit};
 
 /// The binary under test.
 pub const HOOK: &str = env!("CARGO_BIN_EXE_tierstore");
@@ -42,6 +44,8 @@ pub const NEW_VERSION: &str = "2.0.0";
 pub const BOOT: &str = "boot-one";
 /// The capability that lets a release be handed over to.
 pub const HANDOVER: &str = "handover-v1";
+/// The state directory the declaration names, under the scratch root.
+pub const DECLARED_STATE: &str = "/var/lib/updater/hooks/tierstore";
 
 /// `nft list table inet kbf_guard_tierstore`, as the fake logs it.
 pub const LIST_GUARD: &str = "nft list table inet kbf_guard_tierstore";
@@ -69,25 +73,22 @@ pub struct Setup {
     pub old_handover: bool,
     /// The new release lists `handover-v1`.
     pub new_handover: bool,
-    /// The stub serves the public port (and the test holds its lock).
-    pub public: bool,
 }
 
 impl Setup {
-    /// Both releases can hand over, and the public port is served.
+    /// Both releases can hand over.
     pub fn handover() -> Setup {
         Setup {
             old_handover: true,
             new_handover: true,
-            public: true,
         }
     }
 
-    /// Both releases can hand over; the public port is not served (a test that never probes it).
-    pub fn private() -> Setup {
+    /// The old release cannot hand over: the update is a restart.
+    pub fn restart() -> Setup {
         Setup {
-            public: false,
-            ..Setup::handover()
+            old_handover: false,
+            new_handover: true,
         }
     }
 }
@@ -106,6 +107,19 @@ pub struct Ran {
 }
 
 impl Ran {
+    fn of(out: &Output) -> Ran {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let line = stdout.lines().last().map_or(Value::Null, |line| {
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+        });
+        Ran {
+            code: out.status.code(),
+            signal: out.status.signal(),
+            line,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
     /// Asserts exit 0.
     pub fn ok(&self) -> &Ran {
         assert_eq!(self.code, Some(0), "{self:?}");
@@ -140,16 +154,18 @@ pub struct Machine {
 /// The scratch host and its stub.
 pub struct Rig {
     pub stub: Stub,
-    /// The slot that runs at first.
+    /// The slot that runs at first, the lower of the two ports.
     pub a: u16,
     /// The idle slot.
     pub b: u16,
+    /// The public port of this host.
+    pub public: u16,
     pub root: PathBuf,
     pub state: PathBuf,
     /// The directory of the fake programs.
     pub tools: PathBuf,
-    /// The fakes' `state` directory.
-    pub world: PathBuf,
+    /// The fakes' world.
+    pub world: World,
     /// The release that runs at first.
     pub old: PathBuf,
     /// The staged release.
@@ -171,7 +187,7 @@ fn write(path: &Path, text: &str) {
 }
 
 /// Puts the fake program at `to`: a hard link, or a copy across file systems.
-pub fn place_fake(to: &Path) {
+fn place_fake(to: &Path) {
     if fs::hard_link(FAKE, to).is_err() {
         fs::copy(FAKE, to).expect("copy the fake");
     }
@@ -181,7 +197,7 @@ pub fn place_fake(to: &Path) {
 /// A staged release: the fake's `tierstore`, its capabilities and its version.
 fn release(dir: &Path, version: &str, handover: bool) {
     fs::create_dir_all(dir).expect("a release");
-    place_fake(&dir.join("tierstore"));
+    place_fake(&dir.join(RELEASE));
     let caps = if handover {
         format!("{HANDOVER}\n")
     } else {
@@ -205,31 +221,32 @@ impl Rig {
     pub fn new(name: &str, setup: Setup) -> Rig {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let base = fs::canonicalize(dir.path()).expect("the scratch directory");
-        // `a` is the lower port, so a list of both slots in port order is `[a, b]`.
         let (mut held_a, mut held_b) = (Reserved::new(), Reserved::new());
         if held_a.port() > held_b.port() {
             std::mem::swap(&mut held_a, &mut held_b);
         }
-        let (a, b) = (held_a.port(), held_b.port());
+        let held_public = Reserved::new();
+        let (a, b, public) = (held_a.port(), held_b.port(), held_public.port());
         let old = base.join("releases/old");
         let new = base.join("releases/new");
         release(&old, OLD_VERSION, setup.old_handover);
         release(&new, NEW_VERSION, setup.new_handover);
         let tools = base.join("tools");
-        let world = tools.join("state");
-        fs::create_dir_all(&world).expect("the fakes' world");
-        place_fake(&tools.join("nft"));
-        place_fake(&tools.join("systemctl"));
+        let world_dir = tools.join(WORLD);
+        fs::create_dir_all(&world_dir).expect("the fakes' world");
+        place_fake(&tools.join(NFT));
+        place_fake(&tools.join(SYSTEMCTL));
         let root = base.join("root");
-        let state = root.join("var/lib/updater/hooks/tierstore");
+        let state = root.join(DECLARED_STATE.trim_start_matches('/'));
         let rig = Rig {
-            stub: Stub::start(world.clone(), [held_a, held_b], setup.public),
+            stub: Stub::start(world_dir.clone(), [held_a, held_b], held_public),
             a,
             b,
+            public,
             root,
             state,
             tools,
-            world,
+            world: World::new(world_dir),
             old,
             new,
             target: RefCell::new(NEW_VERSION.to_owned()),
@@ -244,10 +261,7 @@ impl Rig {
     /// running behind the redirect.
     fn lay_down(&self) {
         let declaration = self.root.join(DECLARATION_PATH.trim_start_matches('/'));
-        write(
-            &declaration,
-            &self.declaration_text(&self.declared_state_dir()),
-        );
+        write(&declaration, &self.declaration_text(DECLARED_STATE));
         mode(&declaration, 0o644);
         mode(&self.root.join("etc"), 0o755);
         mode(&self.root.join("etc/updater.d"), 0o755);
@@ -276,21 +290,15 @@ impl Rig {
         mode(&self.state.join("slots"), 0o750);
         symlink(&self.old, self.state.join("slots").join(self.a.to_string())).expect("a link");
         self.set_record_bytes(&Record::idle(self.a).encode(), 0o600);
-        write(
-            &self.world.join("exec"),
-            &format!("{}/slots/%i/tierstore", self.state.display()),
-        );
-        self.fake("nft", &["-f", "-"], &redirect_ruleset(PUBLIC_PORT, self.a));
-        self.fake("systemctl", &["start", "--", &unit_name(self.a)], "");
-        for log in ["calls", "effects"] {
-            fs::remove_file(self.world.join(log)).expect("a log of the fakes");
-        }
-    }
-
-    /// The `state_dir` the declaration names: the state directory itself, which the hook opens
-    /// by this path.
-    pub fn declared_state_dir(&self) -> String {
-        self.state.display().to_string()
+        self.world
+            .set_exec(&format!("{}/slots/%i/{RELEASE}", self.state.display()));
+        let apply = redirect_ruleset(self.public, self.a);
+        self.world.call(NFT, &["-f", "-"], &mut apply.as_bytes());
+        let unit = unit_name(self.a);
+        self.world
+            .call(SYSTEMCTL, &["start", "--", &unit], &mut io::empty());
+        assert_eq!(self.running(), [self.a], "the old slot runs");
+        self.world.clear_logs();
     }
 
     /// A declaration of the two slots with `state_dir`.
@@ -316,24 +324,6 @@ impl Rig {
         );
     }
 
-    /// Runs a fake program directly, as the test, with `input` on its standard input.
-    fn fake(&self, program: &str, args: &[&str], input: &str) {
-        let mut child = Command::new(self.tools.join(program))
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("run a fake");
-        child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(input.as_bytes())
-            .expect("write the input");
-        assert!(child.wait().expect("wait").success(), "{program} {args:?}");
-    }
-
     /// Makes the params file name `version` as the target version.
     pub fn set_target(&self, version: &str) {
         version.clone_into(&mut self.target.borrow_mut());
@@ -353,55 +343,64 @@ impl Rig {
         )
     }
 
-    /// Runs `tierstore update-hook` with the flags of this host, then `words`.
-    pub fn hook(&self, words: &[&str]) -> Ran {
-        self.hook_trusting(Some(uid()), words)
-    }
-
-    /// Runs `tierstore update-hook` with the flags of this host, `--root-uid` only when
-    /// `root_uid` is given, then `words`.
-    pub fn hook_trusting(&self, root_uid: Option<u32>, words: &[&str]) -> Ran {
+    /// `tierstore update-hook` with the flags of this host, `--root-uid` only when `root_uid` is
+    /// given, then `words`.
+    fn command(&self, root_uid: Option<u32>, words: &[&str]) -> Command {
         let mut command = Command::new(HOOK);
         command.arg("update-hook").arg("--root").arg(&self.root);
         if let Some(root_uid) = root_uid {
             command.args(["--root-uid", &root_uid.to_string()]);
         }
-        let out = command
+        command
             .arg("--nft")
-            .arg(self.tools.join("nft"))
+            .arg(self.tools.join(NFT))
             .arg("--systemctl")
-            .arg(self.tools.join("systemctl"))
+            .arg(self.tools.join(SYSTEMCTL))
+            .args(["--public-port", &self.public.to_string()])
+            .args(["--poll-interval-ms", "1"])
             .args(words)
-            .current_dir(&self.base)
-            .output()
-            .expect("run the hook");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let line = stdout.lines().last().map_or(Value::Null, |line| {
-            serde_json::from_str(line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
-        });
-        Ran {
-            code: out.status.code(),
-            signal: out.status.signal(),
-            line,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        }
+            .current_dir(&self.base);
+        command
     }
 
-    /// Runs `step` as the updater would: `prepare` with the staged release, the five steps with
-    /// the params file (its text from [`Rig::params_text`] with `extra`), `restore` with nothing.
-    pub fn step_with(&self, step: &str, extra: &str) -> Ran {
+    /// Runs the hook with the flags of this host, then `words`.
+    pub fn hook(&self, words: &[&str]) -> Ran {
+        self.hook_trusting(Some(uid()), words)
+    }
+
+    /// Runs the hook with `--root-uid` only when `root_uid` is given.
+    pub fn hook_trusting(&self, root_uid: Option<u32>, words: &[&str]) -> Ran {
+        Ran::of(
+            &self
+                .command(root_uid, words)
+                .output()
+                .expect("run the hook"),
+        )
+    }
+
+    /// The words of `step` as the updater gives them: `prepare` with the staged release, the
+    /// five steps with the params file (its text from [`Rig::params_text`] with `extra`),
+    /// `restore` with nothing.
+    fn words(&self, step: &str, extra: &str) -> Vec<String> {
         if step == "restore" {
-            return self.hook(&["restore"]);
+            return vec![step.to_owned()];
         }
-        let params = self.base.join("params.toml");
+        let params = self.base.join(format!("params-{step}.toml"));
         write(&params, &self.params_text(extra));
-        let params = params.to_str().expect("a path");
+        let params = params.display().to_string();
+        let mut words = vec![step.to_owned()];
         if step == "prepare" {
-            let new = self.new.to_str().expect("a path");
-            self.hook(&["prepare", new, "--params", params])
-        } else {
-            self.hook(&[step, "--params", params])
+            words.push(self.new.display().to_string());
         }
+        words.extend(["--params".to_owned(), params]);
+        words
+    }
+
+    /// Runs `step` as the updater would, with `extra` in the params file.
+    pub fn step_with(&self, step: &str, extra: &str) -> Ran {
+        let words = self.words(step, extra);
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        self.hook(&words)
     }
 
     /// Runs `step` with the plain params file.
@@ -409,9 +408,25 @@ impl Rig {
         self.step_with(step, "")
     }
 
+    /// Starts `step` and returns at once: the running hook, its output piped.
+    pub fn spawn_step(&self, step: &str) -> Child {
+        let words = self.words(step, "");
+        let words: Vec<&str> = words.iter().map(String::as_str).collect();
+        self.command(Some(uid()), &words)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start the hook")
+    }
+
+    /// Waits for a hook [`Rig::spawn_step`] started.
+    pub fn finish(child: Child) -> Ran {
+        Ran::of(&child.wait_with_output().expect("wait for the hook"))
+    }
+
     /// The calls the fakes have logged.
     pub fn calls(&self) -> Vec<String> {
-        world::lines(&self.world, "calls")
+        self.world.lines("calls")
     }
 
     /// The calls logged since there were `mark`.
@@ -421,39 +436,45 @@ impl Rig {
 
     /// The changes the fakes have made.
     pub fn effects(&self) -> Vec<String> {
-        world::lines(&self.world, "effects")
+        self.world.lines("effects")
     }
 
     /// What the fakes hold.
     pub fn machine(&self) -> Machine {
         Machine {
-            units: world::units(&self.world)
+            units: self
+                .world
+                .units()
                 .into_iter()
-                .map(|(port, Unit { release, .. })| (port, release))
+                .map(|(port, unit)| (port, unit.release))
                 .collect(),
-            tables: world::tables(&self.world),
+            tables: self.world.tables(),
         }
     }
 
-    /// The ports of the active units.
+    /// The ports of the active units, in order.
     pub fn running(&self) -> Vec<u16> {
-        world::units(&self.world).into_keys().collect()
+        self.world.units().into_keys().collect()
     }
 
     /// The port the redirect table names.
     pub fn redirect(&self) -> Option<u16> {
-        world::redirect(&self.world)
+        self.world.redirect()
     }
 
     /// Whether the table `name` is loaded.
     pub fn has_table(&self, name: &str) -> bool {
-        world::tables(&self.world).contains_key(name)
+        self.world.tables().contains_key(name)
+    }
+
+    /// The bytes of the record.
+    pub fn record_bytes(&self) -> Vec<u8> {
+        fs::read(self.state.join("state.json")).expect("the record")
     }
 
     /// The record.
     pub fn record(&self) -> Record {
-        let bytes = fs::read(self.state.join("state.json")).expect("the record");
-        Record::decode(&bytes).expect("a record")
+        Record::decode(&self.record_bytes()).expect("a record")
     }
 
     /// Replaces the record with `bytes` and gives it `mode`.
@@ -468,23 +489,6 @@ impl Rig {
         fs::read_link(self.state.join("slots").join(port.to_string())).ok()
     }
 
-    /// Makes the fake kill the hook after its `n`-th call from now on; `None` stops that.
-    pub fn kill_after(&self, n: Option<usize>) {
-        let file = self.world.join("kill-after");
-        match n {
-            Some(n) => write(&file, &format!("{}\n", self.calls().len() + n)),
-            None => {
-                let _ = fs::remove_file(file);
-            }
-        }
-    }
-
-    /// Makes the fake `systemctl` check `path` (`%i` the port) as the slot unit's
-    /// `ConditionPathExists=`.
-    pub fn set_condition(&self, path: &str) {
-        write(&self.world.join("condition"), path);
-    }
-
     /// Writes the boot id.
     pub fn set_boot(&self, boot: &str) {
         write(
@@ -496,9 +500,7 @@ impl Rig {
     /// A reboot: every unit stopped, every table gone (the rules are not kept across a boot),
     /// and a new boot id.
     pub fn reboot(&self, boot: &str) {
-        for dir in ["units", "tables"] {
-            let _ = fs::remove_dir_all(self.world.join(dir));
-        }
+        self.world.reboot();
         self.set_boot(boot);
     }
 
