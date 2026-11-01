@@ -377,8 +377,8 @@ const RELEASE_DEFECTS: &[(&str, &str, &str)] = &[
     ("needs: [plan, verify]", "needs: [verify]", "publish: needs"),
     ("needs: [plan, publish]", "needs: [plan]", "gamma: needs"),
     (
-        "needs: [plan, publish]\n    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}",
-        "needs: [plan, publish]\n    if: ${{ github.ref == 'refs/heads/main' }}",
+        "needs: [plan, publish]\n    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' && vars",
+        "needs: [plan, publish]\n    if: ${{ github.ref == 'refs/heads/main' && vars",
         "gamma: `if` is not",
     ),
     (

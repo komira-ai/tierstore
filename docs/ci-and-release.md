@@ -56,6 +56,11 @@ waiting run, so a push that is replaced while it waits is not released by itself
 nothing, because the plan measures from the highest tag and the next release carries the skipped
 commits. A manual run is in a group of its own (publish refuses a tag or a release that exists).
 The farm deploy job, `gamma`, is in the same group (the group is the workflow's, so every job of `release.yml` is).
+Two consequences of a manual run's group being `release-<run id>`: a manual release is not serialised
+with the automatic one, so a dispatched `gamma` can run beside an automatic `gamma` and the later
+call to the coordinator wins; and a manual run of a tag lower than the highest sets that older
+version as the farm's desired version, which is a downgrade. Refusing a tag that is not the highest
+is not done here; the operator who dispatches a release chooses the tag.
 
 The workflow lint (`crates/xtask/tests/workflows`) finds these workflows by what they do, not by a
 list of names: any workflow with `contents: write`, `gh release`, a `git tag` or tag push, or a
@@ -103,8 +108,9 @@ with the plan's tag and commit.
 
 ### The gamma stage
 
-The last job of `release.yml`, `gamma`, runs after `publish`, under the same `if:` as `verify` and
-`publish` (the plan said release, on a run of `main`), in the `release` environment, with
+The last job of `release.yml`, `gamma`, runs after `publish`, under the `if:` of `verify` and
+`publish` (the plan said release, on a run of `main`) and a configured coordinator
+(`vars.KBF_COORDINATOR_URL != ''`), in the `release` environment, with
 `contents: read` and `id-token: write` and no other scope. It checks out `komira-ai/kbf` at the commit pinned
 in the job's `KBF_DEPLOY_REF` (the deploy verb is kbf's; the coordinator does not report its build
 commit without a token, so the job cannot read it beforehand), builds kbf's `xtask`, and runs
@@ -115,7 +121,8 @@ cargo xtask deploy-farm --service tierstore --url <coordinator> --ca-pem <farm C
 
 The version is the one tierstore's hosts report (`tierstore --version`, the `version` label of
 `tierstore_build_info`): the tag without its `v`, then the first 12 digits of the commit, which
-`verify` checked the published binary says. The verb sets that as the desired version of the
+`verify` checked the published binary says: `gamma` relies on `verify`'s `check-binary`, so the
+version text equals what `tierstore --version` prints. The verb sets that as the desired version of the
 service `tierstore` and waits, up to 60 minutes, until the coordinator says the farm converged on
 it; a host that fails its update, a farm that stalls or runs out of time, or a refused token fails
 the job. The release stays published whatever the job says. No `--min-up-*` flag is passed: for a
@@ -123,8 +130,9 @@ service other than `kbf`, the coordinator's services file holds the minimums.
 
 The job needs these, set once by an operator (nothing in this repository does it):
 
-- Repository (or `release` environment) variables: `KBF_COORDINATOR_URL`, the coordinator's control
-  address, and `KBF_COORDINATOR_CA`, the farm CA certificate (public) its certificate chains to.
+- Repository variables: `KBF_COORDINATOR_URL`, the coordinator's control
+  address (a repository variable, not an environment one: the job's `if:` reads it before the
+  environment is resolved), and `KBF_COORDINATOR_CA`, the farm CA certificate (public) its certificate chains to.
   When the coordinator is reachable only on a Tailscale network, also `TS_CLIENT_ID` and
   `TS_AUDIENCE`: the job joins that network as an ephemeral node with this run's OIDC token, so it
   holds no secret.
@@ -143,6 +151,9 @@ The job needs these, set once by an operator (nothing in this repository does it
   event_names = ["workflow_run", "workflow_dispatch"]
   services = ["tierstore"]
   ```
+
+  This entry lives on the coordinator: this repository documents `event_names` and the rest of it
+  but does not enforce them, and the workflow lint cannot see them.
 
   `event_names` is a list and must name both `workflow_run` and `workflow_dispatch`: an automatic
   release is started by the completion of `ci` and `artifacts` (token event `workflow_run`), and
@@ -167,8 +178,11 @@ the host updater's service registration, and tierstore registering its release v
 converge on and the wait can only run out its 60 minutes and fail the job (after the release is
 published).
 
-Until `KBF_COORDINATOR_URL` is set the job prints `::notice::the gamma stage is off` and passes
-without fetching or building anything, so a fork, or a repository whose coordinator does not know
+Until `KBF_COORDINATOR_URL` is set the job is skipped as a whole (its job-level `if:`), so a
+skipped job shows in the run and says nothing else. It matters that the job is skipped and not run
+with every step conditional: GitHub resolves a job's `environment` before any step `if:` is read,
+so a reviewer or a wait rule added to `release` later would otherwise hold every release, and the
+non-cancelling `release-main` group behind it, while the stage is off. A fork, or a repository whose coordinator does not know
 tierstore yet, releases as before. Set but not configured on the coordinator, it fails (a 403
 `forbidden`) and changes nothing there. `deploy-farm --service` needs kbf's support for services
 other than `kbf`; until that is on kbf's `main` a configured job fails at the verb's arguments.
