@@ -27,7 +27,7 @@ test('the signer named in the release document is a workflow of this repository'
 
 test('the install page and the install guide give the verify command with this repository as signer', () => {
   for (const [name, text] of pages.slice(0, 1).concat(pages.slice(2, 3))) {
-    for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").includes(flag), `${name} lacks ${flag}`);
+    for (const flag of VERIFY_FLAGS) assert.ok(text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').includes(flag), `${name} lacks ${flag}`);
     assert.match(text, /gh attestation verify/, `${name} lacks the command`);
   }
 });

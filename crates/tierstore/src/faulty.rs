@@ -8,7 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
+use crate::{
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+};
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -245,6 +247,15 @@ impl Backend for FaultyBackend {
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;
         self.inner.get(key, range).await
+    }
+
+    /// A streamed read is a call of kind [`Op::Get`], as a read of the bytes whole is, and is
+    /// given by the wrapped backend's own stream.
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        let asked = range.map(|range| (range.offset(), range.size()));
+        self.plan().ranges.push(asked);
+        self.enter(Op::Get, key).await?;
+        self.inner.get_stream(key, range).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

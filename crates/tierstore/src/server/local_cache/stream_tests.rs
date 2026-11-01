@@ -9,12 +9,14 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
+use futures::stream;
 use tokio::sync::Semaphore;
 
 use super::fill::{Filled, Pending};
 use super::layout::name_of;
 use super::locked;
 use super::metrics::{FailedFill, read};
+use super::stream::read_within;
 use super::testing::{Quirk, Rig, digest, pattern, until};
 use crate::{Backend, ByteRange, Error, Op, ReadBody};
 
@@ -674,4 +676,67 @@ async fn a_read_that_finds_the_place_of_a_keep_is_answered_from_the_upstream() {
     assert_eq!(joined(&chunks), body);
     assert_eq!(read(&rig.cache.counters().fills), 0);
     assert_eq!(rig.cache.held(), (0, 0));
+}
+
+/// Asserts that an upstream that answers a range of 100 bytes with a body ten times as long is the
+/// error of the call, and that no more than 101 bytes (the range and one) are taken from its
+/// body, which the upstream counts one byte at a time as they are taken.
+#[tokio::test]
+async fn a_body_ten_times_the_range_is_refused_at_the_first_byte_past_it() {
+    let rig = rig("tsstream-flood");
+    rig.put("plain/obj", &pattern(SIZE)).await;
+    rig.tamper.flood.store(true, Ordering::SeqCst);
+    let range = ByteRange::new(0, CHUNK);
+
+    let answer = rig.cache.get_stream("plain/obj", Some(range)).await;
+
+    assert!(matches!(answer, Err(Error::Other(_))), "{:?}", answer.err());
+    assert_eq!(rig.tamper.consumed.load(Ordering::SeqCst), CHUNK + 1);
+}
+
+/// Asserts that a body that is exactly the bytes asked for, given as several pieces, is the
+/// pieces joined, and that one piece is given as it is.
+#[tokio::test]
+async fn a_body_of_the_bytes_asked_for_is_given_whole() {
+    let pieces: Vec<Result<Bytes, Error>> = vec![Ok(Bytes::from("abc")), Ok(Bytes::from("de"))];
+    let joined = read_within(stream::iter(pieces).boxed(), 5).await.unwrap();
+    assert_eq!(joined, Bytes::from("abcde"));
+
+    let one = Bytes::from("xyz");
+    let body = stream::iter(vec![Ok(one.clone())]).boxed();
+    let whole = read_within(body, 5).await.unwrap();
+    assert_eq!(whole, one);
+    assert_eq!(whole.as_ptr(), one.as_ptr());
+}
+
+/// Asserts that a body with no bytes is an empty answer, and that a body that fails after some
+/// bytes is that failure, not the bytes.
+#[tokio::test]
+async fn an_empty_body_is_empty_and_a_failing_body_is_its_failure() {
+    let empty = stream::iter(Vec::<Result<Bytes, Error>>::new()).boxed();
+    assert!(read_within(empty, 5).await.unwrap().is_empty());
+
+    let pieces: Vec<Result<Bytes, Error>> = vec![
+        Ok(Bytes::from("ab")),
+        Err(Error::Unavailable("cut".to_owned())),
+    ];
+    let error = read_within(stream::iter(pieces).boxed(), 5)
+        .await
+        .unwrap_err();
+    assert!(error.is_unavailable(), "{error}");
+}
+
+/// Asserts that a piece that takes the body past the bytes asked for ends the read there, with
+/// the pieces after it not taken.
+#[tokio::test]
+async fn a_piece_past_the_bytes_asked_for_ends_the_read_before_the_next_one() {
+    let taken = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let count = std::sync::Arc::clone(&taken);
+    let body = stream::iter(0..10).map(move |_| {
+        let _ = count.fetch_add(1, Ordering::SeqCst);
+        Ok(Bytes::from("0123456789"))
+    });
+    let error = read_within(body.boxed(), 25).await.unwrap_err();
+    assert!(matches!(error, Error::Other(_)), "{error}");
+    assert_eq!(taken.load(Ordering::SeqCst), 3);
 }

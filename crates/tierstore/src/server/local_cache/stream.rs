@@ -75,6 +75,28 @@ pub(super) async fn eager(mut body: ReadBody) -> Result<ReadBody, Error> {
     }
 }
 
+/// The bytes of `body`, which may be no more than `want`: the read ends with an error at the first
+/// byte past them, so a body that is far too long is never held. A body of one piece is given as
+/// it is, with no copy.
+pub(super) async fn read_within(mut body: ReadBody, want: u64) -> Result<Bytes, Error> {
+    let mut pieces = Vec::new();
+    let mut held = 0_u64;
+    while let Some(piece) = body.next().await {
+        let piece = piece?;
+        held += piece.len() as u64;
+        if held > want {
+            return Err(Error::Other(
+                "the upstream gave more bytes than were asked".to_owned(),
+            ));
+        }
+        pieces.push(piece);
+    }
+    if pieces.len() == 1 {
+        return Ok(pieces.remove(0));
+    }
+    Ok(Bytes::from(pieces.concat()))
+}
+
 impl Inner {
     /// The bytes a read holds at a time.
     fn chunk(&self) -> u64 {
@@ -407,13 +429,13 @@ impl Chunks {
             return Ok(None);
         }
         let range = ByteRange::new(self.at, want);
-        let bytes = self.inner.upstream.get(&self.key, Some(range)).await?;
+        let body = self
+            .inner
+            .upstream
+            .get_stream(&self.key, Some(range))
+            .await?;
+        let bytes = read_within(body, want).await?;
         let got = bytes.len() as u64;
-        if got > want {
-            return Err(Error::Other(
-                "the upstream gave more bytes than were asked".to_owned(),
-            ));
-        }
         self.inner.served(Served::Upstream, got);
         self.at += got;
         let last = self.left.is_some_and(|left| left == got);

@@ -4,13 +4,19 @@
 mod backends;
 mod cache;
 mod capacity;
+#[cfg(feature = "s3")]
+mod chain;
 mod conformance;
 mod faults;
+mod hold;
 mod journal;
+mod killed_put;
 mod lease;
+mod lease_takeover;
 mod list_uploads;
 mod list_uploads_reserved;
 mod multipart;
+mod one_winner;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;

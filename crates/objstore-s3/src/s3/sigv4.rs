@@ -1,6 +1,6 @@
 //! AWS Signature Version 4 for S3, header form, and the UTC date formats S3 uses.
 //!
-//! Only what kbf sends is covered: a signed payload hash, headers given by the caller,
+//! Only what the crate sends is covered: a signed payload hash, headers given by the caller,
 //! and query parameters. The tests check it against the worked examples in the S3
 //! SigV4 documentation.
 
@@ -22,7 +22,7 @@ pub(crate) struct Request<'a> {
     pub method: &'a str,
     /// `host` or `host:port`, exactly as the `Host` header carries it.
     pub host: &'a str,
-    /// The path, already URI-encoded (kbf keys need no encoding; see `ObjectKey`).
+    /// The path, already URI-encoded (keys need no encoding; see `ObjectKey`).
     pub path: &'a str,
     /// Query parameters, not yet encoded.
     pub query: &'a [(&'a str, String)],
