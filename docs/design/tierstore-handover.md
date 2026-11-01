@@ -91,7 +91,9 @@ Refuse with `75` (class `environment`: host not ready, nothing done) if the guar
 `nf_conntrack_tcp_timeout_established` is not longer than the service's idle bound, or `nf_conntrack_count` is near
 `nf_conntrack_max` ([`host-updates.md`][hu] 4.1.3). "Nothing done" holds for the guard too: a deferral removes the guard
 table if this update placed it and leaves one that was there; if that removal fails, the exit is `1` (class
-`environment`), and `rollback` removes it. Point the idle slot's link at the artifact,
+`environment`), and `rollback` removes it. `guard_placed` is written after the load, so a crash between the two leaves a guard
+this update placed but did not record; neither a deferral nor `rollback` removes it, and it outlives the update. That is
+safe (the guard only blocks off-host access to the two private ports), and the next update's `prepare` finds it there. Point the idle slot's link at the artifact,
 start `tierstore@<idle>`, and poll `/readyz` on `127.0.0.1:<idle>` until it answers 200 with `read-only` (a counted
 number of attempts; the unit starts only after its self-test). It records `previous = serving`. *Idempotent*: the link is
 replaced by rename, `systemctl start` of a started unit does nothing, the guard table is loaded by replacing it, the idle
