@@ -1,4 +1,4 @@
-//! The S3 XML bodies kbf reads: `ListBucketResult` (ListObjectsV2), `Error`, and the
+//! The S3 XML bodies the crate reads: `ListBucketResult` (ListObjectsV2), `Error`, and the
 //! answers of a multipart upload; and the one it writes, `CompleteMultipartUpload`.
 
 use roxmltree::{Document, Node};
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(message, "x".repeat(200));
     }
 
-    /// Catches: a listing entry with a bad size, a bad `IsTruncated`, a key kbf would
+    /// Catches: a listing entry with a bad size, a bad `IsTruncated`, a key the crate would
     /// refuse, or an empty continuation token taken as a page (a listing that never
     /// advances), each accepted instead of refused as a protocol error.
     #[test]

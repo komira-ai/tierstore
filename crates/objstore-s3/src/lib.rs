@@ -24,7 +24,7 @@ pub use types::{
     ObjectStoreError, PageSize,
 };
 
-/// An object store bucket, as kbf uses it.
+/// An object store bucket, as the store's callers use it.
 ///
 /// The futures are `Send` so a store can be driven from any runtime thread, and a store
 /// is `'static` so a task spawned to write a segment can own a handle on it.
@@ -82,8 +82,8 @@ pub trait ObjectStore: Send + Sync + 'static {
     /// Whether the store may hold `key`: `false` only when the store knows, without a
     /// request over the network, that it does not (a local store's file is gone, or is
     /// not a whole object). A store that would need a request answers `true`, the
-    /// default, and a read finds out. kbf asks before it serves an action-cache hit,
-    /// once per object the hit needs.
+    /// default, and a read finds out. A caller asks before it serves a cached result,
+    /// once per object the result needs.
     fn may_hold(
         &self,
         key: &ObjectKey,

@@ -5,9 +5,9 @@
       <h1 class="display">A hot tier in front of a <em>cold store</em>, behind one S3 endpoint.</h1>
       <p class="lede">tierstore is an S3 server over two S3-compatible stores. It writes new objects to the hot tier, copies them to the cold tier in the background, and frees the hot tier when it fills. Clients see one bucket and sign with any S3 SDK.</p>
       <div class="install-block">
-        <p class="install-label"><strong>Install</strong> <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux, from a kbf release</span></p>
+        <p class="install-label"><strong>Install</strong> <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux, from a GitHub release</span></p>
         <div class="cmd cmd-lg cmd-xl"><pre><code><span class="prompt">$ </span>tar -xzf tierstore-&lt;commit&gt;-linux-x86_64.tar.gz tierstore</code></pre></div>
-        <p class="install-note">tierstore ships from the <a href="https://github.com/komira-ai/kbf">kbf repository</a> for now: each kbf release carries its tarball. The <a href="install.html">install page</a> has the steps, including how to verify the download.</p>
+        <p class="install-note">tierstore ships from its own <a href="https://github.com/komira-ai/tierstore/releases">GitHub releases</a>: each release carries its tarball. The <a href="install.html">install page</a> has the steps, including how to verify the download.</p>
       </div>
       <p class="actions hero-links"><a class="button button-primary" href="install.html">Install</a> <a class="button" href="demo.html">See a start and a drain</a></p>
     </div>

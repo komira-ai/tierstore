@@ -453,8 +453,9 @@ async fn a_get_whose_object_vanishes_after_the_head_counts_a_cold_get_miss() {
 }
 
 /// Asserts that no series of `/metricz` is named twice, whatever its value, and that every line
-/// is a comment or `name value` or `name{labels} value`. It would catch two code paths that
-/// emit the same series, which a scraper takes as a duplicate and drops.
+/// is a comment or `name value` or `name{labels} value`, and that the only series beyond
+/// `SERIES` is `tierstore_build_info`. It would catch two code paths that emit the same series,
+/// which a scraper takes as a duplicate and drops, and an unlisted series in place of the gauge.
 #[tokio::test]
 async fn no_series_is_emitted_twice() {
     let rig = cold_only("obj", b"abc").await;
@@ -466,9 +467,23 @@ async fn no_series_is_emitted_twice() {
         assert!(number.parse::<u64>().is_ok(), "{line}");
         assert!(seen.insert(name.to_owned()), "{name} twice in:\n{text}");
     }
-    // Every series of SERIES, and the build gauge, whose labels name the build and so are not in
-    // the list.
-    assert_eq!(seen.len(), SERIES.len() + 1);
+    // Every series of SERIES, and one more: the build gauge, whose labels name the build and so
+    // are not in the list. Any other extra series fails here.
+    let extra: Vec<&String> = seen
+        .iter()
+        .filter(|name| !SERIES.contains(&name.as_str()))
+        .collect();
+    assert_eq!(extra.len(), 1, "series beyond SERIES: {extra:?}");
+    assert!(
+        extra[0].starts_with("tierstore_build_info{"),
+        "the series beyond SERIES is {}, not tierstore_build_info",
+        extra[0]
+    );
+    assert_eq!(
+        seen.len(),
+        SERIES.len() + 1,
+        "a series of SERIES is missing"
+    );
 }
 
 /// Asserts that a ranged GET of a cold object while the hot tier is above its critical mark
