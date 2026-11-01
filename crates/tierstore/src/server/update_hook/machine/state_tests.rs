@@ -62,7 +62,7 @@ fn the_lock_is_exclusive_and_released_on_drop() {
     let (_guard, dir) = scratch("state-busy");
     mode(&dir, 0o755);
     let state = files(&dir);
-    let first = state.lock().ok().expect("the first lock");
+    let first = state.lock().expect("the first lock");
     assert!(matches!(state.lock().err(), Some(PortError::Busy)));
     drop(first);
     assert!(state.lock().is_ok());
