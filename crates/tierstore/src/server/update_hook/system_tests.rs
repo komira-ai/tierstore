@@ -97,7 +97,7 @@ fn restore_runs_the_step_over_the_machine_ports() {
     assert_eq!(done.report.reason, None);
     let calls = runner.calls();
     assert_eq!(calls.len(), 3, "{calls:?}");
-    assert_eq!(calls[0].program, "nft");
+    assert_eq!(calls[0].program, "/usr/sbin/nft");
     assert_eq!(calls[0].args, ["-f", "-"]);
     let guard = String::from_utf8(calls[0].stdin.clone().unwrap()).unwrap();
     assert!(guard.contains(GUARD_TABLE), "{guard}");
@@ -108,8 +108,8 @@ fn restore_runs_the_step_over_the_machine_ports() {
         "{forward}"
     );
     assert_eq!(calls[1].timeout, NFT_TIMEOUT);
-    assert_eq!(calls[2].program, "systemctl");
-    assert_eq!(calls[2].args, ["start", "tierstore@9301.service"]);
+    assert_eq!(calls[2].program, "/usr/bin/systemctl");
+    assert_eq!(calls[2].args, ["start", "--", "tierstore@9301.service"]);
     assert_eq!(calls[2].timeout, START_TIMEOUT);
     assert_eq!(std::fs::read(host.state.join(STATE_FILE)).unwrap(), before);
     assert!(host.state.join("lock").exists());
