@@ -43,12 +43,22 @@
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
 #
-# One release at a time (the group `release-main`), none cancelled: a second waits for the first
-# (GitHub keeps one waiting run per group, so a third replaces the second). Nothing is lost by
-# that, since the plan measures from the highest tag. A run that is not a success for a push to
-# main takes a group of its own, so that it cannot replace a release that is waiting. The
-# workflow lint holds `contents: write` to the `publish` job alone, `plan` to read access, and
-# this file to no build and no signing step.
+# verify also runs the downloaded linux-x86_64 binary with `--version` and refuses to go on
+# unless it says exactly the tag (without the v) and the first 12 digits of the commit
+# (cargo xtask release check-binary): artifacts.yml built it under the version that
+# `cargo xtask release version` computed, and the plan names the tag with the same computation,
+# so they differ only when a tag appeared between the build and the release, and then nothing
+# is published.
+#
+# One release action at a time, never cancelled: the group is the one kbf's release.yml uses
+# (`release-main` for a run that succeeded, a group of its own for any other, so that it cannot
+# replace the release that is waiting). Every workflow on the release path is in that group, the
+# farm deploy included when it is added; the workflow lint holds each listed workflow to it.
+# GitHub keeps one waiting run per group, so a third replaces the second; nothing is lost by
+# that, since the plan measures from the highest tag. A manual run of this workflow takes a group
+# of its own (publish refuses a tag or release that exists). The lint also holds `contents: write`
+# to the `publish` job alone, `plan` to read access, and this file to no build and no signing
+# step.
 name: release
 
 on:
@@ -75,7 +85,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'main' || github.run_id }}
+  group: release-${{ github.event.workflow_run.conclusion == 'success' && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -141,6 +151,7 @@ jobs:
       attestations: read
     env:
       COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
     outputs:
       run-id: ${{ steps.locate.outputs.run-id }}
     steps:
@@ -188,6 +199,10 @@ jobs:
         run: sha256sum --check --strict SHA256SUMS
       - name: The files are exactly the assets of this commit, each tarball with its bundle
         run: cargo xtask release check dist --commit "$COMMIT"
+      # The runner is linux-x86_64: the binary of that tarball is run, and refused unless it says
+      # the tag (without the v) and the commit. Unpacked outside dist, which holds the assets.
+      - name: The binary says the tag and the commit it is released under
+        run: cargo xtask release check-binary dist --tag "$TAG" --commit "$COMMIT" --scratch "$RUNNER_TEMP/binary"
       - name: Fetch the Sigstore trusted root, for the offline check of the bundles
         env:
           GH_TOKEN: ${{ github.token }}

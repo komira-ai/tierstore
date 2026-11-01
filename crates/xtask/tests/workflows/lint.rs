@@ -287,15 +287,7 @@ pub fn release_problems(text: &str) -> Vec<String> {
             problems.push(format!("workflow_run.{key} is {got:?}, not {want:?}"));
         }
     }
-    let group = entry(&doc, "concurrency").and_then(|c| entry(c, "group"));
-    let group = group.and_then(Node::as_str).unwrap_or_default();
-    if !(group.starts_with("release-") && group.contains("'main'")) {
-        problems.push(format!("concurrency group {group:?} is not release-main"));
-    }
-    let cancel = entry(&doc, "concurrency").and_then(|c| entry(c, "cancel-in-progress"));
-    if cancel.and_then(Node::as_str) != Some("false") {
-        problems.push("concurrency cancel-in-progress is not false".to_owned());
-    }
+    problems.extend(concurrency_problems("release.yml", text));
     let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
     let job = |name: &str| {
         jobs.iter()
@@ -367,6 +359,29 @@ pub fn release_problems(text: &str) -> Vec<String> {
             problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
         }
     }
+    // The binary of the files about to be published says the tag and the commit, checked in
+    // verify, before the publish job (which needs verify) can run.
+    let verify = job("verify");
+    let env_tag = verify
+        .and_then(|j| entry(j, "env"))
+        .and_then(|e| entry(e, "TAG"))
+        .and_then(Node::as_str);
+    if env_tag != Some("${{ needs.plan.outputs.tag }}") {
+        problems.push("verify: env TAG is not ${{ needs.plan.outputs.tag }}".to_owned());
+    }
+    let check = runs(verify)
+        .into_iter()
+        .find(|r| r.contains("release check-binary"));
+    match check {
+        None => problems.push("verify: no step runs `cargo xtask release check-binary`".to_owned()),
+        Some(run) if !(run.contains("--tag \"$TAG\"") && run.contains("--commit \"$COMMIT\"")) => {
+            problems.push(
+                "verify: the check-binary step must pass --tag \"$TAG\" and --commit \"$COMMIT\""
+                    .to_owned(),
+            );
+        }
+        Some(_) => {}
+    }
     if !text.contains("vars.RELEASE_FREEZE") {
         problems.push("plan does not read vars.RELEASE_FREEZE".to_owned());
     }
@@ -404,8 +419,74 @@ fn build_problems(text: &str) -> Vec<String> {
 
 /// One line per way the text of `artifacts.yml` does not build under the version the release
 /// will tag.
-pub fn artifacts_problems(_text: &str) -> Vec<String> {
-    vec!["not written".to_owned()]
+pub fn artifacts_problems(text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![e],
+    };
+    let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
+    let job = |name: &str| {
+        jobs.iter()
+            .find(|(k, _)| k.as_str() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let mut problems = Vec::new();
+    let version = job("version");
+    let version_runs = runs(version);
+    if !version_runs.iter().any(|r| r.contains("release version")) {
+        problems.push("version job: no step runs `cargo xtask release version`".to_owned());
+    }
+    if !version_runs
+        .iter()
+        .any(|r| r.contains("--version-file VERSION"))
+    {
+        problems.push("version job: release version lacks --version-file VERSION".to_owned());
+    }
+    let output = version
+        .and_then(|j| entry(j, "outputs"))
+        .and_then(|o| entry(o, "version"))
+        .and_then(Node::as_str);
+    if output != Some("${{ steps.version.outputs.version }}") {
+        problems.push("version job: output version is not the version step's".to_owned());
+    }
+    for name in ["linux-x86_64", "linux-arm64"] {
+        let build = job(name);
+        let needs = names(build.and_then(|j| entry(j, "needs")));
+        if needs != ["version"] {
+            problems.push(format!("{name}: needs are {needs:?}, not [\"version\"]"));
+        }
+        let given = build
+            .and_then(|j| entry(j, "env"))
+            .and_then(|e| entry(e, "TIERSTORE_BUILD_VERSION_OVERRIDE"))
+            .and_then(Node::as_str);
+        if given != Some("${{ needs.version.outputs.version }}") {
+            problems.push(format!(
+                "{name}: env TIERSTORE_BUILD_VERSION_OVERRIDE is not ${{{{ needs.version.outputs.version }}}}"
+            ));
+        }
+        let checked = runs(build).into_iter().any(|r| {
+            r.contains("build-commit")
+                && r.contains("--version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"")
+        });
+        if !checked {
+            problems.push(format!(
+                "{name}: the build-commit step does not check --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\""
+            ));
+        }
+    }
+    problems
+}
+
+/// The `run:` text of each step of `job`.
+fn runs(job: Option<&Node>) -> Vec<&str> {
+    let steps = job.and_then(|j| entry(j, "steps"));
+    match steps.map(|s| &s.value) {
+        Some(Value::Seq(items)) => items
+            .iter()
+            .filter_map(|s| entry(s, "run").and_then(Node::as_str))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// The workflows on the release path, each of which must sit in the one release group: the
@@ -420,6 +501,28 @@ pub const RELEASE_GROUP: &str =
 
 /// One line per way the workflow `file` (of [`RELEASE_PATH_WORKFLOWS`]) is not in the shared
 /// release group without cancelling.
-pub fn concurrency_problems(_file: &str, _text: &str) -> Vec<String> {
-    vec!["not written".to_owned()]
+pub fn concurrency_problems(file: &str, text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![format!("{file}: {e}")],
+    };
+    let Some(concurrency) = entry(&doc, "concurrency") else {
+        return vec![format!(
+            "{file}: no top-level `concurrency` (group: {RELEASE_GROUP})"
+        )];
+    };
+    let mut problems = Vec::new();
+    let group = entry(concurrency, "group").and_then(Node::as_str);
+    if group != Some(RELEASE_GROUP) {
+        problems.push(format!(
+            "{file}: concurrency group is {group:?}, not {RELEASE_GROUP}"
+        ));
+    }
+    let cancel = entry(concurrency, "cancel-in-progress").and_then(Node::as_str);
+    if cancel != Some("false") {
+        problems.push(format!(
+            "{file}: concurrency cancel-in-progress is {cancel:?}, not false"
+        ));
+    }
+    problems
 }

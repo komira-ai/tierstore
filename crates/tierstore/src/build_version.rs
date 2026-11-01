@@ -17,8 +17,24 @@ pub const OVERRIDE: &str = "TIERSTORE_BUILD_VERSION_OVERRIDE";
 /// The override is set but is not exactly `<major>.<minor>.<patch>`: decimal numbers without a
 /// leading zero, no `v`, no suffix, no spaces. An empty value is refused too: a script whose
 /// variable expanded to nothing must fail, not quietly build under the crate's version.
-pub fn choose(_override_value: Option<&std::ffi::OsStr>, _package: &str) -> Result<String, String> {
-    Err("not written".to_owned())
+pub fn choose(override_value: Option<&std::ffi::OsStr>, package: &str) -> Result<String, String> {
+    let Some(value) = override_value else {
+        return Ok(package.to_owned());
+    };
+    let text = value.to_str().unwrap_or_default();
+    let number = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|b| b.is_ascii_digit())
+            && (part.len() == 1 || !part.starts_with('0'))
+    };
+    let parts: Vec<&str> = text.split('.').collect();
+    if parts.len() == 3 && parts.iter().all(|p| number(p)) {
+        Ok(text.to_owned())
+    } else {
+        Err(format!(
+            "{OVERRIDE}={value:?}: expected <major>.<minor>.<patch>, decimal numbers without a leading zero"
+        ))
+    }
 }
 
 #[cfg(test)]

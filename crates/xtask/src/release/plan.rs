@@ -1,7 +1,9 @@
 //! `release plan` and `release manual`: which tag a push to `main` is released as, or whether
 //! it is released at all. `release.yml` runs one of them first and feeds its outputs
 //! (`release`, `tag`, `commit`, `note`, or `release=false` and a `reason`) to the jobs that
-//! check and publish.
+//! check and publish. `release version` ([`version`]) prints the version part of the same
+//! computation (`X.Y.Z`), which `artifacts.yml` gives the build before it builds, so the binary
+//! reports the tag it is released under.
 //!
 //! - `release plan --repo <owner/repo> --commit <sha> [--version-file <path>] [--freeze <value>]
 //!   [--output <file>] [--gh <program>]` ([`plan`]): no release when `--freeze` is `true`
@@ -249,14 +251,28 @@ fn release(
     Ok(printed)
 }
 
-/// The `release version` verb: the lines to print.
+/// The highest release tag of the repository, if there is one.
+fn latest_tag(gh: &dyn Gh, repo: &str) -> Result<Option<String>, Error> {
+    let tags = release_tags(gh, repo)?;
+    Ok(tags
+        .into_iter()
+        .filter_map(|t| parse_tag(&t).map(|v| (v, t)))
+        .max()
+        .map(|(_, t)| t))
+}
+
+/// The `release version` verb: the lines to print. The version the next release of the
+/// repository has (`<major>.<minor>.<patch>`, no `v`): the one computation the build gives the
+/// binary and the plan names the tag by, so the two cannot differ unless a tag appears between.
 pub fn version(
-    _gh: &dyn Gh,
-    _repo: &str,
-    _version_file: Option<&str>,
-    _output: Option<&Path>,
+    gh: &dyn Gh,
+    repo: &str,
+    version_file: Option<&str>,
+    output: Option<&Path>,
 ) -> Result<Vec<String>, Error> {
-    todo!("version")
+    let latest = latest_tag(gh, repo)?;
+    let tag = next_tag(latest.as_deref(), version_file)?;
+    answer(output, vec![format!("version={}", &tag[1..])])
 }
 
 /// The `release plan` verb: the lines to print.
@@ -282,14 +298,10 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
             );
         }
     }
-    let tags = release_tags(gh, repo)?;
-    let latest = tags
-        .iter()
-        .filter_map(|t| parse_tag(t).map(|v| (v, t)))
-        .max();
-    let note = match latest {
+    let latest = latest_tag(gh, repo)?;
+    let note = match &latest {
         None => format!("The push run of {commit} on {MAIN}."),
-        Some((_, tag)) => match changes_since(gh, repo, tag, commit)? {
+        Some(tag) => match changes_since(gh, repo, tag, commit)? {
             Changes::Released => {
                 return skip(output, format!("{tag} already covers {commit}"));
             }
@@ -302,7 +314,7 @@ pub fn plan(gh: &dyn Gh, request: &Request) -> Result<Vec<String>, Error> {
             Changes::Code(note) => note,
         },
     };
-    let tag = next_tag(latest.map(|(_, t)| t.as_str()), version)?;
+    let tag = next_tag(latest.as_deref(), version)?;
     release(output, &tag, commit, &note)
 }
 

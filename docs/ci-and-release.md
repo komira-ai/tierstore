@@ -42,8 +42,19 @@ Every push to `main` that changes code and passes `ci.yml` and `artifacts.yml` i
 itself; nobody runs anything. `release.yml` starts when a run of `ci` or of `artifacts` on `main`
 finishes, and it acts only on a run that succeeded for a push to `main` of this repository. Both
 workflows finish on every push, so it starts twice for a commit; the plan job lets the run that
-finishes last go on, because it looks for a successful push run of both. Releases are made one at
-a time and none is cancelled.
+finishes last go on, because it looks for a successful push run of both.
+
+Release actions are made one at a time and none is ever cancelled. Every workflow on the release
+path is in one concurrency group, the one kbf's `release.yml` uses: `release-main` for a run that
+succeeded, a group of its own (the run id) for any other run, so that a run that does nothing
+cannot replace a release that is waiting; and `cancel-in-progress: false`. A newer push waits
+behind a running release. GitHub keeps only the newest waiting run, so a push that is replaced
+while it waits is not released by itself; that loses nothing, because the plan measures from the
+highest tag and the next release carries the skipped commits. A manual run is in a group of its own
+(publish refuses a tag or a release that exists). The farm deploy job, when it is added, joins the
+same group and is added to `RELEASE_PATH_WORKFLOWS` in `crates/xtask/tests/workflows/lint.rs`,
+which fails the build of any listed workflow that lacks the group or sets `cancel-in-progress` to
+`true`.
 
 The `plan` job (read-only, `cargo xtask release plan`) decides, in this order:
 
@@ -69,6 +80,25 @@ The release notes list the titles of the commits since the previous tag (the fir
 how to verify the files. The `verify` and `publish` jobs are those of the manual release below, run
 with the plan's tag and commit.
 
+### The version the binary reports
+
+A release binary reports exactly its tag: `tierstore --version` prints `tierstore X.Y.Z+<12 hex>`
+for the release `vX.Y.Z` of the commit whose first 12 digits follow the `+`, and the build gauge
+`tierstore_build_info` carries the same `version` label. The version is not the crate's version
+in `Cargo.toml`. `artifacts.yml` computes it before it builds (`cargo xtask release version`: the
+patch after the highest `vX.Y.Z` tag, or the `VERSION` file when that is higher, the same rule as
+the plan above) and gives it to the build as `TIERSTORE_BUILD_VERSION_OVERRIDE` (strict
+`X.Y.Z`, or the build fails); a build without it, a developer's for one, keeps the crate's
+version. The release plan computes the version again and names the tag with it. The `verify` job
+then unpacks the linux-x86_64 tarball it will publish, runs the binary with `--version`
+(`cargo xtask release check-binary`) and refuses to go on, so that nothing is tagged or published,
+unless the binary says the tag and the commit. The two computations differ only when a tag
+appears between the build and the release (another release published in that time); the release is
+then refused, and the next push is built and released under the new number. File names carry the
+commit, not the version, and are unchanged.
+
+`v0.3.1` predates this: its binary reports `0.3.0+e7fd86844000`, the crate's version at the time.
+
 ### Releasing by hand
 
 Run the `release` workflow from `main` ("Run workflow"), giving the tag (`vX.Y.Z`), the full SHA
@@ -77,7 +107,9 @@ neither held by `RELEASE_FREEZE` nor limited to code changes); the rest is the s
 job refuses a commit that is not on `main`, that lacks a successful push run of `artifacts.yml`
 and of `ci.yml`, or whose files or attestations do not check. The `publish` job creates the
 release as a draft at the commit, reads its assets back and publishes it, which creates the tag.
-A tag or release that exists is refused.
+A tag or release that exists is refused. The binary must say the tag you give, so a release by hand
+is made from a commit whose `artifacts.yml` run computed that same version.
+
 ## One-time setup for the site (a maintainer)
 
 The site publish job is off until these exist:
