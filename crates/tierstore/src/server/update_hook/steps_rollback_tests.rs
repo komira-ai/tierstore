@@ -94,11 +94,12 @@ fn no_rollback_after_stopping() {
         fake.advance(&[Step::Prepare, Step::Cutover, Step::Verify]);
         fake.set_record(&record);
         let before = fake.snapshot();
+        let mark = fake.changes().len();
         let done = fake.run(Step::Rollback);
         assert_eq!(done.outcome, Outcome::Failure);
         assert_eq!(done.report.reason, Some(Reason::Committed));
         assert!(!done.report.reversible);
-        assert!(fake.changes().is_empty());
+        assert_eq!(fake.changes().len(), mark);
         assert_eq!(fake.snapshot(), before);
     }
 }

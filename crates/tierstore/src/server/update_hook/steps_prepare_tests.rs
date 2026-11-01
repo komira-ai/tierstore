@@ -138,7 +138,9 @@ fn a_guard_that_cannot_be_loaded_defers_the_update() {
             .unwrap()
             .contains("guard table cannot be loaded")
     );
-    assert!(fake.changes().is_empty());
+    // The rejected load is a call, but it is one transaction that left nothing, and nothing
+    // else was done: no record, link, unit or removal.
+    assert_eq!(fake.changes(), ["nft.apply kbf_guard_tierstore"]);
     assert_eq!(fake.snapshot(), before);
 }
 
