@@ -5,9 +5,7 @@ use std::time::{Duration, Instant};
 use super::super::ports::Clock;
 
 /// Milliseconds since this value was made, on the monotonic clock.
-#[derive(Clone, Copy, Debug)]
 pub struct MonotonicClock {
-    #[allow(dead_code)]
     start: Instant,
 }
 
@@ -29,8 +27,10 @@ impl Default for MonotonicClock {
 
 impl Clock for MonotonicClock {
     fn now_ms(&self) -> u64 {
-        0
+        u64::try_from(self.start.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    fn pause(&self, _span: Duration) {}
+    fn pause(&self, span: Duration) {
+        std::thread::sleep(span);
+    }
 }

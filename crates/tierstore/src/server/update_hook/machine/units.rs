@@ -1,17 +1,23 @@
 //! The units, through `systemctl`.
+//!
+//! A unit whose `ConditionPathExists=` fails is skipped by `systemctl start`: systemd.unit(5)
+//! says a failing condition leaves the unit out of the `failed` state and the start "(mostly
+//! silently) skipped". The manual does not state `systemctl`'s exit status for that case; it is
+//! 0 on the systemd versions this was written against, and an exit that is not 0 is reported as
+//! a failure here like any other.
 
 use std::time::Duration;
 
-use super::super::ports::{PortError, Units};
-use super::runner::Runner;
+use super::super::ports::{PortError, PortKind, Units};
+use super::runner::{Call, Runner, checked, run};
+
+const PROGRAM: &str = "systemctl";
+const KIND: PortKind = PortKind::Units;
 
 /// `systemctl`, called through a [`Runner`].
 pub struct SystemdUnits<'a> {
-    #[allow(dead_code)]
     runner: &'a dyn Runner,
-    #[allow(dead_code)]
     start_timeout: Duration,
-    #[allow(dead_code)]
     stop_timeout: Duration,
 }
 
@@ -33,11 +39,13 @@ impl<'a> SystemdUnits<'a> {
 }
 
 impl Units for SystemdUnits<'_> {
-    fn start(&self, _unit: &str) -> Result<(), PortError> {
-        Ok(())
+    fn start(&self, unit: &str) -> Result<(), PortError> {
+        let call = Call::new(PROGRAM, &["start", unit], self.start_timeout);
+        checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 
-    fn stop(&self, _unit: &str) -> Result<(), PortError> {
-        Ok(())
+    fn stop(&self, unit: &str) -> Result<(), PortError> {
+        let call = Call::new(PROGRAM, &["stop", unit], self.stop_timeout);
+        checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 }

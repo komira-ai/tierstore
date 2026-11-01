@@ -81,7 +81,6 @@ fn a_non_200_is_a_reply_not_an_error() {
     let (port, server) =
         serve(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 4\r\n\r\nwait".to_vec());
     let reply = client().get(port, "/readyz").unwrap();
-    server.join().unwrap();
     assert_eq!(
         reply,
         Reply {
@@ -89,6 +88,7 @@ fn a_non_200_is_a_reply_not_an_error() {
             body: "wait".to_owned()
         }
     );
+    server.join().unwrap();
 }
 
 /// Asserts that an answer with no length is read to the close, that header names are matched
@@ -98,7 +98,6 @@ fn an_answer_without_a_length_is_read_to_the_close() {
     let (port, server) =
         serve(b"HTTP/1.0 404 Not Found\r\nnonsense\r\nX-A: b\r\n\r\nno such path".to_vec());
     let reply = client().get(port, "/x").unwrap();
-    server.join().unwrap();
     assert_eq!(
         reply,
         Reply {
@@ -106,6 +105,7 @@ fn an_answer_without_a_length_is_read_to_the_close() {
             body: "no such path".to_owned()
         }
     );
+    server.join().unwrap();
 }
 
 /// Asserts that a port nothing listens on is an error that names the request.

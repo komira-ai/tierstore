@@ -32,7 +32,6 @@ pub use slots::SlotLinks;
 pub use state::{LOCK_FILE, STATE_FILE, StateFiles};
 pub use units::SystemdUnits;
 
-#[allow(dead_code)]
 /// What went wrong, as text, before the port that saw it says which port that is.
 pub(super) struct Fault(pub(super) String);
 
@@ -60,7 +59,6 @@ impl From<String> for Fault {
     }
 }
 
-#[allow(dead_code)]
 /// Makes the changes in directory `dir` (a rename, a new link) durable.
 pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()

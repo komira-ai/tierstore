@@ -1,11 +1,15 @@
 //! Running a program: the argument vector, optional standard input and a time limit. The
 //! real runner never involves a shell.
 
-use std::io;
-use std::time::Duration;
+use std::io::{self, Read, Write};
+use std::process::{Command, Stdio};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use super::super::ports::{PortError, PortKind};
 
+/// How often a running program is looked at for its end.
+const POLL: Duration = Duration::from_millis(5);
 /// The most of a program's standard error that goes into a message.
 const STDERR_SHOWN: usize = 300;
 
@@ -91,7 +95,6 @@ pub trait Runner {
 }
 
 /// Runs the program as a child process of this one.
-#[derive(Clone, Copy, Debug, Default)]
 pub struct SystemRunner;
 
 impl Runner for SystemRunner {
@@ -103,8 +106,56 @@ impl Runner for SystemRunner {
     }
 }
 
-fn execute(_call: &Call) -> io::Result<Output> {
-    Err(io::Error::other("stub"))
+/// Reads a pipe to its end on a thread of its own, so that a program that writes more than a
+/// pipe holds is not stuck while this one waits for it to exit.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.map(|mut pipe| pipe.read_to_end(&mut bytes));
+        bytes
+    })
+}
+
+fn execute(call: &Call) -> io::Result<Output> {
+    let mut child = Command::new(&call.program)
+        .args(&call.args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // The input goes in from a thread too, and the pipe closes after it: the program sees the
+    // end of its input. A program that exits without reading it all makes the write fail,
+    // which is its own affair.
+    let input = call.stdin.clone().unwrap_or_default();
+    let pipe = child.stdin.take();
+    let writer = thread::spawn(move || {
+        let _ = pipe.map(|mut pipe| pipe.write_all(&input));
+    });
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + call.timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            child.wait()?;
+            break None;
+        }
+        thread::sleep(POLL);
+    };
+    let _ = writer.join();
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    match status {
+        Some(status) => Ok(Output {
+            code: status.code(),
+            stdout,
+            stderr,
+        }),
+        None => Err(io::ErrorKind::TimedOut.into()),
+    }
 }
 
 /// Runs `call`, and says of a failure to run which port asked.
