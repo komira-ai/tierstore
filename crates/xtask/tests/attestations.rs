@@ -14,7 +14,6 @@ use xtask::bundles::{DEAD_PROXY, ISSUER};
 use xtask::sums::{Attestations, verify_attestations};
 
 /// The reader of the install pages' commands, shared with the unit tests of the crate.
-#[allow(dead_code)]
 #[path = "../src/install_pages.rs"]
 mod install_pages;
 
@@ -507,6 +506,8 @@ fn the_offline_gh_check_of_the_install_pages_gives_only_flags_the_verifier_passe
         let flags = install_pages::flags(&lines[0]);
         assert!(flags.contains(&"--bundle"), "{name}");
         assert!(flags.contains(&"--custom-trusted-root"), "{name}");
+        let bundle = install_pages::value_of(&lines[0], "--bundle");
+        assert_eq!(bundle, "<tarball>.sigstore.json", "{name}");
         for flag in flags {
             assert!(
                 passed.contains(flag),

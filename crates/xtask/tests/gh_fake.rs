@@ -418,23 +418,28 @@ fn a_flag_with_no_value_at_the_end_is_ignored() {
 }
 
 #[test]
-fn a_verification_writes_its_arguments_to_the_record_file_when_one_is_named() {
-    // Catches: a record that misses or reorders an argument, splits a value from its flag, or
-    // is written when no test asked for one.
-    let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join("gh-fake-record")
-        .join("args.txt");
+fn a_verification_appends_its_arguments_to_the_record_file_when_one_is_named() {
+    // Catches: a record that misses or reorders an argument, splits a value from its flag,
+    // replaces what an earlier verification wrote instead of appending to it, or is written
+    // when no test asked for one.
+    let path = dir("record-file").join("args.txt");
     let expect = format!("record={}\n", path.display());
-    let flags = bundle_flags(&["--custom-trusted-root", "/some/root.jsonl"]);
-    let o = verify_expecting("record", BUNDLED, &expect, &flags, &[]);
-    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    let asset = path.with_file_name("asset");
-    let mut want = vec!["attestation", "verify", asset.to_str().expect("utf8")];
-    want.extend_from_slice(&flags);
-    let recorded = std::fs::read_to_string(&path).expect("the record");
-    assert_eq!(recorded, format!("{}\n\n", want.join("\n")));
+    let first = bundle_flags(&["--custom-trusted-root", "/some/root.jsonl"]);
+    let second = bundle_flags(&["--cert-oidc-issuer", "https://issuer.example"]);
+    let mut want = String::new();
+    for (name, flags) in [("record-a", &first), ("record-b", &second)] {
+        let o = verify_expecting(name, BUNDLED, &expect, flags, &[]);
+        assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+        let asset = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("gh-fake-{name}"))
+            .join("asset");
+        let mut args = vec!["attestation", "verify", asset.to_str().expect("utf8")];
+        args.extend_from_slice(flags);
+        want.push_str(&format!("{}\n\n", args.join("\n")));
+    }
+    assert_eq!(std::fs::read_to_string(&path).expect("the record"), want);
 
-    let o = verify_expecting("record-none", BUNDLED, "", &flags, &[]);
+    let o = verify_expecting("record-none", BUNDLED, "", &first, &[]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let none = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gh-fake-record-none");
     assert_eq!(
