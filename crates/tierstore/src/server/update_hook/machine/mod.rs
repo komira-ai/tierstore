@@ -18,9 +18,7 @@ mod state;
 mod units;
 
 use std::fmt;
-use std::fs::File;
 use std::io;
-use std::path::Path;
 
 pub use clock::MonotonicClock;
 pub use host::{RELEASE_BINARY, SystemHost};
@@ -56,11 +54,6 @@ impl From<String> for Fault {
     fn from(text: String) -> Fault {
         Fault(text)
     }
-}
-
-/// Makes the changes in directory `dir` (a rename, a new link) durable.
-pub(super) fn sync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]

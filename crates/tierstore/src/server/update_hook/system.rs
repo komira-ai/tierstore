@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rustix::process::geteuid;
+use rustix::process::{getegid, geteuid};
 
 use super::args::Invocation;
 use super::declaration::Declaration;
@@ -14,7 +14,7 @@ use super::machine::{
 };
 use super::params::Params;
 use super::ports::{Host, Ports};
-use super::report::Done;
+use super::report::{Done, Reason};
 use super::steps::run_step;
 
 /// The longest an `nft` call may run.
@@ -34,7 +34,7 @@ pub(super) const RELEASE_OWNER: u32 = 0;
 /// The user that must own the declaration: the updater's file is root's.
 pub(super) const DECLARATION_OWNER: u32 = 0;
 
-/// Where the machine is and who may own its state directory.
+/// Where the machine is and who owns its state directory.
 pub(super) struct Config<'a> {
     /// The root the host's files are read under (`/` on a host).
     pub root: PathBuf,
@@ -72,6 +72,12 @@ pub(super) fn run_on(
         Ok(decl) => decl,
         Err(done) => return done,
     };
+    let Some(service) = decl.service.clone() else {
+        return Done::fail(
+            Reason::StateInvalid,
+            "the declaration names no service account (uid)",
+        );
+    };
     let nft = NftTool::new(runner, NFT_TIMEOUT);
     let units = SystemdUnits::new(runner, START_TIMEOUT, STOP_TIMEOUT);
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
@@ -79,7 +85,7 @@ pub(super) fn run_on(
     let account = Account {
         owner: config.owner,
         group: config.group,
-        service: decl.service.clone().unwrap_or_default(),
+        service,
         group_file: config.root.join("etc/group"),
     };
     let state = StateFiles::new(decl.state_dir.clone(), account);
@@ -103,7 +109,7 @@ pub(super) fn system_config(runner: &dyn Runner) -> Config<'_> {
     Config {
         root: PathBuf::from("/"),
         owner: geteuid().as_raw(),
-        group: 0,
+        group: getegid().as_raw(),
         release_owner: RELEASE_OWNER,
         declaration_owner: DECLARATION_OWNER,
         runner,
