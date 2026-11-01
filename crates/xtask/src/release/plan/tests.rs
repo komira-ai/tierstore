@@ -437,6 +437,15 @@ fn a_repository_without_a_release_tag_releases_the_first_commit() {
     // compare asked against a tag that does not exist.
     let mut gh = repo(&["latest", "v1.0.0-rc1", "v01.0.0"], "ahead", &[], &[]);
     gh.api.retain(|(p, _)| !p.contains("compare"));
+    // Refs that are not tags, and one without a name, are not release tags either.
+    for (path, listed) in &mut gh.api {
+        if *path == tags_path() {
+            listed
+                .as_array_mut()
+                .expect("refs")
+                .extend([json!({ "ref": "refs/heads/v2" }), json!({})]);
+        }
+    }
     let printed = plan_of(&gh, None);
     assert!(printed.contains(&"tag=v0.1.0".to_owned()), "{printed:?}");
     assert!(

@@ -3,11 +3,34 @@
 # run, checked again, so a host can pin a release asset, which outlives the run's 90-day
 # workflow artifacts.
 #
-# It is started by hand (`workflow_dispatch`) from main, with the tag (`v<major>.<minor>.<patch>`)
-# and the full SHA of the commit. There is no other trigger: nothing tags or releases by itself.
-# The workflow lint (crates/xtask/tests/workflows) holds `contents: write` to the `publish` job
-# alone, and holds this file to no build and no signing step.
+# Every push to main that changes code and passes ci.yml and artifacts.yml is released by itself.
+# There are two triggers and no others (the workflow lint, crates/xtask/tests/workflows, pins
+# them):
 #
+# - `workflow_run`: the completion of a run of `ci` or of `artifacts` on main. Both workflows run
+#   on every push to main, side by side, so this starts once for each of them. Only a run that
+#   succeeded, for a push, to main of this repository, is acted on (the `if:` of `plan`); and the
+#   plan lets the run that finishes last go on, because it looks for a successful push run of
+#   both for that commit (`cargo xtask release plan`). The other starts, finds one missing, and
+#   ends green with nothing to do. No tag starts this workflow.
+# - `workflow_dispatch`: the manual override, from main, with the tag (`v<major>.<minor>.<patch>`)
+#   and the full SHA of the commit, as before. It is not held by the freeze.
+#
+# Why not one workflow that calls ci and artifacts, as a pipeline would: artifacts.yml is the
+# signer identity the installers verify, and ci.yml and artifacts.yml are also the checks of a
+# pull request. Making them callable would move the push runs `release locate` and the
+# attestation check look for. `workflow_run` leaves both files as they are.
+#
+# plan     read-only. Decides whether this commit is released and as which tag, and prints it
+#          (cargo xtask release plan; by hand, cargo xtask release manual). No release when the
+#          repository variable RELEASE_FREEZE is `true`; when ci or artifacts has no successful
+#          push run for the commit yet; when an existing release already covers it; or when
+#          everything since the highest release tag is documentation (the paths are listed in
+#          docs/ci-and-release.md and held by a test). Otherwise the tag is the patch after the
+#          highest v<major>.<minor>.<patch> tag, or the version in the VERSION file at the root
+#          when that is higher. The change is measured from the highest tag, not from the push,
+#          so the code of a push whose run was replaced or failed is in the next release. The note
+#          lists the titles of the commits since that tag.
 # verify   refuses a commit that is not on main, or that lacks a successful push run of
 #          artifacts.yml (the files and their signatures) or of ci.yml (the lint and the tests)
 #          (cargo xtask release locate), downloads the files of that run, checks them against
@@ -19,9 +42,20 @@
 #          only then publishes it, which is when GitHub creates the tag (cargo xtask release
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
+#
+# One release at a time (the group `release-main`), none cancelled: a second waits for the first
+# (GitHub keeps one waiting run per group, so a third replaces the second). Nothing is lost by
+# that, since the plan measures from the highest tag. A run that is not a success for a push to
+# main takes a group of its own, so that it cannot replace a release that is waiting. The
+# workflow lint holds `contents: write` to the `publish` job alone, `plan` to read access, and
+# this file to no build and no signing step.
 name: release
 
 on:
+  workflow_run:
+    workflows: [ci, artifacts]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
@@ -40,37 +74,79 @@ on:
 
 permissions: {}
 
-# One release at a time, none cancelled: a second one waits for the first.
 concurrency:
-  group: release
+  group: release-${{ (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'main' || github.run_id }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # The inputs are read as environment variables of the steps, never spliced into a script.
-  COMMIT: ${{ inputs.commit }}
-  TAG: ${{ inputs.tag }}
 
 defaults:
   run:
     shell: bash
 
 jobs:
+  plan:
+    # A manual run of main, or a finished run of ci or artifacts that succeeded, for a push to
+    # main of this repository (not a pull request, not a fork's branch named main).
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository)) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      release: ${{ steps.auto.outputs.release || steps.manual.outputs.release }}
+      tag: ${{ steps.auto.outputs.tag || steps.manual.outputs.tag }}
+      commit: ${{ steps.auto.outputs.commit || steps.manual.outputs.commit }}
+      note: ${{ steps.auto.outputs.note || steps.manual.outputs.note }}
+    steps:
+      # The commit the run built, not `github.sha` (for a `workflow_run`, the newest commit of
+      # main): its VERSION file is the one read.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || inputs.commit }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Compile xtask
+        run: cargo xtask --help
+      - name: Whether this push is released, and as which tag
+        id: auto
+        if: ${{ github.event_name == 'workflow_run' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          # The stop switch: `true` releases nothing until an admin clears it.
+          FREEZE: ${{ vars.RELEASE_FREEZE }}
+        run: cargo xtask release plan --repo "$GITHUB_REPOSITORY" --commit "$COMMIT" --version-file VERSION --freeze "$FREEZE" --output "$GITHUB_OUTPUT"
+      # The inputs are read as environment variables of the step, never spliced into a script.
+      - name: The tag and commit of a manual run
+        id: manual
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          TAG: ${{ inputs.tag }}
+          COMMIT: ${{ inputs.commit }}
+          NOTE: ${{ inputs.note }}
+        run: cargo xtask release manual --tag "$TAG" --commit "$COMMIT" --note "$NOTE" --output "$GITHUB_OUTPUT"
+
   verify:
-    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: [plan]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
       actions: read
       attestations: read
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
     outputs:
       run-id: ${{ steps.locate.outputs.run-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ needs.plan.outputs.commit }}
           persist-credentials: false
       - run: rustup toolchain install
       # xtask is compiled here, before any step holds a token, so no build script runs beside one.
@@ -128,17 +204,20 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [verify]
-    if: ${{ github.ref == 'refs/heads/main' }}
+    needs: [plan, verify]
+    if: ${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: write
       attestations: read
+    env:
+      COMMIT: ${{ needs.plan.outputs.commit }}
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ needs.plan.outputs.commit }}
           persist-credentials: false
       - run: rustup toolchain install
       - name: Compile xtask
@@ -166,5 +245,5 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ needs.verify.outputs.run-id }}
-          NOTE: ${{ inputs.note }}
+          NOTE: ${{ needs.plan.outputs.note }}
         run: cargo xtask release publish dist --repo "$GITHUB_REPOSITORY" --tag "$TAG" --commit "$COMMIT" --run-id "$RUN_ID" --notes-file "$RUNNER_TEMP/release-notes.md" --note "$NOTE"

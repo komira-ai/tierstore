@@ -60,7 +60,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         file: "release.yml",
         job: "publish",
         scope: "contents",
-        condition: MAIN_ONLY,
+        condition: RELEASE_IF,
     },
     Allowed {
         file: "advisories.yml",
@@ -236,7 +236,168 @@ fn permission_problems(file: &str, name: &str, job: &Node) -> Vec<String> {
     problems
 }
 
-/// One line per way the text of `release.yml` is not the automatic release chain.
-pub fn release_problems(_text: &str) -> Vec<String> {
-    vec!["not written".to_owned()]
+/// The condition of the jobs after the plan: the plan said to release, on a run of `main`.
+pub const RELEASE_IF: &str =
+    "${{ needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main' }}";
+
+/// What the `if:` of the plan job must say of the run that started it: it is a completed
+/// run that succeeded, for a push to `main` of this repository.
+const PLAN_GUARDS: [&str; 4] = [
+    "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_branch == 'main'",
+    "github.event.workflow_run.head_repository.full_name == github.repository",
+];
+
+/// The `cargo xtask` verbs release.yml may run; the others build or fetch.
+const XTASK_VERBS: [&str; 4] = ["--help", "release", "sums", "verify-assets"];
+
+fn names(node: Option<&Node>) -> Vec<String> {
+    let mut found = node.map(triggers).unwrap_or_default();
+    found.sort();
+    found
+}
+
+/// One line per way the text of `release.yml` is not the automatic release chain: started by
+/// the completion of `ci` and `artifacts` on `main` and by hand and by nothing else, one run at
+/// a time and none cancelled, a read-only `plan` job that answers whether and as which tag,
+/// `verify` and `publish` after it (the write scope in `publish` alone), and no step that
+/// builds or signs.
+pub fn release_problems(text: &str) -> Vec<String> {
+    let doc = match yaml::load(text) {
+        Ok(doc) => doc,
+        Err(e) => return vec![e],
+    };
+    let mut problems = Vec::new();
+    let on = entry(&doc, "on");
+    let found = names(on);
+    if found != ["workflow_dispatch", "workflow_run"] {
+        problems.push(format!(
+            "triggers are {found:?}, not workflow_dispatch and workflow_run"
+        ));
+    }
+    let run = on.and_then(|o| entry(o, "workflow_run"));
+    for (key, want) in [
+        ("workflows", vec!["artifacts", "ci"]),
+        ("types", vec!["completed"]),
+        ("branches", vec!["main"]),
+    ] {
+        let got = names(run.and_then(|r| entry(r, key)));
+        if got != want {
+            problems.push(format!("workflow_run.{key} is {got:?}, not {want:?}"));
+        }
+    }
+    let group = entry(&doc, "concurrency").and_then(|c| entry(c, "group"));
+    let group = group.and_then(Node::as_str).unwrap_or_default();
+    if !(group.starts_with("release-") && group.contains("'main'")) {
+        problems.push(format!("concurrency group {group:?} is not release-main"));
+    }
+    let cancel = entry(&doc, "concurrency").and_then(|c| entry(c, "cancel-in-progress"));
+    if cancel.and_then(Node::as_str) != Some("false") {
+        problems.push("concurrency cancel-in-progress is not false".to_owned());
+    }
+    let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
+    let job = |name: &str| {
+        jobs.iter()
+            .find(|(k, _)| k.as_str() == Some(name))
+            .map(|(_, v)| v)
+    };
+    let mut listed: Vec<&str> = jobs.iter().filter_map(|(k, _)| k.as_str()).collect();
+    listed.sort_unstable();
+    if listed != ["plan", "publish", "verify"] {
+        problems.push(format!("jobs are {listed:?}, not plan, verify and publish"));
+    }
+    for (name, job) in jobs {
+        let name = name.as_str().unwrap_or_default();
+        let permissions = entry(job, "permissions").map_or(&[][..], entries);
+        for (scope, level) in permissions {
+            let level = level.as_str().unwrap_or_default();
+            let writes = level != "read" && level != "none";
+            if writes && name != "publish" {
+                problems.push(format!(
+                    "{name}: permissions grant `{}: {level}`; only publish writes",
+                    scope.as_str().unwrap_or_default()
+                ));
+            }
+        }
+    }
+    let plan = job("plan");
+    let plan_if = plan
+        .and_then(|j| entry(j, "if"))
+        .and_then(Node::as_str)
+        .unwrap_or_default();
+    for guard in PLAN_GUARDS {
+        if !plan_if.contains(guard) {
+            problems.push(format!("plan: `if` lacks {guard}"));
+        }
+    }
+    if !plan_if.contains("github.event_name == 'workflow_dispatch'") {
+        problems.push("plan: `if` lacks github.event_name == 'workflow_dispatch'".to_owned());
+    }
+    let mut held: Vec<String> = plan
+        .and_then(|j| entry(j, "permissions"))
+        .map_or(&[][..], entries)
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{}: {}",
+                k.as_str().unwrap_or_default(),
+                v.as_str().unwrap_or_default()
+            )
+        })
+        .collect();
+    held.sort();
+    if held != ["actions: read", "contents: read"] {
+        problems.push(format!(
+            "plan: permissions are {held:?}, not contents: read and actions: read"
+        ));
+    }
+    for (name, needs) in [
+        ("verify", vec!["plan"]),
+        ("publish", vec!["plan", "verify"]),
+    ] {
+        let got = names(job(name).and_then(|j| entry(j, "needs")));
+        if got != needs {
+            problems.push(format!("{name}: needs are {got:?}, not {needs:?}"));
+        }
+        let condition = job(name)
+            .and_then(|j| entry(j, "if"))
+            .and_then(Node::as_str);
+        if condition != Some(RELEASE_IF) {
+            problems.push(format!("{name}: `if` is not {RELEASE_IF}"));
+        }
+    }
+    if !text.contains("vars.RELEASE_FREEZE") {
+        problems.push("plan does not read vars.RELEASE_FREEZE".to_owned());
+    }
+    problems.extend(build_problems(text));
+    problems
+}
+
+/// A line of `text` that builds, fetches or signs: a `cargo` that is not `cargo xtask <verb>`
+/// of [`XTASK_VERBS`], or the attest actions.
+fn build_problems(text: &str) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut words = line.split_whitespace().peekable();
+        while let Some(word) = words.next() {
+            let next = words.peek().copied().unwrap_or_default();
+            let after = line
+                .split_once("cargo xtask ")
+                .and_then(|(_, rest)| rest.split_whitespace().next())
+                .unwrap_or_default();
+            let bad = match word {
+                "cargo" => next != "xtask" || !XTASK_VERBS.contains(&after),
+                _ => word.contains("attest-") || word == "--release",
+            };
+            if bad {
+                problems.push(format!("line {}: release.yml builds or signs", n + 1));
+                break;
+            }
+        }
+    }
+    problems
 }

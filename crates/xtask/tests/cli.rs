@@ -434,7 +434,7 @@ fn release_plan_reads_the_version_file_and_the_freeze_and_appends_its_outputs() 
     assert!(stdout(&o).contains("RELEASE_FREEZE"), "{}", stdout(&o));
     let written = std::fs::read_to_string(d.join("github-output")).expect("out");
     assert!(
-        written.ends_with("release=false\nreason=RELEASE_FREEZE is true: no release is cut\n"),
+        written.ends_with("release=false\nreason=RELEASE_FREEZE is true\n"),
         "{written}"
     );
 }

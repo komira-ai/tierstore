@@ -1,7 +1,10 @@
 //! `cargo xtask release`: a GitHub release of the exact files a push to `main` built and
 //! attested for one commit. Nothing is rebuilt; `.github/workflows/release.yml` runs these
-//! verbs, in this order, and it is started by hand.
+//! verbs, in this order. It starts when `ci.yml` and `artifacts.yml` have finished on a push to
+//! `main`, or by hand.
 //!
+//! - `release plan` and `release manual` ([`plan()`]): whether the commit is released and as
+//!   which tag (the first job); see that module.
 //! - `release locate --repo <owner/repo> --commit <sha> [--output <file>] [--gh <program>]`
 //!   ([`locate`]): refuses a commit that is not on `main` (GitHub's compare of
 //!   `main...<sha>` is neither `identical` nor `behind`), then a commit for which there is no

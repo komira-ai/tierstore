@@ -192,6 +192,38 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// Whether a push to main is released and as which tag; appends the answer to `--output`.
+    Plan {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        commit: String,
+        /// The `VERSION` file: a version above the highest release tag is the next tag.
+        #[arg(long)]
+        version_file: Option<PathBuf>,
+        /// The value of the repository variable `RELEASE_FREEZE`; `true` stops the release.
+        #[arg(long, default_value = "")]
+        freeze: String,
+        /// Append `release=`, `tag=`, `commit=` and `note=` (or `reason=`) to this file
+        /// (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
+    /// The same answer for a run started by hand, with its own tag and commit.
+    Manual {
+        /// `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        commit: String,
+        /// A paragraph for the release notes.
+        #[arg(long, default_value = "")]
+        note: String,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// `dir` holds exactly the assets of the commit, each tarball with its bundle.
     Check {
         dir: PathBuf,
@@ -319,6 +351,36 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             output,
             gh,
         }) => release::locate(&release::RealGh(gh), &repo, &commit, output.as_deref()),
+        Verb::Release(ReleaseVerb::Plan {
+            repo,
+            commit,
+            version_file,
+            freeze,
+            output,
+            gh,
+        }) => {
+            let version = version_file
+                .as_deref()
+                .map(release::read_version)
+                .transpose()?
+                .flatten();
+            release::plan(
+                &release::RealGh(gh),
+                &release::Request {
+                    repo: &repo,
+                    commit: &commit,
+                    version: version.as_deref(),
+                    freeze: &freeze,
+                    output: output.as_deref(),
+                },
+            )
+        }
+        Verb::Release(ReleaseVerb::Manual {
+            tag,
+            commit,
+            note,
+            output,
+        }) => release::manual(&tag, &commit, &note, output.as_deref()),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {
             dir,

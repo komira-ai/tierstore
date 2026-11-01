@@ -392,7 +392,7 @@ fn each_defect_in_the_release_chain_is_named_by_the_lint() {
     let text = text_of("release.yml");
     for (replace, with, names) in RELEASE_DEFECTS {
         assert!(text.contains(replace), "{replace:?} is not in release.yml");
-        let problems = release_problems(&text.replacen(replace, with, 1));
+        let problems = release_problems(&text.replace(replace, with));
         assert!(
             problems.iter().any(|p| p.contains(names)),
             "{replace:?} -> {with:?} must name {names:?}: {problems:?}"
@@ -406,13 +406,14 @@ fn a_build_or_a_signing_step_in_release_yml_is_named_by_the_lint() {
     // there must be `cargo xtask`, and the attest actions are not used.
     let text = text_of("release.yml");
     for step in [
-        "cargo build --release",
-        "cargo xtask package && cargo build",
-        "cargo install cargo-deny",
+        "run: cargo build --release",
+        "run: cargo xtask package && cargo build",
+        "run: cargo xtask package",
+        "run: cargo install cargo-deny",
         "uses: actions/attest-build-provenance@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
         "uses: actions/attest-sbom@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4.0.0",
     ] {
-        let spoiled = format!("{text}      - run: {step}\n");
+        let spoiled = format!("{text}      - {step}\n");
         let problems = release_problems(&spoiled);
         assert!(
             problems.iter().any(|p| p.contains("builds or signs")),
