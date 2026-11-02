@@ -396,8 +396,7 @@ async fn accepts_that_keep_failing_hold_the_door_no_longer_than_the_grace() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn outside_linux_the_count_is_an_error() {
-    assert_eq!(super::syn_cookies(), None);
-    let error = super::handshakes(&[9301], None).unwrap_err();
+    let error = super::handshakes(&[9301]).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
 }
 
