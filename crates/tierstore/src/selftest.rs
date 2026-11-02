@@ -4,8 +4,10 @@
 //! create-only put that refuses a key that exists, a put that replaces only on the right content
 //! tag, a ranged read that gives the range and nothing else, a head that gives the size and the
 //! tag of what was written, a listing that pages by `start_after`, and (on the tier that takes
-//! multipart uploads) a completion that is create-only. A store that answers one of them wrongly
-//! does not fail: it overwrites silently, and the guarantees built on it are gone.
+//! multipart uploads, the cold tier) a completion that is create-only and a reservation (a marked
+//! object that is written create-only, and replaced or removed on its tag). A store that answers
+//! one of them wrongly does not fail: it overwrites silently, and the guarantees built on it are
+//! gone.
 //! [`self_test`] asks each question on a key of its own, and says which answer was wrong.
 //!
 //! Two outcomes are kept apart. A store that answered, and wrongly, is a [`SelfTestFailure`]
@@ -55,6 +57,7 @@ use futures::StreamExt;
 use futures::stream;
 use tokio::time::Instant;
 
+use crate::reservation::{self, RESERVATION_LEN};
 use crate::{Backend, ByteRange, Clock, Error, Listed};
 
 /// The prefix of the probe keys.
@@ -81,6 +84,13 @@ const RANGE_KEY: &str = "range";
 const PAGE_KEYS: [&str; 3] = ["page/a", "page/b", "page/c"];
 const MULTIPART_KEY: &str = "multipart";
 const CONDITIONAL_DELETE_KEY: &str = "conditional-delete";
+const RESERVATION_KEY: &str = "reservation";
+const RESERVATION_RACE_KEY: &str = "reservation-race";
+const RESERVATION_EMPTY_KEY: &str = "reservation-empty";
+const RESERVATION_DELETE_KEY: &str = "reservation-delete";
+
+/// How many callers race to reserve one key in the reservation check.
+const RESERVATION_RACERS: usize = 4;
 
 /// What the object of the range check holds.
 const DIGITS: &[u8] = b"0123456789";
@@ -104,17 +114,24 @@ pub enum Check {
     /// (`If-None-Match: *` on `CompleteMultipartUpload`). Run on the tier that takes multipart
     /// uploads only.
     MultipartConditional,
+    /// A reservation (`put_reservation`) is create-only and reads back as marked, with its size
+    /// and tag; a replace on its tag keeps or clears the mark as the call says, one on a wrong tag
+    /// is refused, of several callers racing for one key exactly one wins, an empty object is not
+    /// marked, and a delete on its tag removes it. Run on the tier that takes multipart uploads
+    /// (the cold tier, where a proxy writes reservations) only, and it cannot be skipped.
+    Reservation,
 }
 
 impl Check {
     /// Every check, in the order they run.
-    pub const ALL: [Check; 6] = [
+    pub const ALL: [Check; 7] = [
         Check::CreateOnly,
         Check::Head,
         Check::IfMatch,
         Check::Range,
         Check::Paging,
         Check::MultipartConditional,
+        Check::Reservation,
     ];
 
     /// The name of the check, as a flag names it and a message gives it.
@@ -127,6 +144,7 @@ impl Check {
             Check::Range => "range",
             Check::Paging => "paging",
             Check::MultipartConditional => "multipart-conditional",
+            Check::Reservation => "reservation",
         }
     }
 
@@ -145,6 +163,12 @@ impl Check {
             Check::Range => &[RANGE_KEY],
             Check::Paging => &PAGE_KEYS,
             Check::MultipartConditional => &[MULTIPART_KEY],
+            Check::Reservation => &[
+                RESERVATION_KEY,
+                RESERVATION_RACE_KEY,
+                RESERVATION_EMPTY_KEY,
+                RESERVATION_DELETE_KEY,
+            ],
         }
     }
 }
@@ -219,7 +243,7 @@ pub struct SelfTestOptions<'a> {
     /// are under it.
     pub run_id: &'a str,
     /// Whether the backend takes multipart uploads (the cold tier), and so whether
-    /// [`Check::MultipartConditional`] runs.
+    /// [`Check::MultipartConditional`] and [`Check::Reservation`] run.
     pub multipart: bool,
     /// Checks that do not run.
     pub skip: &'a [Check],
@@ -323,8 +347,8 @@ pub async fn self_test(
         started: Instant::now(),
     };
     for check in Check::ALL {
-        let multipart_only = check == Check::MultipartConditional && !options.multipart;
-        if options.skip.contains(&check) || multipart_only {
+        let cold_only = matches!(check, Check::MultipartConditional | Check::Reservation);
+        if options.skip.contains(&check) || (cold_only && !options.multipart) {
             continue;
         }
         let verdict = probe.attempt(check).await;
@@ -468,6 +492,7 @@ impl Probe<'_> {
             Check::Range => self.range().await,
             Check::Paging => self.paging().await,
             Check::MultipartConditional => self.multipart_conditional().await,
+            Check::Reservation => self.reservation().await,
         }
     }
 
@@ -652,5 +677,105 @@ impl Probe<'_> {
             "the completion of a multipart upload of a key that exists",
             done.map(drop),
         )
+    }
+
+    /// The reservation of the probe key: written create-only, it reads back as marked with its
+    /// size and tag; a second write is refused, and so is a replace on a wrong tag, which leaves
+    /// it as it was; a replace on its tag that is marked keeps the mark, and one that is not
+    /// (`put_if_match`) makes a real object.
+    async fn reservation(&self) -> Verdict {
+        let (key, backend) = (self.key(RESERVATION_KEY), self.backend);
+        let owner = "self-test";
+        let first = backend
+            .put_reservation(&key, reservation::body(owner))
+            .await;
+        let first = saw("a reservation write", first)?;
+        self.expect_marked("a reservation", &key, &first).await?;
+        let again = backend
+            .put_reservation(&key, reservation::body(owner))
+            .await;
+        refused("a second reservation of the same key", again.map(drop))?;
+        let stale = backend.put_reservation_if_match(&key, reservation::body(owner), WRONG_TAG);
+        refused(
+            "a reservation replace on a wrong ETag",
+            stale.await.map(drop),
+        )?;
+        self.expect_marked("the reservation after the refused replace", &key, &first)
+            .await?;
+        let renewed = backend.put_reservation_if_match(&key, reservation::body(owner), &first);
+        let renewed = saw("a reservation replace on the right ETag", renewed.await)?;
+        self.expect_marked("the reservation after a marked replace", &key, &renewed)
+            .await?;
+        let wrong = backend.put_if_match(&key, text("real"), WRONG_TAG).await;
+        refused(
+            "a replace of a reservation on a wrong ETag",
+            wrong.map(drop),
+        )?;
+        let real = backend.put_if_match(&key, text("real"), &renewed).await;
+        let real = saw("a replace of a reservation on its ETag", real)?;
+        let head = saw("a HEAD", backend.head(&key).await)?;
+        let what = "the mark of a reservation after a plain replace";
+        expect_eq(what, &head.reservation, &false)?;
+        expect_eq("the tag after a plain replace", &head.tag, &real)?;
+        self.reservation_race().await?;
+        self.reservation_delete().await?;
+        self.empty_object_is_real().await
+    }
+
+    /// Checks that a HEAD of `key` says it is a reservation of 56 bytes with this tag.
+    async fn expect_marked(&self, what: &str, key: &str, tag: &str) -> Verdict {
+        let head = saw("a HEAD", self.backend.head(key).await)?;
+        expect_eq(&format!("the mark of {what}"), &head.reservation, &true)?;
+        expect_eq(&format!("the size of {what}"), &head.size, &RESERVATION_LEN)?;
+        expect_eq(&format!("the tag of {what}"), &head.tag.as_str(), &tag)
+    }
+
+    /// Several callers reserve one key at once: exactly one is told it has it.
+    async fn reservation_race(&self) -> Verdict {
+        let key = self.key(RESERVATION_RACE_KEY);
+        let backend = self.backend;
+        let racers = (0..RESERVATION_RACERS).map(|_| {
+            let body = reservation::body("self-test");
+            backend.put_reservation(&key, body)
+        });
+        let answers = futures::future::join_all(racers).await;
+        let mut won = 0;
+        for answer in answers {
+            match answer {
+                Ok(_) => won += 1,
+                Err(Error::AlreadyExists(_) | Error::PreconditionFailed(_)) => {}
+                Err(other) => return Err(fault("a racing reservation write", other)),
+            }
+        }
+        expect_eq("the callers that won a race to reserve one key", &won, &1)
+    }
+
+    /// A delete on the tag of a reservation removes it.
+    async fn reservation_delete(&self) -> Verdict {
+        let key = self.key(RESERVATION_DELETE_KEY);
+        let body = reservation::body("self-test");
+        let tag = saw(
+            "a reservation write",
+            self.backend.put_reservation(&key, body).await,
+        )?;
+        let deleted = self.backend.delete_if_match(&key, &tag).await;
+        saw("a delete of a reservation on its ETag", deleted)?;
+        match self.backend.head(&key).await {
+            Err(Error::NotFound(_)) => Ok(()),
+            Ok(_) => Err(Fault::Wrong(
+                "a HEAD found a reservation after its delete on its ETag".to_owned(),
+            )),
+            Err(other) => Err(fault("a HEAD", other)),
+        }
+    }
+
+    /// A real object with no bytes is not a reservation, whatever its size says.
+    async fn empty_object_is_real(&self) -> Verdict {
+        let key = self.key(RESERVATION_EMPTY_KEY);
+        saw("a put", self.backend.put(&key, Bytes::new()).await)?;
+        let head = saw("a HEAD", self.backend.head(&key).await)?;
+        let what = "the mark of an empty object";
+        expect_eq(what, &head.reservation, &false)?;
+        expect_eq("the size of an empty object", &head.size, &0)
     }
 }

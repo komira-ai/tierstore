@@ -14,7 +14,8 @@
 //! Without `write_through` the build node's upstream is read with a read-only key, so the write
 //! checks of the storage node's self-test are not run against it. With it the node writes to the
 //! upstream, and the start runs the whole self-test there (a create-only put that refuses a key
-//! that exists, a multipart completion that does the same, and the reads the checks rest on)
+//! that exists, a multipart completion that does the same, and the reads the checks rest on;
+//! not the reservation check, which is of a proxy's cold tier)
 //! under probe keys in `_tiering/selftest/`, which it deletes. An upstream that answers one of
 //! them wrongly, a key that may not write included, is exit status 3; one that does not answer is
 //! exit status 1, after the one try that the check of the start gives it. The probe keys that
@@ -46,7 +47,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 use crate::{
-    Backend, Clock, Error as BackendError, MonotonicClock, SelfTestOptions, SweepBudget,
+    Backend, Check, Clock, Error as BackendError, MonotonicClock, SelfTestOptions, SweepBudget,
     SystemClock, self_test, settle_conditional_delete, sweep_probes,
 };
 
@@ -108,7 +109,8 @@ async fn test_upstream(upstream: &dyn Backend, run: &str, spec: &str) -> Result<
         name: &name,
         run_id: run,
         multipart: true,
-        skip: &[],
+        // A node writes no reservations: those are a proxy's, to its own cold tier.
+        skip: &[Check::Reservation],
         wait: Duration::ZERO,
         pause: Duration::from_secs(1),
         max_pause: Duration::from_secs(30),
