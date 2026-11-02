@@ -73,6 +73,10 @@ impl Backend for Chunked {
         self.mem.delete(key).await
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.mem.delete_if_match(key, etag).await
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.mem.list(prefix).await
     }
