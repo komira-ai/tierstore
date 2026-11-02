@@ -102,6 +102,7 @@ mod metrics;
 #[cfg(test)]
 mod metrics_names_tests;
 mod reconciler;
+mod reservation;
 #[cfg(feature = "s3")]
 pub mod s3;
 mod selftest;

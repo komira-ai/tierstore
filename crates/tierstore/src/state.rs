@@ -34,6 +34,9 @@ pub(crate) struct Candidate {
     pub(crate) at: Position,
     pub(crate) key: String,
     pub(crate) time: u64,
+    /// The content tag of the hot tier's object when it was found to be in the cold tier, which
+    /// the eviction deletes on; none for an entry applied by a reconciler before this one.
+    pub(crate) tag: Option<String>,
 }
 
 /// Where the reconciler is in the journal of one proxy.
@@ -137,8 +140,16 @@ impl Books {
     }
 
     /// Records that the cold tier holds the object of a put entry, which makes it a
-    /// candidate for eviction. An entry that a later one replaced is ignored.
-    pub(crate) fn copied(&mut self, proxy: &str, at: Position, key: &str, time: u64) {
+    /// candidate for eviction, with the content tag the hot tier's object had. An entry that a
+    /// later one replaced is ignored.
+    pub(crate) fn copied(
+        &mut self,
+        proxy: &str,
+        at: Position,
+        key: &str,
+        time: u64,
+        tag: Option<String>,
+    ) {
         let found = self.index.get_mut(key);
         let Some(resident) = found.filter(|r| r.is_entry(proxy, at)) else {
             return;
@@ -149,6 +160,7 @@ impl Books {
             at,
             key: key.to_owned(),
             time,
+            tag,
         };
         self.stream(proxy).candidates.push_back(candidate);
     }
@@ -181,14 +193,14 @@ impl Books {
                 continue;
             }
             match entry.op {
-                JournalOp::Put => {
+                op if op.is_put() => {
                     self.put(proxy, at, &entry.key, entry.size);
                     if applied {
-                        self.copied(proxy, at, &entry.key, entry.time);
+                        self.copied(proxy, at, &entry.key, entry.time, None);
                     }
                 }
                 JournalOp::Delete => self.forget(&entry.key),
-                JournalOp::Unknown => {}
+                _ => {}
             }
         }
         if !applied {

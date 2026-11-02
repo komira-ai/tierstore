@@ -6,6 +6,7 @@ mod cache;
 mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
+mod churn;
 mod conformance;
 mod faults;
 mod hold;
@@ -20,7 +21,9 @@ mod one_winner;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;
+mod reconciler_reservations;
 mod reservation;
+mod reservation_reads;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]

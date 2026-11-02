@@ -14,6 +14,7 @@ fn entry(op: JournalOp, key: &str, size: u64, time: u64) -> JournalEntry {
         key: key.to_owned(),
         size,
         time,
+        cold_tag: None,
     }
 }
 
@@ -82,7 +83,8 @@ async fn a_get_of_a_hot_object_does_not_touch_the_cold_tier() {
 }
 
 /// Asserts that a get of an object only the cold tier holds returns it and copies it back into
-/// the hot tier, journaling the copy as a put, so that a second get is answered by the hot
+/// the hot tier, journaling the copy as a mirror of the cold object (with its content tag), so
+/// that a second get is answered by the hot
 /// tier; and that a head of such an object copies nothing back.
 #[tokio::test(start_paused = true)]
 async fn a_get_copies_a_cold_object_back_and_a_head_does_not() {
@@ -97,7 +99,9 @@ async fn a_get_copies_a_cold_object_back_and_a_head_does_not() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
     let entries = journal(&*rig.hot_mem, "p1", 1).await;
-    assert_eq!(entries, [entry(JournalOp::Put, "k", 5, 0)]);
+    let mut mirror = entry(JournalOp::PutMirror, "k", 5, 0);
+    mirror.cold_tag = Some(rig.cold_mem.head("k").await.unwrap().tag);
+    assert_eq!(entries, [mirror]);
 
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
     assert_eq!(rig.cold.calls(Op::Get), 1);

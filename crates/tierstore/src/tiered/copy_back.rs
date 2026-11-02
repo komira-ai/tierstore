@@ -5,17 +5,32 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use super::{Inner, Level};
-use crate::Error;
 use crate::metrics::Skipped;
+use crate::{Error, JournalOp};
 
 impl Inner {
     /// Copies an object read from the cold tier into the hot tier, and journals the copy in
-    /// the background.
+    /// the background as a mirror of the cold object: the entry names the content tag the cold
+    /// object has, which the reconciler compares with the cold tier's before it keeps the copy.
+    ///
+    /// The tag is read with a HEAD before the copy is made. A key the cold tier no longer holds
+    /// as an object (a reservation, or nothing: it was deleted since the read) is not copied.
     pub(super) async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes) {
         if self.level().await >= Level::Critical {
             self.counters.skipped(Skipped::Critical);
             return;
         }
+        let tag = match self.cold.head(key).await {
+            Ok(meta) if !meta.reservation => meta.tag,
+            Ok(_) | Err(Error::NotFound(_)) => {
+                self.counters.skipped(Skipped::Raced);
+                return;
+            }
+            Err(_) => {
+                self.counters.skipped(Skipped::Failed);
+                return;
+            }
+        };
         match self.hot.put(key, body.clone()).await {
             Ok(()) => {
                 // Counted when the hot tier has the object, before the journal entry below,
@@ -25,7 +40,8 @@ impl Inner {
                 let key = key.to_owned();
                 let size = body.len() as u64;
                 drop(tokio::spawn(async move {
-                    let _ = inner.journal_put(&key, size).await;
+                    let op = JournalOp::PutMirror;
+                    let _ = inner.journal_put(op, &key, size, Some(tag)).await;
                 }));
             }
             Err(Error::Full(_)) => {

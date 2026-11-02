@@ -430,6 +430,7 @@ async fn a_hash_that_fails_at_the_last_byte_leaves_nothing_visible() {
         key: "k".to_owned(),
         size: (PIECES * PIECE) as u64,
         time: NOW,
+        cold_tag: None,
     };
     assert_eq!(tiers.journal().await, [entry]);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));

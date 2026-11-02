@@ -1,6 +1,6 @@
 //! The reconciler: copies what the proxies journal to the cold tier, and frees the hot tier.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +11,12 @@ use crate::journal::{
     load_checkpoint, seq_of, to_body, write_object,
 };
 use crate::lease::Lease;
+use crate::state::Candidate;
 use crate::state::{Books, Stream};
-use crate::{Backend, Clock, Error, JournalEntry, JournalOp};
+use crate::{Backend, Clock, Error, JournalEntry, JournalOp, Meta};
+
+/// How many times a copy reads the cold tier's object again after it changed under the copy.
+const COPY_ROUNDS: u32 = 3;
 
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
@@ -78,9 +82,59 @@ pub struct PassReport {
     pub failed: Vec<Error>,
 }
 
-/// The outcome of the copies of one journal object: the key if it is in the cold tier now,
-/// or nothing if the hot tier no longer holds it.
-type Copies = Vec<Result<Option<String>, Error>>;
+/// The outcome of the copies of one journal object: the key and the content tag of the hot
+/// tier's object if the cold tier is settled with it now, or nothing if the hot tier no longer
+/// holds it or the key is another put's.
+type Copies = Vec<Result<Option<(String, String)>, Error>>;
+
+/// What the entries of one journal object say of one key.
+struct Wanted<'a> {
+    /// The op of the last entry that puts the key.
+    kind: JournalOp,
+    /// The cold tags that the reserved puts of the key name.
+    reservations: Vec<&'a str>,
+    /// The cold tag of the last mirror entry of the key.
+    mirror: Option<&'a str>,
+}
+
+/// What each key put by the entries is wanted as.
+fn wanted(entries: &[JournalEntry]) -> BTreeMap<&str, Wanted<'_>> {
+    let mut wanted: BTreeMap<&str, Wanted<'_>> = BTreeMap::new();
+    for entry in entries.iter().filter(|entry| entry.op.is_put()) {
+        let slot = wanted.entry(entry.key.as_str()).or_insert(Wanted {
+            kind: entry.op,
+            reservations: Vec::new(),
+            mirror: None,
+        });
+        slot.kind = entry.op;
+        let tag = entry.cold_tag.as_deref();
+        match entry.op {
+            JournalOp::PutReserved => slot.reservations.extend(tag),
+            JournalOp::PutMirror => slot.mirror = tag,
+            _ => {}
+        }
+    }
+    wanted
+}
+
+/// What one look at a key came to.
+enum Round {
+    /// Settled: with the content tag of the hot tier's object if the cold tier holds the key's
+    /// object now, or without if there is nothing to copy.
+    Done(Option<String>),
+    /// The cold tier's object changed during the look: look again.
+    Again,
+}
+
+/// What an eviction did to an object of the hot tier.
+enum Eviction {
+    /// It deleted the object.
+    Removed,
+    /// The hot tier no longer had it.
+    Gone,
+    /// The hot tier holds another object under the key now, which was left.
+    Replaced,
+}
 
 fn millis(duration: Duration) -> u64 {
     duration.as_millis() as u64
@@ -100,20 +154,41 @@ fn millis(duration: Duration) -> u64 {
 /// objects above the last one it read):
 ///
 /// 1. **Tail the journals.** For each proxy, in the order of the journal objects from its
-///    checkpoint, a journal object is read and applied: its puts are copied from the hot tier
-///    to the cold tier, up to [`ReconcilerConfig::parallel`] at a time, create-only (an
-///    object the cold tier holds already counts as copied, and a key the hot tier no longer
-///    holds is skipped); then its deletes are applied, by deleting the key from the cold tier
-///    unless the hot tier holds it again and the cold tier's copy is of that object (the same
-///    size and content tag). Then the object counts as applied.
+///    checkpoint, a journal object is read and applied: its puts are settled with the cold
+///    tier, up to [`ReconcilerConfig::parallel`] at a time, one look at a time for each key
+///    (the hot tier's object, then the cold tier's), by the rules below; then the deletes of
+///    the keys whose last put in that object is a plain `Put` (the entry a release without
+///    reservations writes) are applied. Then the object counts as applied.
+///
+///    A cold object that a *reservation* is (a marked 56-byte object; see
+///    [`Backend::put_reservation`]) holds a key for a put that the proxy acknowledged. The rules
+///    for a key, by the last put entry of the key in the journal object:
+///    - the hot tier no longer holds the key: nothing to copy; for a `PutReserved`, the
+///      reservations its entries name are deleted by their tags (a put and a delete that were
+///      both acknowledged leave no reservation behind), and no other cold object is touched;
+///    - the cold tier holds an object (not a reservation): a `PutReserved` or a `Put` counts as
+///      copied; a `PutMirror` counts as copied if the cold object has the tag its entry names,
+///      else the hot copy is a stale mirror and is deleted by its tag;
+///    - the cold tier holds a reservation: a `PutReserved` whose entries name its tag replaces it
+///      with the hot bytes in one conditional write (if the reservation changed meanwhile, the
+///      key is looked at again, three times at most, then the pass reports it); a reservation
+///      its entries do not name is another put's, and nothing is touched; a `Put` leaves it
+///      alone; a `PutMirror` is an orphan and the hot copy is deleted by its tag;
+///    - the cold tier holds nothing: a `PutReserved` keeps the hot object and the pass reports
+///      the key (a cold bucket that was repointed or restored is what it means, and the
+///      key stays refused until someone looks); a `PutMirror` deletes the hot copy by its tag;
+///      a `Put` is copied create-only (an object that appears meanwhile counts as copied).
 /// 2. **Evict.** The reconciler adds up the bytes of the objects the hot tier holds from the
 ///    journals alone: the sizes of the puts, less the deletes and the evictions. Above
 ///    [`ReconcilerConfig::high_water`] of the budget it deletes objects from the hot tier,
 ///    oldest first by the time in their journal entries (journal order within a proxy), down
 ///    to [`ReconcilerConfig::low_water`]. Only an object of an applied journal object is a
-///    candidate, so the cold tier holds it, and the reconciler neither lists the hot tier nor
-///    asks it about the object. Before it deletes anything it reads the journals once more,
-///    so that an object that was deleted or put again since is skipped.
+///    candidate, so the cold tier holds it, and the reconciler does not list the hot tier. Before
+///    it deletes anything it reads the journals once more, so that an object that was deleted or
+///    put again since is skipped. The delete is conditional on the content tag the copy found
+///    (`If-Match`, [`Backend::delete_if_match`]), so an object that was put again after the
+///    copy, with other bytes, is kept; for an entry applied by an earlier reconciler the tag is
+///    read from the hot tier just before the delete.
 /// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
 ///    put, after the first): every journal object up to a number is applied, and every entry
 ///    before a position is done with (the eviction folds its progress into the checkpoint,
@@ -133,18 +208,21 @@ fn millis(duration: Duration) -> u64 {
 ///
 /// Known limits:
 ///
-/// - An eviction deletes the key from the hot tier without asking it. The journals are read
-///   again just before the eviction, but the copies of a pass can take long, so an object that
-///   is deleted and put again through a proxy after that read (or whose journal object the
-///   listing does not show yet) is deleted from the hot tier before it is copied. The window
-///   is the time of that read and the deletes that follow it. Closing it takes a delete that
-///   is conditional on the content tag, which [`Backend`] does not have.
+/// - A tag names content, not a write: an object that is deleted and put again with the same
+///   bytes, after the copy that found it and before its eviction, has the tag the eviction
+///   deletes on, and is deleted from the hot tier unless its own journal entry shows in the
+///   read that precedes the eviction. It is in the cold tier by then in the common case (the
+///   copy found it), so only the hot copy goes.
 /// - A pass that takes longer than the lease ttl loses the lease, and goes on to the end:
 ///   it may store an older checkpoint over the one of the reconciler that took over. Keep a
 ///   pass shorter than the ttl (set `parallel` and the ttl accordingly), and do not cancel a
 ///   pass.
-/// - A put that went straight to the cold tier because the hot tier was full is not
-///   journaled, so a delete entry of the same key that is applied after it deletes it.
+/// - A delete entry is applied to the cold tier only for a key whose last put in the same journal
+///   object is a plain `Put`, which a release without reservations writes; a delete that comes in
+///   a journal object of its own is not applied to the cold tier, since the proxy removes the
+///   cold object itself, before it deletes from the hot tier. A copy of a plain `Put` that is under
+///   way while that is done can therefore put the key back in the cold tier until the release that
+///   reserves keys is the only writer.
 /// - After a restart the journal objects before the position of the stored checkpoint that
 ///   are still younger than the retention are not read again, and are never deleted.
 pub struct Reconciler {
@@ -285,14 +363,16 @@ impl Reconciler {
             };
             report.copied += copied.len();
             for (index, entry) in entries.iter().enumerate() {
-                if entry.op != JournalOp::Put {
+                if !entry.op.is_put() {
                     continue;
                 }
                 let at = (seq, index as u64);
-                if copied.contains(&entry.key) {
-                    self.books.copied(id, at, &entry.key, entry.time);
-                } else {
-                    self.books.gone(id, at, &entry.key);
+                match copied.get(&entry.key) {
+                    Some(tag) => {
+                        let tag = Some(tag.clone());
+                        self.books.copied(id, at, &entry.key, entry.time, tag);
+                    }
+                    None => self.books.gone(id, at, &entry.key),
                 }
             }
             let stream = self.books.stream(id);
@@ -301,52 +381,180 @@ impl Reconciler {
         }
     }
 
-    /// Copies the puts of one journal object, then applies its deletes. Says which keys are
-    /// in the cold tier now.
-    async fn apply_object(&self, entries: &[JournalEntry]) -> Result<BTreeSet<String>, Error> {
-        let puts = entries.iter().filter(|entry| entry.op == JournalOp::Put);
-        let keys: BTreeSet<&str> = puts.map(|entry| entry.key.as_str()).collect();
-        let copies = stream::iter(keys).map(|key| self.copy_key(key));
+    /// Settles the puts of one journal object with the cold tier, then applies the deletes that
+    /// are applied. Says which keys the cold tier is settled with, and the content tag of the hot
+    /// tier's object for each.
+    async fn apply_object(
+        &self,
+        entries: &[JournalEntry],
+    ) -> Result<BTreeMap<String, String>, Error> {
+        let wanted = wanted(entries);
+        let copies = stream::iter(&wanted).map(|(key, want)| self.copy_key(key, want));
         let parallel = self.config.parallel.max(1);
         let outcomes: Copies = copies.buffer_unordered(parallel).collect().await;
-        let mut copied = BTreeSet::new();
+        let mut copied = BTreeMap::new();
         for outcome in outcomes {
-            if let Some(key) = outcome? {
-                copied.insert(key);
+            if let Some((key, tag)) = outcome? {
+                copied.insert(key, tag);
             }
         }
         for entry in entries.iter().filter(|e| e.op == JournalOp::Delete) {
-            self.delete_cold(&entry.key).await?;
+            let plain = wanted.get(entry.key.as_str());
+            if plain.is_some_and(|want| want.kind == JournalOp::Put) {
+                self.delete_cold(&entry.key).await?;
+            }
         }
         Ok(copied)
     }
 
-    /// Copies one object from the hot tier to the cold tier, create-only.
-    async fn copy_key(&self, key: &str) -> Result<Option<String>, Error> {
-        let body = match self.hot.get(key, None).await {
-            Ok(body) => body,
-            Err(Error::NotFound(_)) => return Ok(None),
+    /// Settles one key with the cold tier (see the type), looking again if the cold tier's object
+    /// changes under a replacement, up to [`COPY_ROUNDS`] looks.
+    async fn copy_key(
+        &self,
+        key: &str,
+        want: &Wanted<'_>,
+    ) -> Result<Option<(String, String)>, Error> {
+        for _ in 0..COPY_ROUNDS {
+            if let Round::Done(tag) = self.copy_round(key, want).await? {
+                return Ok(tag.map(|tag| (key.to_owned(), tag)));
+            }
+        }
+        let text = format!("the cold copy of {key} changed under the copy");
+        Err(Error::Unavailable(text))
+    }
+
+    /// One look at a key: the hot tier's object, then the cold tier's.
+    async fn copy_round(&self, key: &str, want: &Wanted<'_>) -> Result<Round, Error> {
+        let hot = match self.hot.head(key).await {
+            Ok(hot) => hot,
+            Err(Error::NotFound(_)) => {
+                self.release_reservations(key, want).await?;
+                return Ok(Round::Done(None));
+            }
             Err(error) => return Err(error),
         };
-        match self.cold.put(key, body).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => Ok(Some(key.to_owned())),
+        match self.cold.head(key).await {
+            Ok(cold) if cold.reservation => self.replace_reservation(key, want, &hot, &cold).await,
+            Ok(cold) => self.settle(key, want, &hot, &cold).await,
+            Err(Error::NotFound(_)) => self.fill_empty(key, want, &hot).await,
             Err(error) => Err(error),
         }
     }
 
-    /// Makes sure the cold tier does not hold a key that was deleted, unless the hot tier
-    /// holds the key again and the cold tier's copy, if it has one, is of that object. A copy
-    /// of another content (one that was under way when the key was deleted) is deleted; the
-    /// entry that put the key again copies the new object.
+    /// The hot tier no longer holds `key`: deletes the reservations that the reserved puts of the
+    /// key name, each by its own tag, so that a put and a delete that were both acknowledged leave
+    /// no reservation. A reservation with another tag, or none, is not the put's and stays.
+    async fn release_reservations(&self, key: &str, want: &Wanted<'_>) -> Result<(), Error> {
+        if want.kind != JournalOp::PutReserved {
+            return Ok(());
+        }
+        for tag in &want.reservations {
+            match self.cold.delete_if_match(key, tag).await {
+                Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// The cold tier holds an object that is not a reservation. A put counts as copied; a mirror
+    /// does only if the object is the one it mirrors, and else it is a stale copy to drop.
+    async fn settle(
+        &self,
+        key: &str,
+        want: &Wanted<'_>,
+        hot: &Meta,
+        cold: &Meta,
+    ) -> Result<Round, Error> {
+        let mirrors_it = want.mirror == Some(cold.tag.as_str());
+        if want.kind != JournalOp::PutMirror || mirrors_it {
+            return Ok(Round::Done(Some(hot.tag.clone())));
+        }
+        self.drop_mirror(key, hot).await
+    }
+
+    /// The cold tier holds a reservation. The put it was made for replaces it with the hot bytes,
+    /// in one conditional write on its tag; a reservation that is another put's is left; a mirror
+    /// of an object that is gone from the cold tier is dropped.
+    async fn replace_reservation(
+        &self,
+        key: &str,
+        want: &Wanted<'_>,
+        hot: &Meta,
+        cold: &Meta,
+    ) -> Result<Round, Error> {
+        match want.kind {
+            JournalOp::PutMirror => self.drop_mirror(key, hot).await,
+            JournalOp::PutReserved if want.reservations.contains(&cold.tag.as_str()) => {
+                let body = match self.hot.get(key, None).await {
+                    Ok(body) => body,
+                    Err(Error::NotFound(_)) => return Ok(Round::Again),
+                    Err(error) => return Err(error),
+                };
+                match self.cold.put_if_match(key, body, &cold.tag).await {
+                    Ok(_) => Ok(Round::Done(Some(hot.tag.clone()))),
+                    Err(Error::PreconditionFailed(_) | Error::NotFound(_)) => Ok(Round::Again),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Ok(Round::Done(None)),
+        }
+    }
+
+    /// The cold tier holds nothing under the key. A reserved put keeps its object and reports the
+    /// key; a mirror is dropped; a plain put is copied create-only.
+    async fn fill_empty(&self, key: &str, want: &Wanted<'_>, hot: &Meta) -> Result<Round, Error> {
+        match want.kind {
+            JournalOp::PutReserved => {
+                let text = format!("the cold tier holds nothing for {key}; the hot object is kept");
+                Err(Error::Other(text))
+            }
+            JournalOp::PutMirror => self.drop_mirror(key, hot).await,
+            _ => {
+                let body = match self.hot.get(key, None).await {
+                    Ok(body) => body,
+                    Err(Error::NotFound(_)) => return Ok(Round::Done(None)),
+                    Err(error) => return Err(error),
+                };
+                match self.cold.put(key, body).await {
+                    Ok(()) | Err(Error::AlreadyExists(_)) => Ok(Round::Done(Some(hot.tag.clone()))),
+                    Err(error) => Err(error),
+                }
+            }
+        }
+    }
+
+    /// Deletes a mirror from the hot tier, by the tag it had when it was looked at: an object
+    /// that was replaced or removed meanwhile is not the mirror, and stays.
+    async fn drop_mirror(&self, key: &str, hot: &Meta) -> Result<Round, Error> {
+        match self.hot.delete_if_match(key, &hot.tag).await {
+            Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => {
+                Ok(Round::Done(None))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Applies the delete of a key whose last put in the journal object is a plain `Put`: the
+    /// cold tier's object goes, by its tag, unless the hot tier holds the key again and the cold
+    /// tier's object is of that object (the same size and content tag). A reservation, which is
+    /// another put's, and an absent key are left alone.
     async fn delete_cold(&self, key: &str) -> Result<(), Error> {
         let in_hot = match self.hot.head(key).await {
-            Ok(meta) => meta,
-            Err(Error::NotFound(_)) => return self.cold.delete(key).await,
+            Ok(meta) => Some(meta),
+            Err(Error::NotFound(_)) => None,
             Err(error) => return Err(error),
         };
-        match self.cold.head(key).await {
-            Ok(in_cold) if !in_cold.same_content(&in_hot) => self.cold.delete(key).await,
-            Ok(_) | Err(Error::NotFound(_)) => Ok(()),
+        let in_cold = match self.cold.head(key).await {
+            Ok(meta) if !meta.reservation => meta,
+            Ok(_) | Err(Error::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if in_hot.is_some_and(|hot| hot.same_content(&in_cold)) {
+            return Ok(());
+        }
+        match self.cold.delete_if_match(key, &in_cold.tag).await {
+            Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => Ok(()),
             Err(error) => Err(error),
         }
     }
@@ -373,14 +581,39 @@ impl Reconciler {
                 return;
             };
             if self.books.is_current(&proxy, victim.at, &victim.key) {
-                if let Err(error) = self.hot.delete(&victim.key).await {
-                    report.failed.push(error);
-                    return;
+                match self.evict_one(&victim).await {
+                    Ok(Eviction::Removed) => {
+                        self.books.forget(&victim.key);
+                        report.evicted += 1;
+                    }
+                    Ok(Eviction::Gone) => self.books.forget(&victim.key),
+                    Ok(Eviction::Replaced) => {}
+                    Err(error) => {
+                        report.failed.push(error);
+                        return;
+                    }
                 }
-                self.books.forget(&victim.key);
-                report.evicted += 1;
             }
             self.books.pop(&proxy);
+        }
+    }
+
+    /// Deletes one candidate from the hot tier, on the content tag the copy found, or on the tag the
+    /// hot tier gives now if the entry was applied by an earlier reconciler.
+    async fn evict_one(&self, victim: &Candidate) -> Result<Eviction, Error> {
+        let tag = match &victim.tag {
+            Some(tag) => tag.clone(),
+            None => match self.hot.head(&victim.key).await {
+                Ok(meta) => meta.tag,
+                Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
+                Err(error) => return Err(error),
+            },
+        };
+        match self.hot.delete_if_match(&victim.key, &tag).await {
+            Ok(()) => Ok(Eviction::Removed),
+            Err(Error::NotFound(_)) => Ok(Eviction::Gone),
+            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Replaced),
+            Err(error) => Err(error),
         }
     }
 

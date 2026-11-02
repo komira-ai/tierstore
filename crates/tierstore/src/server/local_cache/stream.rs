@@ -27,7 +27,7 @@ use tokio::sync::watch;
 
 use crate::{ByteRange, Error, Meta, ReadBody};
 
-use super::fill::{Filled, Live, Pending, tagged, written_over};
+use super::fill::{Filled, Live, Pending, as_object, tagged, written_over};
 use super::layout::{Name, data_path};
 use super::metrics::{add, bump};
 use super::{Inner, gone, locked, window};
@@ -390,7 +390,8 @@ impl Chunks {
         if self.expect.is_none() && self.left.is_some_and(|left| left <= chunk) {
             return Ok(());
         }
-        let meta = self.inner.upstream.head(&self.key).await?;
+        let head = self.inner.upstream.head(&self.key).await?;
+        let meta = as_object(&self.key, head)?;
         tagged(&self.key, &meta)?;
         if self
             .expect

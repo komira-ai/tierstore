@@ -199,12 +199,14 @@ fn a_journal_object_is_a_json_list_of_entries() {
         key: "k".to_owned(),
         size: 5,
         time: 7,
+        cold_tag: None,
     };
     let delete = JournalEntry {
         op: JournalOp::Delete,
         key: "j".to_owned(),
         size: 0,
         time: 8,
+        cold_tag: None,
     };
     let entries = vec![put, delete];
     let encoded = encode_journal(&entries);
