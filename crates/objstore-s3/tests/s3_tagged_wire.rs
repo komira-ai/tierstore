@@ -77,12 +77,16 @@ fn head_answer(status: &str, headers: &[&str]) -> String {
 }
 
 fn store(endpoint: String) -> S3Store {
+    store_with(endpoint, Capabilities::default())
+}
+
+fn store_with(endpoint: String, capabilities: Capabilities) -> S3Store {
     S3Store::new(S3Config {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
         credentials: Credentials::new("AKIDEXAMPLE", "secret"),
-        capabilities: Capabilities::default(),
+        capabilities,
         connect_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(5),
         min_body_rate: None,
@@ -180,6 +184,7 @@ async fn a_head_reads_the_size_the_tag_and_the_time_from_the_headers() {
         size: 7,
         etag: "\"abc\"".to_owned(),
         modified_millis: 784_111_777_000,
+        reservation: false,
     };
     assert_eq!(head, want);
     let heads = seen.lock().unwrap();
@@ -348,4 +353,142 @@ async fn a_stamped_listing_sends_a_list_request_and_reads_the_times() {
         "{}",
         heads[0]
     );
+}
+
+const MARK: &str = "x-amz-meta-tierstore-reservation: 1";
+const CONFLICT: &str = "<Error><Code>ConditionalRequestConflict</Code><Message>m</Message></Error>";
+
+/// The store of a service that claims conditional puts.
+fn conditional(endpoint: String) -> S3Store {
+    let capabilities = Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    };
+    store_with(endpoint, capabilities)
+}
+
+/// Asserts that a create-only marked write is a PUT carrying `If-None-Match: *` and the
+/// reservation mark, both signed, with no `If-Match`, and that it gives the `ETag` of the answer;
+/// that a 412 is `AlreadyExists` naming the key; and that a store that does not claim conditional
+/// puts is refused before any request, because the write would replace.
+#[tokio::test]
+async fn a_marked_create_sends_if_none_match_and_the_mark() {
+    let created = answer("200 OK", &["etag: \"new\""], "");
+    let refused = answer("412 Precondition Failed", &[], FAILED);
+    let (endpoint, seen) = script(vec![created, refused]).await;
+    let s = conditional(endpoint);
+    let tag = s.put_new_marked(&key(), Bytes::from("abc")).await.unwrap();
+    assert_eq!(tag, "\"new\"");
+    let again = s.put_new_marked(&key(), Bytes::from("abc")).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(k)) if k == key()));
+
+    let heads = seen.lock().unwrap();
+    let put = heads[0].to_ascii_lowercase();
+    assert!(
+        put.starts_with("put /test-bucket/cas/seg-1 http/1.1\r\n"),
+        "{put}"
+    );
+    assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
+    assert!(put.contains(&format!("\r\n{MARK}\r\n")), "{put}");
+    assert!(!put.contains("if-match:"), "{put}");
+    let signed = "signedheaders=host;if-none-match;x-amz-content-sha256;x-amz-date;\
+                  x-amz-meta-tierstore-reservation";
+    assert!(put.contains(signed), "{put}");
+    drop(heads);
+
+    let (endpoint, seen) = script(vec![]).await;
+    let refused = store(endpoint).put_new_marked(&key(), Bytes::new()).await;
+    assert!(matches!(refused, Err(ObjectStoreError::Unsupported(_))));
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Asserts that a marked replace carries `If-Match` and the mark, signed, that a plain replace
+/// carries no mark, and that each gives the `ETag` of the answer.
+#[tokio::test]
+async fn a_marked_replace_sends_if_match_and_the_mark_and_a_plain_one_does_not() {
+    let replaced = answer("200 OK", &["etag: \"new\""], "");
+    let (endpoint, seen) = script(vec![replaced.clone(), replaced]).await;
+    let s = store(endpoint);
+    let old = "\"old\"";
+    let marked = s.put_if_match_marked(&key(), Bytes::from("abc"), old).await;
+    assert_eq!(marked.unwrap(), "\"new\"");
+    let plain = s.put_if_match(&key(), Bytes::from("abc"), old).await;
+    assert_eq!(plain.unwrap(), "\"new\"");
+
+    let heads = seen.lock().unwrap();
+    let marked = heads[0].to_ascii_lowercase();
+    assert!(marked.contains("\r\nif-match: \"old\"\r\n"), "{marked}");
+    assert!(marked.contains(&format!("\r\n{MARK}\r\n")), "{marked}");
+    let signed = "signedheaders=host;if-match;x-amz-content-sha256;x-amz-date;\
+                  x-amz-meta-tierstore-reservation";
+    assert!(marked.contains(signed), "{marked}");
+    let plain = heads[1].to_ascii_lowercase();
+    assert!(
+        !plain.contains("x-amz-meta-tierstore-reservation"),
+        "{plain}"
+    );
+}
+
+/// Asserts that a conditional write the store answers with 409 is sent again until the store
+/// gives another answer, and that the third 409 is the answer: a `Service` error with status 409
+/// after three requests. A replace is sent again the same way.
+#[tokio::test]
+async fn a_write_answered_409_is_sent_again_up_to_three_times() {
+    let conflict = answer("409 Conflict", &[], CONFLICT);
+    let created = answer("200 OK", &["etag: \"new\""], "");
+    let script_of = vec![conflict.clone(), conflict.clone(), created.clone()];
+    let (endpoint, seen) = script(script_of).await;
+    let s = conditional(endpoint);
+    let tag = s.put_new_marked(&key(), Bytes::from("abc")).await.unwrap();
+    assert_eq!(tag, "\"new\"");
+    assert_eq!(seen.lock().unwrap().len(), 3);
+
+    let (endpoint, seen) = script(vec![conflict.clone(); 3]).await;
+    let s = conditional(endpoint);
+    let body = Bytes::from("abc");
+    let lost = s.put_new_marked(&key(), body).await.unwrap_err();
+    assert_eq!(service(&lost), (409, "ConditionalRequestConflict"));
+    assert_eq!(seen.lock().unwrap().len(), 3);
+
+    let (endpoint, seen) = script(vec![conflict, created]).await;
+    let s = store(endpoint);
+    let replaced = s.put_if_match(&key(), Bytes::from("abc"), "\"old\"").await;
+    assert_eq!(replaced.unwrap(), "\"new\"");
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+/// Asserts that a HEAD reports the reservation mark when the answer carries it with the value
+/// `1`, and not when it carries none or another value.
+#[tokio::test]
+async fn a_head_reads_the_reservation_mark_from_its_header() {
+    let marked = head_answer("200 OK", &[LENGTH, ETAG, MODIFIED, MARK]);
+    let other = "x-amz-meta-tierstore-reservation: 0";
+    let odd = head_answer("200 OK", &[LENGTH, ETAG, MODIFIED, other]);
+    let plain = head_answer("200 OK", &[LENGTH, ETAG, MODIFIED]);
+    let (endpoint, _) = script(vec![marked, odd, plain]).await;
+    let s = store(endpoint);
+    let mut marks = Vec::new();
+    for _ in 0..3 {
+        marks.push(s.head(&key()).await.unwrap().reservation);
+    }
+    assert_eq!(marks, [true, false, false]);
+}
+
+/// Asserts that a read of the whole object gives its bytes and the mark of the same answer, and
+/// that a missing object is `NotFound`.
+#[tokio::test]
+async fn a_whole_object_read_gives_the_mark_of_its_own_answer() {
+    let (endpoint, _) = script(vec![
+        answer("200 OK", &[MARK], "hello"),
+        answer("200 OK", &[], "world"),
+        answer("404 Not Found", &[], NO_SUCH_KEY),
+    ])
+    .await;
+    let s = store(endpoint);
+    let first = s.get_all_marked(&key()).await.unwrap();
+    assert_eq!(first, (Bytes::from("hello"), true));
+    let second = s.get_all_marked(&key()).await.unwrap();
+    assert_eq!(second, (Bytes::from("world"), false));
+    let missing = s.get_all_marked(&key()).await.unwrap_err();
+    assert!(matches!(&missing, ObjectStoreError::NotFound(k) if *k == key()));
 }

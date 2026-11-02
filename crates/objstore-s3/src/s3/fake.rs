@@ -30,6 +30,11 @@
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
 //! or the nth HEAD or DELETE of an object, once ([`FakeS3::fail`]).
 //!
+//! It keeps one piece of user metadata, the reservation mark (`x-amz-meta-tierstore-reservation`),
+//! as S3 keeps metadata: an object has it if the request that wrote it sent it, a HEAD and a
+//! read of the whole object give it back, and a PUT that does not send it, an `If-Match` replace
+//! included, leaves the object without it.
+//!
 //! Bytes are kept compactly: a run of zeros is counted, not stored, so an object of
 //! many GiB of zeros costs the test nothing to hold. It checks no signature unless a test
 //! asks ([`FakeS3::require_credentials`]): then a request not signed with that key pair
@@ -47,6 +52,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod meta;
 mod uploads;
 
 use self::uploads::list_uploads;
@@ -175,12 +181,13 @@ impl State {
 
     /// Keeps `kept` under `key`, stamped with the time of the service, with the entity tag
     /// `joined` if it is made of parts and the tag of its bytes if not.
-    fn store(&mut self, key: String, kept: Kept, joined: Option<String>) {
+    fn store(&mut self, key: String, kept: Kept, joined: Option<String>, marked: bool) {
         let modified = self.time.unwrap_or_else(system_seconds);
         let stored = Stored {
             kept,
             modified,
             joined,
+            marked,
         };
         self.objects.insert(key, stored);
     }
@@ -258,6 +265,8 @@ struct Stored {
     modified: u64,
     /// The entity tag of an object made of parts; none for an object of one PUT.
     joined: Option<String>,
+    /// Whether the request that wrote the object carried the reservation mark ([`meta`]).
+    marked: bool,
 }
 
 impl Stored {
@@ -697,7 +706,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
 
 /// A PUT of a whole object: refused 412 if `conditional` (`If-None-Match: *`) and the key
 /// exists, or if it carries `If-Match` and the object has another entity tag (404 if there is
-/// no object). The answer to a PUT with `If-Match` carries the new object's entity tag.
+/// no object). The answer to a PUT carries the new object's entity tag, as S3's does.
 fn put_object(state: &mut State, key: String, conditional: bool, request: &Request) -> Vec<u8> {
     let expected = request.headers.get("if-match");
     if let Some(expected) = expected {
@@ -712,11 +721,8 @@ fn put_object(state: &mut State, key: String, conditional: bool, request: &Reque
         return error("412 Precondition Failed", "PreconditionFailed");
     }
     let kept = Kept::of(&request.body);
-    let headers = match expected {
-        Some(_) => vec![("etag", etag_of(&kept))],
-        None => vec![],
-    };
-    state.store(key, kept, None);
+    let headers = vec![("etag", etag_of(&kept))];
+    state.store(key, kept, None, meta::sent(&request.headers));
     state.stats.single_puts += 1;
     answer("200 OK", &headers, b"")
 }
@@ -881,7 +887,7 @@ fn complete(state: &mut State, id: &str, key: &str, conditional: bool, body: &[u
         return error("412 Precondition Failed", "PreconditionFailed");
     }
     state.uploads.remove(id);
-    state.store(key.to_owned(), object, Some(joined.clone()));
+    state.store(key.to_owned(), object, Some(joined.clone()), false);
     state.stats.completed += 1;
     let done = format!(
         "<CompleteMultipartUploadResult><ETag>{joined}</ETag>\
@@ -895,10 +901,11 @@ fn head(state: &State, key: &str) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return answer("404 Not Found", &[], b"");
     };
-    let headers = [
+    let mut headers = vec![
         ("etag", stored.etag()),
         ("last-modified", http_date(stored.modified)),
     ];
+    headers.extend(meta::echoed(stored.marked));
     answer_sized("200 OK", stored.kept.len, &headers, b"")
 }
 
@@ -950,7 +957,8 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     };
     let object = &stored.kept;
     let Some(range) = range else {
-        return answer("200 OK", &[], &object.read(0, object.len));
+        let headers = meta::echoed(stored.marked);
+        return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
         .strip_prefix("bytes=")
