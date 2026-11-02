@@ -1,0 +1,28 @@
+# Stored formats
+
+tierstore keeps a few small objects and files of its own. A new release reads what an older one wrote, and an older release must still read what a newer one writes while the two share a tier during an update. So these formats change only by adding.
+
+## What is stored
+
+| What | Where | Format |
+|---|---|---|
+| Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT` or `DELETE`), `key`, `size`, `time` |
+| Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | empty object |
+| Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
+| Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
+| Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
+| Cache sidecar | `obj/<aa>/<bb>/<hex>.meta` in the local cache directory | JSON: `key`, `size`, `sha256`, `tag`, `modified` |
+| Update hook record, two slots (Linux) | `state.json` in the hook's state directory | pretty JSON: `schema`, `serving`, `previous`, `mode`, `markers`, `boot_id`, `guard_placed` |
+| Update hook record, single instance (macOS) | `state.json` in the hook's state directory | pretty JSON: `schema`, `kind`, `updating`, `markers`, `from`, `to`, `version` |
+
+## The rule
+
+A format changes only additively: a new optional field, a new operation word that a reader may skip, a new object under a new key. A field is never renamed, removed or given another meaning, and a field a reader needs is never added without a default. A reader ignores what it does not know and never refuses a file for it.
+
+A journal object with an operation this release does not know is read, and the entry is skipped. A cache sidecar or a checkpoint with a field this release does not know is read as if it were not there. The single-instance hook record ignores a key it does not know. The two-slot hook record does not: it refuses a key it does not know, so a key added to it raises its `schema`, which an older hook reads as newer than it understands and leaves alone.
+
+## The fixtures
+
+The bytes of each format as a release wrote them are in `crates/tierstore/tests/stored_formats/fixtures/`. The tests in `crates/tierstore/tests/stored_formats/` do two things with each one: the current code reads the fixture to the value the test expects, and the current code writes that value as exactly the bytes of the fixture. The lease body holds a random nonce, so its test puts the fixture's nonce in before it compares.
+
+A change that renames, removes or re-means a field fails one of those tests. Do not edit a fixture to make it pass: add a second fixture for the new field, keep the old one, and let both tests read the old fixture too. A change to an existing fixture in a diff is the thing to look at.
