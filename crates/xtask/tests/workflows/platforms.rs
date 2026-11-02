@@ -361,9 +361,9 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
         .filter_map(|(k, _)| k.as_str())
         .collect();
     keys.sort_unstable();
-    if keys != ["TARGET", "RELEASE_VERSION"] {
+    if keys != ["RELEASE_VERSION", "TARGET"] {
         problems.push(format!(
-            "{platform}: its env sets {keys:?}, not TARGET and RELEASE_VERSION alone"
+            "{platform}: its env sets {keys:?}, not RELEASE_VERSION and TARGET alone"
         ));
     }
     for step in steps(Some(build)) {

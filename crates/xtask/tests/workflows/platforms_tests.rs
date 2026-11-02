@@ -335,7 +335,7 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
         MAC,
         "      TARGET: aarch64-apple-darwin\n",
         "      TARGET: aarch64-apple-darwin\n      CARGO_BUILD_TARGET: x86_64-apple-darwin\n",
-        "macos-arm64: its env sets [\"CARGO_BUILD_TARGET\", \"TARGET\", \"RELEASE_VERSION\"]",
+        "macos-arm64: its env sets [\"CARGO_BUILD_TARGET\", \"RELEASE_VERSION\", \"TARGET\"]",
     ),
     (
         MAC,
