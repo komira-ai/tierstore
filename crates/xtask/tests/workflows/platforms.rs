@@ -38,21 +38,42 @@
 //!
 //! [`release_platform_problems`] refuses `release.yml` when its `verify` job does not download
 //! every platform's assets merged into `dist`, the sums into `published` and `bundles` into
-//! `dist`. [`ci_platform_problems`] refuses `ci.yml` without a job on `macos-15` whose commands
-//! are exactly [`CI_MACOS_COMMANDS`] and that no condition skips.
+//! `dist`. [`pull_request_macos_problems`] refuses any workflow a pull request starts that has a
+//! job on a macOS runner without [`NOT_FOR_A_PULL_REQUEST`]: no macOS runner is part of a pull
+//! request's checks. The macOS build and its tests run in `artifacts.yml` on a push and by hand
+//! (`workflow_dispatch`), whose triggers [`TRIGGERS`] pins.
 
 use super::lint::{SIGN_IF, entries, entry, names, runs};
 use super::yaml::{self, Node, Value};
 
 /// A platform's build job: its runner (GitHub-hosted, of the platform's own OS and architecture,
-/// so the binary runs where it is built), its Rust target, and the variable of the file's `env`
-/// that pins the SHA-256 of its cargo-cyclonedx.
+/// so the binary runs where it is built), its Rust target, the variable of the file's `env` that
+/// pins the SHA-256 of its cargo-cyclonedx, the `if:` of the job (none: it runs for every event),
+/// and whether it runs the tests (the platform whose tests no pull-request check runs).
 pub struct Build {
     pub platform: &'static str,
     pub runner: &'static str,
     pub target: &'static str,
     pub pin: &'static str,
+    pub job_if: Option<&'static str>,
+    pub tests: bool,
 }
+
+/// The `if:` of a job on a macOS runner in a workflow a pull request starts: never for a pull
+/// request.
+pub const NOT_FOR_A_PULL_REQUEST: &str = "${{ github.event_name != 'pull_request' }}";
+
+/// The `if:` of `sums`: for a pull request the macOS job is skipped and the Linux files are
+/// summed; for a push or a run by hand every build job must have succeeded.
+pub const SUMS_IF: &str = "${{ !cancelled() && needs.linux-x86_64.result == 'success' && needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')) }}";
+
+/// The triggers of `artifacts.yml`: a pull request, a push to main, and by hand (the macOS build
+/// of a branch, tried before it merges).
+pub const TRIGGERS: [&str; 3] = ["pull_request", "push", "workflow_dispatch"];
+
+/// The tests the macOS build job runs: every test of the crates the binary is made of, none left
+/// out (no `--no-run`, no filter).
+pub const MAC_TESTS: &str = "cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast";
 
 /// The build job of every release platform.
 pub const BUILDS: &[Build] = &[
@@ -61,18 +82,24 @@ pub const BUILDS: &[Build] = &[
         runner: "ubuntu-24.04",
         target: "x86_64-unknown-linux-gnu",
         pin: "CYCLONEDX_SHA256_X86_64_LINUX",
+        job_if: None,
+        tests: false,
     },
     Build {
         platform: "linux-arm64",
         runner: "ubuntu-24.04-arm",
         target: "aarch64-unknown-linux-gnu",
         pin: "CYCLONEDX_SHA256_AARCH64_LINUX",
+        job_if: None,
+        tests: false,
     },
     Build {
         platform: "macos-arm64",
         runner: "macos-15",
         target: "aarch64-apple-darwin",
         pin: "CYCLONEDX_SHA256_AARCH64_MACOS",
+        job_if: Some(NOT_FOR_A_PULL_REQUEST),
+        tests: true,
     },
 ];
 
@@ -82,19 +109,11 @@ const BUNDLES: &str = "bundles";
 /// The artifact that holds `SHA256SUMS`.
 const SUMS: &str = "sha256sums";
 
-/// The commands of the `macos` job of `ci.yml`: the release binary built, and every test of the
-/// crates it is made of run, none left out (no `--no-run`, no filter).
-pub const CI_MACOS_COMMANDS: [&str; 3] = [
-    "rustup toolchain install",
-    "cargo build --locked --release -p tierstore --features server --bin tierstore",
-    "cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast",
-];
-
 /// The `run:` commands of the build job of `b`, in order.
 pub fn build_commands(b: &Build) -> Vec<String> {
     let platform = b.platform;
     let pin = b.pin;
-    vec![
+    let mut commands = vec![
         "rustup toolchain install".to_owned(),
         format!(
             "cargo xtask fetch --url \"https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz\" --sha256 \"${pin}\" --out \"$HOME/.cargo/bin/cargo-cyclonedx\" --extract tar.xz --member \"cargo-cyclonedx-$TARGET/cargo-cyclonedx\""
@@ -112,7 +131,11 @@ pub fn build_commands(b: &Build) -> Vec<String> {
             "tar -xzf \"dist/tierstore-${{GITHUB_SHA}}-{platform}.tar.gz\" -C \"$RUNNER_TEMP/unpacked\" tierstore"
         ),
         "cargo xtask build-commit \"$RUNNER_TEMP/unpacked/tierstore\" \"$GITHUB_SHA\" --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"".to_owned(),
-    ]
+    ];
+    if b.tests {
+        commands.insert(3, MAC_TESTS.to_owned());
+    }
+    commands
 }
 
 /// The `run:` commands of `attest` for `platforms`, in order: the two checks of the sums, then
@@ -443,6 +466,12 @@ pub fn artifacts_platform_problems(
             .map(|(_, v)| v)
     };
     let mut problems = Vec::new();
+    let triggers = names(entry(&doc, "on"));
+    if triggers != TRIGGERS {
+        problems.push(format!(
+            "artifacts.yml: triggers are {triggers:?}, not {TRIGGERS:?}"
+        ));
+    }
     for platform in platforms {
         let Some(b) = BUILDS.iter().find(|b| b.platform == *platform) else {
             problems.push(format!(
@@ -458,8 +487,15 @@ pub fn artifacts_platform_problems(
     problems.extend(shadow_problems(jobs));
     for (name, body) in jobs {
         let name = name.as_str().unwrap_or_default();
-        let signed_only = ["attest", "verify"].contains(&name).then_some(SIGN_IF);
-        problems.extend(execution_problems(name, body, signed_only));
+        let job_if = match name {
+            "attest" | "verify" => Some(SIGN_IF),
+            "sums" => Some(SUMS_IF),
+            _ => BUILDS
+                .iter()
+                .find(|b| b.platform == name)
+                .and_then(|b| b.job_if),
+        };
+        problems.extend(execution_problems(name, body, job_if));
     }
 
     let needs = names(job("sums").and_then(|j| entry(j, "needs")));
@@ -601,23 +637,27 @@ pub fn release_platform_problems(text: &str, platforms: &[&str]) -> Vec<String> 
     )
 }
 
-/// One line per way `ci.yml` (`text`) does not build the release binary and run every test of
-/// its crates on macos-15, unskipped.
-pub fn ci_platform_problems(text: &str) -> Vec<String> {
+/// One line per job of the workflow `file` (`text`) that a pull request runs on a macOS runner:
+/// the workflow has a `pull_request` trigger and the job, on a runner whose name starts with
+/// `macos`, has another `if:` than [`NOT_FOR_A_PULL_REQUEST`].
+pub fn pull_request_macos_problems(file: &str, text: &str) -> Vec<String> {
     let doc = match yaml::load(text) {
         Ok(doc) => doc,
-        Err(e) => return vec![e],
+        Err(e) => return vec![format!("{file}: {e}")],
     };
-    let jobs = entry(&doc, "jobs").map_or(&[][..], entries);
-    let mac = jobs
+    if !names(entry(&doc, "on")).iter().any(|t| t == "pull_request") {
+        return Vec::new();
+    }
+    entry(&doc, "jobs")
+        .map_or(&[][..], entries)
         .iter()
-        .find(|(_, j)| at(j, &["runs-on"]) == Some("macos-15"));
-    let Some((name, mac)) = mac else {
-        return vec!["ci.yml: no job runs on macos-15".to_owned()];
-    };
-    let name = format!("ci.yml {}", name.as_str().unwrap_or_default());
-    let want: Vec<String> = CI_MACOS_COMMANDS.iter().map(|c| (*c).to_owned()).collect();
-    let mut problems = command_problems(&name, &commands(Some(mac)), &want);
-    problems.extend(execution_problems(&name, mac, None));
-    problems
+        .filter(|(_, j)| at(j, &["runs-on"]).is_some_and(|r| r.starts_with("macos")))
+        .filter(|(_, j)| at(j, &["if"]) != Some(NOT_FOR_A_PULL_REQUEST))
+        .map(|(name, _)| {
+            format!(
+                "{file}: the job {} runs on macOS for a pull request; no macOS runner is part of a pull request's checks",
+                name.as_str().unwrap_or_default()
+            )
+        })
+        .collect()
 }

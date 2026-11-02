@@ -1,12 +1,13 @@
-//! The release platforms in `artifacts.yml`, `release.yml` and `ci.yml` ([`super::platforms`]):
+//! The release platforms in `artifacts.yml` and `release.yml`, and no macOS runner in a pull
+//! request's checks ([`super::platforms`]):
 //! the files of the repository pass, and each way of leaving a platform out, of building, signing
 //! or checking it with the wrong inputs, or of skipping a step that checks it, is named.
 
 use super::platforms::{
-    BUILDS, artifacts_platform_problems, attest_commands, build_commands, ci_platform_problems,
-    matches, release_platform_problems,
+    BUILDS, MAC_TESTS, artifacts_platform_problems, attest_commands, build_commands, matches,
+    pull_request_macos_problems, release_platform_problems,
 };
-use super::text_of;
+use super::{text_of, workflows};
 use xtask::package::Platform;
 use xtask::release::ARTIFACTS;
 
@@ -62,8 +63,8 @@ fn each_named(file: &str, check: fn(&str) -> Vec<String>, defects: &[(&str, &str
 #[test]
 fn the_workflows_build_sign_and_check_every_release_platform() {
     // Catches: a release platform without its build job, its signing or its checks in
-    // artifacts.yml or release.yml, artifacts other than the ones a release waits for, and ci.yml
-    // without the macOS build and tests.
+    // artifacts.yml or release.yml, artifacts other than the ones a release waits for, and a
+    // workflow that runs a macOS job for a pull request.
     assert_eq!(
         artifacts_problems_of(&text_of("artifacts.yml")),
         Vec::<String>::new()
@@ -72,10 +73,11 @@ fn the_workflows_build_sign_and_check_every_release_platform() {
         release_platform_problems(&text_of("release.yml"), &platforms()),
         Vec::<String>::new()
     );
-    assert_eq!(
-        ci_platform_problems(&text_of("ci.yml")),
-        Vec::<String>::new()
-    );
+    let mut on_macos = Vec::new();
+    for (file, text) in workflows() {
+        on_macos.extend(pull_request_macos_problems(&file, &text));
+    }
+    assert_eq!(on_macos, Vec::<String>::new());
 }
 
 #[test]
@@ -133,6 +135,17 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
         .collect();
     assert_eq!(checked.len(), 2, "the built binary and the unpacked one");
     assert!(!commands.iter().any(|c| c.contains("linux")));
+    assert_eq!(
+        commands[3], MAC_TESTS,
+        "the macOS job runs the tests before it builds"
+    );
+    for linux in &BUILDS[..2] {
+        assert!(
+            !build_commands(linux).iter().any(|c| c == MAC_TESTS),
+            "{}: the Linux tests run in ci.yml",
+            linux.platform
+        );
+    }
     let attest = attest_commands(&["macos-arm64"]);
     assert_eq!(attest.len(), 3);
     assert!(attest[2].ends_with("-macos-arm64.tar.gz.sigstore.json\""));
@@ -336,9 +349,39 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
 const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         MAC,
-        "    runs-on: macos-15\n",
-        "    if: false\n    runs-on: macos-15\n",
+        "    if: ${{ github.event_name != 'pull_request' }}\n",
+        "    if: false\n",
         "macos-arm64: runs under `if: Some(\"false\")`",
+    ),
+    (
+        MAC,
+        "    if: ${{ github.event_name != 'pull_request' }}\n",
+        "",
+        "macos-arm64: runs under `if: None`",
+    ),
+    (
+        MAC,
+        "--no-fail-fast\n",
+        "--no-fail-fast --no-run\n",
+        "macos-arm64: does not run `cargo test",
+    ),
+    (
+        MAC,
+        "--no-fail-fast\n",
+        "--no-fail-fast -- docs_tests\n",
+        "macos-arm64: does not run `cargo test",
+    ),
+    (
+        MAC,
+        "-p tierstore -p objstore-s3",
+        "-p objstore-s3",
+        "macos-arm64: does not run `cargo test",
+    ),
+    (
+        MAC,
+        "      - name: The tests, on macOS\n",
+        "      - name: The tests, on macOS\n        continue-on-error: true\n",
+        "macos-arm64: the step `The tests, on macOS` has continue-on-error",
     ),
     (
         MAC,
@@ -360,9 +403,15 @@ const EXECUTION_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "sums",
-        "    runs-on: ubuntu-24.04\n",
-        "    if: false\n    runs-on: ubuntu-24.04\n",
-        "sums: runs under `if: Some(\"false\")`",
+        " || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')",
+        " || needs.macos-arm64.result == 'skipped'",
+        "sums: runs under",
+    ),
+    (
+        "sums",
+        "    if: ${{ !cancelled() &&",
+        "    if: ${{ always() &&",
+        "sums: runs under",
     ),
     (
         "verify",
@@ -657,64 +706,52 @@ fn a_release_yml_that_does_not_take_the_macos_files_where_it_checks_them_is_name
 }
 
 #[test]
-fn a_ci_yml_without_the_macos_build_or_every_test_or_that_can_skip_them_is_named() {
-    // Catches: the macOS job dropped from the pull-request gate; kept but no longer building the
-    // release binary; its tests only compiled (`--no-run`) or filtered to a few; and the job or a
-    // step skipped or allowed to fail.
-    let test = "cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast";
-    each_named(
-        "ci.yml",
-        ci_platform_problems,
-        &[
-            (
-                "macos",
-                "runs-on: macos-15",
-                "runs-on: ubuntu-latest",
-                "no job runs on macos-15",
-            ),
-            (
-                "macos",
-                "--bin tierstore\n",
-                "--lib\n",
-                "ci.yml macos: does not run `cargo build --locked --release",
-            ),
-            (
-                "macos",
-                "--no-fail-fast\n",
-                "--no-fail-fast --no-run\n",
-                "ci.yml macos: does not run `cargo test",
-            ),
-            (
-                "macos",
-                "--no-fail-fast\n",
-                "--no-fail-fast -- docs_tests\n",
-                "ci.yml macos: does not run `cargo test",
-            ),
-            (
-                "macos",
-                "-p tierstore -p objstore-s3",
-                "-p objstore-s3",
-                "ci.yml macos: does not run `cargo test",
-            ),
-            (
-                "macos",
-                "    runs-on: macos-15\n",
-                "    if: false\n    runs-on: macos-15\n",
-                "ci.yml macos: runs under `if: Some(\"false\")`",
-            ),
-            (
-                "macos",
-                &format!("      - run: {test}\n"),
-                &format!("      - run: {test}\n        continue-on-error: true\n"),
-                "ci.yml macos: the step",
-            ),
-            (
-                "macos",
-                &format!("      - run: {test}\n"),
-                &format!("      - if: false\n        run: {test}\n"),
-                "has an `if:`",
-            ),
-        ],
+fn a_macos_job_that_a_pull_request_runs_is_named() {
+    // Catches: a macOS runner added to a pull request's checks (ci.yml given a macOS job again, or
+    // the macOS build of artifacts.yml without its condition), while a workflow no pull request
+    // starts may have one.
+    let ci = text_of("ci.yml").replace(
+        "jobs:\n",
+        "jobs:\n  macos:\n    runs-on: macos-15\n    steps:\n      - run: cargo test --locked\n",
     );
-    assert_eq!(ci_platform_problems("jobs: [").len(), 1);
+    assert_eq!(
+        pull_request_macos_problems("ci.yml", &ci),
+        [
+            "ci.yml: the job macos runs on macOS for a pull request; no macOS runner is part of a pull request's checks"
+        ]
+    );
+    let artifacts = in_job(
+        &text_of("artifacts.yml"),
+        MAC,
+        "    if: ${{ github.event_name != 'pull_request' }}\n",
+        "",
+    );
+    assert_eq!(
+        pull_request_macos_problems("artifacts.yml", &artifacts),
+        [
+            "artifacts.yml: the job macos-arm64 runs on macOS for a pull request; no macOS runner is part of a pull request's checks"
+        ]
+    );
+    let by_hand = "on:\n  workflow_dispatch:\njobs:\n  mac:\n    runs-on: macos-15\n";
+    assert_eq!(
+        pull_request_macos_problems("x.yml", by_hand),
+        Vec::<String>::new()
+    );
+    assert_eq!(pull_request_macos_problems("x.yml", "jobs: [").len(), 1);
+}
+
+#[test]
+fn artifacts_yml_without_its_run_by_hand_is_named() {
+    // Catches: the trigger dropped by which a branch's macOS build is tried before it merges,
+    // now that no pull request runs it.
+    let text = text_of("artifacts.yml");
+    let dispatch = "  workflow_dispatch:\n";
+    assert!(text.contains(dispatch));
+    let problems = artifacts_problems_of(&text.replacen(dispatch, "", 1));
+    assert!(
+        problems
+            .iter()
+            .any(|p| p.starts_with("artifacts.yml: triggers are [\"pull_request\", \"push\"]")),
+        "{problems:?}"
+    );
 }

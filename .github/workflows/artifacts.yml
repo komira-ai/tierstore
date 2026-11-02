@@ -8,8 +8,12 @@
 # `macos-arm64`. Each build job runs on a GitHub-hosted runner of its own platform, so each
 # binary is run where it is built and must say the commit and the version there.
 #
-# A pull request builds, packages and sums everything and attests nothing. A push to main also
-# signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does.
+# A pull request builds, packages and sums the Linux files and attests nothing; the macOS job
+# does not run for a pull request (no macOS runner is part of a pull request's checks), so the
+# pull request's sums cover the Linux files alone. A push to main builds every platform, also
+# signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
+# run by hand (workflow_dispatch) on a branch builds every platform, the macOS one included, and
+# sums them, and signs nothing: it is how a change to the macOS build is tried before it merges.
 # The attest job is in THIS file for one reason: the signer identity of an attestation is the
 # workflow file that ran the signing step, and the host installer verifies exactly
 # `.github/workflows/artifacts.yml`. Do not move or rename it. Only `attest` may hold
@@ -43,6 +47,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  # By hand, on any branch: the build jobs (the macOS one included) and the sums, nothing signed
+  # (attest and verify run for a push to main alone).
+  workflow_dispatch:
 
 permissions: {}
 
@@ -223,10 +230,12 @@ jobs:
 
   # macOS on Apple silicon. The binary is ad-hoc signed by the linker, as every arm64 macOS
   # binary must be to run, and is not notarized. Only this job can run it: release.yml's
-  # check-binary runs the linux-x86_64 binary alone, so the build-commit step below is the
-  # version check of the macOS binary.
+  # check-binary runs the linux-x86_64 binary alone, so the build-commit steps below are the
+  # version check of the macOS binary. It also runs the tests of the crates the binary is made
+  # of, which ci.yml runs on Linux only. Not for a pull request: on a push and by hand.
   macos-arm64:
     needs: [version]
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-15
     timeout-minutes: 45
     permissions:
@@ -255,6 +264,10 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
+      # Every test of the crates the binary is made of, on macOS; the update hook's tests are
+      # Linux only and compiled out here.
+      - name: The tests, on macOS
+        run: cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
@@ -291,8 +304,11 @@ jobs:
 
   # SHA256SUMS over every platform's files, checked against the files and a flipped copy. The
   # attest job signs these sums, so they are the one list of what a release holds.
+  # For a pull request the macOS job is skipped, and the sums are those of the Linux files; for a
+  # push or a run by hand every build job must have succeeded.
   sums:
     needs: [linux-x86_64, linux-arm64, macos-arm64]
+    if: ${{ !cancelled() && needs.linux-x86_64.result == 'success' && needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
