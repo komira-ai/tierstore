@@ -643,6 +643,57 @@ async fn an_eviction_of_an_entry_an_earlier_reconciler_applied_reads_the_tag_fir
     assert_eq!(second.hot_bytes(), 63);
 }
 
+/// A rig whose five objects were copied by a reconciler that has stopped, and a second reconciler
+/// over it with a budget that makes it evict three of them: it holds no tag of any object.
+async fn after_a_takeover() -> (Rig, Reconciler) {
+    let rig = five_objects().await;
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    let second = rig.reconciler("r2", 100);
+    (rig, second)
+}
+
+/// Asserts that a reconciler that took over after another applied the journal does not evict an
+/// object whose key the cold tier holds no real object of (nothing, or a reservation): the hot
+/// object may be the only copy. It is left in the hot tier, the pass reports no failure, and the
+/// objects after it are evicted down to the low-water mark.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_no_real_object_of() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold_mem.delete("k1").await.unwrap();
+    rig.cold_mem.delete("k2").await.unwrap();
+    let held = rig.cold_mem.put_reservation("k2", reservation(1)).await;
+    held.unwrap();
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_eq!(read(&*rig.hot_mem, "k2").await, body(&"x".repeat(21)));
+    assert_absent(&*rig.hot_mem, "k3").await;
+    assert_absent(&*rig.hot_mem, "k4").await;
+}
+
+/// Asserts that a failed look at the cold tier before an eviction without a tag is reported, evicts
+/// nothing, and is retried by the next pass, which evicts.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_whose_cold_check_fails_reports_it_and_evicts_on_the_next_pass() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold.fail_next_on(Op::Head, "k1", down());
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_eq!(report.evicted, 0);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+}
+
 /// Asserts that the new ops count in the usage, the copy lag and the eviction like a plain put: a
 /// reserved put and a mirror add their sizes, are copied, and are evicted oldest first.
 #[tokio::test(start_paused = true)]

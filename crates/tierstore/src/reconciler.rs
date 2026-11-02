@@ -132,8 +132,10 @@ enum Eviction {
     Removed,
     /// The hot tier no longer had it.
     Gone,
-    /// The hot tier holds another object under the key now, which was left.
-    Replaced,
+    /// The object was left: the hot tier holds another object under the key now, or the cold tier
+    /// does not hold a real object of the key (nothing, or a reservation), so the hot object may
+    /// be the only copy.
+    Kept,
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -194,7 +196,9 @@ fn millis(duration: Duration) -> u64 {
 ///    put again since is skipped. The delete is conditional on the content tag the copy found
 ///    (`If-Match`, [`Backend::delete_if_match`]), so an object that was put again after the
 ///    copy, with other bytes, is kept; for an entry applied by an earlier reconciler the tag is
-///    read from the hot tier just before the delete.
+///    read from the hot tier just before the delete, and only if the cold tier holds a real
+///    object of the key then (not nothing, and not a reservation: the hot object may be the only
+///    copy, and stays).
 /// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
 ///    put, after the first): every journal object up to a number is applied, and every entry
 ///    before a position is done with (the eviction folds its progress into the checkpoint,
@@ -605,7 +609,7 @@ impl Reconciler {
                         report.evicted += 1;
                     }
                     Ok(Eviction::Gone) => self.books.forget(&victim.key),
-                    Ok(Eviction::Replaced) => {}
+                    Ok(Eviction::Kept) => {}
                     Err(error) => {
                         report.failed.push(error);
                         return;
@@ -616,13 +620,16 @@ impl Reconciler {
         }
     }
 
-    /// Deletes one candidate from the hot tier, on the content tag the copy found, or on the tag the
-    /// hot tier gives now if the entry was applied by an earlier reconciler.
+    /// Deletes one candidate from the hot tier, on the content tag the copy found. An entry that an
+    /// earlier reconciler applied has none: the tag is read from the hot tier, and the cold tier is
+    /// asked first whether it holds a real object of the key (not nothing, not a reservation), since
+    /// nothing here has seen the copy.
     async fn evict_one(&self, victim: &Candidate) -> Result<Eviction, Error> {
         let tag = match &victim.tag {
             Some(tag) => tag.clone(),
             None => match self.hot.head(&victim.key).await {
-                Ok(meta) => meta.tag,
+                Ok(meta) if self.cold_holds_object(&victim.key).await? => meta.tag,
+                Ok(_) => return Ok(Eviction::Kept),
                 Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
                 Err(error) => return Err(error),
             },
@@ -630,7 +637,17 @@ impl Reconciler {
         match self.hot.delete_if_match(&victim.key, &tag).await {
             Ok(()) => Ok(Eviction::Removed),
             Err(Error::NotFound(_)) => Ok(Eviction::Gone),
-            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Replaced),
+            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Kept),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier holds a real object under `key`: a reservation and an absent key are
+    /// not one.
+    async fn cold_holds_object(&self, key: &str) -> Result<bool, Error> {
+        match self.cold.head(key).await {
+            Ok(meta) => Ok(!meta.reservation),
+            Err(Error::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
     }
