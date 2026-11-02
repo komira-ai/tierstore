@@ -2,7 +2,7 @@
 // which scripts it loads. The content files are the page copy as written for the site (content/*.html: the inside of
 // <main>); the document around them is layout.ts.
 
-export type NavKey = 'install' | 'demo' | 'why' | 'docs';
+export type NavKey = 'start' | 'install' | 'demo' | 'why' | 'docs';
 
 export interface Page {
   /** The URL path: '/' or '/name/' or '/404.html'. */
@@ -25,10 +25,10 @@ export interface Page {
 
 export const SITE_NAME = 'tierstore';
 export const DOMAIN = 'tierstore.dev';
-/** Where the source is today: tierstore ships from the kbf repository for now. */
-export const REPO_URL = 'https://github.com/komira-ai/kbf';
+/** Where the source and the releases are. */
+export const REPO_URL = 'https://github.com/komira-ai/tierstore';
 export const CRATE_URL = `${REPO_URL}/tree/main/crates/tierstore`;
-export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/tierstore/README.md`;
+export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/README.md`;
 export const RELEASES_URL = `${REPO_URL}/releases`;
 
 /**
@@ -39,6 +39,7 @@ export const WHITE_PAPER_URL: string | null = null;
 
 /** The navigation, in order: the label and the page it names. */
 export const NAV: readonly { key: NavKey; label: string; route: string }[] = [
+  { key: 'start', label: 'Get started', route: '/getting-started/' },
   { key: 'install', label: 'Install', route: '/install/' },
   { key: 'demo', label: 'Demo', route: '/demo/' },
   { key: 'why', label: 'Why', route: '/why/' },
@@ -54,7 +55,8 @@ export const PAGES: readonly Page[] = [
     scripts: ['copy.js'],
     bands: true,
   },
-  { route: '/install/', source: 'install', title: 'Install', description: 'Get tierstore from a kbf release and run it.', nav: 'install', scripts: ['copy.js'], bands: false },
+  { route: '/getting-started/', source: 'getting-started', title: 'Get started', description: 'Download tierstore, write a configuration file, start it and put and get an object.', nav: 'start', scripts: ['copy.js'], bands: false },
+  { route: '/install/', source: 'install', title: 'Install', description: 'Get tierstore from a release of this repository and run it as a service.', nav: 'install', scripts: ['copy.js'], bands: false },
   { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', nav: 'demo', scripts: ['copy.js'], bands: false },
   { route: '/why/', source: 'why', title: 'Why tierstore', description: 'The problem tierstore solves and how the tiers work.', nav: 'why', scripts: ['copy.js'], bands: false },
   {
