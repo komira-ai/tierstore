@@ -156,9 +156,8 @@ fn millis(duration: Duration) -> u64 {
 /// 1. **Tail the journals.** For each proxy, in the order of the journal objects from its
 ///    checkpoint, a journal object is read and applied: its puts are settled with the cold
 ///    tier, up to [`ReconcilerConfig::parallel`] at a time, one look at a time for each key
-///    (the hot tier's object, then the cold tier's), by the rules below; then the deletes of
-///    the keys whose last put in that object is a plain `Put` (the entry a release without
-///    reservations writes) are applied. Then the object counts as applied.
+///    (the hot tier's object, then the cold tier's), by the rules below; then its deletes are
+///    applied to the cold tier, by the last rule below. Then the object counts as applied.
 ///
 ///    A cold object that a *reservation* is (a marked 56-byte object; see
 ///    [`Backend::put_reservation`]) holds a key for a put that the proxy acknowledged. The rules
@@ -177,7 +176,14 @@ fn millis(duration: Duration) -> u64 {
 ///    - the cold tier holds nothing: a `PutReserved` keeps the hot object and the pass reports
 ///      the key (a cold bucket that was repointed or restored is what it means, and the
 ///      key stays refused until someone looks); a `PutMirror` deletes the hot copy by its tag;
-///      a `Put` is copied create-only (an object that appears meanwhile counts as copied).
+///      a `Put` is copied create-only (an object that appears meanwhile counts as copied);
+///    - delete entries: one is applied to the cold tier (the cold object goes by its tag, unless
+///      the hot tier holds the key again and the cold object is of that object) for a key whose
+///      last put in the same journal object is a plain `Put`, or that has none there and whose
+///      latest put entry the reconciler read in the last [`ReconcilerConfig::retention`] is not
+///      a `PutReserved` or a `PutMirror`; never for another key, and never for a reservation. A
+///      proxy that reserves removes the cold tier's object itself before it deletes from the hot
+///      tier, and an entry applied late could take an object that another put made since.
 /// 2. **Evict.** The reconciler adds up the bytes of the objects the hot tier holds from the
 ///    journals alone: the sizes of the puts, less the deletes and the evictions. Above
 ///    [`ReconcilerConfig::high_water`] of the budget it deletes objects from the hot tier,
@@ -217,12 +223,11 @@ fn millis(duration: Duration) -> u64 {
 ///   it may store an older checkpoint over the one of the reconciler that took over. Keep a
 ///   pass shorter than the ttl (set `parallel` and the ttl accordingly), and do not cancel a
 ///   pass.
-/// - A delete entry is applied to the cold tier only for a key whose last put in the same journal
-///   object is a plain `Put`, which a release without reservations writes; a delete that comes in
-///   a journal object of its own is not applied to the cold tier, since the proxy removes the
-///   cold object itself, before it deletes from the hot tier. A copy of a plain `Put` that is under
-///   way while that is done can therefore put the key back in the cold tier until the release that
-///   reserves keys is the only writer.
+/// - A delete entry of a key that a reserved put or a mirror last put (by what the reconciler read
+///   in the last retention) is not applied to the cold tier: the proxy removed the cold object
+///   itself. One that is applied after more than the retention since that put is applied as a
+///   plain key's is, which can take an object that a put that went straight to the cold tier made
+///   after the delete.
 /// - After a restart the journal objects before the position of the stored checkpoint that
 ///   are still younger than the retention are not read again, and are never deleted.
 pub struct Reconciler {
@@ -281,6 +286,9 @@ impl Reconciler {
             self.advance(id, &mut report).await;
         }
         self.books.trim_stale();
+        let kept = millis(self.config.retention);
+        let now = self.config.clock.now();
+        self.books.forget_reserved_before(now.saturating_sub(kept));
         self.evict(&ids, &mut report).await;
         for id in &ids {
             self.persist(id, &mut report).await;
@@ -399,12 +407,23 @@ impl Reconciler {
             }
         }
         for entry in entries.iter().filter(|e| e.op == JournalOp::Delete) {
-            let plain = wanted.get(entry.key.as_str());
-            if plain.is_some_and(|want| want.kind == JournalOp::Put) {
+            if self.applies_to_cold(&entry.key, wanted.get(entry.key.as_str())) {
                 self.delete_cold(&entry.key).await?;
             }
         }
         Ok(copied)
+    }
+
+    /// Whether the delete entry of `key` is applied to the cold tier: if the object puts the key,
+    /// by the kind of its last put (a plain `Put` is, a reserved put or a mirror is not); if it
+    /// does not, unless the latest put entry read for the key is a reserved put or a mirror. A
+    /// proxy that writes those removes the cold tier's object itself, before it deletes from the
+    /// hot tier, so an entry applied late could take an object that another put made since.
+    fn applies_to_cold(&self, key: &str, put: Option<&Wanted<'_>>) -> bool {
+        match put {
+            Some(want) => want.kind == JournalOp::Put,
+            None => !self.books.is_reserved(key),
+        }
     }
 
     /// Settles one key with the cold tier (see the type), looking again if the cold tier's object
@@ -535,8 +554,7 @@ impl Reconciler {
         }
     }
 
-    /// Applies the delete of a key whose last put in the journal object is a plain `Put`: the
-    /// cold tier's object goes, by its tag, unless the hot tier holds the key again and the cold
+    /// Applies the delete of a key of a release without reservations: the cold tier's object goes, by its tag, unless the hot tier holds the key again and the cold
     /// tier's object is of that object (the same size and content tag). A reservation, which is
     /// another put's, and an absent key are left alone.
     async fn delete_cold(&self, key: &str) -> Result<(), Error> {

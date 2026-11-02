@@ -92,6 +92,11 @@ pub(crate) struct Books {
     usage: u64,
     lag: u64,
     pub(crate) streams: BTreeMap<String, Stream>,
+    /// The keys whose latest put entry that was read is a reserved put or a mirror, with the time
+    /// of that entry: a delete entry of such a key was written by a proxy that removes the cold
+    /// tier's object itself, so the reconciler does not apply it to the cold tier. A key whose
+    /// latest put entry is a plain put (an entry of a release without reservations) is not here.
+    reserved: BTreeMap<String, u64>,
 }
 
 impl Books {
@@ -103,6 +108,18 @@ impl Books {
     /// The bytes of the objects the hot tier holds that the cold tier does not.
     pub(crate) fn lag(&self) -> u64 {
         self.lag
+    }
+
+    /// Whether the latest put entry read for `key` is a reserved put or a mirror.
+    pub(crate) fn is_reserved(&self, key: &str) -> bool {
+        self.reserved.contains_key(key)
+    }
+
+    /// Forgets the keys whose latest reserved put or mirror was written before `time`: a delete
+    /// of such a key that has not been applied by then is applied by the rule for a key of a
+    /// release without reservations.
+    pub(crate) fn forget_reserved_before(&mut self, time: u64) {
+        self.reserved.retain(|_, written| *written >= time);
     }
 
     pub(crate) fn stream(&mut self, proxy: &str) -> &mut Stream {
@@ -189,6 +206,15 @@ impl Books {
         stream.retained.push_back((seq, modified));
         for (index, entry) in entries.iter().enumerate() {
             let at = (seq, index as u64);
+            match entry.op {
+                JournalOp::PutReserved | JournalOp::PutMirror => {
+                    self.reserved.insert(entry.key.clone(), entry.time);
+                }
+                JournalOp::Put => {
+                    self.reserved.remove(&entry.key);
+                }
+                _ => {}
+            }
             if at < cursor {
                 continue;
             }

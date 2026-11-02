@@ -164,14 +164,12 @@ async fn a_key_the_hot_tier_no_longer_holds_is_skipped() {
     assert_eq!(stored, r#"{"seq":5,"evict_seq":0,"evict_idx":0}"#);
 }
 
-/// Asserts that a delete entry that is alone in its journal object leaves the cold tier as it
-/// is: the proxy removed the cold tier's object itself before it deleted from the hot tier, and
-/// an entry applied later could take an object that another put made since. Here a plain copy
-/// under way lands after the delete (the cold tier takes 10 seconds to store it), and the next
-/// pass leaves it; with the reserving puts of the release that follows no copy is made without a
-/// reservation, which the delete removes, so this is a limit of the plain `Put` only.
+/// Asserts that a delete entry removes the cold copy that a copy under way made after the
+/// delete: the object is deleted while the cold tier takes 10 seconds to store the copy,
+/// the copy lands, and the next pass applies the delete entry and removes it, so the object is
+/// not resurrected.
 #[tokio::test(start_paused = true)]
-async fn a_delete_entry_alone_in_its_object_leaves_the_cold_tier_alone() {
+async fn a_delete_entry_removes_a_cold_copy_made_while_the_delete_ran() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("value")).await.unwrap();
@@ -190,7 +188,9 @@ async fn a_delete_entry_alone_in_its_object_leaves_the_cold_tier_alone() {
     rig.cold.set_delay(Op::Put, None);
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
+    assert_absent(&*rig.cold_mem, "k").await;
+    let missing = Error::NotFound("k".to_owned());
+    assert_eq!(proxy.get("k", None).await.unwrap_err(), missing);
     assert_eq!(reconciler.hot_bytes(), 0);
 }
 

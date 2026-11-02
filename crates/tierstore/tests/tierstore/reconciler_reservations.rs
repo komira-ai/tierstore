@@ -9,10 +9,12 @@ use tierstore::{
     Backend, Error, JournalEntry, JournalOp, MemoryBackend, Op, Reconciler, decode_journal,
     encode_journal,
 };
+use tokio::sync::Notify;
 
 use crate::churn::{Change, Churn, Flaky};
 use crate::conformance::reservation;
-use crate::support::{Rig, assert_absent, body, journal_key, read, text};
+use crate::hold::HoldDelete;
+use crate::support::{Rig, assert_absent, body, chunks, journal_key, read, set_usage, text};
 
 fn down() -> Error {
     Error::Unavailable("down".to_owned())
@@ -732,4 +734,160 @@ fn a_journal_with_the_new_ops_decodes_as_unknown_for_the_previous_shape() {
     assert_eq!(ops, [1, 0, 0, 2]);
     let keys: Vec<&str> = previous.iter().map(|e| e.key.as_str()).collect();
     assert_eq!(keys, ["a", "b", "c", "d"]);
+}
+
+/// Asserts that an object put again after a delete, by a put that went straight to the cold
+/// tier because the hot tier was full (so no journal entry says so), is still there, and still
+/// has its new content, after the reconciler applies the journaled delete of the same key.
+/// Catches a delete entry that is applied to the cold tier without telling an object made
+/// after it from the object it deleted, so a key the client wrote and was told succeeded is
+/// lost.
+#[tokio::test(start_paused = true)]
+async fn a_delete_then_a_cold_path_reput_keeps_the_new_object_after_the_reconciler_pass() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("old")).await.unwrap();
+    proxy.delete("k").await.unwrap();
+    rig.clock.advance(10);
+
+    set_usage(&rig, 1000, rig.clock.now()).await;
+    proxy.put("k", body("new")).await.unwrap();
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
+
+    let mut reconciler = rig.reconciler("r1", 1000);
+    let report = reconciler.pass().await;
+    assert!(report.held);
+    assert_eq!(report.failed, Vec::<Error>::new());
+
+    assert_eq!(proxy.get("k", None).await, Ok(body("new")));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
+}
+
+/// Asserts that an object created again after a delete by a multipart completion (which goes
+/// to the cold tier and writes no journal entry) is still there, with its new content, after
+/// the reconciler applies the journaled delete of the same key.
+/// Catches a delete entry that is applied to the cold tier without telling an object made
+/// after it from the object it deleted, so a completed multipart upload is lost.
+#[tokio::test(start_paused = true)]
+async fn a_delete_then_a_multipart_reput_keeps_the_new_object_after_the_reconciler_pass() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1 << 20).await;
+    proxy.put("k", body("old")).await.unwrap();
+    proxy.delete("k").await.unwrap();
+    rig.clock.advance(10);
+
+    let id = proxy.create_upload("k").await.unwrap();
+    let tag = proxy
+        .upload_part("k", &id, 1, chunks(&["new"]))
+        .await
+        .unwrap();
+    proxy.complete_upload("k", &id, &[(1, tag)]).await.unwrap();
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
+
+    let mut reconciler = rig.reconciler("r1", 1 << 20);
+    let report = reconciler.pass().await;
+    assert!(report.held);
+    assert_eq!(report.failed, Vec::<Error>::new());
+
+    assert_eq!(proxy.get("k", None).await, Ok(body("new")));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
+}
+
+/// Asserts that an object that is deleted and put again with new content while the reconciler
+/// is about to evict the old one from the hot tier is not lost: after the eviction and further
+/// passes, a GET of the key through the proxy gives the new content.
+/// Catches an eviction that deletes the hot tier's key without checking it is still the object
+/// it chose, so the put that came after its last read of the journals is deleted before it was
+/// copied, and the later passes, finding the hot tier empty, apply the delete entry to the cold
+/// tier and leave no object at all.
+#[tokio::test(start_paused = true)]
+async fn an_eviction_racing_a_delete_and_a_reput_keeps_the_new_object() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    let old = "o".repeat(21);
+    for key in ["k", "f1", "f2", "f3", "f4"] {
+        rig.clock.advance(10);
+        proxy.put(key, body(&old)).await.unwrap();
+    }
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let held = Arc::new(HoldDelete::new(
+        rig.hot.clone(),
+        "k",
+        entered.clone(),
+        release.clone(),
+    ));
+    let mut reconciler = Reconciler::new(held, rig.cold.clone(), rig.reconciler_config("r1", 100));
+
+    let client = async {
+        entered.notified().await;
+        proxy.delete("k").await.unwrap();
+        proxy.put("k", body("new content")).await.unwrap();
+        release.notify_one();
+    };
+    let (report, ()) = tokio::join!(reconciler.pass(), client);
+    assert!(report.held);
+    assert!(report.evicted >= 1);
+
+    for _ in 0..3 {
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new());
+    }
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("new content"));
+}
+
+/// Writes `entries` as journal object `seq` of proxy `p1`.
+async fn add_journal(rig: &Rig, seq: u64, entries: &[JournalEntry]) {
+    let object = encode_journal(entries);
+    let key = journal_key("p1", seq);
+    rig.hot_mem.put(&key, object).await.unwrap();
+}
+
+/// Asserts that a delete entry that is alone in its journal object is applied to the cold tier for a
+/// key that only plain puts put (it removes a stale copy, as a release without reservations needs),
+/// and is not for a key that a reserved put put: the proxy that wrote that entry removed the cold
+/// tier's object itself, and an object a put made straight to the cold tier since is not its to take.
+#[tokio::test(start_paused = true)]
+async fn a_delete_entry_alone_is_applied_to_a_plain_key_and_not_to_a_reserved_one() {
+    let rig = with_journal(&[
+        entry(JournalOp::PutReserved, "k", Some("its-reservation")),
+        entry(JournalOp::Put, "j", None),
+    ])
+    .await;
+    add_journal(
+        &rig,
+        2,
+        &[
+            entry(JournalOp::Delete, "k", None),
+            entry(JournalOp::Delete, "j", None),
+        ],
+    )
+    .await;
+    rig.cold_mem.put("k", body("cold!")).await.unwrap();
+    rig.cold_mem.put("j", body("cold!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("cold!"));
+    assert_absent(&*rig.cold_mem, "j").await;
+}
+
+/// Asserts that what the reconciler knows of a key a reserved put put is forgotten after the
+/// journal retention: a delete entry of the key that comes later is applied as a plain key's is.
+#[tokio::test(start_paused = true)]
+async fn a_reserved_key_is_forgotten_after_the_retention() {
+    let rig = with_journal(&[entry(JournalOp::PutReserved, "k", Some("its-reservation"))]).await;
+    rig.cold_mem.put("k", body("cold!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+
+    rig.clock.set(3_700_000);
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    add_journal(&rig, 2, &[entry(JournalOp::Delete, "k", None)]).await;
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_absent(&*rig.cold_mem, "k").await;
 }

@@ -7,9 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tierstore::{Backend, ByteRange, Error, JournalOp, Op, Proxy};
+use tokio::sync::Notify;
 
 use crate::churn::{Change, Churn, Ghost};
 use crate::conformance::reservation;
+use crate::hold::Stall;
 use crate::support::{
     Rig, assert_absent, body, journal, journal_keys, keys, page, read, set_usage, text,
 };
@@ -473,4 +475,61 @@ async fn each_failing_call_of_a_delete_fails_it_before_the_calls_after_it() {
     assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
     assert!(rig.cold_mem.head("k").await.unwrap().reservation);
     assert_eq!(read(&*rig.hot_mem, "k").await, body("one"));
+}
+
+/// Asserts that a key deleted while a get of it is copying it back from the cold tier into the
+/// hot tier stays deleted: once the copy-back has written the key to the hot tier and journaled
+/// it, and the reconciler has run, a get of the key is NotFound and neither tier holds it.
+///
+/// Catches a copy-back that brings a deleted object back: its put entry is journaled after the
+/// delete entry, so the reconciler copies the stale hot object to the cold tier.
+#[tokio::test(start_paused = true)]
+async fn a_delete_during_a_copy_back_keeps_the_key_deleted() {
+    let rig = Rig::new();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let stalled_hot = Arc::new(Stall::new(
+        rig.hot.clone(),
+        "k",
+        entered.clone(),
+        Some(release.clone()),
+    ));
+    let proxy = Arc::new(
+        Proxy::open(stalled_hot, rig.cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap(),
+    );
+
+    // The get misses hot, reads cold, and stops at the copy-back's hot put.
+    let getter = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.get("k", None).await })
+    };
+    entered.notified().await;
+
+    // The delete completes in full: both tiers, and its journal entry.
+    proxy.delete("k").await.unwrap();
+    rig.clock.advance(10);
+    assert_absent(&*rig.cold_mem, "k").await;
+
+    // The copy-back goes on: the hot tier takes the object, and the put is journaled.
+    release.notify_one();
+    let served = getter.await.unwrap();
+    assert_eq!(served.unwrap(), body("value"));
+    // The journal write of the copy-back is a background task that waits a linger.
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(journal_keys(&*rig.hot_mem, "p1").await.len(), 2);
+
+    let mut reconciler = rig.reconciler("r1", 1000);
+    let first = reconciler.pass().await;
+    assert_eq!(first.failed, Vec::<Error>::new());
+
+    assert_eq!(
+        proxy.get("k", None).await,
+        Err(Error::NotFound("k".to_owned()))
+    );
+    assert_absent(&*rig.hot_mem, "k").await;
+    assert_absent(&*rig.cold_mem, "k").await;
 }
