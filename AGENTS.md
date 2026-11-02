@@ -45,7 +45,7 @@ Severity: BLOCK must be fixed before merge. SHOULD is fixed unless the author gi
 
 - B9 BLOCK. A PR runs only build and unit tests with coverage. Reject release dry-runs, a `pull_request` trigger on a release workflow, new PR-gate jobs, slow tests in the PR set, and darwin/macOS jobs or targets in per-PR checks. Advisories never block; licences/bans/sources do.
 - B10 BLOCK. Workflows: hosted runners only (no self-hosted or paid), actions pinned by commit SHA, no `pull_request_target`, external tools pinned by URL and SHA-256. Workflows are actionlint clean.
-- B12 SHOULD. Releases are automatic from main: no manual tag step, no bake/gamma-verdict evaluator.
+- B12 SHOULD. Releases are automatic from main: no manual tag step, and no extra gate that holds a release for a separate verdict.
 
 ### PR text and commits
 
@@ -63,7 +63,7 @@ Severity: BLOCK must be fixed before merge. SHOULD is fixed unless the author gi
 
 - S1 BLOCK. No secret, token, key, endpoint address, or worker property set committed. No remote-execution endpoint or `instance_name` committed. Check: grep for URLs with ports, bearer tokens, private keys, `AWS_`/`GOOGLE_` key material, `remote_execution` keys.
 - S2 BLOCK. Configuration is passed as flags, not environment variables. Allowed env: platform-set mode markers, secret material, provider-standard credentials (`AWS_*`, `GOOGLE_*`). Check: grep for `getenv`, `std::env::var`, `env::var_os`, `os.environ`; judge each against the three exceptions.
-- S3 BLOCK. A diff must not make a cluster write, upload, deploy, or cloud spend executable by default, or run against a gamma or prod account. Steps only the owner runs are held scripts: dry-run default, never forcing, `bash -n` clean, in the documented location.
+- S3 BLOCK. A diff must not make a cluster write, upload, deploy, or cloud spend executable by default, or run against a staging or production account. Steps only the owner runs are held scripts: dry-run default, never forcing, `bash -n` clean, in the documented location.
 - S4 SHOULD. Committed scripts and docs use the workspace scratch directory, not `/tmp`. No `rm -rf` in scripts; use the scratch-removal tool.
 <!-- shared-core:end -->
 

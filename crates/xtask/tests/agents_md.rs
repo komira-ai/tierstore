@@ -127,10 +127,14 @@ fn hash_matches(copy: &[u8], hash_file: &str) -> Result<(), String> {
     }
 }
 
-/// Whether `claude` has a line that is exactly `@AGENTS.md` outside a fenced code block.
+/// Whether `claude` has a line that is exactly `@AGENTS.md` outside a fenced code block and
+/// outside a code span.
 fn imports_agents(claude: &str) -> bool {
     // The open fence: its character and length; a closing fence is at least as long.
     let mut fence: Option<(char, usize)> = None;
+    // The lines of the current run of non-blank lines outside a fence, where a code span
+    // may reach from one line to the next.
+    let mut block: Vec<&str> = Vec::new();
     for line in lines(claude) {
         let line = line.text;
         let t = line.trim_start_matches(' ');
@@ -143,15 +147,106 @@ fn imports_agents(claude: &str) -> bool {
             && run >= 3
             && !(ch == Some('`') && t[run..].contains('`'));
         match (fence, is_fence) {
-            (None, true) => fence = ch.map(|c| (c, run)),
-            (Some((c, n)), true) if ch == Some(c) && run >= n && t[run..].trim().is_empty() => {
+            (None, true) => {
+                if imports_in_block(&block) {
+                    return true;
+                }
+                block.clear();
+                fence = ch.map(|c| (c, run));
+            }
+            (Some((c, n)), true)
+                if ch == Some(c) && run >= n && t[run..].chars().all(|x| x == ' ' || x == '\t') =>
+            {
                 fence = None
             }
-            (None, false) if line == IMPORT => return true,
-            _ => {}
+            (Some(_), _) => {}
+            (None, false) if line.trim().is_empty() => {
+                if imports_in_block(&block) {
+                    return true;
+                }
+                block.clear();
+            }
+            (None, false) => block.push(line),
         }
     }
+    fence.is_none() && imports_in_block(&block)
+}
+
+/// Whether one of `block` (consecutive non-blank lines outside a fence) is exactly
+/// `@AGENTS.md` and outside every code span. A span opens at a run of backticks and closes
+/// at the next run of the same length; a run with no such closer is literal text. Backslash
+/// escapes are not read, which can only make a span where Markdown has none, so an import
+/// is never accepted that Markdown would not read.
+fn imports_in_block(block: &[&str]) -> bool {
+    let text = block.join("\n");
+    // The backtick runs of the text: (start, length).
+    let mut runs = Vec::new();
+    let mut i = 0;
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            runs.push((start, i - start));
+        } else {
+            i += 1;
+        }
+    }
+    // The spans, as the byte ranges between their opening and closing runs.
+    let mut spans = Vec::new();
+    let mut k = 0;
+    while k < runs.len() {
+        let (start, len) = runs[k];
+        match runs[k + 1..].iter().position(|&(_, l)| l == len) {
+            Some(j) => {
+                spans.push((start + len, runs[k + 1 + j].0));
+                k += j + 2;
+            }
+            None => k += 1,
+        }
+    }
+    let mut offset = 0;
+    for line in block {
+        let (s, e) = (offset, offset + line.len());
+        if *line == IMPORT && !spans.iter().any(|&(a, b)| a <= s && e <= b) {
+            return true;
+        }
+        offset = e + 1;
+    }
     false
+}
+
+/// The headings of the shared core, and one rule of each, that the copy must hold.
+const HEADINGS: [&str; 5] = [
+    "### Tests and coverage",
+    "### Design and change shape",
+    "### CI and workflows",
+    "### PR text and commits",
+    "### Secrets and configuration",
+];
+const RULES: [&str; 5] = ["T1", "B8", "B9", "P4", "S1"];
+
+/// Nothing when `copy` has every heading of [`HEADINGS`] as a line and a line starting
+/// `- <id> ` for every id of [`RULES`]; otherwise one line per one that is missing.
+fn has_core_sections(copy: &str) -> Result<(), Vec<String>> {
+    let missing: Vec<String> = HEADINGS
+        .iter()
+        .filter(|h| !copy.lines().any(|l| l == **h))
+        .map(|h| format!("{COPY} has no heading `{h}`"))
+        .chain(
+            RULES
+                .iter()
+                .filter(|id| !copy.lines().any(|l| l.starts_with(&format!("- {id} "))))
+                .map(|id| format!("{COPY} has no rule {id}")),
+        )
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
 }
 
 /// A file of the repository, by its path from the root.
@@ -181,26 +276,48 @@ fn agents_md_core_is_the_hashed_copy_and_claude_md_imports_it() {
 /// the five headings of the shared core and a rule of each.
 #[test]
 fn the_real_core_has_every_section_of_the_shared_core() {
-    let copy = read(COPY);
-    for heading in [
-        "### Tests and coverage",
-        "### Design and change shape",
-        "### CI and workflows",
-        "### PR text and commits",
-        "### Secrets and configuration",
-    ] {
-        assert!(
-            copy.lines().any(|l| l == heading),
-            "{COPY} has no heading `{heading}`"
-        );
-    }
-    for id in ["T1", "B8", "B9", "P4", "S1"] {
-        let rule = format!("- {id} ");
-        assert!(
-            copy.lines().any(|l| l.starts_with(&rule)),
-            "{COPY} has no rule {id}"
-        );
-    }
+    assert_eq!(has_core_sections(&read(COPY)), Ok(()));
+}
+
+/// Catches a core and copy cut down together (with the hash updated to match): an empty
+/// copy, a copy without one heading, and a copy without one rule are each refused, naming
+/// what is missing.
+#[test]
+fn a_copy_without_a_heading_or_rule_of_the_shared_core_is_refused() {
+    let full: String = HEADINGS
+        .iter()
+        .zip(RULES)
+        .map(|(h, id)| format!("{h}\n\n- {id} BLOCK. text\n\n"))
+        .collect();
+    assert_eq!(has_core_sections(&full), Ok(()));
+    let all: Vec<String> = HEADINGS
+        .iter()
+        .map(|h| format!("{COPY} has no heading `{h}`"))
+        .chain(RULES.iter().map(|id| format!("{COPY} has no rule {id}")))
+        .collect();
+    assert_eq!(has_core_sections(""), Err(all));
+    assert_eq!(
+        has_core_sections(&full.replace("### CI and workflows\n", "")),
+        Err(vec![format!(
+            "{COPY} has no heading `### CI and workflows`"
+        )])
+    );
+    // A heading kept only inside a longer line is not the heading.
+    assert_eq!(
+        has_core_sections(&full.replace("### CI and workflows\n", "#### CI and workflows\n")),
+        Err(vec![format!(
+            "{COPY} has no heading `### CI and workflows`"
+        )])
+    );
+    assert_eq!(
+        has_core_sections(&full.replace("- P4 BLOCK. text\n", "")),
+        Err(vec![format!("{COPY} has no rule P4")])
+    );
+    // An id that only begins another id (`T1` in `T10`) is not the rule.
+    assert_eq!(
+        has_core_sections(&full.replace("- T1 BLOCK.", "- T10 BLOCK.")),
+        Err(vec![format!("{COPY} has no rule T1")])
+    );
 }
 
 fn agents_with(core_text: &str) -> String {
@@ -388,4 +505,61 @@ fn a_fence_is_indented_at_most_three_spaces() {
     // fence's info string may hold one.
     assert!(imports_agents("```a`b\n@AGENTS.md\n"));
     assert!(!imports_agents("~~~a`b\n@AGENTS.md\n"));
+}
+
+/// Catches an import inside a code span that runs over several lines: Markdown reads no
+/// import there. A span closes only at a run of backticks of its own length, and a run
+/// with no closer, or one cut off by a blank line or a fence, is literal text.
+#[test]
+fn an_import_inside_a_multiline_code_span_is_not_read() {
+    for bad in [
+        "`\n@AGENTS.md\n`\n",
+        "``\n@AGENTS.md\n``\n",
+        "see `x\n@AGENTS.md\ny` here\n",
+        // A run of another length does not close the span.
+        "``\n`\n@AGENTS.md\n``\n",
+        // A span closed before the fence that follows it.
+        "`\n@AGENTS.md\n`\n```\nx\n```\n",
+    ] {
+        assert!(!imports_agents(bad), "{bad:?}");
+    }
+    for good in [
+        // The span closed before the import.
+        "`x`\n@AGENTS.md\n",
+        "`\nx\n`\n@AGENTS.md\n",
+        "``a`b``\n@AGENTS.md\n",
+        // A run with no closer is literal text.
+        "`\n@AGENTS.md\n",
+        "``\n@AGENTS.md\n`\n",
+        // A blank line ends the paragraph, so no span reaches across it.
+        "`\n\n@AGENTS.md\n\n`\n",
+        // A fence ends it too.
+        "`\n```\nx\n```\n@AGENTS.md\n",
+        // The import before the span opens.
+        "@AGENTS.md\n`\nx\n`\n",
+    ] {
+        assert!(imports_agents(good), "{good:?}");
+    }
+}
+
+/// Catches a fence closed by a line Markdown does not read as a closing fence: only spaces
+/// and tabs may follow the closing run, and the run may be longer than the opening one.
+#[test]
+fn a_closing_fence_has_only_spaces_and_tabs_after_it() {
+    for good in [
+        "```\nx\n```\t\n@AGENTS.md\n",
+        "```\nx\n``` \t \n@AGENTS.md\n",
+        "```\nx\n``````\n@AGENTS.md\n",
+        "~~~\nx\n~~~~~\n@AGENTS.md\n",
+    ] {
+        assert!(imports_agents(good), "{good:?}");
+    }
+    for bad in [
+        "```\nx\n```\u{a0}\n@AGENTS.md\n",
+        "```\nx\n```\u{2003}\n@AGENTS.md\n",
+        "~~~\nx\n~~~\u{a0}\n@AGENTS.md\n",
+        "```\nx\n```\r\n@AGENTS.md\n",
+    ] {
+        assert!(!imports_agents(bad), "{bad:?}");
+    }
 }
