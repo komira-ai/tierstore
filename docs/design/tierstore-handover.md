@@ -245,6 +245,11 @@ established keep-alive connection still reaches v-current and would get a 503 wh
   Bytes arriving after the FIN are read, dropped and counted (`tierstore_drain_late_requests_total`): the remaining race
   is a request within one round trip of the FIN, which no server can answer.
 
+The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
+`server/linger.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
+blob) sent in full and its connection closed the same way after it, and its late requests counted in
+`tierstore_oci_drain_late_requests_total`, so that its clients see no gap either (question 4).
+
 **The client policy is no retry**: a retried create-only put is ambiguous (the retry's 412 cannot tell its own earlier
 success from another writer's). A client that follows P1 never meets the race: a connection is idle at the end of the
 settle only if its client sent nothing since before the drain began. The settle is `--drain-lb-wait`, 70 s in the slot
@@ -266,7 +271,8 @@ the cut requests are counted in `Drained.abandoned` (`cut_note`).
 
 Counters restart at 0 in a new process; a rate handles it; read the directory gauges from the lock holder. No family names
 a build, slot or mode today, and a scrape of 9300 does not say which instance answered. New: `tierstore_build_info
-{version,slot}`, `tierstore_cache_mode{mode}`, `tierstore_drain_late_requests_total`. A scraper that wants both instances
+{version,slot}`, `tierstore_cache_mode{mode}`, `tierstore_drain_late_requests_total` and
+`tierstore_oci_drain_late_requests_total`. A scraper that wants both instances
 scrapes the two private ports from the node (the guard blocks off-host); one is down between updates, so an alert is on
 "no instance up", not on `up == 0`.
 

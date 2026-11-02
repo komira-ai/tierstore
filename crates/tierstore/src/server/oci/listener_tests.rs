@@ -13,7 +13,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-use super::listener::{OciLimits, accept_loop};
+use super::listener::{OciLimits, Shared, accept_loop, drain_of};
 use super::test_pki::{ca, ip, leaf};
 use super::{
     OciError, OciFront, OciListener, OciMetrics, OciMode, OciPrefix, acceptor, plain_warning,
@@ -70,7 +70,15 @@ async fn a_failed_accept_is_followed_by_another_ask() {
         asked: Arc::clone(&asked),
     };
     let (stop, stopped) = watch::channel(false);
-    let looping = tokio::spawn(accept_loop(incoming, Some(tls), front, limits, stopped));
+    let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
+    let looping = tokio::spawn(accept_loop(
+        incoming,
+        Some(tls),
+        front,
+        limits,
+        stopped,
+        shared,
+    ));
     tokio::time::sleep(ACCEPT_PAUSE * 2).await;
     assert_eq!(asked.load(Ordering::SeqCst), 2);
     stop.send(true).expect("a loop");

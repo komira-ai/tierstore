@@ -116,7 +116,7 @@ use super::listen::{bind_all, has_duplicate, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
 use super::lock::{self, LockFile, check_lock_path};
 use super::oci::{
-    self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
+    self, OciDrain, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
 };
 #[cfg(target_os = "linux")]
 use super::update_hook;
@@ -1075,9 +1075,10 @@ pub async fn run(
 
 /// [`run`], telling `ready` the address of the OCI front too when it is served.
 ///
-/// The OCI front keeps serving through `--drain-lb-wait`, as the S3 front does, then takes no
-/// new connection, lets the requests being answered finish, and closes them within
-/// `--drain-deadline`.
+/// The OCI front drains as the S3 front does: from the stop on every answer says
+/// `Connection: close`; it keeps serving through `--drain-lb-wait`, then takes no new connection,
+/// closes each idle connection with a lingering close and each other one in the same way once its
+/// answer is out, and waits for them within `--drain-deadline`.
 ///
 /// # Errors
 /// As [`run`], and the OCI front's flags and files (see [`OciError`]).
@@ -1108,11 +1109,14 @@ pub async fn run_serving(
     let oci = bind_oci(built.oci, oci_backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     let stopping = Arc::clone(&server);
+    let oci_drain = oci.as_ref().map(OciListener::drain);
     let (oci_stop, oci_stopped) = watch::channel(false);
     let lb_wait = cli.drain_lb_wait;
     let watcher = tokio::spawn(async move {
         stop.await;
-        stopping.begin_drain();
+        // Both fronts drain alike: `Connection: close` from now on, and at the end of the settle
+        // a lingering close for each idle connection.
+        begin_drains(&stopping, oci_drain.as_ref());
         tokio::time::sleep(lb_wait).await;
         let _ = oci_stop.send(true);
     });
@@ -1165,7 +1169,18 @@ pub(super) async fn bind_oci(
     Ok(Some(bound?))
 }
 
-/// Serves the OCI front until `stopped` says so; the connections it cut. 0 when there is none.
+/// Begins the drain of the S3 front `server` and of the OCI front, if there is one. The OCI front's
+/// first, so that an answer of either front that comes after `/readyz` said 503 says
+/// `Connection: close`.
+pub(super) fn begin_drains(server: &Server, oci: Option<&OciDrain>) {
+    if let Some(oci) = oci {
+        oci.begin();
+    }
+    server.begin_drain();
+}
+
+/// Serves the OCI front until `stopped` says so, the end of the settle; the connections it cut. 0
+/// when there is none.
 pub(super) async fn serve_oci(
     listener: Option<OciListener>,
     stopped: watch::Receiver<bool>,

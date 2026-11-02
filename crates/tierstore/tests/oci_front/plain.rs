@@ -136,7 +136,8 @@ async fn a_plain_connection_is_closed_when_its_lifetime_ends() {
     rig.stop().await;
 }
 
-/// Asserts that a stop closes the connections that are idle and takes no new one, and that a stop
+/// Asserts that a stop closes the connections that are idle with a lingering close (a clean end of
+/// stream, and the stop waits for the client to close) and takes no new one, and that a stop
 /// with a response still being sent to a client that does not read it cuts that connection when
 /// the drain deadline (zero) passes.
 #[tokio::test]
@@ -146,8 +147,10 @@ async fn a_stop_drains_a_plain_front() {
     let mut conn = rig.conn().await;
     let ping = conn.request("GET", "/v2/", &[]).await.expect("an answer");
     assert_eq!(ping.status, 200);
-    assert_eq!(rig.stop().await, 0);
-    assert!(conn.closed().await);
+    let stopping = tokio::spawn(rig.stop());
+    assert!(conn.read_to_end().await.expect("a clean end").is_empty());
+    drop(conn);
+    assert_eq!(stopping.await.expect("the stop ended"), 0);
     assert!(Conn::open_plain(addr).await.is_err());
 
     let rig = Rig::plain_with(|limits| limits.drain_deadline = std::time::Duration::ZERO).await;
