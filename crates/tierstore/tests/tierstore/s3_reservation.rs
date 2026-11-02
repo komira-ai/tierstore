@@ -77,7 +77,8 @@ async fn a_read_with_the_mark_is_one_get_for_a_whole_object_and_a_get_and_a_head
         .get_marked("k", Some(ByteRange::new(0, 4)))
         .await
         .unwrap();
-    let methods: Vec<&str> = s3.requests()[before..]
+    let sent = s3.requests();
+    let methods: Vec<&str> = sent[before..]
         .iter()
         .map(|line| line.split(' ').next().unwrap_or(""))
         .collect();
