@@ -4,6 +4,8 @@
 # `pull_request_target`, and to write scopes that only the jobs named there may hold.
 #
 # `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
+# `macos` builds the release binary and runs the tests of the crates it is made of on macOS
+# (Apple silicon).
 # `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
 # every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
 # (crates/coverage-gate). Every crate is judged, the tooling and the test helper included,
@@ -90,6 +92,41 @@ jobs:
       # it too; running it alone here makes a bad workflow red in seconds, not after that run.
       - run: cargo test -p xtask --locked --test workflows
         if: ${{ !cancelled() }}
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # macOS on Apple silicon, a release platform (artifacts.yml builds and signs its binary): the
+  # release binary builds, and the tests of the crates it is made of pass. The tooling (`xtask`,
+  # `coverage-gate`) runs on the Linux runners only and is not built here; coverage is measured
+  # by the `test` job, on Linux. Tests of Linux-only code (the update hook: systemd, polkit and
+  # nft) are compiled out on macOS by `cfg(target_os = "linux")`.
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - run: cargo build --locked --release -p tierstore --features server --bin tierstore
+      - run: cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

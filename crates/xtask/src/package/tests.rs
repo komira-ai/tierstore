@@ -444,9 +444,59 @@ fn platforms_are_named_as_the_assets_are() {
     // Catches: a platform written under another name than docs/artifacts.md gives
     // (its assets and sums file would not match what the workflow uploads).
     let names: Vec<&str> = Platform::ALL.iter().map(|p| p.name()).collect();
-    assert_eq!(names, ["linux-x86_64", "linux-arm64"]);
+    assert_eq!(names, ["linux-x86_64", "linux-arm64", "macos-arm64"]);
     for p in Platform::ALL {
         assert_eq!(Platform::named(p.name()), Some(p));
     }
-    assert_eq!(Platform::named("linux-riscv64"), None);
+    assert_eq!(
+        Platform::named("macos-arm64"),
+        Some(Platform::MacosArm64),
+        "the macOS name"
+    );
+    for other in [
+        "linux-riscv64",
+        "macos-x86_64",
+        "darwin-arm64",
+        "macos-aarch64",
+        "MACOS-ARM64",
+        "macos-arm64 ",
+    ] {
+        assert_eq!(Platform::named(other), None, "{other:?}");
+    }
+}
+
+#[test]
+fn the_macos_arm64_binary_is_packaged_by_the_same_rules_under_its_own_name() {
+    // Catches: a macos-arm64 tarball that is not the one-entry, root-owned, mode 0755, time 0
+    // tarball of the Linux ones (its bytes would then depend on the platform, not the binary),
+    // or its assets and sums lines written under a Linux name or into a Linux sums file.
+    let dir = scratch("macos-arm64");
+    let (binary, sbom) = inputs(&dir);
+    let out = dir.join("dist");
+    package(&binary, &sbom, Platform::MacosArm64, COMMIT, &out).expect("package");
+    package(&binary, &sbom, Platform::LinuxArm64, COMMIT, &out).expect("package");
+    let mac = format!("tierstore-{COMMIT}-macos-arm64");
+    let linux = format!("tierstore-{COMMIT}-linux-arm64");
+    let tgz = std::fs::read(out.join(format!("{mac}.tar.gz"))).expect("tgz");
+    assert_eq!(
+        check_tarball(&tgz, "tierstore", BINARY),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        tgz,
+        std::fs::read(out.join(format!("{linux}.tar.gz"))).expect("linux tgz"),
+        "the same binary packs to the same bytes on every platform"
+    );
+    let cdx = std::fs::read(out.join(format!("{mac}.cdx.json"))).expect("cdx");
+    assert_eq!(cdx, std::fs::read(&sbom).expect("sbom"));
+    assert_eq!(
+        std::fs::read_to_string(out.join("SHA256SUMS.macos-arm64")).expect("sums"),
+        format!(
+            "{}  {mac}.tar.gz\n{}  {mac}.cdx.json\n",
+            Sha256::of(&tgz),
+            Sha256::of(&cdx)
+        )
+    );
+    let linux_sums = std::fs::read_to_string(out.join("SHA256SUMS.linux-arm64")).expect("sums");
+    assert!(!linux_sums.contains("macos"), "{linux_sums}");
 }

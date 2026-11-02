@@ -7,7 +7,10 @@
 //! `tierstore <tag without v>+<first 12 digits of the commit>`. A release whose binary says
 //! anything else (a crate version nobody bumped, another commit, no commit) is refused before
 //! it is published. The binary is run, so this is made on a runner of its architecture:
-//! linux-x86_64, where the release workflow runs.
+//! linux-x86_64, where the release workflow runs. The binaries of the other platforms, the
+//! macos-arm64 one included, cannot run there; each is run and checked the same way
+//! (`build-commit --version`, [`check_built`]) on its own runner by the job of
+//! `artifacts.yml` that builds it, before it is packaged.
 
 use std::path::Path;
 

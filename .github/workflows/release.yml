@@ -180,7 +180,7 @@ jobs:
         run: cargo xtask release locate --repo "$GITHUB_REPOSITORY" --commit "$COMMIT" --output "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: assets-linux-*
+          pattern: assets-*
           path: dist
           merge-multiple: true
           run-id: ${{ steps.locate.outputs.run-id }}
@@ -195,7 +195,7 @@ jobs:
       # list: the attestation that made it signed the files they list.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: bundles-linux
+          name: bundles
           path: dist
           run-id: ${{ steps.locate.outputs.run-id }}
           github-token: ${{ github.token }}
@@ -211,6 +211,8 @@ jobs:
         run: cargo xtask release check dist --commit "$COMMIT"
       # The runner is linux-x86_64: the binary of that tarball is run, and refused unless it says
       # the tag (without the v) and the commit. Unpacked outside dist, which holds the assets.
+      # The linux-arm64 and macos-arm64 binaries cannot run here: each was run and checked the
+      # same way by its own build job in artifacts.yml, whose run a release requires to be green.
       - name: The binary says the tag and the commit it is released under
         run: cargo xtask release check-binary dist --tag "$TAG" --commit "$COMMIT" --scratch "$RUNNER_TEMP/binary"
       - name: Fetch the Sigstore trusted root, for the offline check of the bundles

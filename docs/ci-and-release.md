@@ -4,9 +4,9 @@
 
 | file | when | what |
 |---|---|---|
-| `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
+| `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `macos`: on a macos-15 runner (Apple silicon), builds the release binary and runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` (the tooling crates and the coverage gate run on Linux only; the update hook's tests are Linux only and compiled out). `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main` | builds `tierstore` (`--features server`) for linux-x86_64 and linux-arm64, packages it with its SBOM, makes `SHA256SUMS`. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main` | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM, makes `SHA256SUMS`. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `paper.yml` | pull request that changes the paper check, its copy of the paper or its results; by hand | runs `crates/xtask/tests/paper.rs`: its tests block, and the ignored completion check runs as its own step, printing the open places and passing until the file `crates/xtask/tests/paper_fixture/FINAL` is committed, after which it fails on any open place. It reads a copy of the paper kept in the repository, so a run speaks for the copy and not for the published page; refreshing the copy is the only guard. Not part of `ci.yml`, so it does not count for a release. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again; `gamma` then sets that release as the farm coordinator's desired version for the service `tierstore` and waits for convergence (see The gamma stage). Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
@@ -19,7 +19,7 @@ one job that needs each (and for `id-token` and `attestations`, only on a push t
 
 ## The release files
 
-For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux-arm64`):
+For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux-arm64`, `macos-arm64`):
 
 - `tierstore-<commit>-<platform>.tar.gz`: the binary alone, the same bytes on every build;
 - `tierstore-<commit>-<platform>.cdx.json`: its CycloneDX SBOM;
@@ -199,7 +199,11 @@ the plan above) and gives it to the build as `TIERSTORE_BUILD_VERSION_OVERRIDE` 
 version. The release plan computes the version again and names the tag with it. The `verify` job
 then unpacks the linux-x86_64 tarball it will publish, runs the binary with `--version`
 (`cargo xtask release check-binary`) and refuses to go on, so that nothing is tagged or published,
-unless the binary says the tag and the commit. The two computations differ only when a tag
+unless the binary says the tag and the commit. The release runner cannot run the linux-arm64 or
+the macos-arm64 binary; each is run with `--version` and checked against the same version and
+commit (`cargo xtask build-commit --version`) by the job that builds it, on a runner of its own
+platform, and a release needs that run of `artifacts.yml` to be green. That build-time check is
+the version proof of the macOS binary. The two computations differ only when a tag
 appears between the build and the release (another release published in that time); the release is
 then refused, and the next push is built and released under the new number. File names carry the
 commit, not the version, and are unchanged.

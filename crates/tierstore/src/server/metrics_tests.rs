@@ -144,7 +144,9 @@ async fn metricz_has_the_build_gauge_with_version_and_commit() {
 /// storage shape and on one with no proxy, in a text the hook's reader finds the slot, version and
 /// commit in, and that a server given none renders no `slot` text anywhere. It would catch a
 /// gauge that never names its slot (the hook's probe through the public port then never sees the
-/// new instance), and a label added to every scrape.
+/// new instance), and a label added to every scrape. Linux only: the reader is the update hook's,
+/// which is built on Linux alone.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
     use super::build_info::{COMMIT, VERSION};
