@@ -24,7 +24,16 @@
 //!   gives the `ETag` of the answer, without its quotes.
 //! - `get` is a GET, with `Range: bytes=<first>-<last>` for a range.
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
-//!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
+//!   other backends give it and the S3 front, which quotes it, expects), `Last-Modified` and
+//!   whether the object carries the reservation mark.
+//! - `put_reservation` is a PUT with `If-None-Match: *` and the user metadata
+//!   `x-amz-meta-tierstore-reservation: 1`, and gives the `ETag` of the answer without its quotes;
+//!   a store that does not claim conditional puts is refused (the backend always claims them, see
+//!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
+//!   metadata. A write the store answers with 409 is sent again, up to three times in all. A
+//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_marked` is
+//!   one GET for the whole object, whose answer carries the metadata; a ranged read is a ranged
+//!   GET and a HEAD.
 //! - `delete` is a DELETE; a 404 is a success.
 //! - `delete_if_match` is best effort, in one of two ways, which
 //!   [`Backend::settle_conditional_delete`] picks once at start-up by asking the store. Where the store enforces `If-Match` on a DELETE
@@ -116,6 +125,7 @@ use objstore_s3::{
 };
 use tokio::sync::mpsc;
 
+use crate::backend::get_then_head;
 use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
 
 pub use objstore_s3::Capabilities;
@@ -446,6 +456,26 @@ impl Backend for S3Backend {
         Ok(unquoted(&tag))
     }
 
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let put = self.store.put_new_marked(&object, body);
+        let tag = put.await.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let etag = quoted(etag);
+        let put = self.store.put_if_match_marked(&object, body, &etag);
+        let tag = put.await.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let object = object_key(key)?;
         let Some(range) = range else {
@@ -453,6 +483,19 @@ impl Backend for S3Backend {
             return all.await.map_err(|e| map_error(e, key));
         };
         self.read_range(&object, key, range).await
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        if range.is_some() {
+            return get_then_head(self, key, range).await;
+        }
+        let object = object_key(key)?;
+        let all = self.store.get_all_marked(&object);
+        all.await.map_err(|e| map_error(e, key))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
@@ -463,6 +506,7 @@ impl Backend for S3Backend {
             size: head.size,
             tag: unquoted(&head.etag),
             modified: head.modified_millis,
+            reservation: head.reservation,
         })
     }
 

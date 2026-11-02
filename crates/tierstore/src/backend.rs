@@ -90,6 +90,11 @@ pub struct Meta {
     /// backend's clock counts them (a backend with a coarser clock, whole seconds as S3 has,
     /// gives equal times to objects written close together).
     pub modified: u64,
+    /// Whether the object was made by [`Backend::put_reservation`] or
+    /// [`Backend::put_reservation_if_match`] and not replaced by a plain write since. It says
+    /// nothing of the content, so [`Meta::same_content`] ignores it: an object with the bytes of
+    /// a reservation that was written plainly is not one.
+    pub reservation: bool,
 }
 
 impl Meta {
@@ -150,6 +155,24 @@ pub(crate) fn upload_page(
     page.sort_by(|a, b| (&a.key, &a.id).cmp(&(&b.key, &b.id)));
     page.truncate(max_uploads);
     page
+}
+
+/// The bytes of a read and then the reservation mark of a HEAD, for a backend that cannot give
+/// both from one object. A replacement between the two calls shows: the mark is that of the object
+/// the HEAD found.
+pub(crate) async fn get_then_head<B: Backend + ?Sized>(
+    backend: &B,
+    key: &str,
+    range: Option<ByteRange>,
+) -> Result<(Bytes, bool), Error> {
+    let bytes = backend.get(key, range).await?;
+    let head = backend.head(key).await?;
+    Ok((bytes, head.reservation))
+}
+
+/// The error of a reservation call that a backend does not override.
+fn no_reservations(call: &str) -> Error {
+    Error::Unsupported(format!("{call}: this backend does not do reservations"))
 }
 
 /// Whether `key` sorts after the key a listing is to start after, if there is one.
@@ -246,11 +269,63 @@ pub trait Backend: Send + Sync {
     /// object has another content tag; the stored object is left as it was.
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error>;
 
+    /// Writes a reservation: an object that is create-only like [`Backend::put`] and marked, so
+    /// that [`Meta::reservation`] says it is one, and gives its content tag (without quotes).
+    ///
+    /// A reservation holds a key without being an object of the store's client: the layer above
+    /// reads a marked object as absent. The bytes are the caller's; to tell two reservations of
+    /// one key apart by their tags they must differ (a nonce in the body). A reservation is
+    /// replaced by a real object with [`Backend::put_if_match`], which writes no mark, in one
+    /// step, and kept a reservation by [`Backend::put_reservation_if_match`].
+    ///
+    /// The provided implementation is [`Error::Unsupported`]: a backend that wraps another must
+    /// forward the call, and one that keeps a copy of what it reads (a cache) must not.
+    ///
+    /// # Errors
+    /// [`Error::AlreadyExists`] if the key has an object, a reservation or not; it is left as it
+    /// was. [`Error::Full`] if the backend has no room. [`Error::Unsupported`] unless the backend
+    /// overrides this call, or if its store cannot make the write create-only.
+    async fn put_reservation(&self, _key: &str, _body: Bytes) -> Result<String, Error> {
+        Err(no_reservations("put_reservation"))
+    }
+
+    /// As [`Backend::put_if_match`], and the new object is marked as a reservation: the
+    /// compare-and-swap that renews a reservation or takes it over.
+    ///
+    /// # Errors
+    /// As [`Backend::put_if_match`]; [`Error::Unsupported`] unless the backend overrides this
+    /// call.
+    async fn put_reservation_if_match(
+        &self,
+        _key: &str,
+        _body: Bytes,
+        _etag: &str,
+    ) -> Result<String, Error> {
+        Err(no_reservations("put_reservation_if_match"))
+    }
+
     /// Reads the object, or the bytes of `range` of it (see [`ByteRange`]).
     ///
     /// # Errors
     /// [`Error::NotFound`] if no object has the key.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error>;
+
+    /// As [`Backend::get`], and whether the object is a reservation ([`Meta::reservation`]).
+    ///
+    /// The provided implementation reads, then asks [`Backend::head`], which costs a request and
+    /// leaves a window in which the object is replaced between the two: the mark is that of the
+    /// object the HEAD found. The in-memory, directory and S3 backends read both from one object
+    /// (S3 for a read of the whole object; a ranged read takes the provided way).
+    ///
+    /// # Errors
+    /// As [`Backend::get`], and [`Error::NotFound`] if the object was removed after the read.
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        get_then_head(self, key, range).await
+    }
 
     /// As [`Backend::get`], for a read that is given as the chunks of the bytes: the bytes of
     /// `range` of the object, in order, ending with an error if they could not all be read. The

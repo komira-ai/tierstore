@@ -111,9 +111,10 @@ impl Cache {
 /// than the budget is not cached.
 /// Errors are never cached. A delete, and a put that replaces the object, drop the object's
 /// cached ranges, and a read that was in flight during it does not fill the cache
-/// afterwards. Everything but `get`, `delete` and `put_if_match` goes to the backend as it
-/// is, the calls of multipart uploads included (a completion creates an object, which no read
-/// has cached).
+/// afterwards. Everything but `get`, `delete`, `put_if_match` and `put_reservation_if_match`
+/// goes to the backend as it is, the calls of multipart uploads and `put_reservation` included
+/// (a completion and a create-only reservation make an object, which no read has cached). A
+/// read with the mark (`get_marked`) is a `get` and a HEAD, as the trait provides it.
 pub struct CachedStore {
     inner: Arc<dyn Backend>,
     budget: u64,
@@ -190,6 +191,22 @@ impl Backend for CachedStore {
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let tag = self.inner.put_if_match(key, body, etag).await?;
+        self.cache().drop_key(key);
+        Ok(tag)
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let inner = &self.inner;
+        let tag = inner.put_reservation_if_match(key, body, etag).await?;
         self.cache().drop_key(key);
         Ok(tag)
     }

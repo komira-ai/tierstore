@@ -587,3 +587,49 @@ async fn a_streamed_put_of_a_key_that_is_no_file_name_is_refused() {
     let refused = backend.put_stream("", None, pieces(&["x"])).await;
     assert!(matches!(refused, Err(Error::Other(_))));
 }
+
+/// Asserts that the mark of a reservation is the owner-execute bit of its file: a reservation
+/// and a marked replace have it, a plain put has not, a plain replace clears it, and no temporary
+/// file is left behind.
+#[tokio::test]
+async fn the_mark_is_the_owner_execute_bit_and_a_plain_replace_clears_it() {
+    let (dir, backend) = backend();
+    let bit = |name: &str| {
+        let meta = std::fs::metadata(dir.path().join(name)).unwrap();
+        meta.permissions().mode() & 0o100
+    };
+    backend.put("plain", body("x")).await.unwrap();
+    let tag = backend.put_reservation("k", body("r")).await.unwrap();
+    assert_eq!((bit("plain"), bit("k")), (0, 0o100));
+    let kept = backend.put_reservation_if_match("k", body("s"), &tag);
+    let kept = kept.await.unwrap();
+    assert_eq!(bit("k"), 0o100);
+    backend
+        .put_if_match("k", body("real"), &kept)
+        .await
+        .unwrap();
+    assert_eq!(bit("k"), 0);
+    assert_eq!(names(dir.path()), [".uploads", "k", "plain"]);
+}
+
+/// Asserts that a reservation whose file lost its mode (a copy that drops modes) reads as a plain
+/// object: it heads unmarked, and a read says so.
+#[tokio::test]
+async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
+    let (dir, backend) = backend();
+    backend.put_reservation("k", body("r")).await.unwrap();
+    chmod(&dir.path().join("k"), 0o644);
+    assert!(!backend.head("k").await.unwrap().reservation);
+    let read = backend.get_marked("k", None).await.unwrap();
+    assert_eq!(read, (body("r"), false));
+}
+
+/// Asserts that a key that cannot be a file name is refused by a reservation, with nothing
+/// written.
+#[tokio::test]
+async fn a_key_that_cannot_be_a_file_name_is_refused_by_a_reservation() {
+    let (dir, backend) = backend();
+    let created = backend.put_reservation("", body("r")).await;
+    assert!(matches!(created, Err(Error::Other(_))), "{created:?}");
+    assert_eq!(names(dir.path()), [".uploads"]);
+}

@@ -1,6 +1,7 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
 
 use std::io::{ErrorKind, SeekFrom};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +19,16 @@ use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, Uploa
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
+
+/// The mode of the file of an object that is not a reservation: read and write for everyone, less
+/// the umask, which no umask turns into one with the owner-execute bit.
+const PLAIN_MODE: u32 = 0o666;
+
+/// The owner-execute bit, which marks the file of a reservation.
+const MARK_BIT: u32 = 0o100;
+
+/// The mode of the file of a reservation: that of an object, with the mark.
+const MARKED_MODE: u32 = 0o744;
 
 /// The longest file name, in bytes, that a key may be encoded to.
 const NAME_LIMIT: usize = 255;
@@ -81,6 +92,14 @@ impl SyncDir for FsyncDir {
 ///   too, so that a delete and a put of new content that come between the check and the removal
 ///   of a conditional delete cannot be undone by it. The directory is synced after the lock is
 ///   released.
+/// - A reservation ([`Backend::put_reservation`], [`Backend::put_reservation_if_match`]) is the
+///   file of an object whose mode has the owner-execute bit, which is the mark that
+///   [`Meta::reservation`] reports. The file is made with that mode, so a put of it is as atomic as
+///   any other, and a plain replacement writes a new file without the bit, which is how a
+///   reservation becomes an object in one step. The format of the file is not changed, so a
+///   release without reservations reads one as a plain object. The mark lives in the file
+///   system: a copy that drops modes (`cp` without `-p`, a restore, some network file systems)
+///   turns a reservation into an unmarked object.
 /// - A streamed put ([`Backend::put_stream`]) writes the chunks to the temporary file as they
 ///   arrive, so that the body is never held in memory; the content tag, which starts the file,
 ///   is written over reserved room after the last chunk, the file is synced, and only then is it
@@ -231,16 +250,22 @@ impl Drop for Scratch {
 /// Makes the new file at `path`, for writing. It is an error if the name is taken, so that two
 /// writers never write to one file.
 async fn create_new(path: &Path) -> std::io::Result<File> {
+    create_with_mode(path, PLAIN_MODE).await
+}
+
+/// As [`create_new`], for a file made with the mode `mode` (less the umask).
+async fn create_with_mode(path: &Path, mode: u32) -> std::io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(mode)
         .open(path)
         .await
 }
 
-/// Writes `data` to a new file at `path`, and syncs it to the disk.
-async fn create_file(path: &Path, mut data: impl Buf) -> std::io::Result<()> {
-    let mut file = create_new(path).await?;
+/// Writes `data` to a new file at `path` made with the mode `mode`, and syncs it to the disk.
+async fn create_file(path: &Path, mode: u32, mut data: impl Buf) -> std::io::Result<()> {
+    let mut file = create_with_mode(path, mode).await?;
     let written = file.write_all_buf(&mut data).await;
     let flushed = written.and(file.flush().await);
     flushed.and(file.sync_all().await)
@@ -318,6 +343,8 @@ struct Stored {
     tag: [u8; TAG_LEN],
     size: u64,
     modified: u64,
+    /// Whether the file has the mark of a reservation.
+    marked: bool,
 }
 
 /// Opens the file of an object and reads its content tag.
@@ -332,6 +359,7 @@ async fn open_stored(path: &Path) -> std::io::Result<Stored> {
         tag,
         size: meta.len().saturating_sub(TAG_LEN as u64),
         modified: modified_of(&meta),
+        marked: meta.permissions().mode() & MARK_BIT != 0,
     })
 }
 
@@ -443,12 +471,13 @@ impl DirBackend {
         removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
     }
 
-    /// Writes the file of an object with this body to a new temporary file.
-    async fn write_temp(&self, body: Bytes) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
+    /// Writes the file of an object with this body to a new temporary file made with the mode
+    /// `mode`.
+    async fn write_temp(&self, body: Bytes, mode: u32) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
         let tag = sha256(&body);
         let data = Bytes::copy_from_slice(&tag).chain(body);
         let temp = self.temp(&self.root);
-        match create_file(&temp, data).await {
+        match create_file(&temp, mode, data).await {
             Ok(()) => Ok((temp, tag)),
             Err(why) => {
                 let _ = fs::remove_file(&temp).await;
@@ -492,6 +521,28 @@ impl DirBackend {
         }
     }
 
+    /// Replaces the object `key` if it has the content tag `etag`, with a file of the mode
+    /// `mode`, which is what marks it or not, and gives the new tag.
+    async fn replace(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+        mode: u32,
+    ) -> Result<String, Error> {
+        let _replacing = self.replacing.lock().await;
+        let current = self.stored(key).await?;
+        if hex::encode(current.tag) != etag {
+            return Err(Error::PreconditionFailed(key.to_owned()));
+        }
+        let (temp, tag) = self.write_temp(body, mode).await?;
+        let renamed = fs::rename(&temp, &current.path).await;
+        let _ = fs::remove_file(&temp).await;
+        renamed.map_err(io_error(&current.path))?;
+        self.sync(&self.root).await?;
+        Ok(hex::encode(tag))
+    }
+
     /// The directory of the upload `id` of `key`.
     async fn upload_dir(&self, key: &str, id: &str) -> Result<PathBuf, Error> {
         let unknown = || Error::NotFound(id.to_owned());
@@ -513,8 +564,15 @@ impl DirBackend {
 impl Backend for DirBackend {
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
         let path = self.path(key)?;
-        let (temp, _) = self.write_temp(body).await?;
+        let (temp, _) = self.write_temp(body, PLAIN_MODE).await?;
         self.publish(&temp, &path, key).await
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        let path = self.path(key)?;
+        let (temp, tag) = self.write_temp(body, MARKED_MODE).await?;
+        self.publish(&temp, &path, key).await?;
+        Ok(hex::encode(tag))
     }
 
     /// Writes the chunks to a temporary file as they arrive, and links it to the name only
@@ -535,20 +593,27 @@ impl Backend for DirBackend {
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
-        let _replacing = self.replacing.lock().await;
-        let current = self.stored(key).await?;
-        if hex::encode(current.tag) != etag {
-            return Err(Error::PreconditionFailed(key.to_owned()));
-        }
-        let (temp, tag) = self.write_temp(body).await?;
-        let renamed = fs::rename(&temp, &current.path).await;
-        let _ = fs::remove_file(&temp).await;
-        renamed.map_err(io_error(&current.path))?;
-        self.sync(&self.root).await?;
-        Ok(hex::encode(tag))
+        self.replace(key, body, etag, PLAIN_MODE).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.replace(key, body, etag, MARKED_MODE).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        Ok(self.get_marked(key, range).await?.0)
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
         let mut stored = self.stored(key).await?;
         let size = stored.size;
         let (offset, len) = match range {
@@ -567,7 +632,7 @@ impl Backend for DirBackend {
         let sought = stored.file.seek(start).await;
         let read = (&mut stored.file).take(len).read_to_end(&mut body).await;
         sought.and(read).map_err(io_error(&stored.path))?;
-        Ok(Bytes::from(body))
+        Ok((Bytes::from(body), stored.marked))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
@@ -576,6 +641,7 @@ impl Backend for DirBackend {
             size: stored.size,
             tag: hex::encode(stored.tag),
             modified: stored.modified,
+            reservation: stored.marked,
         })
     }
 
