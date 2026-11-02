@@ -312,7 +312,7 @@ async fn a_delete_and_a_reput_in_one_journal_object_keeps_the_new_object_when_th
     proxy.put("k", body("old")).await.unwrap();
     let report = reconciler_over_retagged.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("old"));
+    assert_eq!(rig.cold_mem.get("k", None).await, Ok(body("old")));
 
     rig.clock.advance(10);
     let newer = "new-bytes";
@@ -325,8 +325,8 @@ async fn a_delete_and_a_reput_in_one_journal_object_keeps_the_new_object_when_th
         assert_eq!(report.failed, Vec::<Error>::new());
     }
 
-    assert_eq!(read(&*rig.cold_mem, "k").await, body(newer));
-    assert_eq!(proxy.get("k", None).await.unwrap(), body(newer));
+    assert_eq!(rig.cold_mem.get("k", None).await, Ok(body(newer)));
+    assert_eq!(proxy.get("k", None).await, Ok(body(newer)));
 }
 
 /// Asserts that of two unsigned puts of one key with different bodies, one sent to the cold tier
