@@ -5,7 +5,7 @@
 use std::net::TcpListener;
 use std::sync::Mutex;
 
-use objstore_s3::s3::fake::FakeS3;
+use objstore_s3::s3::fake::{Failure, FakeS3};
 use tierstore::{Backend, Error, S3Backend, SelfTestOptions, settle_conditional_delete};
 
 use crate::conformance;
@@ -61,7 +61,7 @@ async fn before_the_store_is_asked_a_conditional_delete_reads_the_tag_first() {
 async fn a_store_that_enforces_if_match_is_given_a_delete_with_the_header() {
     let (s3, backend) = backend().await;
     let way = backend.settle_conditional_delete("probe/conditional").await;
-    assert_eq!(way, Some("if-match"));
+    assert_eq!(way.as_deref(), Some("if-match"));
     assert!(s3.keys().is_empty(), "{:?}", s3.keys());
     conformance::a_conditional_delete_removes_only_the_object_with_that_tag(&backend).await;
 
@@ -84,7 +84,7 @@ async fn a_store_that_ignores_if_match_is_given_a_read_of_the_tag_before_the_del
     let (s3, backend) = backend().await;
     s3.ignore_delete_condition();
     let way = backend.settle_conditional_delete("probe/conditional").await;
-    assert_eq!(way, Some("head-then-delete"));
+    assert_eq!(way.as_deref(), Some("head-then-delete"));
     assert!(s3.keys().is_empty(), "{:?}", s3.keys());
     conformance::a_conditional_delete_removes_only_the_object_with_that_tag(&backend).await;
 }
@@ -98,7 +98,38 @@ async fn a_store_that_cannot_be_asked_is_settled_on_the_read_of_the_tag() {
     drop(closed);
     let backend = S3Backend::new(config(&endpoint)).unwrap();
     let way = backend.settle_conditional_delete("probe/conditional").await;
-    assert_eq!(way, Some("head-then-delete"));
+    let way = way.unwrap();
+    assert!(
+        way.starts_with("head-then-delete (could not ask: "),
+        "{way}"
+    );
+}
+
+/// Asserts that a request that fails in the middle of the probe (the store answering 500, once)
+/// settles the backend on `head-then-delete` with a line that says the store could not be asked
+/// and why, not the line of a store that was asked and ignores the header, whichever of the five
+/// requests of the questions it is, and that the probe key is gone afterwards. The probe is a
+/// write, then HEAD, DELETE, HEAD, DELETE, HEAD.
+#[tokio::test]
+async fn a_request_that_fails_mid_probe_is_told_from_a_store_that_ignores_if_match() {
+    let failures = [
+        Failure::Head(1),
+        Failure::Delete(1),
+        Failure::Head(2),
+        Failure::Delete(2),
+        Failure::Head(3),
+    ];
+    for failure in failures {
+        let (s3, backend) = backend().await;
+        s3.fail(failure);
+        let way = backend.settle_conditional_delete("probe/conditional").await;
+        let way = way.unwrap();
+        assert!(
+            way.starts_with("head-then-delete (could not ask: ") && way.contains("500"),
+            "{failure:?}: {way}"
+        );
+        assert!(s3.keys().is_empty(), "{failure:?}: {:?}", s3.keys());
+    }
 }
 
 /// Asserts that a probe key the client cannot name is settled on `head-then-delete` without a
@@ -107,7 +138,7 @@ async fn a_store_that_cannot_be_asked_is_settled_on_the_read_of_the_tag() {
 async fn a_key_the_client_cannot_name_sends_no_request() {
     let (s3, backend) = backend().await;
     let way = backend.settle_conditional_delete("a b").await;
-    assert_eq!(way, Some("head-then-delete"));
+    assert_eq!(way.as_deref(), Some("head-then-delete"));
     let refused = backend.delete_if_match("a b", "tag").await.unwrap_err();
     assert!(matches!(refused, Error::Other(_)), "{refused}");
     assert_eq!(s3.requests(), Vec::<String>::new());

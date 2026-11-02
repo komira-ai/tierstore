@@ -311,3 +311,30 @@ async fn a_service_that_ignores_the_condition_deletes_on_a_wrong_tag() {
     let gone = store.head(&k).await;
     assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
 }
+
+/// Asserts that a failure asked for a HEAD or a DELETE of an object hits the request it counts
+/// to and no other: the second HEAD from now answers 500 while the first and third are served,
+/// and the next DELETE answers 500 and leaves the object, after which one is served again.
+#[tokio::test]
+async fn a_failure_of_a_head_or_a_delete_hits_the_request_it_counts_to() {
+    use objstore_s3::s3::fake::Failure;
+
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    store.head(&k).await.unwrap();
+    s3.fail(Failure::Head(2));
+    store.head(&k).await.unwrap();
+    let refused = store.head(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+
+    s3.fail(Failure::Delete(1));
+    let refused = store.delete(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+    store.delete(&k).await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+}

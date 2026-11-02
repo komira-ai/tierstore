@@ -25,11 +25,6 @@ fn not_supported(call: &str) -> Error {
     Error::Unsupported(text)
 }
 
-/// The error of a call that a backend does not override and that has no other answer.
-fn unsupported(call: &str) -> Error {
-    Error::Unsupported(format!("{call}: this backend does not do it"))
-}
-
 /// A byte range to read: `len` bytes from `offset`.
 ///
 /// A read returns the bytes of `[offset, offset + len)` that exist, so a range running past
@@ -309,14 +304,18 @@ pub trait Backend: Send + Sync {
     /// has another content tag; it is left as it was. [`Error::Unsupported`] unless the backend
     /// overrides this call.
     async fn delete_if_match(&self, _key: &str, _etag: &str) -> Result<(), Error> {
-        Err(unsupported("delete_if_match"))
+        Err(Error::Unsupported(
+            "delete_if_match: this backend does not do it".to_owned(),
+        ))
     }
 
     /// Finds out, once, how this backend does [`Backend::delete_if_match`] where that depends on
     /// the store, settles on it, and says which in a few words (`None` for a backend with one
     /// way, which is the provided answer). `key` is a probe key the call may write and deletes
-    /// again. It never fails: a store that cannot be asked is taken as the weaker way.
-    async fn settle_conditional_delete(&self, _key: &str) -> Option<&'static str> {
+    /// again. It never fails: a store that cannot be asked is taken as the weaker way, and the
+    /// words say that it could not be asked and why, so that it is told from a store that was
+    /// asked and does not enforce the header.
+    async fn settle_conditional_delete(&self, _key: &str) -> Option<String> {
         None
     }
 

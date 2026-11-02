@@ -195,25 +195,38 @@ impl S3Backend {
     }
 
     /// What the store does with a DELETE of `object` that carries `If-Match`, asked of the
-    /// object this writes: each answer is a flag of what was seen, and the store enforces the
-    /// header only if all four are as they should be (a wrong tag refused with 412, the object
-    /// still there after it, the right tag accepted, the object gone after it). A call that
-    /// fails shows up as a flag that is not as it should be.
-    async fn enforces_if_match(&self, object: &ObjectKey) -> bool {
+    /// object this writes: `Ok(true)` if the store enforces the header (a wrong tag refused
+    /// with 412, the object still there after it, the right tag accepted, the object gone
+    /// after it), `Ok(false)` if it answered and did otherwise, and the text of the error if a
+    /// request failed in a way that says nothing of the header, so that the store was not
+    /// asked.
+    async fn enforces_if_match(&self, object: &ObjectKey) -> Result<bool, String> {
         let store = &self.store;
-        let _ = store
-            .put_new(object, Bytes::from_static(b"probe"), None)
-            .await;
-        let tag = store.head(object).await.map(|head| head.etag);
-        let tag = tag.unwrap_or_default();
-        let wrong = store.delete_if_match(object, "\"wrong\"").await;
-        let refused = matches!(&wrong, Err(ObjectStoreError::Service { status: 412, .. }));
-        let kept = store.head(object).await.is_ok_and(|head| head.etag == tag);
-        let right = store.delete_if_match(object, &tag).await.is_ok();
-        let gone = store.head(object).await;
-        let gone = matches!(gone, Err(ObjectStoreError::NotFound(_)));
-        let seen = [refused, kept, right, gone];
-        seen == [true; 4]
+        let probe = Bytes::from_static(b"probe");
+        let put = store.put_new(object, probe, None).await;
+        put.map_err(|e| e.to_string())?;
+        let head = store.head(object).await.map_err(|e| e.to_string())?;
+        let tag = head.etag;
+        match store.delete_if_match(object, "\"wrong\"").await {
+            Err(ObjectStoreError::Service { status: 412, .. }) => {}
+            Ok(()) => return Ok(false),
+            Err(other) => return Err(other.to_string()),
+        }
+        let kept = self.tag_of(object).await? == Some(tag.clone());
+        let right = store.delete_if_match(object, &tag).await;
+        right.map_err(|e| e.to_string())?;
+        let gone = self.tag_of(object).await?.is_none();
+        Ok([kept, gone] == [true; 2])
+    }
+
+    /// The tag of `object`, or `None` if there is no such object, or the text of the error of
+    /// any other failure.
+    async fn tag_of(&self, object: &ObjectKey) -> Result<Option<String>, String> {
+        match self.store.head(object).await {
+            Ok(head) => Ok(Some(head.etag)),
+            Err(ObjectStoreError::NotFound(_)) => Ok(None),
+            Err(other) => Err(other.to_string()),
+        }
     }
 
     /// At most `limit` of the objects under `prefix` that sort after `start_after`, in key
@@ -475,20 +488,22 @@ impl Backend for S3Backend {
         delete.await.map_err(|e| map_error(e, key))
     }
 
-    async fn settle_conditional_delete(&self, key: &str) -> Option<&'static str> {
-        let enforced = match object_key(key) {
+    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
+        let object = object_key(key);
+        let asked = match &object {
             Ok(object) => {
-                let enforced = self.enforces_if_match(&object).await;
-                let _ = self.store.delete(&object).await;
-                enforced
+                let asked = self.enforces_if_match(object).await;
+                let _ = self.store.delete(object).await;
+                asked
             }
-            Err(_) => false,
+            Err(why) => Err(why.to_string()),
         };
+        let enforced = asked == Ok(true);
         self.if_match_delete.store(enforced, Ordering::Release);
-        Some(if enforced {
-            "if-match"
-        } else {
-            "head-then-delete"
+        Some(match asked {
+            Ok(true) => "if-match".to_owned(),
+            Ok(false) => "head-then-delete".to_owned(),
+            Err(why) => format!("head-then-delete (could not ask: {why})"),
         })
     }
 

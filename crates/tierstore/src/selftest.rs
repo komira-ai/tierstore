@@ -289,7 +289,8 @@ pub async fn sweep_probes(
 /// Asks `backend` once how it does [`Backend::delete_if_match`] where that depends on the store,
 /// and passes a line naming the way to `note` (`conditional delete: if-match`, or
 /// `conditional delete: head-then-delete` for a store that does not enforce `If-Match` on a
-/// DELETE), with the name of the backend. A backend that has one way is not asked and gives no
+/// DELETE, or `conditional delete: head-then-delete (could not ask: <error>)` when a request of
+/// the probe failed), with the name of the backend. A backend that has one way is not asked and gives no
 /// line. This is not a check: whatever the store answers, the test does not fail and the start
 /// goes on, since the call is best effort in either way. It is for the caller to run after
 /// [`self_test`] has passed; the probe key is under the run's prefix and is deleted again.

@@ -108,7 +108,8 @@ pub struct DirBackend {
     counter: AtomicU64,
     /// Held while an object is replaced, or removed, so that two replacements of one backend do
     /// not interleave their check and their write, and a conditional delete's check and removal
-    /// are not split by another delete or replacement.
+    /// are not split by another delete or replacement. A plain delete therefore waits for a
+    /// replacement in progress, through its temporary write and its sync.
     replacing: Mutex<()>,
     /// Held while a part is moved to its name and the other files of its number are removed, so
     /// that two overlapping uploads of one part number do not remove each other's file.
@@ -435,7 +436,11 @@ impl DirBackend {
         }
         let path = current.path.clone();
         drop(current);
-        fs::remove_file(&path).await.map_err(io_error(&path))
+        // The lock keeps out every other call of this backend, so a file that is gone now was
+        // taken by another process: the key has no object, as the trait says.
+        let removed = fs::remove_file(&path).await;
+        let absent = ErrorKind::NotFound;
+        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
     }
 
     /// Writes the file of an object with this body to a new temporary file.
@@ -466,7 +471,13 @@ impl DirBackend {
         let Err(synced) = self.sync(&self.root).await else {
             return Ok(());
         };
-        match fs::remove_file(path).await {
+        // Under the lock of the replacements, so that the rollback is no exception to a check
+        // and a removal that no delete or replacement of this backend can split.
+        let rolled_back = {
+            let _replacing = self.replacing.lock().await;
+            fs::remove_file(path).await
+        };
+        match rolled_back {
             Ok(()) => {
                 let _ = self.sync(&self.root).await;
                 Err(synced)
