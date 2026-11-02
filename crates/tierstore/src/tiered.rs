@@ -48,12 +48,10 @@ pub struct ProxyConfig {
     /// The bytes the hot tier is meant to hold, which the usage the reconciler publishes is
     /// compared with.
     pub hot_budget: u64,
-    /// The share of the budget (0.95, say) above which a put is delayed by `back_pressure`
-    /// and a read does not copy the object it found in the cold tier into the hot tier.
+    /// The share of the budget (0.95, say) above which a read does not copy the object it
+    /// found in the cold tier into the hot tier. A put is not changed by it: it still goes to
+    /// the hot tier, at once, until the usage reaches the budget.
     pub critical: f64,
-    /// How long a put waits before it is written to the hot tier while the usage is above the
-    /// critical share.
-    pub back_pressure: Duration,
     /// The most entries one journal object holds. A batch that reaches it is written at once.
     pub batch_entries: usize,
     /// How long a batch waits for more entries before it is written.
@@ -69,7 +67,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
-    /// critical share of 0.95, a back-pressure of 20 ms, batches of at most 64 entries that
+    /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
@@ -77,7 +75,6 @@ impl ProxyConfig {
             proxy_id: proxy_id.to_owned(),
             hot_budget,
             critical: 0.95,
-            back_pressure: Duration::from_millis(20),
             batch_entries: 64,
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
@@ -215,7 +212,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// older than [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
 /// leaves puts unrestrained: [`Proxy::usage_age`] is how a caller sees it, and the server's
 /// `/usagez` reports it). Above
-/// [`ProxyConfig::critical`] of the budget a put waits [`ProxyConfig::back_pressure`] first.
+/// [`ProxyConfig::critical`] of the budget a put is written to the hot tier as it is under it
+/// (it does not wait), and a read of a cold object is not copied back.
 /// At the budget, or when the hot tier answers a put (of the object, or of the journal object
 /// that holds its entry) with [`Error::Full`], puts go straight to the cold tier, create-only
 /// and unjournaled, and never fail for lack of room in the hot tier; reads still use both

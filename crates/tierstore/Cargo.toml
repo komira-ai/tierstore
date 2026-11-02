@@ -140,8 +140,7 @@ thiserror.workspace = true
 # The `--config` file of the `tierstore` binary and the file `--print-config` writes (`server`).
 toml = { workspace = true, optional = true }
 # `fs` and `io-util` for the directory backend, `rt` to journal a copy-back in the background,
-# `sync` for the batches of the journal, `time` for the linger, the back-pressure and the
-# injected delays.
+# `sync` for the batches of the journal, `time` for the linger and the injected delays.
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 # The handshake of the OCI read front's connections (`server`).
 tokio-rustls = { workspace = true, optional = true }
