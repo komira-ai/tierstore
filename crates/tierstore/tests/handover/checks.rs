@@ -58,10 +58,10 @@ pub fn no_failures(reports: &[Report]) {
 
 /// What the bound of a restart admits: an S3 request that failed in its connect (refused, or reset
 /// in its handshake) while the run said the gap was open, from just before the step that stops the
-/// old slot until that step returned. A request whose connect succeeded and that then failed is
-/// beyond the bound, whatever it read (a reset, a clean end of stream, nothing): the bound is a
-/// failed connect on a new connection, never a failure on a connection the server may have
-/// accepted. Nothing else is admitted either: no timeout, no OCI failure, nothing outside the gap.
+/// old slot until that step returned, or whose connect began then ([`Failure::in_gap`]). A request
+/// whose connect succeeded and that then failed is beyond the bound, whatever it read (a reset, a
+/// clean end of stream, nothing): the bound is a failed connect on a new connection, never a
+/// failure on a connection the server may have accepted. Nothing else is admitted either: no timeout, no OCI failure, nothing outside the gap.
 pub fn in_restart_gap(failure: &Failure) -> bool {
     failure.kind == Kind::S3
         && failure.in_gap

@@ -247,8 +247,19 @@ established keep-alive connection still reaches v-current and would get a 503 wh
   from the start of the drain, but reaches its last value only after the S3 listener that serves `/metricz` has closed,
   so a node that counted any says so on stderr as it exits (`late_note`, `server/drain.rs`), for each front.
 
+At the end of the settle the front closes its listening sockets, and the kernel resets every connection it still holds
+for them: those set up and not yet accepted, and those whose handshake is in flight, whose client saw its connect
+succeed. In a hand-over nothing new reaches v-current by then, but in a plain restart the redirect still names it, so
+the door is closed in steps (`server/door.rs`): each listening socket gets a socket filter that drops SYNs (a client
+that connects now sends its SYN again a second later and is refused by the closed port, a failed connect it can tell
+from a lost request); the connections the kernel set up and the handshakes in flight (`SYN_RECV` in
+`/proc/self/net/tcp` and `tcp6`) are taken and served; and the sockets close once two looks 10 ms apart find none, or
+after 3 s. A new connection that has not sent its first request yet is given the same 3 s to send it, and served, rather
+than closed as an idle one. Left open: a handshake still in flight after 3 s, and one answered with a SYN cookie whose
+ACK takes longer than the 10 ms between the looks.
+
 The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
-`server/linger.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
+`server/linger.rs`, `server/door.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
 blob) sent in full and its connection closed the same way after it, and its late requests counted in
 `tierstore_oci_drain_late_requests_total`, so that its clients see no gap either (question 4).
 
@@ -354,13 +365,11 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
     with no late request; v-next is stopped and its link removed.
   - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
     v-next, so a new connection in between is refused. The bound asserted: every failed request is an S3 connect into
-    that gap (from just before `cutover` until it returned), refused or reset in its handshake, counted and printed; no
-    request whose connect succeeded fails, whatever it reads. A plain restart has a race this bound does not admit, and
-    T1 reports it when it happens: the redirect still names v-current while it settles, so a connection that reaches it
-    as its listener closes at the end of the settle is reset (the listener's queue held it) or, accepted an instant
-    before with its request not yet read, closed idle. It is rare; closing it means moving the redirect off v-current
-    before its settle, which turns the whole settle into refused connects, or changing the end of the settle, and neither
-    is done here. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
+    that gap (a connect that began or failed between just before `cutover` and its return), refused or reset in its
+    handshake, counted and printed; no request whose connect succeeded fails, whatever it reads. The redirect still
+    names v-current while it settles, so new connections reach it up to the end of its settle: the end of the settle
+    closes its door without resetting one (section 7), and a connect that comes then is refused when its SYN is sent
+    again. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
     connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
     requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two
     slots' proxy ids and hold each acknowledged key once; once both slots have stopped, no lease is left.

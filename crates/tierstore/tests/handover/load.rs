@@ -86,7 +86,10 @@ pub struct Failure {
     pub kind: Kind,
     pub op: String,
     pub fault: Fault,
-    /// The run said a restart's gap was open ([`Load::open_gap`]) when the request failed.
+    /// The run said a restart's gap was open ([`Load::gap`]) when the request failed, or, for a
+    /// connect that failed, when that connect began: a SYN that the closing old slot drops (see
+    /// `server/door.rs`) is sent again a second later and refused then, which may be after the
+    /// step that closes the gap has returned.
     pub in_gap: bool,
 }
 
@@ -282,6 +285,9 @@ pub fn hex_sha256(bytes: &[u8]) -> String {
 struct Client {
     spec: Spec,
     kept: Option<Conn>,
+    /// The gap was open when the connect of the request being made began, and that connect
+    /// failed.
+    connect_in_gap: bool,
     report: Report,
     shared: Arc<Shared>,
 }
@@ -293,7 +299,7 @@ impl Client {
             kind: self.spec.kind,
             op: op.to_owned(),
             fault,
-            in_gap: self.shared.gap.load(Ordering::SeqCst),
+            in_gap: self.shared.gap.load(Ordering::SeqCst) || self.connect_in_gap,
         });
     }
 
@@ -307,9 +313,13 @@ impl Client {
         body: &[u8],
     ) -> Result<Answer, Broke> {
         self.report.requests += 1;
+        self.connect_in_gap = false;
         let mut conn = match self.kept.take() {
             Some(conn) => conn,
-            None => Conn::open(self.spec.addr)?,
+            None => {
+                let gap = self.shared.gap.load(Ordering::SeqCst);
+                Conn::open(self.spec.addr).inspect_err(|_| self.connect_in_gap = gap)?
+            }
         };
         let answer = conn.exchange(method, path, headers, body, method == "HEAD")?;
         self.report.answered += 1;
@@ -465,6 +475,7 @@ fn run(index: usize, spec: Spec, registry: &Registry, shared: Arc<Shared>) -> Re
     let mut client = Client {
         spec,
         kept: None,
+        connect_in_gap: false,
         report,
         shared: Arc::clone(&shared),
     };

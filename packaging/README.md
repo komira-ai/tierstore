@@ -1066,7 +1066,9 @@ the operator's choice, and the shipped file does not make it.
 
 systemd sends SIGTERM. The process answers `/readyz` 503 and puts `Connection: close` on every
 answer from then on, serves for `--drain-lb-wait` (the settle) so that a load balancer sees it,
-stops accepting, and closes each idle connection with a lingering close (it shuts its end for
+stops accepting (new connects are refused, and the connections the kernel has already set up for
+it are taken and served, for 3 seconds at most, as is the first request of a new connection), and
+closes each idle connection with a lingering close (it shuts its end for
 writing, so that the client reads a clean end of stream, and reads until the client closes, for 60
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered

@@ -4,7 +4,9 @@
 //!
 //! A drain has three phases: serving; draining, from the moment the drain begins, when every
 //! answer carries `Connection: close`; and settled, from the end of the settle, when the front
-//! takes no new connection and closes the idle ones. A connection that the front closes during
+//! takes no new connection (its door has closed on them without resetting one the kernel held for
+//! it, see `door`) and closes the idle ones, a new one once it has had [`GRACE`] to send its first
+//! request. A connection that the front closes during
 //! the drain gets a lingering close ([`Lingering`](super::linger::Lingering)): the front shuts
 //! its end for writing and reads, and drops, what the peer still sends, until the peer closes or
 //! [`Drain::linger_bound`] passes. The bytes read then are a request that came too late, and the
@@ -24,6 +26,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 use super::Server;
+use super::door::GRACE;
 use super::linger::Wire;
 use super::oci::OciDrain;
 
@@ -171,12 +174,17 @@ impl Drain {
 }
 
 /// Resolves when a connection is to be closed: once the settle is over (`settled` turns true), at
-/// once if no request is on its `wire`, and else once that request is answered in full. The
-/// front's connection task polls its connection beside this, and when it resolves tells the
+/// once if no request is on its `wire`, and else once that request is answered in full. A
+/// connection that has carried no request yet is not idle: its client opened it to send one,
+/// which may still be on its way (a connection taken an instant before the settle ended, or by the
+/// closing door, see `door`). It is given [`GRACE`] to send it, and that request is served, its
+/// answer with `Connection: close`; one that sends nothing in that time is closed as an idle one.
+/// The front's connection task polls its connection beside this, and when it resolves tells the
 /// connection to close once it is idle (hyper's `graceful_shutdown`): its stream, a
 /// [`Lingering`](super::linger::Lingering) one, then lingers.
 pub(super) async fn time_to_close(wire: &Wire, mut settled: watch::Receiver<bool>) {
     let _ = settled.wait_for(|settled| *settled).await;
+    let _ = tokio::time::timeout(GRACE, wire.wait_first()).await;
     wire.wait_clear().await;
 }
 

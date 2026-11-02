@@ -353,9 +353,10 @@ fn a_handover_rolled_back_under_load_fails_no_request() {
 /// T1 (c). Asserts that an update in restart mode (`mode = "restart"` in the params) of storage
 /// nodes over a `dir:` hot tier stays within the restart's bound: `cutover` stops the old slot
 /// before it starts the new one, and the only failed requests are S3 connects into that gap,
-/// refused, or (queued at the end of the old slot's settle) reset before any answer byte; no
-/// failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
-/// connection, no acknowledged write lost. The transfers held across the old slot's settle
+/// refused or reset in their handshake ([`checks::in_restart_gap`]); no request whose connect
+/// succeeded fails (the old slot's settle ends without resetting a connection the kernel held for
+/// it), no failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an
+/// established connection, no acknowledged write lost. The transfers held across the old slot's settle
 /// complete, and its drain read the idle probes' late requests (the storage node's exit note).
 /// The new slot's reconciler holds the lease; the journals are intact, with no two writers, and
 /// once both slots have stopped no lease is left.

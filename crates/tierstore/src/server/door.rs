@@ -1,0 +1,227 @@
+//! The end of a front's settle: how it stops taking connections without resetting one whose
+//! client saw its connect succeed.
+//!
+//! The kernel completes a TCP handshake on behalf of a listening socket before the front accepts
+//! the connection, and when the socket is closed it resets every connection it still holds: those
+//! whose handshake is over and that wait in the accept queue, and those whose handshake is in
+//! flight (the SYN answered, the client's ACK not yet come), whose client then reads a reset on a
+//! connection it saw open. While the port still sends new connections to the front (a plain
+//! restart, whose redirect names the stopping instance until its successor is up), a socket closed
+//! at once at the end of the settle resets the few that are in between. [`Closing`] closes the
+//! door in three moves instead:
+//!
+//! 1. No new handshake: each listening socket gets a socket filter that drops a segment with the
+//!    SYN flag ([`Incoming::stop_handshakes`]). The client of a dropped SYN sends it again a
+//!    second later and finds the port closed: its connect is refused, which it can tell apart
+//!    from a request lost.
+//! 2. Every connection the kernel holds is taken and served as any other: those in the accept
+//!    queue, and those whose handshake was in flight, once it ends ([`Incoming::handshakes`]).
+//! 3. The sockets are closed once two looks [`LOOK`] apart have found no handshake in flight and
+//!    the accept queue empty, or once [`GRACE`] has passed.
+//!
+//! Each connection taken this way is a new one, whose first request the drain waits for
+//! ([`time_to_close`](super::drain::time_to_close)), for [`GRACE`] too.
+//!
+//! What this does not close: a handshake still in flight when [`GRACE`] has passed (its client
+//! lost the server's SYN-ACK and its retransmit), and a handshake answered with a SYN cookie (the
+//! kernel keeps no entry for it while its accept queue is full) whose ACK takes longer than
+//! [`LOOK`] to come. The client of either is reset as before.
+
+use std::future::poll_fn;
+use std::io;
+use std::net::SocketAddr;
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::task::Poll;
+use std::time::Duration;
+
+use tokio::net::TcpListener;
+use tokio::time::Instant;
+
+use super::Incoming;
+
+/// How long a new connection has, from the end of the settle, to finish its handshake and to send
+/// its first request: the first retransmit of the server's SYN-ACK (one second), for a handshake
+/// whose last segment was lost, and some round trips.
+pub(super) const GRACE: Duration = Duration::from_secs(3);
+
+/// How far apart the two looks are that must both find nothing in flight before the door closes:
+/// far longer than the moment between the end of a handshake and its connection's place in the
+/// accept queue, and a round trip on a local network.
+const LOOK: Duration = Duration::from_millis(10);
+
+/// The door of a front, closing: the listening sockets, which take no new handshake.
+pub(super) struct Closing<I> {
+    incoming: I,
+    /// When the door closes on the handshakes still in flight.
+    deadline: Instant,
+    /// The looks in a row that found nothing in flight and nothing queued.
+    quiet: u8,
+    /// Whether a failure to count the handshakes has been said on stderr.
+    told: bool,
+}
+
+impl<I: Incoming> Closing<I> {
+    /// Stops the new handshakes of `incoming`. A failure to stop them is said on stderr: the door
+    /// then closes once nothing waits to be accepted.
+    pub(super) fn begin(mut incoming: I) -> Self {
+        if let Err(error) = incoming.stop_handshakes() {
+            eprintln!(
+                "tierstore: the end of the settle: new connections are not held back: {error}"
+            );
+        }
+        Self {
+            incoming,
+            deadline: Instant::now() + GRACE,
+            quiet: 0,
+            told: false,
+        }
+    }
+
+    /// The next connection that the kernel holds for the front, or an accept that failed; `None`
+    /// once two looks [`LOOK`] apart have found no handshake in flight and the accept queue empty,
+    /// or once [`GRACE`] has passed.
+    ///
+    /// Each look counts the handshakes before it looks at the queue: a handshake that ends after
+    /// the count is in the queue at the next look, and none begins once the filter is on.
+    pub(super) async fn next(&mut self) -> Option<io::Result<(I::Stream, SocketAddr)>> {
+        loop {
+            if Instant::now() >= self.deadline {
+                return None;
+            }
+            let in_flight = self.in_flight();
+            let queued = poll_fn(|cx| Poll::Ready(self.incoming.poll_incoming(cx))).await;
+            if let Poll::Ready(accepted) = queued {
+                self.quiet = 0;
+                return Some(accepted);
+            }
+            if in_flight {
+                self.quiet = 0;
+            } else {
+                self.quiet += 1;
+                if self.quiet == 2 {
+                    return None;
+                }
+            }
+            tokio::select! {
+                accepted = poll_fn(|cx| self.incoming.poll_incoming(cx)) => {
+                    self.quiet = 0;
+                    return Some(accepted);
+                }
+                () = tokio::time::sleep(LOOK) => {}
+                () = tokio::time::sleep_until(self.deadline) => return None,
+            }
+        }
+    }
+
+    /// Resolves once [`GRACE`] has passed: a front that waits for something else before it takes
+    /// the next connection (the OCI front, for a free slot) waits no longer.
+    pub(super) async fn out_of_time(&self) {
+        tokio::time::sleep_until(self.deadline).await;
+    }
+
+    /// Whether a handshake is in flight. One that cannot be counted is taken to be, so that the
+    /// door waits out [`GRACE`]; the failure is said on stderr once.
+    fn in_flight(&mut self) -> bool {
+        match self.incoming.handshakes() {
+            Ok(count) => count > 0,
+            Err(error) => {
+                if !self.told {
+                    self.told = true;
+                    eprintln!(
+                        "tierstore: the end of the settle: cannot count the handshakes in flight, so the listener waits {GRACE:?}: {error}"
+                    );
+                }
+                true
+            }
+        }
+    }
+}
+
+/// The socket filter of [`stop_handshakes`], in classic BPF. A TCP socket's filter sees the
+/// segment from its TCP header on, whose byte 13 holds the flags: a segment with SYN (`0x02`) is
+/// dropped, and any other kept whole. The connections a listening socket makes inherit its
+/// filter, and an open connection gets no SYN, so they lose nothing.
+#[cfg(target_os = "linux")]
+const NO_SYN: [socket2::SockFilter; 4] = [
+    // ldb [13]: the flags.
+    socket2::SockFilter::new(0x30, 0, 0, 13),
+    // jset #0x02: SYN goes on to the drop, anything else skips it.
+    socket2::SockFilter::new(0x45, 0, 1, 0x02),
+    // ret #0: dropped.
+    socket2::SockFilter::new(0x06, 0, 0, 0),
+    // ret #-1: kept whole.
+    socket2::SockFilter::new(0x06, 0, 0, u32::MAX),
+];
+
+/// Stops new handshakes on `listener`: a SYN that comes to it from now on is dropped.
+///
+/// # Errors
+/// The filter cannot be attached.
+#[cfg(target_os = "linux")]
+pub(super) fn stop_handshakes(listener: &TcpListener) -> io::Result<()> {
+    socket2::SockRef::from(listener).attach_filter(&NO_SYN)
+}
+
+/// No socket filter outside Linux: the door closes once nothing waits to be accepted.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn stop_handshakes(_listener: &TcpListener) -> io::Result<()> {
+    Ok(())
+}
+
+/// Where the tables of this network namespace's TCP sockets are.
+#[cfg(target_os = "linux")]
+const TABLES: &str = "/proc/self/net";
+
+/// The handshakes in flight on the listening sockets of `ports`, in this network namespace.
+///
+/// # Errors
+/// A table cannot be read.
+#[cfg(target_os = "linux")]
+pub(super) fn handshakes(ports: &[u16]) -> io::Result<usize> {
+    handshakes_under(Path::new(TABLES), ports)
+}
+
+/// No table of handshakes outside Linux: none is counted.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn handshakes(_ports: &[u16]) -> io::Result<usize> {
+    Ok(0)
+}
+
+/// The handshakes in flight on the listening sockets of `ports`: the entries in state `SYN_RECV`
+/// of the tables `tcp` and `tcp6` in `dir` whose local port is one of them.
+///
+/// # Errors
+/// A table cannot be read.
+#[cfg(target_os = "linux")]
+fn handshakes_under(dir: &Path, ports: &[u16]) -> io::Result<usize> {
+    let mut count = 0;
+    for table in ["tcp", "tcp6"] {
+        count += handshakes_in(&std::fs::read_to_string(dir.join(table))?, ports);
+    }
+    Ok(count)
+}
+
+/// The entries of a table in the format of `/proc/net/tcp` that are in state `SYN_RECV` (`03`)
+/// with a local port of `ports`. The first line is the heading; each other has the slot, the local
+/// address (`address:port`, both hex), the remote one, then the state (hex).
+#[cfg(target_os = "linux")]
+fn handshakes_in(table: &str, ports: &[u16]) -> usize {
+    table
+        .lines()
+        .skip(1)
+        .filter(|line| {
+            let mut fields = line.split_whitespace().skip(1);
+            let port = fields
+                .next()
+                .and_then(|local| local.rsplit_once(':'))
+                .and_then(|(_, port)| u16::from_str_radix(port, 16).ok());
+            let state = fields.nth(1);
+            state == Some("03") && port.is_some_and(|port| ports.contains(&port))
+        })
+        .count()
+}
+
+#[cfg(test)]
+#[path = "door_tests.rs"]
+mod tests;

@@ -289,3 +289,141 @@ async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither
     assert_eq!(refused_at(&[v6, v4]).await, v4);
     drop(bind(v6).expect("the v6 wildcard is free again"));
 }
+
+/// A source whose connections the kernel holds as handshakes in flight until the end of the
+/// settle stops new handshakes: then they wait to be taken, in order. Each is a real loopback
+/// connection, and an entry may be an accept that fails.
+struct Held {
+    /// What the source gives once the handshakes are stopped.
+    held: Vec<io::Result<(TcpStream, SocketAddr)>>,
+    /// What it gives at once, before the end of the settle.
+    ready: Vec<(TcpStream, SocketAddr)>,
+    stopped: bool,
+}
+
+impl Incoming for Held {
+    type Stream = TcpStream;
+
+    fn poll_incoming(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+        if let Some(ready) = self.ready.pop() {
+            return Poll::Ready(Ok(ready));
+        }
+        match self.held.pop() {
+            Some(accepted) if self.stopped => Poll::Ready(accepted),
+            Some(accepted) => {
+                self.held.push(accepted);
+                Poll::Pending
+            }
+            None => Poll::Pending,
+        }
+    }
+
+    fn stop_handshakes(&mut self) -> io::Result<()> {
+        self.stopped = true;
+        Ok(())
+    }
+
+    fn handshakes(&self) -> io::Result<usize> {
+        Ok(if self.stopped { 0 } else { self.held.len() })
+    }
+}
+
+/// A loopback connection: the server's end, with its peer, and the client's.
+async fn pair() -> ((TcpStream, SocketAddr), TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    (listener.accept().await.unwrap(), client)
+}
+
+/// A plain accept loop over `incoming`, draining, with room for `max_connections` and bounds long
+/// enough that none of them ends a test's connection, and its stop.
+fn plain_loop(
+    incoming: Held,
+    max_connections: usize,
+) -> (tokio::task::JoinHandle<usize>, watch::Sender<bool>) {
+    let (front, limits) = plain_front();
+    let minute = Duration::from_secs(60);
+    let limits = OciLimits {
+        max_connections,
+        header_timeout: minute,
+        write_idle: minute,
+        lifetime: minute,
+        drain_deadline: minute,
+        ..limits
+    };
+    let (stop, stopped) = watch::channel(false);
+    let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
+    // The drain begins as the binary begins it, before the stop.
+    shared.drain.begin();
+    let looping = tokio::spawn(accept_loop(incoming, None, front, limits, stopped, shared));
+    (looping, stop)
+}
+
+/// Asserts that the OCI front, at the end of its settle, takes the connections the kernel held
+/// for it as handshakes in flight, after an accept that fails, and serves their request with
+/// `Connection: close`, and that the loop then ends with nothing cut. It would catch an OCI front
+/// that closes its socket at once at the end of the settle, which resets those connections.
+#[tokio::test]
+async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
+    let (server, mut client) = pair().await;
+    let held = Held {
+        held: vec![Ok(server), Err(io::Error::other("an accept that failed"))],
+        ready: Vec::new(),
+        stopped: false,
+    };
+    let (looping, stop) = plain_loop(held, 4);
+    stop.send(true).expect("a loop");
+
+    client
+        .write_all(b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n")
+        .await
+        .unwrap();
+    let mut answer = String::new();
+    client.read_to_string(&mut answer).await.unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    assert!(answer.contains("connection: close"), "{answer}");
+    drop(client);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// Asserts that the OCI front waits for a free slot at the end of its settle for no longer than
+/// the door's grace: with its one slot held by a connection that sends nothing, the connection the
+/// kernel holds is not taken, the socket closes (that client reads the end of its stream, the
+/// limit the module states), the connection in the slot is closed in turn, and the loop ends with
+/// nothing cut. It would catch a door that waits for a slot for ever, and one that takes a
+/// connection past the front's limit.
+#[tokio::test]
+async fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
+    let (first, mut in_slot) = pair().await;
+    let (second, mut waiting) = pair().await;
+    let held = Held {
+        held: vec![Ok(second)],
+        ready: vec![first],
+        stopped: false,
+    };
+    // The first connection takes the slot, before the stop or once the door is closing.
+    let (looping, stop) = plain_loop(held, 1);
+    stop.send(true).expect("a loop");
+
+    // A request on the held connection gets no answer: it was never taken past the limit, and
+    // the kernel ends it (an end of stream, or a reset) when the socket closes.
+    let request = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
+    let _ = waiting.write_all(request).await;
+    let mut answer = Vec::new();
+    let _ = waiting.read_to_end(&mut answer).await;
+    assert_eq!(String::from_utf8_lossy(&answer), "", "not served");
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        in_slot.read(&mut byte).await.unwrap(),
+        0,
+        "closed, unanswered"
+    );
+    // The client closes its end, which ends the lingering close of the server's.
+    drop(in_slot);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}

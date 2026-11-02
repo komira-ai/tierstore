@@ -6,12 +6,13 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::Backend;
@@ -76,11 +77,64 @@ pub(super) async fn until(server: &Server, ready: impl Fn(&Server) -> bool) {
     bounded(waiting).await;
 }
 
+/// What the kernel under a [`Serving`] does at the end of the settle (see `door`): the
+/// handshakes in flight, which a test begins and ends, whether the server has stopped new ones,
+/// and whether stopping or counting them fails.
+#[derive(Default)]
+pub(super) struct Kernel {
+    in_flight: AtomicUsize,
+    stopped: AtomicBool,
+    /// Notified when the server stops new handshakes.
+    stopping: Notify,
+    /// Whether stopping the handshakes fails.
+    stop_fails: bool,
+    /// Whether counting the handshakes fails.
+    count_fails: bool,
+}
+
+impl Kernel {
+    /// A kernel on which the filter that stops new handshakes cannot be put.
+    pub(super) fn stop_failing() -> Self {
+        Self {
+            stop_fails: true,
+            ..Self::default()
+        }
+    }
+
+    /// A kernel whose handshakes in flight cannot be counted.
+    pub(super) fn count_failing() -> Self {
+        Self {
+            count_fails: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// A connection whose handshake is in flight: the kernel holds it for the server, which cannot
+/// take it yet.
+pub(super) struct Handshake {
+    kernel: Arc<Kernel>,
+    door: mpsc::UnboundedSender<DuplexStream>,
+}
+
+impl Handshake {
+    /// Ends the handshake: the connection waits to be taken, as in the accept queue, and then it
+    /// is no longer in flight. `None` if the server has closed its door: the kernel resets the
+    /// connection, whose client saw its connect succeed.
+    pub(super) fn complete(self) -> Option<DuplexStream> {
+        let (client, far) = duplex(PIPE);
+        let queued = self.door.send(far).ok().map(|()| client);
+        self.kernel.in_flight.fetch_sub(1, Ordering::SeqCst);
+        queued
+    }
+}
+
 /// The pipes of a [`Serving`] as the source of connections of the accept loop.
 struct Pipes {
     arriving: mpsc::UnboundedReceiver<DuplexStream>,
     /// How many of the next accepts fail.
     failing: usize,
+    kernel: Arc<Kernel>,
 }
 
 impl Incoming for Pipes {
@@ -98,6 +152,22 @@ impl Incoming for Pipes {
         let door = "a door that is open";
         arrived.map(|stream| Ok((stream.expect(door), peer())))
     }
+
+    fn stop_handshakes(&mut self) -> io::Result<()> {
+        self.kernel.stopped.store(true, Ordering::SeqCst);
+        self.kernel.stopping.notify_waiters();
+        if self.kernel.stop_fails {
+            return Err(io::Error::other("a filter that cannot be attached"));
+        }
+        Ok(())
+    }
+
+    fn handshakes(&self) -> io::Result<usize> {
+        if self.kernel.count_fails {
+            return Err(io::Error::other("a table that cannot be read"));
+        }
+        Ok(self.kernel.in_flight.load(Ordering::SeqCst))
+    }
 }
 
 /// A server whose accept loop takes its connections from pipes, as `serve` takes them from a
@@ -105,6 +175,7 @@ impl Incoming for Pipes {
 pub(super) struct Serving {
     pub(super) rig: Rig,
     door: mpsc::UnboundedSender<DuplexStream>,
+    kernel: Arc<Kernel>,
     /// The accept loop; it ends with the drain.
     pub(super) served: JoinHandle<Drained>,
 }
@@ -120,21 +191,75 @@ impl Serving {
         failures: usize,
         change: impl FnOnce(&mut ServerConfig),
     ) -> Self {
+        Self::start_on(failures, Kernel::default(), change).await
+    }
+
+    /// The same, over `kernel`.
+    pub(super) async fn start_on(
+        failures: usize,
+        kernel: Kernel,
+        change: impl FnOnce(&mut ServerConfig),
+    ) -> Self {
         let rig = Rig::with(64 << 20, change).await;
         let (door, arriving) = mpsc::unbounded_channel();
+        let kernel = Arc::new(kernel);
         let incoming = Pipes {
             arriving,
             failing: failures,
+            kernel: Arc::clone(&kernel),
         };
         let server = Arc::clone(&rig.server);
         let served = tokio::spawn(async move { server.serve_from(incoming).await });
-        Self { rig, door, served }
+        Self {
+            rig,
+            door,
+            kernel,
+            served,
+        }
     }
 
-    /// A connection to the server, or none once the server has stopped taking connections.
+    /// A connection to the server, or none once the server has stopped taking connections: its
+    /// door is closed, or closing and takes no new handshake.
     pub(super) fn connect(&self) -> Option<DuplexStream> {
+        if self.kernel.stopped.load(Ordering::SeqCst) {
+            return None;
+        }
         let (client, far) = duplex(PIPE);
         self.door.send(far).ok().map(|()| client)
+    }
+
+    /// A connection whose handshake begins now and is still in flight.
+    pub(super) fn handshake(&self) -> Handshake {
+        self.kernel.in_flight.fetch_add(1, Ordering::SeqCst);
+        Handshake {
+            kernel: Arc::clone(&self.kernel),
+            door: self.door.clone(),
+        }
+    }
+
+    /// Waits until the settle is over: the server has begun to close its door (it stopped new
+    /// handshakes), or has closed it.
+    pub(super) async fn settle_over(&self) {
+        let waiting = async {
+            loop {
+                let stopping = self.kernel.stopping.notified();
+                tokio::pin!(stopping);
+                let _ = stopping.as_mut().enable();
+                if self.kernel.stopped.load(Ordering::SeqCst) || self.door.is_closed() {
+                    return;
+                }
+                tokio::select! {
+                    () = stopping => {}
+                    () = self.door.closed() => {}
+                }
+            }
+        };
+        bounded(waiting).await;
+    }
+
+    /// Whether the server's door is still open: it has not closed its socket.
+    pub(super) fn door_open(&self) -> bool {
+        !self.door.is_closed()
     }
 
     /// Waits until the server has stopped taking connections.

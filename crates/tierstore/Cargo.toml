@@ -40,6 +40,7 @@ server = [
     "dep:rustix",
     "dep:roxmltree",
     "dep:rustls",
+    "dep:socket2",
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
@@ -147,6 +148,11 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-rustls = { workspace = true, optional = true }
 # The IP subjectAltNames of the OCI front's certificate, which the start checks (`server`).
 x509-parser = { workspace = true, optional = true }
+
+# The filter that drops SYNs on a listening socket at the end of a drain's settle, so that it
+# closes without resetting a connection the kernel holds for it (`server`, Linux only).
+[target.'cfg(target_os = "linux")'.dependencies]
+socket2 = { workspace = true, features = ["all"], optional = true }
 
 [dev-dependencies]
 # A stock S3 SDK (aws-sdk-rust) and its plain-HTTP client, which tests/s3_front/sdk.rs drives

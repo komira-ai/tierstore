@@ -4,6 +4,7 @@
 
 use std::convert::Infallible;
 use std::future::poll_fn;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,6 +24,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::{OciError, OciFront, OciMode};
+use crate::server::door::Closing;
 use crate::server::drain::{self, Drain};
 use crate::server::idle::Watched;
 use crate::server::linger::{Lingering, OnWire};
@@ -277,6 +279,19 @@ where
 {
     let Shared { drain, slots, held } = shared;
     let mut connections = JoinSet::new();
+    let take =
+        |accepted: io::Result<(TcpStream, SocketAddr)>, slot, connections: &mut JoinSet<()>| {
+            let (tcp, peer) = accepted?;
+            let serving = Serving {
+                acceptor: acceptor.clone(),
+                front: Arc::clone(&front),
+                limits,
+                drain: Arc::clone(&drain),
+            };
+            let slot = Slot::give(slot, &held);
+            connections.spawn(serving.connection(tcp, peer, slot));
+            Ok::<_, io::Error>(())
+        };
     loop {
         // A slot is taken before the next accept, so a flood waits in the backlog and not
         // in tasks.
@@ -285,27 +300,31 @@ where
             () = stopped(&mut stop) => break,
         };
         tokio::select! {
-            accepted = poll_fn(|cx| incoming.poll_incoming(cx)) => match accepted {
-                Ok((tcp, peer)) => {
-                    let serving = Serving {
-                        acceptor: acceptor.clone(),
-                        front: Arc::clone(&front),
-                        limits,
-                        drain: Arc::clone(&drain),
-                    };
-                    let slot = Slot::give(slot, &held);
-                    connections.spawn(serving.connection(tcp, peer, slot));
+            accepted = poll_fn(|cx| incoming.poll_incoming(cx)) => {
+                if let Err(error) = take(accepted, slot, &mut connections) {
+                    accept_failed(&error).await;
                 }
-                Err(error) => {
-                    eprintln!("tierstore: oci: accept: {error}");
-                    tokio::time::sleep(ACCEPT_PAUSE).await;
-                }
-            },
+            }
             Some(_) = connections.join_next() => {}
             () = stopped(&mut stop) => break,
         }
     }
-    drop(incoming);
+    // The connections the kernel holds for the listener are taken before it closes (see `door`),
+    // each in a slot as before, for as long as the door waits.
+    let mut door = Closing::begin(incoming);
+    loop {
+        let slot = tokio::select! {
+            slot = Arc::clone(&slots).acquire_owned() => slot,
+            () = door.out_of_time() => break,
+        };
+        let Some(accepted) = door.next().await else {
+            break;
+        };
+        if let Err(error) = take(accepted, slot, &mut connections) {
+            accept_failed(&error).await;
+        }
+    }
+    drop(door);
     drain.settle();
     // A connection's task runs its lingering close too, so that the deadline cuts it.
     let finished = async { while connections.join_next().await.is_some() {} };
@@ -318,6 +337,12 @@ where
     let cut = connections.len();
     connections.abort_all();
     cut
+}
+
+/// Says on stderr that an accept failed, and waits a moment before the next.
+async fn accept_failed(error: &io::Error) {
+    eprintln!("tierstore: oci: accept: {error}");
+    tokio::time::sleep(ACCEPT_PAUSE).await;
 }
 
 /// One plain connection served as the accept loop serves one, holding `permit`, for a test that
