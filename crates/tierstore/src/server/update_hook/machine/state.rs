@@ -18,7 +18,7 @@ use std::cell::OnceCell;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rustix::fs::{
     AtFlags, FileType, FlockOperation, Mode, OFlags, flock, fstat, fsync, openat, renameat,
@@ -178,8 +178,9 @@ impl StateFiles {
         }
     }
 
-    /// The path of the directory, for messages.
-    pub(super) fn path(&self) -> &Path {
+    /// The path of the directory, for the messages of the slot links (Linux's).
+    #[cfg(target_os = "linux")]
+    pub(super) fn path(&self) -> &std::path::Path {
         &self.dir
     }
 

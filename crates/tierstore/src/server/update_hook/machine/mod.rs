@@ -7,9 +7,9 @@
 //!
 //! Programs are called by absolute path (`/usr/sbin/nft`, `/usr/bin/systemctl`, the Debian and
 //! Ubuntu locations; `/bin/launchctl` on macOS); the command line may name others (`--nft`,
-//! `--systemctl`). `nft` and `systemctl` exist on Linux alone, and so are built there alone; the
-//! launchd service, the release links and everything else are built on both systems, so that
-//! Linux runs their tests.
+//! `--systemctl`). `nft`, `systemctl` and the slot links of the two-slot hand-over exist on
+//! Linux alone, and so are built there alone; the launchd service, the release links and
+//! everything else are built on both systems, so that Linux runs their tests.
 
 mod clock;
 mod host;
@@ -19,6 +19,7 @@ mod launchd;
 mod nft;
 mod releases;
 mod runner;
+#[cfg(target_os = "linux")]
 mod slots;
 mod state;
 #[cfg(target_os = "linux")]
@@ -39,6 +40,7 @@ pub use launchd::{
 pub use nft::NftTool;
 pub use releases::ReleaseLinks;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
+#[cfg(target_os = "linux")]
 pub use slots::SlotLinks;
 pub use state::{Account, LOCK_FILE, STATE_FILE, StateFiles};
 #[cfg(target_os = "linux")]
@@ -90,7 +92,7 @@ mod nft_tests;
 mod releases_tests;
 #[cfg(test)]
 mod runner_tests;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod slots_tests;
 #[cfg(test)]
 mod state_tests;

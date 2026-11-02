@@ -32,12 +32,13 @@ fn no_input_is_an_empty_input() {
     assert!(output.stdout.is_empty());
 }
 
-/// Asserts that the exit status and standard error of a program that fails come back.
+/// Asserts that the exit status and standard error of a program that fails come back. `cat` of
+/// a missing file exits 1 on Linux and on macOS alike (`ls`, whose status differs, does not).
 #[test]
 fn the_exit_status_and_standard_error_come_back() {
-    let call = Call::new("ls", &["/this/path/does/not/exist"], LIMIT);
+    let call = Call::new("cat", &["/this/path/does/not/exist"], LIMIT);
     let output = SystemRunner.run(&call).unwrap();
-    assert_eq!(output.code, Some(2));
+    assert_eq!(output.code, Some(1));
     assert!(output.stderr_text().contains("No such file or directory"));
 }
 
