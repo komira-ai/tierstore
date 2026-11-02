@@ -52,8 +52,7 @@ use crate::{
 
 use super::build_info::{COMMIT, VERSION};
 use super::cli::{
-    Addresses, Error, S3Flags, bind_oci, bind_s3, oci_cut_note, oci_setup_of, open_tier,
-    probe_run_id, serve_oci, signals,
+    Addresses, Error, S3Flags, bind_oci, bind_s3, oci_setup_of, open_tier, probe_run_id, signals,
 };
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
@@ -63,7 +62,7 @@ use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
 use super::oci::OciListener;
-use super::stop_watcher::stop_watcher;
+use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
 /// How often the eviction pass runs beside the server.
