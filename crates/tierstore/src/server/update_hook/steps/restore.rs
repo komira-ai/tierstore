@@ -7,7 +7,7 @@
 //! With no record the host has never been set up and there is nothing to restore.
 
 use super::Ctx;
-use crate::server::update_hook::declaration::{PUBLIC_PORT, unit_name};
+use crate::server::update_hook::declaration::unit_name;
 use crate::server::update_hook::record::Record;
 use crate::server::update_hook::report::{Done, Reason};
 use crate::server::update_hook::ruleset::guard_ruleset;
@@ -29,7 +29,7 @@ pub(super) fn run(c: &Ctx<'_, '_>, record: Option<&Record>) -> Result<Done, Done
     }
     c.ports
         .nft
-        .apply(&guard_ruleset(PUBLIC_PORT, c.decl.ports))?;
+        .apply(&guard_ruleset(c.ports.public_port, c.decl.ports))?;
     c.redirect(slot)?;
     c.ports.units.start(&unit_name(slot))?;
     Ok(Done::ok(format!("restored slot {slot}")))

@@ -63,7 +63,7 @@ async fn the_probes_answer_without_a_signature_and_readyz_follows_the_drain() {
 #[tokio::test(start_paused = true)]
 async fn a_server_past_the_settle_serves_s3_calls_with_connection_close() {
     let rig = Rig::new(MEBIBYTE).await;
-    rig.server.phase.store(SETTLED, Ordering::SeqCst);
+    rig.server.drain.phase.store(SETTLED, Ordering::SeqCst);
     let served = rig.put("k", b"v").await;
     assert_eq!(served.status, StatusCode::OK);
     assert_eq!(served.header("connection"), "close");

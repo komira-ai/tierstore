@@ -278,5 +278,7 @@ async fn a_cold_object_is_served_and_a_connection_is_reused() {
     let reply = conn.request("GET", "/v2/", &[]).await.expect("an answer");
     assert_eq!(reply.body, b"{}");
     assert_eq!(rig.metrics.requests("blob", "ok"), 3);
+    // The stop waits for an idle connection's client to close it (a lingering close).
+    drop(conn);
     rig.stop().await;
 }

@@ -210,7 +210,7 @@ async fn mid_answer_at_the_end_of_the_settle() -> (Arc<Server>, DuplexStream, Ve
     assert_eq!(server.unsent(), 1);
 
     // The settle is over: the request is on the wire, so the connection is not closed.
-    let _ = server.settled.send_replace(true);
+    let _ = server.drain.settled.send_replace(true);
     assert_eq!(server.open_connections(), 1);
     (server, client, answer, feed)
 }

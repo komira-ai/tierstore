@@ -1,9 +1,10 @@
-# The pull-request gate: the checks `lint` and `test`. GitHub-hosted runners only; the workflow
+# The pull-request gate: the checks `lint`, `test` and `handover-t1`. GitHub-hosted runners only; the workflow
 # lint (crates/xtask/tests/workflows) holds every workflow of this repository to commit-SHA
 # pinned actions with a version comment, to a top-level `permissions: {}`, to no
 # `pull_request_target`, and to write scopes that only the jobs named there may hold.
 #
 # `lint` is the format, cargo-deny (licences, bans and sources), clippy and the workflow lint.
+# `handover-t1` runs T1, the update hook under live traffic with real nftables, as root (below).
 # `test` runs every test under cargo-llvm-cov with branch coverage and applies the 99% gate:
 # every crate of the workspace must reach 99.00% of its lines and 99.00% of its branches
 # (crates/coverage-gate). Every crate is judged, the tooling and the test helper included,
@@ -179,6 +180,56 @@ jobs:
       # this run's workspace coverage artifacts.
       - if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov clean --workspace
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # T1 of docs/design/tierstore-handover.md (section 10): an update of tierstore under live S3 and
+  # OCI traffic with no retry, the real update hook, the real nft and two real servers
+  # (crates/tierstore/tests/handover). It needs CAP_NET_ADMIN: the test binary is built as the
+  # runner's user and only it runs with sudo, and everything privileged happens in two network
+  # namespaces the test makes and deletes, with every table in them; it checks that the runner's
+  # own ruleset is as it was. Not part of `test`: there the feature `handover-t1` is off, so these
+  # tests are ignored, and their code is under tests/, which the coverage report leaves out.
+  #
+  # The first build is the server without the two properties of its drain (the test-only feature
+  # `test-drain-off`), in a target directory of its own so that it never mixes with the build the
+  # hook and the other runs use: one test runs the hand-over with it and must see requests fail.
+  # nftables comes from the runner's package lists, refreshed first.
+  handover-t1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Refresh the package lists
+        run: sudo apt-get update
+      - name: Install nftables
+        run: sudo apt-get install --yes --no-install-recommends nftables
+      - run: cargo build -p tierstore --locked --features server,test-drain-off --bin tierstore --target-dir target/drain-off
+      # Cargo builds the test binary as the runner's user; its runner runs only that binary, as
+      # root. The test finds the build without the drain in target/drain-off, beside its own.
+      - name: T1 (the test binary runs as root)
+        run: |
+          cargo test -p tierstore --locked --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo'" -- --nocapture
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

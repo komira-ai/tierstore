@@ -16,7 +16,7 @@ mod verify;
 use std::time::Duration;
 
 use super::args::Step;
-use super::declaration::{Declaration, PUBLIC_PORT, unit_name};
+use super::declaration::{Declaration, unit_name};
 use super::params::Params;
 use super::ports::{PortError, Ports};
 use super::probe::{CacheMode, build_of, readiness};
@@ -68,7 +68,7 @@ impl Ctx<'_, '_> {
     /// Whether one request through the public port was answered by the instance on `slot`
     /// running `version`.
     fn answered_by(&self, slot: u16, version: &str) -> bool {
-        match self.ports.instances.get(PUBLIC_PORT, "/metricz") {
+        match self.ports.instances.get(self.ports.public_port, "/metricz") {
             Ok(reply) if reply.status == 200 => {
                 build_of(&reply.body).is_some_and(|build| build.is(slot, version))
             }
@@ -101,7 +101,9 @@ impl Ctx<'_, '_> {
 
     /// Points the public port at `port`, in one transaction.
     fn redirect(&self, port: u16) -> Result<(), PortError> {
-        self.ports.nft.apply(&redirect_ruleset(PUBLIC_PORT, port))
+        self.ports
+            .nft
+            .apply(&redirect_ruleset(self.ports.public_port, port))
     }
 
     /// The port the redirect table names now.
@@ -143,6 +145,15 @@ pub fn run_step(step: Step, params: Option<&Params>, ports: &Ports<'_>) -> Done 
 fn attempt(step: Step, params: Option<&Params>, ports: &Ports<'_>) -> Result<(Done, bool), Done> {
     let _lock = ports.state.lock()?;
     let decl = Declaration::parse(&ports.host.declaration()?)?;
+    if decl.has(ports.public_port) {
+        return Err(Done::fail(
+            Reason::StateInvalid,
+            format!(
+                "health_ports must not include the public port {}",
+                ports.public_port
+            ),
+        ));
+    }
     if let Some(params) = params {
         check_params(params, &decl)?;
     }

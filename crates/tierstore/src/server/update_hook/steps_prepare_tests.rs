@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use super::steps::READY_ATTEMPTS;
 use super::testing::{Fake, NEW, NEWER, OLD};
-use super::{Class, Conntrack, Mode, Outcome, Reason, Record, Step, guard_ruleset};
+use super::{
+    Class, Conntrack, Mode, Outcome, Params, Reason, Record, Step, guard_ruleset, run_step,
+};
 
 const UNIT_2: &str = "units.start tierstore@9302.service";
 
@@ -80,6 +82,79 @@ fn a_release_without_the_capability_makes_it_a_restart() {
     let fake = Fake::legacy();
     fake.advance(&[Step::Prepare]);
     assert_eq!(fake.record().mode, Mode::Restart);
+}
+
+/// Asserts that `mode = "restart"` in the params makes `prepare` choose a restart though both
+/// releases list `handover-v1`: the record says `restart`, the detail names the mode and the
+/// reason (`declared_restart`), nothing is started, and the `cutover` that follows stops the old
+/// unit before it starts the new one. Without the key the same releases give a handover
+/// (`handover_capable`), and a release without the capability a restart (`not_handover_capable`).
+/// It would catch a declaration that cannot keep a `dir:` hot tier out of a handover, or a
+/// capability rule changed for hosts that do not set the key.
+#[test]
+fn a_declared_restart_wins_over_the_capabilities() {
+    let fake = Fake::new();
+    let declared = Params {
+        declared_restart: true,
+        ..fake.params()
+    };
+    let done = run_step(Step::Prepare, Some(&declared), &fake.ports());
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some("prepared slot 9302 beside 9301, mode restart (declared_restart)")
+    );
+    assert_eq!(fake.record().mode, Mode::Restart);
+    // The reason is not in the record: what `prepare` writes has exactly the fields a hook of an
+    // earlier release reads, and that reader refuses any other.
+    let written: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_slice(&fake.record().encode()).unwrap();
+    let mut fields: Vec<&str> = written.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "boot_id",
+            "guard_placed",
+            "markers",
+            "mode",
+            "previous",
+            "schema",
+            "serving"
+        ]
+    );
+    assert!(!fake.log().iter().any(|c| c == UNIT_2));
+    assert_eq!(
+        fake.snapshot().running.keys().copied().collect::<Vec<_>>(),
+        [9301]
+    );
+    let mark = fake.changes().len();
+    fake.advance(&[Step::Cutover]);
+    let changes = fake.changes()[mark..].to_vec();
+    assert_eq!(
+        changes[..2],
+        [
+            "units.stop tierstore@9301.service",
+            "units.start tierstore@9302.service"
+        ]
+    );
+    for (caps, mode, word) in [
+        (
+            &["handover-v1"][..],
+            Mode::Handover,
+            "handover (handover_capable)",
+        ),
+        (&[][..], Mode::Restart, "restart (not_handover_capable)"),
+    ] {
+        let fake = Fake::new();
+        fake.set_caps(NEW, caps);
+        let done = fake.run(Step::Prepare);
+        assert_eq!(
+            done.report.detail.unwrap(),
+            format!("prepared slot 9302 beside 9301, mode {word}")
+        );
+        assert_eq!(fake.record().mode, mode);
+    }
 }
 
 /// Asserts that the host checks give exit 75 with the class `environment`, the retry delay, and

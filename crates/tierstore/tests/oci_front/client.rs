@@ -169,6 +169,25 @@ impl Conn {
         self.buf.is_empty()
     }
 
+    /// Reads to the end of the stream: what came before it, for a clean end (over TLS, the server's
+    /// close), or the error, for a reset or a TLS stream that ends without its close.
+    pub async fn read_to_end(&mut self) -> std::io::Result<Vec<u8>> {
+        let mut all = std::mem::take(&mut self.buf);
+        self.stream.read_to_end(&mut all).await?;
+        Ok(all)
+    }
+
+    /// Writes `bytes` as they are.
+    pub async fn write_raw(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.stream.write_all(bytes).await?;
+        self.stream.flush().await
+    }
+
+    /// Closes the client's end: over TLS, the client's close, then the end of the stream.
+    pub async fn shutdown(&mut self) -> std::io::Result<()> {
+        self.stream.shutdown().await
+    }
+
     async fn fill(&mut self) -> bool {
         let mut chunk = vec![0; 64 * 1024];
         match self.stream.read(&mut chunk).await {

@@ -79,13 +79,18 @@ cannot even be written there, and the hook still does not trust it). The valid p
 must each be one of the two ports and differ; `mode` is `handover` or `restart`; each marker is one of `swapped`,
 `verified`, `stopping`; `schema` is one the binary knows. A unit name is built from a validated port, never read. Anything
 else is refused with exit `1`, class `environment`, reason `state_invalid`, **before any `nft`, `systemctl` or file call**.
-The same goes for the params file (numbers only, within sane ranges) and the environment (empty). The updater then runs
+The same goes for the params file (a flat table of scalars: numbers within sane ranges, the updater's staged release
+and target version, and `mode`, whose only value is `"restart"`; a refused file is `bad_params`) and the environment
+(empty). The updater then runs
 `rollback`, which reads the same record, refuses the same way, and ends in `halt` ([`host-updates.md`][hu] 3.2): a record that
 cannot be trusted is an operator's. The idle port is the other one of `serving`, recomputed every time.
 
 **`prepare <artifact>`** (before anything visible). Check `tierstore --capabilities` of the staged release and of the one
 the `serving` slot links to: both must have `handover-v1`, else the hook records `mode=restart` and `cutover` does a plain
-restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). Then load the guard table, before
+restart with a gap (the first release with the lock, section 5; [host-updates.md][hu] Question 15). The params key
+`mode = "restart"` records `mode=restart` whatever the capabilities say (a `dir:` hot tier, section 6). The step's
+`detail` names the mode and why (`handover_capable`, `not_handover_capable` or `declared_restart`); the record keeps
+the mode only, so that an earlier release's hook can still read it. Then load the guard table, before
 anything else is applied (it records whether the table was there before, and `guard_placed` once this update loaded it).
 Refuse with `75` (class `environment`: host not ready, nothing done) if the guard table cannot be loaded,
 `nf_conntrack_tcp_timeout_established` is not longer than the service's idle bound, or `nf_conntrack_count` is near
@@ -114,7 +119,8 @@ is answered by v-next with the staged version, the redirect names v-next, and v-
 `"promotion_pending":true`: v-current holds the lock, so v-next is read-only by design ([`host-updates.md`][hu] 3.8). After
 `cleanup` has stopped v-current (the `stopping` marker): wait for `/readyz` to say `read-write` for
 `promotion_bound_secs` (900, from the params file); if it does, `0` with no pending flag; if the bound passes, `0` with
-`"promotion_pending":true` and the holder of the lock in `detail`. **There is no ceiling in the hook**: the updater keeps
+`"promotion_pending":true`, and `detail` says the promotion is pending (it does not name who holds the lock: no instance
+reports that). **There is no ceiling in the hook**: the updater keeps
 running `verify` as its post-success watcher, outside the step table, and applies `promotion_ceiling_secs` (3600) itself,
 ending the watch as `Failed(after_commit)` for a storage node and a build node alike ([`host-updates.md`][hu] 3.2); the hook
 receives the value as `updater.promotion_ceiling_secs` in the params file and must not exit `1` for it. After the commit
@@ -214,7 +220,9 @@ create-only and skips a taken number (`Inner::write_batch`, `tiered.rs`).
   writes other bodies than the process before it, so a stale renew or release with the old tag fails. (Before the
   nonce, the body was `holder\n<generation>` and the two could collide.)
 - **A `dir:` hot tier cannot have two holders**: `DirBackend::put_if_match` is atomic among the calls of one backend only
-  (`dir.rs`). It keeps the plain restart (`mode=restart`).
+  (`dir.rs`), so the lease's compare-and-swap is not atomic across two processes. It keeps the plain restart
+  (`mode=restart`): packaging sets `mode = "restart"` in `[hook.params]` on such a host, and `prepare` then chooses a
+  restart even when both releases list `handover-v1`.
 
 **The same lock decides the reconciler.** A storage node takes `--lock-file` (new) with the same try loop. v-next serves
 reads and writes through its own proxy at once and does not run the reconcile loop until it holds the lock: v-current
@@ -235,7 +243,14 @@ established keep-alive connection still reaches v-current and would get a 503 wh
   connection (the client reads a clean end of stream), keep reading until the client closes, then close. A plain
   `close()` with unread request bytes sends a reset that can destroy an answer. A request already on the wire is served.
   Bytes arriving after the FIN are read, dropped and counted (`tierstore_drain_late_requests_total`): the remaining race
-  is a request within one round trip of the FIN, which no server can answer.
+  is a request within one round trip of the FIN, which no server can answer. The count (of connections, once each) can rise
+  from the start of the drain, but reaches its last value only after the S3 listener that serves `/metricz` has closed,
+  so a node that counted any says so on stderr as it exits (`late_note`, `server/drain.rs`), for each front.
+
+The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
+`server/linger.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
+blob) sent in full and its connection closed the same way after it, and its late requests counted in
+`tierstore_oci_drain_late_requests_total`, so that its clients see no gap either (question 4).
 
 **The client policy is no retry**: a retried create-only put is ambiguous (the retry's 412 cannot tell its own earlier
 success from another writer's). A client that follows P1 never meets the race: a connection is idle at the end of the
@@ -258,7 +273,8 @@ the cut requests are counted in `Drained.abandoned` (`cut_note`).
 
 Counters restart at 0 in a new process; a rate handles it; read the directory gauges from the lock holder. No family names
 a build, slot or mode today, and a scrape of 9300 does not say which instance answered. New: `tierstore_build_info
-{version,slot}`, `tierstore_cache_mode{mode}`, `tierstore_drain_late_requests_total`. A scraper that wants both instances
+{version,slot}`, `tierstore_cache_mode{mode}`, `tierstore_drain_late_requests_total` and
+`tierstore_oci_drain_late_requests_total`. A scraper that wants both instances
 scrapes the two private ports from the node (the guard blocks off-host); one is down between updates, so an alert is on
 "no instance up", not on `up == 0`.
 
@@ -309,12 +325,57 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   one in `state_dir` with a port outside the two, an unknown mode or marker, equal `serving` and `previous`, or a newer
   schema makes every step and `restore` exit `1` with the fake `nft` and `systemctl` recording **no call** (red: a hook
   that takes the port from the record). nft tests: see [`host-updates.md`][hu] 9. The service's own tests follow.
-- **T1 hand-over under load, no retry.** N clients put (create-only) and get, keep-alive and new, each sending its next
-  request when it has the previous answer, no retry of any request, while all five steps run end to end (remote clients
-  through a veth peer as well as local ones). Zero failed requests; every object a client was told was written reads
-  back with its bytes and hash; both instances answered (build gauge); `tierstore_drain_late_requests_total` is 0; the
-  directory passes `scan` with nothing discarded. Without P1 and P2 it fails; the same run ending in `rollback` before
-  `cleanup` has zero failures too.
+- **T1 hand-over under load, no retry.** In `crates/tierstore/tests/handover`, run by the CI job `handover-t1`. The real
+  `tierstore update-hook` runs its steps, the real `nft` applies its rules in two network namespaces the test makes and
+  deletes, and two real servers are the slots 9301 and 9302 behind 9300; `systemctl` is a stand-in that starts and stops
+  the test's own processes with the slot unit's semantics. Twelve clients, each sending its next request when it has
+  the previous answer and retrying none: eight S3 clients (create-only puts, every sixteenth an empty object, gets of
+  what they wrote, `/metricz`) through 9300, kept-alive and new connections, in the host and through a veth peer, IPv4
+  and IPv6; four OCI clients (`GET` and `HEAD` of `/v2/`, of a manifest and of blobs by digest, each answer's
+  `Docker-Content-Digest` checked; the content seeded by S3 puts at its `oci/blobs/sha256/` keys) on v-current's own OCI
+  port. Between two steps every client finishes twenty more requests (or an OCI client has ended). The OCI front is
+  read-only and the hook does not redirect it, so an OCI client's sequence ends, cleanly, at v-current's drain (an
+  answer with `Connection: close`, or a clean end of stream), and only after the run has said that drain is coming;
+  until then every OCI request must succeed. Besides the clients, a put and an S3 and an OCI get of 16 MiB are held
+  part-way from before `cutover` until v-current's settle is over (both its listeners refuse), and must then complete
+  (each get is held with more of its answer unsent than the largest send buffer of the kernel, so the server is still
+  sending);
+  and an idle S3 and OCI connection to v-current each write a request after its end of stream and close, which the
+  lingering close reads and counts. The runs, one test each:
+  - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
+    `handover-v1`, so `CAPABILITIES` is unchanged): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
+    requests; the held transfers complete; every acknowledged write, empty ones included, reads back with its bytes and
+    hash; each client on new connections met both slots (`/metricz` through 9300); a direct connect from the veth peer
+    to a private slot is dropped by the guard, IPv4 and IPv6 (counted by a watch table of the test's own around the
+    guard), while the redirected traffic passes; every server that stopped exited 0, v-current's exit note (section 7)
+    naming exactly the idle probes' late requests, one on each front, and the other's none; v-next's promotion and a
+    fresh start on the directory discard nothing.
+  - (b) the same ending in `rollback` before `cleanup`: zero failures; v-current serves read-write through the rule,
+    with no late request; v-next is stopped and its link removed.
+  - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
+    v-next, so a new connection in between is refused. The bound asserted: every failed request is an S3 connect into
+    that gap (from just before `cutover` until it returned), refused or reset in its handshake, counted and printed; no
+    request whose connect succeeded fails, whatever it reads. A plain restart has a race this bound does not admit, and
+    T1 reports it when it happens: the redirect still names v-current while it settles, so a connection that reaches it
+    as its listener closes at the end of the settle is reset (the listener's queue held it) or, accepted an instant
+    before with its request not yet read, closed idle. It is rare; closing it means moving the redirect off v-current
+    before its settle, which turns the whole settle into refused connects, or changing the end of the settle, and neither
+    is done here. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
+    connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
+    requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two
+    slots' proxy ids and hold each acknowledged key once; once both slots have stopped, no lease is left.
+  - The hook killed by its `nft` right after `cutover` applied the swap, before `swapped`: `restore` puts the rule back
+    on v-current, `rollback` follows, then a whole hand-over; zero failures throughout.
+  - Without P1 and P2 (servers built with the test-only feature `test-drain-off`), run (a) fails: kept-alive S3
+    connections end without an answer at v-current's drain. Apart from that, v-current's drain reads none of the idle
+    probes' late requests: no answer in the drain went to those connections, so only the lingering close (P2) could.
+
+  It needs CAP_NET_ADMIN and runs only with the feature `handover-t1`; without it the workspace's test run ignores it.
+  As a user who may `sudo` (cargo builds as that user; only the test binary runs as root):
+
+  ```sh
+  cargo build -p tierstore --features server,test-drain-off --bin tierstore --target-dir target/drain-off && cargo test -p tierstore --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo'"
+  ```
 - **T2 lock and self-take.** Two processes on one directory: the second is read-only and its retry count rises while the
   first holds the lock (an injected clock ticks the retries); after the first is killed it takes the lock, runs
   `clear_stage` and `scan` (a half-published sidecar is cleaned), serves a counted fill and says `read-write`; a replaced
@@ -348,7 +409,9 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
 6. *Decided (accepted 2026-11-01).* **The residual race** (a request within one round trip of the FIN on a connection idle since before the drain).
    Recommendation: accept it as the stated limit, counted, and do not ask clients to retry a create-only put.
 7. *Decided (accepted 2026-11-01).* **First lock release** goes in by `mode=restart` ([host-updates.md][hu] Question 15), and so does a `dir:` hot tier.
-   Recommendation: accept.
+   Recommendation: accept. The `dir:` case is declared, not detected: packaging sets `mode = "restart"` in
+   `[hook.params]` for a host whose hot tier is `dir:`, since the lease's compare-and-swap there is not atomic across
+   processes; it is the only value the key takes.
 8. *Decided (accepted 2026-11-01).* **Version source.** Recommendation: the build gauge, with the commit baked into the binary rather than the crate version.
 9. *Decided (accepted 2026-11-01).* **`state_dir` mode.** The slot links must be executable by the service, so `state_dir` cannot be `0700`
    ([host-updates.md][hu] 3.4.1 says read access "through group membership", the 2.4 example says `0700`). Recommendation: mode

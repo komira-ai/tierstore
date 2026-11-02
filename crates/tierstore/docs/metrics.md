@@ -277,6 +277,15 @@ request within one round trip of the end of the stream: the request was read, dr
 answered (see "Drain and restart" in [operations](operations.md)). A request that was on the wire
 before the server shut its end is served and is not counted.
 
+The OCI read front drains the same way, and its block has one more series that counts the same
+thing for the front's own connections (the series above counts only those of the S3 listener):
+
+| name | type | labels | increments when |
+|---|---|---|---|
+| `tierstore_oci_drain_late_requests_total` | counter | none | in a drain, the OCI front had shut its end of a connection for writing and its client wrote after that: counted once for each such connection, not for each read |
+
+The two together are the requests that came too late in a drain.
+
 ### v1: changes in the next release
 
 The series of "The build-node cache (v1)" above change as follows, and the cache gains the series

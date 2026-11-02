@@ -19,6 +19,8 @@
 
 mod args;
 mod declaration;
+#[cfg(feature = "hook-conformance")]
+pub mod fake;
 pub mod machine;
 mod params;
 mod plain;
@@ -36,11 +38,11 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-pub use args::{ArgsError, Invocation, Step};
+pub use args::{ArgsError, HostArgs, Invocation, ROOT_UID, Step};
 pub use declaration::{DECLARATION_PATH, Declaration, DeclarationError, PUBLIC_PORT, unit_name};
 pub use params::{
-    CONNTRACK_PERCENT_KEY, DEFER_RETRY_KEY, PROMOTION_BOUND_KEY, PROMOTION_CEILING_KEY, Params,
-    ParamsError, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    CONNTRACK_PERCENT_KEY, DEFER_RETRY_KEY, MODE_KEY, PROMOTION_BOUND_KEY, PROMOTION_CEILING_KEY,
+    Params, ParamsError, RESTART_MODE, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
 };
 pub use ports::{
     Clock, Conntrack, Host, Instances, Lock, Nft, PortError, PortKind, Ports, Reply, Slots,
@@ -149,6 +151,10 @@ pub fn main(args: &[OsString]) -> ExitCode {
 mod args_tests;
 #[cfg(test)]
 mod declaration_tests;
+#[cfg(test)]
+mod docs_tests;
+#[cfg(all(test, feature = "hook-conformance"))]
+mod fake_tests;
 #[cfg(test)]
 mod params_tests;
 #[cfg(test)]

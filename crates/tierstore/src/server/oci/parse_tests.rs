@@ -307,6 +307,10 @@ fn the_counters_count_and_render() {
     metrics.sent(7);
     metrics.sent(5);
     metrics.mismatch();
+    // What the drain of the front's listener counts into.
+    let late = metrics.late_counter();
+    late.fetch_add(3, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(metrics.late_requests(), 3);
     assert_eq!(metrics.requests("blob", "ok"), 2);
     assert_eq!(metrics.requests("manifest", "failed"), 1);
     assert_eq!(metrics.requests("other", "not_allowed"), 1);
@@ -324,6 +328,8 @@ fn the_counters_count_and_render() {
         ranged,
         "tierstore_oci_bytes_served_total 12\n",
         "tierstore_oci_digest_mismatches_total 1\n",
+        "# TYPE tierstore_oci_drain_late_requests_total counter\n",
+        "tierstore_oci_drain_late_requests_total 3\n",
     ] {
         assert!(text.contains(line), "{line}\n{text}");
     }
@@ -336,8 +342,8 @@ fn the_counters_count_and_render() {
         plain.contains("tierstore_oci_front_info{mode=\"http\"} 1\n"),
         "{plain}"
     );
-    // Four routes by seven outcomes, four counters' type lines, two totals, the mode.
-    assert_eq!(text.lines().count(), 4 * 7 + 4 + 2 + 1);
+    // Four routes by seven outcomes, five counters' type lines, three totals, the mode.
+    assert_eq!(text.lines().count(), 4 * 7 + 5 + 3 + 1);
 }
 
 /// Asserts a header value that cannot be one is replaced by an empty value, not a panic.

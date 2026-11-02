@@ -214,6 +214,7 @@ impl Fake {
             host: self,
             clock: self,
             state: self,
+            public_port: PUBLIC_PORT,
         }
     }
 

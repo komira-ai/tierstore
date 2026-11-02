@@ -64,7 +64,7 @@ pub(super) fn attach(server: &Arc<Server>) -> DuplexStream {
 pub(super) async fn until(server: &Server, ready: impl Fn(&Server) -> bool) {
     let waiting = async {
         loop {
-            let changed = server.idle.notified();
+            let changed = server.drain.idle.notified();
             tokio::pin!(changed);
             let _ = changed.as_mut().enable();
             if ready(server) {

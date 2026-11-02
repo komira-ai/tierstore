@@ -5,6 +5,7 @@
 mod binary;
 mod cache_node;
 mod client;
+mod drain;
 mod front;
 mod limits;
 mod pki;

@@ -1,7 +1,8 @@
 //! The registry front of a build node, in the `tierstore` process: a manifest and a blob that sit
 //! in the upstream are pulled by digest over plain HTTP, the second read of a blob is answered
 //! from the cache's disk, a blob larger than `whole_fill_limit` is passed through and still
-//! checked against its digest, and a start whose OCI address is taken fails.
+//! checked against its digest, the front drains as the S3 front does, and a start whose OCI
+//! address is taken fails.
 
 use std::fs::Permissions;
 use std::net::SocketAddr;
@@ -70,6 +71,11 @@ impl<'a> Node<'a> {
     /// Starts the node. `local` is more keys of `[local_cache]`. The upstream wants its own key,
     /// so what the test seeds is put before this is called.
     fn start(fake: &'a FakeS3, name: &str, local: &str) -> Self {
+        Self::start_with_settle(fake, name, local, "50ms")
+    }
+
+    /// [`Node::start`] with `--drain-lb-wait` set to `settle`.
+    fn start_with_settle(fake: &'a FakeS3, name: &str, local: &str, settle: &str) -> Self {
         fake.require_credentials("UPKEY", "up-secret");
         let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
@@ -110,7 +116,7 @@ cache  = true
         let mut command = Command::new(env!("CARGO_BIN_EXE_tierstore"));
         command
             .args(["--config", &config.display().to_string()])
-            .args(["--drain-lb-wait", "50ms"])
+            .args(["--drain-lb-wait", settle])
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         let mut child = spawn(&mut command, 3).expect("spawned");
@@ -172,10 +178,20 @@ cache  = true
         assert_eq!(hex_of(&body), hex);
     }
 
-    /// Stops the node with SIGTERM and gives its exit status.
-    async fn stop(mut self) -> Option<i32> {
+    /// Sends SIGTERM to the node: its drain begins.
+    fn signal_stop(&self) {
         let pid = Pid::from_raw(i32::try_from(self.child.id()).expect("a pid")).expect("a pid");
         kill_process(pid, Signal::TERM).expect("signalled");
+    }
+
+    /// Stops the node with SIGTERM and gives its exit status.
+    async fn stop(self) -> Option<i32> {
+        self.signal_stop();
+        self.stop_waiting().await
+    }
+
+    /// Waits for the node, which has been sent SIGTERM, to exit; its exit status.
+    async fn stop_waiting(mut self) -> Option<i32> {
         let waiting = tokio::task::spawn_blocking(move || self.child.wait());
         waiting.await.expect("joined").expect("waited").code()
     }
@@ -238,6 +254,36 @@ async fn a_build_node_serves_the_registry_from_its_cache() {
 
     drop(conn);
     assert_eq!(node.stop().await, Some(0));
+}
+
+/// Asserts that the registry front of a build node drains as its S3 front does: once SIGTERM has
+/// begun the drain (`/readyz` on the S3 listener says 503), an answer of the OCI front, on a
+/// connection that was served without it before, carries `Connection: close` and the connection
+/// then ends with a clean end of stream; and that the process exits with status 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_build_node_says_connection_close_on_the_registry_front_in_the_drain() {
+    let fake = FakeS3::start().await;
+    // Long enough for the requests below to be made within it.
+    let node = Node::start_with_settle(&fake, "oci-cache-node-drain", "", "5s");
+    let mut conn = Conn::open_plain(node.oci).await.expect("a connection");
+    let before = conn.request("GET", "/v2/", &[]).await.expect("an answer");
+    assert_eq!((before.status, before.header("connection")), (200, None));
+
+    node.signal_stop();
+    let url = format!("http://{}/readyz", node.s3);
+    let draining = async {
+        while reqwest::get(&url).await.expect("readyz").status() == 200 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    let seen = tokio::time::timeout(Duration::from_secs(60), draining).await;
+    seen.expect("the drain never began");
+    let after = conn.request("GET", "/v2/", &[]).await.expect("an answer");
+    assert_eq!(after.status, 200);
+    assert_eq!(after.header("connection"), Some("close"), "{after:?}");
+    assert!(conn.read_to_end().await.expect("a clean end").is_empty());
+    drop(conn);
+    assert_eq!(node.stop_waiting().await, Some(0));
 }
 
 /// Asserts what `whole_fill_limit` does to the registry front, with the limit lowered to 200000
