@@ -5,7 +5,9 @@
 //! The cache does file I/O on blocking threads, so these tests run on the real clock.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use futures::{StreamExt as _, stream};
 use tierstore::server::local_cache::{CacheConfig, LocalCache, SystemDisk};
 use tierstore::{
     Backend, ByteRange, Clock, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig,
@@ -188,4 +190,30 @@ async fn a_hot_only_put_through_the_cache_answers_full_and_stores_nothing_in_col
         .unwrap();
     assert_eq!(read(&*rig.cold_mem, "other/c").await, body("abc"));
     assert_absent(&*rig.hot_mem, "other/c").await;
+}
+
+/// Asserts that a put of a key only the hot tier holds is refused by the cache before any byte of
+/// the body is read, and that neither tier is written: the proxy's own put would write the whole
+/// body to the hot tier before it found the key there. The body counts the chunks asked of it.
+#[tokio::test]
+async fn a_put_of_a_key_the_hot_tier_holds_is_refused_before_the_body_is_read() {
+    let tiers = Tiers::new();
+    let proxy = tiers.proxy().await;
+    tiers.hot_mem.put("img/h", body("old")).await.unwrap();
+    let (_dir, cache) = cache_over(proxy, true, |_| {});
+    let puts = (tiers.hot.calls(Op::Put), tiers.cold.calls(Op::Put));
+
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&asked);
+    let large = stream::iter(0..1000)
+        .map(move |_| {
+            let _ = counted.fetch_add(1, Ordering::SeqCst);
+            Ok(body("0123456789"))
+        })
+        .boxed();
+    let refused = cache.put_stream("img/h", Some(10_000), large).await;
+    assert_eq!(refused, Err(Error::AlreadyExists("img/h".to_owned())));
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+    assert_eq!(read(&*tiers.hot_mem, "img/h").await, body("old"));
+    assert_eq!(puts, (tiers.hot.calls(Op::Put), tiers.cold.calls(Op::Put)));
 }

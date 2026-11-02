@@ -343,17 +343,16 @@ impl Inner {
         hot_only: bool,
     ) -> Result<(), Error> {
         self.writable(key)?;
-        // An upstream of two tiers answers `AlreadyExists` to its own create-only put before it
-        // reads the body, and a HEAD of it costs a call to each tier: the HEAD is left out.
-        if !self.config.tiered_upstream {
-            match self.upstream.head(key).await {
-                Ok(_) => {
-                    bump(&self.counters.write_exists);
-                    return Err(Error::AlreadyExists(key.to_owned()));
-                }
-                Err(Error::NotFound(_)) => {}
-                Err(other) => return Err(other),
+        // One HEAD before the body is read, for an upstream of two tiers as for any other: a key
+        // that only the first tier holds is refused by the proxy's own put only after the whole
+        // body has been written to that tier, so the HEAD is what spares the bandwidth and room.
+        match self.upstream.head(key).await {
+            Ok(_) => {
+                bump(&self.counters.write_exists);
+                return Err(Error::AlreadyExists(key.to_owned()));
             }
+            Err(Error::NotFound(_)) => {}
+            Err(other) => return Err(other),
         }
         let name = self.cacheable(key);
         let mut keeping = match &name {
