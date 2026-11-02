@@ -1035,6 +1035,133 @@ mod tests {
         assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    /// A relay on loopback between a client and a store that only the runtime's idle turns
+    /// move: each time the runtime is about to park with nothing to do, [`Relay::turn`]
+    /// passes what the client sent on to the store at once, and what the store sent on to
+    /// the client `delay` turns after it read it. A park that follows finds nothing new for
+    /// the client while the store's bytes are held, which is the order of events a loopback
+    /// socket on macOS can give (a write the peer cannot read yet when the runtime looks).
+    struct Relay {
+        state: std::sync::Mutex<RelayState>,
+        addr: std::net::SocketAddr,
+    }
+
+    struct RelayState {
+        listener: std::net::TcpListener,
+        store: Option<std::net::SocketAddr>,
+        pair: Option<(std::net::TcpStream, std::net::TcpStream)>,
+        /// The store's bytes not yet passed on, each with the turns it still waits.
+        held: std::collections::VecDeque<(usize, Vec<u8>)>,
+        delay: usize,
+    }
+
+    impl Relay {
+        fn new(delay: usize) -> Arc<Self> {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addr = listener.local_addr().unwrap();
+            Arc::new(Self {
+                state: std::sync::Mutex::new(RelayState {
+                    listener,
+                    store: None,
+                    pair: None,
+                    held: std::collections::VecDeque::new(),
+                    delay,
+                }),
+                addr,
+            })
+        }
+
+        /// A current-thread runtime whose every idle park first turns this relay.
+        fn runtime(self: &Arc<Self>) -> tokio::runtime::Runtime {
+            let relay = Arc::clone(self);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .on_thread_park(move || relay.turn())
+                .build()
+                .unwrap()
+        }
+
+        /// The endpoint the client uses to reach the store at `endpoint` through this relay.
+        fn front(&self, endpoint: &str) -> String {
+            let store = endpoint.trim_start_matches("http://").parse().unwrap();
+            self.state.lock().unwrap().store = Some(store);
+            format!("http://{}", self.addr)
+        }
+
+        fn turn(&self) {
+            use std::io::Write;
+            let mut s = self.state.lock().unwrap();
+            let s = &mut *s;
+            if s.pair.is_none() {
+                let Some(store) = s.store else { return };
+                match s.listener.accept() {
+                    Ok((client, _)) => {
+                        let upstream = std::net::TcpStream::connect(store).unwrap();
+                        client.set_nonblocking(true).unwrap();
+                        upstream.set_nonblocking(true).unwrap();
+                        s.pair = Some((client, upstream));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
+                    Err(e) => panic!("relay accept: {e}"),
+                }
+            }
+            let Some((client, store)) = s.pair.as_mut() else {
+                return;
+            };
+            store.write_all(&drain(client)).unwrap();
+            for held in s.held.iter_mut() {
+                held.0 -= 1;
+            }
+            while s.held.front().is_some_and(|held| held.0 == 0) {
+                let (_, bytes) = s.held.pop_front().unwrap();
+                client.write_all(&bytes).unwrap();
+            }
+            let down = drain(store);
+            if !down.is_empty() {
+                s.held.push_back((s.delay, down));
+            }
+        }
+    }
+
+    /// Everything `sock` (non-blocking) has to read now.
+    fn drain(sock: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match sock.read(&mut buf) {
+                Ok(0) => return out,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return out,
+                Err(e) => panic!("relay read: {e}"),
+            }
+        }
+    }
+
+    /// Catches: a test clock that moves while bytes the store wrote are still on their
+    /// way to the client. The steady body of the test above, with each of the store's
+    /// writes held for fifty idle turns of the runtime before the client can read it.
+    #[test]
+    fn a_steady_body_that_reaches_the_client_fifty_idle_turns_late_comes_back_whole() {
+        let relay = Relay::new(50);
+        relay.runtime().block_on(async {
+            let len = 1000;
+            let (endpoint, taken, served) = scripted(
+                len,
+                Script::Steady {
+                    pieces: 20,
+                    every: Duration::from_secs(4),
+                },
+            )
+            .await;
+            let endpoint = relay.front(&endpoint);
+            let got = read_once_served(&endpoint, &served, len).await.unwrap();
+            assert_eq!(got.as_ref(), vec![7u8; len].as_slice());
+            assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
+        });
+    }
+
     /// Catches: a stalled body that is never cut, or cut but reported as a plain
     /// transport failure and sent again: it fails as a timeout, after one request.
     #[tokio::test]
