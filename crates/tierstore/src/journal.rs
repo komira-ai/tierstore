@@ -7,7 +7,8 @@
 //!   reconciler; the ones at or below it may have been deleted.
 //! - `_tiering/proxies/<proxy_id>`: written when a proxy starts, so that the reconciler finds
 //!   the journals without listing the journal prefix of every proxy.
-//! - `_tiering/checkpoint/<proxy_id>`: a [`Checkpoint`], rewritten by the reconciler.
+//! - `_tiering/checkpoint/<proxy_id>`: a [`Checkpoint`], rewritten by the reconciler, never to a
+//!   lower value.
 //! - `_tiering/usage`: the usage the reconciler publishes, for the proxies.
 //! - `_tiering/lease`: the lease that makes one reconciler the runner.
 
@@ -117,11 +118,27 @@ pub fn decode_journal(body: &[u8]) -> Result<Vec<JournalEntry>, Error> {
 /// delete, or a put that the cold tier holds and that left the hot tier or was superseded.
 /// With the journal objects from `evict_seq` on, it is all the reconciler needs to know about
 /// the hot tier after a restart.
+///
+/// The stored values never decrease: see [`store_checkpoint`].
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
     pub(crate) seq: u64,
     pub(crate) evict_seq: u64,
     pub(crate) evict_idx: u64,
+}
+
+impl Checkpoint {
+    /// What both checkpoints say: the larger `seq`, and the later of the two positions
+    /// (`evict_seq`, then `evict_idx`, as a pair). Each claim stands alone ("applied up to
+    /// here", "done with everything before here"), so it is true if either writer made it.
+    pub(crate) fn joined(&self, other: &Self) -> Self {
+        let position = (self.evict_seq, self.evict_idx).max((other.evict_seq, other.evict_idx));
+        Self {
+            seq: self.seq.max(other.seq),
+            evict_seq: position.0,
+            evict_idx: position.1,
+        }
+    }
 }
 
 /// What the reconciler publishes in `_tiering/usage` after each pass.
@@ -151,7 +168,7 @@ pub(crate) async fn load_checkpoint(
     }
 }
 
-/// Writes a small object that is rewritten in place: create-only the first time, and then
+/// Writes a small object that is rewritten in place (the usage, not a checkpoint): create-only the first time, and then
 /// only over the object whose content tag a HEAD just gave.
 pub(crate) async fn write_object(hot: &dyn Backend, key: &str, body: Bytes) -> Result<(), Error> {
     match hot.head(key).await {
@@ -159,4 +176,35 @@ pub(crate) async fn write_object(hot: &dyn Backend, key: &str, body: Bytes) -> R
         Err(Error::NotFound(_)) => hot.put(key, body).await,
         Err(error) => Err(error),
     }
+}
+
+/// Stores `wanted` as the checkpoint of a proxy unless the stored one already says as much, and
+/// never lowers a stored value: what is stored is read back, joined with `wanted`, and written
+/// only if the join is more than what was stored, and only over the object whose tag the HEAD
+/// gave (if another writer stored since, this fails with [`Error::PreconditionFailed`] and the
+/// next pass tries again). Gives what is stored after the call.
+///
+/// # Errors
+/// What the HEAD, the read or the write give; [`Error::Other`] if the stored checkpoint does not
+/// decode (delete the object to start the proxy over).
+pub(crate) async fn store_checkpoint(
+    hot: &dyn Backend,
+    proxy_id: &str,
+    wanted: &Checkpoint,
+) -> Result<Checkpoint, Error> {
+    let key = checkpoint_key(proxy_id);
+    let tag = match hot.head(&key).await {
+        Ok(meta) => meta.tag,
+        Err(Error::NotFound(_)) => {
+            hot.put(&key, to_body(wanted)).await?;
+            return Ok(wanted.clone());
+        }
+        Err(error) => return Err(error),
+    };
+    let stored = load_checkpoint(hot, proxy_id).await?;
+    let merged = stored.joined(wanted);
+    if merged != stored {
+        hot.put_if_match(&key, to_body(&merged), &tag).await?;
+    }
+    Ok(merged)
 }

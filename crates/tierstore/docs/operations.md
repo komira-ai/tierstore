@@ -48,6 +48,16 @@ The hot tier's size is measured against `--hot-bytes` (`hot_store.budget`). Thre
 
 Eviction frees the hot tier only as fast as the cold tier takes copies, which `--copy-parallel` bounds. If the cold tier is slow or down, copies stall, nothing becomes evictable, and the hot tier climbs to the budget.
 
+## The reconciler's checkpoint
+
+The reconciler keeps one small object for each proxy, `_tiering/checkpoint/<proxy_id>` in the hot tier, that says how far it has worked through that proxy's journal. It never stores a checkpoint that is behind the one that is stored: it reads the stored one, keeps the larger of each number, and writes only if that is more. Before it stores anything in a pass it checks, with a read that does not renew it, that it still holds the lease; a pass that finds the lease gone (it took longer than `--lease-ttl`, and another process took over) stores no checkpoint, deletes no journal object and publishes no usage, and the next pass starts from the stored checkpoint. That is not reported as a failure.
+
+The check is not a fence. A pass that outlasts the lease still copies, and may still evict, beside the new holder, and a takeover that falls between the check and the writes can still let that pass prune or publish usage; keep passes shorter than `--lease-ttl`.
+
+Lowering a checkpoint by hand does not stick, because the reconciler keeps the larger value. To make a proxy's journal be read again from the start, delete the checkpoint object (the next pass starts from journal object 1; copies find what the cold tier holds). A checkpoint object that does not decode fails that proxy's pass each time, with `corrupt checkpoint of <proxy_id>`, until it is deleted the same way.
+
+Rolling upgrade: the guarantee that a checkpoint never moves backwards holds once every process that runs a reconciler runs this version. While an older process is among them, it can still store a lower checkpoint.
+
 ## What a full disk does
 
 A `dir` hot tier whose disk is out of space, or an `s3` hot tier that answers 507, is a full hot tier: the put that met it goes to the cold tier where nothing of its body was taken yet, and the tier is taken to be full for a moment. A put that had already streamed some of its body into the hot tier fails, and the client's retry goes to the cold tier. Reads use both tiers throughout. The hot tier is used again once the usage falls. Objects written straight to the cold tier are not journaled and not copied; the reconciler has nothing to do for them.
