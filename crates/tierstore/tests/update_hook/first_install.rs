@@ -64,15 +64,17 @@ fn readme() -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
-/// The guard table the README has loaded before any slot runs: the body of its `nft` block.
+/// The guard table the README has loaded before any slot runs: the lines of its `nft` block,
+/// each without the list item's indentation, up to the line of the closing fence.
 fn readme_guard() -> String {
     let readme = readme();
-    let at = readme.find("```nft\n").expect("the README's nft block") + "```nft\n".len();
-    let end = readme[at..].find("```").expect("the end of the block") + at;
-    readme[at..end]
-        .lines()
-        .map(|line| format!("{}\n", line.trim()))
-        .collect()
+    let mut lines = readme.lines().map(str::trim);
+    lines
+        .by_ref()
+        .find(|line| *line == "```nft")
+        .expect("the README's nft block");
+    let block: Vec<&str> = lines.take_while(|line| *line != "```").collect();
+    block.iter().map(|line| format!("{line}\n")).collect()
 }
 
 /// Asserts that the guard the README loads by hand is the hook's own guard for the public port
