@@ -159,6 +159,12 @@ pub(crate) fn header_text(text: &str) -> String {
         .collect()
 }
 
+/// `text` as a header value. `header_text` leaves printable ASCII only, which is always one;
+/// a text that is not is answered as `?`, so that the header is still there and shows it.
+pub(crate) fn header_value(text: &str) -> HeaderValue {
+    HeaderValue::from_str(text).unwrap_or_else(|_| HeaderValue::from_static("?"))
+}
+
 /// An answer with these headers (names in lower case) and this body.
 pub(crate) fn answer(
     status: StatusCode,
@@ -171,15 +177,10 @@ pub(crate) fn answer(
     let mut response = Response::new(body);
     *response.status_mut() = status;
     for (name, value) in headers {
-        // `header_text` leaves printable ASCII only, which is always a header value: the `Ok`
-        // is every case there is.
-        HeaderValue::from_str(&header_text(value))
-            .into_iter()
-            .for_each(|value| {
-                response
-                    .headers_mut()
-                    .insert(HeaderName::from_static(name), value);
-            });
+        response.headers_mut().insert(
+            HeaderName::from_static(name),
+            header_value(&header_text(value)),
+        );
     }
     response
 }

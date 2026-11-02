@@ -49,6 +49,7 @@ use tokio::sync::Notify;
 
 use crate::server::lock::{self, LockFile};
 
+use super::evict::joined;
 use super::{Inner, LocalCache, layout, locked};
 use super::{add, index_of};
 
@@ -430,8 +431,8 @@ impl LocalCache {
                 let outcome = inner.tick();
                 inner.describe(&outcome)
             });
-            // A tick that panicked said so on stderr (the panic hook); the loop goes on to the next.
-            if let Some(line) = ticking.await.unwrap_or_default() {
+            // A tick that panicked or was cancelled is said on stderr; the loop goes on to the next.
+            if let Some(line) = joined(ticking.await, "a hold tick").flatten() {
                 eprintln!("tierstore: {line}");
             }
             #[cfg(test)]
