@@ -55,6 +55,7 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--systemctl",
     "--public-port",
     "--poll-interval-ms",
+    "--pattern",
 ];
 
 /// Flags of the binary the pages need not name.

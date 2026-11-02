@@ -1,7 +1,7 @@
 //! The start of a build node: what it serves, and the refusals of its start.
 
 use std::fs::Permissions;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -775,12 +775,27 @@ async fn a_taken_oci_address_stops_the_start_and_closes_the_s3_listener() {
     assert!(again.is_ok(), "the S3 address is still held");
 }
 
+/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
+/// one: 127.0.0.2 on Linux, where all of 127.0.0.0/8 is loopback.
+#[cfg(target_os = "linux")]
+fn beside_loopback() -> IpAddr {
+    IpAddr::from([127, 0, 0, 2])
+}
+
+/// An address of this host other than 127.0.0.1, for a configured address beside the loopback
+/// one: `::1` where 127.0.0.1 is the only IPv4 loopback address (macOS). Its socket is IPv6
+/// only, so 127.0.0.1 on the same port is still added and still free ([`super::listen::bind_set`]).
+#[cfg(not(target_os = "linux"))]
+fn beside_loopback() -> IpAddr {
+    IpAddr::from(std::net::Ipv6Addr::LOCALHOST)
+}
+
 /// Asserts that a build node serves its S3 port on 127.0.0.1 as well as on the configured
 /// address, and answers `/readyz` on both, with the configured address first in `ready`.
 #[tokio::test]
 async fn a_build_node_also_serves_the_s3_port_on_loopback() {
     let node = Node::new("tscache-cli-loopback");
-    let free = std::net::TcpListener::bind("127.0.0.2:0").unwrap();
+    let free = std::net::TcpListener::bind((beside_loopback(), 0)).unwrap();
     let configured = free.local_addr().unwrap();
     drop(free);
     let text = node
@@ -808,7 +823,7 @@ async fn a_taken_loopback_port_stops_the_start_of_a_build_node() {
     let node = Node::new("tscache-cli-loopback-taken");
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
-    let configured: SocketAddr = format!("127.0.0.2:{port}").parse().unwrap();
+    let configured = SocketAddr::from((beside_loopback(), port));
     let text = node
         .text("", "")
         .replace("127.0.0.1:0", &configured.to_string());

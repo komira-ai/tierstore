@@ -5,6 +5,8 @@
 #![allow(dead_code)]
 
 mod lint;
+mod platforms;
+mod platforms_tests;
 mod yaml;
 
 use std::path::PathBuf;
