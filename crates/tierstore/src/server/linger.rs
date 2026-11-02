@@ -23,6 +23,10 @@ use super::drain::Drain;
 pub(super) struct Wire {
     /// Bytes of a request have been read and its answer has not been written and flushed in full.
     on: AtomicBool,
+    /// Bytes of a request have been read, ever: the connection has carried one.
+    carried: AtomicBool,
+    /// Notified when the first bytes of the first request are read.
+    begun: Notify,
     /// Notified when the answer of the request on the wire is flushed.
     answered: Notify,
     /// The streamed bodies of the request on the wire that are not over (see [`WireHold`]): the
@@ -72,6 +76,20 @@ impl Wire {
     /// Whether a request is on the wire.
     pub(super) fn is_on(&self) -> bool {
         self.on.load(Ordering::SeqCst)
+    }
+
+    /// Resolves once the connection has carried a request: at once if it has, and else when the
+    /// first bytes of its first request are read.
+    pub(super) async fn wait_first(&self) {
+        loop {
+            let begun = self.begun.notified();
+            tokio::pin!(begun);
+            let _ = begun.as_mut().enable();
+            if self.carried.load(Ordering::SeqCst) {
+                return;
+            }
+            begun.await;
+        }
     }
 
     /// Resolves, once the wire is clear of the request that is on it; at once if none is.
@@ -179,6 +197,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Lingering<T> {
     pub(super) fn new(inner: T, drain: &Arc<Drain>) -> (Self, Arc<Wire>) {
         let wire = Arc::new(Wire {
             on: AtomicBool::new(false),
+            carried: AtomicBool::new(false),
+            begun: Notify::new(),
             answered: Notify::new(),
             streams: AtomicUsize::new(0),
             wrote: AtomicBool::new(false),
@@ -228,6 +248,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Lingering<T> {
     fn arrived(&mut self) {
         if !self.wire.on.swap(true, Ordering::SeqCst) {
             self.drain.unanswered.fetch_add(1, Ordering::SeqCst);
+        }
+        if !self.wire.carried.swap(true, Ordering::SeqCst) {
+            self.wire.begun.notify_waiters();
         }
     }
 }

@@ -141,12 +141,14 @@ fn a_handover_runs_its_steps_against_the_fakes_and_ends_on_the_new_slot() {
 }
 
 /// Asserts the restart through the real binary, when the running release lacks `handover-v1`:
-/// `prepare` loads the guard and starts nothing; `cutover` stops the old unit, starts the new one
-/// and only then applies the redirect; `verify` sees the new instance read-write at once (no
-/// promotion pending); `cleanup`'s stop of the stopped unit changes nothing. It would catch two
-/// instances of a release without the lock running side by side.
+/// `prepare` loads the guard and starts nothing; `cutover` applies the redirect to the new slot's
+/// port first, then stops the old unit, starts the new one and applies the redirect again;
+/// `verify` sees the new instance read-write at once (no promotion pending); `cleanup`'s stop of
+/// the stopped unit changes nothing. It would catch two instances of a release without the lock
+/// running side by side, and an old unit stopped while the redirect still sends it new
+/// connections, which its closing listener resets.
 #[test]
-fn a_restart_stops_the_old_unit_before_the_new_one_starts() {
+fn a_restart_moves_the_redirect_then_stops_the_old_unit_before_the_new_one_starts() {
     let rig = Rig::new("hook-conformance-restart", Setup::restart());
     let (a, b) = (rig.a, rig.b);
     let ran = rig.step("prepare");
@@ -163,7 +165,7 @@ fn a_restart_stops_the_old_unit_before_the_new_one_starts() {
     rig.step("cutover").ok();
     assert_eq!(
         rig.calls_since(mark),
-        [stop(a).as_str(), start(b).as_str(), APPLY]
+        [APPLY, stop(a).as_str(), start(b).as_str(), APPLY]
     );
     assert_eq!(rig.running(), [b]);
 
@@ -184,9 +186,9 @@ fn a_restart_stops_the_old_unit_before_the_new_one_starts() {
         kinds(&rig.effects()),
         [
             "set kbf_guard_tierstore",
+            "set kbf_forward_tierstore",
             format!("stop tierstore@{a}.service").as_str(),
             format!("start tierstore@{b}.service").as_str(),
-            "set kbf_forward_tierstore",
         ]
     );
 }

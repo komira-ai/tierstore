@@ -1,20 +1,21 @@
 <h1>Install</h1>
-<p class="lede">tierstore is a Linux binary. It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
+<p class="lede">tierstore is a binary for Linux (x86_64 and arm64) and macOS (Apple silicon). It ships from the <a href="https://github.com/komira-ai/tierstore/releases">releases of this repository</a>: every release carries the tarball, its provenance bundle and its checksum. There is no package and no container image, and nothing updates it afterwards.</p>
 
 <div class="notice notice-warn"><p><strong>Where the code lives.</strong> The source is <code>crates/tierstore</code> in <a href="https://github.com/komira-ai/tierstore">komira-ai/tierstore</a>, and the packaging notes are in <a href="https://github.com/komira-ai/tierstore/blob/main/packaging/README.md"><code>packaging</code></a>. tierstore began in kbf: versions up to 0.2.0 were built there, and the release history of those versions is kbf's. From 0.3.0 on, every release is built and signed here.</p></div>
 
 <ol class="steps">
   <li>
     <h3>Take the tarball of your architecture <span class="tag tag-ok">works today</span></h3>
-    <p>A <a href="https://github.com/komira-ai/tierstore/releases">release</a> lists <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code> and <code>tierstore-&lt;commit&gt;-linux-arm64.tar.gz</code>, each with a <code>.sigstore.json</code> bundle, and all of them in <code>SHA256SUMS</code>. Take the one for the host by its digest.</p>
+    <p>A <a href="https://github.com/komira-ai/tierstore/releases">release</a> lists <code>tierstore-&lt;commit&gt;-linux-x86_64.tar.gz</code>, <code>tierstore-&lt;commit&gt;-linux-arm64.tar.gz</code> and <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, each with a <code>.sigstore.json</code> bundle, and all of them in <code>SHA256SUMS</code>. Take the one for the host by its digest.</p>
     <p><code>&lt;commit&gt;</code> is the full 40-hex SHA of the commit the release was built from. Find it in the release's asset list, or in <code>SHA256SUMS</code>, where each line is a digest and a file name, so the name of a tierstore tarball carries it. For instance, with the example SHA <code>0123456789abcdef0123456789abcdef01234567</code>:</p>
     <div class="code"><pre>tierstore-0123456789abcdef0123456789abcdef01234567-linux-x86_64.tar.gz
-tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div>
+tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz
+tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div>
   </li>
   <li>
     <h3>Verify it <span class="tag tag-ok">works today</span></h3>
     <p>Three checks, in this order: the first proves the download is intact, the second or the third that this repository built and signed it. The second needs <code>gh</code>; the third needs only cosign, for a host whose <code>gh</code> has no <code>gh attestation</code> command. Take the tarball's <code>.sigstore.json</code> bundle and <code>SHA256SUMS</code> from the same release; below, <code>&lt;tarball&gt;</code> is the tarball's file name.</p>
-    <p><strong>Integrity.</strong> <code>SHA256SUMS</code> lists the tarballs and SBOMs of both platforms, so <code>--ignore-missing</code> skips the ones you did not take:</p>
+    <p><strong>Integrity.</strong> <code>SHA256SUMS</code> lists the tarballs and SBOMs of every platform, so <code>--ignore-missing</code> skips the ones you did not take:</p>
     <div class="code"><pre><span class="p">$</span> sha256sum -c --ignore-missing SHA256SUMS</pre></div>
     <p><code>SHA256SUMS</code> is not itself an attestation subject, so this check proves integrity, not authenticity: who built the file is what the next check proves.</p>
     <p><strong>Authenticity with gh.</strong> This needs a <code>gh</code> that has the <code>gh attestation</code> command (Ubuntu 24.04's packaged <code>gh</code>, 2.46.0, does not: use the check without <code>gh</code> there). Check the tarball against the workflow of this repository that signed it:</p>
@@ -39,7 +40,20 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
     <p>Every check names one signer: the workflow file <code>.github/workflows/artifacts.yml</code> of this repository, run on <code>refs/heads/main</code>. That identity is part of what a release promises: if the file were renamed or moved, every command here would fail. <a href="https://github.com/komira-ai/tierstore/blob/main/docs/ci-and-release.md">docs/ci-and-release.md</a> lists the files of a release and what each attests.</p>
   </li>
   <li>
-    <h3>Place the binary <span class="tag tag-ok">works today</span></h3>
+    <h3>On macOS (Apple silicon) <span class="tag tag-ok">works today</span></h3>
+    <p>The macOS binary is <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This step covers taking and verifying it; running tierstore as a service on macOS is not described here, and the update hook is Linux only.</p>
+    <p>Take the tarball, its bundle and <code>SHA256SUMS</code> from one release, with <code>gh</code> (Homebrew's <code>gh</code> has <code>gh attestation</code>) or with <code>curl</code>, and check its digest with <code>shasum</code>, which every Mac has; it prints <code>OK</code>:</p>
+    <div class="code"><pre><span class="p">$</span> gh release download v&lt;X.Y.Z&gt; --repo komira-ai/tierstore \
+    --pattern 'tierstore-*-macos-arm64.tar.gz*' --pattern SHA256SUMS
+<span class="p">$</span> grep -- '-macos-arm64\.tar\.gz$' SHA256SUMS | shasum -a 256 -c</pre></div>
+    <p>Then check that this repository built and signed it, offline against its bundle: run the offline check above (<code>gh attestation trusted-root</code> on a host with a network, then <code>gh attestation verify</code> with <code>--bundle</code> and <code>--custom-trusted-root</code>), with <code>&lt;tarball&gt;</code> set to <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>. cosign's check without <code>gh</code> works the same way.</p>
+    <p>The binary is not notarized by Apple. It is ad-hoc signed by the linker, as every binary for Apple silicon must be to run. <code>gh release download</code> and <code>curl</code> save it without the quarantine attribute, so macOS runs it as it runs any program installed from the command line, as a Linux host runs a binary fetched with <code>curl</code>; a file saved by a web browser carries the attribute, and macOS then refuses to open it because it is not notarized. Take it with <code>gh</code> or <code>curl</code>. Its authenticity is what the checks above prove, not an Apple signature.</p>
+    <div class="code"><pre><span class="p">$</span> tar -xzf tierstore-&lt;commit&gt;-macos-arm64.tar.gz tierstore
+<span class="p">$</span> ./tierstore --version</pre></div>
+    <p><strong>On a Mac, this is the last step.</strong> The steps after it (the placement under <code>/usr/libexec</code>, the systemd unit, the sysusers account, the key files' owner and the start) are for a Linux host.</p>
+  </li>
+  <li>
+    <h3>Place the binary <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>The tarball holds one member, the binary under its own name.</p>
     <div class="code"><pre><span class="p">$</span> tar -xzf tierstore-&lt;commit&gt;-linux-x86_64.tar.gz tierstore
 <span class="p">$</span> install -d -m 0755 /usr/libexec/kbf
@@ -47,7 +61,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
     <p>The host updater (<code>kbf-updater</code>, <code>kbf-host-install</code>) does not manage tierstore yet. To move to the next release, place the next binary the same way and restart the unit.</p>
   </li>
   <li>
-    <h3>Place the unit <span class="tag tag-ok">works today</span></h3>
+    <h3>Place the unit <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>The repository has an example systemd unit, <code>tierstore.service</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging/tierstore</code>. The values in the unit are examples: edit the listen address, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
     <div class="code"><pre><span class="p">$</span> install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> systemd-sysusers /etc/sysusers.d/tierstore.conf
@@ -56,7 +70,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
 <span class="p">$</span> systemctl daemon-reload</pre></div>
   </li>
   <li>
-    <h3>Write the key files <span class="tag tag-ok">works today</span></h3>
+    <h3>Write the key files <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>Four files, each owned by <code>tierstore</code> with mode 0600 or 0400 (the process refuses a key file that its group or others can read). A secret is never on the command line and the process reads no environment variable.</p>
     <ul>
       <li><code>/etc/tierstore/access.key</code>: the full key, the one clients that write sign with (<code>--access-key-file</code>);</li>
@@ -66,7 +80,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-linux-arm64.tar.gz</pre></div
     <p>A file holds its key as JSON or as two lines, the access key id and then the secret access key. The <a href="/docs/keys/">configuration page</a> has both forms.</p>
   </li>
   <li>
-    <h3>Start it <span class="tag tag-ok">works today</span></h3>
+    <h3>Start it <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>The unit does not start at install or at boot (it has no <code>[Install]</code> section), and it is skipped while <code>/etc/tierstore/access.key</code> does not exist. Start it by hand when the files are in place:</p>
     <div class="code"><pre><span class="p">$</span> systemctl start tierstore</pre></div>
     <p>To start it at boot, add the section in a drop-in (<code>systemctl edit tierstore</code>, <code>[Install]</code> and <code>WantedBy=multi-user.target</code>) and run <code>systemctl enable tierstore</code>.</p>

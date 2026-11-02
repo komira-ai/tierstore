@@ -2,9 +2,9 @@
 
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
-frees the hot tier when it fills. It is a release asset for Linux only, as a tarball with its
-SBOM and its provenance bundle (`docs/ci-and-release.md`); there is no package and no container image.
-These files go beside the binary.
+frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
+silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); there is
+no package and no container image. These files, for Linux hosts, go beside the binary.
 
 | file | what |
 |---|---|
@@ -22,7 +22,10 @@ starts the unit by itself.
 The release carries `tierstore-<commit>-linux-x86_64.tar.gz` and
 `tierstore-<commit>-linux-arm64.tar.gz`, each with `<tarball>.sigstore.json` and listed in
 `SHA256SUMS`. Take the tarball of the host's architecture by its digest, and verify it as every
-tarball is verified (`docs/ci-and-release.md`).
+tarball is verified (`docs/ci-and-release.md`). The release also carries
+`tierstore-<commit>-macos-arm64.tar.gz`; the files here (systemd, sysusers.d) are for Linux hosts,
+and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
+binary.
 The tarball holds one member, the binary under its own name:
 
 ```sh
@@ -1066,7 +1069,9 @@ the operator's choice, and the shipped file does not make it.
 
 systemd sends SIGTERM. The process answers `/readyz` 503 and puts `Connection: close` on every
 answer from then on, serves for `--drain-lb-wait` (the settle) so that a load balancer sees it,
-stops accepting, and closes each idle connection with a lingering close (it shuts its end for
+stops accepting (the connections the kernel has already set up for it are taken and served, for
+3 seconds at most, as is the first request of a new connection), and
+closes each idle connection with a lingering close (it shuts its end for
 writing, so that the client reads a clean end of stream, and reads until the client closes, for 60
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered

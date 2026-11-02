@@ -4,6 +4,7 @@
 
 use std::convert::Infallible;
 use std::future::poll_fn;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,6 +24,7 @@ use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 
 use super::{OciError, OciFront, OciMode};
+use crate::server::door::Closing;
 use crate::server::drain::{self, Drain};
 use crate::server::idle::Watched;
 use crate::server::linger::{Lingering, OnWire};
@@ -71,7 +73,8 @@ pub struct OciListener {
 /// The start of the drain of an [`OciListener`], which the S3 front's drain begins at the same
 /// time: from [`OciDrain::begin`] on, every answer carries `Connection: close`, and the listener
 /// goes on accepting and serving. The stop given to [`OciListener::serve`] ends the settle (and
-/// begins the drain, if it had not begun): the listener takes no new connection, closes each
+/// begins the drain, if it had not begun): the listener takes only the connections the kernel
+/// already holds for it, through its closing door (see `door`), closes each
 /// connection that has no request on the wire with a lingering close (it shuts its end for
 /// writing, so that the client reads a clean end of stream, and reads and drops what the client
 /// still sends until the client closes its end, for [`OciLimits::header_timeout`] at most), and
@@ -186,7 +189,8 @@ impl OciListener {
         self.listeners.local_addrs()
     }
 
-    /// Serves connections until `stop` turns true, the end of the settle: then it takes no more,
+    /// Serves connections until `stop` turns true, the end of the settle: then it takes only what
+    /// the kernel holds for it (see `door`),
     /// lets the connections that are open finish the request they are answering and closes them
     /// with a lingering close (its write half shut, then what the client sends read and dropped
     /// until it closes, for [`OciLimits::header_timeout`] at most), waits for all of that for
@@ -277,6 +281,19 @@ where
 {
     let Shared { drain, slots, held } = shared;
     let mut connections = JoinSet::new();
+    let take =
+        |accepted: io::Result<(TcpStream, SocketAddr)>, slot, connections: &mut JoinSet<()>| {
+            let (tcp, peer) = accepted?;
+            let serving = Serving {
+                acceptor: acceptor.clone(),
+                front: Arc::clone(&front),
+                limits,
+                drain: Arc::clone(&drain),
+            };
+            let slot = Slot::give(slot, &held);
+            connections.spawn(serving.connection(tcp, peer, slot));
+            Ok::<_, io::Error>(())
+        };
     loop {
         // A slot is taken before the next accept, so a flood waits in the backlog and not
         // in tasks.
@@ -285,28 +302,34 @@ where
             () = stopped(&mut stop) => break,
         };
         tokio::select! {
-            accepted = poll_fn(|cx| incoming.poll_incoming(cx)) => match accepted {
-                Ok((tcp, peer)) => {
-                    let serving = Serving {
-                        acceptor: acceptor.clone(),
-                        front: Arc::clone(&front),
-                        limits,
-                        drain: Arc::clone(&drain),
-                    };
-                    let slot = Slot::give(slot, &held);
-                    connections.spawn(serving.connection(tcp, peer, slot));
+            accepted = poll_fn(|cx| incoming.poll_incoming(cx)) => {
+                if let Err(error) = take(accepted, slot, &mut connections) {
+                    accept_failed(&error).await;
                 }
-                Err(error) => {
-                    eprintln!("tierstore: oci: accept: {error}");
-                    tokio::time::sleep(ACCEPT_PAUSE).await;
-                }
-            },
+            }
             Some(_) = connections.join_next() => {}
             () = stopped(&mut stop) => break,
         }
     }
-    drop(incoming);
+    // The settle is over: the idle connections close now, with a lingering close, so that their
+    // slots free as their clients leave. The connections the kernel holds for the listener are
+    // then taken before it closes (see `door`), each in a slot as before, for as long as the door
+    // waits.
     drain.settle();
+    let mut door = Closing::begin(incoming);
+    loop {
+        let slot = tokio::select! {
+            slot = Arc::clone(&slots).acquire_owned() => slot,
+            () = door.out_of_time() => break,
+        };
+        let Some(accepted) = door.next().await else {
+            break;
+        };
+        if let Err(error) = take(accepted, slot, &mut connections) {
+            accept_failed(&error).await;
+        }
+    }
+    drop(door);
     // A connection's task runs its lingering close too, so that the deadline cuts it.
     let finished = async { while connections.join_next().await.is_some() {} };
     if tokio::time::timeout(limits.drain_deadline, finished)
@@ -318,6 +341,12 @@ where
     let cut = connections.len();
     connections.abort_all();
     cut
+}
+
+/// Says on stderr that an accept failed, and waits a moment before the next.
+async fn accept_failed(error: &io::Error) {
+    eprintln!("tierstore: oci: accept: {error}");
+    tokio::time::sleep(ACCEPT_PAUSE).await;
 }
 
 /// One plain connection served as the accept loop serves one, holding `permit`, for a test that

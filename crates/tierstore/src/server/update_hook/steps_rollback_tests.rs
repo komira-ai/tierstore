@@ -156,12 +156,14 @@ fn rollback_works_in_both_directions() {
     assert_eq!(snap.record.unwrap().serving, 9302);
 }
 
-/// Asserts the order of the calls of a restart-mode rollback: the new unit is stopped first, then
-/// the old one started, then the rule moved, and the host never has two instances of the release
-/// that has no lock running together. It would catch a rollback that starts the old release
-/// beside the new one, which are then two writers on one cache directory.
+/// Asserts the order of the calls of a restart-mode rollback: the rule is moved to the old port
+/// first, then the new unit is stopped, then the old one started, and the host never has two
+/// instances of the release that has no lock running together, nor a unit stopped while the rule
+/// names it. It would catch a rollback that starts the old release beside the new one, which are
+/// then two writers on one cache directory, and one that stops the new instance while the rule
+/// still sends it new connections, which its closing listener resets.
 #[test]
-fn a_restart_rollback_stops_the_new_unit_before_it_starts_the_old_one() {
+fn a_restart_rollback_moves_the_rule_then_stops_the_new_unit_before_it_starts_the_old_one() {
     let fake = Fake::legacy();
     fake.advance(&[Step::Prepare, Step::Cutover]);
     let mark = fake.changes().len();
@@ -169,9 +171,9 @@ fn a_restart_rollback_stops_the_new_unit_before_it_starts_the_old_one() {
     assert_eq!(
         fake.changes()[mark..],
         [
+            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9302.service",
             "units.start tierstore@9301.service",
-            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9302.service",
             "slots.remove 9302",
             "state.save"
@@ -240,4 +242,29 @@ fn the_fake_notices_two_instances_of_a_release_with_no_lock() {
         .unwrap();
     ports.units.start("tierstore@9302.service").unwrap();
     assert_eq!(fake.errors().len(), 1);
+}
+
+/// Asserts that the fake itself records a running unit stopped while the redirect names it, and
+/// not a stop of a unit already stopped, nor one stopped once the redirect has left it, so that the tests that read `errors()` catch a
+/// restart whose stopping instance still gets new connections. It would catch a fake that never
+/// notices.
+#[test]
+fn the_fake_notices_a_unit_stopped_while_the_redirect_names_it() {
+    let fake = Fake::legacy();
+    let ports = fake.ports();
+    ports.units.stop("tierstore@9301.service").unwrap();
+    assert_eq!(
+        fake.errors(),
+        ["stopped tierstore@9301.service while the redirect names it"]
+    );
+    ports.units.stop("tierstore@9301.service").unwrap();
+    assert_eq!(fake.errors().len(), 1, "a stopped unit stopped again");
+    let fake = Fake::legacy();
+    let ports = fake.ports();
+    ports
+        .nft
+        .apply(&super::redirect_ruleset(9300, 9302))
+        .unwrap();
+    ports.units.stop("tierstore@9301.service").unwrap();
+    assert!(fake.errors().is_empty(), "{:?}", fake.errors());
 }

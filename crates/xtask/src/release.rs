@@ -59,12 +59,14 @@ pub const BUILD_WORKFLOW: &str = "artifacts.yml";
 pub const CI_WORKFLOW: &str = "ci.yml";
 
 /// The artifacts a push run of [`BUILD_WORKFLOW`] leaves, all of which a release needs: the
-/// files of each platform, the sums, and the provenance bundles.
-pub const ARTIFACTS: [&str; 4] = [
+/// files of each platform (`assets-<platform>`, one per [`Platform::ALL`]), the sums, and the
+/// provenance bundles of every platform's tarball.
+pub const ARTIFACTS: [&str; 5] = [
     "assets-linux-x86_64",
     "assets-linux-arm64",
+    "assets-macos-arm64",
     "sha256sums",
-    "bundles-linux",
+    "bundles",
 ];
 
 /// The files `SHA256SUMS` lists for `commit`, sorted: for each platform the tarball and the

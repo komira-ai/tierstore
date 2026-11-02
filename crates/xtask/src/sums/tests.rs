@@ -368,3 +368,57 @@ fn assemble_appends_the_digest_of_the_sums_it_wrote_to_the_output_file() {
     assemble(&dir, None, None, None).expect("assemble");
     assert!(!dir.join("output").exists());
 }
+
+#[test]
+fn assemble_and_verify_cover_the_macos_arm64_files_beside_the_linux_ones() {
+    // Catches: a macos-arm64 sums part refused as naming no platform, or merged but left out of
+    // the check, so that a changed byte in the Mac tarball passes verification.
+    let mac = "tierstore-c0ffee012345-macos-arm64.tar.gz";
+    let mac_sbom = "tierstore-c0ffee012345-macos-arm64.cdx.json";
+    let files: [(&str, &[u8]); 4] = [
+        (A, b"a"),
+        (B, b"b"),
+        (mac, b"the mac tarball"),
+        (mac_sbom, b"the mac sbom"),
+    ];
+    let dir = scratch("assemble-macos");
+    for (name, bytes) in files {
+        std::fs::write(dir.join(name), bytes).expect("asset");
+    }
+    parts(
+        &dir,
+        &[
+            ("linux-x86_64", &line(A, b"a")),
+            ("linux-arm64", &line(B, b"b")),
+            (
+                "macos-arm64",
+                &format!(
+                    "{}{}",
+                    line(mac, b"the mac tarball"),
+                    line(mac_sbom, b"the mac sbom")
+                ),
+            ),
+        ],
+    );
+    let printed = assemble(&dir, None, None, None).expect("assemble");
+    let listed: Vec<&str> = printed
+        .iter()
+        .map(|l| l.split_once("  ").expect("a sums line").1)
+        .collect();
+    assert_eq!(listed, [B, A, mac_sbom, mac]);
+    assert!(!dir.join(format!("{SUMS}.macos-arm64")).exists());
+    assert_eq!(
+        verify_sums(&dir, Sha256::of),
+        Ok("sums: 4 files match; the flipped copy does not".to_owned())
+    );
+
+    let mut flipped = b"the mac tarball".to_vec();
+    if let Some(last) = flipped.last_mut() {
+        *last ^= 1;
+    }
+    std::fs::write(dir.join(mac), &flipped).expect("flip");
+    assert_eq!(
+        refused(verify_sums(&dir, Sha256::of)),
+        [format!("{mac}: does not match its line")]
+    );
+}

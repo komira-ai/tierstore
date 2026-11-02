@@ -149,11 +149,14 @@ fn a_new_instance_that_took_the_lock_is_accepted() {
     assert_eq!(again.report.reason, Some(Reason::PreviousDown));
 }
 
-/// Asserts the restart: v-current is stopped and v-next started and waited for before the swap,
-/// in that order, and the lock moves with them. It would catch a restart that swaps before the
-/// new instance is up, which is a refused connection for every client.
+/// Asserts the restart: the redirect is pointed at v-next's port first, while nothing listens
+/// there, then v-current is stopped and v-next started and waited for, in that order, and the lock
+/// moves with them; no unit is stopped while the redirect names it. It would catch a restart that
+/// stops v-current while the redirect still sends it new connections, whose listener then closes
+/// on them and resets clients that saw their connect succeed (T1, run (c)), and a restart that
+/// swaps after the new instance is up without moving the redirect first.
 #[test]
-fn in_restart_mode_the_old_instance_stops_before_the_new_one_starts() {
+fn in_restart_mode_the_redirect_leaves_the_old_instance_before_it_stops() {
     let fake = Fake::legacy();
     fake.advance(&[Step::Prepare]);
     let mark = fake.changes().len();
@@ -161,22 +164,30 @@ fn in_restart_mode_the_old_instance_stops_before_the_new_one_starts() {
     assert_eq!(
         fake.changes()[mark..],
         [
+            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service",
             "nft.apply kbf_forward_tierstore",
             "state.save"
         ]
     );
+    assert_eq!(
+        fake.applied()[fake.applied().len() - 2..],
+        [redirect_ruleset(9300, 9302), redirect_ruleset(9300, 9302)]
+    );
     let snap = fake.snapshot();
+    assert_eq!(snap.redirect, Some(9302));
     assert_eq!(snap.running.keys().copied().collect::<Vec<_>>(), [9302]);
     assert_eq!(snap.holder, Some(9302));
     assert_eq!(snap.running.get(&9302).unwrap().to_str(), Some(NEW));
+    assert!(fake.errors().is_empty(), "{:?}", fake.errors());
 }
 
-/// Asserts that a restart whose probe fails stops the new instance first, then starts the old one
-/// and points the rule back at it, in that order, with no moment of two instances of the release
-/// that has no lock. It would catch a failed restart that leaves no instance serving, or starts
-/// the old release beside the new: two writers.
+/// Asserts that a restart whose probe fails points the redirect back at the old instance first,
+/// then stops the new instance and starts the old one, in that order, with no moment of two
+/// instances of the release that has no lock and no unit stopped while the redirect names it. It
+/// would catch a failed restart that leaves no instance serving, starts the old release beside
+/// the new (two writers), or stops the new instance while new connections still reach it.
 #[test]
 fn a_failed_restart_brings_the_old_instance_back() {
     let fake = Fake::legacy();
@@ -188,12 +199,13 @@ fn a_failed_restart_brings_the_old_instance_back() {
     assert_eq!(
         fake.changes()[mark..],
         [
+            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service",
             "nft.apply kbf_forward_tierstore",
+            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9302.service",
-            "units.start tierstore@9301.service",
-            "nft.apply kbf_forward_tierstore"
+            "units.start tierstore@9301.service"
         ]
     );
     let snap = fake.snapshot();
