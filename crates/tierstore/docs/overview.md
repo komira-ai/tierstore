@@ -23,7 +23,7 @@ client --S3--> tierstore --> hot tier  (dir: on SSD)
                          \-> cold tier (dir: on HDD, or an S3 bucket)
 ```
 
-A write goes to the hot tier and is acknowledged once a journal entry for it is durable there. The reconciler later copies it to the cold tier. A read is served from the hot tier, else from the cold tier, and what it found in the cold tier is copied back into the hot tier. So the hot tier is also a cache of what was used lately. When the hot tier is full, new objects are written straight to the cold tier.
+A write first reserves its key in the cold tier (one small create-only object, which decides which of two concurrent puts of a key wins), goes to the hot tier, and is acknowledged once a journal entry for it is durable there. The reconciler later copies it to the cold tier, over the reservation. A read is served from the hot tier, else from the cold tier, and what it found in the cold tier is copied back into the hot tier. So the hot tier is also a cache of what was used lately. When the hot tier is full, new objects are written straight to the cold tier.
 
 ## What it guarantees and what it does not
 

@@ -72,7 +72,7 @@ An address given twice (on main, not in v0.0.41) exits 2 before anything is boun
 <key>: it needs at least one address
 ```
 
-A tier that answers a self-test question wrongly exits 3 and names the tier, the check and what it answered: the store overwrites on a create-only put, ignores `If-Match`, answers a range with the whole object, or completes a multipart upload over an existing object. Use a store that does these properly. `--skip-backend-check multipart-conditional=<reason>` is for the last only.
+A tier that answers a self-test question wrongly exits 3 and names the tier, the check and what it answered: the store overwrites on a create-only put, ignores `If-Match`, answers a range with the whole object, completes a multipart upload over an existing object, or does not keep the mark of a reservation (the `reservation` check: a cold tier that drops user metadata, or a directory on a file system that drops the owner-execute bit). Use a store that does these properly. `--skip-backend-check multipart-conditional=<reason>` is for the multipart one only.
 
 ## Errors a client sees
 
@@ -82,7 +82,7 @@ A tier that answers a self-test question wrongly exits 3 and names the tier, the
 | 403 `SignatureDoesNotMatch` | the secret is wrong, or the request was changed after it was signed |
 | 403 `RequestTimeTooSkewed` | the client's clock is more than 15 minutes from the server's |
 | 403 `AccessDenied` | the key's role does not allow the call; see [keys and roles](keys.md) |
-| 412 `PreconditionFailed` | the key already exists in either tier: puts are create-only |
+| 412 `PreconditionFailed` | the key already exists in either tier, or a put of it is in progress, or a put of it was killed and left its reservation (a read of the key is not found): puts are create-only |
 | 413 `EntityTooLarge` | a body longer than `--max-request-bytes` (or the presigning key's ceiling) |
 | 400 `RequestTimeout` | a body that stalled for `--body-idle-timeout` or came slower than `--put-min-bytes-per-sec`; nothing is stored |
 | 503 `SlowDown` | more than `--max-concurrent-puts` bodies at once for longer than `--put-permit-wait`, or a put that met a full tier; retry |
