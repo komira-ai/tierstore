@@ -438,7 +438,8 @@ impl Reconciler {
     /// Whether the cold object `there` has the bytes of `body`. The sizes are compared first.
     /// With the tag of the hot object that `body` was read as (`hot`), equal tags settle it
     /// (the tiers tag by the same function); otherwise the cold object is read, chunk by
-    /// chunk, and compared with `body`, so that it is never held whole.
+    /// chunk, and compared with `body`, so that it is never held whole. An object that is gone
+    /// by then does not have them.
     async fn same_bytes(
         &self,
         key: &str,
@@ -452,7 +453,12 @@ impl Reconciler {
         if hot.is_some_and(|hot| hot.tag == there.tag) {
             return Ok(true);
         }
-        let mut chunks = self.cold.get_stream(key, None).await?;
+        // An object that is gone since its tag was read is not the same bytes.
+        let mut chunks = match self.cold.get_stream(key, None).await {
+            Ok(chunks) => chunks,
+            Err(Error::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
         let mut at = 0;
         while let Some(chunk) = chunks.try_next().await? {
             let end = at + chunk.len();

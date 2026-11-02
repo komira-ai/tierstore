@@ -280,6 +280,31 @@ async fn a_copy_takes_back_only_the_cold_object_it_wrote() {
     }
 }
 
+/// Asserts that a copy whose conditional delete of its own cold object is refused because the
+/// object has another tag, or because it is gone, is not a failure: the copy is not counted, and
+/// the checkpoint moves.
+#[tokio::test(start_paused = true)]
+async fn a_take_back_the_cold_tier_refuses_as_changed_or_gone_is_not_a_failure() {
+    let refusals = [
+        Error::PreconditionFailed("k".to_owned()),
+        Error::NotFound("k".to_owned()),
+    ];
+    for refusal in refusals {
+        let rig = Rig::new();
+        let proxy = rig.proxy("p1", 1000).await;
+        proxy.put("k", body("1")).await.unwrap();
+        let hot = vec![None, Some(AtHead::Before(None))];
+        let mut reconciler = scripted(&rig, "k", hot, vec![]);
+        rig.cold.fail_next_on(Op::DeleteIfMatch, "k", refusal);
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new());
+        assert_eq!(report.copied, 0);
+        let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+        assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+    }
+}
+
 /// Asserts that a copy that cannot delete its own cold object when it takes the copy back (the
 /// cold tier's conditional delete fails) reports the failure and does not move the checkpoint.
 #[tokio::test(start_paused = true)]
