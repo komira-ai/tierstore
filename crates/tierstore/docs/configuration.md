@@ -136,7 +136,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-The keys of each table are those of the storage node and of the build node. What differs: `local_cache.write_through` is true whether it is left out or given (the node owns the data and takes writes, which pass through the cache so that its entries stay right), and `false` is refused; the cache path may not be the directory of a `dir` tier, inside it or around it, nor around the lock file or the key files of `[oci]`; `server.backend_check_wait`, `cold_store.skip_checks` and the reconciler's keys of `[hot_store]` keep their meaning (a build node refuses them). What the cache keeps, how a hand-over behaves and what to expect are in [operations](operations.md#a-storage-node-with-a-local-cache) and [limits](limits.md#a-storage-node-with-a-local-cache). The start line says `mode=storage-cache`.
+The keys of each table are those of the storage node and of the build node. What differs: `local_cache.write_through` is true whether it is left out or given (the node owns the data and takes writes, which pass through the cache so that its entries stay right), and `false` is refused; the cache path (absolute, as the directory of a `dir` tier must be) may not be the directory of a `dir` tier, inside it or around it, nor around the lock file or the key files of `[oci]`; `server.backend_check_wait`, `cold_store.skip_checks` and the reconciler's keys of `[hot_store]` keep their meaning (a build node refuses them). What the cache keeps, how a hand-over behaves and what to expect are in [operations](operations.md#a-storage-node-with-a-local-cache) and [limits](limits.md#a-storage-node-with-a-local-cache). The start line says `mode=storage-cache`.
 
 ## Types
 
@@ -291,7 +291,7 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 - a key or a table the format does not have, and a value of the wrong type;
 - a key that holds a secret: keys and credentials are paths of files whose names end in `_file` or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the like are refused anywhere;
 - a file that is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`) and a storage node's with a cache (all three tables);
-- in a storage node's file with a cache, `write_through = false` and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of `[oci]`);
+- in a storage node's file with a cache, `write_through = false`, a relative cache `path` or `dir` tier directory, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of `[oci]`);
 - in the file of a build node or of a storage node with a cache, an `[oci]` table, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
 - a key a tier's `kind` does not take, a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);
 - a water mark outside 1 to 100, and a budget, count or limit of zero;

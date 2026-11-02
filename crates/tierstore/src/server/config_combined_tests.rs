@@ -75,7 +75,8 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
 
 /// Asserts each refusal of the file of a node with a cache, each naming the key and what is wrong,
 /// and none repeating a value: `write_through = false`, no policy that caches, policies that nest,
-/// a cache directory that is a tier's directory, inside it or around it (and around the lock file
+/// a cache directory that is a tier's directory, inside it or around it (also written with `.` and
+/// `..`, or relative, or with a relative tier directory) (and around the lock file
 /// or a key file of the OCI front), a list of endpoints, the keys of the hot store that are not for
 /// the cold one, a mark out of order in `[local_cache]`, and an OCI front no policy keeps.
 #[test]
@@ -127,6 +128,26 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
             cache_path("/srv"),
             "local_cache.path",
             "must not be the directory of hot_store",
+        ),
+        (
+            cache_path("/srv/other/../hot/./cache"),
+            "local_cache.path",
+            "must not be the directory of hot_store",
+        ),
+        (
+            cache_path("/../srv/hot"),
+            "local_cache.path",
+            "must not be the directory of hot_store",
+        ),
+        (
+            cache_path("./hot/cache"),
+            "local_cache.path",
+            "must be an absolute path (it is compared",
+        ),
+        (
+            text().replacen("path   = \"/srv/hot\"", "path   = \"hot\"", 1),
+            "local_cache.path",
+            "must be an absolute path to be compared with hot_store",
         ),
         (
             in_cache("lock_file = \"/var/lib/tierstore-cache/instance.lock\""),

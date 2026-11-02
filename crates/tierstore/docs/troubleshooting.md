@@ -49,13 +49,15 @@ The configuration file:
 <key>: the file needs both [hot_store] and [cold_store] (the storage-node shape), or [local_cache] and [cold_store] without [hot_store] (the build-node shape)
 <key>: a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true
 <key>: must not be the directory of <tier>, inside it or around it: the tier would list the cache's files as objects
+<key>: must be an absolute path (it is compared with the directories of the tiers)
+<key>: must be an absolute path to be compared with <tier>'s directory
 <key>: must not hold <key>: it is not a place for the cache's files
 <key>: is in a file with [hot_store] too, which has no flag form
 <key>: no [[policy]] covers the blobs under <prefix>, so every pull would go to the upstream; give a [[policy]] with prefix = <prefix> and cache = true
 <key>: the blobs under <prefix> are covered by the [[policy]] with prefix <prefix>, which has cache = false, so every pull would go to the upstream; give a [[policy]] with prefix = <prefix> and cache = true
 ```
 
-Move the setting into the file as a path, or take the flag out of the command line; give the file one of the three shapes: a storage node's, a build node's, or a storage node's with a `[local_cache]` in front of it (all three tables). A cache needs a `[[policy]]` with `cache = true`, a `write_through` that is not `false` when the node has a hot store, and a `path` that is not a tier's directory, inside it or around it. A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
+Move the setting into the file as a path, or take the flag out of the command line; give the file one of the three shapes: a storage node's, a build node's, or a storage node's with a `[local_cache]` in front of it (all three tables). A cache needs a `[[policy]]` with `cache = true`, a `write_through` that is not `false` when the node has a hot store, and a `path` that is absolute and is not a tier's directory, inside it or around it (a `dir` tier's directory is absolute too). A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
 
 The tiers:
 

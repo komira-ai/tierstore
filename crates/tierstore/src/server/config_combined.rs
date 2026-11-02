@@ -38,7 +38,7 @@
 //! the `[oci]` table (the tier would list the cache's files as objects). The paths are compared
 //! by component and as written, not through links.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use super::cli::Cli;
 use super::config::{
@@ -92,14 +92,46 @@ fn oci_flags(node: &Cli) -> OciFlags {
     }
 }
 
+/// The absolute `path` with its `.` and `..` components resolved by text (no symlink is
+/// followed), or none for a relative path.
+fn normalised(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // The parent of the root is the root.
+                if out.parent().is_some() {
+                    let _ = out.pop();
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
 /// Refuses a cache directory that is, is inside, or holds the directory of a `dir` tier, and one
-/// that holds the lock file or a key file of the OCI front. Paths are compared by component.
+/// that holds the lock file or a key file of the OCI front. Paths are compared by component
+/// after `.` and `..` are resolved by text, so the cache path and the directory of a `dir` tier
+/// must be absolute: a relative path cannot be compared with another.
 fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
+    let Some(cache) = normalised(cache) else {
+        let why = "must be an absolute path (it is compared with the directories of the tiers)";
+        return Err(invalid("local_cache.path", why));
+    };
     for (name, spec) in [("hot_store", &node.hot), ("cold_store", &node.cold)] {
         let Some(tier) = spec.strip_prefix("dir:").map(Path::new) else {
             continue;
         };
-        if cache.starts_with(tier) || tier.starts_with(cache) {
+        let Some(tier) = normalised(tier) else {
+            let why = format!("must be an absolute path to be compared with {name}'s directory");
+            return Err(invalid("local_cache.path", why));
+        };
+        if cache.starts_with(&tier) || tier.starts_with(&cache) {
             let why = format!(
                 "must not be the directory of {name}, inside it or around it: the tier would list the cache's files as objects"
             );
@@ -112,7 +144,10 @@ fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
         ("oci.tls_key_file", node.oci_tls_key.as_deref()),
     ];
     for (name, file) in files {
-        if file.is_some_and(|file| file.starts_with(cache)) {
+        let held = file
+            .and_then(normalised)
+            .is_some_and(|file| file.starts_with(&cache));
+        if held {
             let why = format!("must not hold {name}: it is not a place for the cache's files");
             return Err(invalid("local_cache.path", why));
         }
