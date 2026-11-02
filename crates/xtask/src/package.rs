@@ -39,17 +39,24 @@ pub enum Platform {
     LinuxX86_64,
     #[value(name = "linux-arm64")]
     LinuxArm64,
+    #[value(name = "macos-arm64")]
+    MacosArm64,
 }
 
 impl Platform {
     /// Every platform a release is built for.
-    pub const ALL: [Platform; 2] = [Platform::LinuxX86_64, Platform::LinuxArm64];
+    pub const ALL: [Platform; 3] = [
+        Platform::LinuxX86_64,
+        Platform::LinuxArm64,
+        Platform::MacosArm64,
+    ];
 
     /// The name assets and sums files use.
     pub fn name(self) -> &'static str {
         match self {
             Platform::LinuxX86_64 => "linux-x86_64",
             Platform::LinuxArm64 => "linux-arm64",
+            Platform::MacosArm64 => "macos-arm64",
         }
     }
 

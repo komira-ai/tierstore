@@ -106,8 +106,15 @@ fn bundle(sha: &Sha256) -> String {
 
 /// `dir` holding the assets of `COMMIT`, their sums and a bundle per tarball.
 fn assets(dir: &Path) {
+    assets_of(dir, &expected_assets(COMMIT));
+}
+
+/// `dir` holding the files `names` (assets of any commit), a `SHA256SUMS` that lists exactly
+/// them and a bundle per tarball among them: a directory that passes `verify-assets sums`
+/// whatever the set is, so that `check` is what judges the set.
+fn assets_of(dir: &Path, names: &[String]) {
     let mut sums = String::new();
-    let mut names = expected_assets(COMMIT);
+    let mut names = names.to_vec();
     names.sort();
     for name in &names {
         let bytes = format!("bytes of {name}");
@@ -139,8 +146,81 @@ fn the_assets_of_a_commit_are_a_tarball_and_an_sbom_per_platform() {
             format!("tierstore-{COMMIT}-linux-arm64.tar.gz"),
             format!("tierstore-{COMMIT}-linux-x86_64.cdx.json"),
             format!("tierstore-{COMMIT}-linux-x86_64.tar.gz"),
+            format!("tierstore-{COMMIT}-macos-arm64.cdx.json"),
+            format!("tierstore-{COMMIT}-macos-arm64.tar.gz"),
         ]
     );
+}
+
+#[test]
+fn a_release_without_the_macos_arm64_tarball_or_sbom_or_with_an_extra_file_is_refused() {
+    // Catches: a release check that passes a dist directory built for the Linux platforms
+    // alone (the macos-arm64 job's files never downloaded), one that lacks only the Mac SBOM,
+    // and one that holds a tarball of a platform that is not released, each with sums that
+    // match their files, so the check of the set, not of the digests, is what refuses them.
+    let mac = format!("tierstore-{COMMIT}-macos-arm64.tar.gz");
+    let mac_sbom = format!("tierstore-{COMMIT}-macos-arm64.cdx.json");
+    let all = expected_assets(COMMIT);
+    let without = |gone: &[&String]| -> Vec<String> {
+        all.iter().filter(|n| !gone.contains(n)).cloned().collect()
+    };
+
+    let dir = scratch("check-no-macos");
+    assets_of(&dir, &without(&[&mac, &mac_sbom]));
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [
+            format!("{SUMS} does not list {mac_sbom}"),
+            format!("{SUMS} does not list {mac}"),
+        ]
+    );
+
+    let dir = scratch("check-no-macos-tarball");
+    assets_of(&dir, &without(&[&mac]));
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{SUMS} does not list {mac}")]
+    );
+
+    let dir = scratch("check-no-macos-sbom");
+    assets_of(&dir, &without(&[&mac_sbom]));
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{SUMS} does not list {mac_sbom}")]
+    );
+
+    let extra = format!("tierstore-{COMMIT}-macos-x86_64.tar.gz");
+    let dir = scratch("check-unlisted-platform");
+    let mut more = all.clone();
+    more.push(extra.clone());
+    assets_of(&dir, &more);
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!(
+            "{SUMS} lists {extra}, which is not an asset of {COMMIT}"
+        )]
+    );
+
+    let dir = scratch("check-no-macos-bundle");
+    assets(&dir);
+    std::fs::remove_file(dir.join(bundles::name_of(&mac))).expect("rm");
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{mac}: no provenance bundle {mac}.sigstore.json")]
+    );
+}
+
+#[test]
+fn the_build_run_artifacts_are_each_platforms_assets_the_sums_and_one_bundles() {
+    // Catches: a platform whose files a release does not wait for (locate would pass a run
+    // that lost them, and the release would fail later or ship without them), and the bundle
+    // artifact still under a name of the Linux platforms alone.
+    let mut want: Vec<String> = Platform::ALL
+        .iter()
+        .map(|p| format!("assets-{}", p.name()))
+        .collect();
+    want.extend(["sha256sums".to_owned(), "bundles".to_owned()]);
+    assert_eq!(ARTIFACTS.to_vec(), want);
 }
 
 #[test]
@@ -150,7 +230,7 @@ fn a_complete_directory_passes_the_check() {
     assets(&dir);
     let printed = check(&dir, COMMIT).expect("check");
     assert!(
-        printed.last().is_some_and(|l| l.contains("4 files")),
+        printed.last().is_some_and(|l| l.contains("6 files")),
         "{printed:?}"
     );
 }
@@ -298,11 +378,16 @@ fn locate_refuses_what_a_release_must_not_be_cut_from() {
     assert!(locate(&gh, REPO, COMMIT, None).is_err(), "not a push run");
 
     let mut gh = good_repo();
-    gh.api[3].1["artifacts"][3]["expired"] = json!(true);
+    gh.api[3].1["artifacts"][4]["expired"] = json!(true);
+    let problems = refused(locate(&gh, REPO, COMMIT, None));
+    assert_eq!(problems, ["run 11 holds no unexpired artifact bundles"]);
+
+    let mut gh = good_repo();
+    gh.api[3].1["artifacts"][2]["expired"] = json!(true);
     let problems = refused(locate(&gh, REPO, COMMIT, None));
     assert_eq!(
         problems,
-        ["run 11 holds no unexpired artifact bundles-linux"]
+        ["run 11 holds no unexpired artifact assets-macos-arm64"]
     );
 
     let mut gh = good_repo();
@@ -391,13 +476,13 @@ fn publish_creates_a_draft_with_every_file_reads_it_back_and_publishes_it() {
         "{create:?}"
     );
     assert!(create.contains(&"--draft".to_owned()));
-    // 4 assets + 2 bundles + the sums.
+    // 6 assets (a tarball and an SBOM per platform) + 3 bundles + the sums.
     assert_eq!(
         create
             .iter()
             .filter(|a| Path::new(a).starts_with(&*dir))
             .count(),
-        7
+        10
     );
     assert_eq!(ran[1][..3], ["release", "edit", "v0.3.0"]);
     assert!(ran[1].contains(&"--draft=false".to_owned()));
