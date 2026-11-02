@@ -66,6 +66,11 @@ impl AsRef<Path> for TestDir {
 }
 
 impl Drop for TestDir {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the keep-on-failure variable is set by a person reading a failed test, not \
+                  configuration of the code under test; a drop has no flags to read"
+    )]
     fn drop(&mut self) {
         if std::thread::panicking() && std::env::var_os(KEEP_ENV).is_some() {
             eprintln!("{KEEP_ENV} set: keeping {}", self.path.display());
@@ -140,6 +145,12 @@ mod tests {
     /// removes it with the variable set: a thread that panics while it holds a directory
     /// leaves it only when `KEEP_ENV` is set.
     #[test]
+    #[expect(
+        unsafe_code,
+        clippy::disallowed_methods,
+        reason = "the test sets and clears the variable `drop` reads, which is unsafe in edition \
+                  2024; each call has a SAFETY comment"
+    )]
     fn a_panic_keeps_the_dir_only_when_asked() {
         let in_panic = |name: &'static str| {
             let (sender, receiver) = std::sync::mpsc::channel();

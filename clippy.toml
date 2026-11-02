@@ -1,0 +1,15 @@
+# Clippy's configuration for every crate of the workspace. The lint levels are in the root
+# `Cargo.toml` (`[workspace.lints]`); this file says what the `disallowed_*` lints refuse.
+# A site that must call one of these says why with `#[expect(clippy::disallowed_methods,
+# reason = "...")]` on the smallest item around it.
+
+# Configuration comes in as flags, not environment variables (AGENTS.md S2). Reading the
+# environment is refused, and so is changing it, which edition 2024 also makes unsafe.
+disallowed-methods = [
+    { path = "std::env::var", reason = "configuration is a flag, not an environment variable (AGENTS.md S2)" },
+    { path = "std::env::var_os", reason = "configuration is a flag, not an environment variable (AGENTS.md S2)" },
+    { path = "std::env::vars", reason = "configuration is a flag, not an environment variable (AGENTS.md S2)" },
+    { path = "std::env::vars_os", reason = "configuration is a flag, not an environment variable (AGENTS.md S2)" },
+    { path = "std::env::set_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
+    { path = "std::env::remove_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
+]

@@ -1,0 +1,4 @@
+# rustfmt's configuration for every crate of the workspace: today's defaults, spelled out so
+# the file can be copied unchanged to the other Rust repositories. Stable options only.
+edition = "2024"
+max_width = 100

@@ -315,6 +315,10 @@ pub(crate) fn git_stdout(root: &Path, args: &[&str]) -> Result<Vec<u8>, Error> {
 }
 
 /// The `cargo` program: the one that ran this xtask.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "`CARGO` is set by cargo itself for the process it runs, not configuration"
+)]
 fn cargo_program() -> OsString {
     std::env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"))
 }
