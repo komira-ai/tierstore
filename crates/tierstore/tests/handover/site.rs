@@ -4,8 +4,8 @@
 //!
 //! Each release is a directory whose `tierstore` is the launcher (double/main.rs): it answers
 //! `--capabilities` with `handover-v1` and otherwise becomes the server binary the run names, so
-//! the hook sees two releases that can be handed over to without the shipped `CAPABILITIES`
-//! changing. A run that wants a restart says so in the params file (`mode = "restart"`).
+//! the hook sees two releases that can be handed over to whatever the server's own
+//! `CAPABILITIES` say. A run that wants a restart says so in the params file (`mode = "restart"`).
 //!
 //! The slots are 9301 and 9302 and the public port is 9300, as in the design: the namespace is the
 //! run's own, so the numbers are free. A build node (`Node::Cache`) serves a cache directory that
