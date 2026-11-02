@@ -1,6 +1,6 @@
 # tierstore design
 
-This document says why tierstore exists, what it promises, and how the code keeps those promises. It is kept in step with the code: a change to code that this text describes changes the text with it. It also marks what is not built yet (section 12), so a reader can tell the design from the plan. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the update hook and the hand-over of a running node are in [tierstore-handover.md](tierstore-handover.md). Where a source comment and the code differ, this document follows the code. Terms in bold are defined in the glossary (section 14).
+This document says why tierstore exists, what it promises, and how the code keeps those promises. It is kept in step with the code: a change to code that this text describes changes the text with it. It also marks what is not built yet (section 12), so a reader can tell the design from the plan. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the hand-over of a running node is section 6.6. Where a source comment and the code differ, this document follows the code. Terms in bold are defined in the glossary (section 14).
 
 ## 1. The problem
 
@@ -25,8 +25,8 @@ From this follow the requirements:
 Goals:
 
 - One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned put) and, beside it, a read-only OCI distribution front, both over one proxy.
-- Create-only puts across two tiers: a key that exists in either tier is refused, except when two puts race with one going to the hot tier and one to the cold tier of a full hot tier (section 11).
-- A put is acknowledged only when it can be found again: either its journal entry is durable in the hot tier, or the cold tier holds it.
+- Create-only puts across two tiers: a key that exists in either tier is refused. One write in the cold tier decides every race, except between a presigned (hot-only) put and a put that goes through cold (section 11).
+- A put is acknowledged only when it can be found again: the key is reserved in the cold tier and the object and its journal entry are durable in the hot tier, or (hot tier full) the cold tier holds the object.
 - Reads from the fastest tier that holds the object, with a fill of the faster tier on a miss.
 - Back-pressure instead of failure when the hot tier fills.
 - Recovery from a restart or a lost lease using only what is stored in the tiers.
@@ -48,10 +48,10 @@ Non-goals:
 One `tierstore` process serves an S3 front (`--listen`) and, if asked, a read-only OCI front (`--oci-listen`, its own address). Both fronts call the same **proxy**, so an image pulled over OCI and an object read over S3 are answered from the same tiers by the same code ([server/cli.rs](../../crates/tierstore/src/server/cli.rs) module docs). The pieces:
 
 - **Tiers.** A **hot tier** (small, fast: `dir:` on local disk or an S3-compatible bucket) and a **cold tier** (large, cheap: `dir:` or an S3-compatible bucket). Both are used through one trait, [`Backend`](../../crates/tierstore/src/backend.rs). `memory` is also accepted as a tier kind; it keeps nothing across a restart and stamps every object with time zero, so it is for tests.
-- **Proxy** ([tiered.rs](../../crates/tierstore/src/tiered.rs), `Proxy`). Answers every request against the two tiers. It keeps no durable state: a cached reading of capacity, a full latch, the open journal batch and its next number. Each proxy has a **proxy id**, unique among processes running at once over the same tiers.
+- **Proxy** ([tiered.rs](../../crates/tierstore/src/tiered.rs), `Proxy`). Answers every request against the two tiers. It keeps no durable state: a cached reading of capacity, a full latch, the open journal batch and its next number. Each process boot gets a fresh id `<node>-<boot id>`, never reused.
 - **Fronts** ([server/](../../crates/tierstore/src/server/), `ops.rs` and `oci/`). Check signatures, enforce request limits, and call the proxy as a `Backend`.
-- **Journal** ([journal.rs](../../crates/tierstore/src/journal.rs)). A put or delete is recorded as an entry in a small object `_journal/<proxy id>/<seq>` in the hot tier. A put is acknowledged after its entry is durable. The reconciler learns what the hot tier holds from journal objects and never lists the hot tier's data, so a pass costs work in proportion to new writes.
-- **Reconciler** ([reconciler.rs](../../crates/tierstore/src/reconciler.rs)). Copies journaled puts to the cold tier, applies journaled deletes, evicts from the hot tier when it fills, checkpoints and prunes. It works on the raw tiers, not through the proxy.
+- **Journal** ([journal.rs](../../crates/tierstore/src/journal.rs)). A put is recorded as an entry in a small object `_journal/<proxy id>/<seq>` in the hot tier (a copy-back appends one too, and today's delete appends a delete entry; section 5). A put is acknowledged when the key is reserved in cold and the object and its entry are durable in hot. The leader learns what the hot tier holds from journal objects and never lists the hot tier's data, so a pass costs work in proportion to new writes.
+- **Reconciler** ([reconciler.rs](../../crates/tierstore/src/reconciler.rs)). Runs in the leader only. Copies each journaled put to the cold tier (replacing the reservation), evicts from the hot tier when it fills, writes checkpoints, deletes journal objects at once and retires departed nodes (today's code also applies journaled deletes; section 5, Delete). It works on the raw tiers, not through the proxy.
 - **Lease** ([lease.rs](../../crates/tierstore/src/lease.rs)). One object in the hot tier; its holder is the one active reconciler among all processes.
 - **Local cache** ([server/local_cache/](../../crates/tierstore/src/server/local_cache/)). A read-through disk cache on a node's own NVMe, used by the build-node configuration (section 4). It is not part of the storage-node path.
 
@@ -83,20 +83,21 @@ The sequences below are for configuration B. Every store call is shown in code o
 
 ### Put
 
-![Put: store calls in order and the ack point](diagrams/seq-put.svg)
+This is the decided design; the code moves to it through the pull requests listed in section 12.
 
-The S3 front sends every create-only put that is not a multipart part to `Proxy::put_stream` (or `put_stream_hot_only` when the request is presigned). In order ([tiered.rs](../../crates/tierstore/src/tiered.rs), `put_object_stream` and `put_hot_stream`):
+![Put: reserve the key in cold, write hot, then acknowledge](diagrams/seq-put.svg)
 
-1. `cold.head(key)`. Found: `AlreadyExists` (HTTP 412). An error other than not-found fails the put, so a put fails closed if the cold tier cannot be asked.
-2. Read the capacity **level** from the usage object the reconciler publishes (cached for one second). `Open`: continue. `Critical` (at or above 95% of the budget): sleep 20 ms, then continue. `Full` (at or above the budget): take the cold path below.
-3. `hot.put_stream(key, len, body)`, create-only. The object becomes visible only when the last chunk has arrived, and a body that ends in error leaves nothing.
-4. `cold.head(key)` again (`confirm_not_tiered`). Found: delete the new hot object (best effort) and return `AlreadyExists`. Any other error: delete the new hot object (best effort) and fail the put with that error, since the object cannot be shown to be the only one. This second ask exists because the reconciler copies to cold before it deletes from hot; section 7 shows the race it closes.
-5. Append a `PUT` entry and wait for the batch holding it to be written to the hot tier as `_journal/<id>/<seq>`.
-6. **Acknowledge.** If step 5 fails, delete the hot object (best effort) and return the error.
+The S3 front sends every create-only put that is not a multipart part to `Proxy::put_stream` (or `put_stream_hot_only` when the request is presigned). In order:
 
-The ack point is therefore: the object and its journal entry are durable in the hot tier. The cold tier has nothing yet. A batch is written after a short linger (20 ms in the binary) or at 64 entries; every put in it waits for one shared outcome, and if the writer is dropped another waiter writes it.
+1. **Reserve the key in the cold tier.** One create-only conditional write (`If-None-Match: *`) of a small reservation object under the key. It decides who owns the key: the winner continues, a loser gets `AlreadyExists` (HTTP 412). The cold tier is the truth for whether a key exists, so there is no separate HEAD to ask first. A reservation is marked (object metadata), so a HEAD tells it from a real object. If the cold tier cannot be asked, the put fails: it fails closed.
+2. **Write the hot tier, twice at once.** The object goes to the hot tier under its own key (`hot.put_stream`, create-only; it becomes visible only when the last chunk has arrived, and a body that ends in error leaves nothing), and this node's journal entry goes to the hot tier as `_journal/<id>/<seq>` (create-only). The entry names the key and the reservation's tag. Entries are written in batches, so that one shared journal write serves every put in the batch: a batch closes at 64 entries or when the journal batch window runs out (a short window set by the binary). That window is not the old fixed sleep, and nothing else in the put path waits. Every put in a batch waits for one shared outcome.
+3. **Acknowledge** when both writes are durable. If either fails, the put is not acknowledged, and the proxy removes what it wrote (best effort: its own hot object by its tag, then its own reservation).
 
-**Cold path (hot tier full).** An unsigned put goes `hot.head(key)` (a hot object makes it `AlreadyExists`), then a create-only cold put, with no journal entry; it is acknowledged when the cold tier has it. A hot tier that answers `Full` before taking any byte takes the same path. The fallback applies only when the body has not been read at all (`Offered::taken() == 0`), because the bytes already taken cannot be offered to the cold tier again. If it answers `Full` after taking bytes, or the journal write answers `Full`, the put fails with 503 `SlowDown` (the hot object is removed) and the client's retry goes to the cold path.
+The ack point is therefore: the key is reserved in cold, and the object and its journal entry are durable in hot. The cold tier holds only the marked reservation, not the bytes; the leader replaces the reservation with the real object later (section 6.4). A put never waits for the leader or for eviction.
+
+The reason for the order is that one write in one store decides every race for a key. Two puts of the same key race for the reservation and exactly one wins; the loser has written nothing else. Because the reservation is made before anything reaches the hot tier, the leader's copy and eviction can never let a second put in behind them, which is the race the older design closed with a second cold HEAD.
+
+**Hot tier full.** At level `Full` (usage at or above the budget) or when the hot store answers `Full` before taking any byte, an unsigned put makes no reservation and writes no journal entry: it writes the real object straight to the cold tier, create-only. That one write is the decision, `AlreadyExists` is a 412, and the put is acknowledged when the cold tier answers. The fallback applies only when the body has not been read at all (`Offered::taken() == 0`), because bytes already taken cannot be offered to the cold tier again. If the hot tier answers `Full` after taking bytes, or the journal write answers `Full`, the put fails with 503 `SlowDown` (its hot object and reservation are removed) and the client's retry takes the cold path. There is no back-pressure sleep: a full hot tier is answered at once, by one of these two paths.
 
 **Presigned puts** are hot-only: at level `Full`, or when the hot tier or journal answers `Full`, the put gets 503 `SlowDown` and nothing is written to cold. One create-only write in one store then decides a race between presigned puts (section 7).
 
@@ -109,25 +110,28 @@ The ack point is therefore: the object and its journal entry are durable in the 
 The front calls `head` (see Head), then `get_stream`; the proxy has no streaming read, so the default `get_stream` calls `Proxy::get`, which holds the whole object (or the cut range). A read is two proxy calls. The numbers below are the numbers of the diagram, which shows `Proxy::get` only.
 
 1. `hot.get(key, range)`. Found: return it (step 5). Any error but not-found is returned; the cold tier is not tried.
-2. On a hot miss, a ranged get first reads the level (step 3). At `Critical` or `Full` it reads only the range from cold and copies nothing back, since a whole read per chunk of a long object would be quadratic. Otherwise, and for every unranged get, `cold.get` reads the whole object.
+2. On a hot miss, a cold answer that is a marked reservation counts as not found: the put that made it is still in flight. Otherwise a ranged get first reads the level (step 3). At `Critical` or `Full` it reads only the range from cold and copies nothing back, since a whole read per chunk of a long object would be quadratic. Otherwise, and for every unranged get, `cold.get` reads the whole object.
 3. The level comes from the usage object (cached for one second); it is read here for a ranged get, and in `copy_back` for the others.
 4. Unless the level is `Critical` or worse, **copy back**: a create-only `hot.put` of the whole object, awaited by the read; a ranged get is then cut from the whole body. A failed copy-back never fails the read.
-5. Reply. A successful copy-back also starts a background task (`b`) that appends a `PUT` entry (so the reconciler can count and evict the copy) and deletes the hot copy if the append fails. The reply does not wait for it.
+5. Reply. A successful copy-back also starts a background task (`b`) that appends a `PUT` entry (so the leader can count and evict the copy; the entry carries no reservation tag, because the real object is already in cold, so the leader only counts and evicts it) and deletes the hot copy if the append fails. The reply does not wait for it.
 
 ### Head
 
 ![Head: hot, then cold on not-found](diagrams/seq-head.svg)
 
-`hot.head`, and `cold.head` only on a hot not-found. Any other hot error is returned without asking cold. There is no copy-back.
+`hot.head`, and `cold.head` only on a hot not-found. A marked reservation in cold counts as not found. Any other hot error is returned without asking cold. There is no copy-back.
 
 ### Delete
 
+A delete removes the key where the cold tier says it exists, and only then from the hot tier. This is the decided design; the code moves to it with the reservation pull requests (section 12).
+
 ![Delete: hot, cold, journal entry, reply](diagrams/seq-delete.svg)
 
-1. `hot.delete`, then `cold.delete` (a missing key succeeds). Either failing returns the error and writes no journal entry.
-2. Append a `DELETE` entry and wait for its journal object, then reply 204.
+1. `cold.head(key)`. A **real object**: delete it with `delete_if_match` on its tag. A **reservation** whose put has already written its hot object: delete the reservation the same way. A **bare reservation** (a put still in flight, before its hot write): leave it; the delete is ordered before that put, which then completes. Nothing: go on.
+2. `hot.delete(key)`.
+3. Append a `DELETE` entry and wait for its journal object, then reply 204. The entry only updates the leader's books; the leader never deletes from the cold tier.
 
-The entry exists so the reconciler can undo a cold copy that was in flight when the delete ran. Deleting an absent key succeeds and is journaled. A journal failure returns an error for a delete that has taken effect; a retry is safe. The front runs the delete on its own task so a disconnect cannot split it.
+Because the cold tier is deleted first and the leader copies by replacing a reservation with `If-Match`, a copy in flight when the delete runs finds its reservation gone and writes nothing, and a copy-back that lands after the delete leaves a hot object whose key no longer exists in cold, which the leader removes. Deleting an absent key succeeds and is journaled. A journal failure returns an error for a delete that has taken effect; a retry is safe. The front runs the delete on its own task so a disconnect cannot split it.
 
 ### List and multipart
 
@@ -141,77 +145,178 @@ On configuration A the same S3 calls reach a `LocalCache` instead of a proxy. A 
 
 ## 6. Background work
 
-### The reconciler pass
+This is the decided design; the code moves to it through the pull requests listed in section 12.
 
-![One reconciler pass](diagrams/reconciler-pass.svg)
+Puts and gets run on every node. The background work, copying to cold, evicting and cleaning up, is done by one process at a time, the leader. This section follows one design from the ground up: where things live, how a node comes and goes, how the leader is chosen, what the leader does with a write, and what happens when something dies. Safety never depends on there being exactly one leader: every destructive step is conditional on a tag the step just read, so a process that is wrong about being the leader makes a step that fails instead of one that destroys.
 
-The binary runs a pass, sleeps `--reconcile-interval` (5 s), and repeats. In order ([reconciler.rs](../../crates/tierstore/src/reconciler.rs), `Reconciler::pass`):
+![The cluster at a glance: nodes, hot tier, cold tier, and what each writes](diagrams/cluster.svg)
 
-1. **Lease.** Renew if held, else acquire. If not held, clear the books and end the pass.
-2. **Discover** proxies by listing `_tiering/proxies/`, and load each new proxy's checkpoint.
-3. **Read journals** per proxy from the last object read, and register the entries.
-4. **Apply puts**: for one journal object, copy its distinct put keys with up to 16 in flight (`copy_key`: `hot.get` whole, then a create-only `cold.put`; hot not-found is skipped; `AlreadyExists` counts as copied without comparing content).
-5. **Apply deletes** of the same journal object in entry order (`delete_cold`, below).
-6. **Evict** if usage is above the high-water share (80%) of the budget: re-read the journals once more, then take candidates oldest first until usage is at the low-water share (70%), each with an unconditional `hot.delete`.
-7. **Checkpoint** each proxy if it changed.
-8. **Prune** journal objects behind the eviction position and older than the retention (24 h in the binary).
-9. **Publish** `_tiering/usage`.
+The figure is the whole story in one picture: any number of nodes, one of them the leader, over a hot and a cold tier. The sections below zoom in: where each key lives (6.1), how a node comes and goes (6.2), how the leader is chosen (6.3), what the leader does with a write (6.4 and 6.5), live update (6.6) and failures (6.7).
 
-Copy to cold strictly before delete from hot. That order is what makes a get after an acknowledged put always find the object (hot first, then cold) and what the second cold HEAD of a put relies on.
+### 6.1 Where things live
 
-`delete_cold` HEADs the hot tier. If hot lacks the key, it deletes from cold. If hot has the key, it deletes from cold only when the cold copy differs in size or content tag, on the reading that the cold copy is then one that was in flight when the key was deleted and the hot object is the new one. Section 8 gives the sequences in which a `delete_cold` acts on a cold object that is not the one the delete entry was written for.
+![Where each key lives in the hot and cold tiers, who writes it, how, and when it goes](diagrams/store-paths.svg)
 
-### Eviction
+The hot tier holds the data until it is evicted, and all coordination state, under reserved prefixes. The cold tier decides whether a key exists, and holds client keys only.
 
-Eviction is first-in-first-out by journal entry time across proxies and by journal order within one proxy. Nothing records reads, so recency is not available; the design chooses the policy that needs only the journal. Only entries of journal objects already applied are candidates, so the cold tier holds them. The reconciler never lists the hot tier: `hot_bytes` is the sum of logical sizes in journal entries minus deletes and evictions. It does not count puts that went straight to cold, multipart objects, or hot objects with no entry.
+- **Hot tier.** Client objects under their own keys. `_journal/<id>/<seq>`: one create-only object per batch of a node's puts, deleted by the leader as soon as it is checkpointed. `_tiering/proxies/<id>`: the node's registration and heartbeat. `_tiering/checkpoint/<id>`: how far the leader has applied that node's journal. `_tiering/lease`: the leader's lease. `_tiering/usage`: published by the leader. `_tiering/selftest/<run>/`: start-up probes.
+- **Cold tier.** Client objects, in one of two states under the same key: a marked **reservation** (a small object that says a put owns the key) and then the **real object**. Nothing else lives there: no `_journal`, no `_tiering`.
 
-### Checkpoints and pruning
+Why: the coordination state is in the hot tier because it is small, changes often and must be fast, and the hot tier is the store every node already writes to. The key's existence is decided in the cold tier because that is the one place that outlives eviction: a key is taken when cold holds a reservation or a real object for it, and a second create-only put of the key fails there. Section 10 lists each path with its writer and write mode.
 
-The checkpoint `{seq, evict_seq, evict_idx}` says: every journal object up to `seq` is applied; every entry before `(evict_seq, evict_idx)` is done with. The eviction cursor moves only when a candidate is popped. Below the high-water mark with no superseded entries it stays at the start, `evict_seq` stays 0 and nothing is pruned, so journal objects accumulate (about one per hot object). After a restart the set of retained objects is empty, so journal objects behind the cursor that are younger than the retention are never deleted.
+### 6.2 A node's life: online, heartbeat, stop, departure
 
-### Usage and back-pressure
+![One node: boot, heartbeat, graceful stop or silence, and how the leader retires it](diagrams/node-lifecycle.svg)
 
-The reconciler publishes `{hot_bytes, copy_lag, time}` at the end of each pass in which it holds the lease. The proxy never measures the hot tier. It rereads the usage object at most once per second and maps it to a level; a missing, unreadable or 30-second-old usage counts as `Open`. A hot tier that answers `Full` is latched `Full` for one second. `hot_bytes` is a **budget** the deployment sets below the real capacity, not a measurement of the disk. `/usagez` answers 200, or 503 when the usage is older than `--usage-stale-after`.
+Each process boot gets a fresh id, `<node>-<boot id>`; an id is never reused. On boot the process creates its registration, `_tiering/proxies/<id>`, in the hot tier (create-only) and then rewrites it every minute as a heartbeat. Its puts write `_journal/<id>/<seq>`. On a graceful stop it drains and writes `closed` into the registration.
 
-### The lease and the process lock
+The leader treats a node as **departed** when either holds: its registration says `closed`, or the registration object has not changed for ten minutes, measured on the leader's own steady clock (the leader notes when it first saw this exact object). No timestamp from another machine is compared with anything, so clock skew between machines cannot make a live node look dead.
 
-![Lease timeline: acquire, renew, expire, take over](diagrams/lease.svg)
+To retire a departed node the leader:
 
-The lease is the object `_tiering/lease`. **Acquire** is a create-only put, then a HEAD to learn the tag. **Renew** is `put_if_match` on the tag this holder last wrote; any error counts as not held, and clears the holder's tag. **Take over** HEADs the object and, if `modified + ttl <= now`, calls `put_if_match` on the tag just seen, so of two takers only one succeeds. **Release** HEADs and deletes only if the tag is still the holder's. The body is `holder`, `nonce`, `generation`; it is never read, only its tag and `modified` time are used. A failed renewal clears the holder's tag; the next pass tries to acquire, finds the object, and can take it over only after the ttl has passed since the last successful write, even if the failure was a transient error and no one else holds it. A holder learns it lost the lease only at its next renewal, once per pass.
+1. creates a **sentinel** object at the node's next journal number (create-only);
+2. applies everything below the sentinel: copies each object to cold and writes the node's checkpoint;
+3. deletes the node's journal, checkpoint and registration.
 
-On a `dir:` hot tier `put_if_match` is atomic only among calls of one in-process backend, so two processes on one node would not exclude each other through the lease. With `--lock-file` a process serves at once but reconciles only while it holds an exclusive `flock` on that file; this is also what lets two slots of a hand-over overlap ([tierstore-handover.md](tierstore-handover.md)).
+Why a sentinel: journal objects are create-only, so once the sentinel holds the next number, nothing can write it. A node that was only frozen (a long pause, a partition that heals) still believes it is alive; when it wakes, its next journal write collides with the sentinel and fails, so its put is not acknowledged. The node stops and registers again under a new id. Nothing can be acknowledged past the point where the leader stopped looking. A dead node's journal keeps being copied the whole time; only its cleanup waits for the departure.
+
+### 6.3 Choosing the leader
+
+![Leader election over the lease object: acquire, renew, release, expire, take over](diagrams/leader-election.svg)
+
+Every process runs the same code; the leader is whoever holds the object `_tiering/lease` in the hot tier.
+
+1. **Acquire** is a create-only put, then a HEAD to learn the tag. On an empty store the first node to try wins.
+2. **Renew** happens each pass, as `put_if_match` on the tag this holder last wrote. Any error counts as not held and clears the holder's tag.
+3. **Release** happens on drain: the holder, which has already stopped accepting, deletes the lease only if the tag is still its own (`If-Match` on its tag), then exits.
+4. Another process **acquires** within one pass (create-only).
+5. If the leader crashes, nobody renews. A process sees the tag unchanged.
+6. **Take over**: after the ttl (30 s) has passed on the taker's own clock since it first saw that tag, it calls `put_if_match` on the tag it saw, so of two takers only one succeeds. The gap after a crash is therefore about 30 s: the ttl, counted from when a taker first sees the unchanged tag, plus up to one pass (5 s).
+
+The lease body is `holder`, `nonce`, `generation`; it is never read, only its tag is used. A failed renewal clears the holder's tag, so the next pass can only take the lease over after the ttl, even if the failure was a transient error and nobody else holds it. A holder learns it lost the lease only at its next renewal, once per pass.
+
+Why a lease object and not a coordination service: requirement 5 says there is none, and a conditional write on one small object in a store the deployment already has gives exactly one winner. Why a single leader at all: copying, checkpoints and eviction then have one writer in the normal case, so they never contend, and a journal is read by one process. Puts never stop: every process keeps accepting puts and gets through a hand-over or a crash. While there is no leader, only the leader's work waits: copying to cold, checkpoints, deleting journal objects, evicting.
+
+**What the hot tier must provide.** The lease, checkpoint and registration writes need a hot tier whose create-only and `If-Match` writes are atomic across processes, because during a live update two processes run at once over one hot tier. An S3-compatible hot bucket provides this. A `dir:` hot tier provides it by doing its create-only and `If-Match` writes under a file lock inside its own directory (decided, section 12; today it is atomic only inside one process, which is why the code still has `--lock-file`). The start-up self-test (section 9) checks the sequential behaviour of both writes and refuses a tier that gets it wrong; its probes are sequential, so it cannot detect a lack of atomicity across processes, and the choice of tier is the deployment's.
+
+### 6.4 The life of a write: journal to cold to prune to eviction
+
+![The life of one write: put, copy to cold, checkpoint and prune, eviction](diagrams/journal-lifecycle.svg)
+
+The diagram follows one put through its three stages.
+
+**A. The put** (section 5). The node reserves the key in cold (once), then writes the object and its journal entry to hot (twice, concurrently), and acknowledges. Now cold holds only the marked reservation, and hot holds the object and the journal entry. The bytes are not in cold yet.
+
+**B. The leader copies it to cold.** The leader reads the journal object, reads the object from hot (streamed, read once), and puts it to cold under the key, replacing the reservation with `If-Match` on the reservation's tag. It then writes the node's checkpoint (`If-Match`, never backwards) and deletes the journal object at once, so journals stay small. Cold now holds the real object. Other nodes never copy or evict.
+
+Why replace with `If-Match`: the copy replaces that reservation and nothing else. If the key was deleted and re-reserved by another put in the meantime, the tag no longer matches and the copy fails instead of overwriting the newer object. Why delete the journal at once: its only purpose is to tell the leader what to copy; after the checkpoint it is dead weight, and the number of objects stays proportional to the unapplied writes, not to the hot tier's size.
+
+**C. Eviction**, later. Above the high-water share (80% of the budget) the leader evicts, oldest first, down to the low-water share (70%). Per object, in order: HEAD the key in cold, which must show the real object, not a reservation; HEAD the key in hot and read its tag T; delete from hot with `If-Match` T. The hot copy goes and cold keeps the real object. If the hot tag changed in between, the delete fails and the copy stays.
+
+Why: cold must hold the real object before the hot copy is deleted, so a get after an acknowledged put always finds the object, hot first and then cold. The delete is conditional on the tag just read so eviction can only remove the object it decided about. Tags are never compared across tiers, since the two tiers may tag content differently. Eviction is first-in-first-out by put order: nothing records reads, so the design chooses the policy that needs only what the leader already knows. `hot_bytes` is the sum of logical sizes the leader has seen put minus those it has deleted; it does not count puts that went straight to cold, multipart objects, or hot objects with no entry.
+
+The checkpoint `{seq, evict_seq, evict_idx}` says that every journal object up to `seq` is applied. A write that would move it back is refused, so a leader that outlasted its lease cannot undo progress.
+
+### 6.5 The leader's pass
+
+![One pass of the leader, in order](diagrams/reconciler-pass.svg)
+
+The binary runs a pass, waits `--reconcile-interval` (5 s), and repeats. In order:
+
+1. **Renew the lease** if held; if the renewal fails, stop. If not the holder, try the create-only acquire, or take over with `If-Match` once the ttl has passed. If still not held, the pass ends: this process copies and evicts nothing.
+2. **List registrations** under `_tiering/proxies/`.
+3. **Read journal objects** per node: those after its checkpoint, in order.
+4. **Copy each object to cold**, streamed, replacing the reservation with `If-Match`; up to 16 in flight.
+5. **Write the checkpoint** of each node whose journal moved.
+6. **Delete the journal objects** at or below the checkpoint just written.
+7. **Evict** above high water, per object (6.4).
+8. **Retire departed nodes** (6.2).
+9. **Publish usage** (6.8).
+
+Steps 3 to 6 run once for each node. Copy to cold strictly before delete from hot is what makes a get after an acknowledged put always find the object. A pass has no deadline of its own but renews the lease once, at its start, so the lease ttl (30 s) must exceed a pass; a leader that is slower loses the lease, and its late steps fail on their conditions.
+
+### 6.6 Live update
+
+![A live update: the new process takes over the sockets, then the old one leaves](diagrams/live-update.svg)
+
+Updates replace a running process without a gap. The running process keeps a control socket (a Unix domain socket in its state directory).
+
+0. Requests keep arriving at the old process.
+1. The new process boots with a fresh id (`<node>-<boot id>`).
+2. It registers: it creates `_tiering/proxies/<new id>`.
+3. It connects to the old process's control socket.
+4. The old process hands over the already-bound listening sockets of every interface as file descriptors (`SCM_RIGHTS`), a POSIX hand-off.
+5. The new process starts accepting; new connections arrive there.
+6. The old process stops accepting and drains its in-flight requests.
+7. It writes `closed` in its registration.
+8. If it was the leader, it releases the lease (`If-Match` on its tag).
+9. Another process acquires the lease within one pass (create-only).
+10. The old process exits; it does not wait for step 9.
+11. Later, the leader retires the old id (6.2): sentinel, apply, delete.
+
+Why: the listening sockets are passed on, never closed, so the kernel's queue of pending connections is never lost and no connection is refused. No fixed ports or slots are involved, because the new process has its own fresh id, and no firewall rules. It is the same on Linux and macOS. Puts continue throughout; if the lease changes hands, only copying to cold waits, for at most one pass.  The update hook is a POSIX script, so one hook serves Linux and macOS; only the runner that starts and stops a process differs (systemd, launchd).
+
+### 6.7 When a node or the leader dies
+
+![A node freezes: how the leader retires it, and what the node meets on waking](diagrams/node-death.svg)
+
+**A node dies or freezes.** Its journal and registration just sit there. The leader keeps copying its journal like every other node's: each pass it reads the journal, copies each object to cold (replacing the reservation), writes the checkpoint and deletes the journal object. After ten minutes with no change in the registration, on the leader's own clock, the node counts as departed and the leader retires it (6.2). If the node was only frozen and wakes after the sentinel is written, its next journal write fails against the sentinel, its put is not acknowledged, the client sees an error and may retry, and the node stops and registers under a new id.
+
+**The leader dies** (leader election, steps 5 and 6). It stops renewing the lease, which expires about 30 s later: the ttl, counted from when a taker first sees the unchanged tag, plus up to one pass. Another process takes it over with `If-Match` on the expired lease's tag, reads every journal from its checkpoint, copies, and evicts as needed. Puts continue meanwhile on every node: each still reserves its key in cold, writes the object and its entry to hot, and is acknowledged. Copying waits, and journals only grow until it resumes. If the hot tier fills in that time, puts answer `Full` and take the cold path (section 5).
+
+### 6.8 Usage and back-pressure
+
+The leader publishes `_tiering/usage` = `{hot_bytes, copy_lag, time}` at the end of each pass in which it holds the lease. The proxy never measures the hot tier. It rereads the usage object at most once per second and maps it to a level: `Open`, `Critical` (at or above 95% of the budget) or `Full` (at or above the budget). A missing, unreadable or 30-second-old usage counts as `Open`. A hot tier that answers `Full` is latched `Full` for one second. `hot_bytes` is a **budget** the deployment sets below the real capacity, not a measurement of the disk. `/usagez` answers 200, or 503 when the usage is older than `--usage-stale-after`.
+
+There is no back-pressure sleep. A put at `Open` or `Critical` takes the normal path; at `Full` it takes the cold path or, if presigned, is refused with 503 `SlowDown` (section 5). `Critical` stops copy-back, so a read does not fill a hot tier that is nearly full.
+
+### The timings
+
+| What | Value | Measured on | Why this long |
+|---|---|---|---|
+| Heartbeat (registration rewrite) | 1 minute | the node | cheap evidence of life; one small write per node per minute |
+| Departure of a silent node | 10 minutes without a change | the leader's own steady clock | longer than any pause that is not a failure; no clocks compared across machines |
+| Lease ttl | 30 seconds; about 30 s from a crash to a new leader (the ttl from when a taker first sees the unchanged tag, plus up to one pass) | the taker's own clock | the longest pause in copying after a leader crash |
+| Pass interval | 5 seconds (`--reconcile-interval`) | the leader | the lease is renewed once per pass; a new write waits about one pass to reach cold |
+| Usage refresh | 1 second (proxy), published each pass | the proxy | back-pressure reacts within seconds |
 
 ## 7. Edge cases the design handles
 
-Each entry is a mechanism in the code and the reason it works.
+Each entry is a mechanism and the reason it works.
 
-- **Demotion race.** The reconciler copies an object to cold and then evicts it from hot while a second put of the same key is between its first cold HEAD and its hot create. Without a second ask the put would win the hot slot after eviction and be acknowledged although cold holds the key. The proxy asks cold again after its hot create (`Proxy::confirm_not_tiered`) and removes the new object if cold has it. This is sound only because copy-before-evict is the reconciler's order. The race between a cold-path put and a hot put is not closed by it (section 11). Test: `tests/tierstore/recheck.rs`.
-
-  ![The demotion race and the second cold check](diagrams/race-demotion.svg)
-
-- **A killed or dropped put.** Acknowledgement waits for the journal write, so a put that is never acknowledged either has no hot object, or a hot object with no entry. An object with no entry is invisible to the reconciler (never copied, evicted or counted) and a retry of the key is refused as existing. The front finishes a put whose client has left, by running it on its own task, so the realistic triggers are a process kill, a crash, or a cut at the drain deadline. Test: `tests/tierstore/killed_put.rs`.
-- **A failed journal write.** The proxy deletes its own hot object (best effort) and returns the error, so a put whose entry failed is not left stored by the proxy. A delete that returns an error is retried safely, because every step of it is idempotent.
+- **The demotion race is closed by the reservation.** A key's reservation is made in the cold tier before anything reaches the hot tier, and it is replaced by the real object only by the leader's `If-Match` copy. A second put of a key that the leader has just copied and evicted meets the real object in cold and gets `AlreadyExists`; a second put of a key still in flight meets the reservation. No second cold HEAD is needed and none exists. The one race left is between a presigned (hot-only) put and a put that goes through cold (section 11).
+- **A crashed put's reservation.** A put that dies after reserving (a process kill, a crash, a cut at the drain deadline) leaves a small reservation in cold and possibly a hot object with no journal entry. The reservation names the node that made it. Until the leader has retired that node (it wrote `closed`, or its registration did not change for 10 minutes on the leader's clock, section 6.2), a put of the key is refused as existing, because the put may still finish. After that, a new put of the key takes the reservation over with one compare-and-swap on its tag (one winner among takers, nothing deleted first), and a hot object the crashed put left behind is adopted through a journal entry rather than lost. A put whose journal entry was durable is applied by the leader as usual. A client that aborts its request releases nothing, since the front finishes a put whose client has left (next but one bullet). The cost of a crash is one small object for one key, not a wrong answer.
+- **A frozen node and the sentinel.** A node that pauses for longer than the departure time is retired by the leader, which creates a sentinel at the node's next journal number. When the node wakes, its journal write is create-only, collides with the sentinel and fails, so its put is not acknowledged; the node stops and registers under a new id. Without this, a node could acknowledge puts into a journal nobody reads any more. Section 6.2.
+- **Two leaders at once.** A leader that is slow (a long pass, a frozen process) can believe it holds a lease that another process has taken over. Every destructive step it makes is conditional: the copy replaces a reservation with `If-Match` on that reservation's tag, a hot delete names the hot tag just read, a checkpoint is `If-Match` and never moves backwards, a renewal fails on a tag it does not hold. The late leader's steps fail instead of destroying; the new leader repeats work the old one did, which is safe because every step is idempotent or conditional. Section 6.3.
+- **A killed or dropped put** is the case above: the front finishes a put whose client has left by running it on its own task, so the realistic triggers are a process kill, a crash, or a cut at the drain deadline.
+- **A failed journal write.** The proxy deletes its own hot object (best effort), releases its own reservation and returns the error, so a put whose entry failed is not acknowledged and is not left stored by the proxy. A delete that returns an error is retried safely, because every step of it is idempotent.
 - **Presigned puts are hot-only.** A presigned put never writes cold, so the hot tier's create-only write alone decides a race between them. Test: `tests/tierstore/one_winner.rs`.
-- **Journal numbering on `AlreadyExists`.** A journal object is written create-only. If its number is taken (two writers with one proxy id, or a reopened proxy), the proxy tries the next number. A failed write does not advance the number. A proxy that opens resumes at one more than the larger of the highest number it lists and its checkpoint's `seq`, so after a prune it cannot reuse numbers the reconciler has already read. Test: `tests/tierstore/journal.rs`.
-- **Restart rebuild.** The reconciler's in-memory books are rebuilt from checkpoints and journals: it reloads each checkpoint, re-reads journal objects from `evict_seq`, treats objects up to `seq` as already copied and later ones as pending. Work done since the last stored checkpoint is done again, which is safe because copies are create-only and deletes of missing keys succeed. Test: `tests/tierstore/reconciler.rs`.
-- **Lease take-over by `If-Match`.** Many reconcilers may find the lease expired or absent at once; create-only or `If-Match` on the tag just read lets exactly one succeed. On a `dir:` hot tier this holds only within one process; two processes on one node are kept apart by `--lock-file`, not by the lease. Test: `tests/tierstore/lease_takeover.rs`.
+- **Journal numbering.** A journal object is written create-only. If its number is taken by a sentinel, the node stops and registers again (above); a node never skips to the next number, because a taken number means the leader has stopped reading its journal. A node that boots takes a fresh id and starts at the first number, so a number is not reused after a prune.
+- **Restart rebuild.** The leader's in-memory books are rebuilt from checkpoints and journals: it reloads each checkpoint and re-reads the journal objects after it, which are exactly the writes not yet applied. Work done since the last stored checkpoint is done again, which is safe because the copy is conditional on the reservation's tag and deletes of missing keys succeed.
+- **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.3).
 - **Reserved prefixes.** `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses put, delete and multipart under them, and the S3 front refuses every call on them (403). The proxy filters them from the hot listing.
 - **The start-up self-test.** Before any address is bound, each tier is probed (section 9). A store whose create-only put or `If-Match` does not hold is refused with exit status 3, so the lease and the one-winner promise are never built on a store that cannot keep them.
-- **Fail closed.** A put whose first cold HEAD cannot be answered fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read.
+- **Fail closed.** A put whose reservation cannot be made fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read.
 
-## 8. Edge cases with several actors
+## 8. Races the current code loses (the test list for the build)
 
-This section lists the places where several actors touch one key, step by step, with the outcome the design intends and what the code does today. Each scenario has a test (`tests/tierstore/edge_cases.rs`; each test lands with the change that makes it pass) that holds the interleaving at the named step with a gate (`Stall` in `hold.rs`, or a backend defined in the test) and asserts the **intended** outcome. Today all eight tests fail, each on its final check, so all seven scenarios are known gaps: a lost object, a resurrected delete, a double acknowledgement or a checkpoint that moves backwards. The options are in section 12(d).
+This section is not part of the design. It lists the places where several actors touch one key in the current code, step by step, as the test list for the build. The steps show the old protocol (two cold HEADs, `confirm_not_tiered`, create-only copies, unconditional eviction), which the decided design (sections 5 to 7) does not have. Under the decided design:
+
+- Scenarios 2, 3 and 7 are closed by the conditional steps: copies and checkpoints are `If-Match`, eviction deletes on the hot tag just read, tags are never compared across tiers. Scenario 3 keeps the byte-identical re-put window of section 13, item 15.
+- Scenario 6 is closed: both puts go through the cold reservation, so exactly one wins.
+- Scenarios 1, 4 and 5 involve a delete; the decided delete (cold first, section 5) and the copy by `If-Match` on the reservation close them.
+
+Each scenario has a test (`tests/tierstore/edge_cases.rs`; each test lands with the change that makes it pass) that holds the interleaving at the named step with a gate (`Stall` in `hold.rs`, or a backend defined in the test) and asserts the **intended** outcome. Today all eight tests fail, each on its final check, so all seven scenarios are known gaps of the current code: a lost object, a resurrected delete, a double acknowledgement or a checkpoint that moves backwards. The decided fix for the ones that do not involve a delete is the ordered list in section 12(d).
 
 ### A delete and a re-put of one key in one journal object
 
 1. The reconciler is copying an earlier put of `k` (content `v1`): `copy_key` has read `v1` from hot and its `cold.put` is under way; the cold tier is slow, so the call lands late.
-2. Client: `DELETE k`, then `PUT k` with content `v2`, within one linger of one proxy. `Proxy::delete` removes both tiers and appends a `DELETE` entry; `Proxy::put` finds cold without `k` (both cold HEADs), writes hot and appends a `PUT` entry. Both entries are in one journal object `[DELETE k, PUT k]`.
+2. Client: `DELETE k`, then `PUT k` with content `v2`, within one journal batch window of one proxy. `Proxy::delete` removes both tiers and appends a `DELETE` entry; `Proxy::put` finds cold without `k` (both cold HEADs), writes hot and appends a `PUT` entry. Both entries are in one journal object `[DELETE k, PUT k]`.
 3. The delayed `cold.put(k, v1)` lands. The cold tier now holds a stray copy of the old content.
 4. Reconciler pass: `apply_object` applies puts first: `copy_key(k)` reads `v2` from hot, `cold.put` returns `AlreadyExists` (the stray copy) and is counted as copied. Then `delete_cold(k)`: hot holds `k`, cold holds different content, so cold is deleted. Cold is now empty and the put is marked copied.
 5. Further puts raise usage above high water; the next pass applies them and evicts oldest first, so `k` goes first and its hot copy is removed.
 
-Intended: `GET k` returns `v2`. Today: with different content in the stray copy, cold is deleted after `v2` is copied and eviction then removes the hot copy, so `GET k` is `NotFound`. With no stray copy, or one of the same content as `v2`, cold keeps `v2` (`a_delete_entry_keeps_the_cold_copy_of_a_key_that_was_put_again` in `tests/tierstore/reconciler.rs` covers the case with no stray copy). Option: apply entries in order, section 12(d).
+Intended: `GET k` returns `v2`. Today: with different content in the stray copy, cold is deleted after `v2` is copied and eviction then removes the hot copy, so `GET k` is `NotFound`. With no stray copy, or one of the same content as `v2`, cold keeps `v2` (`a_delete_entry_keeps_the_cold_copy_of_a_key_that_was_put_again` in `tests/tierstore/reconciler.rs` covers the case with no stray copy). Closed by the decided design (section 12(d)).
 
 **Test:** `a_delete_then_a_reput_in_one_journal_object_keeps_the_new_object` fails today: `GET k` is `NotFound`.
 
@@ -223,7 +328,7 @@ Intended: `GET k` returns `v2`. Today: with different content in the stray copy,
 4. Reconciler pass: `copy_key(k)` writes `v2` to cold (cold was emptied by the delete). `delete_cold(k)` then HEADs hot and cold; the sizes are equal and the tags differ only because of the wrapper, so `same_content` is false.
 5. Eviction removes the hot copy (`v2` is above high water for the budget).
 
-Intended: the cold copy of the live object is never deleted because of a difference of tag function, so `GET k` returns `v2`. Today: `Meta::same_content` compares size and tag, so `delete_cold` deletes the cold copy just written and eviction then removes hot; `GET k` is `NotFound`. A dir hot tier (SHA-256 tags) over an S3 cold tier (ETags) is this case. Option: compare content or refuse the pair, section 12(d).
+Intended: the cold copy of the live object is never deleted because of a difference of tag function, so `GET k` returns `v2`. Today: `Meta::same_content` compares size and tag, so `delete_cold` deletes the cold copy just written and eviction then removes hot; `GET k` is `NotFound`. A dir hot tier (SHA-256 tags) over an S3 cold tier (ETags) is this case. Closed by the decided design (section 12(d)).
 
 **Test:** `a_delete_and_a_reput_in_one_journal_object_keeps_the_new_object_when_the_tiers_tag_differently` fails today: the cold tier no longer holds `k` and `GET k` is `NotFound`.
 
@@ -235,7 +340,7 @@ Intended: the cold copy of the live object is never deleted because of a differe
 4. The held `hot.delete(k)` runs; it is unconditional (the `Backend` trait has no conditional delete), so it removes `v2`.
 5. Further passes run: they apply the `DELETE` (hot lacks `k`, so cold's `k` is deleted) and the `PUT` (hot lacks `k`, so it is skipped).
 
-Intended: the re-put object is not lost; `GET k` returns `v2`. Today: `k` is in neither tier, so `GET k` is `NotFound`. Option: a conditional delete, section 12(d). The nearest tests are `an_object_replaced_while_the_reconciler_copies_is_not_evicted` and `an_object_put_again_is_not_evicted_by_its_old_entry` in `tests/tierstore/reconciler.rs`, which do not hold the eviction's own delete.
+Intended: the re-put object is not lost; `GET k` returns `v2`. Today: `k` is in neither tier, so `GET k` is `NotFound`. Closed by the decided design (section 12(d)). The nearest tests are `an_object_replaced_while_the_reconciler_copies_is_not_evicted` and `an_object_put_again_is_not_evicted_by_its_old_entry` in `tests/tierstore/reconciler.rs`, which do not hold the eviction's own delete.
 
 **Test:** `an_eviction_racing_a_delete_and_a_reput_keeps_the_new_object` fails today: `GET k` is `NotFound`.
 
@@ -247,7 +352,7 @@ Intended: the re-put object is not lost; `GET k` returns `v2`. Today: `k` is in 
 4. The held put runs: the copy-back's `hot.put` creates `k` in hot, and the background task appends a `PUT` entry after the `DELETE` entry.
 5. Reconciler passes: apply the `DELETE` (nothing to delete) and then the `PUT`, which copies `k` to cold.
 
-Intended: a deleted key stays deleted; `GET k` is `NotFound`. Today: the deleted key comes back. `k` is in hot and in cold and `GET k` returns the old bytes. The `Proxy` doc lists it as a known limit. Option: a second cold check after the copy-back, section 12(d).
+Intended: a deleted key stays deleted; `GET k` is `NotFound`. Today: the deleted key comes back. `k` is in hot and in cold and `GET k` returns the old bytes. The `Proxy` doc lists it as a known limit. Closed by the decided design (section 12(d)).
 
 **Test:** `a_delete_during_a_copy_back_keeps_the_key_deleted` fails today: `GET k` returns the deleted bytes.
 
@@ -257,7 +362,7 @@ Intended: a deleted key stays deleted; `GET k` is `NotFound`. Today: the deleted
 2. Client: `PUT k` (`v2`) with the proxy seeing the hot tier `Full`: `put_cold` (or `put_cold_stream` for a streamed body): `hot.head` not-found, then a create-only `cold.put`. No journal entry is written. The multipart variant ends in `complete_cold` (a hot HEAD, then the cold tier's create-only completion), also with no entry.
 3. Reconciler pass: the `PUT` object is applied (`copy_key` finds hot without `k` and skips it), then the `DELETE`: `delete_cold` finds hot without `k` and deletes the cold object, which is `v2`.
 
-Intended: the re-created object survives; `GET k` returns `v2`. Today: cold holds no `k`, so `GET k` is `NotFound`. Option: journal cold-path puts, section 12(d).
+Intended: the re-created object survives; `GET k` returns `v2`. Today: cold holds no `k`, so `GET k` is `NotFound`. Closed by the decided design (section 12(d)).
 
 **Test:** `a_delete_then_a_cold_path_reput_keeps_the_new_object_after_the_reconciler_pass` and `a_delete_then_a_multipart_reput_keeps_the_new_object_after_the_reconciler_pass` fails today: `GET k` is `NotFound`, for both the cold-path put and the multipart completion.
 
@@ -279,7 +384,7 @@ Intended (the create-only promise): at most one put is acknowledged, and `GET k`
 2. The test clock moves past the ttl. Reconciler B's pass: `ensure` sees the lease expired and takes it over with `put_if_match`; B reads the journals, applies them, and stores its checkpoint for the proxy (`seq = 4`) through `journal::write_object` (HEAD, then `put_if_match` on the tag read).
 3. A's held call returns and its pass ends: A stores the checkpoint it computed from its older view (`seq = 2`) the same way: HEAD returns B's fresh tag, `put_if_match` on that tag succeeds.
 
-Intended: a checkpoint never moves backwards. Today: the stored checkpoint has `seq` 2. A restart re-reads and re-applies journal objects 3 and 4, which is safe because copies are create-only and deletes of missing keys succeed. `lease_takeover.rs` sets up overlapping passes. Option: fence or refuse a lower `seq`, section 12(d).
+Intended: a checkpoint never moves backwards. Today: the stored checkpoint has `seq` 2. A restart re-reads and re-applies journal objects 3 and 4, which is safe because copies are create-only and deletes of missing keys succeed. `lease_takeover.rs` sets up overlapping passes. Closed by the decided design (section 12(d)).
 
 **Test:** `a_stale_pass_does_not_move_the_stored_checkpoint_back` fails today: the stored checkpoint is `{"seq":2,…}` after the new holder stored `seq` 4.
 
@@ -298,7 +403,7 @@ Before binding any address the server runs a self-test against each tier, hot fi
 | Listing is ordered, paged, honours `start_after` | Reading the journal | yes (`paging`) |
 | Delete of a missing key succeeds | Repeated and re-applied deletes, eviction, prune, restart rebuild | no |
 | Multipart completion is create-only (cold tier) | The proxy does not HEAD cold at completion | yes (`multipart-conditional`, skippable) |
-| Create-only and `If-Match` are atomic under concurrent writers | One winner; one lease holder | no: the probes are sequential |
+| Create-only and `If-Match` are atomic under concurrent writers, across processes | One winner; one lease holder, also while two processes run during a live update | no: the probes are sequential; a `dir:` hot tier fails this across processes (section 6.3) |
 | The tag is the same function of content on both tiers | `delete_cold` compares a hot tag with a cold tag | no |
 | Strong read-after-write for get, head and list | Journal reading, probes | implicitly, by reading right after writing |
 | Store clock and this machine's clock agree to well under the lease ttl | Lease expiry, journal retention | no (the flag relations are checked, not the clocks) |
@@ -309,37 +414,39 @@ How `S3Backend` maps answers: 507 is `Full`; 408, 429, other 5xx (not 501), tran
 
 ## 10. State
 
-![Key layout of the hot bucket](diagrams/hot-bucket.svg)
+![Where each key lives: every path, who writes it, how, and when it goes](diagrams/store-paths.svg)
 
-All coordination state is small objects in the hot bucket, under reserved prefixes, beside client objects under their own names. The cold bucket holds client objects only (plus the self-test's probes).
+All coordination state is small objects in the hot bucket, under reserved prefixes, beside client objects under their own names. The cold bucket holds client keys only: real objects and reservations (the same key, marked). The self-test's probes live in the hot tier under `_tiering/selftest/`.
 
-| Key | Writer | Write mode | Content | Lifetime |
-|---|---|---|---|---|
-| client key | proxy (put, copy-back) | create-only | the client's bytes | until evicted or deleted |
-| `_journal/<proxy id>/<seq:020>` | proxy | create-only; on `AlreadyExists` the next number | JSON array of entries `{op, key, size, time}` | pruned once applied, passed by the eviction cursor and older than retention |
-| `_tiering/proxies/<id>` | proxy at open | create-only, empty | marker | never deleted |
-| `_tiering/checkpoint/<id>` | reconciler | HEAD, create-only if absent, else `If-Match` | `{seq, evict_seq, evict_idx}` | never deleted |
-| `_tiering/usage` | reconciler, each pass | as the checkpoint | `{hot_bytes, copy_lag, time}` | never deleted |
-| `_tiering/lease` | reconciler | create-only to acquire; `If-Match` to renew and take over | `holder`, `nonce`, `generation` | deleted on release if the tag is still the holder's |
-| `_tiering/selftest/<run>/...` | start-up | per check | short literals | deleted after each check; swept after an hour |
+| Key | Tier | Writer | Write mode | Content | Lifetime |
+|---|---|---|---|---|---|
+| client key | hot | proxy (put, copy-back) | create-only, after the put won the cold reservation | the client's bytes | until evicted (`If-Match` on the hot tag) or deleted |
+| client key, reservation | cold | proxy, first step of a put | create-only (`If-None-Match: *`) | a small marked object | removed by its own put if the put fails (`If-Match` on its tag); otherwise replaced by the real object; a crashed put's is taken over by the next put of the key with `If-Match` once the leader has retired its node |
+| client key, real object | cold | leader (`If-Match` on the reservation's tag, streamed); the proxy at level `Full` (create-only, no reservation); multipart completion (create-only) | as named in the writer column | the client's bytes | until deleted by the client |
+| `_journal/<id>/<seq:020>` | hot | node `<id>`, one per batch; leader, a sentinel | create-only | JSON array of entries `{op, key, size, time}` and, on a put, an optional reservation tag | deleted by the leader once checkpointed; the rest at retirement |
+| `_tiering/proxies/<id>` | hot | node `<id>`: boot, every minute, `closed` on stop | create-only at boot, then `If-Match` | registration and heartbeat | deleted by the leader at retirement |
+| `_tiering/checkpoint/<id>` | hot | leader | `If-Match`; never moves backwards | `{seq, evict_seq, evict_idx}` | deleted at retirement |
+| `_tiering/lease` | hot | the leader | create-only to acquire; `If-Match` to renew and take over | `holder`, `nonce`, `generation` | deleted on release if the tag is still the holder's |
+| `_tiering/usage` | hot | leader, each pass | unconditional overwrite: only the leader publishes, and a stale leader's write is replaced on the next pass | `{hot_bytes, copy_lag, time}` | replaced by the next publish |
+| `_tiering/selftest/<run>/...` | hot | start-up | per check | short literals | deleted after each check; swept after an hour |
 
-A `DELETE` entry has size 0. A journal object holds up to 64 entries. An unknown `op` decodes as `Unknown` and is skipped. The reconciler's own memory (`Books`: an index of the latest put per key, usage, lag, and per proxy a stream of pending, candidate and retained objects) is rebuilt from the above and is never a record.
+A `DELETE` entry has size 0. A journal object holds up to 64 entries. An unknown `op` decodes as `Unknown` and is skipped. The leader's own memory (`Books`: an index of the latest put per key, usage, lag, and per node a stream of pending and candidate objects) is rebuilt from the above and is never a record.
 
-**Formats and versioning.** No stored format carries a version: not the journal array, entries, checkpoint, usage, the lease body or the proxy marker. What is tolerated: an unknown `op` is skipped, and an added field is ignored by an older reader (no struct denies unknown fields). What is not: a missing field (none has a default), and a new top-level field in the journal (its root is a bare array). The rule the design follows is additive-only change; section 12(e) is the plan to make it checkable.
+**Formats and versioning.** No stored format carries a version: not the journal array, entries, checkpoint, usage, the lease body, the registration or the reservation. What is tolerated: an unknown `op` is skipped, and an added field is ignored by an older reader (no struct denies unknown fields). What is not: a missing field (none has a default), and a new top-level field in the journal (its root is a bare array). The rule the design follows is additive-only change (a new optional field, a new journal op, a new kind of object); the reservation tag in a journal entry is such an optional field, so an older reader ignores it and a newer reader of an older entry finds none (the leader then has no tag to match and copies nothing for it). Section 12(e) is the plan to make it checkable.
 
 ## 11. Limits
 
 Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tierstore/docs/limits.md). The design-level limits are:
 
 - A lost hot tier loses what was not yet copied; the window is the copy lag.
-- Create-only across two tiers is four checks, none atomic with the others (section 7 and *Two puts of one key, one to each tier* in section 8).
+- Until the reservation put is built (section 12(d)), create-only across two tiers is four checks, none atomic with the others (*Two puts of one key, one to each tier* in section 8). After it, one write decides every race except between a presigned (hot-only) put and a put that goes through cold.
 - An object with no journal entry is invisible to eviction, usage and copy.
 - A pass has no deadline and renews the lease only at its start; the lease ttl (30 s) must exceed a pass, which start-up does not check.
 - The reconciler's copy and the proxy's read path hold whole objects, while puts are streamed.
 - Eviction is first-in-first-out.
 - One failed lease renewal stops reconciliation for up to a ttl.
 - A stalled journal stream (a gap, a corrupt object, a copy that fails for good) is visible only on stderr.
-- The sequences of section 8 end in a lost object, a resurrected delete, a double acknowledgement or a checkpoint that moves backwards; the options are in section 12(d).
+- The races of section 8 (current code) end in a lost object, a resurrected delete, a double acknowledgement or a checkpoint that moves backwards; the decided fix is in section 12(d), except for the delete protocol (section 13, item 16).
 - Reserved keys can appear in a cold listing (the filter applies to the hot listing).
 
 ## 12. Future work
@@ -350,14 +457,17 @@ Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tie
 
 **(c) The single-process local_cache + hot_store + cold_store configuration.** What: configuration C of section 4. Why: a node that also owns the data should serve its own reads from local NVMe without a second process and a hop between them. Touches: `config.rs` (accept the three tables), `config_cache.rs` and `cli.rs` (construct the `LocalCache` with the proxy as its `Arc<dyn Backend>` upstream, which it takes as any `Backend`, rather than over an S3 upstream), the start-up checks (the tiers are already self-tested before the proxy opens, so the cache must not run its write-through self-test against the proxy, which refuses the `_tiering/` probe keys; only the cache directory's own file-system check applies), the drain and hand-over (a local cache holds a directory lock), and `docs/configuration.md`.
 
-**(d) Closing the known gaps of section 8.** Options, each closing one or more of the gaps in section 8:
-- A conditional delete in `Backend` (delete if the tag is unchanged), which eviction and `delete_cold` could use so that they act only on the object they decided about. Touches `backend.rs`, the three backends, `reconciler.rs`. Closes *Eviction meets a delete and a re-put*.
-- Applying a journal object's entries in entry order rather than puts first, or having a delete entry name the content it deleted. Touches `reconciler.rs` and `state.rs`, and the format if an entry gains a field. Closes *A delete and a re-put of one key in one journal object* (and *the same, when the two tiers tag content differently* when the order leaves cold without a stray copy).
-- Fencing checkpoint writes by the lease (or by a generation stored with the checkpoint), or having a pass renew the lease. Touches `lease.rs`, `journal.rs`, `reconciler.rs`. Closes *A pass that outlasts the lease*; the smaller form is a checkpoint write that refuses to store a `seq` below the stored one, touching `journal.rs` `write_object` and `reconciler.rs` `persist`.
-- Journaling cold-path puts and multipart completions so that a delete entry cannot meet an object it does not know. Touches `tiered.rs` and the accounting in `state.rs`; an entry gains a field for objects not in hot, so the format change is additive. Closes *A delete meets a re-put that writes no journal entry*.
-- Making a copy compare content when the cold tier answers `AlreadyExists`, or refusing a tier pair whose tags are different functions. Touches `reconciler.rs` or the start-up in `cli.rs`. Closes *the same, when the two tiers tag content differently*.
-- A second cold check after a copy-back's hot put (as `confirm_not_tiered` does for a put): if cold no longer has the key, delete the hot object and journal nothing. Touches `tiered.rs` (`copy_back`). It narrows the copy-back and delete race and does not close it (*A copy-back meets a delete*).
-- *Two puts of one key, one to each tier* has no option here: closing it means making the cold-path create and the hot create exclude each other, which the two stores cannot do without a coordination step (open question 15).
+**(d) Replication: one leader and a cold reservation (decided, not built yet).** What: the design of sections 5 and 6, which closes the known gaps of section 8. In order, each step a pull request that can land alone:
+
+1. A conditional delete in `Backend` (delete only if the tag is unchanged) and a streamed `If-Match` put, in every backend. No behaviour change.
+2. A reconciler that reads around a reservation: the leader's copy replaces the reservation with `If-Match` (streamed, read once), and eviction checks that cold holds the real object and then deletes from hot on the tag just read. Proxy get, head and list hide reservations. Journal entries gain an optional field for the reservation's tag (additive). Lands before anything writes a reservation.
+3. The reservation put: one create-only write in cold, then the object and the journal entry in hot concurrently, acknowledged when both are durable; the two cold HEADs and `confirm_not_tiered` go, and so does the fixed sleep in the put path; the cold path at `Full` stays; the start-up self-test learns the reservation checks. An abandoned reservation is taken over with one compare-and-swap once the leader has retired the node that made it (section 7).
+4. One leader: other nodes never copy or evict; renewal each pass, release on drain; checkpoints never move backwards; the journal object is deleted at once when checkpointed.
+5. Node lifecycle: a fresh id per boot, the registration and its one-minute heartbeat, `closed` on stop, departure after ten minutes on the leader's clock, the sentinel, and retirement of the node's journal, checkpoint and registration.
+6. Live update by socket hand-off (section 6.6): the new instance receives the listening sockets over a Unix control socket, the old one drains. The update hook stays POSIX, so one hook serves Linux and macOS; only the runner that starts and stops an instance differs (systemd, launchd). It replaces the current update hook. The properties: a fresh id per boot, socket hand-off over a Unix control socket, a POSIX hook, no fixed ports, no firewall rules.
+7. Docs, goldens and the section 8 tests move with the steps above; a compatibility test reads the previous release's objects (item e).
+
+Why: the gaps of section 8 (a lost object, a resurrected delete, a double acknowledgement, a checkpoint that moves backwards) all come from steps that were not conditional or from two stores that cannot decide a key together. A reservation makes the cold tier decide, and conditional steps make a wrong leader harmless.
 
 **(d2) Interfaces and configuration (decided, not built yet).** What: tierstore takes only `--config`, and the file declares the interfaces it serves as a list, so the data-path flags and the old `listen` keys go:
 
@@ -373,29 +483,29 @@ params = { port = 5000, tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file =
 
 An interface is a front over the same proxy; a later `type = "fs"` (item b) has a mount point and no port. Why: one configuration surface instead of 53 flags and a second spelling of them in the file, and a place where new interfaces plug in. Touches: `server/config.rs` and `cli.rs` (the loader and the start), every front's start-up, `packaging/`, the operator docs, and the tests that start the binary. It is a breaking change of the configuration, made before the first public release.
 
-**(d3) Updates through tierstore's hostkeeper hook, on Linux and macOS alike (decided, not built yet).** The hostkeeper coordinator and agents are generic: they know a service only by its hook. Everything tierstore needs to replace itself without a gap lives in tierstore's own hook (`server/update_hook/`), and it is POSIX so the same hook builds and runs on Linux and macOS. The running instance keeps a control socket (a Unix domain socket in its state directory). The new instance, started by the hook, connects to it and receives the already-bound listening sockets of every interface as file descriptors (`SCM_RIGHTS`); it starts accepting on them, and the old instance stops accepting and drains its open connections. The kernel's queue of pending connections is never closed, so no connection is refused, and no firewall rule, extra port or privilege is involved. Instances alternate between two slot identities, `a` and `b`, which name their proxy ids, since two instances overlap during the hand-over and nothing retires a proxy id (open question 12). The only part that differs by system is how the hook starts and stops an instance: a small runner with a systemd implementation on Linux and a launchd implementation on macOS. This replaces today's design, in which two instances listen on ports 9301 and 9302, an nftables redirect moves the public port between them, the proxy id is derived from the port, and the hook runs on Linux only.
-
 **(d4) A full OCI registry (decided, not built yet).** What: beyond pull by digest, (1) **push**: blob uploads, monolithic and chunked, and manifest `PUT`; blobs are content-addressed, so they are ordinary create-only objects; (2) **tags**: a tag is a mutable pointer to a manifest digest, kept as a small object in a reserved namespace and moved with `If-Match` compare-and-swap, as the reconciler's checkpoints are; (3) **pull-through cache**: on a miss, the front fetches the image from a configured upstream registry, verifies every digest, stores the pieces as objects and serves them, so later pulls are local. Authentication reuses tierstore's S3 keys: a read-only key may pull, a full key may push (HTTP Basic over TLS, or the registry token flow backed by the same keys). Why: a complete registry on top of the object store, not only a read path. Touches: `server/oci/` (routes, upload sessions, tag objects, the upstream client), the key roles in `server/keys.rs`, the reserved prefixes, the limits, and the operator docs. A pull-through cache makes tierstore an outbound client of public registries, with their credentials and rate limits.
 
 **(e) Format versioning.** What: a version in each stored format, or a written additive-only rule enforced by a test that reads the previous release's objects. Why: the journal is a bare array and cannot gain a top-level field. Touches `journal.rs` and a compatibility test.
 
 ## 13. Open questions
 
-1. Should a hot and a cold tier with different tag functions be supported? If yes, what compares content in `delete_cold`? If not, should start-up refuse the pair?
+1. (Resolved by the decided design: tags are never compared across tiers, so tiers with different tag functions are supported.)
 2. Should a journal object apply a key's entries in entry order, or should a delete not touch a cold object the reconciler cannot show it deleted?
 3. Is it acceptable that cold-path puts and multipart objects bypass the journal?
-4. Is a conditional delete in `Backend` in scope, or are the eviction and `delete_cold` windows documented limits?
-5. Should a checkpoint write be fenced by the lease, or is "a pass is shorter than the ttl" enough? Should a pass renew the lease or be bounded?
+4. (Resolved: a conditional delete in `Backend` is item 1 of section 12(d).)
+5. (Resolved: every destructive step is conditional and a checkpoint never moves backwards, so no fencing by the lease is needed; the lease is renewed each pass.)
 6. The binary cuts an in-flight pass on halt while a comment in the reconciler says not to cancel one. Which is intended?
 7. Should the reconciler's copy and the proxy's read path stay whole-object, given that puts are streamed?
 8. Should start-up measure the store's clock against the machine's and refuse beyond a bound?
 9. Should the self-test say plainly that concurrent atomicity is assumed, and should its paging check tolerate a lagging listing, which the trait allows?
 10. Should reserved keys be filtered from cold listings, and from the proxy's get and head, or only at the front?
-11. Should the 20 ms back-pressure, the 64-entry batch, the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
-12. Nothing deletes `_tiering/proxies/<id>`; each pass lists every id forever. Is a retirement path needed?
+11. Should the 64-entry batch, the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
+12. Should the one-minute heartbeat and the ten-minute departure time have flags, or stay fixed?
 13. For configuration C, should the local cache sit in front of the proxy (cache hits skip the hot tier) or beside it?
 14. Should a copy-back check the cold tier again after its hot put, as a put does, so a key deleted meanwhile is not brought back?
-15. Create-only across two tiers is four non-atomic checks: is a window where an unsigned cold-path put and a hot put of one key are both acknowledged acceptable, or should a put at level `Full` take the hot path whenever the key might be in flight?
+15. Tags come from content, so a delete followed by a byte-identical re-put between eviction's cold check and its conditional hot delete can lose an acknowledged object; it is found only afterwards. Is that acceptable, or does it need a unique version per write? Likewise, is a window where a presigned (hot-only) put and a put that goes through cold both get acknowledged for one key acceptable?
+
+16. *Resolved:* a delete removes the key where cold says it exists, then from hot; the leader never deletes from cold (section 5, Delete).
 
 ## 14. Glossary
 
@@ -405,19 +515,21 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 | Cold tier / `cold_store` | The large, cheap store that holds every object eventually. On a build node, the upstream. |
 | Local cache / `local_cache` | A read-through cache on a node's own disk in front of one upstream. |
 | Proxy | The component that answers requests against the two tiers. |
-| Proxy id | Non-empty name without `/` that names a proxy's journal and checkpoint. |
+| Proxy id / node id | `<node>-<boot id>`, fresh at every process boot and never reused; names a node's registration, journal and checkpoint. |
 | Front | The S3 or OCI HTTP surface over a proxy. |
-| Reconciler | The one component, chosen by lease, that copies, applies deletes, evicts, checkpoints, prunes and publishes usage. |
-| Journal / entry | Per-proxy sequence of objects recording puts and deletes; one record is an entry. |
+| Reconciler / leader | The one process, chosen by lease, that copies to cold (replacing the reservation), evicts, checkpoints, deletes journal objects, retires departed nodes and publishes usage. Today's code also applies journaled deletes. |
+| Reservation | A small marked object in the cold tier, made by a put's first write, that says the put owns the key until the leader replaces it with the real object. |
+| Sentinel | A journal object the leader creates at a departed node's next number, so a frozen node's later write collides and fails. |
+| Journal / entry | Per-node sequence of objects recording puts (and, in today's code, deletes); one record is an entry. A put's entry may carry the reservation's tag. |
 | Checkpoint | Stored per proxy: journal objects applied, and the position before which entries are done with. |
 | Candidate | A copied put that may be evicted. |
-| Lease | The object `_tiering/lease`, whose holder is the active reconciler. |
+| Lease | The object `_tiering/lease`, whose holder is the leader. |
 | Usage / copy lag | `_tiering/usage`: logical hot bytes, and the bytes of puts the cold tier does not yet hold. |
 | Level | The proxy's reading of capacity: `Open`, `Critical`, `Full`. |
 | Budget | The bytes of client objects, by logical size, the hot tier is meant to hold. |
-| Back-pressure | At `Critical`, a put waits 20 ms first and copy-back stops. |
+| Back-pressure | At `Critical`, copy-back stops; at `Full`, a put takes the cold path (presigned: 503). No sleep. |
 | High water / low water | Usage shares (80% / 70%) at which eviction starts and stops. |
-| Copy-back | Writing an object read from cold into hot, journaled so it can be evicted again. |
+| Copy-back | Writing an object read from cold into hot, journaled so it can be evicted again; its entry carries no reservation tag, so the leader only counts and evicts it. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
 | Reserved prefix | `_journal/` and `_tiering/`; refused to clients. |
