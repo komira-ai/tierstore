@@ -2,8 +2,9 @@
 //! acknowledged, so nothing is only local and there is nothing to recover.
 //!
 //! - **Create-only put** ([`put_through`](Inner::put_through), in `keep`): one HEAD of the key
-//!   goes to the upstream before the body is read (not when the upstream is a proxy of two tiers,
-//!   `tiered_upstream`, whose own put answers the same before it reads the body). An object that is there is
+//!   goes to the upstream before the body is read (also when the upstream is a proxy of two tiers,
+//!   `tiered_upstream`, whose own put refuses a key that only its first tier holds only after the
+//!   body has been written there). An object that is there is
 //!   [`AlreadyExists`](Error::AlreadyExists) at once, with no byte of the body read and no put
 //!   sent (the S3 backend would otherwise upload all the parts of a large body and learn it at the
 //!   completion). The HEAD only saves work: the upstream's create-only put is the one arbiter of

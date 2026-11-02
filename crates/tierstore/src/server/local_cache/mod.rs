@@ -229,6 +229,7 @@ const READ_ONLY: &str = "this tierstore is a read cache";
 
 /// The settings of a [`LocalCache`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// The directory of the cache: made if it is not there.
     pub path: PathBuf,
@@ -278,8 +279,7 @@ pub struct CacheConfig {
     /// Whether the upstream is a proxy of two tiers (a hot and a cold one). The tag of an object
     /// is then the tag of the tier that answers, and moves when the proxy copies the object from
     /// one tier to the other, so the versions of an object are told apart by size alone (the
-    /// proxy never replaces an object); and a create-only put is not checked with a HEAD first,
-    /// because the proxy's own put answers `AlreadyExists` before it reads the body.
+    /// proxy never replaces an object). A create-only put is still checked with a HEAD first.
     pub tiered_upstream: bool,
 }
 
