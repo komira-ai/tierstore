@@ -22,9 +22,25 @@ use crate::load::{Acked, hex_sha256, object};
 use crate::site::{BUCKET, PUBLIC, oci_port, signed};
 use crate::wire::{Answer, Conn};
 
-/// The size of the objects of the held transfers: larger than the socket buffers, so that the
-/// server is still sending when the client stops reading.
-pub const BIG: usize = 4 << 20;
+/// The size of the objects of the held transfers: with half of it read, the other half is far more
+/// than the kernel's largest send buffer, so the server is still sending when the client stops.
+pub const BIG: usize = 16 << 20;
+/// The receive buffer of a held get, set before its connect: its window stays small.
+const WINDOW: usize = 64 << 10;
+
+/// The largest send buffer the kernel gives a TCP socket in this namespace: the third value of
+/// `net.ipv4.tcp_wmem`, or `net.core.wmem_max` (for a socket that sets its own) if larger.
+fn largest_send_buffer() -> usize {
+    let read = |path: &str| -> usize {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("{path}: {e}"))
+            .split_whitespace()
+            .last()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{path}: not a size"))
+    };
+    read("/proc/sys/net/ipv4/tcp_wmem").max(read("/proc/sys/net/core/wmem_max"))
+}
 /// The key of the object the held S3 get reads.
 pub const BIG_KEY: &str = "t1/held/big";
 /// The key the held put writes.
@@ -59,13 +75,22 @@ struct HalfRead {
 }
 
 impl HalfRead {
+    /// Asks for `path` and reads half the answer, then checks that the server is still sending:
+    /// what has neither been read nor come into this side's buffers is more than the largest
+    /// buffer the server's kernel holds, so the rest is still in the server.
     fn begin(addr: SocketAddr, path: &str, headers: &[(String, String)], hex: String) -> HalfRead {
-        let mut conn = Conn::open(addr).expect("connect");
+        let mut conn = Conn::open_small(addr, WINDOW).expect("connect");
         conn.begin("GET", path, headers, 0, b"").expect("ask");
         let answer = conn.answer_head().expect("a head");
         assert_eq!(answer.status, 200, "{path}");
         let length = answer.length().expect("a length");
         let got = conn.exactly(length / 2).expect("half the body");
+        let unsent = length - got.len() - conn.pending();
+        let buffer = largest_send_buffer();
+        assert!(
+            unsent > buffer,
+            "{path}: {unsent} bytes neither read nor here, no more than a send buffer of {buffer}"
+        );
         HalfRead {
             conn,
             answer,

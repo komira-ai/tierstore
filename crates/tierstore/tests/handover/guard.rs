@@ -13,7 +13,7 @@ use std::process::Command;
 use std::thread;
 
 use rustix::io::Errno;
-use rustix::net::{AddressFamily, SocketType, connect, socket};
+use rustix::net::{AddressFamily, SocketFlags, SocketType, connect, socket_with};
 
 use crate::netns::{self, LOCAL_V4, LOCAL_V6, Names, nft_program};
 use crate::site::A;
@@ -71,7 +71,7 @@ fn connect_in_background(addr: SocketAddr) -> OwnedFd {
     } else {
         AddressFamily::INET6
     };
-    let fd = socket(family, SocketType::STREAM, None).expect("a socket");
+    let fd = socket_with(family, SocketType::STREAM, SocketFlags::CLOEXEC, None).expect("a socket");
     rustix::io::ioctl_fionbio(&fd, true).expect("non-blocking");
     match connect(&fd, &addr) {
         Err(Errno::INPROGRESS) => fd,

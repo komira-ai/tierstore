@@ -4,7 +4,7 @@
 //! the hook gives its programs an environment of its own.
 //!
 //! - `systemctl`: sends its arguments to the test's service manager over the Unix socket
-//!   `manager.sock` beside it and answers what the manager answers. The test owns the server
+//!   `mgr` beside it and answers what the manager answers. The test owns the server
 //!   processes; this only asks it to start or stop one (services.rs).
 //! - `nft`: runs the real `nft` (the path in `real-nft` beside it) with its arguments and standard
 //!   input and answers what it answers. When the file `kill-after` beside it holds a text that
@@ -32,7 +32,7 @@ fn beside(dir: &Path, name: &str) -> Option<String> {
 }
 
 fn systemctl(dir: &Path, args: &[String]) -> ExitCode {
-    let mut socket = match UnixStream::connect(dir.join("manager.sock")) {
+    let mut socket = match UnixStream::connect(dir.join("mgr")) {
         Ok(socket) => socket,
         Err(error) => {
             eprintln!("systemctl: the test's service manager: {error}");

@@ -377,8 +377,9 @@ fn amz_now() -> String {
         .expect("after the epoch")
         .as_secs();
     let (days, rest) = (secs / 86_400, secs % 86_400);
-    // Days since the epoch to a civil date, in the proleptic Gregorian calendar (eras of 400
-    // years from 0000-03-01).
+    // Days since the epoch to a civil date, in the proleptic Gregorian calendar: whole eras of
+    // 400 years (146 097 days), then the year of the era, each year counted from March so that the
+    // leap day ends it.
     let z = i64::try_from(days).expect("a day") + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

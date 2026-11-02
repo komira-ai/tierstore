@@ -164,7 +164,7 @@ impl Namespaces {
     /// not be done: a completed run asserts it is nothing.
     pub fn close(mut self) -> Vec<String> {
         self.closed = true;
-        clean(&self.names, &mut run_checked)
+        clean(&self.names, &nft_path(), &mut run_checked)
     }
 }
 
@@ -185,13 +185,21 @@ fn run_checked(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The real `nft`, as a string for an `ip netns exec` command line.
+fn nft_path() -> String {
+    nft_program().to_string_lossy().into_owned()
+}
+
 /// The cleanup of the namespaces `names`, through `ip` (given as `run`, so that a test can make it
-/// fail): list the tables of the host namespace, delete each, delete both namespaces, then list
-/// the namespaces and find neither. Every failure is a problem, and none stops the rest.
-fn clean(names: &Names, run: &mut dyn FnMut(&[&str]) -> Result<String, String>) -> Vec<String> {
+/// fail) and the `nft` at `nft`: list the tables of the host namespace, delete each, delete both
+/// namespaces, then list the namespaces and find neither. Every failure is a problem, and none
+/// stops the rest.
+fn clean(
+    names: &Names,
+    nft: &str,
+    run: &mut dyn FnMut(&[&str]) -> Result<String, String>,
+) -> Vec<String> {
     let mut problems = Vec::new();
-    let nft = nft_program();
-    let nft = nft.to_str().unwrap_or("nft");
     let local = names.local.as_str();
     match run(&["netns", "exec", local, nft, "list", "tables"]) {
         Ok(listing) => {
@@ -233,7 +241,7 @@ impl Drop for Namespaces {
         if self.closed {
             return;
         }
-        for problem in clean(&self.names, &mut run_checked) {
+        for problem in clean(&self.names, &nft_path(), &mut run_checked) {
             eprintln!("T1: cleanup: {problem}");
         }
     }
@@ -244,6 +252,9 @@ mod tests {
     //! The cleanup, through a stand-in for `ip` that fails where it is told to.
 
     use super::{Names, clean};
+
+    /// A path no host has: the unit test needs no nftables.
+    const NFT: &str = "/nonexistent/nft";
 
     fn names() -> Names {
         Names {
@@ -256,7 +267,7 @@ mod tests {
     /// `netns list`, and fails each call whose words contain `fail`.
     fn with(listing: &str, fail: &str) -> (Vec<String>, Vec<String>) {
         let mut calls = Vec::new();
-        let problems = clean(&names(), &mut |args| {
+        let problems = clean(&names(), NFT, &mut |args| {
             let line = args.join(" ");
             calls.push(line.clone());
             if !fail.is_empty() && line.contains(fail) {
@@ -285,6 +296,10 @@ mod tests {
             2
         );
         assert_eq!(calls.iter().filter(|c| c.contains("netns del")).count(), 2);
+        assert!(
+            calls[0].contains("/nonexistent/nft list tables"),
+            "{calls:?}"
+        );
         for fail in [
             "list tables",
             "delete table inet kbf_guard",
@@ -295,7 +310,7 @@ mod tests {
             assert_eq!(problems.len(), 1, "{fail}: {problems:?}");
             assert!(calls.iter().any(|c| c.contains("netns del t1-l")), "{fail}");
         }
-        let mut problems = clean(&names(), &mut |args| {
+        let mut problems = clean(&names(), NFT, &mut |args| {
             Ok(if args == ["netns", "list"] {
                 "t1-l (id: 3)\n".to_owned()
             } else {

@@ -336,8 +336,10 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   port. Between two steps every client finishes twenty more requests (or an OCI client has ended). The OCI front is
   read-only and the hook does not redirect it, so an OCI client's sequence ends, cleanly, at v-current's drain (an
   answer with `Connection: close`, or a clean end of stream), and only after the run has said that drain is coming;
-  until then every OCI request must succeed. Besides the clients, a put and an S3 and an OCI get of 4 MiB are held
-  part-way from before `cutover` until v-current's settle is over (both its listeners refuse), and must then complete;
+  until then every OCI request must succeed. Besides the clients, a put and an S3 and an OCI get of 16 MiB are held
+  part-way from before `cutover` until v-current's settle is over (both its listeners refuse), and must then complete
+  (each get is held with more of its answer unsent than the largest send buffer of the kernel, so the server is still
+  sending);
   and an idle S3 and OCI connection to v-current each write a request after its end of stream and close, which the
   lingering close reads and counts. The runs, one test each:
   - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
@@ -352,9 +354,11 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
     with no late request; v-next is stopped and its link removed.
   - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
     v-next, so a new connection in between is refused. The bound asserted: every failed request is an S3 connect into
-    that gap (from just before `cutover` until it returned): refused, reset in its handshake, or reset before any byte of
-    an answer on a new connection (one the old listener's queue held when it closed at the end of its settle), counted
-    and printed; no
+    that gap (from just before `cutover` until it returned): refused, reset in its handshake, reset before any byte of
+    an answer on a new connection (one the old listener's queue held when it closed at the end of its settle), or a
+    clean end of stream before any byte of an answer on a new connection (accepted in the last moment of the settle and
+    closed idle: the residual race of section 7, whose request the old slot must count as late, one for each, in its exit
+    note), counted and printed; no
     failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established connection, no
     acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
     requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two

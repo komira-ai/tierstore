@@ -56,28 +56,53 @@ pub fn no_failures(reports: &[Report]) {
     );
 }
 
-/// What the bound of a restart admits: an S3 request that failed while the run said the gap was
-/// open (from just before the step that stops the old slot until that step returned), as a
-/// connect into the gap: refused; reset in its handshake; or reset before any byte of an answer
-/// on a new connection, which is a connect that the old slot's kernel completed and that its
-/// listener, closing at the end of its settle, never accepted. Nothing else: no clean end of stream or timeout, no failure on a connection that had
-/// carried an answer, no cut answer, no status, no OCI failure, nothing outside the gap.
-pub fn in_restart_gap(failure: &Failure) -> bool {
+/// A new connection whose first request read a clean end of stream before any byte of an answer:
+/// the old slot accepted it in the last moment of its settle, before the request came, and closed
+/// it, idle, with its lingering close. The request is then read and counted late: the residual race
+/// of design section 7 (question 6), which a restart meets because new connections reach the old
+/// slot until it stops. Each one must appear in the old slot's late count ([`late_note`]).
+pub fn closed_at_the_settle(failure: &Failure) -> bool {
     failure.kind == Kind::S3
         && failure.in_gap
         && matches!(
             failure.fault,
-            Fault::Broke(
-                Broke::Refused
-                    | Broke::ConnectReset
-                    | Broke::BeforeAnswer {
-                        fresh: true,
-                        eof: false,
-                        reset: true,
-                        ..
-                    }
-            )
+            Fault::Broke(Broke::BeforeAnswer {
+                fresh: true,
+                eof: true,
+                ..
+            })
         )
+}
+
+/// What the bound of a restart admits: an S3 request that failed while the run said the gap was
+/// open (from just before the step that stops the old slot until that step returned), as a
+/// connect into the gap:
+/// - refused, or reset in its handshake;
+/// - reset before any byte of an answer on a new connection: a connect that the old slot's kernel
+///   completed and that its listener, closing at the end of its settle, never accepted;
+/// - [`closed_at_the_settle`], which the run matches one for one with the old slot's late count.
+///
+/// That tierstore reset no connection it had accepted is asserted on the server's side: the old
+/// slot exits 0 with nothing cut at its deadline. Nothing else is admitted: no timeout, no failure
+/// on a connection that had carried an answer, no cut answer, no status, no OCI failure, nothing
+/// outside the gap.
+pub fn in_restart_gap(failure: &Failure) -> bool {
+    closed_at_the_settle(failure)
+        || failure.kind == Kind::S3
+            && failure.in_gap
+            && matches!(
+                failure.fault,
+                Fault::Broke(
+                    Broke::Refused
+                        | Broke::ConnectReset
+                        | Broke::BeforeAnswer {
+                            fresh: true,
+                            eof: false,
+                            reset: true,
+                            ..
+                        }
+                )
+            )
 }
 
 /// Asserts the bound of a restart (design sections 3, 9 and 11 question 5), [`in_restart_gap`]:
@@ -204,24 +229,45 @@ pub fn late_lines(stderr: &str) -> String {
         .collect()
 }
 
-/// The note of a drain that read exactly the late request of each idle probe (held.rs) and of
-/// nothing else, on a node with both fronts.
-pub const PROBES_NOTE: &str = "tierstore: 1 connections sent a request too late in the drain \
-of the S3 front\ntierstore: 1 connections sent a request too late in the drain of the OCI front\n";
+/// The exit note of a node with both fronts that counted `s3` and `oci` late connections.
+pub fn late_note(s3: usize, oci: usize) -> String {
+    [("S3", s3), ("OCI", oci)]
+        .iter()
+        .filter(|(_, n)| *n > 0)
+        .map(|(front, n)| {
+            format!("tierstore: {n} connections sent a request too late in the drain of the {front} front\n")
+        })
+        .collect()
+}
 
-/// Asserts that every server process that stopped exited 0 after its drain, cut nothing at its
-/// deadline, and left the note of late requests that `late` gives for its port (the exit note of
+/// The note of a drain that read exactly the late request of each idle probe (held.rs) and of
+/// nothing else.
+pub fn probes_note() -> String {
+    late_note(1, 1)
+}
+
+/// Asserts that the server processes stopped are exactly `expected`, in order: each its port and
+/// the note of late requests its exit must leave (the exit note of
 /// `tierstore_drain_late_requests_total` and its OCI twin, which cannot be scraped once the drain
-/// has closed `/metricz`): [`PROBES_NOTE`] for the one drained with the idle probes, none for any
-/// other. Catches requests of the clients that arrived after the drain boundary (P2), and a note
-/// not tied to the real counters. Returns the number of exits.
-pub fn exits_clean(site: &Site, late: impl Fn(usize, u16) -> &'static str) -> usize {
+/// has closed `/metricz`): [`probes_note`] for the one drained with the idle probes, none for any
+/// other. Each exited 0 and cut nothing at its deadline. Catches a missing or extra stop, requests
+/// of the clients that arrived after the drain boundary (P2), and a note not tied to the real
+/// counters.
+pub fn exits_are(site: &Site, expected: &[(u16, &str)]) {
     let exits = site.services.exits();
-    for (index, exit) in exits.iter().enumerate() {
-        assert_eq!(exit.code, Some(0), "the stop of {}: {exit:?}", exit.port);
+    let ports: Vec<u16> = exits.iter().map(|exit| exit.port).collect();
+    let expected_ports: Vec<u16> = expected.iter().map(|(port, _)| *port).collect();
+    assert_eq!(ports, expected_ports, "the stops: {exits:?}");
+    for (index, (exit, (_, late))) in exits.iter().zip(expected).enumerate() {
+        assert_eq!(
+            exit.code,
+            Some(0),
+            "stop {index}, of {}: {exit:?}",
+            exit.port
+        );
         assert_eq!(
             late_lines(&exit.stderr),
-            late(index, exit.port),
+            *late,
             "the late requests of stop {index}, of {}: {exit:?}",
             exit.port
         );
@@ -230,7 +276,6 @@ pub fn exits_clean(site: &Site, late: impl Fn(usize, u16) -> &'static str) -> us
             "{exit:?}"
         );
     }
-    exits.len()
 }
 
 /// Asserts that the cache directory passes the server's own scan with nothing discarded: a fresh
@@ -338,7 +383,7 @@ pub fn lease_held_by(site: &Site, port: u16) {
 /// exactly once, and each holder gave the lease up as it stopped (a holder deletes the lease
 /// object only if it is still the one it wrote, so a lease another writer overwrote would be
 /// left). Catches two processes writing one journal, and a lease not given up or held by two.
-pub fn journals_and_lease(site: &Site, reports: &[Report]) {
+pub fn journals_and_lease(site: &Site, reports: &[Report], more: &[Acked]) {
     assert!(
         site.services.running().is_empty(),
         "every slot stopped first"
@@ -365,7 +410,8 @@ pub fn journals_and_lease(site: &Site, reports: &[Report]) {
         }
     });
     assert_eq!(writers, ids, "the journals' writers");
-    for acked in reports.iter().flat_map(|report| &report.acked) {
+    assert_eq!(more.len(), 1, "the held put was acknowledged");
+    for acked in reports.iter().flat_map(|report| &report.acked).chain(more) {
         assert_eq!(
             journaled.get(&acked.key),
             Some(&1),
@@ -429,6 +475,15 @@ mod tests {
         let s3 = |in_gap, fault| failure(Kind::S3, in_gap, fault);
         assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::Refused))));
         assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::ConnectReset))));
+        // A new connection closed idle at the end of the settle: admitted in the gap, and then
+        // matched against the old slot's late count by the run.
+        assert!(in_restart_gap(&s3(true, before(true, true, false))));
+        assert!(!in_restart_gap(&s3(false, before(true, true, false))));
+        assert!(!in_restart_gap(&failure(
+            Kind::Oci,
+            true,
+            before(true, true, false)
+        )));
         assert!(!in_restart_gap(&s3(
             false,
             Fault::Broke(Broke::ConnectReset)
@@ -438,7 +493,6 @@ mod tests {
             s3(false, Fault::Broke(Broke::Refused)),
             failure(Kind::Oci, true, Fault::Broke(Broke::Refused)),
             s3(false, before(true, false, true)),
-            s3(true, before(true, true, false)),
             s3(true, before(true, false, false)),
             s3(true, before(false, false, true)),
             s3(true, before(false, true, false)),

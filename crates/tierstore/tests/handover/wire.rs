@@ -125,6 +125,30 @@ impl Conn {
         Conn::over(stream).map_err(|error| Broke::Connect(describe(&error)))
     }
 
+    /// Connects to `addr` with a receive buffer of `bytes` (set before the connect, so that the
+    /// window the peer sees is small): a client that stops reading stops the peer's sending soon.
+    pub fn open_small(addr: SocketAddr, bytes: usize) -> io::Result<Conn> {
+        use rustix::net::{AddressFamily, SocketFlags, SocketType, connect, socket_with, sockopt};
+        let family = if addr.is_ipv4() {
+            AddressFamily::INET
+        } else {
+            AddressFamily::INET6
+        };
+        // Close-on-exec, as std's sockets are: a step the run starts next must not inherit it
+        // and hold the connection open after this side has closed it.
+        let fd = socket_with(family, SocketType::STREAM, SocketFlags::CLOEXEC, None)?;
+        sockopt::set_socket_recv_buffer_size(&fd, bytes)?;
+        connect(&fd, &addr)?;
+        Conn::over(TcpStream::from(fd))
+    }
+
+    /// The bytes that have come and are not yet read: in this connection's buffer, and in the
+    /// socket's receive queue.
+    pub fn pending(&self) -> usize {
+        let queued = rustix::io::ioctl_fionread(self.reader.get_ref()).expect("FIONREAD");
+        self.reader.buffer().len() + usize::try_from(queued).expect("a size")
+    }
+
     /// A connection over `stream`, which is connected.
     pub fn over(stream: TcpStream) -> io::Result<Conn> {
         stream.set_read_timeout(Some(PATIENCE))?;

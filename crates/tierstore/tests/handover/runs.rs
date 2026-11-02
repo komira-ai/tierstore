@@ -9,7 +9,7 @@ use std::thread;
 
 use tierstore::server::update_hook::{Marker, Mode};
 
-use crate::checks::{self, PROBES_NOTE};
+use crate::checks;
 use crate::guard;
 use crate::held::{self, BIG_KEY, Held, Idle, Released};
 use crate::host::HOOK;
@@ -268,7 +268,7 @@ impl Ended {
 /// in flight; the old slot was stopped once, after the new one started. Then the new slot is
 /// stopped; every stop is clean, and the old slot's drain read exactly the probes' late requests.
 /// Then a fresh start on the cache directory discards nothing.
-fn committed_host(site: &Site, calls: &[&str]) {
+fn committed_host(site: &Site, calls: &[&str], exits: &[(u16, &str)]) {
     assert_eq!(site.services.running(), [B]);
     assert_eq!(site.services.calls(), calls);
     assert_eq!(site.redirect(), Some(B));
@@ -284,8 +284,7 @@ fn committed_host(site: &Site, calls: &[&str]) {
         Some(0)
     );
     site.services.stop_slot(B);
-    let late = |_, port: u16| if port == A { PROBES_NOTE } else { "" };
-    assert_eq!(checks::exits_clean(site, late), site.services.exits().len());
+    checks::exits_are(site, exits);
     checks::scan_discards_nothing(site);
 }
 
@@ -311,7 +310,11 @@ fn a_handover_under_load_fails_no_request() {
         checks::oci_ends(&ended.reports, true);
         let exits = ended.site.services.exits();
         assert!(!exits[0].stderr.contains(DRAIN_OFF), "{exits:?}");
-        committed_host(&ended.site, &["start 9301", "start 9302", "stop 9301"]);
+        committed_host(
+            &ended.site,
+            &["start 9301", "start 9302", "stop 9301"],
+            &[(A, &checks::probes_note()), (B, "")],
+        );
     });
 }
 
@@ -342,7 +345,7 @@ fn a_handover_rolled_back_under_load_fails_no_request() {
         assert_eq!(String::from_utf8_lossy(&ready.body), "ready read-write");
         checks::no_late_live(site, A);
         site.services.stop_slot(A);
-        assert_eq!(checks::exits_clean(site, |_, _| ""), 2);
+        checks::exits_are(site, &[(B, ""), (A, "")]);
         checks::scan_discards_nothing(site);
     });
 }
@@ -405,9 +408,17 @@ fn a_restart_under_load_fails_only_connects_in_its_gap() {
         );
         checks::lease_held_by(site, B);
         site.services.stop_slot(B);
-        let late = |_, port: u16| if port == A { PROBES_NOTE } else { "" };
-        assert_eq!(checks::exits_clean(site, late), 2);
-        checks::journals_and_lease(site, &reports);
+        // A connection the old slot closed idle at the end of its settle, just after accepting
+        // it, has its request read and counted late: one late connection for each, beside the
+        // idle probe's.
+        let closed = reports
+            .iter()
+            .flat_map(|report| &report.failures)
+            .filter(|failure| checks::closed_at_the_settle(failure))
+            .count();
+        let note = checks::late_note(1 + closed, 1);
+        checks::exits_are(site, &[(A, &note), (B, "")]);
+        checks::journals_and_lease(site, &reports, &acked);
     });
 }
 
@@ -468,6 +479,7 @@ fn a_hook_killed_after_the_swap_then_restored_fails_no_request() {
                 "start 9302",
                 "stop 9301",
             ],
+            &[(B, ""), (A, &checks::probes_note()), (B, "")],
         );
     });
 }

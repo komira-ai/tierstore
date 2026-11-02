@@ -1,6 +1,6 @@
 //! The service manager of a run: the test's stand-in for systemd, which owns the server processes.
 //! The hook's `systemctl` is the double (double/main.rs), which sends `start -- <unit>` or `stop --
-//! <unit>` over the Unix socket `manager.sock` in the tools directory; the manager answers with an
+//! <unit>` over the Unix socket [`SOCKET`] in the tools directory; the manager answers with an
 //! exit code and what systemctl would say. The semantics are those of the slot unit template
 //! (docs/design/tierstore-handover.md section 2) under `Type=simple`:
 //!
@@ -28,6 +28,10 @@ use std::thread::{self, JoinHandle};
 use rustix::process::{Pid, Signal, kill_process};
 use tierstore::server::update_hook::unit_name;
 use tierstore_testkit::reaped::{Reaped, spawn};
+
+/// The Unix socket of the manager in the tools directory, which the double finds beside it. Short:
+/// a socket's whole path must fit in 107 bytes.
+pub const SOCKET: &str = "mgr";
 
 /// The arguments a slot's process is started with, by port: the unit's `ExecStart=` after the
 /// binary.
@@ -251,10 +255,18 @@ impl Inner {
 
 impl Services {
     /// A manager for the slots `ports`, whose binaries are under `<state>/slots`, started with
-    /// the arguments `exec` gives, logging to `logs`, answering on `<tools>/manager.sock`.
+    /// the arguments `exec` gives, logging to `logs`, answering on `<tools>/`[`SOCKET`].
     pub fn start(tools: &Path, state: &Path, ports: [u16; 2], exec: Exec, logs: &Path) -> Services {
         fs::create_dir_all(logs).expect("the logs");
-        let socket = tools.join("manager.sock");
+        let socket = tools.join(SOCKET);
+        // A Unix socket's path has room for 107 bytes: a deep target directory (the coverage run
+        // builds in target/llvm-cov-target) must not make the bind fail with a riddle.
+        let length = socket.as_os_str().len();
+        assert!(
+            length < 108,
+            "{} is {length} bytes, more than a Unix socket's path holds",
+            socket.display()
+        );
         let listener = UnixListener::bind(&socket).expect("the manager's socket");
         let inner = Arc::new(Inner {
             state: Mutex::new(State::default()),
@@ -384,7 +396,7 @@ mod tests {
 
     /// A manager whose slots run `sh -c` with the script `script` holds when they start.
     fn services(dir: &TestDir, script: &Arc<Mutex<&'static str>>) -> Services {
-        let tools = dir.join("tools");
+        let tools = dir.join("t");
         fs::create_dir_all(&tools).expect("tools");
         let script = Arc::clone(script);
         let exec: Exec = Box::new(move |_| {
@@ -410,7 +422,7 @@ mod tests {
     /// catch a double that starts a slot with no link, or that runs a slot twice.
     #[test]
     fn a_start_without_a_link_is_skipped_and_starts_and_stops_are_idempotent() {
-        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-idempotent");
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1sv-a");
         let services = services(&dir, &Arc::new(Mutex::new(LIVES)));
         assert_eq!(call(&services, "start", 9302), 0);
         assert!(services.running().is_empty());
@@ -436,7 +448,7 @@ mod tests {
     /// launches a new process, as systemd starts an inactive unit anew.
     #[test]
     fn a_process_that_dies_before_it_listens_is_reported_and_started_anew() {
-        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-dies");
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1sv-b");
         let script = Arc::new(Mutex::new(DIES));
         let services = services(&dir, &script);
         slot(&dir.join("state"), 9301);
@@ -460,12 +472,12 @@ mod tests {
     /// drop does not hang. It would catch a cleanup that cannot reach a process being stopped.
     #[test]
     fn dropping_the_manager_ends_a_stop_that_hangs() {
-        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-hung");
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1sv-c");
         let services = services(&dir, &Arc::new(Mutex::new(DEAF)));
         slot(&dir.join("state"), 9301);
         assert_eq!(call(&services, "start", 9301), 0);
         services.wait_listening(9301);
-        let socket = dir.join("tools/manager.sock");
+        let socket = dir.join("t").join(super::SOCKET);
         let asking = thread::spawn(move || {
             let mut stream = UnixStream::connect(socket).expect("the manager");
             stream
