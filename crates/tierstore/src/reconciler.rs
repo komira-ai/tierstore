@@ -133,8 +133,8 @@ enum Eviction {
     /// The hot tier no longer had it.
     Gone,
     /// The object was left: the hot tier holds another object under the key now, or the cold tier
-    /// does not hold a real object of the key (nothing, or a reservation), so the hot object may
-    /// be the only copy.
+    /// does not hold a real object of the hot object's content (nothing, a reservation, or
+    /// another object), so the hot object may be the only copy. It stays a candidate.
     Kept,
 }
 
@@ -197,8 +197,8 @@ fn millis(duration: Duration) -> u64 {
 ///    (`If-Match`, [`Backend::delete_if_match`]), so an object that was put again after the
 ///    copy, with other bytes, is kept; for an entry applied by an earlier reconciler the tag is
 ///    read from the hot tier just before the delete, and only if the cold tier holds a real
-///    object of the key then (not nothing, and not a reservation: the hot object may be the only
-///    copy, and stays).
+///    object of that content then (not nothing, not a reservation, not another object: the hot
+///    object may be the only copy, and stays, and is asked about again by the next pass).
 /// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
 ///    put, after the first): every journal object up to a number is applied, and every entry
 ///    before a position is done with (the eviction folds its progress into the checkpoint,
@@ -598,6 +598,24 @@ impl Reconciler {
         }
         self.books.trim_stale();
         let low = (budget * self.config.low_water) as u64;
+        let mut kept = Vec::new();
+        self.evict_down(low, report, &mut kept).await;
+        // A candidate that was left stays a candidate (oldest first, as before), so that a later
+        // pass asks again once the cold tier holds the object.
+        for (proxy, candidate) in kept.into_iter().rev() {
+            self.books.requeue(&proxy, candidate);
+        }
+    }
+
+    /// Evicts candidates, oldest first, until the hot tier holds no more than `low` bytes, there
+    /// is no candidate left, or a call failed. The candidates that were left are put in `kept`,
+    /// with the name of their proxy.
+    async fn evict_down(
+        &mut self,
+        low: u64,
+        report: &mut PassReport,
+        kept: &mut Vec<(String, Candidate)>,
+    ) {
         while self.books.usage() > low {
             let Some((proxy, victim)) = self.books.next_victim() else {
                 return;
@@ -609,7 +627,7 @@ impl Reconciler {
                         report.evicted += 1;
                     }
                     Ok(Eviction::Gone) => self.books.forget(&victim.key),
-                    Ok(Eviction::Kept) => {}
+                    Ok(Eviction::Kept) => kept.push((proxy.clone(), victim)),
                     Err(error) => {
                         report.failed.push(error);
                         return;
@@ -622,17 +640,22 @@ impl Reconciler {
 
     /// Deletes one candidate from the hot tier, on the content tag the copy found. An entry that an
     /// earlier reconciler applied has none: the tag is read from the hot tier, and the cold tier is
-    /// asked first whether it holds a real object of the key (not nothing, not a reservation), since
-    /// nothing here has seen the copy.
+    /// asked first whether it holds a real object of that content (not nothing, not a reservation,
+    /// not another object), since nothing here has seen the copy.
     async fn evict_one(&self, victim: &Candidate) -> Result<Eviction, Error> {
         let tag = match &victim.tag {
             Some(tag) => tag.clone(),
-            None => match self.hot.head(&victim.key).await {
-                Ok(meta) if self.cold_holds_object(&victim.key).await? => meta.tag,
-                Ok(_) => return Ok(Eviction::Kept),
-                Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
-                Err(error) => return Err(error),
-            },
+            None => {
+                let hot = match self.hot.head(&victim.key).await {
+                    Ok(meta) => meta,
+                    Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
+                    Err(error) => return Err(error),
+                };
+                if !self.cold_holds_copy(&victim.key, &hot).await? {
+                    return Ok(Eviction::Kept);
+                }
+                hot.tag
+            }
         };
         match self.hot.delete_if_match(&victim.key, &tag).await {
             Ok(()) => Ok(Eviction::Removed),
@@ -642,11 +665,11 @@ impl Reconciler {
         }
     }
 
-    /// Whether the cold tier holds a real object under `key`: a reservation and an absent key are
-    /// not one.
-    async fn cold_holds_object(&self, key: &str) -> Result<bool, Error> {
+    /// Whether the cold tier holds a real object under `key` of the content of `hot` (the same
+    /// size and content tag): a reservation, an absent key and another object are not one.
+    async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<bool, Error> {
         match self.cold.head(key).await {
-            Ok(meta) => Ok(!meta.reservation),
+            Ok(cold) => Ok(!cold.reservation && hot.same_content(&cold)),
             Err(Error::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }

@@ -675,6 +675,54 @@ async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_no_real_object_of() {
     assert_absent(&*rig.hot_mem, "k4").await;
 }
 
+/// Asserts that a reconciler that took over does not evict a hot object when the cold tier holds a
+/// real object of the key that is not of the hot object's content (an older copy, while the hot
+/// tier holds acknowledged newer bytes): the hot object is kept, the pass reports no failure, and
+/// the objects after it are evicted down to the low-water mark.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_another_object_of() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold_mem
+        .put("k1", body("an older object"))
+        .await
+        .unwrap();
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_eq!(read(&*rig.cold_mem, "k1").await, body("an older object"));
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
+}
+
+/// Asserts that a candidate an eviction left (the cold tier held no object of its content) is
+/// asked about again by the next pass, in the same order: once the cold tier holds the objects,
+/// the oldest two are evicted. A pass that left all of them evicts nothing and reports no failure.
+#[tokio::test(start_paused = true)]
+async fn a_candidate_that_an_eviction_left_is_evicted_by_a_later_pass_once_cold_holds_it() {
+    let (rig, mut second) = after_a_takeover().await;
+    let keys = ["k1", "k2", "k3", "k4", "k5"];
+    for key in keys {
+        rig.cold_mem.delete(key).await.unwrap();
+    }
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 0);
+    assert_eq!(second.hot_bytes(), 105);
+
+    for key in keys {
+        rig.cold_mem.put(key, body(&"x".repeat(21))).await.unwrap();
+    }
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_eq!(read(&*rig.hot_mem, "k3").await, body(&"x".repeat(21)));
+}
+
 /// Asserts that a failed look at the cold tier before an eviction without a tag is reported, evicts
 /// nothing, and is retried by the next pass, which evicts.
 #[tokio::test(start_paused = true)]

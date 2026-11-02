@@ -182,6 +182,14 @@ impl Books {
         self.stream(proxy).candidates.push_back(candidate);
     }
 
+    /// Puts a candidate that an eviction left back at the front of its stream, with the cursor on
+    /// it. Candidates put back newest first end up in their old order.
+    pub(crate) fn requeue(&mut self, proxy: &str, candidate: Candidate) {
+        let stream = self.stream(proxy);
+        stream.cursor = candidate.at;
+        stream.candidates.push_front(candidate);
+    }
+
     /// Records that the hot tier does not hold the object of a put entry after all (it was
     /// deleted before the copy). An entry that a later one replaced is ignored.
     pub(crate) fn gone(&mut self, proxy: &str, at: Position, key: &str) {
