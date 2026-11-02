@@ -52,6 +52,7 @@ fn an_update_stops_the_service_swaps_current_starts_it_and_probes_it() {
             "state.lock",
             "host.declaration",
             "state.load",
+            &format!("host.capabilities {NEW}"),
             "links.target current",
             "state.save",
             &format!("links.point previous {OLD}"),
@@ -219,8 +220,10 @@ fn a_rollback_that_fails_inside_cutover_is_reported_as_failed() {
 /// two-slot steps (the guard table, the conntrack check and the second instance in `prepare`,
 /// the redirect in `cutover`, stopping a previous instance in `cleanup`), and that across a whole
 /// update, a rollback and a restore no step asks for anything but the service, the two links,
-/// the one port, the declaration and the state directory: no boot, no conntrack, no
-/// capabilities. It would catch a hand-over step brought onto this path.
+/// the one port, the declaration, the staged release's check and the state directory: no boot
+/// and no conntrack. The words of the details are spelt out here, not taken from the constants,
+/// so that a detail that stops naming what it skips fails. It would catch a hand-over step
+/// brought onto this path.
 #[test]
 fn the_steps_skip_what_needs_a_hand_over_and_say_so() {
     let fake = SingleFake::new();
@@ -229,17 +232,25 @@ fn the_steps_skip_what_needs_a_hand_over_and_say_so() {
     assert_eq!(
         detail,
         format!(
-            "prepared {NEW} to follow {OLD}, mode restart (single_instance); {SKIPPED_PREPARE}"
+            "prepared {NEW} to follow {OLD}, mode restart (single_instance); skipped: the guard table, the conntrack check and a second instance (one instance)"
         )
     );
+    assert!(detail.ends_with(SKIPPED_PREPARE));
     let cut = fake.run(Cutover).report.detail.unwrap();
     assert_eq!(
         cut,
-        format!("the service runs {NEW} on {PORT}; {SKIPPED_CUTOVER}")
+        format!(
+            "the service runs {NEW} on {PORT}; skipped: the redirect (one instance on its own port)"
+        )
     );
+    assert!(cut.ends_with(SKIPPED_CUTOVER));
     fake.advance(&[Verify]);
     let clean = fake.run(Cleanup).report.detail.unwrap();
-    assert_eq!(clean, format!("{NEW} serves alone; {SKIPPED_CLEANUP}"));
+    assert_eq!(
+        clean,
+        format!("{NEW} serves alone; skipped: stopping a previous instance (there is none)")
+    );
+    assert!(clean.ends_with(SKIPPED_CLEANUP));
     let again = SingleFake::new();
     again.advance(&[Prepare, Cutover, Rollback]);
     again.reboot();
@@ -251,6 +262,7 @@ fn the_steps_skip_what_needs_a_hand_over_and_say_so() {
                 "links.",
                 "service.",
                 "host.declaration",
+                "host.capabilities ",
                 "get 9300 ",
             ]
             .iter()
@@ -260,24 +272,53 @@ fn the_steps_skip_what_needs_a_hand_over_and_say_so() {
     }
 }
 
-/// Asserts that the fake host refuses the three questions a single-instance step never asks,
-/// so that the test above would see a step that asked fail: the boot, the conntrack and the
-/// capabilities each fail with a host error and are logged.
+/// Asserts that the fake host refuses the two questions a single-instance step never asks, so
+/// that the test above would see a step that asked fail (the boot and the conntrack each fail
+/// with a host error and are logged), and refuses the capabilities of a release the updater did
+/// not place, as the host refuses a binary that is not root's. It would catch a fake that let a
+/// step's stray question pass unseen.
 #[test]
 fn the_fake_host_refuses_what_a_single_step_never_asks() {
     let fake = SingleFake::new();
     assert!(fake.boot_id().is_err());
     assert!(fake.conntrack().is_err());
-    assert!(fake.capabilities(&PathBuf::from(NEW)).is_err());
+    assert!(fake.capabilities(&PathBuf::from("/elsewhere")).is_err());
     assert_eq!(
         fake.log(),
         [
             "host.boot_id",
             "host.conntrack",
-            &format!("host.capabilities {NEW}")
+            "host.capabilities /elsewhere"
         ]
     );
     assert_eq!(fake.now_ms(), 0);
+}
+
+/// Asserts that `prepare` refuses a staged release the host does not vouch for (`host_failed`,
+/// before anything is written or linked), and that the session refuses a staged release reached
+/// through a release link (`state_invalid`): `current` pointed at itself, or `previous` at the
+/// link `cleanup` removes. It would catch an update to a binary another account could have
+/// written, and one that leaves `current` dangling.
+#[test]
+fn prepare_refuses_a_staged_release_it_cannot_vouch_for() {
+    let fake = SingleFake::new();
+    let before = fake.snapshot();
+    let unknown = params_for("/usr/local/tierstore/releases/unplaced", "0.4.0");
+    let done = fake.run_with(Prepare, Some(&unknown));
+    assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
+    assert_eq!(fake.snapshot(), before);
+    for through in [
+        "/usr/local/tierstore/current",
+        "/usr/local/tierstore/previous/x",
+    ] {
+        let done = fake.run_with(Prepare, Some(&params_for(through, "0.4.0")));
+        assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{through}");
+        assert_eq!(
+            done.report.detail.as_deref(),
+            Some("the staged release is reached through a release link")
+        );
+        assert_eq!(fake.snapshot(), before);
+    }
 }
 
 /// Asserts that `verify` waits for the new instance to say `read-write` for at most

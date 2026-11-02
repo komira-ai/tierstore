@@ -377,8 +377,8 @@ impl Host for SingleFake {
         Ok(self.w.borrow().declaration.clone())
     }
 
-    // A single-instance step asks the host for nothing but its declaration: these three fail,
-    // and are logged, so that a step that asked would fail and show it in the log.
+    // A single-instance step asks the host for no boot and no conntrack: these fail, and are
+    // logged, so that a step that asked would fail and show it in the log.
     fn boot_id(&self) -> Result<String, PortError> {
         self.tick("host.boot_id".to_owned(), PortKind::Host)?;
         Err(PortError::failed(PortKind::Host, "no boot on this host"))
@@ -397,10 +397,16 @@ impl Host for SingleFake {
             format!("host.capabilities {}", release.display()),
             PortKind::Host,
         )?;
-        Err(PortError::failed(
-            PortKind::Host,
-            "no capabilities asked on this host",
-        ))
+        // A staged release the host knows is one the updater placed; anything else is refused,
+        // as the host refuses a binary that is not root's.
+        if self.w.borrow().versions.contains_key(release) {
+            Ok(vec!["handover-v1".to_owned()])
+        } else {
+            Err(PortError::failed(
+                PortKind::Host,
+                "not a release the updater placed",
+            ))
+        }
     }
 }
 

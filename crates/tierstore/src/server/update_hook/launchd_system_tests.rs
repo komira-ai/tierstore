@@ -22,8 +22,10 @@ use super::{
     Step,
 };
 
-const OLD: &str = "/usr/local/tierstore/releases/old";
-const NEW: &str = "/usr/local/tierstore/releases/new";
+/// The releases, by name: directories under the links directory of the scratch root, each with
+/// its binary.
+const OLD: &str = "old";
+const NEW: &str = "new";
 const STATE: &str = "var/db/updater/hooks/tierstore";
 const LINKS: &str = "usr/local/tierstore";
 
@@ -32,7 +34,8 @@ type Running = Arc<Mutex<Option<PathBuf>>>;
 
 /// `launchctl`, as far as the hook sees it: `print` answers whether the job is loaded,
 /// `bootstrap` loads it (and so starts the release `current` names at that moment), `bootout`
-/// unloads it, `kickstart` of a loaded job does nothing more. Every call is kept.
+/// unloads it, `kickstart` of a loaded job does nothing more. The binary of a staged release, asked
+/// its capabilities, lists `handover-v1`. Every call is kept.
 struct Launchd {
     links: PathBuf,
     running: Running,
@@ -50,6 +53,14 @@ fn exited(code: i32) -> Result<Output, RunError> {
 impl Runner for Launchd {
     fn run(&self, call: &Call) -> Result<Output, RunError> {
         self.calls.borrow_mut().push(call.clone());
+        if call.program != LAUNCHCTL_PROGRAM {
+            assert_eq!(call.args, ["--capabilities"], "{call:?}");
+            return Ok(Output {
+                code: Some(0),
+                stdout: b"handover-v1\n".to_vec(),
+                stderr: Vec::new(),
+            });
+        }
         let mut running = self.running.lock().unwrap();
         match call.args[0].as_str() {
             "print" | "kickstart" => exited(if running.is_some() { 0 } else { 113 }),
@@ -129,13 +140,26 @@ fn dir_mode(path: &Path, bits: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(bits)).unwrap();
 }
 
+/// The directory of the release `name` under `root`.
+fn release_of(root: &Path, name: &str) -> PathBuf {
+    root.join(LINKS).join("releases").join(name)
+}
+
 fn mac(name: &str, versions: &[(&str, &str)], declaration: Option<String>) -> Mac {
     let dir = TestDir::under(std::env::temp_dir(), name);
     let root = dir.path().to_path_buf();
-    let running: Running = Arc::new(Mutex::new(Some(PathBuf::from(OLD))));
+    let running: Running = Arc::new(Mutex::new(Some(release_of(&root, OLD))));
+    for (release, _) in versions {
+        // The release as the updater places it: a directory with the binary, of the tests' own
+        // user (the release owner here), that no group or others can write.
+        let at = release_of(&root, release);
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("tierstore"), b"").unwrap();
+        dir_mode(&at.join("tierstore"), 0o755);
+    }
     let versions = versions
         .iter()
-        .map(|(release, version)| (PathBuf::from(release), (*version).to_owned()))
+        .map(|(release, version)| (release_of(&root, release), (*version).to_owned()))
         .collect();
     let port = instance(running.clone(), versions);
     let declared = root.join(LAUNCHD_DECLARATION_PATH.trim_start_matches('/'));
@@ -163,7 +187,7 @@ fn mac(name: &str, versions: &[(&str, &str)], declaration: Option<String>) -> Ma
     let links = root.join(LINKS);
     std::fs::create_dir_all(&links).unwrap();
     dir_mode(&links, 0o755);
-    symlink(OLD, links.join("current")).unwrap();
+    symlink(release_of(&root, OLD), links.join("current")).unwrap();
     Mac {
         _dir: dir,
         root,
@@ -181,6 +205,7 @@ impl Mac {
             root: self.root.clone(),
             owner: me(),
             declaration_owner: me(),
+            release_owner: me(),
             launchctl: PathBuf::from(LAUNCHCTL_PROGRAM),
             poll: Some(Duration::from_millis(1)),
             runner: &self.launchd,
@@ -197,19 +222,25 @@ impl Mac {
         run_on(&config, &invocation, None)
     }
 
+    /// The directory of the release `name`.
+    fn release(&self, name: &str) -> PathBuf {
+        release_of(&self.root, name)
+    }
+
     /// Runs `step` as the updater runs it, with the params of an update to `NEW` (0.4.0).
     fn run(&self, step: Step, params_dir: &Path) -> Done {
+        let staged = self.release(NEW).display().to_string();
         let file = params_dir.join("params.toml");
         std::fs::write(
             &file,
             format!(
-                "promotion_bound_secs = 30\nmode = \"restart\"\n\"updater.staged_release\" = \"{NEW}\"\n\"updater.target_version\" = \"0.4.0\"\n"
+                "promotion_bound_secs = 30\nmode = \"restart\"\n\"updater.staged_release\" = \"{staged}\"\n\"updater.target_version\" = \"0.4.0\"\n"
             ),
         )
         .unwrap();
         let mut words = vec![step.to_string()];
         if step == Step::Prepare {
-            words.push(NEW.to_owned());
+            words.push(staged.clone());
         }
         if step != Step::Restore {
             words.push("--params".to_owned());
@@ -224,15 +255,21 @@ impl Mac {
         run_on(&self.config(), &invocation, params.as_ref())
     }
 
-    /// The `launchctl` calls since the last look, as words.
+    /// The programs run since the last look, as words: a `launchctl` call as its arguments, and
+    /// a release's binary as `<release>/tierstore` and its arguments.
     fn take_calls(&self) -> Vec<String> {
+        let releases = self.root.join(LINKS).join("releases");
         self.launchd
             .calls
             .borrow_mut()
             .drain(..)
             .map(|call| {
-                assert_eq!(call.program, LAUNCHCTL_PROGRAM, "{call:?}");
-                call.args.join(" ")
+                if call.program == LAUNCHCTL_PROGRAM {
+                    return call.args.join(" ");
+                }
+                let program = Path::new(&call.program);
+                let release = program.strip_prefix(&releases).expect("a release's binary");
+                format!("{} {}", release.display(), call.args.join(" "))
             })
             .collect()
     }
@@ -256,14 +293,16 @@ const STOP_START: [&str; 5] = [
 ];
 
 /// Asserts that an update of a Mac, step by step through the machine's own ports, runs no
-/// program but `/bin/launchctl`, and that only `cutover` calls it, exactly: `print`, `bootout`,
-/// `print` until the job is gone, `print`, `bootstrap system <plist>`. Then `current` names the
+/// program but `/bin/launchctl` and the staged binary's check in `prepare` (its capabilities,
+/// asked once it is seen to be the release owner's), and that only `cutover` calls `launchctl`,
+/// exactly: `print`, `bootout`, `print` until the job is gone, `print`, `bootstrap system
+/// <plist>`. Then `current` names the
 /// new release, `previous` is gone, the instance answers as 0.4.0, the record is committed with
 /// nothing in flight, and the state directory holds the record and the lock alone (no slot
 /// links). It would catch an `nft` or `systemctl` call on a Mac, a restart through any other
 /// sequence, and a link or a record left in the wrong state.
 #[test]
-fn an_update_of_a_mac_runs_launchctl_alone_and_only_in_cutover() {
+fn an_update_of_a_mac_runs_no_nft_or_systemctl_and_launchctl_only_in_cutover() {
     let host = mac(
         "tierstore-launchd-update",
         &[(OLD, "0.3.0"), (NEW, "0.4.0")],
@@ -271,7 +310,7 @@ fn an_update_of_a_mac_runs_launchctl_alone_and_only_in_cutover() {
     );
     let scratch = host.root.clone();
     for (step, expected) in [
-        (Step::Prepare, &[][..]),
+        (Step::Prepare, &["new/tierstore --capabilities"][..]),
         (Step::Cutover, &STOP_START[..]),
         (Step::Verify, &[][..]),
         (Step::Cleanup, &[][..]),
@@ -280,11 +319,11 @@ fn an_update_of_a_mac_runs_launchctl_alone_and_only_in_cutover() {
         assert_eq!(done.outcome, Outcome::Success, "{step}: {done:?}");
         assert_eq!(host.take_calls(), expected, "{step}");
     }
-    assert_eq!(host.link("current"), Some(PathBuf::from(NEW)));
+    assert_eq!(host.link("current"), Some(host.release(NEW)));
     assert_eq!(host.link("previous"), None);
     assert_eq!(
         *host.launchd.running.lock().unwrap(),
-        Some(PathBuf::from(NEW))
+        Some(host.release(NEW))
     );
     let record = host.record();
     assert!(record.committed() && !record.updating, "{record:?}");
@@ -310,18 +349,22 @@ fn a_failed_probe_on_a_mac_restarts_the_previous_release() {
     );
     let scratch = host.root.clone();
     assert_eq!(host.run(Step::Prepare, &scratch).outcome, Outcome::Success);
+    host.take_calls();
     let done = host.run(Step::Cutover, &scratch);
     assert_eq!(done.report.reason, Some(Reason::ProbeFailed), "{done:?}");
     let detail = done.report.detail.unwrap();
     assert!(
-        detail.ends_with(&format!("; rolled back: the service runs {OLD} again")),
+        detail.ends_with(&format!(
+            "; rolled back: the service runs {} again",
+            host.release(OLD).display()
+        )),
         "{detail}"
     );
     assert_eq!(host.take_calls(), [STOP_START, STOP_START].concat());
-    assert_eq!(host.link("current"), Some(PathBuf::from(OLD)));
+    assert_eq!(host.link("current"), Some(host.release(OLD)));
     assert_eq!(
         *host.launchd.running.lock().unwrap(),
-        Some(PathBuf::from(OLD))
+        Some(host.release(OLD))
     );
     let back = host.run(Step::Rollback, &scratch);
     assert_eq!(back.outcome, Outcome::Success, "{back:?}");
@@ -346,7 +389,7 @@ fn restore_of_a_mac_kickstarts_the_loaded_job() {
         ]
     );
     assert_eq!(host.record(), SingleRecord::idle());
-    assert_eq!(host.link("current"), Some(PathBuf::from(OLD)));
+    assert_eq!(host.link("current"), Some(host.release(OLD)));
 }
 
 /// Asserts that a Mac is refused before any `launchctl` call when its declaration is absent
@@ -384,7 +427,7 @@ fn a_mac_that_cannot_be_trusted_is_refused_before_any_call() {
 
 /// Asserts that the machine a Mac's hook builds from the command line is the host's own: the
 /// root `/`, the hook's own user as the owner of its files, root as the owner of the
-/// declaration, `/bin/launchctl`, and the steps' own poll; and that a `--root` and a
+/// declaration and of a staged release's binary, `/bin/launchctl`, and the steps' own poll; and that a `--root` and a
 /// `--poll-interval-ms` of a conformance build reach it. It would catch a release that reads a
 /// Mac's files under another root, or runs another `launchctl`.
 #[test]
@@ -398,6 +441,7 @@ fn the_launchd_config_is_the_hosts_own() {
     assert_eq!(config.root, PathBuf::from("/"));
     assert_eq!(config.owner, me());
     assert_eq!(config.declaration_owner, ROOT_UID);
+    assert_eq!(config.release_owner, ROOT_UID);
     assert_eq!(config.launchctl, PathBuf::from("/bin/launchctl"));
     assert_eq!(config.poll, None);
     let args = HostArgs {
@@ -409,5 +453,6 @@ fn the_launchd_config_is_the_hosts_own() {
     let config = launchd_config(&runner, &args);
     assert_eq!(config.root, PathBuf::from("/scratch"));
     assert_eq!(config.declaration_owner, 7);
+    assert_eq!(config.release_owner, 7);
     assert_eq!(config.poll, Some(Duration::from_millis(3)));
 }

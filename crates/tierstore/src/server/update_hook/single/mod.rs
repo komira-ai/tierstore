@@ -9,8 +9,9 @@
 //! The service runs the binary that the release link `current` points at, on one port of
 //! loopback, so:
 //!
-//! - `prepare` records the update and points the link `previous` at the release `current` names.
-//!   Nothing is started. The two-slot `prepare`'s guard table, its connection-tracking check and
+//! - `prepare` checks the staged release's binary (a regular file of root's that no group or
+//!   others can write: the host's check before it asks a release its capabilities), records the
+//!   update and points the link `previous` at the release `current` names. Nothing is started. The two-slot `prepare`'s guard table, its connection-tracking check and
 //!   its second instance have nothing to act on here, and are skipped ([`SKIPPED_PREPARE`]).
 //! - `cutover` stops the service, points `current` at the staged release and starts the service,
 //!   then waits for `/readyz` and for [`PROBE_HITS`](super::steps::PROBE_HITS) answers in a row
@@ -38,6 +39,7 @@ use std::path::{Path, PathBuf};
 
 use super::args::Step;
 use super::declaration::LaunchdDeclaration;
+use super::machine::LAUNCHD_LINKS_DIR;
 use super::params::Params;
 use super::ports::{Link, PortError, SinglePorts};
 use super::record::Marker;
@@ -168,6 +170,18 @@ fn attempt(
     {
         return Err(Invalid::Staged.into());
     }
+    if let Some(params) = params
+        && [Link::Current, Link::Previous].iter().any(|link| {
+            params
+                .staged_release
+                .starts_with(Path::new(LAUNCHD_LINKS_DIR).join(link.name()))
+        })
+    {
+        return Err(Done::fail(
+            Reason::StateInvalid,
+            "the staged release is reached through a release link",
+        ));
+    }
     let mut record = match ports.state.load()? {
         Some(bytes) => Some(SingleRecord::decode(&bytes)?),
         None => None,
@@ -206,6 +220,10 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
             "an update is past its cutover: finish or roll it back first",
         ));
     }
+    // The staged release's binary must be one the updater placed: a regular file of the release
+    // owner (root) that no group or others can write, which the host checks before it asks the
+    // binary anything. The answer is not needed: one instance always restarts.
+    c.ports.host.capabilities(&params.staged_release)?;
     let current = c.target(Link::Current)?.ok_or_else(|| {
         Done::fail(
             Reason::NoSlot,

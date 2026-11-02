@@ -187,3 +187,51 @@ fn each_single_step_converges_after_the_world_stops_at_any_call() {
         }
     }
 }
+
+/// The fake of a host whose staged release `NEW` answers with another version, after `prepare`:
+/// its `cutover` fails the probe and rolls back.
+fn failing() -> SingleFake {
+    let fake = SingleFake::new();
+    fake.lie(super::single_testing::NEW, "9.9.9");
+    fake.advance(&[Prepare]);
+    fake
+}
+
+/// Asserts that a `cutover` whose probe fails, interrupted at any of its calls (one call failing,
+/// or the world stopping there, inside the swap or inside its own rollback), is finished by the
+/// updater's `rollback` in the state an uninterrupted failed `cutover` and `rollback` reach: the
+/// old release running from `current`, no `previous`, nothing in flight. It would catch a crash
+/// inside the in-cutover rollback that leaves the new release linked or the service stopped.
+#[test]
+fn a_failed_cutover_interrupted_anywhere_is_finished_by_rollback() {
+    let clean = failing();
+    let from = clean.calls();
+    let failed = clean.run(Cutover);
+    assert_eq!(failed.outcome, Outcome::Failure, "{failed:?}");
+    let calls = clean.calls() - from;
+    clean.advance(&[Rollback]);
+    let end = clean.snapshot();
+    assert_eq!(end.running, end.current);
+    for n in 1..=calls {
+        for halt in [false, true] {
+            let fake = failing();
+            if halt {
+                fake.halt_at(Some(n));
+            } else {
+                fake.fail_at(Some(n));
+            }
+            let first = fake.run(Cutover);
+            check_line(&first);
+            assert_eq!(fake.live_locks(), 0, "at {n}");
+            fake.halt_at(None);
+            fake.fail_at(None);
+            let back = fake.run(Rollback);
+            assert_eq!(
+                back.outcome,
+                Outcome::Success,
+                "at {n}, halt {halt}: {back:?}"
+            );
+            assert_eq!(fake.snapshot(), end, "at {n}, halt {halt}");
+        }
+    }
+}

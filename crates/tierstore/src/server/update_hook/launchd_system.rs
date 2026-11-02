@@ -38,7 +38,8 @@ pub(super) const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(60);
 pub(super) const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(300);
 /// How many looks, a poll apart, `stop` gives launchd to let the service go after `bootout`.
 pub(super) const GONE_ATTEMPTS: u32 = 60;
-/// The longest `<release>/tierstore --capabilities` may run (not asked on this host).
+/// The longest `<release>/tierstore --capabilities` may run: `prepare` asks it, after the
+/// binary's check.
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a connect to the instance may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -56,6 +57,8 @@ pub(super) struct LaunchdConfig<'a> {
     pub owner: u32,
     /// The user id that must own the declaration.
     pub declaration_owner: u32,
+    /// The user id that must own the binary of a staged release.
+    pub release_owner: u32,
     /// The `launchctl` program.
     pub launchctl: PathBuf,
     /// What a step waits between two looks; `None` is a second.
@@ -76,6 +79,7 @@ pub(super) fn run_on(
     let runner = config.runner;
     let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
         .with_declaration_owner(config.declaration_owner)
+        .with_release_owner(config.release_owner)
         .with_declaration_path(LAUNCHD_DECLARATION_PATH);
     // The declaration names the state directory, so it is read before the state port exists;
     // the step reads it again, under the lock.
@@ -116,13 +120,15 @@ pub(super) fn run_on(
 
 /// The launchd host this process runs on: the host's own files under the root the command line
 /// names (`/` unless `--root` says otherwise), the state directory and the links owned by the
-/// user the hook runs as, a declaration owned by root (or the user `--root-uid` names), and
+/// user the hook runs as, a declaration and a staged release owned by root (or the user
+/// `--root-uid` names), and
 /// `/bin/launchctl`.
 pub(super) fn launchd_config<'a>(runner: &'a dyn Runner, host: &HostArgs) -> LaunchdConfig<'a> {
     LaunchdConfig {
         root: host.root.clone(),
         owner: geteuid().as_raw(),
         declaration_owner: host.root_uid,
+        release_owner: host.root_uid,
         launchctl: PathBuf::from(LAUNCHCTL_PROGRAM),
         poll: host.poll,
         runner,
