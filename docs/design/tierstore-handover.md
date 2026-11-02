@@ -243,7 +243,9 @@ established keep-alive connection still reaches v-current and would get a 503 wh
   connection (the client reads a clean end of stream), keep reading until the client closes, then close. A plain
   `close()` with unread request bytes sends a reset that can destroy an answer. A request already on the wire is served.
   Bytes arriving after the FIN are read, dropped and counted (`tierstore_drain_late_requests_total`): the remaining race
-  is a request within one round trip of the FIN, which no server can answer.
+  is a request within one round trip of the FIN, which no server can answer. The count can only rise after the S3
+  listener that serves `/metricz` has closed, so a node that counted any says so on stderr as it exits (`late_note`,
+  `server/drain.rs`), for each front.
 
 The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
 `server/linger.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
@@ -323,12 +325,40 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   one in `state_dir` with a port outside the two, an unknown mode or marker, equal `serving` and `previous`, or a newer
   schema makes every step and `restore` exit `1` with the fake `nft` and `systemctl` recording **no call** (red: a hook
   that takes the port from the record). nft tests: see [`host-updates.md`][hu] 9. The service's own tests follow.
-- **T1 hand-over under load, no retry.** N clients put (create-only) and get, keep-alive and new, each sending its next
-  request when it has the previous answer, no retry of any request, while all five steps run end to end (remote clients
-  through a veth peer as well as local ones). Zero failed requests; every object a client was told was written reads
-  back with its bytes and hash; both instances answered (build gauge); `tierstore_drain_late_requests_total` is 0; the
-  directory passes `scan` with nothing discarded. Without P1 and P2 it fails; the same run ending in `rollback` before
-  `cleanup` has zero failures too.
+- **T1 hand-over under load, no retry.** In `crates/tierstore/tests/handover`, run by the CI job `handover-t1`. The real
+  `tierstore update-hook` runs its steps, the real `nft` applies its rules in two network namespaces the test makes and
+  deletes, and two real servers are the slots 9301 and 9302 behind 9300; `systemctl` is a stand-in that starts and stops
+  the test's own processes with the slot unit's semantics. Twelve clients, each sending its next request when it has
+  the previous answer and retrying none: eight S3 clients (create-only puts, gets of what they wrote, `/metricz`) through
+  9300, kept-alive and new connections, in the host and through a veth peer, IPv4 and IPv6; four OCI clients (`GET` and
+  `HEAD` of `/v2/`, of a manifest and of blobs by digest, seeded by S3 puts at their `oci/blobs/sha256/` keys) on
+  v-current's own OCI port. The OCI front is read-only and the hook does not redirect it, so an OCI client's sequence
+  ends, cleanly, at v-current's drain (an answer with `Connection: close`, or a clean end of stream); until then every
+  OCI request must succeed. The runs, one test each:
+  - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
+    `handover-v1`, so `CAPABILITIES` is unchanged): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
+    requests; every acknowledged write reads back with its bytes and hash; both slots answered `/metricz` through 9300;
+    every server that stopped exited 0 with no late request on either front (the exit note of section 7); v-next's
+    promotion and a fresh start on the directory discard nothing.
+  - (b) the same ending in `rollback` before `cleanup`: zero failures; v-current serves read-write through the rule,
+    with no late request; v-next is stopped and its link removed.
+  - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
+    v-next, so a new connection in between is refused. The bound asserted: every failed request is a connect that
+    failed on a new connection before any byte of an answer (counted and printed); no 5xx, no reset or cut answer on an
+    established connection, no acknowledged write lost. v-next's reconciler holds the lease, named for its slot; the
+    journals decode, are those of the two slots' proxy ids and hold each acknowledged key once; once both slots have
+    stopped, no lease is left.
+  - The hook killed by its `nft` right after `cutover` applied the swap, before `swapped`: `restore` puts the rule back
+    on v-current, `rollback` follows, then a whole hand-over; zero failures throughout.
+  - Without P1 and P2 (servers built with the test-only feature `test-drain-off`), run (a) fails: kept-alive
+    connections end without an answer at v-current's drain.
+
+  It needs CAP_NET_ADMIN and runs only with the feature `handover-t1`; without it the workspace's test run ignores it.
+  As a user who may `sudo` (cargo builds as that user; only the test binary runs as root):
+
+  ```sh
+  cargo build -p tierstore --features server,test-drain-off --bin tierstore --target-dir target/drain-off && TIERSTORE_T1_DRAIN_OFF=$PWD/target/drain-off/debug/tierstore cargo test -p tierstore --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo -E'"
+  ```
 - **T2 lock and self-take.** Two processes on one directory: the second is read-only and its retry count rises while the
   first holds the lock (an injected clock ticks the retries); after the first is killed it takes the lock, runs
   `clear_stage` and `scan` (a half-published sidecar is cleaned), serves a counted fill and says `read-write`; a replaced

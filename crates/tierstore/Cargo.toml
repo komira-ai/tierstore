@@ -55,6 +55,18 @@ server = [
 # `--public-port`, `--poll-interval-ms`). The crate's own tests turn it on through the
 # dev-dependency on itself.
 hook-conformance = ["server"]
+# `test-drain-off`: a server without the two properties of its drain, `Connection: close` from
+# its start (P1) and the lingering close (P2), as `server/drain.rs` says. Test-only: the CI job
+# `handover-t1` builds the binary with it, in a target directory of its own, to show that the
+# hand-over test under load (tests/handover) fails without them. Nothing else turns it on: not the
+# dev-dependency on itself, not a release (artifacts.yml builds `--features server`), not
+# `cargo install`; `server/drain_switch_tests.rs` holds the crate to that.
+test-drain-off = ["server"]
+# `handover-t1`: runs the hand-over test under load (tests/handover), which needs CAP_NET_ADMIN
+# and real nftables in network namespaces of its own. Without it the test binary is built and
+# its tests are ignored, so the workspace's test run neither runs nor fails on them. It changes
+# nothing in the library or the binary.
+handover-t1 = ["hook-conformance"]
 
 [[bin]]
 name = "tierstore"
@@ -70,6 +82,15 @@ required-features = ["server"]
 [[bin]]
 name = "tierstore-hook-fake"
 path = "tests/update_hook/fake/main.rs"
+required-features = ["hook-conformance"]
+
+# The stand-in `systemctl`, the `nft` that can kill the hook after a call, and the launcher of a
+# staged release, of the hand-over test under load (tests/handover): one program, which is each
+# of them by the name it is run as. Test code only, built with `hook-conformance` as the hook's
+# own fake is, so no release and no `cargo install` has it.
+[[bin]]
+name = "tierstore-handover-double"
+path = "tests/handover/double/main.rs"
 required-features = ["hook-conformance"]
 
 [dependencies]
@@ -148,8 +169,8 @@ reqwest.workspace = true
 # The TLS client of the tests of the OCI read front.
 rustls.workspace = true
 tokio-rustls.workspace = true
-# SIGTERM to the binary.
-rustix = { workspace = true, features = ["process"] }
+# SIGTERM to the binary, and the network namespace a thread of the hand-over test moves into.
+rustix = { workspace = true, features = ["process", "thread"] }
 # Turns the `server` feature on for this crate's own tests, and for the clippy and coverage
 # runs over the workspace that build them, and `hook-conformance`, the stand-in programs and the
 # hook's flags that tests/update_hook runs the update hook with.
