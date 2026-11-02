@@ -483,15 +483,11 @@ fn artifacts_yml_builds_under_the_version_the_release_will_tag() {
 const ARTIFACTS_DEFECTS: &[(&str, &str, &str)] = &[
     ("needs: [version]", "needs: []", "needs"),
     (
-        "TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}",
-        "TIERSTORE_BUILD_VERSION_OVERRIDE: ''",
-        "TIERSTORE_BUILD_VERSION_OVERRIDE",
+        "RELEASE_VERSION: ${{ needs.version.outputs.version }}",
+        "RELEASE_VERSION: ''",
+        "RELEASE_VERSION",
     ),
-    (
-        " --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"",
-        "",
-        "build-commit",
-    ),
+    (" --version \"$RELEASE_VERSION\"", "", "build-commit"),
     (
         "release version --repo",
         "release plan --repo",

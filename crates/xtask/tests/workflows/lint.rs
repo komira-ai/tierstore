@@ -530,20 +530,19 @@ pub fn artifacts_problems(text: &str) -> Vec<String> {
         }
         let given = build
             .and_then(|j| entry(j, "env"))
-            .and_then(|e| entry(e, "TIERSTORE_BUILD_VERSION_OVERRIDE"))
+            .and_then(|e| entry(e, "RELEASE_VERSION"))
             .and_then(Node::as_str);
         if given != Some("${{ needs.version.outputs.version }}") {
             problems.push(format!(
-                "{name}: env TIERSTORE_BUILD_VERSION_OVERRIDE is not ${{{{ needs.version.outputs.version }}}}"
+                "{name}: env RELEASE_VERSION is not ${{{{ needs.version.outputs.version }}}}"
             ));
         }
-        let checked = runs(build).into_iter().any(|r| {
-            r.contains("build-commit")
-                && r.contains("--version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"")
-        });
+        let checked = runs(build)
+            .into_iter()
+            .any(|r| r.contains("build-commit") && r.contains("--version \"$RELEASE_VERSION\""));
         if !checked {
             problems.push(format!(
-                "{name}: the build-commit step does not check --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\""
+                "{name}: the build-commit step does not check --version \"$RELEASE_VERSION\""
             ));
         }
     }

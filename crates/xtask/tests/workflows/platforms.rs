@@ -119,10 +119,12 @@ pub fn build_commands(b: &Build) -> Vec<String> {
             "cargo xtask fetch --url \"https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz\" --sha256 \"${pin}\" --out \"$HOME/.cargo/bin/cargo-cyclonedx\" --extract tar.xz --member \"cargo-cyclonedx-$TARGET/cargo-cyclonedx\""
         ),
         "cargo cyclonedx --version".to_owned(),
+        "cargo xtask release set-version --version \"$RELEASE_VERSION\"".to_owned(),
+        "cp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"".to_owned(),
         "cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore".to_owned(),
-        "cargo xtask build-commit \"target/$TARGET/release/tierstore\" \"$GITHUB_SHA\" --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"".to_owned(),
+        "cargo xtask build-commit \"target/$TARGET/release/tierstore\" \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\"".to_owned(),
         "cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target \"$TARGET\"".to_owned(),
-        "git diff --exit-code -- Cargo.lock".to_owned(),
+        "cmp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"".to_owned(),
         format!(
             "cargo xtask package --binary \"target/$TARGET/release/tierstore\" --sbom crates/tierstore/tierstore_bin.cdx.json --platform {platform} --commit \"$GITHUB_SHA\" --out dist"
         ),
@@ -130,7 +132,7 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         format!(
             "tar -xzf \"dist/tierstore-${{GITHUB_SHA}}-{platform}.tar.gz\" -C \"$RUNNER_TEMP/unpacked\" tierstore"
         ),
-        "cargo xtask build-commit \"$RUNNER_TEMP/unpacked/tierstore\" \"$GITHUB_SHA\" --version \"$TIERSTORE_BUILD_VERSION_OVERRIDE\"".to_owned(),
+        "cargo xtask build-commit \"$RUNNER_TEMP/unpacked/tierstore\" \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\"".to_owned(),
     ];
     if b.tests {
         commands.insert(3, MAC_TESTS.to_owned());
@@ -359,9 +361,9 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
         .filter_map(|(k, _)| k.as_str())
         .collect();
     keys.sort_unstable();
-    if keys != ["TARGET", "TIERSTORE_BUILD_VERSION_OVERRIDE"] {
+    if keys != ["TARGET", "RELEASE_VERSION"] {
         problems.push(format!(
-            "{platform}: its env sets {keys:?}, not TARGET and TIERSTORE_BUILD_VERSION_OVERRIDE alone"
+            "{platform}: its env sets {keys:?}, not TARGET and RELEASE_VERSION alone"
         ));
     }
     for step in steps(Some(build)) {

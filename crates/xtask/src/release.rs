@@ -5,6 +5,8 @@
 //!
 //! - `release plan` and `release manual` ([`plan()`]): whether the commit is released and as
 //!   which tag (the first job); see that module.
+//! - `release set-version --version <X.Y.Z>` ([`set_version`]): writes the version into the manifest
+//!   of `tierstore` and `Cargo.lock`, which the build jobs of `artifacts.yml` run before they build.
 //! - `release locate --repo <owner/repo> --commit <sha> [--output <file>] [--gh <program>]`
 //!   ([`locate`]): refuses a commit that is not on `main` (GitHub's compare of
 //!   `main...<sha>` is neither `identical` nor `behind`), then a commit for which there is no
@@ -27,12 +29,14 @@
 mod binary;
 mod plan;
 mod publish;
+mod set_version;
 
 pub use binary::{check_binary, check_built, check_said};
 pub use plan::{
     DOCS_PATHS, Request, docs_only, is_docs_path, manual, next_tag, plan, read_version, version,
 };
 pub use publish::{Gh, RealGh, publish};
+pub use set_version::set_version;
 
 use std::io::Write;
 use std::path::Path;

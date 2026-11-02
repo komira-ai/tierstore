@@ -2,8 +2,8 @@
 //! capabilities a host updater may ask for with `tierstore --capabilities`.
 
 /// The version of this build, which `--version`, the start line and `tierstore_build_info` name:
-/// the crate's version, or the one the build was given (`TIERSTORE_BUILD_VERSION_OVERRIDE`, which
-/// the release workflow sets to the version of the tag). `build.rs` embeds it.
+/// the version of `Cargo.toml`. The release workflow writes the version of the tag there before it
+/// builds (`cargo xtask release set-version`). `build.rs` embeds it.
 pub const VERSION: &str = env!("TIERSTORE_BUILD_VERSION");
 
 /// The commit this binary was built from: twelve hex digits, or `unknown` where the build had no
