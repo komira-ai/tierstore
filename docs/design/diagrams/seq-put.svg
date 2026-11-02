@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" width="960" height="720" role="img" aria-label="Sequence diagram of a put: Client, Proxy, Hot, Cold; acknowledged after the journal object is in the hot tier.">
 <title>A streamed put, in order of store calls</title>
-<defs><marker id="put-sequence-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="put-sequence-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<defs><marker id="seq-put-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-put-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
 .box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
@@ -29,36 +29,36 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
 <line x1="840" y1="76" x2="840" y2="540" class="ln-d"/>
 <rect x="332" y="100" width="16" height="20" rx="5" class="box"/>
-<line x1="110" y1="112" x2="340" y2="112" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="110" y1="112" x2="340" y2="112" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="225" y="106" class="t-m lbl" text-anchor="middle">0  PUT key (streamed body)</text>
 <text x="360" y="132" class="t-m">refuse reserved key; server checks</text>
 <text x="360" y="148" class="t-m">length and takes a put slot</text>
-<line x1="340" y1="168" x2="840" y2="168" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="340" y1="168" x2="840" y2="168" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="590" y="162" class="t-m lbl" text-anchor="middle">1  head(key)</text>
-<line x1="840" y1="194" x2="340" y2="194" class="ln-d" marker-end="url(#put-sequence-ak)"/>
+<line x1="840" y1="194" x2="340" y2="194" class="ln-d" marker-end="url(#seq-put-ak)"/>
 <text x="590" y="188" class="t-m lbl" text-anchor="middle">NotFound (put fails closed if cold cannot answer)</text>
-<line x1="340" y1="228" x2="600" y2="228" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="340" y1="228" x2="600" y2="228" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="206" class="t-m lbl" text-anchor="middle">2  get _tiering/usage</text>
 <text x="470" y="222" class="t-m lbl" text-anchor="middle">(cached 1 s; skipped when latched Full)</text>
-<line x1="600" y1="254" x2="340" y2="254" class="ln-d" marker-end="url(#put-sequence-ak)"/>
+<line x1="600" y1="254" x2="340" y2="254" class="ln-d" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="248" class="t-m lbl" text-anchor="middle">level (missing or stale = Open)</text>
 <text x="612" y="272" class="t-m">Critical: sleep 20 ms first.</text>
 <text x="612" y="288" class="t-m">Full: cold path, see below.</text>
-<line x1="340" y1="306" x2="600" y2="306" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="340" y1="306" x2="600" y2="306" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="300" class="t-m lbl" text-anchor="middle">3  put_stream(key), create-only</text>
-<line x1="600" y1="332" x2="340" y2="332" class="ln-d" marker-end="url(#put-sequence-ak)"/>
+<line x1="600" y1="332" x2="340" y2="332" class="ln-d" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="326" class="t-m lbl" text-anchor="middle">ok (visible after the last chunk)</text>
-<line x1="340" y1="366" x2="840" y2="366" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="340" y1="366" x2="840" y2="366" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="590" y="360" class="t-m lbl" text-anchor="middle">4  head(key) again (the second ask)</text>
-<line x1="840" y1="392" x2="340" y2="392" class="ln-d" marker-end="url(#put-sequence-ak)"/>
+<line x1="840" y1="392" x2="340" y2="392" class="ln-d" marker-end="url(#seq-put-ak)"/>
 <text x="590" y="386" class="t-m lbl" text-anchor="middle">NotFound</text>
-<line x1="340" y1="426" x2="600" y2="426" class="ln" marker-end="url(#put-sequence-ak)"/>
+<line x1="340" y1="426" x2="600" y2="426" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="404" class="t-m lbl" text-anchor="middle">5  put _journal/&lt;proxy&gt;/&lt;seq&gt;</text>
 <text x="470" y="420" class="t-m lbl" text-anchor="middle">create-only, one object per batch</text>
-<line x1="600" y1="452" x2="340" y2="452" class="ln-d" marker-end="url(#put-sequence-ak)"/>
+<line x1="600" y1="452" x2="340" y2="452" class="ln-d" marker-end="url(#seq-put-ak)"/>
 <text x="470" y="446" class="t-m lbl" text-anchor="middle">ok</text>
 <rect x="30" y="484" width="900" height="56" rx="5" class="box-o"/>
-<line x1="340" y1="512" x2="110" y2="512" class="ln-o" marker-end="url(#put-sequence-ao)"/>
+<line x1="340" y1="512" x2="110" y2="512" class="ln-o" marker-end="url(#seq-put-ao)"/>
 <text x="225" y="506" class="t-m lbl" text-anchor="middle">6  200: ACK POINT</text>
 <text x="40" y="532" class="t-m">The journal entry is durable in the hot tier. The object is not in the cold tier yet.</text>
 <text x="30" y="572" class="t-m">Later, not part of the put: the reconciler copies the object to cold (create-only), then may evict it from hot.</text>
@@ -66,7 +66,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="30" y="610" width="900" height="96" rx="5" class="box"/>
 <text x="42" y="630" class="b">Hot tier full (usage at budget, or the store answers Full)</text>
 <text x="42" y="648" class="t-m">Level Full: unsigned put goes hot.head(key), then create-only cold put; no journal entry; acked when cold answers.</text>
-<text x="42" y="664" class="t-m">Hot answers Full before taking a byte: same cold path. After it took any byte (a journal Full included): 503 Full, the retry goes to cold.</text>
+<text x="42" y="664" class="t-m">Hot answers Full before taking a byte: same cold path. After it took any byte (a journal Full included): 503 SlowDown (Retry-After 1), the retry goes to cold.</text>
 <text x="42" y="680" class="t-m">Presigned put (hot-only): 503 SlowDown, never cold.</text>
 <text x="42" y="696" class="t-m">A journal write that fails removes the hot object (best effort); the put is not acked.</text>
 </svg>

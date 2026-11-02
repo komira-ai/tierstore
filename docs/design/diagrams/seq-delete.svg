@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 631" width="960" height="631" role="img" aria-label="Sequence diagram of a delete: hot delete, cold delete, journal DELETE entry, then the reply.">
+<title>A delete: hot, then cold, then the journal, then the reply</title>
+<defs><marker id="seq-delete-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-delete-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="631" fill="#FFFFFF"/>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="110" y="65" class="b" text-anchor="middle">Client</text>
+<line x1="110" y1="76" x2="110" y2="513" class="ln-d"/>
+<rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="340" y="65" class="b" text-anchor="middle">Proxy</text>
+<line x1="340" y1="76" x2="340" y2="513" class="ln-d"/>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
+<line x1="600" y1="76" x2="600" y2="513" class="ln-d"/>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="840" y1="76" x2="840" y2="513" class="ln-d"/>
+<text x="20" y="28" class="b" font-size="16" text-anchor="start">A delete: hot, then cold, then the journal, then the reply</text>
+<text x="225.0" y="110" class="t-m lbl" text-anchor="middle">0  DELETE key</text>
+<line x1="110" y1="119" x2="340" y2="119" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="360" y="137" class="t-m lbl" text-anchor="start">Reserved key: refused. The call runs on</text>
+<text x="360" y="150" class="t-m lbl" text-anchor="start">a task of its own, so a client that goes</text>
+<text x="360" y="163" class="t-m lbl" text-anchor="start">away cannot stop it half done.</text>
+<text x="470.0" y="196" class="t-m lbl" text-anchor="middle">1  delete(key)</text>
+<line x1="340" y1="205" x2="600" y2="205" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="233" class="t-m lbl" text-anchor="middle">ok (a key that is not there is ok too)</text>
+<line x1="600" y1="242" x2="340" y2="242" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<text x="360" y="260" class="t-m lbl" text-anchor="start">An error stops here: cold is not asked,</text>
+<text x="360" y="273" class="t-m lbl" text-anchor="start">no journal entry, the error is the reply.</text>
+<text x="590.0" y="306" class="t-m lbl" text-anchor="middle">2  delete(key)</text>
+<line x1="340" y1="315" x2="840" y2="315" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="590.0" y="343" class="t-m lbl" text-anchor="middle">ok (a key that is not there is ok too)</text>
+<line x1="840" y1="352" x2="340" y2="352" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="380" class="t-m lbl" text-anchor="middle">3  put _journal/&lt;proxy&gt;/&lt;seq&gt;</text>
+<text x="470.0" y="393" class="t-m lbl" text-anchor="middle">(DELETE entry, create-only, batched)</text>
+<line x1="340" y1="402" x2="600" y2="402" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="430" class="t-m lbl" text-anchor="middle">ok: the journal object is durable</text>
+<line x1="600" y1="439" x2="340" y2="439" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<rect x="30" y="455" width="900" height="60" rx="5" class="box-o"/>
+<text x="225.0" y="471" class="t-m lbl" text-anchor="middle">4  204 (also for a key that was not there)</text>
+<line x1="340" y1="480" x2="110" y2="480" class="ln-o" marker-end="url(#seq-delete-ao)"/>
+<text x="40" y="498" class="t-m lbl" text-anchor="start">The reply waits for the journal object, not for the reconciler.</text>
+<rect x="30" y="525" width="900" height="82" rx="5" class="box"/>
+<text x="42" y="545" class="b" text-anchor="start">Not atomic across the steps</text>
+<text x="42" y="563" class="t-m" text-anchor="start">Fails at step 2: the hot copy is gone, the cold copy stays, the error is the reply; a retry is safe (deleting an absent key succeeds).</text>
+<text x="42" y="579" class="t-m" text-anchor="start">Fails at step 3: the object is gone from both tiers but the reply is an error; a retry is safe.</text>
+<text x="42" y="595" class="t-m" text-anchor="start">The DELETE entry lets the reconciler undo a cold copy it was making from an earlier PUT entry of the same key.</text>
+</svg>
