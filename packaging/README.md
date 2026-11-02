@@ -161,32 +161,49 @@ moves only once the new slot answers.
 
    With no record the boot entry has nothing to restore and does nothing; with this one it points
    the redirect at 9301.
-4. **Slot 9301, started by hand and ready.** Run `systemctl start tierstore@9301` and wait until
+4. **The guard, before any slot runs.** The slot unit listens on the wildcard of both families,
+   so load the hook's guard table first; it drops every connection to 9301 and 9302, IPv4 and
+   IPv6, that neither comes over loopback nor was redirected from 9300, and changes nothing
+   for port 9300. As root, give this text to `nft -f -`; it is exactly the table `restore`
+   loads, so `restore` later finds it in place and leaves it as it is:
+
+   ```nft
+   add table inet kbf_guard_tierstore
+   flush table inet kbf_guard_tierstore
+   add chain inet kbf_guard_tierstore in { type filter hook input priority filter; policy accept; }
+   add rule inet kbf_guard_tierstore in iifname "lo" tcp dport { 9301, 9302 } accept
+   add rule inet kbf_guard_tierstore in tcp dport { 9301, 9302 } ct status dnat ct original proto-dst 9300 accept
+   add rule inet kbf_guard_tierstore in tcp dport { 9301, 9302 } drop
+   ```
+
+   Check that `nft list table inet kbf_guard_tierstore` shows it.
+5. **Slot 9301, started by hand and ready.** Run `systemctl start tierstore@9301` and wait until
    a `GET` of `/readyz` on `127.0.0.1:9301` answers 200 with a body that starts with `ready`.
    Nothing has moved yet: port 9300 is still the old unit's. If the slot never answers, run
    `systemctl stop tierstore@9301`, read its journal, mend what it says and start it again; the
    old unit served throughout.
-5. **`restore`, through the updater.** Have the updater run the declaration's boot entry, as it
+6. **`restore`, through the updater.** Have the updater run the declaration's boot entry, as it
    does at its own start: `tierstore update-hook restore` as `tierstore-update`, with
-   `CAP_NET_ADMIN`. It loads the guard table, points the redirect of port 9300 at 9301 and starts
+   `CAP_NET_ADMIN`. It loads the guard table (already there: no change), points the redirect of port 9300 at 9301 and starts
    `tierstore@9301.service`, which already runs, so the start changes nothing. `restore` does not
    wait for the slot to answer: it moves the public port first and starts the unit after, and a
-   start that fails leaves port 9300 pointing at a slot that does not answer. That is why step 4
+   start that fails leaves port 9300 pointing at a slot that does not answer. That is why step 5
    comes first.
-6. **Check through the public port.** A request to port 9300 must be answered by slot 9301: the
+7. **Check through the public port.** A request to port 9300 must be answered by slot 9301: the
    `slot` label of `tierstore_build_info` on `/metricz` says 9301. If it is not, or `restore`
    failed, hand port 9300 back to the old unit, which never stopped, by deleting the redirect:
    `nft delete table inet kbf_forward_tierstore`. The guard table can stay: it drops only
    connections to 9301 and 9302 that neither come over loopback nor were redirected from 9300.
-   Then stop slot 9301, mend it, and go back to step 4.
-7. **The old unit, last.** Stop `tierstore.service`, which drains, and disable it if it was
+   Then stop slot 9301, mend it, and go back to step 5. A host that gives up the move deletes
+   the guard too, `nft delete table inet kbf_guard_tierstore`, once no slot runs.
+8. **The old unit, last.** Stop `tierstore.service`, which drains, and disable it if it was
    enabled (`systemctl disable tierstore`, and remove its drop-ins and the `[Install]` drop-in
    that enabled it). From now on the slot units are the only ones, and the updater updates them.
 
-Until step 7 the old unit and slot 9301 run side by side over the same tiers, each with a proxy
+Until step 8 the old unit and slot 9301 run side by side over the same tiers, each with a proxy
 id of its own and one reconciler at a time under the lease. That holds for S3 tiers. A host whose
 hot tier is a directory (`dir:`), or a build node whose cache directory the old unit writes, must
-not run two instances: stop the old unit before step 4, and accept the gap.
+not run two instances: stop the old unit before step 5, and accept the gap.
 
 ### What these files do not do yet
 
