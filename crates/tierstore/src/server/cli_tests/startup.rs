@@ -138,14 +138,14 @@ fn a_wrong_answer_has_its_own_exit_status_and_an_unreachable_tier_has_not() {
         check: Check::Range,
         observed: "x".to_owned(),
     };
-    let wrong: super::Error = Box::new(SelfTestError::Violation(failure));
+    let wrong: super::super::Error = Box::new(SelfTestError::Violation(failure));
     let down = SelfTestError::Unreachable {
         backend: "hot tier memory".to_owned(),
         error: "connection refused".to_owned(),
     };
-    let down: super::Error = Box::new(down);
-    let invalid: super::Error = Box::new(InvalidFlags("x".to_owned()));
-    let other: super::Error = "another reason".into();
+    let down: super::super::Error = Box::new(down);
+    let invalid: super::super::Error = Box::new(InvalidFlags("x".to_owned()));
+    let other: super::super::Error = "another reason".into();
     assert_eq!(exit_status(&wrong), 3);
     assert_eq!(exit_status(&down), 1);
     assert_eq!(exit_status(&invalid), 2);

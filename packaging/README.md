@@ -237,7 +237,7 @@ time keeps `--drain-deadline` at most 220s, which brings the stop within 295 s.
 
 A client that holds a presigned URL writes one object with a plain `PUT`, and a GC key lists, heads
 and deletes under one prefix. The two kinds of key, their key files and what each may do are in
-[docs/presigned-and-gc-keys.md](docs/presigned-and-gc-keys.md).
+[guides/presigned-and-gc-keys.md](guides/presigned-and-gc-keys.md).
 
 ## Scoped keys
 
@@ -695,7 +695,7 @@ the three has one line that says so; the proxy's series are in "Metrics" in
 
 ### The registry front
 
-The registry front (see [The OCI read front](docs/oci-front.md)) is the optional `[oci]` table of a storage node's file
+The registry front (see [The OCI read front](guides/oci-front.md)) is the optional `[oci]` table of a storage node's file
 or of a build node's, left out for a server with no front. The two shapes have the same keys and
 the same rules. On a storage node the front reads through the proxy; on a build node it reads
 through the local cache, so a blob or a manifest under a `[[policy]]` prefix with `cache = true`
@@ -887,8 +887,8 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
 | `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
-| `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL; see [Presigned PUT URLs](docs/presigned-and-gc-keys.md) |
-| `--gc-key-file` | a GC key (given once for each key); see [GC keys](docs/presigned-and-gc-keys.md#gc-keys) |
+| `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL; see [Presigned PUT URLs](guides/presigned-and-gc-keys.md) |
+| `--gc-key-file` | a GC key (given once for each key); see [GC keys](guides/presigned-and-gc-keys.md#gc-keys) |
 | `--scoped-key-file` | a scoped key (given once for each key); see Scoped keys |
 | `--grant-key-file`, `--grant-max-lifetime` | a grant key (given once for each key), and how far ahead a grant may end; see Read grants |
 | `--hot`, `--cold` | the tiers: `s3:<bucket>` for a bucket of an S3-compatible store (also `dir:<path>` and `memory`; a `dir:` path must also be writable under `ProtectSystem=strict`, so add it to `ReadWritePaths=`) |
@@ -896,20 +896,20 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--hot-bytes` | the bytes the hot tier is meant to hold; the water marks are shares of it (`--high-water`, `--low-water`, `--critical`) |
 | `--drain-lb-wait`, `--drain-deadline` | the drain on SIGTERM: how long `/readyz` says 503 while the server goes on accepting and serving (the settle), and how long it then waits for requests in flight and for the connections it closes (see "Stopping it") |
 | `--usage-stale-after` | how old the usage that the reconciler publishes may be (2m by default, longer than `--lease-ttl`) before `/usagez` says 503 with the reason (200 and the age while fresh). Puts ignore a usage older than 30 s, so a stopped reconciler means a hot tier that is never taken to be full; puts are not refused. A load balancer probes `/readyz`, which does not look at the usage (one stopped reconciler would otherwise take every node out); alerting probes `/usagez` |
-| `--oci-listen`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-prefix` | the read-only registry front, off unless `--oci-listen` is given; see [The OCI read front](docs/oci-front.md) |
+| `--oci-listen`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-prefix` | the read-only registry front, off unless `--oci-listen` is given; see [The OCI read front](guides/oci-front.md) |
 
 `tierstore --help` lists them all, with their defaults.
 
 ## Using a stock SDK
 
 The settings a stock S3 SDK needs against the front (endpoint, addressing, region, credentials, checksums, listing) are in
-[docs/stock-sdk.md](docs/stock-sdk.md).
+[guides/stock-sdk.md](guides/stock-sdk.md).
 
 ## The OCI read front
 
 The read-only registry front over the store: its two modes, keys and namespace, integrity,
 anonymous reads, putting an image in, pulling it and its counters are in
-[docs/oci-front.md](docs/oci-front.md).
+[guides/oci-front.md](guides/oci-front.md).
 
 ## Starting it
 
