@@ -55,6 +55,7 @@ async fn a_marked_replace_keeps_the_mark_and_takes_only_the_tag() {
 async fn a_conditional_delete_takes_a_reservation_only_on_its_tag() {
     let (_s3, backend) = backend().await;
     conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag(&backend).await;
+    backend.delete("k").await.unwrap();
     let way = backend.settle_conditional_delete("probe/conditional").await;
     assert_eq!(way.as_deref(), Some("if-match"));
     conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag(&backend).await;
