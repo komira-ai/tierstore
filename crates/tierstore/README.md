@@ -116,7 +116,7 @@ What the counts mean:
 - `critical` is a skip because the hot tier is at or above its critical mark by the usage the
   reconciler published (the budget included), and also while the proxy takes the hot tier to be
   full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier
-  answering this copy with "full". `raced` is another read having copied the object first: two
+  answering this copy with "full". `raced` is another read having copied the object first, or the key having been deleted from the cold tier while the copy was made (the copy is then removed again): two
   concurrent cold gets of one object read it twice and promote it once, the second counting
   `raced`. `failed` is any other error of the copy.
 - `promotions_total` counts a copy when the hot tier has taken it, before its entry is appended

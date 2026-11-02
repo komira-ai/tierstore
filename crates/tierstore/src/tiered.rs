@@ -130,8 +130,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Get** reads the hot tier, else the cold tier. An object it read from the cold tier is
 ///   copied back into the hot tier, create-only (it is fine if another read got there
 ///   first), unless the hot tier is above the critical mark; the copy is journaled, in the
-///   background, so that the reconciler can evict it again. A failed copy-back does not
-///   fail the read. A ranged read that misses the hot tier reads the whole object from the
+///   background, so that the reconciler can evict it again. After the copy is made the cold
+///   tier is asked once more (a HEAD): if the key is gone from it (it was deleted
+///   meanwhile), the copy is removed again, if it is still the bytes this get wrote, by a
+///   conditional delete, and is not journaled. A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the whole object from the
 ///   cold tier, since the hot tier takes the whole of it, and cuts the range from that.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back.
 /// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
@@ -159,8 +161,11 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   after it took some of the body, the bytes cannot be offered to the cold tier, so the put
 ///   fails with [`Error::Full`] (the tier is latched full, and the client's retry goes to the
 ///   cold tier); if it took none, the cold tier gets the whole body as for a held put.
-/// - **Delete** removes the object from the hot tier and from the cold tier, then appends a
-///   delete entry, which lets the reconciler undo a copy to the cold tier that was under way.
+/// - **Delete** removes the object from the cold tier and then from the hot tier (in that
+///   order, which the check of a copy-back relies on), then appends a delete entry, which
+///   lets the reconciler undo a copy to the cold tier that was under way. A delete that fails
+///   between the two leaves the object in the hot tier only, where it can be read, and a
+///   retry finishes it.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
 ///   `_tiering/`. [`Backend::list_page`] pages through the merged listing: the last key of a
@@ -209,8 +214,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   hot tier's create-only write alone decides it. For the other keys the race remains: the
 ///   reconciler then counts the cold tier's object as the copy of the hot tier's, and the object
 ///   of the cold tier is the one that stays.
-/// - A get that copies an object back into the hot tier while it is deleted may put it back
-///   there, with a put entry after the delete entry.
+/// - A copy-back is kept out of a deleted key only if the delete is of this version (cold tier
+///   first). A copy that cannot be removed again, because the hot tier fails the calls, is
+///   journaled as a put. A copy-back that is held past a delete and a put of the same bytes
+///   removes that put's object, since the tag names content.
 pub struct Proxy {
     inner: Arc<Inner>,
 }
@@ -634,15 +641,21 @@ impl Inner {
         }
         match self.hot.put(key, body.clone()).await {
             Ok(()) => {
-                // Counted when the hot tier has the object, before the journal entry below,
-                // which can fail.
-                self.counters.promoted(body.len());
-                let inner = Arc::clone(self);
-                let key = key.to_owned();
-                let size = body.len() as u64;
-                drop(tokio::spawn(async move {
-                    let _ = inner.journal_put(&key, size).await;
-                }));
+                if self.keeps_copy(key, body).await {
+                    // Counted when the hot tier has the object, before the journal entry
+                    // below, which can fail.
+                    self.counters.promoted(body.len());
+                    let inner = Arc::clone(self);
+                    let key = key.to_owned();
+                    let size = body.len() as u64;
+                    drop(tokio::spawn(async move {
+                        let _ = inner.journal_put(&key, size).await;
+                    }));
+                } else {
+                    // The key left the cold tier while the copy was made (it was deleted): the
+                    // copy is gone, or is not ours, and nothing is journaled.
+                    self.counters.skipped(Skipped::Raced);
+                }
             }
             Err(Error::Full(_)) => {
                 self.latch_full();
@@ -651,6 +664,36 @@ impl Inner {
             Err(Error::AlreadyExists(_)) => self.counters.skipped(Skipped::Raced),
             Err(_) => self.counters.skipped(Skipped::Failed),
         }
+    }
+
+    /// Whether a copy that was just put into the hot tier stays: it does if the cold tier still
+    /// holds the key. If it does not (the key was deleted since the get read it, or the cold
+    /// tier cannot say), the copy is removed again, as far as it is the copy this call wrote,
+    /// and the answer is no. The delete removes the cold tier's object before the hot tier's,
+    /// so a copy that survives this check is removed by that delete, and one that does not is
+    /// removed here.
+    ///
+    /// The answer is also yes where the copy could not be removed, so that the object in the
+    /// hot tier is journaled and the reconciler can evict it.
+    async fn keeps_copy(&self, key: &str, body: &Bytes) -> bool {
+        if self.cold.head(key).await.is_ok() {
+            return true;
+        }
+        match self.remove_own_copy(key, body).await {
+            Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Removes the object of the hot tier if it holds `body`, and only the object whose tag was
+    /// read for that: an object put under the key after the delete is left alone, unless it has
+    /// the same bytes and so the same tag.
+    async fn remove_own_copy(&self, key: &str, body: &Bytes) -> Result<(), Error> {
+        let tag = self.hot.head(key).await?.tag;
+        if self.hot.get(key, None).await? != *body {
+            return Ok(());
+        }
+        self.hot.delete_if_match(key, &tag).await
     }
 
     /// A get of the cold tier, counted as a hit, a miss or an error of it.
@@ -740,8 +783,10 @@ impl Inner {
 
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
-        self.hot.delete(key).await?;
+        // The cold tier first: a copy-back that checks the cold tier after its hot put then
+        // either sees the key gone and removes its copy, or is removed by the hot delete below.
         self.cold.delete(key).await?;
+        self.hot.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0)).await
     }
 

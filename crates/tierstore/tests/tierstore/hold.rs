@@ -124,6 +124,8 @@ pub struct Stall {
     entered: Arc<Notify>,
     release: Option<Arc<Notify>>,
     spent: AtomicBool,
+    /// Whether the call that stops is a head and not a write.
+    on_head: bool,
 }
 
 impl Stall {
@@ -139,6 +141,27 @@ impl Stall {
             entered,
             release,
             spent: AtomicBool::new(false),
+            on_head: false,
+        }
+    }
+
+    /// As [`Stall::new`], but the call that stops is the first head of a key under the prefix,
+    /// and writes go straight through.
+    pub fn on_head(
+        inner: Arc<dyn Backend>,
+        prefix: &str,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> Self {
+        Self {
+            on_head: true,
+            ..Self::new(inner, prefix, entered, Some(release))
+        }
+    }
+
+    async fn stop_write(&self, key: &str) {
+        if !self.on_head {
+            self.stop(key).await;
         }
     }
 
@@ -160,7 +183,7 @@ impl Backend for Stall {
     }
 
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.stop(key).await;
+        self.stop_write(key).await;
         self.inner.put(key, body).await
     }
 
@@ -170,7 +193,7 @@ impl Backend for Stall {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.stop(key).await;
+        self.stop_write(key).await;
         self.inner.put_stream(key, len, body).await
     }
 
@@ -180,8 +203,69 @@ impl Backend for Stall {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.stop(key).await;
+        self.stop_write(key).await;
         self.inner.put_stream_hot_only(key, len, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.inner.get(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        if self.on_head {
+            self.stop(key).await;
+        }
+        self.inner.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.inner.delete(key).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.inner.list(prefix).await
+    }
+}
+
+/// A backend over another that holds the first delete of one key: the call says it has arrived
+/// (`entered`) and goes on when `release` is notified. Every other call goes straight through.
+pub struct HoldDelete {
+    inner: Arc<dyn Backend>,
+    key: &'static str,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    spent: AtomicBool,
+}
+
+impl HoldDelete {
+    pub fn new(
+        inner: Arc<dyn Backend>,
+        key: &'static str,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> Self {
+        Self {
+            inner,
+            key,
+            entered,
+            release,
+            spent: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for HoldDelete {
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.inner.put(key, body).await
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
@@ -197,10 +281,27 @@ impl Backend for Stall {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
+        if key == self.key && !self.spent.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
         self.inner.delete(key).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
+    }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        self.inner.list_page(prefix, start_after, max_keys).await
     }
 }
