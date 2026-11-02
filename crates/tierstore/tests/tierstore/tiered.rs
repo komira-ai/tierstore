@@ -225,3 +225,19 @@ async fn a_proxy_id_must_be_a_name_without_a_slash() {
     }
     assert_eq!(rig.hot.calls(Op::List), 0);
 }
+
+/// Asserts that the proxy does not take a conditional delete: it is `Unsupported`, nothing is
+/// journaled, and the object stays in the hot tier (the proxy's own delete is the one that
+/// removes from both tiers and journals).
+#[tokio::test(start_paused = true)]
+async fn a_conditional_delete_through_the_proxy_is_unsupported_and_changes_nothing() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("v")).await.unwrap();
+    let tag = proxy.head("k").await.unwrap().tag;
+    let refused = proxy.delete_if_match("k", &tag).await.unwrap_err();
+    assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("v"));
+    let objects = journal_keys(&*rig.hot_mem, "p1").await;
+    assert_eq!(objects, [journal_key("p1", 1)]);
+}

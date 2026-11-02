@@ -282,3 +282,18 @@ async fn a_streamed_put_is_passed_to_the_inner_store_unread() {
     assert_eq!(f.cached.get("k", None).await.unwrap(), body("0123"));
     assert!(!f.cached.needs_length());
 }
+
+/// Asserts that the cache does not take a conditional delete: it holds copies of what it read, so
+/// a delete that did not drop them would serve a deleted object. The call is `Unsupported`, does
+/// not reach the backend and leaves the object and its cached copy as they were.
+#[tokio::test]
+async fn a_conditional_delete_through_the_cache_is_unsupported_and_changes_nothing() {
+    let f = fixture(100);
+    f.cached.put("k", body("v")).await.unwrap();
+    let tag = f.cached.head("k").await.unwrap().tag;
+    f.cached.get("k", None).await.unwrap();
+    let refused = f.cached.delete_if_match("k", &tag).await.unwrap_err();
+    assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
+    assert_eq!(f.backend.calls(Op::DeleteIfMatch), 0);
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("v"));
+}

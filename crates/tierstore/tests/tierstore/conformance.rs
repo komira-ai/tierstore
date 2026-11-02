@@ -103,6 +103,30 @@ pub async fn a_put_if_match_replaces_only_the_object_with_that_tag(backend: &dyn
     assert_eq!(absent, Err(Error::NotFound("other".to_owned())));
 }
 
+/// A delete with the content tag of the object removes it, and the key can be put again; a
+/// delete with another tag is refused and changes nothing, as is one with the tag the object had
+/// before it was deleted and put again with other bytes; a delete of an absent key is
+/// `NotFound`.
+pub async fn a_conditional_delete_removes_only_the_object_with_that_tag(backend: &dyn Backend) {
+    backend.put("k", body("one")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+
+    let wrong = backend.delete_if_match("k", "not-the-tag").await;
+    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), body("one"));
+
+    backend.delete_if_match("k", &tag).await.unwrap();
+    assert_eq!(keys(backend).await, Vec::<String>::new());
+
+    backend.put("k", body("two")).await.unwrap();
+    let stale = backend.delete_if_match("k", &tag).await;
+    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), body("two"));
+
+    let absent = backend.delete_if_match("other", &tag).await;
+    assert_eq!(absent, Err(Error::NotFound("other".to_owned())));
+}
+
 /// A streamed put creates the object from its chunks, whose length is told or not, with the
 /// size and the content tag a put of the same bytes gives.
 pub async fn a_streamed_put_creates_the_object_from_its_chunks(backend: &dyn Backend) {

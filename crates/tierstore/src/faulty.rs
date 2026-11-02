@@ -25,6 +25,8 @@ pub enum Op {
     Head,
     /// [`Backend::delete`].
     Delete,
+    /// [`Backend::delete_if_match`].
+    DeleteIfMatch,
     /// [`Backend::list`].
     List,
     /// [`Backend::create_upload`].
@@ -266,6 +268,11 @@ impl Backend for FaultyBackend {
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.enter(Op::Delete, key).await?;
         self.inner.delete(key).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.enter(Op::DeleteIfMatch, key).await?;
+        self.inner.delete_if_match(key, etag).await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {

@@ -169,6 +169,18 @@ impl Backend for MemoryBackend {
         Ok(tag)
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        let mut objects = self.objects();
+        let current = objects
+            .get(key)
+            .ok_or_else(|| Error::NotFound(key.to_owned()))?;
+        if tag_of(&current.body) != etag {
+            return Err(Error::PreconditionFailed(key.to_owned()));
+        }
+        objects.remove(key);
+        Ok(())
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let (body, _) = self.object(key)?;
         match range {

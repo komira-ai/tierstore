@@ -23,7 +23,7 @@ use crate::list_uploads::contract as uploads_contract;
 use crate::multipart::{contract, large};
 use crate::support::{body, keys, page};
 
-fn config(endpoint: &str) -> S3Config {
+pub fn config(endpoint: &str) -> S3Config {
     S3Config {
         endpoint: endpoint.to_owned(),
         region: "us-east-1".to_owned(),
@@ -37,7 +37,7 @@ fn config(endpoint: &str) -> S3Config {
 }
 
 /// A backend over a service of its own, which is returned with it.
-async fn backend() -> (FakeS3, S3Backend) {
+pub async fn backend() -> (FakeS3, S3Backend) {
     let s3 = FakeS3::start().await;
     let backend = S3Backend::new(config(s3.endpoint())).unwrap();
     (s3, backend)
