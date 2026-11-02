@@ -88,17 +88,19 @@ async fn a_cold_only_object_with_another_tag_function_is_filled_and_served() {
     let (_dir, cache) = cache_over(proxy, true, |_| {});
 
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
+    assert_eq!(cache.held(), (10, 1));
     assert_eq!(read(&*tiers.hot_mem, "img/a").await, body("cold bytes"));
     let before = tiers.reads();
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
     assert_eq!(tiers.reads(), before);
 }
 
-/// Asserts that the same read through a cache that compares tags is refused as written over:
-/// the tag the first HEAD gave (the cold tier's) is not the one the proxy gives after it has
-/// copied the object up. This is the failure `tiered_upstream` removes.
+/// Asserts that the same read through a cache that compares tags is answered, but the object is
+/// kept nowhere: the tag the first HEAD gave (the cold tier's) is not the one the proxy gives
+/// after it has copied the object up, so the fill ends as changed, and the next read goes to the
+/// tiers again. This is what `tiered_upstream` removes.
 #[tokio::test]
-async fn without_the_tiered_option_the_same_read_is_refused_as_written_over() {
+async fn without_the_tiered_option_a_cold_only_object_is_not_kept() {
     let tiers = Tiers::new();
     let proxy = tiers.proxy().await;
     tiers
@@ -108,8 +110,11 @@ async fn without_the_tiered_option_the_same_read_is_refused_as_written_over() {
         .unwrap();
     let (_dir, cache) = cache_over(proxy, false, |_| {});
 
-    let refused = cache.get("img/a", None).await;
-    assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
+    assert_eq!(cache.held(), (0, 0));
+    let before = tiers.reads();
+    assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
+    assert!(tiers.reads() > before);
 }
 
 /// Asserts the same for an object larger than the whole-fill limit, which is read in windows and
