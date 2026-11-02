@@ -1,6 +1,6 @@
 //! A stock S3 SDK (aws-sdk-rust) against the S3 front over loopback, configured as the
-//! "Using a stock SDK" section of `packaging/README.md` says: the other tests of the
-//! front sign their requests by hand or with the client of kbf, so these are the ones that show
+//! "Using a stock SDK" page of `packaging/docs/stock-sdk.md` says: the other tests of the
+//! front sign their requests by hand or with the repository's own client, so these are the ones that show
 //! what a client nobody here wrote sends and gets back.
 
 use std::fmt::Debug;
