@@ -60,10 +60,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
-    ConfigError, Dur, OciFlags, OciTable, PerRun, Policy, ServerTable, Size, TierParts, TierTable,
-    check_policies, duration, front_of, invalid, oci as oci_of, parse_size, refuse,
-    refuse_hot_keys, require, tier, within,
+    ConfigError, Dur, OciFlags, OciTable, PerRun, ServerTable, Size, TierParts, TierTable,
+    duration, front_of, invalid, oci as oci_of, parse_size, refuse, refuse_hot_keys, require, tier,
+    within,
 };
+use super::config_policy::{Policy, check_policies, require_keeping};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 
@@ -247,27 +248,22 @@ fn check_oci_is_kept(oci: &OciFlags, policy: &[Policy]) -> Result<(), ConfigErro
     }
 }
 
-impl CacheSettings {
-    /// The settings of the tables of a build-node file.
-    pub(super) fn new(
-        server: ServerTable,
-        tables: (LocalCacheTable, TierTable),
-        oci_table: Option<OciTable>,
-        policy: &[Policy],
-        per_run: PerRun,
-    ) -> Result<Self, ConfigError> {
-        let (table, cold) = tables;
-        check_policies(policy, true)?;
-        if !policy.iter().any(|policy| policy.cache) {
-            let why = "no policy has cache = true, so nothing would be kept";
-            return Err(invalid("policy", why));
-        }
-        let unused = [("backend_check_wait", server.backend_check_wait.is_some())];
-        refuse("server", "not used by a build node", &unused)?;
-        refuse_hot_keys(&cold)?;
-        let skipping = [("skip_checks", cold.skip_checks.is_some())];
-        refuse("cold_store", "not for a build node", &skipping)?;
-        let upstream = tier("cold_store", &upstream_table(cold)?)?;
+/// What `[local_cache]` stands for: the cache, and the scrub that runs beside it.
+#[derive(Debug)]
+pub(super) struct CachePart {
+    /// The cache.
+    pub config: CacheConfig,
+    /// The rate of the scrub in bytes a second: the default if the file gave none; none if the
+    /// file turned it off.
+    pub scrub_rate: Option<u64>,
+    /// The least time between the starts of two rounds of the scrub.
+    pub scrub_min_round: Duration,
+}
+
+impl CachePart {
+    /// The settings of the `[local_cache]` table `table`, checked against the `[[policy]]` tables
+    /// `policy` (the OCI front's blobs are checked by the caller, with `check_oci_is_kept`).
+    pub(super) fn new(table: LocalCacheTable, policy: &[Policy]) -> Result<Self, ConfigError> {
         if table
             .layout
             .as_deref()
@@ -301,8 +297,6 @@ impl CacheSettings {
                 "must not be above critical",
             ));
         }
-        let oci = oci_of(oci_table)?;
-        let shared = front_of(server, per_run)?;
         let policies = policy
             .iter()
             .map(|policy| (policy.prefix.clone(), policy.cache))
@@ -347,15 +341,44 @@ impl CacheSettings {
         if let Some(limit) = table.whole_fill_limit {
             cache.whole_limit = within("local_cache", "whole_fill_limit", limit.0, 1, budget)?;
         }
+        Ok(Self {
+            config: cache,
+            scrub_min_round,
+            scrub_rate: Some(table.scrub_rate.map_or(SCRUB_RATE, |rate| rate.0)).filter(|n| *n > 0),
+        })
+    }
+}
+
+impl CacheSettings {
+    /// The settings of the tables of a build-node file.
+    pub(super) fn new(
+        server: ServerTable,
+        tables: (LocalCacheTable, TierTable),
+        oci_table: Option<OciTable>,
+        policy: &[Policy],
+        per_run: PerRun,
+    ) -> Result<Self, ConfigError> {
+        let (table, cold) = tables;
+        check_policies(policy, true)?;
+        require_keeping(policy)?;
+        let unused = [("backend_check_wait", server.backend_check_wait.is_some())];
+        refuse("server", "not used by a build node", &unused)?;
+        refuse_hot_keys(&cold)?;
+        let skipping = [("skip_checks", cold.skip_checks.is_some())];
+        refuse("cold_store", "not for a build node", &skipping)?;
+        let upstream = tier("cold_store", &upstream_table(cold)?)?;
+        let part = CachePart::new(table, policy)?;
+        let oci = oci_of(oci_table)?;
+        let shared = front_of(server, per_run)?;
         check_oci_is_kept(&oci, policy)?;
         Ok(Self {
             front: shared.front,
             s3_request_timeout: shared.s3_request_timeout,
             upstream,
-            cache,
-            scrub_min_round,
+            cache: part.config,
+            scrub_min_round: part.scrub_min_round,
             oci,
-            scrub_rate: Some(table.scrub_rate.map_or(SCRUB_RATE, |rate| rate.0)).filter(|n| *n > 0),
+            scrub_rate: part.scrub_rate,
         })
     }
 }
