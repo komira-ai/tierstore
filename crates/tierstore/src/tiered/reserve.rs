@@ -99,14 +99,33 @@ impl Inner {
     }
 
     /// Removes the object a put created in the hot tier, if `landed`, and releases its
-    /// reservation, each by the content tag of the put's own, so that an object or a
-    /// reservation that another put made since is not touched. The hot tier's tag is read with
-    /// a HEAD: the put does not know it. Errors are ignored: this runs after the put has
-    /// failed, and a leftover is what the limits of the type say.
+    /// reservation by its content tag, so that a reservation that another put made since is not
+    /// touched. The hot object is removed only while the cold tier still holds the put's own
+    /// reservation: that reservation keeps every other put of the key out of the hot tier, so
+    /// while it is there the object under the key is the put's, and once it is gone (a delete of
+    /// the key took it) the object under the key may be another put's, and is left. The hot
+    /// tier's tag is read with a HEAD: the put does not know it. A delete and a put of the key
+    /// that both run between the check and the hot delete are the narrow case left. Errors are
+    /// ignored: this runs after the put has failed, and a leftover is what the limits of the
+    /// type say.
     async fn clean_up(&self, key: &str, tag: &str, landed: bool) {
-        if landed && let Ok(meta) = self.hot.head(key).await {
+        if landed
+            && self.still_holds(key, tag).await
+            && let Ok(meta) = self.hot.head(key).await
+        {
             let _ = self.hot.delete_if_match(key, &meta.tag).await;
         }
         let _ = self.cold.delete_if_match(key, tag).await;
+    }
+
+    /// Whether the cold tier still holds the reservation with content tag `tag` under `key`. An
+    /// answer that is not an answer (the HEAD failed) counts as holding: the cleanup is best
+    /// effort, and a leftover object is the worse result.
+    async fn still_holds(&self, key: &str, tag: &str) -> bool {
+        match self.cold.head(key).await {
+            Ok(meta) => meta.reservation && meta.tag == tag,
+            Err(Error::NotFound(_)) => false,
+            Err(_) => true,
+        }
     }
 }

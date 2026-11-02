@@ -2,11 +2,8 @@
 //! tier is full, to the cold tier, and the creation of the object of a multipart upload. The
 //! rules they follow are those of the type's rustdoc.
 
-use std::future::{Future, poll_fn};
-use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::task::Poll;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
@@ -94,40 +91,26 @@ impl Inner {
         self.cold.complete_upload(key, id, parts).await
     }
 
-    /// Writes the object to the hot tier, and its journal entry to the journal, after the
+    /// Writes the object to the hot tier, then its journal entry to the journal, after the
     /// reservation of the key in the cold tier, and acknowledges the put when both are written.
-    /// The hot tier's create is polled first: if it answers at once the entry is appended after
-    /// it (nothing is journaled for a create that failed); if it has not, the entry is appended
-    /// while the create goes on, and the put waits for both.
+    /// The entry is appended only after the hot tier's create has answered with success, so an
+    /// entry that the reconciler reads names an object that is in the hot tier, and a create that
+    /// fails or is dropped journals nothing.
     ///
-    /// If either fails, the put fails and removes what it wrote: its own hot object, by tag, and
-    /// its own reservation, by tag. A hot tier with no room (for the object or for the journal
-    /// object) is latched full, and the object goes to the cold tier instead.
+    /// If either fails, the put fails and removes what it wrote: its own hot object and its own
+    /// reservation (see `Inner::clean_up`). A hot tier with no room (for the object or for the
+    /// journal object) is latched full, and the object goes to the cold tier instead.
     async fn put_hot(self: &Arc<Self>, key: &str, body: Bytes) -> Result<(), Error> {
         let hold = self.reserve(key).await?;
         let size = body.len() as u64;
-        let entry = self.entry(
-            JournalOp::PutReserved,
-            key,
-            size,
-            Some(hold.tag().to_owned()),
-        );
-        let (hot, landing, offered) = (&self.hot, &hold, body.clone());
-        let mut create = pin!(async move {
-            let created = hot.put(key, offered).await;
-            if created.is_ok() {
-                landing.hot_landed();
+        let failure = match self.hot.put(key, body.clone()).await {
+            Ok(()) => {
+                hold.hot_landed();
+                let tag = Some(hold.tag().to_owned());
+                let entry = self.entry(JournalOp::PutReserved, key, size, tag);
+                self.append(entry).await.err()
             }
-            created
-        });
-        let first = poll_fn(|cx| Poll::Ready(create.as_mut().poll(cx))).await;
-        let failure = match first {
-            Poll::Ready(Err(error)) => Some(error),
-            Poll::Ready(Ok(())) => self.append(entry).await.err(),
-            Poll::Pending => {
-                let (created, journaled) = futures::join!(create, self.append(entry));
-                created.err().or(journaled.err())
-            }
+            Err(error) => Some(error),
         };
         let Some(failure) = failure else {
             hold.settle();

@@ -254,12 +254,12 @@ async fn a_multipart_completion_is_refused_by_a_reservation_of_its_key() {
     assert!(rig.cold_mem.head("k").await.unwrap().reservation);
 }
 
-/// Asserts that a held put writes its journal entry while the hot tier's create is still on its
-/// way (the hot tier is held at the create): the journal object is in the hot tier before the
-/// create answers, the put is not acknowledged until it does, and it then is, with the entry that
-/// names its reservation.
+/// Asserts that a held put whose hot create is slow journals nothing until the create has landed:
+/// no journal object exists while the create is on its way, a reconciler pass in that gap leaves
+/// the reservation alone, and once the create lands the put is acknowledged with an entry that
+/// names its reservation, which the next pass replaces by the object.
 #[tokio::test(start_paused = true)]
-async fn a_held_put_journals_while_its_hot_create_is_on_its_way_and_waits_for_both() {
+async fn a_held_put_journals_only_after_its_hot_create_landed() {
     let rig = Rig::new();
     let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     let slow: Arc<dyn Backend> = Arc::new(Stall::new(
@@ -280,9 +280,13 @@ async fn a_held_put_journals_while_its_hot_create_is_on_its_way_and_waits_for_bo
     entered.notified().await;
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    assert_eq!(journal_keys(&*rig.hot_mem, "p1").await.len(), 1);
+    assert_eq!(journal_keys(&*rig.hot_mem, "p1").await.len(), 0);
     assert_absent(&*rig.hot_mem, "k").await;
     assert!(!putting.is_finished());
+    let mut reconciler = rig.reconciler("r1", 1000);
+    let gap = reconciler.pass().await;
+    assert!(gap.failed.is_empty());
+    assert_reserved(&*rig.cold_mem, "k").await;
 
     release.notify_one();
     putting.await.unwrap().unwrap();
@@ -291,6 +295,137 @@ async fn a_held_put_journals_while_its_hot_create_is_on_its_way_and_waits_for_bo
     let tag = rig.cold_mem.head("k").await.unwrap().tag;
     assert_eq!(entries[0].op, JournalOp::PutReserved);
     assert_eq!(entries[0].cold_tag, Some(tag));
+
+    let copied = reconciler.pass().await;
+    assert!(copied.failed.is_empty());
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
+    assert!(!rig.cold_mem.head("k").await.unwrap().reservation);
+}
+
+/// Asserts that a put dropped while its hot create is on its way, whose create then lands late
+/// (the object is in the hot tier and no journal entry names it), does not stop the reconciler:
+/// a put of another key that was acknowledged after it is copied to the cold tier.
+#[tokio::test(start_paused = true)]
+async fn a_late_landing_of_a_dropped_put_does_not_stop_the_copy_of_later_puts() {
+    let rig = Rig::new();
+    let entered = Arc::new(Notify::new());
+    let stuck: Arc<dyn Backend> = Arc::new(Stall::new(rig.hot.clone(), "k", entered.clone(), None));
+    let proxy = Arc::new(
+        Proxy::open(stuck, rig.cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap(),
+    );
+    let putting = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.put("k", body("lost")).await })
+    };
+    entered.notified().await;
+    putting.abort();
+    assert!(putting.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    rig.hot_mem.put("k", body("late")).await.unwrap();
+    proxy.put("other", body("kept")).await.unwrap();
+
+    let report = rig.reconciler("r1", 1000).pass().await;
+
+    assert!(report.failed.is_empty());
+    assert_eq!(read(&*rig.cold_mem, "other").await, body("kept"));
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("late"));
+}
+
+/// Asserts that a put dropped after its hot create landed, whose reservation was taken by a
+/// delete of the key and which another put has reserved and written since, removes nothing of
+/// that put: the other put's hot object and its reservation stay.
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_after_a_delete_and_a_new_put_leaves_the_new_puts_object() {
+    let rig = Rig::new();
+    let entered = Arc::new(Notify::new());
+    let stuck: Arc<dyn Backend> = Arc::new(Stall::new(
+        rig.hot.clone(),
+        "_journal/",
+        entered.clone(),
+        None,
+    ));
+    let proxy = Arc::new(
+        Proxy::open(stuck, rig.cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap(),
+    );
+    let putting = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.put("k", body("first")).await })
+    };
+    entered.notified().await;
+    rig.cold_mem.delete("k").await.unwrap();
+    rig.hot_mem.delete("k").await.unwrap();
+    rig.cold_mem
+        .put_reservation("k", reservation(7))
+        .await
+        .unwrap();
+    rig.hot_mem.put("k", body("second")).await.unwrap();
+
+    putting.abort();
+    assert!(putting.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("second"));
+    assert_reserved(&*rig.cold_mem, "k").await;
+    assert_eq!(rig.hot.calls(Op::DeleteIfMatch), 0);
+}
+
+/// Asserts that a put dropped after its hot create landed, whose reservation a delete of the key
+/// took, touches neither tier in its cleanup: an object that appears in the hot tier afterwards
+/// stays, and the cold tier is left empty.
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_after_a_delete_of_the_key_leaves_a_later_hot_object() {
+    let rig = Rig::new();
+    let entered = Arc::new(Notify::new());
+    let stuck: Arc<dyn Backend> = Arc::new(Stall::new(
+        rig.hot.clone(),
+        "_journal/",
+        entered.clone(),
+        None,
+    ));
+    let proxy = Arc::new(
+        Proxy::open(stuck, rig.cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap(),
+    );
+    let putting = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.put("k", body("first")).await })
+    };
+    entered.notified().await;
+    rig.cold_mem.delete("k").await.unwrap();
+    rig.hot_mem.delete("k").await.unwrap();
+    rig.hot_mem.put("k", body("later")).await.unwrap();
+
+    putting.abort();
+    assert!(putting.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("later"));
+    assert_absent(&*rig.cold_mem, "k").await;
+    assert_eq!(rig.hot.calls(Op::DeleteIfMatch), 0);
+}
+
+/// Asserts that a put whose journal fails still removes its own hot object when the cold tier
+/// cannot say whether the reservation is still its own (the HEAD fails): a leftover object that
+/// no entry names is the worse result.
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_that_cannot_check_its_reservation_still_removes_its_object() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    let down = Error::Unavailable("journal".to_owned());
+    rig.hot.fail_next_on(Op::Put, "_journal/", down.clone());
+    rig.cold
+        .fail_next_on(Op::Head, "k", Error::Unavailable("head".to_owned()));
+
+    let failed = proxy.put("k", body("value")).await;
+
+    assert_eq!(failed, Err(down));
+    assert_absent(&*rig.hot_mem, "k").await;
+    assert_absent(&*rig.cold_mem, "k").await;
 }
 
 /// Asserts that a put that is dropped (its caller gave up) while the hot tier's create is on its

@@ -159,9 +159,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   the proxy that wrote it). That write decides who owns the key: it is refused with
 ///   [`Error::AlreadyExists`] where the cold tier holds the key as an object (it may have been
 ///   evicted from the hot tier) or as another put's reservation, and there is no other look at
-///   the cold tier. Then the object is written to the hot tier, create-only, and the journal
-///   entry (a `PutReserved` that names the reservation's content tag) is appended, both at
-///   once, and the put is acknowledged when both are written. **The acknowledgement waits for
+///   the cold tier. Then the object is written to the hot tier, create-only, and then the journal
+///   entry (a `PutReserved` that names the reservation's content tag) is appended, and the put
+///   is acknowledged when both are written. **The acknowledgement waits for
 ///   the journal object that holds the entry to be written to the hot tier**: an object that is
 ///   acknowledged and not journaled would be in no one's list of objects to copy to the cold
 ///   tier, and so could be lost with the hot tier. The reconciler replaces the reservation by
@@ -241,13 +241,11 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   reservation, after it removes its own object and then releases. If the create was still on
 ///   its way when the put was dropped and lands afterwards, the hot tier holds an object that no
 ///   journal entry names: it is never copied, and the key is refused as existing.
-/// - A held put polls the hot tier's create once before it appends its journal entry, and goes
-///   on to append the entry while the create is still on its way if it has not answered. If that
-///   create then fails, the entry is left for an object that is not there: if the hot tier holds
-///   no object under the key the reconciler skips it, and if the hot tier holds the key (the
-///   create failed with [`Error::AlreadyExists`], the object being one no reservation accounts
-///   for, such as one a proxy of an earlier release acknowledged and the reconciler has not
-///   copied) and the cold tier holds nothing, it reports the key and does not apply the entry.
+/// - A put that is cleaning up after a failure (or after its caller gave up) removes its own hot
+///   object only while the cold tier still holds its reservation, since only then is the object
+///   under the key its own. A client's delete of the key, and a put of the key that is
+///   acknowledged, that both run between that check and the hot tier's delete leave the second
+///   put's object to be deleted.
 /// - A get that copies an object back into the hot tier while it is deleted may put it back
 ///   there, with a put entry after the delete entry; reads are served that copy until the
 ///   reconciler's next pass, which finds the cold tier without the object and drops the mirror.
