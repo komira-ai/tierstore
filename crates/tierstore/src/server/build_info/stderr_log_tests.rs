@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tracing::Level;
 use tracing::subscriber::with_default;
 
-use super::stderr_log::{LineLog, install};
+use super::stderr_log::{LineLog, try_install};
 
 /// A writer whose bytes the test reads back.
 #[derive(Clone, Default)]
@@ -118,7 +118,21 @@ fn a_stderr_that_cannot_be_written_does_not_stop_the_server() {
 }
 
 #[test]
-fn installing_twice_keeps_the_first_subscriber() {
-    install();
-    install();
+fn events_of_other_crates_are_not_written() {
+    let text = capture(Level::INFO, || {
+        tracing::warn!(target: "aws_smithy_runtime::client", "a dependency's warning");
+        tracing::warn!(target: "tierstore_other", "a lookalike target");
+        tracing::info!(target: "tierstore", "the crate root");
+        tracing::info!(target: "tierstore::server::door", "a module");
+    });
+    assert_eq!(text, "the crate root\na module\n");
+}
+
+// The global subscriber is process-wide; no other test in this binary reads it, since each one
+// scopes its own with `with_default`, so setting it here cannot change what they see.
+#[test]
+fn a_second_install_is_refused_because_the_first_subscriber_is_kept() {
+    // Another test may have set the global default first, so only the second call is asserted.
+    let _ = try_install();
+    assert!(try_install().is_err());
 }

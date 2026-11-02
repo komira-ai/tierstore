@@ -1,9 +1,13 @@
 //! The operator messages of the server: a `tracing` subscriber that writes each event to stderr
 //! as one line, and the policy that says what is logged at which level.
 //!
-//! The server says what it does with `tracing::info!`, `warn!` and `error!` (never `println!` or
-//! `eprintln!`), and this subscriber, which the binary installs before anything else runs, turns
-//! each event into the line an operator reads in the journal. A line is the event's message and
+//! The server says what it does with `tracing::info!`, `warn!` and `error!`, and this subscriber,
+//! which the binary installs before anything else runs, turns each event into the line an operator
+//! reads in the journal. The conversion is partial: the start line, mode changes, sweep results
+//! and drain counts in `cli.rs`, `cache_cli.rs` and `server/mod.rs` are still written with
+//! `eprintln!`, and the levels below are what they take when they move. Only events of the
+//! `tierstore` crate are written; events of other crates (the S3 client and its runtime, the
+//! object-store backends) are dropped, so the operator sees the same lines as before. A line is the event's message and
 //! then its fields as ` name=value`, with no time, no level and no target: the journal stamps
 //! the time, and the message texts, which already begin with `tierstore: `, are what the pages
 //! quote. There is no flag and no environment variable for it.
@@ -29,12 +33,18 @@ use std::sync::{Mutex, PoisonError};
 
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record};
+use tracing::subscriber::SetGlobalDefaultError;
 use tracing::{Event, Level, Metadata, Subscriber};
 
 /// Installs the stderr subscriber for the process, showing `info` and above. A process that
 /// already has a global subscriber keeps it.
 pub fn install() {
-    let _ = tracing::subscriber::set_global_default(LineLog::new(io::stderr(), Level::INFO));
+    let _ = try_install();
+}
+
+/// Installs the stderr subscriber as the global default; an error says one is already set.
+pub fn try_install() -> Result<(), SetGlobalDefaultError> {
+    tracing::subscriber::set_global_default(LineLog::new(io::stderr(), Level::INFO))
 }
 
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.
@@ -73,8 +83,10 @@ impl Visit for Line {
 
 impl<W: Write + Send + 'static> Subscriber for LineLog<W> {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        // A more verbose level compares greater.
-        *metadata.level() <= self.max
+        // A more verbose level compares greater. Only this crate's events are written.
+        let target = metadata.target();
+        let ours = target == "tierstore" || target.starts_with("tierstore::");
+        ours && *metadata.level() <= self.max
     }
 
     fn new_span(&self, _span: &Attributes<'_>) -> Id {
