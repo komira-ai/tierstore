@@ -233,60 +233,11 @@ finishes; a `rollback` that stops a slot still draining can fail the same way. U
 waits for a stop as long as the unit allows, a host that needs every step to succeed the first
 time keeps `--drain-deadline` at most 220s, which brings the stop within 295 s.
 
-## Presigned PUT URLs
+## Presigned PUT URLs and GC keys
 
-A client that holds a presigned URL writes one object with a plain `PUT` of the URL: the server
-checks SigV4 query-string authentication as the AWS documentation has it (`X-Amz-Algorithm`,
-`X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`, `X-Amz-Signature`;
-payload `UNSIGNED-PAYLOAD`; `host` signed), so any SDK presigner or `tierstore::server::presign_put`
-makes one. Only a presigning key (`--presign-key-file`, once per key, mode 0600) can sign a URL; the
-full and read-only keys cannot, and a presigning key is refused for any request signed in the
-header. The file holds the key and its ceiling, all required (a file without one is refused at
-start):
-
-```json
-{"access_key_id": "pack-presign", "secret_access_key": "the secret",
- "ceiling": {"prefix": "cas/b/", "max_expires_secs": 600, "max_object_bytes": 134217728}}
-```
-
-A URL is good for one `PUT` of a key that starts with the prefix (after the path is decoded: no
-`..`, no `.` segment, no control character, never `_journal/` or `_tiering/`), with an
-`X-Amz-Expires` of at most the smaller of `max_expires_secs` and `--presign-max-expires` (default
-15m), and a body of at most `max_object_bytes` (5 GiB at most, the S3 single-PUT limit; each key file chooses its own), checked on
-`Content-Length` and on the bytes received (and held to `--max-request-bytes`, 256 MiB by default, too: a key with a larger
-cap needs that raised, and the smaller of the two applies; the body is streamed to the tier and
-never held whole). It is refused from `X-Amz-Date` plus `X-Amz-Expires` on, with no grace. The
-object appears only after a complete body, a second `PUT` of the key is `412`, and no multipart
-call, `If-Match`, read, list or delete is allowed. The signature does not cover the body, so the
-reader of the object must check its content. The query string is never logged.
-
-A secret is never on the command line or in the environment: the process reads no environment
-variable, and the unit sets none.
-
-## GC keys
-
-A GC key (`--gc-key-file`, once per key; JSON of `access_key_id`, `secret_access_key` and `prefix`,
-mode 0600, not a symbolic link, owned by the user the server runs as) is for the process that
-collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
-with it is refused) and may do these, only for a key that starts with its prefix (which ends in `/`)
-and is longer than it:
-
-| call | allowed |
-|---|---|
-| ListObjectsV2 | with a `prefix` inside the key's; a list with no prefix or another is 403, not filtered |
-| ListMultipartUploads | with a `prefix` inside the key's, the open uploads under it; no prefix or another is 403, not filtered |
-| HeadObject | yes |
-| DeleteObject | yes: from both tiers, journaled as for any delete |
-| AbortMultipartUpload | of an upload of such a key |
-| GetObject | no: a GC key never reads a body |
-| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
-| `_journal/`, `_tiering/`, any key outside the prefix, the prefix itself | no |
-
-A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
-refusals are made in this order: the signature and key id, the method, the decoding of the path and
-query (400, or 404 for an unknown bucket), the checksum headers (400 or 501), and last the key or
-list prefix; so a call that is both refused and malformed may get the malformed-request error. A delete by a GC key is not
-create-only; it is the only way an object leaves the prefix that presigned PUTs write.
+A client that holds a presigned URL writes one object with a plain `PUT`, and a GC key lists, heads
+and deletes under one prefix. The two kinds of key, their key files and what each may do are in
+[docs/presigned-and-gc-keys.md](docs/presigned-and-gc-keys.md).
 
 ## Scoped keys
 
@@ -744,7 +695,7 @@ the three has one line that says so; the proxy's series are in "Metrics" in
 
 ### The registry front
 
-The registry front (see The OCI read front) is the optional `[oci]` table of a storage node's file
+The registry front (see [The OCI read front](docs/oci-front.md)) is the optional `[oci]` table of a storage node's file
 or of a build node's, left out for a server with no front. The two shapes have the same keys and
 the same rules. On a storage node the front reads through the proxy; on a build node it reads
 through the local cache, so a blob or a manifest under a `[[policy]]` prefix with `cache = true`
@@ -936,8 +887,8 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
 | `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
-| `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL; see Presigned PUT URLs |
-| `--gc-key-file` | a GC key (given once for each key); see GC keys |
+| `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL; see [Presigned PUT URLs](docs/presigned-and-gc-keys.md) |
+| `--gc-key-file` | a GC key (given once for each key); see [GC keys](docs/presigned-and-gc-keys.md#gc-keys) |
 | `--scoped-key-file` | a scoped key (given once for each key); see Scoped keys |
 | `--grant-key-file`, `--grant-max-lifetime` | a grant key (given once for each key), and how far ahead a grant may end; see Read grants |
 | `--hot`, `--cold` | the tiers: `s3:<bucket>` for a bucket of an S3-compatible store (also `dir:<path>` and `memory`; a `dir:` path must also be writable under `ProtectSystem=strict`, so add it to `ReadWritePaths=`) |
@@ -945,253 +896,20 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--hot-bytes` | the bytes the hot tier is meant to hold; the water marks are shares of it (`--high-water`, `--low-water`, `--critical`) |
 | `--drain-lb-wait`, `--drain-deadline` | the drain on SIGTERM: how long `/readyz` says 503 while the server goes on accepting and serving (the settle), and how long it then waits for requests in flight and for the connections it closes (see "Stopping it") |
 | `--usage-stale-after` | how old the usage that the reconciler publishes may be (2m by default, longer than `--lease-ttl`) before `/usagez` says 503 with the reason (200 and the age while fresh). Puts ignore a usage older than 30 s, so a stopped reconciler means a hot tier that is never taken to be full; puts are not refused. A load balancer probes `/readyz`, which does not look at the usage (one stopped reconciler would otherwise take every node out); alerting probes `/usagez` |
-| `--oci-listen`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-prefix` | the read-only registry front, off unless `--oci-listen` is given; see The OCI read front |
+| `--oci-listen`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-prefix` | the read-only registry front, off unless `--oci-listen` is given; see [The OCI read front](docs/oci-front.md) |
 
 `tierstore --help` lists them all, with their defaults.
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the `Authorization`
-header only. An SDK with its defaults sends some things the front refuses, so a client needs these
-settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
-`aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
-what "tested" means below.
-
-| setting | value | why |
-|---|---|---|
-| endpoint | `http://<host>:<port>` of `--listen` | the front has no TLS; an `https://` endpoint fails |
-| addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
-| bucket | the `--bucket` name | there is one; other names are not served |
-| region | tierstore's own `--region` (not `--hot-region` or `--cold-region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
-| credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
-| request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
-| response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
-| checksum algorithm | none, or CRC-32, CRC-32C, SHA-1 or SHA-256 | read from the front's code, not tested with an SDK: CRC-64/NVMe, `aws-chunked` and trailing checksums are refused with 501; `Content-MD5` is checked |
-| `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
-| listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
-
-Payload signing, read from the front's code and not tested as such (not checked: whether the Rust
-SDK signs the hex hash or `UNSIGNED-PAYLOAD` for an in-memory body): a body whose signed `x-amz-content-sha256` is its hex SHA-256 is checked against it;
-`UNSIGNED-PAYLOAD` with no checksum header is accepted unchecked; a `STREAMING-` payload is
-refused with 501.
-
-aws-sdk-rust, as the test sets it (the test also passes the SDK's HTTP client built without TLS,
-`aws_smithy_http_client::Builder::new().build_http()`, which the lines below leave out):
-
-```rust
-use aws_sdk_s3::config::{Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation};
-
-let config = aws_sdk_s3::Config::builder()
-    .behavior_version_latest()
-    .endpoint_url("http://tierstore.example:9000")
-    .force_path_style(true)
-    .region(Region::new("us-east-1"))
-    .credentials_provider(Credentials::new(KEY_ID, SECRET, None, None, "static"))
-    .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
-    .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
-    .build();
-let client = aws_sdk_s3::Client::from_conf(config);
-```
-
-With these, the test puts an object, gets it whole and by byte ranges, heads it, lists with a prefix
-and a continuation token, deletes it, uploads in parts (create, two parts, complete) and aborts an
-upload. A second put of a key, with `If-None-Match: *` or without, comes back as an error with
-status 412 and code `PreconditionFailed`. A read-only key gets, heads and lists, and its put and
-delete come back as 403 `AccessDenied`.
-The aws CLI and boto3 are **not tested**: the lines below are from their documentation, and
-whether they are enough is not shown. They need a version that has the checksum settings (aws CLI
-2.23 or later, boto3 1.36 or later).
-
-```ini
-# ~/.aws/config
-[default]
-region = us-east-1
-endpoint_url = http://tierstore.example:9000
-request_checksum_calculation = when_required
-response_checksum_validation = when_required
-s3 =
-    addressing_style = path
-```
-
-```python
-# boto3
-import boto3
-from botocore.config import Config
-
-s3 = boto3.client(
-    "s3",
-    endpoint_url="http://tierstore.example:9000",
-    region_name="us-east-1",
-    aws_access_key_id=KEY_ID,
-    aws_secret_access_key=SECRET,
-    config=Config(
-        signature_version="s3v4",
-        s3={"addressing_style": "path"},
-        request_checksum_calculation="when_required",
-        response_checksum_validation="when_required",
-    ),
-)
-```
-
-One thing is known from the front and not from those clients: boto3 and the aws CLI are said to
-add `encoding-type=url` to a ListObjects or ListObjectsV2 call on their own, with no setting to
-stop it, and the front answers that parameter with 501 `NotImplemented`. If that is so, `aws s3
-ls` and `list_objects_v2` fail against the front, and the calls that name a key (`get_object`,
-`put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
-client before relying on either.
+The settings a stock S3 SDK needs against the front (endpoint, addressing, region, credentials, checksums, listing) are in
+[docs/stock-sdk.md](docs/stock-sdk.md).
 
 ## The OCI read front
 
-With `--oci-listen`, the process also serves the objects of the store as a read-only container
-registry, over HTTPS or over plain HTTP (see Two modes), so that podman (and the
-other clients of the OCI distribution API) pulls an image by digest from the same hot and cold tiers the S3 front writes to. It reads through the
-proxy in the process: no S3 credential and no hop through the S3 listener. It is off unless
-`--oci-listen` is given, and then nothing else about the process changes.
-
-With `--config` the front is the `[oci]` table of the file and the `--oci-*` flags are refused
-(see The configuration file, which lists the key of each flag below). `--print-config` writes
-the front's flags as that table. A build node's file takes the same `[oci]` table (it has no flags):
-the front then reads through the node's local cache, not a proxy (see The registry front).
-
-| flag | what |
-|---|---|
-| `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. On main, not in v0.0.41: give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
-| `--oci-tls-cert PATH`, `--oci-tls-key PATH` | both or neither (one without the other is refused at start, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for `--oci-listen` (for each of them, when it is given more than once; any IP subjectAltName, if the address is `0.0.0.0` or `::`); a certificate without one, one that is expired or not yet valid, a key file any user can read (the "other" mode bits; a group may), or an unreadable file, is refused at start. The files are read once: a new certificate takes a restart, so renew it before it expires |
-| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
-| `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
-| `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
-
-A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
-minute) to send the head of a request, which is also how long an idle connection may wait for its
-next request. A connection holds one of the `--oci-max-connections` slots from accept to close and
-there is no limit per client address, so a host that opens that many connections and says nothing
-can keep the others waiting: the host's firewall rules are the control for that. A client that takes no byte of an answer for `--body-idle-timeout`
-is cut. A connection that reaches its lifetime finishes the answer it is sending for at most
-`--drain-deadline`, and is cut then. On the drain the front goes on serving through `--drain-lb-wait`, takes no new connection,
-lets the requests being answered finish, and closes what is left at `--drain-deadline`. The start
-line on stdout gets ` oci-listen=<address> (https)` or ` (http)` after `listen=<address>`, and `/metricz`
-has `tierstore_oci_front_info{mode="https"}` or `{mode="http"}`. In plain mode there is no handshake,
-so the handshake time does not apply; the other limits are the same.
-
-### Two modes
-
-- **HTTPS**: with `--oci-tls-cert` and `--oci-tls-key`, at any address.
-- **Plain HTTP**: with neither, at any address. A node's own container engine can pull from the
-  front of its own tierstore over loopback, so the pull is a connection from the host to itself and
-  the traffic never leaves it. A connection to any address beyond loopback can be read and changed on
-  its way: the process starts, prints one warning line on stderr, and a certificate and key are
-  advised there. Loopback is reachable by every local process, and by containers that
-  share the host's network namespace; the front is anonymous in either mode.
-
-A container engine that pulls over plain HTTP has to be told it may:
-
-- podman: mark the registry insecure for that location in `registries.conf`, e.g.
-
-  ```toml
-  [[registry]]
-  location = "127.0.0.1:9500"
-  insecure = true
-  ```
-
-  or pull with `--tls-verify=false`. No `certs.d` directory is needed.
-- js-oci needs to be allowed plain HTTP to a loopback registry address for such a pull; that is a
-  setting of js-oci, not of tierstore.
-
-What it serves, and nothing else (any other path is 404 and any method but GET and HEAD is 405
-`UNSUPPORTED` with `Allow: GET, HEAD`, both with the OCI error document):
-
-| request | answer |
-|---|---|
-| `/v2/` | 200, `{}`, `Docker-Distribution-API-Version: registry/2.0` |
-| `/v2/<name>/manifests/sha256:<hex>` | the manifest (at most 4 MiB), with `Content-Type` from its `mediaType`, `Content-Length`, `Docker-Content-Digest` and an `ETag` of the digest. A tag is 404 `MANIFEST_UNKNOWN`: tags are not served |
-| `/v2/<name>/blobs/sha256:<hex>` | the blob, streamed, `application/octet-stream`, with `Accept-Ranges: bytes`; one `Range` is 206 with `Content-Range`, one past the end 416 |
-
-The `Content-Type` of a manifest is its `mediaType` when that is the OCI image manifest or index or
-the Docker schema 2 manifest or manifest list. A manifest with none, or another, is served as an OCI
-image manifest if it is `schemaVersion` 2 with a `config` object and a `layers` array, as an OCI
-image index if it is `schemaVersion` 2 with a `manifests` array (an index may leave `mediaType`
-out), and is 500 `MANIFEST_INVALID` with the reason otherwise.
-
-A malformed digest (not `sha256:` and 64 lowercase hex digits) is 400 `DIGEST_INVALID`, a repository
-name that is not valid by the distribution grammar is 400 `NAME_INVALID`, an object that is not in
-the store is 404 `BLOB_UNKNOWN` or `MANIFEST_UNKNOWN`, a store that cannot be reached is 503, and
-what the store said stays in the log.
-
-### Keys, and one namespace
-
-An object is at `<prefix>blobs/sha256/<64 lowercase hex digits>`, the same for a manifest, an index,
-a layer and a config: manifests are blobs. The `<name>` in a URL is checked against the grammar and
-then ignored, so there is one content-addressed namespace and any name pulls any digest. A key is
-built only from a validated digest, so nothing outside the prefix can be named.
-
-### Integrity
-
-A manifest is read whole and its SHA-256 is checked against its digest before a byte is sent; one
-that does not match is 500 `DIGEST_INVALID`, is never served and is counted. The size is asked
-before the read, so a manifest replaced by an object of another size between the two can be
-answered 500 `DIGEST_INVALID` once; a retry succeeds. A blob is hashed as it is
-read, in chunks of 4 MiB, and its last chunk is held back until the hash is right: a blob that does
-not match its digest ends the connection before the response is complete, so no client receives a
-whole wrong body, and the mismatch is counted. That holds for a read of the whole blob, and for a
-`Range` that covers all of it (which is still 206). A blob `HEAD` and a `Range` of part of a blob
-report what the store holds and verify nothing; the client verifies the digest of what it
-assembles. (A manifest `HEAD` reads and verifies the manifest.) A client that sends several ranges
-(as a partial pull of a `zstd:chunked` or `estargz` layer does) is sent the whole blob with 200,
-which the specification allows, and falls back to splitting it. `If-Range`, `If-None-Match` and
-`Accept` are ignored.
-
-### Anonymous reads
-
-The front never asks for a token: a request with an `Authorization` header is served as one without.
-Anyone who can connect can read any digest under the prefix, and nothing else. That is the intent:
-the images in it are public (a public registry's images are the first thing put there), and the
-network decides who can connect (the host's firewall rules). Do not put an image in
-the prefix that is not meant to be read by whoever can reach the port.
-
-### Putting an image in the store
-
-Take the blobs of an OCI layout (the files under `blobs/sha256/` of a layout made with
-`skopeo copy ... oci:<dir>` or `podman save --format oci-dir`) and put each, create-only, at
-`<prefix>blobs/sha256/<hex>` through the S3 front with the full key: the layers, the config, the
-manifest, and the index of a multi-platform image, all by the file's own name, which is its digest.
-`index.json` of the layout is not put; the digest of the manifest (or index) to pull is in it, and
-is what a client is given. A layer larger than `--max-request-bytes` (256 MiB if not given) needs the
-flag raised, or a multipart upload, or a presigned PUT whose key has a `max_object_bytes` of up to
-5 GiB (see Presigned PUT URLs; the ceiling prefix must cover `oci/`). An object that is already
-there is refused (412), which is a retry that is safe.
-
-Check a put with `HEAD` on the front: the `Docker-Content-Digest` of a manifest is the digest of the
-bytes it read, after they were checked.
-
-### Pulling
-
-Over plain HTTP on loopback there is no CA to trust; see Two modes for the client settings.
-
-podman, from a host that trusts the CA of the certificate:
-
-```sh
-# the CA that issued --oci-tls-cert, in the directory named like the registry in the reference
-# (the address, with :port when the reference has one)
-install -D -m 0644 farm-ca.crt /etc/containers/certs.d/192.0.2.10/ca.crt
-podman pull 192.0.2.10/library/app@sha256:<manifest digest>
-```
-
-The reference is by digest: a tag is refused. The repository name (`library/app`) is any name that
-fits the grammar and means nothing to the store. A registry on another port than 443 is written
-`192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
-
-A client that allows only `https` registries on port 443 (or the port in the reference), and
-registries at a private address only when told to, pulls the same references; allow the address in
-that client's own settings.
-
-### Counters
-
-`GET /metricz` on the S3 listener (unsigned, like `/healthz`; a bucket cannot be called `metricz`)
-shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcome}` (routes `ping`,
-`manifest`, `blob`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
-`range_not_satisfiable`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
-responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
-which serves nothing else. Without `--oci-listen` the path says the front is not enabled.
+The read-only registry front over the store: its two modes, keys and namespace, integrity,
+anonymous reads, putting an image in, pulling it and its counters are in
+[docs/oci-front.md](docs/oci-front.md).
 
 ## Starting it
 
