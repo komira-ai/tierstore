@@ -137,9 +137,9 @@ pub struct Scrubber {
     min_round: u64,
     /// Set to end the walk: looked at before each chunk of an object and each object.
     pub(super) stop: Arc<AtomicBool>,
-    /// Runs after each chunk of an object is hashed.
-    #[cfg(test)]
-    pub(super) on_chunk: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Runs after each chunk of an object is hashed: nothing, unless [`Scrubber::after_chunk`]
+    /// set it.
+    on_chunk: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Scrubber {
@@ -154,8 +154,7 @@ impl Scrubber {
             round_at: None,
             min_round: 0,
             stop: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            on_chunk: None,
+            on_chunk: Arc::new(|| {}),
         }
     }
 
@@ -164,6 +163,15 @@ impl Scrubber {
     #[must_use]
     pub fn with_min_round(mut self, ticks: u64) -> Self {
         self.min_round = ticks;
+        self
+    }
+
+    /// Runs `hook` after each chunk of an object is hashed, in place of nothing. A seam for the
+    /// tests, which hold a read between two chunks or fail one; the cache sets none.
+    #[cfg(test)]
+    #[must_use]
+    pub(super) fn after_chunk(mut self, hook: impl Fn() + Send + Sync + 'static) -> Self {
+        self.on_chunk = Arc::new(hook);
         self
     }
 
@@ -222,10 +230,7 @@ impl Scrubber {
             }
             hasher.update(&buffer);
             total += read as u64;
-            #[cfg(test)]
-            if let Some(hook) = &self.on_chunk {
-                hook();
-            }
+            (self.on_chunk)();
         }
         Ok(Some((hex::encode(hasher.finalize()), total)))
     }
