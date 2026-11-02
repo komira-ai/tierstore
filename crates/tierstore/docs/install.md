@@ -115,7 +115,7 @@ The unit restarts a failed start after 30 seconds. It does not restart exit stat
 
 ## Updates through the host updater
 
-A host can instead run tierstore as two slot units that the host updater updates without a gap, through `tierstore update-hook` ([The update hook](update-hook.md)). The files are in `packaging` of the repository, each placed owned by root with mode 0644:
+A host can instead run tierstore as two slot units that the host updater updates through `tierstore update-hook` ([The update hook](update-hook.md)), by a hand-over without a gap once both releases of an update can hand over (below). The files are in `packaging` of the repository, each placed owned by root with mode 0644:
 
 | file | placed as |
 |---|---|
@@ -134,7 +134,15 @@ A host that runs `tierstore.service` moves to the slot units once, in this order
 1. Create the account and the state directory: place the sysusers.d and tmpfiles.d entries and have `systemd-sysusers` and `systemd-tmpfiles` create what they list.
 2. Place the declaration, the slot unit (with the edits of the host's `tierstore.service` and its drop-ins) and the polkit rule, and run `systemctl daemon-reload`.
 3. Place the binary as slot 9301: the release's `tierstore` in a directory that root owns, `slots/9301` a link to it, and the record `{"schema":1,"serving":9301,"mode":"handover","markers":[]}` as `state.json`, owned by `tierstore-update`, mode 0600, so that the redirect points at 9301.
-4. Have the updater run `tierstore update-hook restore`, its boot entry: it points the redirect of port 9300 at 9301 and starts the slot unit `tierstore@9301`.
-5. Last, stop and disable `tierstore.service`.
+4. Start the slot unit `tierstore@9301` by hand and wait until `/readyz` on `127.0.0.1:9301` answers 200 `ready`. Port 9300 is still the old unit's.
+5. Have the updater run `tierstore update-hook restore`, its boot entry: it points the redirect of port 9300 at 9301 and starts `tierstore@9301`, which already runs. `restore` moves the redirect before it starts the unit and does not wait for the slot to answer, which is why step 4 comes first.
+6. Check that port 9300 is answered by slot 9301 (the `slot` label of `tierstore_build_info` on `/metricz`). If it is not, or `restore` failed, `nft delete table inet kbf_forward_tierstore` hands port 9300 back to the old unit, which never stopped; then stop slot 9301, mend it and go back to step 4.
+7. Last, stop and disable `tierstore.service`.
 
-The old unit and slot 9301 run side by side between steps 4 and 5, which is safe over S3 tiers. A host with a `dir:` hot tier, or a build node, stops the old unit before step 4 and accepts the gap.
+The old unit and slot 9301 run side by side between steps 4 and 7, which is safe over S3 tiers. A host with a `dir:` hot tier, or a build node, stops the old unit before step 4 and accepts the gap.
+
+### What these files do not do yet
+
+- An update is a hand-over only when both releases list `handover-v1` in `tierstore --capabilities`; otherwise it is a plain restart, with a gap. No release lists it yet, so every update through the hook is a restart for now.
+- The host updater reads the declaration placed under `/etc/updater.d` and does not yet take it from a release: it is placed, and replaced, by hand.
+- A slot stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease), but the hook waits at most 300 s for `systemctl stop`, and `rollback` has 600 s. A drain past 300 s makes `cleanup` fail while systemd goes on stopping the unit; `cleanup` run again waits for that stop and finishes. Until the hook waits as long as the unit allows, a host that needs every step to succeed the first time keeps `--drain-deadline` at most 220s.

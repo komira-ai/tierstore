@@ -25,6 +25,9 @@ aws-sdk-s3 = { version = "=1.96.0", default-features = false, features = ["behav
 # endpoint. Apache-2.0.
 aws-smithy-http-client = { version = "1.1.4", default-features = false, features = ["default-client"] }
 base64 = "0.23.1"
+# A JavaScript engine in pure Rust, to run the polkit rule of packaging/ (tierstore's tests only).
+# No default features: the rule needs no Temporal, float16 or exact sums. Unlicense OR MIT.
+boa_engine = { version = "0.22.0", default-features = false }
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
 # The hardware CRC-32C (SSE4.2 / ARMv8) with a portable fallback.

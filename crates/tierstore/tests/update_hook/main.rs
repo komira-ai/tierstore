@@ -13,6 +13,7 @@
 #![cfg(target_os = "linux")]
 
 mod failures;
+mod first_install;
 mod flows;
 mod host;
 mod killed;

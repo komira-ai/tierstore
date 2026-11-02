@@ -65,7 +65,9 @@ ExecStart=/var/lib/updater/hooks/tierstore/slots/%i/tierstore \
 # still answered), then stops accepting and waits for those in flight for at most
 # --drain-deadline, gives up the reconciler's lease (5 s at most) and exits 0. Seconds: 1100 is
 # the 70 s, the 15 m and the 5 s with a margin, so that systemd never sends SIGKILL to a drain in
-# progress. The hook's cleanup timeout (1300 s) is above it.
+# progress. The hook's cleanup timeout (1300 s) is above it. The hook itself waits at most 300 s
+# for systemctl stop, so a drain past that fails cleanup until cleanup is run again
+# (packaging/README.md, "Stop budgets").
 KillSignal=SIGTERM
 TimeoutStopSec=1100
 # As tierstore.service: exit 2 (a refused command line) and 3 (a tier that failed the start-up

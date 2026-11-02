@@ -669,6 +669,293 @@ fn the_polkit_rule_grants_manage_units_for_the_two_slots_only() {
     );
 }
 
+/// polkit's objects as far as a rule reads them, and `decide`, which asks every rule added for
+/// one request as polkit does, in order until one answers. `Result` has polkit's values
+/// (`NOT_HANDLED` is null); the action's `lookup` answers from the request's details, and
+/// `undefined` for a key it does not have; the subject is its user, in no group, with no
+/// session. `decide` gives the answer as a string, `not_handled` when no rule answers.
+const POLKIT_HARNESS: &str = r#"
+var rules = [];
+var polkit = {
+  Result: { NO: "no", YES: "yes", AUTH_SELF: "auth_self", AUTH_SELF_KEEP: "auth_self_keep",
+            AUTH_ADMIN: "auth_admin", AUTH_ADMIN_KEEP: "auth_admin_keep", NOT_HANDLED: null },
+  addRule: function (rule) { rules.push(rule); },
+  addAdminRule: function () { throw new Error("the rule adds an admin rule"); },
+  log: function () {},
+  spawn: function () { throw new Error("the rule spawns a program"); }
+};
+function decide(request) {
+  var action = {
+    id: request.action,
+    lookup: function (key) {
+      return Object.prototype.hasOwnProperty.call(request.details, key)
+        ? request.details[key] : undefined;
+    }
+  };
+  var subject = {
+    user: request.user, groups: [], local: false, active: false,
+    isInGroup: function () { return false; },
+    isInNetGroup: function () { return false; }
+  };
+  for (var i = 0; i < rules.length; i++) {
+    var result = rules[i](action, subject);
+    if (result !== null && result !== undefined) { return String(result); }
+  }
+  return "not_handled";
+}
+"#;
+
+/// One request polkit puts to the rule: the action, the account that asks, and the details
+/// systemd sends with `manage-units` (`unit` and `verb`), each of which may be missing.
+#[derive(Clone, Copy, Debug)]
+struct Ask<'a> {
+    action: &'a str,
+    user: &'a str,
+    unit: Option<&'a str>,
+    verb: Option<&'a str>,
+}
+
+/// The decision polkit reaches for each of `asks` with `rule` as its only rule, the rule run by
+/// a JavaScript engine as polkit runs it: `yes`, or `not_handled` when the rule does not answer.
+fn polkit_decisions(rule: &str, asks: &[Ask<'_>]) -> Vec<String> {
+    let requests: Vec<serde_json::Value> = asks
+        .iter()
+        .map(|ask| {
+            let mut details = serde_json::Map::new();
+            if let Some(unit) = ask.unit {
+                details.insert("unit".to_owned(), unit.into());
+            }
+            if let Some(verb) = ask.verb {
+                details.insert("verb".to_owned(), verb.into());
+            }
+            serde_json::json!({ "action": ask.action, "user": ask.user, "details": details })
+        })
+        .collect();
+    let script = format!(
+        "{POLKIT_HARNESS}\n{rule}\n{}.map(decide).join(\"\\n\")",
+        serde_json::Value::Array(requests)
+    );
+    let mut context = boa_engine::Context::default();
+    let value = context
+        .eval(boa_engine::Source::from_bytes(&script))
+        .unwrap_or_else(|e| panic!("the rule does not run: {e}"));
+    let text = value
+        .to_string(&mut context)
+        .unwrap_or_else(|e| panic!("the decisions: {e}"))
+        .to_std_string_escaped();
+    text.split('\n').map(str::to_owned).collect()
+}
+
+/// A request of `user` for `action`.
+fn ask<'a>(
+    action: &'a str,
+    user: &'a str,
+    unit: Option<&'a str>,
+    verb: Option<&'a str>,
+) -> Ask<'a> {
+    Ask {
+        action,
+        user,
+        unit,
+        verb,
+    }
+}
+
+/// A request of the hook's account to start, stop or otherwise act on a unit.
+fn hook<'a>(unit: Option<&'a str>, verb: Option<&'a str>) -> Ask<'a> {
+    ask(MANAGE_UNITS, HOOK_USER, unit, verb)
+}
+
+/// Asserts what polkit decides with the rule, run by a JavaScript engine against stand-ins of
+/// polkit's action and subject: the hook's account may start and stop each of the declaration's
+/// two slot units; every other request is left unanswered (so polkit's defaults refuse it):
+/// another verb (restart, reload, kill, reset-failed), another unit, a request without a unit
+/// or a verb, another account, `manage-unit-files` and any other action. And that the
+/// evaluation tells a rule whose guard is turned around, though it names the same strings:
+/// a unit test inverted grants another unit, an account test inverted grants another account,
+/// and a dropped verb test grants restart.
+#[test]
+fn the_polkit_rule_decides_start_and_stop_of_the_two_slots_for_the_hook_only() {
+    let units = strings(table(&declaration(), "hook"), "units");
+    let [a, b] = [units[0].as_str(), units[1].as_str()];
+    assert_eq!([a, b], ["tierstore@9301.service", "tierstore@9302.service"]);
+    let cases = [
+        (hook(Some(a), Some("start")), "yes"),
+        (hook(Some(a), Some("stop")), "yes"),
+        (hook(Some(b), Some("start")), "yes"),
+        (hook(Some(b), Some("stop")), "yes"),
+        (hook(Some(a), Some("restart")), "not_handled"),
+        (hook(Some(b), Some("reload")), "not_handled"),
+        (hook(Some(a), Some("kill")), "not_handled"),
+        (hook(Some(b), Some("reset-failed")), "not_handled"),
+        (hook(Some("tierstore.service"), Some("stop")), "not_handled"),
+        (
+            hook(Some("tierstore@9303.service"), Some("start")),
+            "not_handled",
+        ),
+        (hook(Some("ssh.service"), Some("stop")), "not_handled"),
+        (hook(None, Some("start")), "not_handled"),
+        (hook(Some(a), None), "not_handled"),
+        (hook(None, None), "not_handled"),
+        (
+            ask(MANAGE_UNITS, "tierstore", Some(a), Some("start")),
+            "not_handled",
+        ),
+        (
+            ask(MANAGE_UNITS, "root", Some(b), Some("stop")),
+            "not_handled",
+        ),
+        (
+            ask(
+                "org.freedesktop.systemd1.manage-unit-files",
+                HOOK_USER,
+                Some(a),
+                Some("start"),
+            ),
+            "not_handled",
+        ),
+        (
+            ask(
+                "org.freedesktop.systemd1.reload-daemon",
+                HOOK_USER,
+                None,
+                None,
+            ),
+            "not_handled",
+        ),
+        (
+            ask("org.freedesktop.login1.reboot", HOOK_USER, None, None),
+            "not_handled",
+        ),
+    ];
+    let asks: Vec<Ask<'_>> = cases.iter().map(|(ask, _)| *ask).collect();
+    let wanted: Vec<String> = cases.iter().map(|(_, d)| (*d).to_owned()).collect();
+    let rule = read(POLKIT_RULE);
+    assert_eq!(polkit_decisions(&rule, &asks), wanted);
+
+    let turned = [
+        (
+            "units.indexOf(unit) >= 0",
+            "units.indexOf(unit) < 0",
+            hook(Some("ssh.service"), Some("stop")),
+        ),
+        (
+            "subject.user !== \"tierstore-update\"",
+            "subject.user === \"tierstore-update\"",
+            ask(MANAGE_UNITS, "tierstore", Some(a), Some("start")),
+        ),
+        (
+            " && verbs.indexOf(verb) >= 0",
+            "",
+            hook(Some(a), Some("restart")),
+        ),
+    ];
+    for (from, to, granted) in turned {
+        let changed = rule.replacen(from, to, 1);
+        assert_ne!(changed, rule, "{from}");
+        assert_eq!(
+            polkit_decisions(&changed, &[granted]),
+            ["yes"],
+            "{from} -> {to}"
+        );
+    }
+}
+
+/// A page of the operator guide, `crates/tierstore/docs/<page>`.
+fn guide(page: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join(page);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The whole number of seconds that follows `marker` in `text`, up to `s` or a space.
+fn seconds_after(text: &str, marker: &str) -> u64 {
+    let at = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("{marker:?} is not said"))
+        + marker.len();
+    let digits: String = text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().unwrap_or_else(|e| panic!("{marker:?}: {e}"))
+}
+
+/// The paragraph of `text` that starts with `start`, its lines joined with single spaces.
+fn paragraph(text: &str, start: &str) -> String {
+    let found = text
+        .split("\n\n")
+        .map(str::trim_start)
+        .find(|p| p.starts_with(start))
+        .unwrap_or_else(|| panic!("no paragraph starts with {start:?}"));
+    found.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Asserts the stop budgets that the README's "Stop budgets" paragraph and the install guide
+/// state, against the files the numbers come from: the slot's longest stop (its parsed
+/// `--drain-lb-wait` and `--drain-deadline`, and 5 s for the lease) is within the unit's
+/// `TimeoutStopSec=`, which the declaration's `cleanup` outlasts; the hook's own wait for
+/// `systemctl stop` (from update-hook.md) and the declaration's `rollback` are shorter than that
+/// stop, which is the limit both pages state with each of these numbers; and the shorter
+/// `--drain-deadline` they offer brings the stop under the hook's wait. It would catch a changed
+/// drain, unit, step timeout or hook wait that leaves the pages saying numbers that are no longer
+/// so, and the limit still stated once the hook waits for the whole stop.
+#[test]
+fn the_stop_budgets_of_the_slot_the_hook_and_the_steps_are_as_the_pages_say() {
+    let cli = slot_cli(9301);
+    let (lb, deadline) = (cli.drain_lb_wait.as_secs(), cli.drain_deadline.as_secs());
+    let stop = lb + deadline + 5;
+    let unit: u64 = value(&read(SLOT_UNIT), "TimeoutStopSec")
+        .parse()
+        .expect("seconds");
+    let declared = declaration();
+    let timeouts = table(&declared, "hook.timeout_secs");
+    let step = |name: &str| u64::try_from(integer(timeouts, name)).expect("seconds");
+    let (cleanup, rollback) = (step("cleanup"), step("rollback"));
+    let hook_wait = seconds_after(
+        &guide("update-hook.md"),
+        "`/usr/bin/systemctl stop -- <unit>` (after ",
+    );
+    assert!(stop <= unit && unit < cleanup, "{stop} {unit} {cleanup}");
+    assert!(
+        hook_wait < stop,
+        "the hook waits {hook_wait} s for a {stop} s stop: the pages state a limit there is not"
+    );
+    assert!(rollback < stop, "{rollback} {stop}");
+
+    let readme = paragraph(&read("README.md"), "**Stop budgets.**");
+    let install = guide("install.md");
+    let install = install
+        .lines()
+        .find(|line| line.starts_with("- A slot stops in at most"))
+        .expect("the install guide's limit");
+    let offered = seconds_after(&readme, "`--drain-deadline` at most ");
+    assert_eq!(
+        seconds_after(install, "`--drain-deadline` at most "),
+        offered
+    );
+    let offered_stop = lb + offered + 5;
+    assert!(offered_stop < hook_wait, "{offered_stop} {hook_wait}");
+    let both = [
+        format!("at most {stop} s"),
+        format!("the {lb} s `--drain-lb-wait`, the {deadline} s drain and 5 s for the lease"),
+        format!("at most {hook_wait} s for `systemctl stop`"),
+        format!("`rollback` has {rollback} s"),
+    ];
+    for said in &both {
+        assert!(readme.contains(said.as_str()), "README: {said}");
+        assert!(install.contains(said.as_str()), "install.md: {said}");
+    }
+    for said in [
+        format!("`TimeoutStopSec=` of {unit}"),
+        format!("`cleanup` timeout of {cleanup} s"),
+        format!("within {offered_stop} s"),
+    ] {
+        assert!(readme.contains(said.as_str()), "README: {said}");
+    }
+}
+
 /// Asserts that the record the first install writes (`packaging/README.md`) is one the hook
 /// reads and validates against the declaration: a host with no update in flight, serving on
 /// slot 9301, which `restore` then starts.
