@@ -53,10 +53,10 @@ struct Release {
 }
 
 impl Release {
-    /// Two tarballs with their SBOMs and bundles, the sums, and the ledger of a release that
-    /// was signed as it should be.
+    /// The tarball of every release platform with its SBOM and bundle, the sums, and the
+    /// ledger of a release that was signed as it should be.
     fn good(name: &str) -> Release {
-        Release::good_for(name, &["linux-arm64", "linux-x86_64"])
+        Release::good_for(name, &["linux-arm64", "linux-x86_64", "macos-arm64"])
     }
 
     /// The same for the platforms `platforms` alone.
@@ -177,21 +177,23 @@ fn a_release_signed_as_it_should_be_verifies() {
     // lines name every file and every kind of attestation it verified.
     let release = Release::good("good");
     let printed = release.verify().expect("verify");
-    assert_eq!(printed.len(), 4 + 1, "{printed:?}");
+    assert_eq!(printed.len(), 6 + 1, "{printed:?}");
     assert_eq!(
         printed
             .iter()
             .filter(|l| l.contains("(provenance, SBOM, bundle)"))
             .count(),
-        2
+        3
     );
     assert_eq!(
         printed
             .iter()
             .filter(|l| l.ends_with("(provenance)"))
             .count(),
-        2
+        3
     );
+    let mac = format!("verified: tierstore-{COMMIT}-macos-arm64.tar.gz (provenance, SBOM, bundle)");
+    assert!(printed.contains(&mac), "{printed:?}");
     assert!(
         printed
             .last()
@@ -367,7 +369,7 @@ fn a_trusted_root_and_the_dead_proxies_reach_every_bundle_check() {
     let root = release.dir.join("trusted_root.jsonl");
     std::fs::write(&root, "{}").expect("root");
     let printed = release.verify_with(Some(&root)).expect("verify");
-    assert_eq!(printed.len(), 5, "{printed:?}");
+    assert_eq!(printed.len(), 7, "{printed:?}");
 
     let base = format!("repo={REPO}\nissuer={ISSUER}\nsource-ref=refs/heads/main\n");
     let proxy = format!("proxy={DEAD_PROXY}\n");
@@ -515,4 +517,41 @@ fn the_offline_gh_check_of_the_install_pages_gives_only_flags_the_verifier_passe
             );
         }
     }
+}
+
+#[test]
+fn every_tarball_needs_its_own_bundle_the_macos_arm64_one_included() {
+    // Catches: a release whose macos-arm64 tarball has no bundle passing (the bundle copy of the
+    // attest job left out for that platform), refused before gh is run; and a bundle that pairs
+    // with its tarball but whose attestation was signed by another workflow than artifacts.yml
+    // passing because the tarball's other attestations are good.
+    let mac = format!("tierstore-{COMMIT}-macos-arm64.tar.gz");
+
+    let mut release = Release::good("macos-no-bundle");
+    release.ledger.clear();
+    std::fs::remove_file(release.dir.join(format!("{mac}.sigstore.json"))).expect("rm");
+    assert_eq!(
+        failure(release.verify()),
+        format!("{mac}: no provenance bundle {mac}.sigstore.json")
+    );
+
+    let good = Release::good("macos-bundle-other-signer");
+    let digest = good.digest_of(&mac);
+    let other = "example/tierstore/.github/workflows/ci.yml";
+    let failed = failure(
+        good.changed(|l| {
+            if l.starts_with(&digest) && l.ends_with(COMMIT) {
+                l.replace(SIGNER, other)
+            } else {
+                l.to_owned()
+            }
+        })
+        .verify(),
+    );
+    assert!(
+        failed.contains(&format!(
+            "{mac}: its bundle {mac}.sigstore.json does not verify"
+        )),
+        "{failed}"
+    );
 }

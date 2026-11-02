@@ -76,7 +76,7 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
     },
 ];
 
-fn entry<'a>(map: &'a Node, key: &str) -> Option<&'a Node> {
+pub fn entry<'a>(map: &'a Node, key: &str) -> Option<&'a Node> {
     match &map.value {
         Value::Map(entries) => entries
             .iter()
@@ -86,7 +86,7 @@ fn entry<'a>(map: &'a Node, key: &str) -> Option<&'a Node> {
     }
 }
 
-fn entries(map: &Node) -> &[(Node, Node)] {
+pub fn entries(map: &Node) -> &[(Node, Node)] {
     match &map.value {
         Value::Map(entries) => entries,
         _ => &[],
@@ -271,7 +271,7 @@ const PLAN_REF: &str = "${{ github.event_name == 'workflow_run' && github.event.
 /// The `cargo xtask` verbs release.yml may run; the others build or fetch.
 const XTASK_VERBS: [&str; 5] = ["--help", "release", "sums", "verify-assets", "deploy-farm"];
 
-fn names(node: Option<&Node>) -> Vec<String> {
+pub fn names(node: Option<&Node>) -> Vec<String> {
     let mut found = node.map(triggers).unwrap_or_default();
     found.sort();
     found
@@ -667,7 +667,8 @@ pub fn artifacts_problems(text: &str) -> Vec<String> {
     if output != Some("${{ steps.version.outputs.version }}") {
         problems.push("version job: output version is not the version step's".to_owned());
     }
-    for name in ["linux-x86_64", "linux-arm64"] {
+    for platform in xtask::package::Platform::ALL {
+        let name = platform.name();
         let build = job(name);
         let needs = names(build.and_then(|j| entry(j, "needs")));
         if needs != ["version"] {
@@ -696,7 +697,7 @@ pub fn artifacts_problems(text: &str) -> Vec<String> {
 }
 
 /// The `run:` text of each step of `job`.
-fn runs(job: Option<&Node>) -> Vec<&str> {
+pub fn runs(job: Option<&Node>) -> Vec<&str> {
     let steps = job.and_then(|j| entry(j, "steps"));
     match steps.map(|s| &s.value) {
         Some(Value::Seq(items)) => items
