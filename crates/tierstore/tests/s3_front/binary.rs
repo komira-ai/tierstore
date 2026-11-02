@@ -235,6 +235,17 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
     assert_eq!(out, expected);
 }
 
+/// Asserts that `--capabilities` of the binary prints exactly `handover-v1` and a newline, and
+/// exits 0 with nothing on stderr: the line the host updater's `prepare` step reads to hand over
+/// to this release instead of restarting it. Catches: the capability left out of the list (the
+/// binary prints nothing and every update is a restart), a misspelled name the updater would not
+/// find, and a second name nothing promises.
+#[test]
+fn capabilities_lists_handover_v1() {
+    let (code, out, err) = run(&["--capabilities".to_owned()]);
+    assert_eq!((code, out.as_str(), err.as_str()), (0, "handover-v1\n", ""));
+}
+
 /// Asserts that `--capabilities` with any other flag is refused with status 2, naming it, and
 /// prints nothing on stdout, so that a script that reads the list never takes a refusal for one.
 /// Catches: the other flags ignored (a start's flags given by mistake read as a list), and a

@@ -367,7 +367,7 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   and an idle S3 and OCI connection to v-current each write a request after its end of stream and close, which the
   lingering close reads and counts. The runs, one test each:
   - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
-    `handover-v1`, so `CAPABILITIES` is unchanged): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
+    `handover-v1`, so the run does not depend on the server's own `CAPABILITIES`): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
     requests; the held transfers complete; every acknowledged write, empty ones included, reads back with its bytes and
     hash; each client on new connections met both slots (`/metricz` through 9300); a direct connect from the veth peer
     to a private slot is dropped by the guard, IPv4 and IPv6 (counted by a watch table of the test's own around the

@@ -5,7 +5,8 @@
 //! address is taken fails.
 
 use std::fs::Permissions;
-use std::net::SocketAddr;
+use std::io::Read as _;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -24,13 +25,13 @@ use crate::rig::hex_of;
 const MANIFEST: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
 
 /// A blob of `len` bytes that does not repeat within a chunk.
-fn pattern(len: usize) -> Vec<u8> {
+pub(crate) fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| ((i * 7 + i / 251) % 256) as u8).collect()
 }
 
 /// The value of the counter `name` in the text of `/metricz`.
 #[track_caller]
-fn counter(text: &str, name: &str) -> u64 {
+pub(crate) fn counter(text: &str, name: &str) -> u64 {
     let line = text
         .lines()
         .find_map(|line| line.strip_prefix(name)?.strip_prefix(' '));
@@ -47,7 +48,7 @@ fn secret(dir: &TestDir, name: &str, text: &str) -> PathBuf {
 }
 
 /// Puts `bytes` in the upstream where the front reads `hex`, whatever `bytes` hash to.
-async fn seed(fake: &FakeS3, hex: &str, bytes: &[u8]) {
+pub(crate) async fn seed(fake: &FakeS3, hex: &str, bytes: &[u8]) {
     let upstream = fake.store(Capabilities {
         conditional_put: true,
         object_lock: false,
@@ -57,34 +58,109 @@ async fn seed(fake: &FakeS3, hex: &str, bytes: &[u8]) {
     upstream.put_new(&key, body, None).await.expect("put");
 }
 
+/// The address a client dials to reach a socket bound at `at`: a wildcard by way of loopback.
+pub(crate) fn reach(at: SocketAddr) -> SocketAddr {
+    let ip = match at.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, at.port())
+}
+
+/// The addresses of a start line's `listen=` or `oci-listen=` word: one, or several joined by
+/// commas.
+fn addresses(word: &str) -> Vec<SocketAddr> {
+    let parsed = word.split(',').map(|at| at.parse().expect("an address"));
+    parsed.collect()
+}
+
+/// The value of a `listen` key: a string for one address, an array for several.
+fn listen_value(addresses: &[String]) -> String {
+    match addresses {
+        [one] => format!("\"{one}\""),
+        many => {
+            let quoted: Vec<String> = many.iter().map(|at| format!("\"{at}\"")).collect();
+            format!("[{}]", quoted.join(", "))
+        }
+    }
+}
+
+/// How [`Node::launch`] starts a node.
+pub(crate) struct Launch {
+    /// The addresses of the S3 front, `listen` of `[server]`.
+    pub listen: Vec<String>,
+    /// The addresses of the OCI front, `listen` of `[oci]`.
+    pub oci_listen: Vec<String>,
+    /// The cache directory: `None` for one of the node's own, `Some` to share another node's.
+    pub cache: Option<PathBuf>,
+    /// More keys of `[local_cache]`.
+    pub local: String,
+    /// `--drain-lb-wait`.
+    pub settle: String,
+    /// Whether the node's stderr is kept, for [`Node::exit_and_stderr`]; else it goes nowhere.
+    pub stderr: bool,
+}
+
+impl Launch {
+    /// One address on loopback for each front, port 0, the node's own cache directory, no more
+    /// keys, the settle `settle`, and no stderr.
+    pub(crate) fn loopback(settle: &str) -> Self {
+        Self {
+            listen: vec!["127.0.0.1:0".to_owned()],
+            oci_listen: vec!["127.0.0.1:0".to_owned()],
+            cache: None,
+            local: String::new(),
+            settle: settle.to_owned(),
+            stderr: false,
+        }
+    }
+}
+
 /// A build node in a process, over the fake upstream, with the OCI front on plain HTTP.
-struct Node<'a> {
+pub(crate) struct Node<'a> {
     fake: &'a FakeS3,
     child: Reaped,
-    s3: String,
-    oci: SocketAddr,
-    cache_dir: PathBuf,
+    /// Where a client reaches the first address of the S3 front.
+    pub s3: String,
+    /// Where a client reaches the first address of the OCI front.
+    pub oci: SocketAddr,
+    /// Every address of the S3 front, as the start line names them.
+    pub s3_all: Vec<SocketAddr>,
+    /// Every address of the OCI front, as the start line names them.
+    pub oci_all: Vec<SocketAddr>,
+    pub cache_dir: PathBuf,
     _dir: TestDir,
 }
 
 impl<'a> Node<'a> {
     /// Starts the node. `local` is more keys of `[local_cache]`. The upstream wants its own key,
     /// so what the test seeds is put before this is called.
-    fn start(fake: &'a FakeS3, name: &str, local: &str) -> Self {
+    pub(crate) fn start(fake: &'a FakeS3, name: &str, local: &str) -> Self {
         Self::start_with_settle(fake, name, local, "50ms")
     }
 
     /// [`Node::start`] with `--drain-lb-wait` set to `settle`.
     fn start_with_settle(fake: &'a FakeS3, name: &str, local: &str, settle: &str) -> Self {
+        let mut launch = Launch::loopback(settle);
+        launch.local = local.to_owned();
+        Self::launch(fake, name, &launch)
+    }
+
+    /// Starts the node as `launch` says.
+    pub(crate) fn launch(fake: &'a FakeS3, name: &str, launch: &Launch) -> Self {
         fake.require_credentials("UPKEY", "up-secret");
         let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
         let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
         let upstream_key = secret(&dir, "upstream.key", "UPKEY\nup-secret\n");
-        let cache_dir = dir.path().join("cache");
+        let cache_dir = launch
+            .cache
+            .clone()
+            .unwrap_or_else(|| dir.path().join("cache"));
         let file = format!(
             r#"
 [server]
-listen          = "127.0.0.1:0"
+listen          = {listen}
 proxy_id        = "oci-cache"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -101,14 +177,17 @@ endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
 [oci]
-listen = "127.0.0.1:0"
+listen = {oci_listen}
 
 [[policy]]
 prefix = "oci/"
 cache  = true
 "#,
+            listen = listen_value(&launch.listen),
+            oci_listen = listen_value(&launch.oci_listen),
             key = key.display(),
             cache = cache_dir.display(),
+            local = launch.local,
             endpoint = fake.endpoint(),
             upstream_key = upstream_key.display(),
         );
@@ -116,32 +195,43 @@ cache  = true
         let mut command = Command::new(env!("CARGO_BIN_EXE_tierstore"));
         command
             .args(["--config", &config.display().to_string()])
-            .args(["--drain-lb-wait", settle])
+            .args(["--drain-lb-wait", &launch.settle])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if launch.stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         let mut child = spawn(&mut command, 3).expect("spawned");
         let stdout = child.stdout.take().expect("stdout");
         let (line, _reader) = first_line(stdout, Duration::from_secs(30)).expect("a start line");
         let words: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(words.len(), 7, "{line}");
-        assert_eq!(words[3], "mode=read-cache", "{line}");
+        let mode = if launch.local.contains("write_through = true") {
+            "mode=write-through-cache"
+        } else {
+            "mode=read-cache"
+        };
+        assert_eq!(words[3], mode, "{line}");
         assert_eq!(words[5], "(http)", "{line}");
         let commit = tierstore::server::build_info::COMMIT;
         assert_eq!(words[6], format!("commit={commit}"), "{line}");
-        let s3 = words[2].strip_prefix("listen=").expect("listen=");
-        let oci = words[4].strip_prefix("oci-listen=").expect("oci-listen=");
+        let s3_all = addresses(words[2].strip_prefix("listen=").expect("listen="));
+        let oci_all = addresses(words[4].strip_prefix("oci-listen=").expect("oci-listen="));
         Self {
             fake,
             child,
-            s3: s3.to_owned(),
-            oci: oci.parse().expect("an address"),
+            s3: reach(s3_all[0]).to_string(),
+            oci: reach(oci_all[0]),
+            s3_all,
+            oci_all,
             cache_dir,
             _dir: dir,
         }
     }
 
     /// The text of `/metricz`.
-    async fn metrics(&self) -> String {
+    pub(crate) async fn metrics(&self) -> String {
         let url = format!("http://{}/metricz", self.s3);
         let reply = reqwest::get(url).await.expect("metricz");
         assert_eq!(reply.status(), 200);
@@ -163,29 +253,23 @@ cache  = true
 
     /// Pulls the blob `hex` on a connection of its own: the status and the bytes, or `None` if
     /// the connection was cut before the head of an answer.
-    async fn pull(&self, hex: &str) -> Option<(u16, Vec<u8>, bool)> {
-        let mut conn = Conn::open_plain(self.oci).await.expect("a connection");
-        let path = format!("/v2/library/app/blobs/sha256:{hex}");
-        let reply = conn.request("GET", &path, &[]).await?;
-        Some((reply.status, reply.body, reply.short))
+    pub(crate) async fn pull(&self, hex: &str) -> Option<(u16, Vec<u8>, bool)> {
+        pull_at(self.oci, hex).await
     }
 
     /// Pulls the blob `hex` and asserts it is whole, 200, and has the bytes `want`.
-    async fn pull_whole(&self, hex: &str, want: &[u8]) {
-        let (status, body, short) = self.pull(hex).await.expect("an answer");
-        assert_eq!((status, short), (200, false));
-        assert!(body == want, "the bytes differ from the upstream's");
-        assert_eq!(hex_of(&body), hex);
+    pub(crate) async fn pull_whole(&self, hex: &str, want: &[u8]) {
+        pull_whole_at(self.oci, hex, want).await;
     }
 
     /// Sends SIGTERM to the node: its drain begins.
-    fn signal_stop(&self) {
+    pub(crate) fn signal_stop(&self) {
         let pid = Pid::from_raw(i32::try_from(self.child.id()).expect("a pid")).expect("a pid");
         kill_process(pid, Signal::TERM).expect("signalled");
     }
 
     /// Stops the node with SIGTERM and gives its exit status.
-    async fn stop(self) -> Option<i32> {
+    pub(crate) async fn stop(self) -> Option<i32> {
         self.signal_stop();
         self.stop_waiting().await
     }
@@ -195,6 +279,47 @@ cache  = true
         let waiting = tokio::task::spawn_blocking(move || self.child.wait());
         waiting.await.expect("joined").expect("waited").code()
     }
+
+    /// Waits for the node, which has been sent SIGTERM and was launched with [`Launch::stderr`],
+    /// to exit: its exit status, and what it wrote on stderr.
+    pub(crate) async fn exit_and_stderr(mut self) -> (Option<i32>, String) {
+        let mut stderr = self
+            .child
+            .stderr
+            .take()
+            .expect("launched with its stderr kept");
+        let waiting = tokio::task::spawn_blocking(move || {
+            let mut text = String::new();
+            stderr.read_to_string(&mut text).expect("stderr");
+            (self.child.wait().expect("waited").code(), text)
+        });
+        waiting.await.expect("joined")
+    }
+
+    /// Kills the node with SIGKILL, for a node whose drain the test does not wait for, and waits
+    /// for it to be gone.
+    pub(crate) async fn kill(mut self) {
+        self.child.kill().expect("killed");
+        self.stop_waiting().await;
+    }
+}
+
+/// Pulls the blob `hex` from the OCI front at `at` on a connection of its own: the status and the
+/// bytes, or `None` if the connection was cut before the head of an answer.
+async fn pull_at(at: SocketAddr, hex: &str) -> Option<(u16, Vec<u8>, bool)> {
+    let mut conn = Conn::open_plain(at).await.expect("a connection");
+    let path = format!("/v2/library/app/blobs/sha256:{hex}");
+    let reply = conn.request("GET", &path, &[]).await?;
+    Some((reply.status, reply.body, reply.short))
+}
+
+/// Pulls the blob `hex` from the OCI front at `at` and asserts it is whole, 200, and has the
+/// bytes `want`.
+pub(crate) async fn pull_whole_at(at: SocketAddr, hex: &str, want: &[u8]) {
+    let (status, body, short) = pull_at(at, hex).await.expect("an answer");
+    assert_eq!((status, short), (200, false), "{at}");
+    assert!(body == want, "the bytes differ from the upstream's");
+    assert_eq!(hex_of(&body), hex);
 }
 
 /// Asserts that a build node with an `[oci]` table, over an upstream that holds a manifest and a
