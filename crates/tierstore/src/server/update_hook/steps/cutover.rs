@@ -3,8 +3,11 @@
 //! Handover mode: the idle instance must still answer `/readyz`; the redirect is applied in one
 //! transaction; requests through the public port must be answered by the new instance with the
 //! staged version; a probe that never succeeds puts the redirect back and exits 1. Restart mode:
-//! v-current is stopped and v-next started first. The step records `swapped` last. A second run
-//! only re-applies the redirect.
+//! the redirect is pointed at v-next's port first, where nothing listens yet, so that a new
+//! connection is refused rather than sent to v-current while its listening sockets close (which
+//! would reset it); then v-current is stopped and v-next started, and the same swap follows. The
+//! restart's gap is v-current's settle and exit and v-next's start. The step records `swapped`
+//! last. A second run only re-applies the redirect.
 
 use super::{Ctx, READY_ATTEMPTS};
 use crate::server::update_hook::declaration::unit_name;
@@ -18,6 +21,7 @@ fn swap(c: &Ctx<'_, '_>, params: &Params, record: &Record) -> Result<(), Done> {
     let swapped = record.markers.contains(&Marker::Swapped);
     if !swapped {
         let attempts = if record.mode == Mode::Restart {
+            c.redirect(next)?;
             c.ports.units.stop(&unit_name(record.current()))?;
             c.ports.units.start(&unit_name(next))?;
             READY_ATTEMPTS

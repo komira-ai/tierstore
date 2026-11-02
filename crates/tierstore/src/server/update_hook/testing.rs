@@ -502,6 +502,11 @@ impl Units for Fake {
         self.tick(format!("units.stop {unit}"), PortKind::Units)?;
         let port = port_of(unit);
         let mut w = self.w.borrow_mut();
+        let named = w.rules.get(FORWARD_TABLE).and_then(|t| redirect_target(t)) == Some(port);
+        if named && w.running.contains_key(&port) {
+            let note = format!("stopped {unit} while the redirect names it");
+            w.errors.push(note);
+        }
         w.running.remove(&port);
         w.let_go(port);
         Ok(())

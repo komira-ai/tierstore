@@ -4,12 +4,12 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -19,8 +19,10 @@ use super::{
     OciError, OciFront, OciListener, OciMetrics, OciMode, OciPrefix, acceptor, plain_warning,
 };
 use crate::MemoryBackend;
+use crate::server::drain::Drain;
 use crate::server::listen::bind;
 use crate::server::{ACCEPT_PAUSE, Incoming};
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 /// A source whose first accept fails and whose others never complete; it counts the asks.
 struct Failing {
@@ -177,6 +179,8 @@ async fn one_listener_serves_every_address_it_is_given() {
     let bound = listener.local_addrs().expect("addresses");
     assert_eq!(bound.len(), wanted.len(), "{bound:?}");
     assert_eq!(listener.local_addr().expect("the first"), bound[0]);
+    let sockets = listening(&bound);
+    assert_eq!(sockets.len(), bound.len(), "{sockets:?}");
     let (stop, stopped) = watch::channel(false);
     let serving = tokio::spawn(listener.serve(stopped));
     for at in &bound {
@@ -190,10 +194,45 @@ async fn one_listener_serves_every_address_it_is_given() {
     }
     stop.send(true).expect("a listener");
     assert_eq!(serving.await.expect("served"), 0);
-    for at in &bound {
-        let refused = TcpStream::connect(reach(*at)).await;
-        assert!(refused.is_err(), "{at} still takes connections");
+    let left: Vec<_> = listening(&bound)
+        .into_iter()
+        .filter(|socket| sockets.contains(socket))
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the listener's sockets still listen: {left:?}"
+    );
+}
+
+/// The sockets of this network namespace that listen on the port of one of `addrs`, by inode, from
+/// the tables of `/proc`: an inode names a socket, so another test's listener that takes a port
+/// once it is free is not taken for this one's.
+#[cfg(target_os = "linux")]
+fn listening(addrs: &[SocketAddr]) -> Vec<String> {
+    let ports: Vec<u16> = addrs.iter().map(SocketAddr::port).collect();
+    let mut sockets = Vec::new();
+    for table in ["tcp", "tcp6"] {
+        let text = std::fs::read_to_string(format!("/proc/self/net/{table}")).expect("a table");
+        for line in text.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let port = fields[1].rsplit_once(':').map(|(_, port)| port);
+            let port = port.and_then(|port| u16::from_str_radix(port, 16).ok());
+            if fields[3] == "0A" && port.is_some_and(|port| ports.contains(&port)) {
+                sockets.push(fields[9].to_owned());
+            }
+        }
     }
+    sockets
+}
+
+/// Outside Linux there is no table to read: the addresses that take a connect stand for the
+/// sockets, which another test's listener on a port freed a moment ago could also answer.
+#[cfg(not(target_os = "linux"))]
+fn listening(addrs: &[SocketAddr]) -> Vec<String> {
+    let taking = addrs
+        .iter()
+        .filter(|addr| std::net::TcpStream::connect(reach(**addr)).is_ok());
+    taking.map(ToString::to_string).collect()
 }
 
 /// Asserts that a listener given no address binds nothing and has no address to report.
@@ -288,4 +327,366 @@ async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither
     let (v4, v6) = (at(format!("0.0.0.0:{port}")), at(format!("[::]:{port}")));
     assert_eq!(refused_at(&[v6, v4]).await, v4);
     drop(bind(v6).expect("the v6 wildcard is free again"));
+}
+
+/// A source whose connections the kernel holds as handshakes in flight until the door that ends
+/// the settle has counted them: then their handshakes end and they wait to be taken, in order.
+/// Each is a real loopback connection, and an entry may be an accept that fails.
+struct Held {
+    /// What the source gives once the handshakes have been counted.
+    held: Vec<io::Result<(TcpStream, SocketAddr)>>,
+    /// What it gives at once, before the end of the settle.
+    ready: Vec<(TcpStream, SocketAddr)>,
+    counted: AtomicBool,
+}
+
+impl Incoming for Held {
+    type Stream = TcpStream;
+
+    fn poll_incoming(
+        &mut self,
+        _cx: &mut Context<'_>,
+    ) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
+        if let Some(ready) = self.ready.pop() {
+            return Poll::Ready(Ok(ready));
+        }
+        match self.held.pop() {
+            Some(accepted) if self.counted.load(Ordering::SeqCst) => Poll::Ready(accepted),
+            Some(accepted) => {
+                self.held.push(accepted);
+                Poll::Pending
+            }
+            None => Poll::Pending,
+        }
+    }
+
+    fn handshakes(&self) -> io::Result<usize> {
+        let counted = self.counted.swap(true, Ordering::SeqCst);
+        Ok(if counted { 0 } else { self.held.len() })
+    }
+}
+
+/// A loopback connection: the server's end, with its peer, and the client's.
+async fn pair() -> ((TcpStream, SocketAddr), TcpStream) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    (listener.accept().await.unwrap(), client)
+}
+
+/// An accept loop over `incoming` (TLS when `acceptor` is given), with room for
+/// `max_connections` and bounds long enough that none of them ends a test's connection, its stop,
+/// and its drain, which the test begins.
+fn closing_loop(
+    incoming: Held,
+    max_connections: usize,
+    acceptor: Option<TlsAcceptor>,
+) -> (
+    tokio::task::JoinHandle<usize>,
+    watch::Sender<bool>,
+    Arc<Drain>,
+) {
+    let (front, _) = plain_front();
+    let minute = Duration::from_secs(60);
+    let limits = OciLimits {
+        max_connections,
+        handshake_timeout: minute,
+        header_timeout: minute,
+        write_idle: minute,
+        lifetime: minute,
+        drain_deadline: minute,
+    };
+    let (stop, stopped) = watch::channel(false);
+    let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
+    let drain = Arc::clone(&shared.drain);
+    let looping = tokio::spawn(accept_loop(
+        incoming, acceptor, front, limits, stopped, shared,
+    ));
+    (looping, stop, drain)
+}
+
+/// [`closing_loop`], plain, whose drain has begun, as the binary begins it before the stop.
+fn plain_loop(
+    incoming: Held,
+    max_connections: usize,
+) -> (tokio::task::JoinHandle<usize>, watch::Sender<bool>) {
+    let (looping, stop, drain) = closing_loop(incoming, max_connections, None);
+    drain.begin();
+    (looping, stop)
+}
+
+/// The request the OCI tests send: the API's base, which a plain front answers 200.
+const BASE: &[u8] = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
+
+/// Reads one whole answer from `client`, which may leave the connection open: the head, and the
+/// body its `content-length` gives. A read that fails, or the end of the stream, before the
+/// answer is whole is an error: an answer cut after its head is not taken for one served.
+async fn read_one<R: AsyncRead + Unpin>(client: &mut R) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    let mut piece = [0_u8; 4096];
+    loop {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+            let length = head.lines().find_map(|line| {
+                let line = line.to_ascii_lowercase();
+                line.strip_prefix("content-length: ")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            });
+            let Some(length) = length else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("no content-length: {text}"),
+                ));
+            };
+            if body.len() >= length {
+                return Ok(text);
+            }
+        }
+        let read = client.read(&mut piece).await?;
+        if read == 0 {
+            let cut = format!("the connection ended inside an answer: {text}");
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, cut));
+        }
+        bytes.extend_from_slice(&piece[..read]);
+    }
+}
+
+/// Asserts that `answer` is the whole answer of the API base: 200, `Connection: close` when
+/// `closed`, and the body `{}` of exactly the length its head gives.
+#[track_caller]
+fn assert_ping(answer: &str, closed: bool) {
+    let (head, body) = answer.split_once("\r\n\r\n").expect("a head");
+    assert!(head.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert_eq!(head.contains("connection: close"), closed, "{answer}");
+    assert!(head.contains("content-length: 2"), "{answer}");
+    assert_eq!(body, "{}", "{answer}");
+}
+
+/// Asserts that the reader the OCI tests read answers with refuses an answer cut after its head
+/// (its body short of the length the head gives, then the end of the stream), and one whose
+/// transport fails there, and takes a whole one: a reset or a truncation after the headers is not
+/// taken for a served request. It would catch a reader that lets the ping test pass on a
+/// connection the server cut.
+#[tokio::test]
+async fn an_answer_cut_after_its_head_is_not_taken_for_a_served_one() {
+    let whole = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\n{}";
+    let (mut client, mut server) = tokio::io::duplex(1024);
+    server.write_all(whole.as_bytes()).await.unwrap();
+    drop(server);
+    let answer = read_one(&mut client).await.expect("a whole answer");
+    assert_ping(&answer, true);
+
+    let (mut client, mut server) = tokio::io::duplex(1024);
+    server
+        .write_all(&whole.as_bytes()[..whole.len() - 1])
+        .await
+        .unwrap();
+    drop(server);
+    let cut = read_one(&mut client).await.unwrap_err();
+    assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
+
+    let mut failing = cut_by_reset(whole.len() - 1, whole.as_bytes());
+    let reset = read_one(&mut failing).await.unwrap_err();
+    assert_eq!(reset.kind(), io::ErrorKind::ConnectionReset);
+}
+
+/// A stream that gives the first `upto` bytes of `bytes` and then fails as a reset connection.
+fn cut_by_reset(upto: usize, bytes: &[u8]) -> impl AsyncRead + Unpin {
+    let given = io::Cursor::new(bytes[..upto].to_vec());
+    given.chain(Resetting)
+}
+
+/// A reader that fails as a reset connection.
+struct Resetting;
+
+impl AsyncRead for Resetting {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+    }
+}
+
+/// Asserts that the OCI front, at the end of its settle, takes the connections the kernel held
+/// for it as handshakes in flight, after an accept that fails, and serves their request with
+/// `Connection: close`, and that the loop then ends with nothing cut. It would catch an OCI front
+/// that closes its socket at once at the end of the settle, which resets those connections.
+#[tokio::test]
+async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
+    let (server, mut client) = pair().await;
+    let held = Held {
+        held: vec![Ok(server), Err(io::Error::other("an accept that failed"))],
+        ready: Vec::new(),
+        counted: AtomicBool::new(false),
+    };
+    let (looping, stop) = plain_loop(held, 4);
+    stop.send(true).expect("a loop");
+
+    client
+        .write_all(b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n")
+        .await
+        .unwrap();
+    let answer = read_one(&mut client).await.expect("a whole answer");
+    assert_ping(&answer, true);
+    drop(client);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// Asserts that the OCI front waits for a free slot at the end of its settle for no longer than
+/// the door's grace: with its one slot held by a connection that sends nothing, the connection the
+/// kernel holds is not taken, the socket closes (that client reads the end of its stream, the
+/// limit the module states), the connection in the slot is closed in turn, and the loop ends with
+/// nothing cut. It would catch a door that waits for a slot for ever, and one that takes a
+/// connection past the front's limit.
+#[tokio::test(start_paused = true)]
+async fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
+    let (first, mut in_slot) = pair().await;
+    let (second, mut waiting) = pair().await;
+    let held = Held {
+        held: vec![Ok(second)],
+        ready: vec![first],
+        counted: AtomicBool::new(false),
+    };
+    // The first connection takes the slot, before the stop or once the door is closing.
+    let (looping, stop) = plain_loop(held, 1);
+    stop.send(true).expect("a loop");
+
+    // A request on the held connection gets no answer: it was never taken past the limit, and
+    // the kernel ends it (an end of stream, or a reset) when the socket closes.
+    let request = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
+    let _ = waiting.write_all(request).await;
+    let mut answer = Vec::new();
+    let _ = waiting.read_to_end(&mut answer).await;
+    assert_eq!(String::from_utf8_lossy(&answer), "", "not served");
+    let mut byte = [0_u8; 1];
+    assert_eq!(
+        in_slot.read(&mut byte).await.unwrap(),
+        0,
+        "closed, unanswered"
+    );
+    // The client closes its end, which ends the lingering close of the server's.
+    drop(in_slot);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// Asserts that an OCI front whose every slot is held by an idle keep-alive connection (it has
+/// carried a request, and its client waits for the end of the stream) closes that connection when
+/// the door begins, so that its client leaves and frees the slot, and that the connection the
+/// kernel holds for the listener is then taken in that slot and its request answered in full,
+/// with `Connection: close`; the loop ends with nothing cut. It would catch a door that waits for a
+/// slot only the end of the drain would free, and so closes the socket on a connected client.
+#[tokio::test]
+async fn an_idle_connection_in_every_slot_closes_and_frees_one_for_the_held() {
+    let (first, mut idle) = pair().await;
+    let (second, mut queued) = pair().await;
+    let held = Held {
+        held: vec![Ok(second)],
+        ready: vec![first],
+        counted: AtomicBool::new(false),
+    };
+    let (looping, stop, drain) = closing_loop(held, 1, None);
+    idle.write_all(BASE).await.unwrap();
+    let kept = read_one(&mut idle).await.expect("a whole answer");
+    assert_ping(&kept, false);
+
+    drain.begin();
+    stop.send(true).expect("a loop");
+    queued.write_all(BASE).await.unwrap();
+    let mut rest = Vec::new();
+    idle.read_to_end(&mut rest).await.unwrap();
+    assert!(rest.is_empty(), "closed with nothing more sent");
+    drop(idle);
+    let answer = read_one(&mut queued).await.expect("a whole answer");
+    assert_ping(&answer, true);
+    drop(queued);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// A TLS acceptor for 127.0.0.1 and a connector that trusts its CA, from files in `dir`.
+fn tls_pair(dir: &TestDir) -> (TlsAcceptor, TlsConnector) {
+    let authority = ca();
+    let files = leaf(dir.path(), "front", &authority, vec![ip("127.0.0.1")]);
+    let listen: SocketAddr = "127.0.0.1:0".parse().expect("an address");
+    let tls = acceptor(&files.cert, &files.key, listen).expect("an acceptor");
+    use rustls::pki_types::pem::PemObject as _;
+    let mut roots = rustls::RootCertStore::empty();
+    let pem = authority.pem();
+    for cert in rustls::pki_types::CertificateDer::pem_slice_iter(pem.as_bytes()) {
+        roots.add(cert.expect("a certificate")).expect("a root");
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    (tls, TlsConnector::from(Arc::new(config)))
+}
+
+/// A client over TLS on `tcp`: its handshake, its request, and everything it reads.
+async fn tls_client(connector: TlsConnector, tcp: TcpStream) -> io::Result<String> {
+    let name = rustls::pki_types::ServerName::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    let mut stream = connector.connect(name, tcp).await?;
+    stream.write_all(BASE).await?;
+    read_one(&mut stream).await
+}
+
+/// Asserts, on a TLS front with one slot, that a connection the door takes whose client then fails
+/// its TLS handshake (it sends bytes that are not TLS) gives its slot back, and that the next
+/// connection the kernel held, whose TLS handshake ends after the settle, is taken in that slot
+/// and its request answered with `Connection: close`; the loop ends with nothing cut. It would
+/// catch a failed handshake that keeps its slot, and a door that closes on a connection whose
+/// handshake is still under way.
+#[tokio::test]
+async fn a_failed_tls_handshake_frees_its_slot_and_a_later_one_is_served() {
+    let dir = TestDir::under(std::env::temp_dir(), "oci-door-tls");
+    let (tls, connector) = tls_pair(&dir);
+    let (bad_server, mut bad) = pair().await;
+    let (good_server, good) = pair().await;
+    let held = Held {
+        held: vec![Ok(good_server), Ok(bad_server)],
+        ready: Vec::new(),
+        counted: AtomicBool::new(false),
+    };
+    let (looping, stop, drain) = closing_loop(held, 1, Some(tls));
+    drain.begin();
+    stop.send(true).expect("a loop");
+    bad.write_all(b"not a TLS record\r\n\r\n").await.unwrap();
+    let mut nothing = Vec::new();
+    let _ = bad.read_to_end(&mut nothing).await;
+    let answer = tls_client(connector, good)
+        .await
+        .expect("a whole answer over TLS");
+    assert_ping(&answer, true);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// Asserts that a connection the door takes whose client resets it before sending anything (a
+/// read that fails, during the wait for its first request) ends and gives its slot back, and that
+/// the next connection the kernel held is taken in that slot and answered; the loop ends with
+/// nothing cut. It would catch a wait for a first request that outlives a connection whose read
+/// failed, and keeps its slot.
+#[tokio::test]
+async fn a_connection_reset_before_its_first_request_frees_its_slot() {
+    let (reset_server, reset) = pair().await;
+    let (next_server, mut next) = pair().await;
+    let held = Held {
+        held: vec![Ok(next_server), Ok(reset_server)],
+        ready: Vec::new(),
+        counted: AtomicBool::new(false),
+    };
+    let (looping, stop) = plain_loop(held, 1);
+    stop.send(true).expect("a loop");
+    reset.set_zero_linger().unwrap();
+    drop(reset);
+    next.write_all(BASE).await.unwrap();
+    let answer = read_one(&mut next).await.expect("a whole answer");
+    assert_ping(&answer, true);
+    drop(next);
+    assert_eq!(looping.await.expect("the loop ended"), 0);
 }

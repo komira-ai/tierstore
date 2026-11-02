@@ -1,7 +1,8 @@
 //! `rollback`: valid only before `cleanup` has written `stopping`.
 //!
-//! v-current is started if it is not running (in restart mode v-next is stopped first, since the
-//! release that runs has no lock) and the redirect is pointed at it; then the instance the
+//! v-current is started if it is not running and the redirect is pointed at it (in restart mode
+//! the redirect is pointed at it first and v-next then stopped before v-current starts, since the
+//! release that runs has no lock); then the instance the
 //! restored rule does not name is stopped and its slot link removed; the guard table is removed
 //! if this update placed it; the record goes back to no update in flight. After `stopping` the
 //! step changes nothing and exits 1.

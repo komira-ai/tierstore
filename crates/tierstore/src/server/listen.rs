@@ -20,7 +20,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::Incoming;
+use super::{Incoming, door};
 
 /// The value of a `listen` key of the file: one address, or a list of them. It is written as a
 /// string when it is one address, so a file that has one reads and prints as it always did.
@@ -210,6 +210,13 @@ impl Incoming for Listeners {
             }
         }
         Poll::Pending
+    }
+
+    /// The handshakes in flight on the ports of the sockets ([`door::handshakes`]); an error once
+    /// the network namespace has sent a SYN cookie.
+    fn handshakes(&self) -> io::Result<usize> {
+        let ports: Vec<u16> = self.local_addrs()?.iter().map(SocketAddr::port).collect();
+        door::handshakes(&ports)
     }
 }
 
