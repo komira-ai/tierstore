@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 
+use crate::backend::ReadBody;
 use crate::journal::{
     PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
     load_checkpoint, seq_of, to_body, write_object,
@@ -665,13 +667,38 @@ impl Reconciler {
         }
     }
 
-    /// Whether the cold tier holds a real object under `key` of the content of `hot` (the same
-    /// size and content tag): a reservation, an absent key and another object are not one.
+    /// Whether the cold tier holds a real object under `key` of the content of `hot`: not a
+    /// reservation, not nothing, and not another object. The tags are not compared (two tiers of
+    /// different kinds tag the same bytes differently): the sizes are, and if they agree the bytes.
     async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<bool, Error> {
         match self.cold.head(key).await {
-            Ok(cold) => Ok(!cold.reservation && hot.same_content(&cold)),
+            Ok(cold) if !cold.reservation && cold.size == hot.size => self.same_bytes(key).await,
+            Ok(_) => Ok(false),
             Err(Error::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Whether both tiers hold the same bytes under `key`, read as the chunks they come in (one
+    /// chunk of each at a time, and a read stops at the first difference).
+    async fn same_bytes(&self, key: &str) -> Result<bool, Error> {
+        let mut hot = self.hot.get_stream(key, None).await?;
+        let mut cold = self.cold.get_stream(key, None).await?;
+        let (mut mine, mut theirs) = (Bytes::new(), Bytes::new());
+        loop {
+            if mine.is_empty() {
+                mine = next_chunk(&mut hot).await?;
+            }
+            if theirs.is_empty() {
+                theirs = next_chunk(&mut cold).await?;
+            }
+            if mine.is_empty() || theirs.is_empty() {
+                return Ok(mine.is_empty() && theirs.is_empty());
+            }
+            let len = mine.len().min(theirs.len());
+            if mine.split_to(len) != theirs.split_to(len) {
+                return Ok(false);
+            }
         }
     }
 
@@ -724,4 +751,15 @@ impl Reconciler {
             report.failed.push(error);
         }
     }
+}
+
+/// The next chunk of a read that has bytes, or none (an empty `Bytes`) at the end of the body.
+async fn next_chunk(body: &mut ReadBody) -> Result<Bytes, Error> {
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk?;
+        if !chunk.is_empty() {
+            return Ok(chunk);
+        }
+    }
+    Ok(Bytes::new())
 }

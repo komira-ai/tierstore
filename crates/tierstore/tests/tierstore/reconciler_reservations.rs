@@ -573,7 +573,7 @@ async fn a_delete_whose_cold_object_changes_under_it_leaves_the_new_object() {
 }
 
 /// Puts five objects of 21 bytes through a proxy, one journal object each.
-async fn five_objects() -> Rig {
+pub async fn five_objects() -> Rig {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     let value = "x".repeat(21);
@@ -645,7 +645,7 @@ async fn an_eviction_of_an_entry_an_earlier_reconciler_applied_reads_the_tag_fir
 
 /// A rig whose five objects were copied by a reconciler that has stopped, and a second reconciler
 /// over it with a budget that makes it evict three of them: it holds no tag of any object.
-async fn after_a_takeover() -> (Rig, Reconciler) {
+pub async fn after_a_takeover() -> (Rig, Reconciler) {
     let rig = five_objects().await;
     let mut first = rig.reconciler("r1", 1000);
     first.pass().await;
@@ -682,6 +682,7 @@ async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_no_real_object_of() {
 #[tokio::test(start_paused = true)]
 async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_another_object_of() {
     let (rig, mut second) = after_a_takeover().await;
+    rig.cold_mem.delete("k1").await.unwrap();
     rig.cold_mem
         .put("k1", body("an older object"))
         .await
