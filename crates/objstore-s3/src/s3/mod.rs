@@ -30,6 +30,8 @@
 pub mod fake;
 mod multipart;
 mod parts;
+#[cfg(test)]
+mod read_limit_tests;
 mod sigv4;
 mod tagged;
 mod times;
@@ -355,7 +357,10 @@ impl Conn {
         headers: Vec<(&'static str, String)>,
     ) -> Result<Response, ObjectStoreError> {
         let req = self.signed(Method::GET, Some(key), &[], headers, &Bytes::new());
-        self.within(req.send()).await?.map_err(transport)
+        let resp = self.within(req.send()).await?.map_err(transport)?;
+        #[cfg(test)]
+        read_limit_tests::took_head();
+        Ok(resp)
     }
 
     /// Runs `step`, failing as a stalled read if it takes longer than `request_timeout`.
@@ -380,6 +385,8 @@ impl Conn {
         }
         let mut body = BytesMut::new();
         while let Some(piece) = self.within(resp.chunk()).await?.map_err(transport)? {
+            #[cfg(test)]
+            read_limit_tests::took_body(piece.len());
             if body.len() as u64 + piece.len() as u64 > limit {
                 return Err(too_long(limit));
             }
@@ -787,7 +794,7 @@ fn valid_bucket(b: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn r(offset: u64, len: u64) -> ByteRange {
+    pub(super) fn r(offset: u64, len: u64) -> ByteRange {
         ByteRange::new(offset, len).unwrap()
     }
 
@@ -891,179 +898,6 @@ mod tests {
             3,
             "an idle connection was kept"
         );
-    }
-
-    /// What a scripted store sends for a ranged read of `len` bytes.
-    #[derive(Clone, Copy)]
-    enum Script {
-        /// Headers, then the body in `pieces` pieces `every` apart.
-        Steady { pieces: usize, every: Duration },
-        /// Headers, half the body, then nothing.
-        StallsInBody,
-        /// Nothing at all after the request.
-        Silent,
-        /// A 500 whose body is promised and never sent.
-        StallsInError,
-    }
-
-    /// A one-object store on loopback that answers every request as `script` says and
-    /// counts the requests it took; `served` is notified when it has read one, and has
-    /// started its script (written everything the script writes at once). The `every` of a
-    /// steady body is a time on tokio's clock, which the test that uses it pauses.
-    async fn scripted(
-        len: usize,
-        script: Script,
-    ) -> (
-        String,
-        Arc<std::sync::atomic::AtomicUsize>,
-        Arc<tokio::sync::Notify>,
-    ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
-        let taken = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count = Arc::clone(&taken);
-        let served = Arc::new(tokio::sync::Notify::new());
-        let told = Arc::clone(&served);
-        tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                tokio::spawn({
-                    let count = Arc::clone(&count);
-                    let told = Arc::clone(&told);
-                    async move {
-                        let mut seen = Vec::new();
-                        let mut buf = [0u8; 4096];
-                        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
-                            match sock.read(&mut buf).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => seen.extend_from_slice(&buf[..n]),
-                            }
-                        }
-                        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        let head = format!(
-                            "HTTP/1.1 206 Partial Content\r\ncontent-length: {len}\r\n\
-                             content-range: bytes 0-{}/{len}\r\n\r\n",
-                            len - 1
-                        );
-                        match script {
-                            Script::Silent => {
-                                told.notify_one();
-                                std::future::pending::<()>().await
-                            }
-                            Script::StallsInError => {
-                                let _ = sock
-                                    .write_all(b"HTTP/1.1 500 Oops\r\ncontent-length: 100\r\n\r\n")
-                                    .await;
-                                told.notify_one();
-                                std::future::pending::<()>().await;
-                            }
-                            Script::StallsInBody => {
-                                let _ = sock.write_all(head.as_bytes()).await;
-                                let _ = sock.write_all(&vec![7u8; len / 2]).await;
-                                told.notify_one();
-                                std::future::pending::<()>().await;
-                            }
-                            Script::Steady { pieces, every } => {
-                                let _ = sock.write_all(head.as_bytes()).await;
-                                told.notify_one();
-                                for _ in 0..pieces {
-                                    tokio::time::sleep(every).await;
-                                    let _ = sock.write_all(&vec![7u8; len / pieces]).await;
-                                }
-                                // Keep the connection open until the client is done.
-                                let _ = sock.read(&mut buf).await;
-                            }
-                        }
-                    }
-                });
-            }
-        });
-        (endpoint, taken, served)
-    }
-
-    /// A store whose limit is [`LIMIT`].
-    fn short_limit_store(endpoint: &str) -> S3Store {
-        let mut c = config(endpoint, "test-bucket");
-        c.request_timeout = LIMIT;
-        S3Store::new(c).unwrap()
-    }
-
-    /// The `request_timeout` of the scripted reads. It passes on tokio's clock, paused by
-    /// [`read_once_served`] once the scripted store has the request, so it costs no time.
-    const LIMIT: Duration = Duration::from_secs(10);
-
-    /// Reads `len` bytes from the scripted store at `endpoint`, with tokio's clock paused
-    /// as soon as the store has the request and has written what its script writes at once.
-    /// From then on the client waits for nothing but timers (its limit, and the pieces of a
-    /// steady script), and the paused clock moves from one to the next by itself, so the
-    /// outcome is decided by what the store sends and never sends, not by how long anything
-    /// took. The clock is paused only now, because before it the client waits for the
-    /// socket and an idle runtime would move the clock on past its limit.
-    async fn read_once_served(
-        endpoint: &str,
-        served: &tokio::sync::Notify,
-        len: usize,
-    ) -> Result<Bytes, ObjectStoreError> {
-        let store = short_limit_store(endpoint);
-        let reading = tokio::spawn(async move { store.get_range(&key(), r(0, len as u64)).await });
-        served.notified().await;
-        tokio::time::pause();
-        reading.await.unwrap()
-    }
-
-    fn key() -> ObjectKey {
-        ObjectKey::new("obj").unwrap()
-    }
-
-    /// Catches: a read cut by a limit on the whole request: a body that arrives
-    /// steadily, for several times `request_timeout` in all (20 pieces, 4 s apart, against
-    /// a limit of 10 s), must come back whole.
-    #[tokio::test]
-    async fn a_ranged_read_that_keeps_progressing_outlasts_the_request_timeout() {
-        let len = 1000;
-        let (endpoint, taken, served) = scripted(
-            len,
-            Script::Steady {
-                pieces: 20,
-                every: Duration::from_secs(4),
-            },
-        )
-        .await;
-        let got = read_once_served(&endpoint, &served, len).await.unwrap();
-        assert_eq!(got.as_ref(), vec![7u8; len].as_slice());
-        assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    /// Catches: a stalled body that is never cut, or cut but reported as a plain
-    /// transport failure and sent again: it fails as a timeout, after one request.
-    #[tokio::test]
-    async fn a_ranged_read_whose_body_stops_fails_as_a_timeout_and_is_not_resent() {
-        let (endpoint, taken, served) = scripted(1000, Script::StallsInBody).await;
-        let err = read_once_served(&endpoint, &served, 1000)
-            .await
-            .unwrap_err();
-        assert!(!is_retryable(&err));
-        assert!(err.to_string().contains("timed out"), "{err}");
-        assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    /// Catches: the wait for the answer's headers left unbounded once the whole-request
-    /// limit is gone.
-    #[tokio::test]
-    async fn a_ranged_read_with_no_answer_fails_as_a_timeout() {
-        let (endpoint, taken, served) = scripted(10, Script::Silent).await;
-        let err = read_once_served(&endpoint, &served, 10).await.unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
-        assert_eq!(taken.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    /// Catches: an error answer whose body never arrives holding the read forever.
-    #[tokio::test]
-    async fn an_error_body_that_stops_fails_as_a_timeout() {
-        let (endpoint, _, served) = scripted(10, Script::StallsInError).await;
-        let err = read_once_served(&endpoint, &served, 10).await.unwrap_err();
-        assert!(err.to_string().contains("timed out"), "{err}");
     }
 
     /// The error reqwest gives for a response whose body delivers a few bytes and then
@@ -1199,7 +1033,7 @@ mod tests {
         assert!(is_retryable(&reset));
     }
 
-    fn config(endpoint: &str, bucket: &str) -> S3Config {
+    pub(super) fn config(endpoint: &str, bucket: &str) -> S3Config {
         S3Config {
             endpoint: endpoint.to_owned(),
             region: "us-east-1".to_owned(),
