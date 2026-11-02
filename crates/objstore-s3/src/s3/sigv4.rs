@@ -114,9 +114,25 @@ pub(crate) fn uri_encode(s: &str) -> String {
     out
 }
 
+/// The size of the input block of SHA-256, which is the size of an HMAC-SHA-256 key.
+const BLOCK: usize = 64;
+
+/// `key` as RFC 2104 makes it a key of the hash's block size: hashed first if it is longer than
+/// the block, then padded with zeros. Built here so that the key given to the HMAC has the size
+/// the type asks for and no length can be refused.
+fn block_key(key: &[u8]) -> [u8; BLOCK] {
+    let mut block = [0_u8; BLOCK];
+    if key.len() > BLOCK {
+        let hashed = Sha256::digest(key);
+        block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    block
+}
+
 fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac =
-        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts a key of any length");
+    let mut mac = <Hmac<Sha256> as KeyInit>::new(&block_key(key).into());
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }
@@ -193,6 +209,26 @@ mod tests {
         region: "us-east-1",
     };
     const DATE: &str = "20130524T000000Z";
+
+    /// Asserts the HMAC-SHA-256 cases of RFC 4231 that bracket the block size: a short key
+    /// (case 1, 20 bytes, padded) and a key longer than the 64-byte block (case 6, 131 bytes,
+    /// hashed first); and that a key of exactly one block, or none, is padded as it should be.
+    #[test]
+    fn hmac_keys_shorter_and_longer_than_the_block_give_the_standard_tags() {
+        assert_eq!(
+            hex::encode(hmac(&[0x0b; 20], b"Hi There")),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        assert_eq!(
+            hex::encode(hmac(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            )),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+        assert_eq!(block_key(&[7; BLOCK]), [7; BLOCK]);
+        assert_eq!(block_key(&[]), [0; BLOCK]);
+    }
 
     fn signature(auth: &str) -> &str {
         auth.rsplit_once("Signature=").unwrap().1

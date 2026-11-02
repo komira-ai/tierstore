@@ -430,7 +430,8 @@ impl LocalCache {
                 let outcome = inner.tick();
                 inner.describe(&outcome)
             });
-            if let Some(line) = ticking.await.expect("a tick does not panic") {
+            // A tick that panicked said so on stderr (the panic hook); the loop goes on to the next.
+            if let Some(line) = ticking.await.unwrap_or_default() {
                 eprintln!("tierstore: {line}");
             }
             #[cfg(test)]

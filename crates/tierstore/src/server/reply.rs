@@ -171,10 +171,15 @@ pub(crate) fn answer(
     let mut response = Response::new(body);
     *response.status_mut() = status;
     for (name, value) in headers {
-        let value = HeaderValue::from_str(&header_text(value)).expect("printable ASCII");
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static(name), value);
+        // `header_text` leaves printable ASCII only, which is always a header value: the `Ok`
+        // is every case there is.
+        HeaderValue::from_str(&header_text(value))
+            .into_iter()
+            .for_each(|value| {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static(name), value);
+            });
     }
     response
 }

@@ -228,12 +228,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Lingering<T> {
         (stream, wire)
     }
 
-    fn io(&mut self) -> Pin<&mut T> {
-        Pin::new(
-            self.inner
-                .as_mut()
-                .expect("the stream is there until the drop"),
-        )
+    /// What `with` makes of the stream, or `gone` if the stream was already taken for the
+    /// lingering close, which happens only in the drop, after the last poll.
+    fn io<R>(&mut self, gone: R, with: impl FnOnce(Pin<&mut T>) -> R) -> R {
+        self.inner
+            .as_mut()
+            .map_or(gone, |inner| with(Pin::new(inner)))
     }
 
     /// Notes a write that was taken.
@@ -263,7 +263,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncRead for Lingering
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let before = buf.filled().len();
-        let polled = this.io().poll_read(cx, buf);
+        let polled = this.io(Poll::Ready(Err(gone())), |io| io.poll_read(cx, buf));
         if matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before {
             this.arrived();
         }
@@ -278,7 +278,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for Lingerin
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        let written = this.io().poll_write(cx, buf);
+        let written = this.io(Poll::Ready(Err(gone())), |io| io.poll_write(cx, buf));
         this.wrote(&written);
         written
     }
@@ -289,7 +289,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for Lingerin
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        let written = this.io().poll_write_vectored(cx, bufs);
+        let written = this.io(Poll::Ready(Err(gone())), |io| {
+            io.poll_write_vectored(cx, bufs)
+        });
         this.wrote(&written);
         written
     }
@@ -309,7 +311,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for Lingerin
     /// bytes were flushed already.
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let flushed = this.io().poll_flush(cx);
+        let flushed = this.io(Poll::Ready(Err(gone())), |io| io.poll_flush(cx));
         if matches!(flushed, Poll::Ready(Ok(()))) {
             this.wire.dirty.store(false, Ordering::SeqCst);
             // Not while a streamed body is still being sent: hyper flushes after each frame.
@@ -328,7 +330,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for Lingerin
             // finds the connection held. Once, however many times the shutdown is polled.
             this.hold.get_or_insert_with(|| Hold::enter(&this.drain));
         }
-        this.io().poll_shutdown(cx)
+        this.io(Poll::Ready(Err(gone())), |io| io.poll_shutdown(cx))
     }
 }
 
@@ -346,6 +348,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Drop for Lingering<T> {
             None => drop(Handle::try_current().map(|handle| handle.spawn(lingered.run()))),
         }
     }
+}
+
+/// The error of a poll of a [`Lingering`] whose stream was taken for the lingering close.
+fn gone() -> io::Error {
+    io::Error::from(io::ErrorKind::NotConnected)
 }
 
 /// Reads `io` and drops what it reads until the peer closes its end or the bound passes. The

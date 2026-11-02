@@ -128,7 +128,8 @@ impl LocalCache {
             }
             let inner = Arc::clone(&self.inner);
             let pass = tokio::task::spawn_blocking(move || inner.evict_pass());
-            pass.await.expect("a pass does not panic");
+            // A pass that panicked said so on stderr (the panic hook); the loop goes on to the next.
+            let _ = pass.await.unwrap_or_default();
         }
         self.inner.flush_touches();
     }
