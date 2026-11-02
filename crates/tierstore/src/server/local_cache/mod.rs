@@ -159,6 +159,8 @@ mod start_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
+mod tiered_tests;
+#[cfg(test)]
 pub(in crate::server) mod testing;
 #[cfg(test)]
 mod write_front_tests;
@@ -273,6 +275,12 @@ pub struct CacheConfig {
     /// The most keys a read-only cache remembers it deleted or replaced through the upstream
     /// (see the module `hold`). Past it the cache is emptied when it takes the lock.
     pub forget_limit: usize,
+    /// Whether the upstream is a proxy of two tiers (a hot and a cold one). The tag of an object
+    /// is then the tag of the tier that answers, and moves when the proxy copies the object from
+    /// one tier to the other, so the versions of an object are told apart by size alone (the
+    /// proxy never replaces an object); and a create-only put is not checked with a HEAD first,
+    /// because the proxy's own put answers `AlreadyExists` before it reads the body.
+    pub tiered_upstream: bool,
 }
 
 impl CacheConfig {
@@ -297,6 +305,7 @@ impl CacheConfig {
             keep_queue_bytes: keep::KEEP_QUEUE_BYTES,
             write_through: false,
             forget_limit: FORGET_LIMIT,
+            tiered_upstream: false,
         }
     }
 
@@ -529,6 +538,16 @@ impl LocalCache {
 }
 
 impl Inner {
+    /// Whether `a` and `b` are one version of an object: the same size and tag, or, when the
+    /// upstream is a proxy of two tiers (see `CacheConfig::tiered_upstream`), the same size.
+    pub(super) fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        if self.config.tiered_upstream {
+            a.size == b.size
+        } else {
+            a.same_content(b)
+        }
+    }
+
     /// The on-disk name of `key` if the cache keeps it.
     fn cacheable(&self, key: &str) -> Option<Name> {
         if is_reserved(key) {
@@ -586,7 +605,16 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_through(key, len, body).await
+        self.inner.put_through(key, len, body, false).await
+    }
+
+    async fn put_stream_hot_only(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_through(key, len, body, true).await
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {

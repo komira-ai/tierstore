@@ -316,21 +316,44 @@ pub(super) fn tee<'a>(key: &'a str, body: PartBody<'a>, keeping: &'a mut Keeping
 }
 
 impl Inner {
-    /// A create-only put of a body that arrives as chunks.
+    /// Sends a body to the upstream as a create-only put: for `hot_only`, the put that a backend
+    /// with two tiers writes to its first tier only (see
+    /// [`put_stream_hot_only`](crate::Backend::put_stream_hot_only)).
+    async fn send_put(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<(), Error> {
+        if hot_only {
+            self.upstream.put_stream_hot_only(key, len, body).await
+        } else {
+            self.upstream.put_stream(key, len, body).await
+        }
+    }
+
+    /// A create-only put of a body that arrives as chunks; `hot_only` as for
+    /// [`send_put`](Inner::send_put).
     pub(super) async fn put_through(
         self: &Arc<Self>,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
+        hot_only: bool,
     ) -> Result<(), Error> {
         self.writable(key)?;
-        match self.upstream.head(key).await {
-            Ok(_) => {
-                bump(&self.counters.write_exists);
-                return Err(Error::AlreadyExists(key.to_owned()));
+        // An upstream of two tiers answers `AlreadyExists` to its own create-only put before it
+        // reads the body, and a HEAD of it costs a call to each tier: the HEAD is left out.
+        if !self.config.tiered_upstream {
+            match self.upstream.head(key).await {
+                Ok(_) => {
+                    bump(&self.counters.write_exists);
+                    return Err(Error::AlreadyExists(key.to_owned()));
+                }
+                Err(Error::NotFound(_)) => {}
+                Err(other) => return Err(other),
             }
-            Err(Error::NotFound(_)) => {}
-            Err(other) => return Err(other),
         }
         let name = self.cacheable(key);
         let mut keeping = match &name {
@@ -343,9 +366,9 @@ impl Inner {
         let sent = match &mut keeping {
             Some(keeping) => {
                 let teed = tee(key, body, keeping);
-                self.upstream.put_stream(key, len, teed).await
+                self.send_put(key, len, teed, hot_only).await
             }
-            None => self.upstream.put_stream(key, len, body).await,
+            None => self.send_put(key, len, body, hot_only).await,
         };
         match sent {
             Ok(()) => {}

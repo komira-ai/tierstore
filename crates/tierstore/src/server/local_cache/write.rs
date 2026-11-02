@@ -2,13 +2,18 @@
 //! acknowledged, so nothing is only local and there is nothing to recover.
 //!
 //! - **Create-only put** ([`put_through`](Inner::put_through), in `keep`): one HEAD of the key
-//!   goes to the upstream before the body is read. An object that is there is
+//!   goes to the upstream before the body is read (not when the upstream is a proxy of two tiers,
+//!   `tiered_upstream`, whose own put answers the same before it reads the body). An object that is there is
 //!   [`AlreadyExists`](Error::AlreadyExists) at once, with no byte of the body read and no put
 //!   sent (the S3 backend would otherwise upload all the parts of a large body and learn it at the
 //!   completion). The HEAD only saves work: the upstream's create-only put is the one arbiter of
 //!   two writers of one key, and its `AlreadyExists` is passed on as it is. An upstream that
 //!   cannot answer the HEAD is the error of the put. Under a `cache = true` policy the object is
 //!   also kept on the node (see `keep`).
+//! - **Hot-only put** ([`put_stream_hot_only`](crate::Backend::put_stream_hot_only)): the same
+//!   put, sent to the upstream as its hot-only put, which a proxy answers
+//!   [`Full`](Error::Full) and stores nothing in when its first tier has no room; a write that
+//!   is not to race the other tier's puts (a presigned put) passes through the cache as it is.
 //! - **Multipart** (create, part, complete, abort): passed to the upstream as they are and not
 //!   kept (the first read fills the object). A completion that succeeds drops the cache's entry
 //!   for the key, if it has one.
@@ -49,7 +54,7 @@ impl Inner {
     pub(super) async fn put_whole(self: &Arc<Self>, key: &str, body: Bytes) -> Result<(), Error> {
         let len = body.len() as u64;
         let once: PartBody<'_> = stream::once(async move { Ok(body) }).boxed();
-        self.put_through(key, Some(len), once).await
+        self.put_through(key, Some(len), once, false).await
     }
 
     /// Deletes the object: the entry first, then the upstream's. A read that fills the key
