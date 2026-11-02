@@ -264,20 +264,24 @@ async fn drains_with_close_and_linger(node: &Node<'_>, ports: (u16, u16)) {
     answered_open(&mut oci, "/v2/", "{}").await;
 
     node.signal_stop();
-    // The drain begins at some point after the signal: each answer before it is the 200 of a
-    // serving node, without `Connection: close`, and the first after it the 503.
+    // The drain begins at some point after the signal: `/readyz` is asked on a connection of its
+    // own each time until it says 503. An answer in the instant the drain begins may be a 200
+    // that already says `Connection: close` (the status and the header are read apart), so
+    // these answers are not judged.
     let draining = async {
         loop {
-            let reply = s3.request("GET", "/readyz", &[]).await.expect("an answer");
-            if reply.status == 503 {
-                break reply;
+            let mut probe = conn(v4, ports.0).await;
+            let reply = probe.request("GET", "/readyz", &[]).await;
+            if reply.is_some_and(|reply| reply.status == 503) {
+                break;
             }
-            assert_eq!(reply.header("connection"), None, "{reply:?}");
         }
     };
     let begun = tokio::time::timeout(SAFETY, draining).await;
-    let begun = begun.expect("the drain never began");
-    assert_eq!(begun.header("connection"), Some("close"), "{begun:?}");
+    begun.expect("the drain never began");
+    let reply = s3.request("GET", "/readyz", &[]).await.expect("an answer");
+    assert_eq!(reply.status, 503, "{reply:?}");
+    assert_eq!(reply.header("connection"), Some("close"), "{reply:?}");
     ends_cleanly_and_reads_on(&mut s3).await;
 
     // The binary begins the OCI front's drain before the S3 front's.
@@ -307,6 +311,35 @@ async fn drains_with_close_and_linger(node: &Node<'_>, ports: (u16, u16)) {
     }
 }
 
+/// The lines of `stderr` that name the late requests of a drain.
+fn late_lines(stderr: &str) -> String {
+    let late = stderr.lines().filter(|line| line.contains("too late"));
+    late.map(|line| format!("{line}\n")).collect()
+}
+
+/// Asserts the end of the settle of `node` on both fronts: a connection idle since its answer
+/// before SIGTERM, one to each front, reads a clean end of stream when the settle ends, and the
+/// request it writes after that is read and counted by the lingering close, so the node's exit
+/// note names one late connection on each front; and the node exits 0.
+async fn idle_connections_linger_at_the_end_of_the_settle(node: Node<'_>) {
+    let ip = LOOPBACKS[0];
+    let mut s3 = conn(ip, node.s3_all[0].port()).await;
+    answered_open(&mut s3, "/healthz", "ok").await;
+    let mut oci = conn(ip, node.oci_all[0].port()).await;
+    answered_open(&mut oci, "/v2/", "{}").await;
+    node.signal_stop();
+    ends_cleanly_and_reads_on(&mut s3).await;
+    ends_cleanly_and_reads_on(&mut oci).await;
+    let (code, stderr) = node.exit_and_stderr().await;
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(
+        late_lines(&stderr),
+        "tierstore: 1 connections sent a request too late in the drain of the S3 front\n\
+         tierstore: 1 connections sent a request too late in the drain of the OCI front\n",
+        "{stderr}"
+    );
+}
+
 /// Asserts that a build node lists `handover-v1` only with what the name promises. The binary's
 /// `--capabilities` names it. A first node holds the lock of a cache directory, has filled a blob
 /// into it, and has a stage file and a half-published sidecar there; then a second node on that
@@ -320,18 +353,23 @@ async fn drains_with_close_and_linger(node: &Node<'_>, ports: (u16, u16)) {
 ///   upstream (`writes_through_total` 1) and is not kept (`write_keep_skipped_total` 1 for
 ///   `read_only`, 0 for every other reason); no fill family counts anything; and the directory is
 ///   as it was, the holder's stage file and sidecar included;
-/// - the drain, on each front, while the drain has begun and the settle has not ended: the first
-///   answer that says the node is draining (`/readyz` 503), and the next answer of the OCI front,
-///   carry `Connection: close`; each connection then reads a clean end of stream, and a request
-///   it writes after that is read and counted by the lingering close (each late counter 1).
+/// - the drain, on each front, while the drain has begun and the settle has not ended (the new
+///   instance): once `/readyz` says 503, the next answer on a kept-alive connection of each front
+///   carries `Connection: close`; each connection then reads a clean end of stream, and a request
+///   it writes after that is read and counted by the lingering close (each late counter 1);
+/// - the drain at the end of the settle (the holder, whose settle is short): a connection to each
+///   front idle since before SIGTERM reads a clean end of stream when the settle ends, the
+///   request it writes after that is counted (the exit note names one on each front), and the
+///   node exits 0.
 ///
 /// Catches: `handover-v1` left out of the list; and, with it listed, a second instance that takes
 /// the cache for read-write, fills or keeps beside the holder, or clears the holder's stage or
 /// sidecar at its start; an IPv6 socket that is not `IPV6_V6ONLY` (the IPv4 wildcard on its port
 /// is then refused and the node never starts); an answer in the drain without `Connection: close`
 /// on either front, including one that adds it only at the end of the settle; and a drain that
-/// closes a connection without reading what the client still sends (the late request is not
-/// counted, and the client's next read may be a reset).
+/// closes a connection, answered or idle at the end of the settle, without reading what the
+/// client still sends (the late request is not counted, and the client's next read may be a
+/// reset).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handover_v1_is_listed_with_the_three_behaviours_it_promises() {
     let out = Command::new(env!("CARGO_BIN_EXE_tierstore"))
@@ -354,6 +392,7 @@ async fn handover_v1_is_listed_with_the_three_behaviours_it_promises() {
     seed(&fake, &hex_of(&missed), &missed).await;
     let mut first = Launch::loopback("50ms");
     first.local = WRITE_THROUGH.to_owned();
+    first.stderr = true;
     let holder = Node::launch(&fake, "handover-v1-holder", &first);
     let mut probe = conn(LOOPBACKS[0], holder.s3_all[0].port()).await;
     answered_open(&mut probe, "/readyz", "ready read-write").await;
@@ -386,5 +425,5 @@ async fn handover_v1_is_listed_with_the_three_behaviours_it_promises() {
 
     // The new instance's settle outlasts the test: it is killed.
     next.kill().await;
-    assert_eq!(holder.stop().await, Some(0));
+    idle_connections_linger_at_the_end_of_the_settle(holder).await;
 }

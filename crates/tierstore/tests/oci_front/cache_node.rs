@@ -5,6 +5,7 @@
 //! address is taken fails.
 
 use std::fs::Permissions;
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -97,11 +98,13 @@ pub(crate) struct Launch {
     pub local: String,
     /// `--drain-lb-wait`.
     pub settle: String,
+    /// Whether the node's stderr is kept, for [`Node::exit_and_stderr`]; else it goes nowhere.
+    pub stderr: bool,
 }
 
 impl Launch {
     /// One address on loopback for each front, port 0, the node's own cache directory, no more
-    /// keys, and the settle `settle`.
+    /// keys, the settle `settle`, and no stderr.
     pub(crate) fn loopback(settle: &str) -> Self {
         Self {
             listen: vec!["127.0.0.1:0".to_owned()],
@@ -109,6 +112,7 @@ impl Launch {
             cache: None,
             local: String::new(),
             settle: settle.to_owned(),
+            stderr: false,
         }
     }
 }
@@ -193,7 +197,11 @@ cache  = true
             .args(["--config", &config.display().to_string()])
             .args(["--drain-lb-wait", &launch.settle])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(if launch.stderr {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         let mut child = spawn(&mut command, 3).expect("spawned");
         let stdout = child.stdout.take().expect("stdout");
         let (line, _reader) = first_line(stdout, Duration::from_secs(30)).expect("a start line");
@@ -270,6 +278,22 @@ cache  = true
     async fn stop_waiting(mut self) -> Option<i32> {
         let waiting = tokio::task::spawn_blocking(move || self.child.wait());
         waiting.await.expect("joined").expect("waited").code()
+    }
+
+    /// Waits for the node, which has been sent SIGTERM and was launched with [`Launch::stderr`],
+    /// to exit: its exit status, and what it wrote on stderr.
+    pub(crate) async fn exit_and_stderr(mut self) -> (Option<i32>, String) {
+        let mut stderr = self
+            .child
+            .stderr
+            .take()
+            .expect("launched with its stderr kept");
+        let waiting = tokio::task::spawn_blocking(move || {
+            let mut text = String::new();
+            stderr.read_to_string(&mut text).expect("stderr");
+            (self.child.wait().expect("waited").code(), text)
+        });
+        waiting.await.expect("joined")
     }
 
     /// Kills the node with SIGKILL, for a node whose drain the test does not wait for, and waits
