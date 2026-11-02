@@ -6,6 +6,14 @@
 //! account that could change a link there could choose what the service runs. Every link is made,
 //! read and removed relative to that descriptor; a new link is made beside the old under a name of
 //! its own and renamed over it, and the directory is synced after it.
+//!
+//! A staged release is checked before the service is pointed at it ([`Releases::check`]): its
+//! path is walked from the host's root one component at a time, each directory opened relative
+//! to the one before with `O_DIRECTORY | O_NOFOLLOW` and checked on that descriptor, and the
+//! binary opened relative to the last with `O_NOFOLLOW`. Nothing on the way may be a link, and
+//! everything must be the release owner's (root) with no group or other write bit, so no other
+//! account can change what the checked path names afterwards. The root itself is the host's own
+//! and is not checked, as for the declaration.
 
 use std::cell::OnceCell;
 use std::ffi::OsStr;
@@ -13,19 +21,27 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{AtFlags, Mode, OFlags, fstat, fsync, readlinkat, renameat, symlinkat, unlinkat};
+use rustix::fs::{
+    AtFlags, FileType, Mode, OFlags, fstat, fsync, open, openat, readlinkat, renameat, statat,
+    symlinkat, unlinkat,
+};
 use rustix::io::Errno;
 
+use super::super::plain::is_plain;
 use super::super::ports::{Link, PortError, PortKind, Releases};
 use super::Fault;
+use super::host::RELEASE_BINARY;
 use super::state::{others_write, permissions};
 
 const KIND: PortKind = PortKind::Slots;
 
-/// The links of the directory `dir`, which `owner` must own.
+/// The links of the directory `dir`, which `owner` must own; staged releases are read under
+/// `root` and must be `release_owner`'s.
 pub struct ReleaseLinks {
     dir: PathBuf,
     owner: u32,
+    root: PathBuf,
+    release_owner: u32,
     fd: OnceCell<OwnedFd>,
 }
 
@@ -40,8 +56,90 @@ impl ReleaseLinks {
         ReleaseLinks {
             dir,
             owner,
+            root: PathBuf::from("/"),
+            release_owner: 0,
             fd: OnceCell::new(),
         }
+    }
+
+    /// The same, reading staged releases under `root` (`/` unless this says otherwise) and
+    /// requiring them to be `release_owner`'s (root, 0, unless this says otherwise).
+    #[must_use]
+    pub fn with_releases_under(mut self, root: PathBuf, release_owner: u32) -> ReleaseLinks {
+        self.root = root;
+        self.release_owner = release_owner;
+        self
+    }
+
+    /// Whether the object open as `fd`, at `at`, is the release owner's and writable by no group
+    /// or others.
+    fn trusted(&self, fd: &OwnedFd, at: &Path) -> Result<FileType, String> {
+        let stat = fstat(fd).map_err(|errno| format!("{}: {errno}", at.display()))?;
+        if stat.st_uid != self.release_owner {
+            return Err(format!(
+                "{} is owned by user {}, not {}",
+                at.display(),
+                stat.st_uid,
+                self.release_owner
+            ));
+        }
+        if others_write(permissions(&stat)) {
+            return Err(format!(
+                "{} can be written by a group or others",
+                at.display()
+            ));
+        }
+        Ok(FileType::from_raw_mode(stat.st_mode))
+    }
+
+    /// Opens `name` in `dir`, at `at`, without following a link, saying which it was when it is
+    /// one.
+    fn open_in(
+        dir: BorrowedFd<'_>,
+        name: &OsStr,
+        flags: OFlags,
+        at: &Path,
+    ) -> Result<OwnedFd, String> {
+        openat(
+            dir,
+            name,
+            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| {
+            let link = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)
+                .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Symlink);
+            if link {
+                format!("{} is a symbolic link", at.display())
+            } else {
+                format!("{}: {errno}", at.display())
+            }
+        })
+    }
+
+    /// The walk of [`Releases::check`].
+    fn walk(&self, release: &Path) -> Result<(), String> {
+        if !is_plain(release) {
+            return Err("it is not an absolute path of plain components".to_owned());
+        }
+        let mut dir = open(
+            self.root.as_path(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|errno| format!("the host root {}: {errno}", self.root.display()))?;
+        let mut at = PathBuf::from("/");
+        for part in release.iter().skip(1) {
+            at.push(part);
+            dir = Self::open_in(dir.as_fd(), part, OFlags::RDONLY | OFlags::DIRECTORY, &at)?;
+            self.trusted(&dir, &at)?;
+        }
+        at.push(RELEASE_BINARY);
+        let binary = Self::open_in(dir.as_fd(), OsStr::new(RELEASE_BINARY), OFlags::RDONLY, &at)?;
+        if self.trusted(&binary, &at)? != FileType::RegularFile {
+            return Err(format!("{} is not a regular file", at.display()));
+        }
+        Ok(())
     }
 
     fn path(&self, link: Link) -> PathBuf {
@@ -119,6 +217,15 @@ impl Releases for ReleaseLinks {
                     release.display()
                 ),
                 errno,
+            )
+        })
+    }
+
+    fn check(&self, release: &Path) -> Result<(), PortError> {
+        self.walk(release).map_err(|why| {
+            PortError::failed(
+                PortKind::Host,
+                format!("the release {} is not trusted: {why}", release.display()),
             )
         })
     }

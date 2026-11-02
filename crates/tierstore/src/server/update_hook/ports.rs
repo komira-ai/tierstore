@@ -293,6 +293,17 @@ pub trait Releases {
     /// # Errors
     /// The link could not be removed.
     fn remove(&self, link: Link) -> Result<(), PortError>;
+
+    /// Checks that `release` is one the service may be pointed at: reached from the host's root
+    /// through directories only (no symbolic link on the way, so no alias of `current` or
+    /// `previous`, no relative, dangling or cyclic path), each owned by the release owner (root)
+    /// and writable by no group or others, and holding the binary as a regular file of that
+    /// owner that no group or others can write. Nothing is run: the hook never executes a
+    /// release.
+    ///
+    /// # Errors
+    /// The release is not one to trust, or cannot be read. Reported as [`PortKind::Host`].
+    fn check(&self, release: &Path) -> Result<(), PortError>;
 }
 
 /// Everything a step of a single-instance host may touch: no nftables, no slot and no second
@@ -310,6 +321,9 @@ pub struct SinglePorts<'a> {
     pub clock: &'a dyn Clock,
     /// The state directory.
     pub state: &'a dyn StateDir,
+    /// The record directory `state` was opened for: the step refuses a declaration, read again
+    /// under the lock, that names another.
+    pub state_dir: &'a Path,
 }
 
 /// Everything a step may touch.

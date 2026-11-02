@@ -32,21 +32,21 @@ use super::ports::{Host, SinglePorts};
 use super::report::Done;
 use super::single::run_step;
 
-/// The longest `launchctl print`, `bootstrap` or `kickstart` may run.
-pub(super) const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(60);
-/// The longest `launchctl bootout` may run: it returns when the drain is over.
-pub(super) const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(300);
+/// The longest `launchctl print`, `bootstrap` or `kickstart` may run: each is quick.
+pub(super) const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest `launchctl bootout` may run: it may wait for the drain, which the plist's
+/// `ExitTimeOut` (90 s) bounds.
+pub(super) const BOOTOUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// How many looks, a poll apart, `stop` gives launchd to let the service go after `bootout`.
-pub(super) const GONE_ATTEMPTS: u32 = 60;
-/// The longest `<release>/tierstore --capabilities` may run: `prepare` asks it, after the
-/// binary's check.
+pub(super) const GONE_ATTEMPTS: u32 = 30;
+/// What `SystemHost` is built with; this host never asks a release its capabilities.
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a connect to the instance may take.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// The longest the instance may leave a request unanswered.
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The pause between two looks at launchd or the instance, unless the command line sets one.
-const POLL: Duration = Duration::from_secs(1);
+pub(super) const POLL: Duration = Duration::from_secs(1);
 
 /// Where the machine is and who owns the hook's files.
 pub(super) struct LaunchdConfig<'a> {
@@ -79,7 +79,6 @@ pub(super) fn run_on(
     let runner = config.runner;
     let host = SystemHost::new(config.root.clone(), runner, CAPABILITIES_TIMEOUT)
         .with_declaration_owner(config.declaration_owner)
-        .with_release_owner(config.release_owner)
         .with_declaration_path(LAUNCHD_DECLARATION_PATH);
     // The declaration names the state directory, so it is read before the state port exists;
     // the step reads it again, under the lock.
@@ -104,7 +103,8 @@ pub(super) fn run_on(
     };
     let service = LaunchdService::new(runner, &clock, times)
         .with_program(&config.launchctl.to_string_lossy());
-    let releases = ReleaseLinks::new(under(LAUNCHD_LINKS_DIR), config.owner);
+    let releases = ReleaseLinks::new(under(LAUNCHD_LINKS_DIR), config.owner)
+        .with_releases_under(config.root.clone(), config.release_owner);
     let instances = LoopbackInstances::new(CONNECT_TIMEOUT, READ_TIMEOUT);
     let state = StateFiles::private(under(&decl.state_dir.to_string_lossy()), config.owner);
     let ports = SinglePorts {
@@ -114,6 +114,7 @@ pub(super) fn run_on(
         host: &host,
         clock: &clock,
         state: &state,
+        state_dir: &decl.state_dir,
     };
     run_step(invocation.step, params, &ports)
 }

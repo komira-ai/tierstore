@@ -17,7 +17,7 @@ install -m 0644 -o root -g wheel updater.d/tierstore.toml /usr/local/etc/updater
 install -m 0644 -o root -g wheel com.komira.tierstore.plist /Library/LaunchDaemons/com.komira.tierstore.plist
 ```
 
-Then the key files in `/usr/local/tierstore/etc` (each `_tierstore`, mode 0600), the hook's first record as `/var/db/updater/hooks/tierstore/state.json` (root, mode 0600):
+Every release, the first and those the updater stages, must sit on a path of real directories owned by root that no group or others can write (`/usr/local/tierstore/releases/<commit>` is one; `/var` and `/tmp` are links on macOS), with its `tierstore` a file of root's: the hook checks that before it points the job at a release, and refuses anything else. Then the key files in `/usr/local/tierstore/etc` (each `_tierstore`, mode 0600), the hook's first record as `/var/db/updater/hooks/tierstore/state.json` (root, mode 0600):
 
 ```json
 {"schema":1,"kind":"single","updating":false,"markers":[]}

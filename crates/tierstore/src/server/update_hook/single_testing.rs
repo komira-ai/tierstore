@@ -22,6 +22,9 @@ use super::ports::{
 use super::report::Done;
 use super::single::{SingleRecord, run_step};
 
+/// The record directory the declaration names.
+pub const STATE_DIR: &str = "/var/db/updater/hooks/tierstore";
+
 /// The port the one instance serves on.
 pub const PORT: u16 = 9300;
 
@@ -75,6 +78,8 @@ struct World {
     calls: usize,
     fail_at: Option<usize>,
     halt_from: Option<usize>,
+    late_at: Option<usize>,
+    distrusted: BTreeSet<PathBuf>,
 }
 
 impl World {
@@ -130,6 +135,8 @@ impl SingleFake {
                 calls: 0,
                 fail_at: None,
                 halt_from: None,
+                late_at: None,
+                distrusted: BTreeSet::new(),
             }),
             locks: Rc::new(Cell::new(0)),
         }
@@ -144,6 +151,7 @@ impl SingleFake {
             host: self,
             clock: self,
             state: self,
+            state_dir: Path::new(STATE_DIR),
         }
     }
 
@@ -219,6 +227,22 @@ impl SingleFake {
         w.fail_at = n.map(|n| w.calls + n);
     }
 
+    /// The n-th call from now fails after its effect: a start, a stop, a link made or removed or
+    /// a record written has happened, and the step is told it failed (a rename made, its sync
+    /// failed). A call that changes nothing just fails. `None` lets every call through.
+    pub fn fail_late_at(&self, n: Option<usize>) {
+        let mut w = self.w.borrow_mut();
+        w.late_at = n.map(|n| w.calls + n);
+    }
+
+    /// `release` is not one the host vouches for: its check fails.
+    pub fn distrust(&self, release: &str) {
+        self.w
+            .borrow_mut()
+            .distrusted
+            .insert(PathBuf::from(release));
+    }
+
     /// The world stops from the n-th call on: that call and every later one fail without effect.
     pub fn halt_at(&self, n: Option<usize>) {
         let mut w = self.w.borrow_mut();
@@ -236,6 +260,11 @@ impl SingleFake {
     /// The instance of `release` never answers.
     pub fn mute(&self, release: &str) {
         self.w.borrow_mut().mute.insert(PathBuf::from(release));
+    }
+
+    /// The instance of `release` answers again.
+    pub fn unmute(&self, release: &str) {
+        self.w.borrow_mut().mute.remove(Path::new(release));
     }
 
     pub fn set_promotion(&self, promotion: Promotion) {
@@ -269,15 +298,38 @@ impl SingleFake {
 
     /// Counts one call and fails it if it is the chosen one.
     fn tick(&self, what: String, kind: PortKind) -> Result<(), PortError> {
+        if self.tick_changing(what, kind)? {
+            return Err(PortError::failed(kind, "injected failure"));
+        }
+        Ok(())
+    }
+
+    /// Counts one call that changes something: fails it before its effect if it is the chosen
+    /// one, and says whether it is to fail after its effect ([`SingleFake::fail_late_at`]).
+    fn tick_changing(&self, what: String, kind: PortKind) -> Result<bool, PortError> {
         let mut w = self.w.borrow_mut();
         w.calls += 1;
         w.log.push(what);
         if w.fail_at == Some(w.calls) || w.halt_from.is_some_and(|from| w.calls >= from) {
             Err(PortError::failed(kind, "injected failure"))
         } else {
+            Ok(w.late_at == Some(w.calls))
+        }
+    }
+
+    /// The failure of a call whose effect has happened, if it is the chosen one.
+    fn after(late: bool, kind: PortKind) -> Result<(), PortError> {
+        if late {
+            Err(PortError::failed(kind, "injected failure after its effect"))
+        } else {
             Ok(())
         }
     }
+}
+
+/// The record of the update from `OLD` to `NEW` (0.4.0) that `prepare` lays down.
+pub fn in_flight() -> SingleRecord {
+    SingleRecord::updating(PathBuf::from(OLD), PathBuf::from(NEW), "0.4.0".to_owned())
 }
 
 /// The params of an update to `release`, which is `version`.
@@ -293,19 +345,19 @@ pub fn params_for(release: &str, version: &str) -> Params {
 
 impl Service for SingleFake {
     fn start(&self) -> Result<(), PortError> {
-        self.tick("service.start".to_owned(), PortKind::Units)?;
+        let late = self.tick_changing("service.start".to_owned(), PortKind::Units)?;
         let mut w = self.w.borrow_mut();
         if w.running.is_none() {
             w.running = w.current.clone();
             w.starts += 1;
         }
-        Ok(())
+        Self::after(late, PortKind::Units)
     }
 
     fn stop(&self) -> Result<(), PortError> {
-        self.tick("service.stop".to_owned(), PortKind::Units)?;
+        let late = self.tick_changing("service.stop".to_owned(), PortKind::Units)?;
         self.w.borrow_mut().running = None;
-        Ok(())
+        Self::after(late, PortKind::Units)
     }
 }
 
@@ -316,18 +368,29 @@ impl Releases for SingleFake {
     }
 
     fn point(&self, link: Link, release: &Path) -> Result<(), PortError> {
-        self.tick(
+        let late = self.tick_changing(
             format!("links.point {} {}", link.name(), release.display()),
             PortKind::Slots,
         )?;
         *self.w.borrow_mut().link(link) = Some(release.to_owned());
-        Ok(())
+        Self::after(late, PortKind::Slots)
     }
 
     fn remove(&self, link: Link) -> Result<(), PortError> {
-        self.tick(format!("links.remove {}", link.name()), PortKind::Slots)?;
+        let late = self.tick_changing(format!("links.remove {}", link.name()), PortKind::Slots)?;
         *self.w.borrow_mut().link(link) = None;
-        Ok(())
+        Self::after(late, PortKind::Slots)
+    }
+
+    fn check(&self, release: &Path) -> Result<(), PortError> {
+        self.tick(format!("links.check {}", release.display()), PortKind::Host)?;
+        let w = self.w.borrow();
+        // A release the host vouches for is one the updater placed and nobody else can change.
+        if w.versions.contains_key(release) && !w.distrusted.contains(release) {
+            Ok(())
+        } else {
+            Err(PortError::failed(PortKind::Host, "not a trusted release"))
+        }
     }
 }
 
@@ -377,8 +440,9 @@ impl Host for SingleFake {
         Ok(self.w.borrow().declaration.clone())
     }
 
-    // A single-instance step asks the host for no boot and no conntrack: these fail, and are
-    // logged, so that a step that asked would fail and show it in the log.
+    // A single-instance step asks the host for no boot, no conntrack and no capabilities (it
+    // runs no release): these fail, and are logged, so that a step that asked would fail and
+    // show it in the log.
     fn boot_id(&self) -> Result<String, PortError> {
         self.tick("host.boot_id".to_owned(), PortKind::Host)?;
         Err(PortError::failed(PortKind::Host, "no boot on this host"))
@@ -397,16 +461,10 @@ impl Host for SingleFake {
             format!("host.capabilities {}", release.display()),
             PortKind::Host,
         )?;
-        // A staged release the host knows is one the updater placed; anything else is refused,
-        // as the host refuses a binary that is not root's.
-        if self.w.borrow().versions.contains_key(release) {
-            Ok(vec!["handover-v1".to_owned()])
-        } else {
-            Err(PortError::failed(
-                PortKind::Host,
-                "not a release the updater placed",
-            ))
-        }
+        Err(PortError::failed(
+            PortKind::Host,
+            "no release is run on this host",
+        ))
     }
 }
 
@@ -438,8 +496,8 @@ impl StateDir for SingleFake {
     }
 
     fn save(&self, bytes: &[u8]) -> Result<(), PortError> {
-        self.tick("state.save".to_owned(), PortKind::State)?;
+        let late = self.tick_changing("state.save".to_owned(), PortKind::State)?;
         self.w.borrow_mut().record = Some(bytes.to_vec());
-        Ok(())
+        Self::after(late, PortKind::State)
     }
 }

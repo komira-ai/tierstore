@@ -7,12 +7,12 @@ use std::path::PathBuf;
 
 use super::record::{Marker, Record};
 use super::single_testing::{
-    DECLARATION, NEW, NEWER, OLD, PORT, Promotion, SingleFake, Snapshot, params_for,
+    DECLARATION, NEW, NEWER, OLD, PORT, Promotion, SingleFake, Snapshot, in_flight, params_for,
 };
 use super::steps::{PROBE_ATTEMPTS, PROBE_HITS, READY_ATTEMPTS};
 use super::testing::DECLARATION as SLOT_DECLARATION;
 use super::{
-    Clock, Host, Link, Outcome, Reason, RecordError, SKIPPED_CLEANUP, SKIPPED_CUTOVER,
+    Clock, Host, Link, Outcome, RECORD_MAX, Reason, RecordError, SKIPPED_CLEANUP, SKIPPED_CUTOVER,
     SKIPPED_PREPARE, SingleRecord, Step,
 };
 
@@ -52,8 +52,9 @@ fn an_update_stops_the_service_swaps_current_starts_it_and_probes_it() {
             "state.lock",
             "host.declaration",
             "state.load",
-            &format!("host.capabilities {NEW}"),
+            &format!("links.check {NEW}"),
             "links.target current",
+            &format!("links.check {OLD}"),
             "state.save",
             &format!("links.point previous {OLD}"),
         ]
@@ -66,7 +67,6 @@ fn an_update_stops_the_service_swaps_current_starts_it_and_probes_it() {
         "state.lock".to_owned(),
         "host.declaration".to_owned(),
         "state.load".to_owned(),
-        "links.target previous".to_owned(),
         "service.stop".to_owned(),
         format!("links.point current {NEW}"),
         "service.start".to_owned(),
@@ -80,7 +80,7 @@ fn an_update_stops_the_service_swaps_current_starts_it_and_probes_it() {
         Snapshot {
             record: Some(SingleRecord {
                 markers: markers(&[Marker::Swapped]),
-                ..SingleRecord::updating()
+                ..in_flight()
             }),
             current: path(NEW),
             previous: path(OLD),
@@ -92,8 +92,10 @@ fn an_update_stops_the_service_swaps_current_starts_it_and_probes_it() {
         fake.snapshot(),
         Snapshot {
             record: Some(SingleRecord {
+                updating: false,
+                from: None,
                 markers: markers(&[Marker::Swapped, Marker::Verified, Marker::Stopping]),
-                ..SingleRecord::idle()
+                ..in_flight()
             }),
             current: path(NEW),
             previous: None,
@@ -131,17 +133,17 @@ fn a_failed_probe_puts_previous_back_restarts_and_reports_rolled_back() {
     assert_eq!(
         tail,
         [
-            "links.target previous",
             "links.target current",
             "service.stop",
             &format!("links.point current {OLD}"),
             "service.start",
+            "get 9300 /readyz",
         ]
     );
     assert_eq!(
         fake.snapshot(),
         Snapshot {
-            record: Some(SingleRecord::updating()),
+            record: Some(in_flight()),
             current: path(OLD),
             previous: path(OLD),
             running: path(OLD),
@@ -198,10 +200,10 @@ fn a_rollback_that_fails_inside_cutover_is_reported_as_failed() {
     let fake = SingleFake::new();
     fake.lie(NEW, "9.9.9");
     fake.advance(&[Prepare]);
-    // The cutover's eight calls up to its probe (the lock, the declaration, the record, the link
-    // previous, the stop, the link current, the start and /readyz), every look of the probe, and
-    // the rollback's two looks at the links: its stop is the call that fails.
-    let to_stop = 8 + PROBE_ATTEMPTS as usize + 3;
+    // The cutover's seven calls up to its probe (the lock, the declaration, the record, the stop,
+    // the link current, the start and /readyz), every look of the probe, and the rollback's look
+    // at the link current: its stop is the call that fails.
+    let to_stop = 7 + PROBE_ATTEMPTS as usize + 2;
     fake.fail_at(Some(to_stop));
     let done = fake.run(Cutover);
     assert_eq!(done.report.reason, Some(Reason::ProbeFailed));
@@ -294,31 +296,31 @@ fn the_fake_host_refuses_what_a_single_step_never_asks() {
     assert_eq!(fake.now_ms(), 0);
 }
 
-/// Asserts that `prepare` refuses a staged release the host does not vouch for (`host_failed`,
-/// before anything is written or linked), and that the session refuses a staged release reached
-/// through a release link (`state_invalid`): `current` pointed at itself, or `previous` at the
-/// link `cleanup` removes. It would catch an update to a binary another account could have
-/// written, and one that leaves `current` dangling.
+/// Asserts that `prepare` refuses, with `host_failed` and before anything is written or linked, a
+/// staged release the host does not vouch for (`Releases::check`: a path through a link, such as
+/// one through `current` or `previous`, a relative or dangling one, or one another account could
+/// change) and a host whose `current` names such a release. It would catch an update to a binary
+/// another account could have written, and a rollback target that is not a release.
 #[test]
 fn prepare_refuses_a_staged_release_it_cannot_vouch_for() {
-    let fake = SingleFake::new();
-    let before = fake.snapshot();
-    let unknown = params_for("/usr/local/tierstore/releases/unplaced", "0.4.0");
-    let done = fake.run_with(Prepare, Some(&unknown));
-    assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
-    assert_eq!(fake.snapshot(), before);
-    for through in [
+    for staged in [
+        "/usr/local/tierstore/releases/unplaced",
         "/usr/local/tierstore/current",
         "/usr/local/tierstore/previous/x",
     ] {
-        let done = fake.run_with(Prepare, Some(&params_for(through, "0.4.0")));
-        assert_eq!(done.report.reason, Some(Reason::StateInvalid), "{through}");
-        assert_eq!(
-            done.report.detail.as_deref(),
-            Some("the staged release is reached through a release link")
-        );
-        assert_eq!(fake.snapshot(), before);
+        let fake = SingleFake::new();
+        let before = fake.snapshot();
+        let done = fake.run_with(Prepare, Some(&params_for(staged, "0.4.0")));
+        assert_eq!(done.report.reason, Some(Reason::HostFailed), "{staged}");
+        assert_eq!(fake.snapshot(), before, "{staged}");
+        assert!(!fake.log().iter().any(|c| c.starts_with("service.")));
     }
+    let fake = SingleFake::new();
+    fake.distrust(OLD);
+    let before = fake.snapshot();
+    let done = fake.run(Prepare);
+    assert_eq!(done.report.reason, Some(Reason::HostFailed), "{done:?}");
+    assert_eq!(fake.snapshot(), before);
 }
 
 /// Asserts that `verify` waits for the new instance to say `read-write` for at most
@@ -459,10 +461,11 @@ fn rollback_after_prepare_leaves_the_service_running_and_clears_the_update() {
     assert_eq!(calls, ["state.lock", "host.declaration", "state.load"]);
 }
 
-/// Asserts that a `rollback` after `cutover` (and after `verify`) puts `previous` back as
+/// Asserts that a `rollback` after `cutover` (and after `verify`) puts the record's `from` back as
 /// `current`, restarts the service on it, removes `previous` and clears the update; and that one
-/// that finds no `previous` (a crash of `prepare` before it made the link) only makes sure the
-/// service runs. It would catch a rollback that leaves the new release running.
+/// whose `previous` link is missing (a crash of `prepare` before it made the link) goes by the
+/// record all the same. It would catch a rollback that leaves the new release running, or one
+/// that trusts a link over the record.
 #[test]
 fn rollback_after_cutover_puts_previous_back_and_restarts() {
     for setup in [&[Prepare, Cutover][..], &[Prepare, Cutover, Verify][..]] {
@@ -481,13 +484,15 @@ fn rollback_after_cutover_puts_previous_back_and_restarts() {
         );
     }
     let fake = SingleFake::new();
-    fake.set_record(&SingleRecord::updating());
+    fake.set_record(&in_flight());
+    fake.set_link(Link::Current, Some(NEW));
     let done = fake.run(Rollback);
     assert_eq!(
         done.report.detail.as_deref(),
-        Some("rolled back: current was never changed, and the service runs")
+        Some(format!("rolled back: the service runs {OLD} again").as_str())
     );
     assert_eq!(fake.snapshot().record, Some(SingleRecord::idle()));
+    assert_eq!(fake.snapshot().current, path(OLD));
 }
 
 /// Asserts that `prepare` refuses a host whose `current` names no release (`no_slot`) and an
@@ -527,7 +532,14 @@ fn a_second_update_starts_afresh_after_the_first_commits() {
         assert_eq!(done.outcome, Outcome::Success, "{step}: {done:?}");
         if step == Prepare {
             assert_eq!(fake.snapshot().previous, path(NEW));
-            assert_eq!(fake.record(), SingleRecord::updating());
+            assert_eq!(
+                fake.record(),
+                SingleRecord::updating(
+                    PathBuf::from(NEW),
+                    PathBuf::from(NEWER),
+                    "0.5.0".to_owned()
+                )
+            );
         }
     }
     assert_eq!(fake.snapshot().running, path(NEWER));
@@ -576,8 +588,9 @@ fn restore_starts_the_service_and_changes_nothing_else() {
 type Refusal = (&'static str, Box<dyn Fn(&SingleFake)>, Step, Reason);
 
 /// Asserts what the session refuses before any service or link call: a held lock (`locked`), a
-/// declaration of the two-slot hook (`state_invalid`), a staged release inside the state
-/// directory, no record, a record of the two-slot hook, a record whose markers are out of order,
+/// declaration of the two-slot hook (`state_invalid`), a declaration read under the lock that
+/// names another state directory than the one locked (it changed between the two reads), a staged
+/// release inside the state directory, no record, a record of the two-slot hook, a record whose markers are out of order,
 /// and a step without its params (`bad_params`). It would catch a step that acts on what it
 /// cannot trust.
 #[test]
@@ -608,11 +621,17 @@ fn the_session_refuses_before_acting() {
             Reason::StateInvalid,
         ),
         (
+            "a declaration that names another state directory",
+            Box::new(|f| f.set_declaration(&DECLARATION.replace("hooks/tierstore", "hooks/other"))),
+            Cutover,
+            Reason::StateInvalid,
+        ),
+        (
             "markers out of order",
             Box::new(|f| {
                 f.set_record(&SingleRecord {
                     markers: markers(&[Marker::Verified]),
-                    ..SingleRecord::updating()
+                    ..in_flight()
                 });
             }),
             Rollback,
@@ -647,10 +666,12 @@ fn the_session_refuses_before_acting() {
 }
 
 /// Asserts the record's bytes and its rules: the idle record is exactly the JSON the docs show,
-/// it reads back as itself, a record of the two-slot hook is refused here and this one there, a
-/// newer schema is refused as newer, and the marker rules refuse `verified` without `swapped`,
-/// `stopping` without `verified`, and markers with no update in flight and no commit. It would
-/// catch a hook that acts on the other platform's record.
+/// an update in flight carries `from`, `to` and `version` and reads back as itself, a record of
+/// the two-slot hook is refused here and this one there, and the rules refuse `verified` without
+/// `swapped`, `stopping` without `verified`, markers with no update in flight and no commit, an
+/// update in flight that does not name its releases, a commit that does not name its release, and
+/// releases named at rest. It would catch a hook that acts on the other platform's record, or on
+/// an update it cannot roll back.
 #[test]
 fn the_single_record_reads_back_and_refuses_the_other_kind() {
     let idle = SingleRecord::idle();
@@ -659,6 +680,12 @@ fn the_single_record_reads_back_and_refuses_the_other_kind() {
         "{\n  \"kind\": \"single\",\n  \"markers\": [],\n  \"schema\": 1,\n  \"updating\": false\n}\n"
     );
     assert_eq!(SingleRecord::decode(&idle.encode()), Ok(idle.clone()));
+    let flying = in_flight();
+    let text = String::from_utf8(flying.encode()).unwrap();
+    assert!(text.contains(&format!("\"from\": \"{OLD}\"")), "{text}");
+    assert!(text.contains(&format!("\"to\": \"{NEW}\"")), "{text}");
+    assert!(text.contains("\"version\": \"0.4.0\""), "{text}");
+    assert_eq!(SingleRecord::decode(flying.encode().as_slice()), Ok(flying));
     assert!(matches!(
         SingleRecord::decode(&Record::idle(9301).encode()),
         Err(RecordError::Corrupt(_))
@@ -667,69 +694,296 @@ fn the_single_record_reads_back_and_refuses_the_other_kind() {
         Record::decode(&idle.encode()),
         Err(RecordError::Corrupt(_))
     ));
-    assert_eq!(
-        SingleRecord::decode(b"{\"schema\":2,\"kind\":\"single\"}"),
-        Err(RecordError::Newer { found: 2 })
-    );
-    let rules = [
+    let committed = SingleRecord {
+        updating: false,
+        from: None,
+        markers: markers(&[Marker::Swapped, Marker::Verified, Marker::Stopping]),
+        ..in_flight()
+    };
+    assert_eq!(committed.check(), Ok(()));
+    let rules: [(SingleRecord, &str); 7] = [
         (
-            vec![Marker::Verified],
-            true,
+            SingleRecord {
+                markers: markers(&[Marker::Verified]),
+                ..in_flight()
+            },
             "verified is set but swapped is not",
         ),
         (
-            vec![Marker::Swapped, Marker::Stopping],
-            true,
+            SingleRecord {
+                markers: markers(&[Marker::Swapped, Marker::Stopping]),
+                ..in_flight()
+            },
             "stopping is set but verified is not",
         ),
         (
-            vec![Marker::Swapped],
-            false,
+            SingleRecord {
+                markers: markers(&[Marker::Swapped]),
+                ..SingleRecord::idle()
+            },
             "markers are set with no update in flight",
         ),
+        (
+            SingleRecord {
+                from: None,
+                ..in_flight()
+            },
+            "updating is set but from, to and version is not",
+        ),
+        (
+            SingleRecord {
+                version: None,
+                ..committed.clone()
+            },
+            "stopping is set but to and version is not",
+        ),
+        (
+            SingleRecord {
+                from: Some(PathBuf::from(OLD)),
+                ..committed.clone()
+            },
+            "from is set but updating is not",
+        ),
+        (
+            SingleRecord {
+                to: Some(PathBuf::from(NEW)),
+                ..SingleRecord::idle()
+            },
+            "to or version is set but updating or stopping is not",
+        ),
     ];
-    for (set, updating, why) in rules {
-        let record = SingleRecord {
-            updating,
-            markers: markers(&set),
-            ..SingleRecord::idle()
-        };
-        assert_eq!(record.check().unwrap_err().to_string(), why);
+    for (record, why) in rules {
+        assert_eq!(record.check().unwrap_err().to_string(), why, "{record:?}");
     }
-    let committed = SingleRecord {
-        markers: markers(&[Marker::Swapped, Marker::Verified, Marker::Stopping]),
-        ..SingleRecord::idle()
-    };
-    assert_eq!(committed.check(), Ok(()));
     assert!(DECLARATION.contains("[9300]"));
 }
 
-/// Asserts that `cutover` and `verify` refuse the records they do not follow from: a `cutover`
-/// with no update in flight, one whose update has no `previous` to go back to (a `prepare` that
-/// crashed before making it), and one on a record a crashed `cleanup` left committed but still in
-/// flight; a `verify` with nothing in flight. Each is `out_of_order` and changes nothing. It
-/// would catch a swap with no way back, and a restart after the commit.
+/// Asserts what `SingleRecord::decode` takes and refuses on its own: a key it does not know (a
+/// later hook's optional one) is ignored; malformed JSON, a missing required key and a kind other
+/// than `single` are `Corrupt`; schema 0 is `Older` and schema 2 `Newer`; a record of exactly
+/// `RECORD_MAX` bytes is read and one byte more is `TooBig`. It would catch a reader that refuses
+/// an additive field during a recovery, or one that reads an unbounded file.
+#[test]
+fn the_single_record_decoder_takes_additive_keys_and_refuses_the_rest() {
+    let idle = SingleRecord::idle();
+    let with_more =
+        br#"{"schema":1,"kind":"single","updating":false,"markers":[],"later":{"x":1}}"#;
+    assert_eq!(SingleRecord::decode(with_more), Ok(idle.clone()));
+    for bad in [
+        &b"{\"schema\":1,"[..],
+        br#"{"schema":1,"kind":"single","markers":[]}"#,
+        br#"{"schema":1,"kind":"slots","updating":false,"markers":[]}"#,
+        br#"{"kind":"single","updating":false,"markers":[]}"#,
+    ] {
+        assert!(
+            matches!(SingleRecord::decode(bad), Err(RecordError::Corrupt(_))),
+            "{}",
+            String::from_utf8_lossy(bad)
+        );
+    }
+    assert_eq!(
+        SingleRecord::decode(br#"{"schema":0,"kind":"single"}"#),
+        Err(RecordError::Older { found: 0 })
+    );
+    assert_eq!(
+        SingleRecord::decode(br#"{"schema":2,"kind":"single"}"#),
+        Err(RecordError::Newer { found: 2 })
+    );
+    let mut full = idle.encode();
+    full.resize(RECORD_MAX, b' ');
+    assert_eq!(SingleRecord::decode(&full), Ok(idle));
+    full.push(b' ');
+    assert_eq!(SingleRecord::decode(&full), Err(RecordError::TooBig));
+}
+
+/// Asserts that `cutover` and `verify` refuse the records they do not follow from: either with
+/// no update in flight, and a `cutover` on a record a crashed `cleanup` left committed but still
+/// in flight (`out_of_order`, irreversible, nothing changed). It would catch a restart after the
+/// commit.
 #[test]
 fn cutover_and_verify_refuse_what_they_do_not_follow_from() {
     let fake = SingleFake::new();
     assert_eq!(fake.run(Cutover).report.reason, Some(Reason::OutOfOrder));
     assert_eq!(fake.run(Verify).report.reason, Some(Reason::OutOfOrder));
-    fake.set_record(&SingleRecord::updating());
-    let before = fake.snapshot();
-    let done = fake.run(Cutover);
-    assert_eq!(done.report.reason, Some(Reason::OutOfOrder));
-    assert_eq!(
-        done.report.detail.as_deref(),
-        Some("the link previous names no release: prepare first")
-    );
-    assert_eq!(fake.snapshot(), before);
     let half_cleaned = SingleRecord {
         markers: markers(&[Marker::Swapped, Marker::Verified, Marker::Stopping]),
-        ..SingleRecord::updating()
+        ..in_flight()
     };
     fake.set_record(&half_cleaned);
     let done = fake.run(Cutover);
     assert_eq!(done.report.reason, Some(Reason::OutOfOrder));
     assert!(!done.report.reversible);
     assert_eq!(fake.record(), half_cleaned);
+}
+
+/// Asserts that a `prepare` interrupted after it recorded the update and before it replaced a
+/// stale `previous` (one a crash of an older update left, naming another release), run again,
+/// recorded and linked the release that ran, so that a `cutover` and a `rollback` end on it,
+/// whether the interruption is a failed call or a stop of the world. It would catch a re-run that
+/// trusts the stale link over the release `current` named.
+#[test]
+fn an_interrupted_prepare_over_a_stale_previous_rolls_back_to_the_release_that_ran() {
+    for halt in [false, true] {
+        let fake = SingleFake::new();
+        fake.set_link(Link::Previous, Some(NEWER));
+        // The lock, the declaration, the record, two checks and the link current, the save: the
+        // eighth call is the link previous.
+        if halt {
+            fake.halt_at(Some(8));
+        } else {
+            fake.fail_at(Some(8));
+        }
+        let first = fake.run(Prepare);
+        assert_eq!(first.report.reason, Some(Reason::LinkFailed), "{first:?}");
+        assert_eq!(fake.record(), in_flight());
+        assert_eq!(fake.snapshot().previous, path(NEWER));
+        fake.halt_at(None);
+        fake.fail_at(None);
+        fake.advance(&[Prepare]);
+        assert_eq!(fake.snapshot().previous, path(OLD));
+        fake.advance(&[Cutover, Rollback]);
+        let end = fake.snapshot();
+        assert_eq!(
+            (end.current, end.running),
+            (path(OLD), path(OLD)),
+            "halt {halt}"
+        );
+    }
+}
+
+/// Asserts that a write of `stopping` that reaches the disk and then reports a failure (a rename
+/// made, its sync failed) is reported as the commit it is: `"reversible":false`, and the next
+/// `cleanup` finishes it. It would catch a report that tells the updater it may still roll back
+/// a commit that is on disk.
+#[test]
+fn a_commit_on_disk_whose_write_reported_a_failure_is_irreversible() {
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare, Cutover, Verify]);
+    // The lock, the declaration, the record, the link current, /readyz and the three probes:
+    // the ninth call is the write of `stopping`.
+    fake.fail_late_at(Some(9));
+    let done = fake.run(Cleanup);
+    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
+    assert!(!done.report.reversible);
+    assert!(fake.record().committed());
+    fake.fail_late_at(None);
+    fake.advance(&[Cleanup]);
+    assert!(!fake.record().updating);
+    assert_eq!(fake.snapshot().previous, None);
+}
+
+/// Asserts that every step after `prepare` refuses params that are not the update on record,
+/// with `bad_params` and before any service or link call: another release, another version of
+/// the same release, and another release of the same version, for `cutover`, `verify` and
+/// `cleanup`; and that a second `prepare` before the cutover records the new release, keeping
+/// the release to go back to. It would catch a cutover to a release `prepare` never checked.
+#[test]
+fn later_steps_refuse_params_that_are_not_the_update_on_record() {
+    let others = [
+        params_for(NEWER, "0.5.0"),
+        params_for(NEW, "0.4.1"),
+        params_for(NEWER, "0.4.0"),
+    ];
+    for setup in [
+        &[Prepare][..],
+        &[Prepare, Cutover][..],
+        &[Prepare, Cutover, Verify][..],
+    ] {
+        let step = [Cutover, Verify, Cleanup][setup.len() - 1];
+        for other in &others {
+            let fake = SingleFake::new();
+            fake.advance(setup);
+            let before = fake.snapshot();
+            let from = fake.log().len();
+            let done = fake.run_with(step, Some(other));
+            assert_eq!(
+                done.report.reason,
+                Some(Reason::BadParams),
+                "{step}: {done:?}"
+            );
+            assert_eq!(fake.snapshot(), before);
+            let calls = &fake.log()[from..];
+            assert!(
+                !calls
+                    .iter()
+                    .any(|c| c.starts_with("service.") || c.starts_with("links.")),
+                "{calls:?}"
+            );
+        }
+    }
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare]);
+    let newer = params_for(NEWER, "0.5.0");
+    assert_eq!(
+        fake.run_with(Prepare, Some(&newer)).outcome,
+        Outcome::Success
+    );
+    assert_eq!(
+        fake.record(),
+        SingleRecord::updating(PathBuf::from(OLD), PathBuf::from(NEWER), "0.5.0".to_owned())
+    );
+}
+
+/// Asserts that a `rollback` whose release launchd starts but which never answers `/readyz`
+/// fails with `not_ready` and keeps the update on record and the link `previous`, so that a
+/// second `rollback`, once it answers, finishes; and that a failed `cutover` whose own rollback
+/// meets the same says so in its detail. It would catch a rollback that clears the way back
+/// before the release it went back to serves.
+#[test]
+fn a_rollback_whose_release_does_not_answer_keeps_the_update() {
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare, Cutover]);
+    fake.mute(OLD);
+    let done = fake.run(Rollback);
+    assert_eq!(done.report.reason, Some(Reason::NotReady), "{done:?}");
+    assert_eq!(
+        done.report.detail.as_deref(),
+        Some(format!("{OLD} does not answer /readyz on {PORT}").as_str())
+    );
+    assert!(fake.record().updating);
+    assert_eq!(fake.snapshot().previous, path(OLD));
+    fake.unmute(OLD);
+    fake.advance(&[Rollback]);
+    assert_eq!(fake.record(), SingleRecord::idle());
+    let fake = SingleFake::new();
+    fake.lie(NEW, "9.9.9");
+    fake.mute(OLD);
+    fake.advance(&[Prepare]);
+    let done = fake.run(Cutover);
+    let detail = done.report.detail.unwrap();
+    assert!(
+        detail.ends_with(&format!(
+            "; the rollback to {OLD} failed: {OLD} does not answer /readyz on {PORT}"
+        )),
+        "{detail}"
+    );
+}
+
+/// Asserts that a `cutover` run again after `swapped` looks again: with the service stopped since
+/// (a reboot) it starts it and sees it serve, with no stop; with `current` moved to another
+/// release it swaps back; and with the instance no longer answering it swaps again, fails, rolls
+/// back to the release that ran and clears `swapped`, so that the record says no swap. It would
+/// catch a re-run that reports a swap it no longer sees.
+#[test]
+fn a_cutover_run_again_looks_again() {
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare, Cutover]);
+    fake.reboot();
+    let (done, calls) = calls_of(&fake, Cutover);
+    assert_eq!(done.outcome, Outcome::Success, "{done:?}");
+    assert!(!calls.contains(&"service.stop".to_owned()), "{calls:?}");
+    assert_eq!(fake.snapshot().running, path(NEW));
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare, Cutover]);
+    fake.set_link(Link::Current, Some(NEWER));
+    fake.advance(&[Cutover]);
+    assert_eq!(fake.snapshot().current, path(NEW));
+    let fake = SingleFake::new();
+    fake.advance(&[Prepare, Cutover]);
+    fake.mute(NEW);
+    let done = fake.run(Cutover);
+    assert_eq!(done.report.reason, Some(Reason::NotReady), "{done:?}");
+    assert_eq!(fake.record(), in_flight());
+    let end = fake.snapshot();
+    assert_eq!((end.current, end.running), (path(OLD), path(OLD)));
 }

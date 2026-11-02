@@ -294,9 +294,10 @@ fn the_plist_the_declaration_the_file_and_the_hook_name_one_job() {
 
 /// Asserts that launchd lets the drain finish before it kills the process: `ExitTimeOut` is at
 /// least the plist's `--drain-lb-wait` plus `--drain-deadline` plus the 5 s a lease release may
-/// take, and the declaration's `cutover` timeout covers that, the start, and the hook's wait for
-/// `/readyz` and its probe (120 and 60 looks a second apart). It would catch a SIGKILL of a drain
-/// in progress, or an updater that gives up on a cutover still within its bounds.
+/// take, and the declaration keeps the Mac on a plain restart. The declaration's step timeouts
+/// against every bound of the hook (the calls, the requests, the rollback) are checked where those
+/// bounds are, in `src/server/update_hook/launchd_system_tests.rs`. It would catch a SIGKILL of a
+/// drain in progress.
 #[test]
 fn launchd_and_the_updater_wait_for_the_drain() {
     let drain = duration(&flag("--drain-lb-wait"))
@@ -305,13 +306,6 @@ fn launchd_and_the_updater_wait_for_the_drain() {
     let exit = Duration::from_secs(integer(&plist(), "ExitTimeOut").try_into().unwrap());
     assert!(exit >= drain, "{exit:?} is less than {drain:?}");
     let decl: toml::Table = read("updater.d/tierstore.toml").parse().unwrap();
-    let hook = table(&decl, "hook");
-    let cutover = table(hook, "timeout_secs")["cutover"].as_integer().unwrap();
-    let needed = exit + Duration::from_secs(120 + 60);
-    assert!(
-        Duration::from_secs(cutover.try_into().unwrap()) >= needed,
-        "cutover {cutover} s is less than {needed:?}"
-    );
     assert_eq!(
         table(&decl, "hook")["params"]["mode"].as_str(),
         Some("restart")

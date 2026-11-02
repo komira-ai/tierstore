@@ -235,3 +235,47 @@ fn a_failed_cutover_interrupted_anywhere_is_finished_by_rollback() {
         }
     }
 }
+
+/// For each scenario: every call in turn reports a failure after its effect has happened (a
+/// service started or stopped, a link made or removed, a record written, and then an error, as a
+/// rename followed by a failed sync gives), then a clean run. The end state is that of a run
+/// that was never interrupted, and the first report says `"reversible":false` exactly when the
+/// record on disk says `stopping`. It would catch a step that a reported failure leaves in a
+/// state it cannot finish, or that hides a commit it made.
+#[test]
+fn each_single_step_converges_after_a_failure_reported_after_its_effect() {
+    for s in SCENARIOS {
+        let clean = start(s);
+        let from = clean.calls();
+        clean.advance(&[s.act]);
+        let end: Snapshot = clean.snapshot();
+        let calls = clean.calls() - from;
+        let was_committed = start(s).snapshot().record.is_some_and(|r| r.committed());
+        for n in 1..=calls {
+            let fake = start(s);
+            fake.fail_late_at(Some(n));
+            let first = fake.run(s.act);
+            check_line(&first);
+            assert_eq!(fake.live_locks(), 0, "{} at {n}", s.name);
+            // A step that fails before it can read the record says nothing of a commit that an
+            // earlier run made.
+            if first.outcome != Outcome::Success && !was_committed {
+                let committed = fake.snapshot().record.is_some_and(|r| r.committed());
+                assert_eq!(
+                    first.report.reversible, !committed,
+                    "{} at {n}: {first:?}",
+                    s.name
+                );
+            }
+            fake.fail_late_at(None);
+            let second = fake.run(s.act);
+            assert_eq!(
+                second.outcome,
+                Outcome::Success,
+                "{} at {n}: {second:?}",
+                s.name
+            );
+            assert_eq!(fake.snapshot(), end, "{} at {n}", s.name);
+        }
+    }
+}

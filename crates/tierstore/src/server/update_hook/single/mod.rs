@@ -9,23 +9,33 @@
 //! The service runs the binary that the release link `current` points at, on one port of
 //! loopback, so:
 //!
-//! - `prepare` checks the staged release's binary (a regular file of root's that no group or
-//!   others can write: the host's check before it asks a release its capabilities), records the
-//!   update and points the link `previous` at the release `current` names. Nothing is started. The two-slot `prepare`'s guard table, its connection-tracking check and
-//!   its second instance have nothing to act on here, and are skipped ([`SKIPPED_PREPARE`]).
-//! - `cutover` stops the service, points `current` at the staged release and starts the service,
-//!   then waits for `/readyz` and for [`PROBE_HITS`](super::steps::PROBE_HITS) answers in a row
-//!   from the staged version on the port. A failure puts `previous` back as `current`, restarts
-//!   the service and reports the failure with the words `rolled back`; the update stays on
-//!   record, for the updater's `rollback` to clear. There is no redirect to move
+//! - `prepare` checks the staged release and the release `current` names
+//!   ([`Releases::check`](super::Releases::check): reached through root's directories only, no
+//!   link on the way, the binary a file of root's that no group or others can write; nothing is
+//!   run), records the update (`from` the release `current` names, `to` the staged release, and
+//!   its `version`) and points the link `previous` at `from`. Nothing is started. A re-run keeps
+//!   the `from` of the record. The two-slot `prepare`'s guard table, its connection-tracking check
+//!   and its second instance have nothing to act on here, and are skipped ([`SKIPPED_PREPARE`]).
+//! - Every later step refuses params whose staged release or version is not the record's
+//!   (`bad_params`), before it acts.
+//! - `cutover` stops the service, points `current` at `to` and starts the service, then waits
+//!   for `/readyz` and for [`PROBE_HITS`](super::steps::PROBE_HITS) answers in a row from
+//!   `version` on the port, and writes `swapped`. A re-run after `swapped` looks again (`current`,
+//!   `/readyz`, the probe) and swaps again if it must. A failure puts `from` back as `current`,
+//!   restarts the service, waits for it to answer `/readyz`, clears `swapped` if it was written,
+//!   and reports the failure with the words `rolled back` (or what failed in the rollback); the
+//!   update stays on record, for the updater's `rollback` to clear. There is no redirect to move
 //!   ([`SKIPPED_CUTOVER`]).
 //! - `verify` looks at `current`, `/readyz` and the build on the port, waits for the promotion
 //!   as a restart-mode `verify` does, and records `verified`.
-//! - `rollback` points `current` at `previous` again (when it is not already), restarts the
-//!   service, removes `previous` and clears the update. Valid only before the commit.
+//! - `rollback` points `current` at `from` again (when it is not already), restarts the service,
+//!   and waits for it to answer `/readyz`; only then does it remove `previous` and clear the
+//!   update. Valid only before the commit.
 //! - `cleanup` confirms afresh what `verify` saw, writes `stopping` (the commit), removes
 //!   `previous` and clears the update. There is no previous instance to stop
-//!   ([`SKIPPED_CLEANUP`]).
+//!   ([`SKIPPED_CLEANUP`]). When `cleanup` fails, the record is read back, so that a write of
+//!   `stopping` that reached the disk and then reported a failure (a rename made, its sync
+//!   failed) is reported as the commit it is.
 //! - `restore`, the boot entry, starts the service if it is not running. launchd starts the job
 //!   at boot by itself (`RunAtLoad`), so this is a no-op there.
 //!
@@ -39,10 +49,10 @@ use std::path::{Path, PathBuf};
 
 use super::args::Step;
 use super::declaration::LaunchdDeclaration;
-use super::machine::LAUNCHD_LINKS_DIR;
 use super::params::Params;
 use super::ports::{Link, PortError, SinglePorts};
 use super::record::Marker;
+use super::report::Outcome;
 use super::report::{Done, Reason};
 use super::steps::READY_ATTEMPTS;
 use super::steps::look::{Look, observed};
@@ -129,19 +139,46 @@ impl Ctx<'_, '_> {
         Ok(self.ports.state.save(&record.encode())?)
     }
 
-    /// Puts the release `previous` names back as `current`, restarting the service when `current`
-    /// named another, and otherwise makes sure the service runs. Returns that release, when
-    /// `previous` names one.
-    fn restore_previous(&self) -> Result<Option<PathBuf>, PortError> {
-        let previous = self.target(Link::Previous)?;
-        match &previous {
-            Some(release) if self.target(Link::Current)?.as_ref() != Some(release) => {
-                self.restart_on(release)?;
-            }
-            _ => self.ports.service.start()?,
+    /// Puts `from` back as `current`, restarting the service when `current` named another
+    /// release and otherwise making sure it runs, then waits for it to answer `/readyz`: a
+    /// rollback is not done until the release it went back to serves.
+    fn restore_previous(&self, from: &Path) -> Result<(), Done> {
+        if self.target(Link::Current)?.as_deref() == Some(from) {
+            self.ports.service.start()?;
+        } else {
+            self.restart_on(from)?;
         }
-        Ok(previous)
+        if self.look().wait_ready(self.port, READY_ATTEMPTS).is_none() {
+            return Err(Done::fail(
+                Reason::NotReady,
+                format!(
+                    "{} does not answer /readyz on {}",
+                    from.display(),
+                    self.port
+                ),
+            ));
+        }
+        Ok(())
     }
+}
+
+/// Refuses params that name another release or version than the update on record.
+fn same_update(record: &SingleRecord, params: &Params) -> Result<(), Done> {
+    let to = record.to.as_deref();
+    let version = record.version.as_deref();
+    if to == Some(params.staged_release.as_path()) && version == Some(&params.target_version) {
+        return Ok(());
+    }
+    Err(Done::fail(
+        Reason::BadParams,
+        format!(
+            "the params name {} {}, and the update on record is {} {}",
+            params.staged_release.display(),
+            params.target_version,
+            to.map_or_else(|| "none".into(), |to| to.display().to_string()),
+            version.unwrap_or("none")
+        ),
+    ))
 }
 
 /// Runs `step`. `params` is the parsed params file; the five steps need it, `restore` does not.
@@ -165,22 +202,20 @@ fn attempt(
 ) -> Result<(Done, bool), Done> {
     let _lock = ports.state.lock()?;
     let decl = LaunchdDeclaration::parse(&ports.host.declaration()?)?;
+    if decl.state_dir != ports.state_dir {
+        return Err(Done::fail(
+            Reason::StateInvalid,
+            format!(
+                "the declaration changed under the step: it names {}, and the lock is that of {}",
+                decl.state_dir.display(),
+                ports.state_dir.display()
+            ),
+        ));
+    }
     if let Some(params) = params
         && params.staged_release.starts_with(&decl.state_dir)
     {
         return Err(Invalid::Staged.into());
-    }
-    if let Some(params) = params
-        && [Link::Current, Link::Previous].iter().any(|link| {
-            params
-                .staged_release
-                .starts_with(Path::new(LAUNCHD_LINKS_DIR).join(link.name()))
-        })
-    {
-        return Err(Done::fail(
-            Reason::StateInvalid,
-            "the staged release is reached through a release link",
-        ));
     }
     let mut record = match ports.state.load()? {
         Some(bytes) => Some(SingleRecord::decode(&bytes)?),
@@ -210,7 +245,16 @@ fn attempt(
         (Step::Cleanup, Some(params), Some(record)) => cleanup(&c, params, record),
     }
     .unwrap_or_else(std::convert::identity);
-    Ok((done, record.is_some_and(|r| r.committed())))
+    let mut committed = record.is_some_and(|r| r.committed());
+    if step == Step::Cleanup && !committed && done.outcome != Outcome::Success {
+        // A failed write of `stopping` may have reached the disk (a rename made, its sync
+        // failed): the record on disk says what was decided. One that cannot be read leaves
+        // the answer as the step saw it; a `rollback` refuses a commit it finds on disk anyway.
+        if let Ok(Some(bytes)) = ports.state.load() {
+            committed = SingleRecord::decode(&bytes).is_ok_and(|r| r.committed());
+        }
+    }
+    Ok((done, committed))
 }
 
 fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Result<Done, Done> {
@@ -220,30 +264,35 @@ fn prepare(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
             "an update is past its cutover: finish or roll it back first",
         ));
     }
-    // The staged release's binary must be one the updater placed: a regular file of the release
-    // owner (root) that no group or others can write, which the host checks before it asks the
-    // binary anything. The answer is not needed: one instance always restarts.
-    c.ports.host.capabilities(&params.staged_release)?;
-    let current = c.target(Link::Current)?.ok_or_else(|| {
-        Done::fail(
-            Reason::NoSlot,
-            "the link current names no release: the first install lays it down",
-        )
-    })?;
-    // A re-run keeps the `previous` an earlier run made: by then `current` may already be the
-    // staged release. A fresh update replaces whatever a crash left there.
-    let keep = record.updating && c.target(Link::Previous)?.is_some();
-    let next = SingleRecord::updating();
+    let staged = &params.staged_release;
+    c.ports.releases.check(staged)?;
+    // A re-run keeps the `from` an earlier run recorded: by then `current` may already name the
+    // staged release. A fresh update takes it from `current`, whatever a crash left in `previous`.
+    let from = match (&record.from, record.updating) {
+        (Some(from), true) => from.clone(),
+        _ => c.target(Link::Current)?.ok_or_else(|| {
+            Done::fail(
+                Reason::NoSlot,
+                "the link current names no release: the first install lays it down",
+            )
+        })?,
+    };
+    c.ports.releases.check(&from)?;
+    let next = SingleRecord::updating(from.clone(), staged.clone(), params.target_version.clone());
     c.save(&next)?;
     *record = next;
-    if !keep {
-        c.ports.releases.point(Link::Previous, &current)?;
-    }
+    c.ports.releases.point(Link::Previous, &from)?;
     Ok(Done::ok(format!(
         "prepared {} to follow {}, mode restart (single_instance); {SKIPPED_PREPARE}",
-        params.staged_release.display(),
-        current.display()
+        staged.display(),
+        from.display()
     )))
+}
+
+/// The swap: stop, point `current` at the staged release, start, and see it serve `version`.
+fn swap(c: &Ctx<'_, '_>, staged: &Path, version: &str) -> Result<(), Done> {
+    c.restart_on(staged)?;
+    c.serves(version)
 }
 
 fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Result<Done, Done> {
@@ -253,35 +302,45 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
             "cutover follows a prepare and precedes the commit",
         ));
     }
+    same_update(record, params)?;
     let staged = &params.staged_release;
-    if record.has(Marker::Swapped) {
-        // A second run: the swap is made; only the service's running is set again.
-        c.ports.service.start()?;
-    } else {
-        let Some(previous) = c.target(Link::Previous)? else {
-            return Err(Done::fail(
-                Reason::OutOfOrder,
-                "the link previous names no release: prepare first",
-            ));
-        };
-        let swapped = c
-            .restart_on(staged)
-            .map_err(Done::from)
-            .and_then(|()| c.serves(&params.target_version));
-        if let Err(mut done) = swapped {
+    let version = &params.target_version;
+    let swapped = record.has(Marker::Swapped);
+    // A second run after `swapped` looks again: the service may have been stopped, `current`
+    // moved or the instance gone since. It swaps again when what it sees is not the staged
+    // release serving.
+    let seen = swapped
+        && c.current_is(staged)?
+        && c.ports.service.start().is_ok()
+        && c.serves(version).is_ok();
+    if !seen {
+        if let Err(mut done) = swap(c, staged, version) {
+            let from = record.from.clone().unwrap_or_default();
             // The previous release goes back in front, whatever failed; the update stays on
             // record, for the updater's `rollback` to clear (or a second `cutover` to retry).
-            let back = match c.restore_previous() {
-                Ok(_) => format!("rolled back: the service runs {} again", previous.display()),
-                Err(failed) => format!("the rollback to {} failed: {failed}", previous.display()),
+            let back = match c.restore_previous(&from) {
+                Ok(()) => format!("rolled back: the service runs {} again", from.display()),
+                Err(failed) => format!(
+                    "the rollback to {} failed: {}",
+                    from.display(),
+                    failed.report.detail.unwrap_or_default()
+                ),
             };
             let detail = done.report.detail.take().unwrap_or_default();
             done.report.detail = Some(format!("{detail}; {back}"));
+            if swapped {
+                let mut unswapped = record.clone();
+                unswapped.markers.clear();
+                c.save(&unswapped)?;
+                *record = unswapped;
+            }
             return Err(done);
         }
-        let next = record.with(Marker::Swapped);
-        c.save(&next)?;
-        *record = next;
+        if !swapped {
+            let next = record.with(Marker::Swapped);
+            c.save(&next)?;
+            *record = next;
+        }
     }
     Ok(Done::ok(format!(
         "the service runs {} on {}; {SKIPPED_CUTOVER}",
@@ -291,6 +350,9 @@ fn cutover(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
 }
 
 fn verify(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Result<Done, Done> {
+    if record.updating || record.committed() {
+        same_update(record, params)?;
+    }
     let version = &params.target_version;
     let bound = params.promotion_bound_secs;
     if record.committed() {
@@ -336,19 +398,19 @@ fn rollback(c: &Ctx<'_, '_>, record: &mut SingleRecord) -> Result<Done, Done> {
     if !record.updating {
         return Ok(Done::ok("no update in flight: nothing to roll back"));
     }
-    let previous = c.restore_previous()?;
+    let from = record.from.clone().unwrap_or_default();
+    // The update stays on record until the release it went back to answers: a rollback that
+    // started a release that does not serve can be run again.
+    c.restore_previous(&from)?;
     c.ports.releases.remove(Link::Previous)?;
     // The record is cleared last: a crash before it re-runs every part above.
     let idle = SingleRecord::idle();
     c.save(&idle)?;
     *record = idle;
-    Ok(match previous {
-        Some(previous) => Done::ok(format!(
-            "rolled back: the service runs {} again",
-            previous.display()
-        )),
-        None => Done::ok("rolled back: current was never changed, and the service runs"),
-    })
+    Ok(Done::ok(format!(
+        "rolled back: the service runs {} again",
+        from.display()
+    )))
 }
 
 fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Result<Done, Done> {
@@ -358,6 +420,7 @@ fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
             "no verify has succeeded: cleanup does not commit on its own authority",
         ));
     }
+    same_update(record, params)?;
     let staged = &params.staged_release;
     if !record.committed() {
         let unconfirmed = |why: String| Done::fail(Reason::NotConfirmed, why);
@@ -382,6 +445,7 @@ fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
         c.ports.releases.remove(Link::Previous)?;
         let mut retired = record.clone();
         retired.updating = false;
+        retired.from = None;
         c.save(&retired)?;
         *record = retired;
     }

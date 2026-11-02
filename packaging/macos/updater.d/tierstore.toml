@@ -20,9 +20,9 @@ uid = "_tierstore"
 registration_ttl_secs = 300
 # The one port of the one instance, on loopback (`listen` and `slot` in tierstore.toml).
 health_ports = [9300]
-# After cutover, verify must succeed by then (at least verify plus rollback), or the updater
-# rolls back.
-verify_deadline_secs = 1600
+# After cutover, verify must succeed by then (at least verify plus rollback, below), or the
+# updater rolls back.
+verify_deadline_secs = 3200
 # The one ceiling on a pending promotion: the updater applies it, the hook never does.
 promotion_ceiling_secs = 3600
 # A cleanup that fails after its commit is run again forward this many times.
@@ -50,14 +50,22 @@ write_paths = ["/usr/local/tierstore"]
 environment = {}
 
 [hook.timeout_secs]
+# Each is at least the longest the step may take within the hook's own bounds: every launchctl
+# call to its time limit (10 s; a bootout 120 s, then up to 30 looks for the job to go), every
+# look at the instance to its connect and read timeouts and its pause (8 s), 120 looks for
+# /readyz and 60 for the probe. src/server/update_hook/launchd_system_tests.rs adds them up and
+# holds these numbers to them.
+# Only files are read and written.
 prepare = 60
-# The bootout (the drain: ExitTimeOut is 90 s), the start, the wait for /readyz (120 looks) and
-# the probe (60 looks), with a margin.
-cutover = 600
-# promotion_bound_secs and a margin.
-verify = 1000
-rollback = 600
-cleanup = 120
+# A re-run's look again (start, /readyz, probe), the swap (stop, start, /readyz, probe) and the
+# rollback that follows a failure (stop, start, /readyz): 4820 s at most.
+cutover = 5000
+# A look, the probe, promotion_bound_secs and a last look: 1396 s at most.
+verify = 1500
+# The restart of the previous release and its /readyz: 1440 s at most.
+rollback = 1500
+# A look and the probe: 488 s at most.
+cleanup = 600
 
 [hook.params]
 # How long verify waits, after the restart, for the new instance to say read-write.

@@ -142,3 +142,131 @@ fn a_links_directory_others_could_change_is_refused() {
     assert!(text.starts_with("the links directory "), "{text}");
     assert!(fs::read_dir(&dir).unwrap().next().is_none());
 }
+
+/// A host root under a scratch directory with the release `/opt/r/one` placed as the updater
+/// places it: every directory mode 0755 and the binary mode 0755, all the tests' own user's;
+/// the links directory `/opt/links` with `current` naming the release, as a Mac's does.
+fn host_with_a_release(name: &str) -> (tierstore_testkit::dir::TestDir, PathBuf) {
+    let (guard, root) = scratch(name);
+    for dir in ["opt", "opt/r", "opt/r/one", "opt/links"] {
+        fs::create_dir(root.join(dir)).unwrap();
+        fs::set_permissions(root.join(dir), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fs::write(root.join("opt/r/one/tierstore"), b"").unwrap();
+    fs::set_permissions(
+        root.join("opt/r/one/tierstore"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("/opt/r/one", root.join("opt/links/current")).unwrap();
+    (guard, root)
+}
+
+fn checked(root: &Path, release: &str, owner: u32) -> Result<(), String> {
+    ReleaseLinks::new(root.join("opt/links"), me())
+        .with_releases_under(root.to_path_buf(), owner)
+        .check(Path::new(release))
+        .map_err(|error| match error {
+            PortError::Failed {
+                kind: PortKind::Host,
+                message,
+            } => message,
+            other => panic!("not a host failure: {other:?}"),
+        })
+}
+
+/// Asserts that a release placed as the updater places it passes the check, and that the check
+/// refuses, naming the release and why: a path through the link `current` (an alias of a
+/// release, which would make `current` name itself), a path through a link elsewhere, a relative
+/// path, a dangling one, one through a link that loops, a directory or binary that a group or
+/// others can write, a release of another owner, a binary that is a link, and one that is not a
+/// regular file. Nothing is run. It would catch a release that another account could change
+/// between the check and the start, and a release reached through the links the hook moves.
+#[test]
+fn a_staged_release_is_checked_on_disk_without_following_a_link() {
+    let (_guard, root) = host_with_a_release("links-check");
+    assert_eq!(checked(&root, "/opt/r/one", me()), Ok(()));
+    let why = |release: &str, owner: u32| checked(&root, release, owner).unwrap_err();
+    let prefix = |release: &str| format!("the release {release} is not trusted: ");
+    assert_eq!(
+        why("/opt/links/current", me()),
+        format!(
+            "{}/opt/links/current is a symbolic link",
+            prefix("/opt/links/current")
+        )
+    );
+    symlink("/opt/r", root.join("opt/alias")).unwrap();
+    assert_eq!(
+        why("/opt/alias/one", me()),
+        format!("{}/opt/alias is a symbolic link", prefix("/opt/alias/one"))
+    );
+    assert_eq!(
+        why("opt/r/one", me()),
+        format!(
+            "{}it is not an absolute path of plain components",
+            prefix("opt/r/one")
+        )
+    );
+    assert!(
+        why("/opt/r/gone", me()).starts_with(&format!("{}/opt/r/gone: ", prefix("/opt/r/gone")))
+    );
+    symlink("/opt/loop", root.join("opt/loop")).unwrap();
+    assert_eq!(
+        why("/opt/loop", me()),
+        format!("{}/opt/loop is a symbolic link", prefix("/opt/loop"))
+    );
+    assert_eq!(
+        why("/opt/r/one", me() + 1),
+        format!(
+            "{}/opt is owned by user {}, not {}",
+            prefix("/opt/r/one"),
+            me(),
+            me() + 1
+        )
+    );
+    fs::set_permissions(root.join("opt/r"), fs::Permissions::from_mode(0o775)).unwrap();
+    assert_eq!(
+        why("/opt/r/one", me()),
+        format!(
+            "{}/opt/r can be written by a group or others",
+            prefix("/opt/r/one")
+        )
+    );
+    fs::set_permissions(root.join("opt/r"), fs::Permissions::from_mode(0o755)).unwrap();
+    let binary = root.join("opt/r/one/tierstore");
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o757)).unwrap();
+    assert_eq!(
+        why("/opt/r/one", me()),
+        format!(
+            "{}/opt/r/one/tierstore can be written by a group or others",
+            prefix("/opt/r/one")
+        )
+    );
+    fs::remove_file(&binary).unwrap();
+    symlink("/bin/true", &binary).unwrap();
+    assert_eq!(
+        why("/opt/r/one", me()),
+        format!(
+            "{}/opt/r/one/tierstore is a symbolic link",
+            prefix("/opt/r/one")
+        )
+    );
+    fs::remove_file(&binary).unwrap();
+    fs::create_dir(&binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        why("/opt/r/one", me()),
+        format!(
+            "{}/opt/r/one/tierstore is not a regular file",
+            prefix("/opt/r/one")
+        )
+    );
+}
+
+/// Asserts that a host root that cannot be opened fails the check with a message that names it.
+#[test]
+fn a_host_root_that_cannot_be_opened_fails_the_check() {
+    let (_guard, root) = scratch("links-check-root");
+    let text = checked(&root.join("absent"), "/opt/r/one", me()).unwrap_err();
+    assert!(text.contains("the host root "), "{text}");
+}
