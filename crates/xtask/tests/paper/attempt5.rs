@@ -9,18 +9,15 @@
 //! unit. An edit to the page or the result file that changes any of them fails until it is made
 //! here as well.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use super::{
-    Tag, attr, element_end, element_text, fixture, numbers, paper, plain, scratch, squeeze, tags,
-    trace_problems,
-};
+use super::{Tag, attr, element_end, element_text, numbers, plain, squeeze, tags};
 
 /// The result file of the attempt-5 cells.
 pub(super) const RESULTS: &str = "ts-farm-a5.tsv";
 
 /// The id of the element that holds the attempt-5 subsection.
-const BLOCK: &str = "attempt5";
+pub(super) const BLOCK: &str = "attempt5";
 
 /// A cell this module holds: its id, its basis (`None` for a measured cell, traced to
 /// `RESULTS`), the numbers it prints in order, and its whole text, lower case with white space
@@ -158,6 +155,95 @@ const CELLS: &[Cell] = &[
     ),
 ];
 
+/// The whole text of the attempt-5 block, as `squeeze(plain(..))` reads it, in pieces that join
+/// with nothing between them. Every word of the block is the record: its prose around the cells,
+/// the empty baseline cells, the method notes.
+const BLOCK_TEXT: &[&str] = &[
+    "we built one target, komira_sdk_exec, three times and counted what reached the cold ",
+    "store. the build has 5,194 actions, and in every run all of them were executed ",
+    "remotely, on one node with 88 cores, with no action cache and none run locally; the ",
+    "other nodes took no work during the runs. the baseline is kbf with its cold store on ",
+    "the hdd minio and no tierstore, from an earlier session of runs, ending 9.0 h before ",
+    "the two tierstore runs. the cold run read through the nodes tierstore with an empty ",
+    "local_cache, and the warm run read through it again with the local_cache holding what ",
+    "the cold run had filled. each arm is one run. quantity, one run per armbaseline: minio, ",
+    "no tierstore (kbf v0.0.49)cold: tierstore, empty local_cache (kbf v0.0.52)warm: ",
+    "tierstore, local_cache filled (kbf v0.0.52) actions, all executed ",
+    "remotely5,1945,1945,194 gets that reached minio306,488177,930140,509 gets that reached ",
+    "minio, against the baselinethe reference42% fewer54% fewer local_cache hit rate, by ",
+    "objectno lookups (no tierstore)41.4% (22,928 of 55,430 lookups)44.0% (20,045 of 45,589 ",
+    "lookups) bytes tierstore served from the local_cache, of all it servednone (no ",
+    "tierstore)11.5 mb of 84.1 mb (13.7%)6.3 mb of 53.1 mb (11.8%) wall time of the build, ",
+    "seconds (not a comparison; see below)6,2196,5196,748 what this shows. tierstore cut the ",
+    "gets that reached minio in both of its runs, against the baseline, by the shares in the ",
+    "table, and the warm run, with the local_cache already filled, cut more. the count is ",
+    "minios cluster-wide counter and the baseline is from an earlier session (below). the ",
+    "local_cache answered a larger share of lookups than of bytes, so the objects it hit ",
+    "were smaller on average than those it served. what this does not show: build time. we ",
+    "make no claim about build time from these runs, in either direction. each arm is a ",
+    "single run. the baseline ran 9.0 h before the tierstore runs and on an older kbf, ",
+    "v0.0.49 against v0.0.52. the build is compute-bound, and kbfs own 100 gib local hot ",
+    "tier on the node serves most repeat reads before a read reaches tierstore at all. the ",
+    "wall times are in the table as recorded and are not evidence about tierstore. kbf ",
+    "v0.0.49 against v0.0.52. between v0.0.49 and v0.0.52 the storage read path was not ",
+    "changed in what it reads, from where, how many requests it makes, or in what order, and ",
+    "the object-store client crates are byte-identical. the release added counters of ",
+    "requests, errors and latency around every cold-store request (a few atomic operations ",
+    "and two clock reads per request, negligible against an object stores round-trip time), ",
+    "and a key-file option that affects start-up only. how this was measured, and how far to ",
+    "trust it every run executed every action. the action cache was off and each run started ",
+    "a fresh build daemon, and the keys of most actions were changed between runs, so no run ",
+    "reused anothers results. each builds own record says how many actions it executed ",
+    "remotely and how many locally; the table has them. what the hit rate counts. the ",
+    "tierstore figures are the difference of the node tierstores own counters read before ",
+    "and after each run: hits, misses, and bytes served from the local_cache and from the ",
+    "cold store. a read that kbfs own hot tier answered never reached tierstore and is in ",
+    "none of them. what the get count counts. minio does not expose a get counter per bucket ",
+    "here, so the counts are its cluster-wide counter and include any other client of that ",
+    "minio during a run. one node, not the farm. the other nodes were taken out of service ",
+    "for the runs. a check of the nodes leases on both kbf frontends before and after each ",
+    "run found no other build; it is a before-and-after snapshot and can miss a build that ",
+    "starts and ends inside a run. the baseline is older. it was not repeated with the cold ",
+    "and warm runs: it is from the session before, with the same pins, target and scheme for ",
+    "changing keys, on kbf v0.0.49. still open. a day of builds, the hit rate of each tier, ",
+    "and how many of the gets that reached minio were tierstores own misses are not ",
+    "measured.",
+];
+
+/// Sentences outside the block that scope the run: how many builds, runs and nodes it covers,
+/// and what the conclusion draws from it. Each must appear word for word in the page.
+const SCOPE: &[&str] = &[
+    "our build farm is the first application and the only workload we have measured, \
+     and one build read through v1 (section 5) is the only farm traffic through it \
+     we have measured, so sections 1 and 5 are a case study marked with a case study \
+     label, and farm-specific detail elsewhere sits in side notes.",
+    "v1 runs in place on all six nodes; one build has been measured reading through \
+     it (section 5).",
+    "for the build runs below, kbf on the one node that ran them read its cold store \
+     through that nodes tierstore; before them the farm read straight from the hdd \
+     minio.",
+    "for the build runs above, kbf on the one node that ran them read its cold store \
+     through that nodes tierstore.",
+    "we hold the local_caches hit rate and the gets at the cold minio for one build \
+     per arm (the build runs above) and no count over a day of builds or by tier.",
+    "the count of what it did serve exists for one build per arm only.",
+    "this paper measures how many reads reached the cold store for one build only, \
+     on one node, one run per arm (section 5).",
+    "for one build per arm, section 5 has the local_caches hit rate by object and by \
+     byte and the gets that reached the cold minio.",
+    "low for the one-build local_cache hit rate: one run per arm, one node, a \
+     cluster-wide get counter.",
+    "a get the local_cache answers is a request that the object stores disks and the \
+     network to them do not carry, so that capacity is left for everything else on \
+     the farm.",
+    "the runs do not show a change in build time, and we draw none from them \
+     (section 5 says why).",
+    "a read cache does nothing for that path, and how much of a build it takes we \
+     did not measure.",
+    "we counted requests at the object store, not its bytes or its bandwidth, and \
+     each arm is one run.",
+];
+
 /// The headings of the table's columns: which arm is which, and on which kbf.
 const ARMS: &[&str] = &[
     "quantity, one run per arm",
@@ -174,6 +260,47 @@ const ROW_LABELS: &[&str] = &[
     "local_cache hit rate, by object",
     "bytes tierstore served from the local_cache, of all it served",
     "wall time of the build, seconds (not a comparison; see below)",
+];
+
+/// The cells of each body row of the table, column by column (label, baseline, cold, warm): a
+/// value moved to another arm's column is refused even when its own cell is unchanged.
+const ROW_CELLS: &[[Option<&str>; 4]] = &[
+    [
+        None,
+        Some("att5.actions.komira_sdk_exec.baseline"),
+        Some("att5.actions.komira_sdk_exec.cold"),
+        Some("att5.actions.komira_sdk_exec.warm"),
+    ],
+    [
+        None,
+        Some("att5.minio_get.komira_sdk_exec.baseline"),
+        Some("att5.minio_get.komira_sdk_exec.cold"),
+        Some("att5.minio_get.komira_sdk_exec.warm"),
+    ],
+    [
+        None,
+        None,
+        Some("att5.minio_get_cut.komira_sdk_exec.cold"),
+        Some("att5.minio_get_cut.komira_sdk_exec.warm"),
+    ],
+    [
+        None,
+        None,
+        Some("att5.lc_object_hit_rate.komira_sdk_exec.cold"),
+        Some("att5.lc_object_hit_rate.komira_sdk_exec.warm"),
+    ],
+    [
+        None,
+        None,
+        Some("att5.lc_bytes.komira_sdk_exec.cold"),
+        Some("att5.lc_bytes.komira_sdk_exec.warm"),
+    ],
+    [
+        None,
+        Some("att5.wall_s.komira_sdk_exec.baseline"),
+        Some("att5.wall_s.komira_sdk_exec.cold"),
+        Some("att5.wall_s.komira_sdk_exec.warm"),
+    ],
 ];
 
 /// Phrases of the block's method notes that carry a caveat the numbers depend on.
@@ -224,6 +351,76 @@ const ROWS: &[(&str, f64, &str)] = &[
     ("lc.hit_rate_bytes_pct.warm", 11.8, "percent"),
 ];
 
+/// The fifth column of each row: how the value was taken. It is part of the record (a per-bucket
+/// count or a median of runs would be another measurement).
+const HOWS: &[(&str, &str)] = &[
+    (
+        "actions",
+        "actions of the build in every arm; every one executed remotely, none from the action cache, none locally",
+    ),
+    (
+        "node_cores",
+        "cores of the one node that executed every action of every arm",
+    ),
+    (
+        "baseline_age_h",
+        "hours from the end of the baseline run to the start of the cold run",
+    ),
+    (
+        "kbf_hot_tier_gib",
+        "size of kbf's own local hot tier on the node, which kbf reads before it asks its cold store",
+    ),
+    ("wall_s.baseline", "wall time of the build, one run"),
+    ("wall_s.cold", "wall time of the build, one run"),
+    ("wall_s.warm", "wall time of the build, one run"),
+    ("minio_get.baseline", "MinIO GETs over the run, all buckets"),
+    ("minio_get.cold", "MinIO GETs over the run, all buckets"),
+    ("minio_get.warm", "MinIO GETs over the run, all buckets"),
+    ("lc.hits.cold", "local_cache hits (cache_hits_total)"),
+    ("lc.misses.cold", "local_cache misses (cache_misses_total)"),
+    ("lc.lookups.cold", "hits plus misses"),
+    ("lc.hits.warm", "local_cache hits (cache_hits_total)"),
+    ("lc.misses.warm", "local_cache misses (cache_misses_total)"),
+    ("lc.lookups.warm", "hits plus misses"),
+    (
+        "lc.bytes_local.cold",
+        "bytes served from the local_cache (cache_bytes_served_local_total)",
+    ),
+    (
+        "lc.bytes_upstream.cold",
+        "bytes served from the cold store through tierstore (cache_bytes_served_upstream_total)",
+    ),
+    ("lc.bytes_served.cold", "local plus upstream"),
+    (
+        "lc.bytes_local.warm",
+        "bytes served from the local_cache (cache_bytes_served_local_total)",
+    ),
+    (
+        "lc.bytes_upstream.warm",
+        "bytes served from the cold store through tierstore (cache_bytes_served_upstream_total)",
+    ),
+    ("lc.bytes_served.warm", "local plus upstream"),
+    (
+        "minio_get_cut_pct.cold",
+        "(306488 - 177930) / 306488 = 41.9%, rounded",
+    ),
+    (
+        "minio_get_cut_pct.warm",
+        "(306488 - 140509) / 306488 = 54.2%, rounded",
+    ),
+    ("lc.hit_rate_obj_pct.cold", "22928 / 55430"),
+    ("lc.hit_rate_obj_pct.warm", "20045 / 45589"),
+    ("lc.mb_local.cold", "11517872 bytes / 10^6"),
+    ("lc.mb_served.cold", "84119989 bytes / 10^6"),
+    ("lc.mb_local.warm", "6289943 bytes / 10^6"),
+    ("lc.mb_served.warm", "53127706 bytes / 10^6"),
+    ("lc.hit_rate_bytes_pct.cold", "11517872 / 84119989"),
+    ("lc.hit_rate_bytes_pct.warm", "6289943 / 53127706"),
+];
+
+/// A line the result file's header must keep: it says what each value is.
+const HEADER: &str = "One run per arm, so no medians.";
+
 /// The indexes of the start tags whose `data-cell` is `cell`.
 fn cells_named(all: &[Tag<'_>], cell: &str) -> Vec<usize> {
     (0..all.len())
@@ -235,24 +432,28 @@ fn known(id: &str) -> bool {
     CELLS.iter().any(|c| c.id == id)
 }
 
-/// The rows of a result file as (id, value, unit), or why it cannot be read.
-fn rows_with_units(text: &str) -> Result<Vec<(String, f64, String)>, String> {
+/// The rows of a result file as (id, value, unit, how), or why it cannot be read.
+fn rows_with_units(text: &str) -> Result<Vec<(String, f64, String, String)>, String> {
     let mut out = Vec::new();
     for (n, line) in text.lines().enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let columns: Vec<&str> = line.split('\t').collect();
-        let [_, id, value, unit, ..] = columns[..] else {
+        let [_, id, value, unit, ref rest @ ..] = columns[..] else {
             return Err(format!(
                 "line {}: fewer than 4 tab-separated columns",
                 n + 1
             ));
         };
+        // NaN and infinity parse, and compare unequal to everything, so they are refused here.
         let value = value
             .parse::<f64>()
-            .map_err(|_| format!("line {}: value {value:?} is not a number", n + 1))?;
-        out.push((id.to_owned(), value, unit.to_owned()));
+            .ok()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| format!("line {}: value {value:?} is not a finite number", n + 1))?;
+        let how = rest.first().copied().unwrap_or_default();
+        out.push((id.to_owned(), value, unit.to_owned(), how.to_owned()));
     }
     Ok(out)
 }
@@ -305,7 +506,13 @@ pub(super) fn problems(html: &str, results: &Path) -> Vec<String> {
             ));
         }
     }
-    if squeeze(&plain(html)).contains("nothing on the storage read path changed") {
+    let page = squeeze(&plain(html));
+    for sentence in SCOPE {
+        if !page.contains(sentence) {
+            problems.push(format!("the page lost the scope of the run: {sentence:?}"));
+        }
+    }
+    if page.contains("nothing on the storage read path changed") {
         problems.push(
             "the page says nothing on the storage read path changed; the cold-store counters did"
                 .to_owned(),
@@ -376,6 +583,23 @@ fn block_problems(html: &str, all: &[Tag<'_>], b: usize, end: usize) -> Vec<Stri
     }
     let inner = &html[all[b].end..end];
     let text = squeeze(&plain(inner));
+    let record = BLOCK_TEXT.concat();
+    if text != record {
+        let at = text
+            .char_indices()
+            .zip(record.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(text.len().min(record.len()), |((i, _), _)| i);
+        let from = text[..at]
+            .char_indices()
+            .rev()
+            .nth(40)
+            .map_or(0, |(i, _)| i);
+        problems.push(format!(
+            "the attempt-5 block differs from the record at {:?}",
+            text[from..].chars().take(100).collect::<String>()
+        ));
+    }
     for word in super::claims::SPEED_WORDS {
         if super::claims::has_word(&text, word) {
             problems.push(format!(
@@ -413,24 +637,63 @@ fn block_problems(html: &str, all: &[Tag<'_>], b: usize, end: usize) -> Vec<Stri
             "the attempt-5 table labels its rows {labels:?}, the record is {ROW_LABELS:?}"
         ));
     }
+    // Each value sits in its arm's column: the cells of each body row, in order, are the record's.
+    let rows: Vec<Vec<Option<&str>>> = (0..inner_tags.len().saturating_sub(1))
+        .filter(|&k| {
+            let (row, first) = (&inner_tags[k], &inner_tags[k + 1]);
+            row.name == "tr" && !row.closing && first.name == "td" && !first.closing
+        })
+        .map(|k| {
+            inner_tags[k + 1..]
+                .iter()
+                .take_while(|t| !(t.name == "tr" && t.closing))
+                .filter(|t| t.name == "td" && !t.closing)
+                .map(|t| attr(t.attrs, "data-cell"))
+                .collect()
+        })
+        .collect();
+    let want: Vec<Vec<Option<&str>>> = ROW_CELLS.iter().map(|r| r.to_vec()).collect();
+    if rows != want {
+        problems.push(format!(
+            "the attempt-5 table puts its cells in the columns {rows:?}, the record is {want:?}"
+        ));
+    }
     problems
 }
 
 /// The problems of the result file: a row missing, doubled, with another value or unit, or one
 /// the run does not have (a wall-time difference or ratio among them).
 fn row_problems(results: &Path) -> Vec<String> {
-    let rows = match std::fs::read_to_string(results.join(RESULTS))
-        .map_err(|e| e.to_string())
-        .and_then(|text| rows_with_units(&text))
-    {
+    let text = match std::fs::read_to_string(results.join(RESULTS)) {
+        Ok(text) => text,
+        Err(why) => return vec![format!("{RESULTS}: {why}")],
+    };
+    let rows = match rows_with_units(&text) {
         Ok(rows) => rows,
         Err(why) => return vec![format!("{RESULTS}: {why}")],
     };
     let mut problems = Vec::new();
+    if !text
+        .lines()
+        .any(|l| l.starts_with('#') && l.contains(HEADER))
+    {
+        problems.push(format!("{RESULTS}: the header lost {HEADER:?}"));
+    }
+    for (id, how) in HOWS {
+        if let Some(row) = rows.iter().find(|r| r.0 == *id)
+            && row.3 != *how
+        {
+            problems.push(format!(
+                "{RESULTS}: {id} says it was taken as {:?}, the record is {how:?}",
+                row.3
+            ));
+        }
+    }
     for (id, value, unit) in ROWS {
         match rows.iter().filter(|r| r.0 == *id).collect::<Vec<_>>()[..] {
             [row] => {
-                if (row.1 - value).abs() >= 1e-9 {
+                let same = (row.1 - value).abs() < 1e-9;
+                if !same {
                     problems.push(format!(
                         "{RESULTS}: {id} is {}, the run measured {value}",
                         row.1
@@ -446,7 +709,7 @@ fn row_problems(results: &Path) -> Vec<String> {
             ref other => problems.push(format!("{RESULTS}: {} rows {id}, not one", other.len())),
         }
     }
-    for (id, _, _) in &rows {
+    for (id, _, _, _) in &rows {
         if !ROWS.iter().any(|r| r.0 == id) {
             problems.push(format!(
                 "{RESULTS}: {id} is a row the run does not have (no wall-time difference or ratio is one)"
@@ -454,332 +717,4 @@ fn row_problems(results: &Path) -> Vec<String> {
         }
     }
     problems
-}
-
-/// The fixture's results copied to a scratch directory, with `edit` applied to the attempt-5
-/// file (`None` deletes it).
-fn results_with(name: &str, edit: impl Fn(&str) -> Option<String>) -> PathBuf {
-    let dir = scratch(name);
-    for entry in std::fs::read_dir(fixture().join("results")).expect("results") {
-        let path = entry.expect("entry").path();
-        let text = std::fs::read_to_string(&path).expect("result file");
-        let file = path.file_name().expect("name");
-        let text = if file == RESULTS {
-            edit(&text)
-        } else {
-            Some(text)
-        };
-        if let Some(text) = text {
-            std::fs::write(dir.join(file), text).expect("write");
-        }
-    }
-    dir
-}
-
-/// `html` with the one occurrence of `old` replaced by `new`.
-pub(super) fn once(html: &str, old: &str, new: &str) -> String {
-    assert_eq!(
-        html.matches(old).count(),
-        1,
-        "{old:?} occurs once in the page"
-    );
-    html.replacen(old, new, 1)
-}
-
-/// What the check says when the row `old` (id, tab, value) is edited to `new`.
-fn edit_says(old: &str, new: &str) -> String {
-    let (id, was) = old.split_once('\t').expect("id and value");
-    let now = new.split_once('\t').expect("id and value").1;
-    format!("ts-farm-a5.tsv: {id} is {now}, the run measured {was}")
-}
-
-/// The problems of `html` against the fixture's results, as one text.
-fn refused(html: &str) -> String {
-    problems(html, &fixture().join("results")).join("\n")
-}
-
-#[test]
-fn the_attempt_5_cells_hold_the_measured_numbers() {
-    // Catches: a filled attempt-5 cell, a heading, a caveat or a row of the result file edited
-    // away from what the run measured; a cell dropped, doubled, untraced or added unchecked; a
-    // number in the attempt-5 prose that no rule reads; the kbf-version note weakened or
-    // overstated. Holds today.
-    let html = paper();
-    let found = problems(&html, &fixture().join("results"));
-    assert!(found.is_empty(), "{}", found.join("\n"));
-}
-
-#[test]
-fn a_cell_with_the_right_digits_and_the_wrong_meaning_is_refused() {
-    // Catches: a check that compares only the digits of a cell, so that a unit, a sign, a label,
-    // an arm heading or a direction word can change under the same numbers.
-    let html = paper();
-    for (old, new, says) in [
-        (
-            ">6,519</td>",
-            ">6,159</td>",
-            "att5.wall_s.komira_sdk_exec.cold: prints [6159.0]",
-        ),
-        (
-            "11.5 MB of 84.1 MB",
-            "11.5 GiB of 84.1 GiB",
-            "att5.lc_bytes.komira_sdk_exec.cold: reads \"11.5 gib of 84.1 gib (13.7%)\"",
-        ),
-        (
-            ">54% fewer<",
-            ">54% more<",
-            "att5.minio_get_cut.komira_sdk_exec.warm: reads \"54% more\"",
-        ),
-        (
-            ">54% fewer<",
-            ">-54% fewer<",
-            "att5.minio_get_cut.komira_sdk_exec.warm: reads \"-54% fewer\"",
-        ),
-        (
-            "41.4% (22,928 of 55,430 lookups)",
-            "41.4% (22,928 of 55,430 bytes)",
-            "att5.lc_object_hit_rate.komira_sdk_exec.cold: reads",
-        ),
-        (
-            "<td>local_cache hit rate, by object</td>",
-            "<td>local_cache hit rate, by byte</td>",
-            "the attempt-5 table labels its rows",
-        ),
-        (
-            "<th>Baseline: MinIO, no tierstore (kbf v0.0.49)</th>",
-            "<th>Baseline: MinIO, no tierstore (kbf v0.0.52)</th>",
-            "the attempt-5 table heads the arms",
-        ),
-        (
-            "all of them were executed remotely",
-            "all of them were executed locally",
-            "att5.setup.komira_sdk_exec.one_node: reads",
-        ),
-        (
-            "The build is compute-bound, and",
-            "The build is I/O-bound, and",
-            "att5.no_time_claim.komira_sdk_exec.baseline_cold_warm: reads",
-        ),
-        (
-            "The action cache was off and each run",
-            "The action cache was on and each run",
-            "lost the caveat \"the action cache was off",
-        ),
-        (
-            "The release added counters of requests, errors and latency around every cold-store request",
-            "The release added nothing on the read path",
-            "att5.kbf_versions.na.v0_0_49_vs_v0_0_52: reads",
-        ),
-        (
-            "the object-store client crates are byte-identical",
-            "nothing on the storage read path changed",
-            "the page says nothing on the storage read path changed",
-        ),
-    ] {
-        let joined = refused(&once(&html, old, new));
-        assert!(joined.contains(says), "{old:?} -> {new:?}:\n{joined}");
-    }
-}
-
-#[test]
-fn a_cell_that_is_missing_doubled_unclosed_or_untraced_is_refused() {
-    // Catches: a required cell dropped, carried by two elements, never closed, or traced to
-    // another result file or to a basis; an unknown cell in the block whatever its prefix and
-    // basis; a number in the prose of the block.
-    let html = paper();
-    let cases = [
-        (
-            once(
-                &html,
-                "data-cell=\"att5.minio_get_cut.komira_sdk_exec.warm\" ",
-                "",
-            ),
-            "att5.minio_get_cut.komira_sdk_exec.warm: 0 elements carry this cell, not one",
-        ),
-        (
-            once(
-                &html,
-                "<td>the reference</td>",
-                "<td data-cell=\"att5.minio_get_cut.komira_sdk_exec.warm\" data-result=\"ts-farm-a5.tsv\">54% fewer</td>",
-            ),
-            "att5.minio_get_cut.komira_sdk_exec.warm: 2 elements carry this cell, not one",
-        ),
-        (
-            once(
-                &html,
-                "<td data-cell=\"att5.wall_s.komira_sdk_exec.warm\" data-result=\"ts-farm-a5.tsv\">6,748</td>",
-                "<xcell data-cell=\"att5.wall_s.komira_sdk_exec.warm\" data-result=\"ts-farm-a5.tsv\">6,748</td>",
-            ),
-            "att5.wall_s.komira_sdk_exec.warm: the element is never closed",
-        ),
-        (
-            once(
-                &html,
-                "data-cell=\"att5.wall_s.komira_sdk_exec.warm\" data-result=\"ts-farm-a5.tsv\"",
-                "data-cell=\"att5.wall_s.komira_sdk_exec.warm\" data-result=\"ts-m2-phase-b-a3.tsv\"",
-            ),
-            "att5.wall_s.komira_sdk_exec.warm: not traced to ts-farm-a5.tsv",
-        ),
-        (
-            once(
-                &html,
-                "data-cell=\"att5.kbf_versions.na.v0_0_49_vs_v0_0_52\" data-basis=\"code-reading\"",
-                "data-cell=\"att5.kbf_versions.na.v0_0_49_vs_v0_0_52\" data-basis=\"decision\"",
-            ),
-            "att5.kbf_versions.na.v0_0_49_vs_v0_0_52: not data-basis=\"code-reading\"",
-        ),
-        (
-            once(
-                &html,
-                "<p><strong>What this shows.</strong>",
-                "<p><strong>What this shows.</strong> <span data-cell=\"design.speed\" data-basis=\"design\">It took 5,800 s.</span>",
-            ),
-            "design.speed: a cell in the attempt-5 block this check does not hold",
-        ),
-        (
-            once(
-                &html,
-                "<p><strong>What this shows.</strong>",
-                "<p><strong>What this shows.</strong> In 12 of 13 runs.",
-            ),
-            "the attempt-5 block prints [12.0, 13.0] outside its cells",
-        ),
-        (
-            once(
-                &html,
-                "<div id=\"attempt5\" class=\"attempt5\">",
-                "<div id=\"attempt5\" class=\"attempt5\"><p data-cell=\"att5.extra.na.na\" data-result=\"ts-farm-a5.tsv\">x</p>",
-            ),
-            "att5.extra.na.na: an attempt-5 cell this check does not hold",
-        ),
-    ];
-    for (page, says) in cases {
-        let joined = refused(&page);
-        assert!(joined.contains(says), "{says}:\n{joined}");
-    }
-}
-
-#[test]
-fn a_missing_or_doubled_block_is_refused() {
-    // Catches: the block's id lost (its prose then escapes every rule), the block doubled, or
-    // the block never closed.
-    let html = paper();
-    let gone = once(
-        &html,
-        "<div id=\"attempt5\" class=\"attempt5\">",
-        "<div class=\"attempt5\">",
-    );
-    assert!(refused(&gone).contains("0 elements have id=\"attempt5\", not one"));
-    let twice = once(
-        &html,
-        "<p><strong>What this shows.</strong>",
-        "<div id=\"attempt5\"></div><p><strong>What this shows.</strong>",
-    );
-    assert!(refused(&twice).contains("2 elements have id=\"attempt5\", not one"));
-    let open = once(
-        &html,
-        "<div id=\"attempt5\" class=\"attempt5\">",
-        "<xblock id=\"attempt5\">",
-    );
-    assert!(refused(&open).contains("the attempt-5 block is never closed"));
-}
-
-#[test]
-fn a_result_file_that_disagrees_with_the_run_is_refused() {
-    // Catches: a row edited together with the page (which the trace rule alone accepts), a row
-    // that no cell prints (the misses and the upstream bytes) edited or deleted, a unit changed,
-    // a row doubled, a derived wall-time row added, and a result file missing or unreadable.
-    let html = paper();
-    let both = once(&html, ">306,488</td>", ">306,000</td>");
-    let edited = results_with("a5-rows", |t| {
-        Some(t.replace("minio_get.baseline\t306488", "minio_get.baseline\t306000"))
-    });
-    assert!(trace_problems(&both, &edited).is_empty());
-    let joined = problems(&both, &edited).join("\n");
-    assert!(
-        joined.contains("ts-farm-a5.tsv: minio_get.baseline is 306000, the run measured 306488"),
-        "{joined}"
-    );
-    for (name, edit, says) in [
-        (
-            "a5-misses",
-            "lc.misses.cold\t32502",
-            "lc.misses.cold\t32000",
-        ),
-        (
-            "a5-upstream",
-            "lc.bytes_upstream.warm\t46837763",
-            "lc.bytes_upstream.warm\t1",
-        ),
-    ] {
-        let dir = results_with(name, |t| Some(t.replace(edit, says)));
-        let joined = problems(&html, &dir).join("\n");
-        assert!(joined.contains(&edit_says(edit, says)), "{joined}");
-    }
-    let deleted = results_with("a5-deleted", |t| {
-        Some(
-            t.lines()
-                .filter(|l| !l.contains("\tlc.misses.warm\t"))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-    });
-    assert!(
-        problems(&html, &deleted)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: 0 rows lc.misses.warm, not one")
-    );
-    let doubled = results_with("a5-doubled", |t| {
-        let row = t
-            .lines()
-            .find(|l| l.contains("\tlc.hits.cold\t"))
-            .unwrap()
-            .to_owned();
-        Some(format!("{t}{row}\n"))
-    });
-    assert!(
-        problems(&html, &doubled)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: 2 rows lc.hits.cold, not one")
-    );
-    let unit = results_with("a5-unit", |t| {
-        Some(t.replace(
-            "lc.mb_served.cold\t84.1\tMB",
-            "lc.mb_served.cold\t84.1\tGiB",
-        ))
-    });
-    assert!(
-        problems(&html, &unit)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: lc.mb_served.cold is in GiB, the run's unit is MB")
-    );
-    let ratio = results_with("a5-ratio", |t| {
-        Some(format!(
-            "{t}derived\twall_ratio.warm\t1.09\tratio\t6748 / 6219\n"
-        ))
-    });
-    assert!(
-        problems(&html, &ratio)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: wall_ratio.warm is a row the run does not have")
-    );
-    let gone = results_with("a5-gone", |_| None);
-    assert!(
-        problems(&html, &gone)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: No such file")
-    );
-    let bad = results_with("a5-bad", |t| {
-        Some(t.replace("wall_s.cold\t6519", "wall_s.cold\tmany"))
-    });
-    assert!(
-        problems(&html, &bad)
-            .join("\n")
-            .contains("ts-farm-a5.tsv: line")
-    );
-    assert!(
-        problems(&html, &bad)
-            .join("\n")
-            .contains("value \"many\" is not a number")
-    );
 }

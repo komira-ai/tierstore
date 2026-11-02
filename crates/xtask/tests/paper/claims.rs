@@ -5,14 +5,21 @@
 //! The guard reads the text a reader sees (the page without its style and script, a space for
 //! every tag, whitespace entities decoded), and on its own each attribute a reader is shown
 //! (`content`, `aria-label`, `title`, `alt`, in any letter case). It splits that text into
-//! sentences at `.`, `!` or `?` before white space, and each sentence into clauses at `;` and
-//! `:`. A clause claims a build-time comparison when its sentence names a build and the clause:
+//! sentences at `.`, `!` or `?` before white space, and each sentence into clauses at `;`, `:`
+//! and joining words (but, however, yet, although, though, whereas), so a disclaimer covers only
+//! its own proposition. A clause claims a build-time comparison when its sentence names a build and the clause:
 //!
 //! - has a word that compares speeds (faster, slower, speedup, ...), or
 //! - has a word that compares amounts (fell, less, half, ...) while its sentence speaks of time
 //!   (time, seconds, took, complete, ...), or
-//! - prints, in such a sentence, a number within 5% of a comparison of the wall times (their
-//!   differences 300, 529 and 229 s, their changes 4.8%, 8.5% and 3.5%, their ratios).
+//! - prints, in such a sentence, a number within 10% of a comparison of the wall times, in its
+//!   unit (their differences in seconds or minutes, their changes in percent, their ratios).
+//!
+//! A sentence about a build or a wall time that prints two of the wall times sets the runs side
+//! by side and is refused, and a sentence about GETs at the object store may print only the
+//! shares the run measured. A wall time alone (wall-clock, wall time) is the recorded runs' time,
+//! so it is context enough for a speed word. The attempt-5 block's own text is left to the
+//! attempt5 module, which holds it word for word; its tags' attributes are still read here.
 //!
 //! A clause that disclaims ("we make no claim", "claim no", "not evidence", "in either
 //! direction") is not a claim, so the page can say plainly that it makes none. A sentence about
@@ -36,6 +43,27 @@ pub(super) const SPEED_WORDS: &[&str] = &[
     "slows down",
     "slowed down",
     "sooner",
+    "shortened",
+    "shortens",
+    "lengthened",
+    "lengthens",
+    "snappier",
+    "sluggish",
+    "beat",
+    "beats",
+    "outperform",
+    "outperforms",
+    "outperformed",
+    "better",
+    "worse",
+    "wins",
+    "won",
+    "improve",
+    "improved",
+    "improves",
+    "improvement",
+    "regressed",
+    "regression",
 ];
 
 /// Words that compare amounts; with a build named and time spoken of they are a claim.
@@ -64,13 +92,11 @@ const AMOUNT_WORDS: &[&str] = &[
     "twice",
     "saved",
     "saves",
-    "improve",
-    "improved",
-    "improves",
-    "improvement",
-    "regressed",
-    "regression",
     "less",
+    "lower",
+    "higher",
+    "earlier",
+    "later",
     "more",
 ];
 
@@ -99,13 +125,15 @@ const TIME_WORDS: &[&str] = &[
 ];
 
 /// What a comparison of the attempt-5 wall times (6219, 6519, 6748 s) prints, with the unit it
-/// is printed in: the differences in seconds, the changes in percent and the ratios as times. A
-/// number within 5% of one, followed by its unit, counts.
+/// is printed in: the differences in seconds or minutes, the changes in percent and the ratios
+/// as times. A number within 10% of one, followed by its unit, counts.
 const WALL_DERIVED: &[(&[f64], &[&str])] = &[
     (
         &[300.0, 529.0, 229.0],
         &["s", "sec", "secs", "second", "seconds"],
     ),
+    // 300 s is 5 minutes, a figure too common to read as a comparison.
+    (&[8.82, 3.82], &["min", "mins", "minute", "minutes"]),
     (&[4.82, 8.51, 3.51], &["%", "percent", "per cent"]),
     (
         &[1.048, 1.085, 1.035, 0.954, 0.922, 0.966],
@@ -115,6 +143,27 @@ const WALL_DERIVED: &[(&[f64], &[&str])] = &[
 
 /// The numbers of `clause` that a comparison of the wall times would print, with their unit.
 fn derived_numbers(clause: &str) -> Vec<f64> {
+    with_unit(clause)
+        .into_iter()
+        .filter(|(value, rest)| {
+            WALL_DERIVED.iter().any(|(values, units)| {
+                values.iter().any(|d| (d - value).abs() <= 0.1 * d) && starts_with_unit(rest, units)
+            })
+        })
+        .map(|(value, _)| value)
+        .collect()
+}
+
+/// Whether `rest` starts with one of `units` as a whole word.
+fn starts_with_unit(rest: &str, units: &[&str]) -> bool {
+    units.iter().any(|u| {
+        rest.strip_prefix(u)
+            .is_some_and(|tail| !tail.chars().next().is_some_and(char::is_alphanumeric))
+    })
+}
+
+/// Each number printed in `clause`, with the text after it (white space trimmed).
+fn with_unit(clause: &str) -> Vec<(f64, &str)> {
     let chars: Vec<(usize, char)> = clause.char_indices().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -133,17 +182,7 @@ fn derived_numbers(clause: &str) -> Vec<f64> {
         let token = clause[at..end].trim_end_matches([',', '.']);
         let rest = clause[end..].trim_start();
         if let Some(&value) = super::numbers(token).first() {
-            let hit = WALL_DERIVED.iter().any(|(values, units)| {
-                values.iter().any(|d| (d - value).abs() <= 0.05 * d)
-                    && units.iter().any(|u| {
-                        rest.strip_prefix(u).is_some_and(|tail| {
-                            !tail.chars().next().is_some_and(char::is_alphanumeric)
-                        })
-                    })
-            });
-            if hit {
-                out.push(value);
-            }
+            out.push((value, rest));
         }
         i = j;
     }
@@ -211,16 +250,27 @@ fn texts(html: &str) -> Vec<String> {
     let mut visible = String::new();
     let mut shown = Vec::new();
     let mut at = 0;
+    // The attempt-5 block is held word for word by the attempt5 module (its table prints the
+    // wall times side by side by design), so its visible text is left out here; the attributes
+    // of its tags are still read.
+    let mut hidden_until = 0;
     for (k, tag) in all.iter().enumerate() {
         // What looks like a tag inside a skipped style or script is not one.
         if tag.start < at {
             continue;
         }
-        visible.push_str(&html[at..tag.start]);
+        if tag.start >= hidden_until {
+            visible.push_str(&html[at..tag.start]);
+        }
         visible.push(' ');
         at = tag.end;
         if tag.closing {
             continue;
+        }
+        if super::attr(tag.attrs, "id") == Some(super::attempt5::BLOCK)
+            && let Some(end) = super::element_end(&all, k)
+        {
+            hidden_until = end;
         }
         let name = tag.name.to_ascii_lowercase();
         if (name == "style" || name == "script")
@@ -259,9 +309,46 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
+/// Words that join two propositions. A disclaimer covers only the proposition it is in, so a
+/// clause is cut at each of them as well as at `;` and `:`.
+const JOINS: &[&str] = &["but", "however", "yet", "although", "though", "whereas"];
+
+/// The clauses of a sentence: cut at `;`, `:` and before each word of `JOINS`.
+fn clauses(sentence: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    for part in sentence.split([';', ':']) {
+        let mut cuts: Vec<usize> = JOINS
+            .iter()
+            .flat_map(|j| {
+                part.match_indices(j)
+                    .filter(|(at, _)| {
+                        let before = part[..*at].chars().next_back();
+                        let after = part[at + j.len()..].chars().next();
+                        !before.is_some_and(char::is_alphanumeric)
+                            && !after.is_some_and(char::is_alphanumeric)
+                    })
+                    .map(|(at, _)| at)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        cuts.sort_unstable();
+        let mut start = 0;
+        for cut in cuts {
+            out.push(&part[start..cut]);
+            start = cut;
+        }
+        out.push(&part[start..]);
+    }
+    out
+}
+
 /// What claim, if any, the clause makes in its sentence.
 fn claim(sentence: &str, clause: &str) -> Option<String> {
-    if !names_build(sentence) || DISCLAIMERS.iter().any(|d| clause.contains(d)) {
+    // The wall times are the recorded build runs' times, so naming one is speaking of a build's
+    // time even when the word build is absent.
+    let wall = has_word(sentence, "wall") || sentence.contains("wall-clock");
+    let build = names_build(sentence);
+    if !(build || wall) || DISCLAIMERS.iter().any(|d| clause.contains(d)) {
         return None;
     }
     if let Some(word) = SPEED_WORDS.iter().find(|w| has_word(clause, w)) {
@@ -270,7 +357,9 @@ fn claim(sentence: &str, clause: &str) -> Option<String> {
     if !TIME_WORDS.iter().any(|w| has_word(sentence, w)) {
         return None;
     }
-    if let Some(word) = AMOUNT_WORDS.iter().find(|w| has_word(clause, w)) {
+    // A word that compares amounts is a claim only of a build: "wall time fell" alone is said of
+    // other runs on the page (a tree read at 1 and 64 requests in flight).
+    if build && let Some(word) = AMOUNT_WORDS.iter().find(|w| has_word(clause, w)) {
         return Some(format!("{word:?}"));
     }
     derived_numbers(clause)
@@ -278,12 +367,46 @@ fn claim(sentence: &str, clause: &str) -> Option<String> {
         .map(|n| format!("{n}, a comparison of the wall times,"))
 }
 
-/// One line per clause of the page that claims a build-time speedup or slowdown.
+/// The attempt-5 wall times. Two of them in one sentence about a build or a wall time set the
+/// runs side by side, which is a comparison whatever the words.
+const WALL_TIMES: &[f64] = &[6219.0, 6519.0, 6748.0];
+
+/// The shares a sentence about GETs at the object store may print: the cuts the run measured,
+/// and its hit rates by object and by byte.
+const GET_SHARES: &[f64] = &[42.0, 54.0, 41.4, 44.0, 13.7, 11.8];
+
+/// One line per clause of the page that claims a build-time speedup or slowdown, and per share of
+/// GETs at the object store that the run did not measure.
 pub(super) fn time_claims(html: &str) -> Vec<String> {
     let mut found = Vec::new();
     for text in texts(html) {
         for sentence in sentences(&text) {
-            for clause in sentence.split([';', ':']) {
+            let context = names_build(sentence)
+                || has_word(sentence, "wall")
+                || sentence.contains("wall-clock");
+            let walls: Vec<f64> = super::numbers(sentence)
+                .into_iter()
+                .filter(|n| WALL_TIMES.contains(n))
+                .collect();
+            if context && walls.iter().any(|w| walls.iter().any(|v| v != w)) {
+                found.push(format!(
+                    "{walls:?}, the wall times side by side, in a sentence about build time: {sentence}"
+                ));
+            }
+            let gets = (has_word(sentence, "get") || has_word(sentence, "gets"))
+                && (sentence.contains("minio") || sentence.contains("object store"));
+            if gets {
+                for (value, rest) in with_unit(sentence) {
+                    if starts_with_unit(rest, &["%", "percent", "per cent"])
+                        && !GET_SHARES.contains(&value)
+                    {
+                        found.push(format!(
+                            "{value}%, a share of GETs the run did not measure: {sentence}"
+                        ));
+                    }
+                }
+            }
+            for clause in clauses(sentence) {
                 if let Some(what) = claim(sentence, clause) {
                     found.push(format!("{what} in a sentence about build time: {sentence}"));
                 }
@@ -333,6 +456,66 @@ fn a_build_time_claim_is_refused_in_every_form() {
         (
             "<svg ARIA-LABEL=\"Wall-clock regression of the build\"></svg>",
             "\"regression\"",
+        ),
+        // The original case: a wall time, no build named.
+        (
+            "<svg aria-label=\"Wall-clock regression of 4.8%\"></svg>",
+            "\"regression\"",
+        ),
+        (
+            "<p>Wall time rose by 8.5% with tierstore.</p>",
+            "8.5, a comparison",
+        ),
+        // Forms found by trying to get past the guard.
+        (
+            "<p>Tierstore shortened the builds by five minutes.</p>",
+            "\"shortened\"",
+        ),
+        (
+            "<p>The build time was 8 percent lower with tierstore.</p>",
+            "\"lower\"",
+        ),
+        (
+            "<p>The build time was 8 percent of it.</p>",
+            "8, a comparison",
+        ),
+        (
+            "<p>The build finished 5 minutes earlier with tierstore.</p>",
+            "\"earlier\"",
+        ),
+        ("<p>The build finished in 5 minutes less.</p>", "\"less\""),
+        (
+            "<p>The tierstore wall time of 6219 s beat the baseline 6748 s.</p>",
+            "\"beat\"",
+        ),
+        (
+            "<p>Tierstore wins on build time: 6219 vs 6748.</p>",
+            "the wall times side by side",
+        ),
+        (
+            "<p>Builds took 6219 s against 6748 s, so choose tierstore.</p>",
+            "the wall times side by side",
+        ),
+        (
+            "<p>The builds with tierstore got snappier than the baseline.</p>",
+            "\"snappier\"",
+        ),
+        (
+            "<p>Section 5 has the GETs that reached the cold MinIO, which fell by 99%.</p>",
+            "99%, a share of GETs the run did not measure",
+        ),
+        (
+            "<p>The wall time is slower with tierstore.</p>",
+            "\"slower\"",
+        ),
+        // A disclaimer of something else does not cover the claim joined to it.
+        (
+            "<p>We make no claim about causation, but the build is faster with tierstore.</p>",
+            "\"faster\"",
+        ),
+        (
+            "<p>We make no claim about causation; however builds take less time.</p>",
+            "\"less time\"",
         ),
         (
             "<p>The <span title=\"A note. Another\">build</span> is faster.</p>",

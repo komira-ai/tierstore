@@ -648,6 +648,8 @@ fn the_measured_cells_trace_to_their_results() {
 
 #[path = "paper/attempt5.rs"]
 mod attempt5;
+#[path = "paper/attempt5_tests.rs"]
+mod attempt5_tests;
 #[path = "paper/claims.rs"]
 mod claims;
 
