@@ -1,7 +1,6 @@
 # site: the tierstore.dev website
 
-The same stack as kbf.dev (`site/` at the root of this repository, itself mopm.dev's with `node:test` in place of jest):
-plain TypeScript compiled by `tsc`, a build program (`tools/`) that prerenders the pages, no framework, no bundler, no
+The stack is plain TypeScript compiled by `tsc`, a build program (`tools/`) that prerenders the pages, no framework, no bundler, no
 runtime dependencies. `package.json` lists two development packages, pinned exactly; Node is the exact version in
 `.node-version`.
 
@@ -22,14 +21,14 @@ the repository root by looking for `.github/workflows` above them, and compute t
 `working-directory` and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact
 path and in the two files its deploy job checks out, and `test/supply-chain.test.ts` checks that the
 workflows and the site agree. The test `csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy that
-`infra/site/lib/site-stack.ts` in komira-ai/kbf serves; a change to it there is made here in the same step.
+the site's hosting stack serves; a change to it there is made here in the same step.
 
 | Path | What |
 |---|---|
 | `../docs/*.md` | the operator guide, rendered by `tools/docs.ts` into `/docs/` and `/docs/<name>/` (a page for each file, so a new file is a new page; `Not in a release yet` sections are marked). The crate's test `src/server/docs_tests.rs` holds the guide to the code, so the pages cannot say what the code does not. A minimal renderer for the subset the guide uses, no dependency; it refuses what it does not read |
 | `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/tierstore/README.md` or the code; a page says where |
-| `served-policy.ts` | the Content-Security-Policy the site is served under, copied from `infra/site/lib/site-stack.ts` in komira-ai/kbf, which sets the header |
-| `static/theme.css` | the shared theme (kbf.dev, mopm.dev, ucdk.dev, tierstore.dev), copied byte for byte; `test/theme.test.ts` pins its sha256 |
+| `served-policy.ts` | the Content-Security-Policy the site is served under, copied from the hosting stack that sets the header |
+| `static/theme.css` | the shared theme (tierstore.dev and its sibling sites), copied byte for byte; `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
 | `src/copy.ts` | copy buttons on command blocks |
 | `tools/` | `pages.ts` (routes, titles, the white-paper URL), `layout.ts` (the page shell, with the `> tierstore` mark), `build.ts`, `check-dist.ts`, `links.ts`, `csp.ts`, `publish.ts` (uploads a built `dist/`; see Deploying) |
@@ -60,8 +59,7 @@ distribution does the upload. A pull request never reaches it.
 | `deploy` | `contents: read` and `id-token: write`; environment `prod-site-tierstore`; runs only for a push or a manual run on `main` and `needs` the build | checks out the commit's `tools/publish.ts` and `.node-version` (sparse, no credentials kept), downloads the pages, and runs the program from source with Node's type stripping: no install, no build |
 
 `tools/publish.ts` is what holds the credentials, so it never comes from the build job, which runs dependency code. It imports
-`node:` built-ins only and uses only syntax Node can strip (`erasableSyntaxOnly` in `tsconfig.json`); the lint in
-`crates/kbf-integration-test/tests/site_deploy_workflow` holds both.
+`node:` built-ins only and uses only syntax Node can strip (`erasableSyntaxOnly` in `tsconfig.json`).
 
 The publish program asks the runner for the job's token, exchanges it with `aws sts assume-role-with-web-identity` for credentials
 that last an hour, uploads the assets (immutable) then the pages (short cache) then `version.txt`, sweeps what the build no
@@ -80,7 +78,7 @@ The settings are three variables of the environment `prod-site-tierstore`, set o
 variable is an empty flag, which the program refuses. The environment, the role and its trust, the bucket, the distribution and
 the certificate are created once by an operator with their own AWS credentials (`infra/site`); the workflow only publishes.
 
-`crates/kbf-integration-test/tests/site_deploy_workflow` holds the workflow's safety properties: main only, one job with the
+The workflow lint holds the workflow's safety properties: main only, one job with the
 token, the environment, the role from a variable and no stored key, the build and the tests before the upload, a deploy that is
 never cancelled. The workflow lint additionally allows `id-token: write` for this job and this environment alone.
 

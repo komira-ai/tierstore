@@ -148,8 +148,7 @@ cache  = true
 ### All-in-one (planned)
 
 One process that is both: the storage node's two tiers and the build node's disk cache in front of them, for a single
-machine. It is not in a release and has no configuration keys yet; the design is in
-[docs/design/tierstore-design.md](docs/design/tierstore-design.md).
+machine. It is not in a release and has no configuration keys yet.
 
 ## Documentation
 
@@ -158,7 +157,7 @@ machine. It is not in a release and has no configuration keys yet; the design is
 - [Configuration reference](crates/tierstore/docs/configuration.md): every flag and every key of the file.
 - [Operations](crates/tierstore/docs/operations.md), [troubleshooting](crates/tierstore/docs/troubleshooting.md),
   [limits](crates/tierstore/docs/limits.md), [metrics](crates/tierstore/docs/metrics.md).
-- [The design](docs/design/tierstore-design.md), and [CI and releases](docs/ci-and-release.md).
+- [CI and releases](docs/ci-and-release.md).
 - The same guide is on the website under `crates/tierstore/site`.
 
 ## Contributing
