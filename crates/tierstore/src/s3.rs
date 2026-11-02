@@ -462,7 +462,8 @@ impl Backend for S3Backend {
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
         let object = object_key(key)?;
         if self.if_match_delete.load(Ordering::Acquire) {
-            let delete = self.store.delete_if_match(&object, &quoted(etag));
+            let etag = quoted(etag);
+            let delete = self.store.delete_if_match(&object, &etag);
             return delete.await.map_err(|e| map_error(e, key));
         }
         let head = self.store.head(&object).await;
