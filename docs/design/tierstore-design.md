@@ -57,6 +57,8 @@ One `tierstore` process serves an S3 front (`--listen`) and, if asked, a read-on
 
 Several processes may run over the same tiers; each has its own proxy and fronts, and only one reconciler works at a time.
 
+**What the OCI front is, and is not.** It is a read-only registry *server* over tierstore's own objects, not a cache of another registry: nothing in [server/oci/](../../crates/tierstore/src/server/oci/) calls out. Each piece of an image (manifest, index, config, layer) is an ordinary object stored by content at `oci/blobs/sha256/<digest>`, written through the S3 front by whatever builds the images. A container engine then pulls by digest (`/v2/<name>/manifests/<digest>`, `/v2/<name>/blobs/<digest>`) from whichever tier holds the object, and every byte is checked against its digest before the response completes. There is no push, no tags (only digests), and no fetch from an upstream registry on a miss; a pull-through cache of a public registry would be a further interface (section 12).
+
 ## 4. Configurations
 
 ![The three configurations: build node, storage node, and the planned single-process combination](diagrams/configurations.svg)
@@ -356,6 +358,22 @@ Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tie
 - Making a copy compare content when the cold tier answers `AlreadyExists`, or refusing a tier pair whose tags are different functions. Touches `reconciler.rs` or the start-up in `cli.rs`. Closes *the same, when the two tiers tag content differently*.
 - A second cold check after a copy-back's hot put (as `confirm_not_tiered` does for a put): if cold no longer has the key, delete the hot object and journal nothing. Touches `tiered.rs` (`copy_back`). It narrows the copy-back and delete race and does not close it (*A copy-back meets a delete*).
 - *Two puts of one key, one to each tier* has no option here: closing it means making the cold-path create and the hot create exclude each other, which the two stores cannot do without a coordination step (open question 15).
+
+**(d2) Interfaces and configuration (decided, not built yet).** What: tierstore takes only `--config`, and the file declares the interfaces it serves as a list, so the data-path flags and the old `listen` keys go:
+
+```toml
+[[interface]]
+type = "s3"
+params = { port = 9300 }      # or addresses = ["10.0.0.5:9300"]
+
+[[interface]]
+type = "oci"
+params = { port = 5000, tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/" }
+```
+
+An interface is a front over the same proxy; a later `type = "fs"` (item b) has a mount point and no port. Why: one configuration surface instead of 53 flags and a second spelling of them in the file, and a place where new interfaces plug in. Touches: `server/config.rs` and `cli.rs` (the loader and the start), every front's start-up, `packaging/`, the operator docs, and the tests that start the binary. It is a breaking change of the configuration, made before the first public release.
+
+**(d3) Updates through tierstore's hostkeeper hook (decided, not built yet).** The hostkeeper coordinator and agents are generic: they know a service only by its hook. Everything tierstore needs to replace itself without a gap lives in tierstore's own hook (`server/update_hook/`): it starts the new instance with a copy of the user's configuration whose interfaces bind port 0, so the kernel picks a free ephemeral port, and the instance writes the port it got to its state directory; the hook reads it, moves the public port's redirect (nftables on Linux) to that port, and drains the old instance. Instances alternate between two slot identities, `a` and `b`, which name their proxy ids, so an update reuses two journals instead of creating a new one each time (nothing retires a proxy id, open question 12). Today the hook pins the two instances to ports 9301 and 9302 and derives the proxy id from the port. On macOS, where the hook does not run (it drives systemd and nftables, both Linux-only), an update is a restart with a short gap; a hook backend over launchd and pf is the follow-up.
 
 **(e) Format versioning.** What: a version in each stored format, or a written additive-only rule enforced by a test that reads the previous release's objects. Why: the journal is a bare array and cannot gain a top-level field. Touches `journal.rs` and a compatibility test.
 
