@@ -1,6 +1,6 @@
 # The update hook
 
-`tierstore update-hook` is the part of the binary that a host updater runs to put a new release in place without a gap. This page is for the person who writes the updater's declaration for tierstore or reads what a step said. The verb is Linux only. The steps run on the machine through its programs and files (see [On the machine](update-hook.md#on-the-machine)); no release carries the hook yet (see [Not in a release yet](update-hook.md#not-in-a-release-yet)).
+`tierstore update-hook` is the part of the binary that a host updater runs to put a new release in place without a gap. The updater it is written for is hostkeeper's, which is in development; any updater that speaks the same protocol (the steps as arguments, a params file, an exit status and one JSON line on standard output) can run it. This page is for the person who writes the updater's declaration for tierstore or reads what a step said. The verb is Linux only. The steps run on the machine through its programs and files (see [On the machine](update-hook.md#on-the-machine)); no release carries the hook yet (see [Not in a release yet](update-hook.md#not-in-a-release-yet)).
 
 ## The shape of an update
 

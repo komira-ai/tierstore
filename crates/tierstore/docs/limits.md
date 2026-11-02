@@ -11,7 +11,7 @@ What tierstore does not do on main, so that you can decide before you depend on 
 - **A hot tier that is lost loses what was not yet copied.** A put is acknowledged when its journal entry is durable in the hot tier, not when the cold tier has a copy. The reconciler publishes the copy lag in the hot tier; `/metricz` does not export it.
 - **Checksums.** CRC-32, CRC-32C, SHA-1, SHA-256 and `Content-MD5` are checked; CRC-64/NVMe, `aws-chunked` bodies and trailing checksums are refused with 501 `NotImplemented`. A client SDK needs its checksum settings turned to "when required".
 - **Anonymous OCI reads.** The registry front never asks for a token. Put only public images under its prefix.
-- **No update mechanism.** The host updater does not manage tierstore yet; place the next binary and restart.
+- **No update mechanism in a release yet.** The update hook is written for hostkeeper's host updater, which is in development, and no release carries the hook as a step an updater calls (see [the update hook](update-hook.md#not-in-a-release-yet)); until then place the next binary and restart.
 - **Release tarballs for Linux (x86_64, arm64) and macOS (Apple silicon).** The example unit, its account and the update hook are Linux only; running it as a service on macOS is not described.
 
 ## Not in a release yet
