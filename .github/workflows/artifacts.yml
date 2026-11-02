@@ -136,6 +136,12 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-x86_64 --commit "$GITHUB_SHA" --out dist
+      # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
+      # and must say the commit and the version, as the built one did.
+      - run: mkdir "$RUNNER_TEMP/unpacked"
+      - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
+      - name: The packaged tierstore names the commit and the version
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-x86_64
@@ -194,6 +200,12 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-arm64 --commit "$GITHUB_SHA" --out dist
+      # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
+      # and must say the commit and the version, as the built one did.
+      - run: mkdir "$RUNNER_TEMP/unpacked"
+      - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
+      - name: The packaged tierstore names the commit and the version
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-arm64
@@ -256,6 +268,12 @@ jobs:
         run: git diff --exit-code -- Cargo.lock
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform macos-arm64 --commit "$GITHUB_SHA" --out dist
+      # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
+      # and must say the commit and the version, as the built one did.
+      - run: mkdir "$RUNNER_TEMP/unpacked"
+      - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-macos-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
+      - name: The packaged tierstore names the commit and the version
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-macos-arm64

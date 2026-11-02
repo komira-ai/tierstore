@@ -88,6 +88,8 @@ tar -xzf tierstore-<commit>-macos-arm64.tar.gz tierstore
 ./tierstore --version
 ```
 
+On a Mac this is the last step: the sections after it (the placement under `/usr/libexec`, the account, the systemd unit and its start) are for a Linux host.
+
 ## Place the binary
 
 The tarball holds one member, the binary under its own name.
