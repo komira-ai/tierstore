@@ -302,6 +302,30 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         MAC,
+        "      - run: cargo build --locked --release --target \"$TARGET\"",
+        "      - env:\n          TARGET: x86_64-apple-darwin\n        run: cargo build --locked --release --target \"$TARGET\"",
+        "macos-arm64: the step `cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore` sets its own env [\"TARGET\"]",
+    ),
+    (
+        MAC,
+        "      - name: SBOM\n",
+        "      - name: SBOM\n        env:\n          TARGET: x86_64-apple-darwin\n",
+        "macos-arm64: the step `SBOM` sets its own env [\"TARGET\"]",
+    ),
+    (
+        MAC,
+        "      - name: The packaged tierstore names the commit and the version\n",
+        "      - name: The packaged tierstore names the commit and the version\n        env:\n          TIERSTORE_BUILD_VERSION_OVERRIDE: 9.9.9\n",
+        "macos-arm64: the step `The packaged tierstore names the commit and the version` sets its own env",
+    ),
+    (
+        MAC,
+        "      TARGET: aarch64-apple-darwin\n",
+        "      TARGET: aarch64-apple-darwin\n      CARGO_BUILD_TARGET: x86_64-apple-darwin\n",
+        "macos-arm64: its env sets [\"CARGO_BUILD_TARGET\", \"TARGET\", \"TIERSTORE_BUILD_VERSION_OVERRIDE\"]",
+    ),
+    (
+        MAC,
         "      - name: Install cargo-cyclonedx (pinned version and checksum)\n",
         "      - name: Install cargo-cyclonedx (pinned version and checksum)\n        env:\n          CYCLONEDX_SHA256_AARCH64_MACOS: 0000000000000000000000000000000000000000000000000000000000000000\n",
         "the step `Install cargo-cyclonedx (pinned version and checksum)`: sets CYCLONEDX_SHA256_AARCH64_MACOS",

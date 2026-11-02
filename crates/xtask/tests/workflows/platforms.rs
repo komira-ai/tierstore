@@ -10,7 +10,9 @@
 //!
 //! [`artifacts_platform_problems`] refuses `artifacts.yml` when:
 //! - a platform has no job of its name, or that job runs on another runner than [`BUILDS`] gives,
-//!   its `TARGET` is not the platform's Rust target, its `run:` steps are not exactly
+//!   its `TARGET` is not the platform's Rust target, its `env` holds anything but `TARGET` and
+//!   the version, a step of it sets an `env` of its own (which would change the target, the
+//!   version or a pin of the commands below without changing their text), its `run:` steps are not exactly
 //!   [`build_commands`] in that order (the build, the SBOM, the check of the built binary, the
 //!   package, the unpack of the tarball with the runner's own `tar` and the check of the binary
 //!   unpacked from it), it uses an action other than checkout, a cache restore that restores
@@ -327,6 +329,32 @@ fn build_problems(doc: &Node, b: &Build, build: &Node) -> Vec<String> {
             "{platform}: TARGET is {target:?}, not {:?}, the Rust target of its platform",
             b.target
         ));
+    }
+    let mut keys: Vec<&str> = entry(build, "env")
+        .map_or(&[][..], entries)
+        .iter()
+        .filter_map(|(k, _)| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    if keys != ["TARGET", "TIERSTORE_BUILD_VERSION_OVERRIDE"] {
+        problems.push(format!(
+            "{platform}: its env sets {keys:?}, not TARGET and TIERSTORE_BUILD_VERSION_OVERRIDE alone"
+        ));
+    }
+    for step in steps(Some(build)) {
+        if let Some(env) = entry(step, "env") {
+            let label = at(step, &["name"])
+                .or_else(|| at(step, &["run"]))
+                .or_else(|| at(step, &["uses"]))
+                .unwrap_or_default();
+            let set: Vec<&str> = entries(env)
+                .iter()
+                .filter_map(|(k, _)| k.as_str())
+                .collect();
+            problems.push(format!(
+                "{platform}: the step `{label}` sets its own env {set:?}; a build step takes the job's"
+            ));
+        }
     }
     problems.extend(command_problems(
         platform,
