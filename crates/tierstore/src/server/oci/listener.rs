@@ -86,6 +86,11 @@ impl OciDrain {
     pub(crate) fn begin(&self) {
         self.0.begin();
     }
+
+    /// The connections whose client wrote after the front shut its end, in the drain.
+    pub(crate) fn late(&self) -> u64 {
+        self.0.late()
+    }
 }
 
 impl OciListener {
@@ -396,7 +401,7 @@ impl Serving {
             async move {
                 let (method, uri, headers) = (request.method(), request.uri(), request.headers());
                 let mut answer = front.handle(method, uri.path(), headers).await;
-                if !drain.is_ready() {
+                if drain.closes_answers() {
                     let close = HeaderValue::from_static("close");
                     answer.headers_mut().insert(CONNECTION, close);
                 }

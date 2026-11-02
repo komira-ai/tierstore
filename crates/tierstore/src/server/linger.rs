@@ -300,7 +300,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AsyncWrite for Lingerin
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.drain.is_ready() {
+        if this.drain.lingers() {
             // Counted before the end of the stream is sent, so that a client that has read it
             // finds the connection held. Once, however many times the shutdown is polled.
             this.hold.get_or_insert_with(|| Hold::enter(&this.drain));

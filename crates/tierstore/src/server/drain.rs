@@ -9,6 +9,13 @@
 //! its end for writing and reads, and drops, what the peer still sends, until the peer closes or
 //! [`Drain::linger_bound`] passes. The bytes read then are a request that came too late, and the
 //! connection is counted in the drain's late counter.
+//!
+//! The two properties of the drain, `Connection: close` from its start (P1, [`Drain::closes_answers`])
+//! and the lingering close (P2, [`Drain::lingers`]), are each one function here, which the S3 and
+//! the OCI front both ask. A build with the test-only feature `test-drain-off` answers both with
+//! no: it is the server as it was before them, which the hand-over test under load
+//! (`tests/handover`) runs to show that it fails without them. Only that test's CI job builds it;
+//! no release, `cargo install` or test run of the crate turns it on.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -16,7 +23,9 @@ use std::time::Duration;
 
 use tokio::sync::{Notify, watch};
 
+use super::Server;
 use super::linger::Wire;
+use super::oci::OciDrain;
 
 /// The front is serving.
 pub(super) const SERVING: u8 = 0;
@@ -54,6 +63,10 @@ impl Drain {
     /// at most, and the connections whose peer writes after the front shut its end are counted in
     /// `late`.
     pub(super) fn new(linger_bound: Duration, late: Arc<AtomicU64>) -> Self {
+        #[cfg(feature = "test-drain-off")]
+        eprintln!(
+            "tierstore: a test build (test-drain-off): no Connection: close and no lingering close in the drain"
+        );
         Self {
             phase: AtomicU8::new(SERVING),
             unanswered: AtomicUsize::new(0),
@@ -73,6 +86,32 @@ impl Drain {
     /// Whether the drain has not begun.
     pub(super) fn is_ready(&self) -> bool {
         self.phase() == SERVING
+    }
+
+    /// Whether an answer says `Connection: close` (P1): from the moment the drain begins, so that
+    /// a client that has its answer opens its next connection to whatever now serves the port.
+    #[cfg(not(feature = "test-drain-off"))]
+    pub(super) fn closes_answers(&self) -> bool {
+        !self.is_ready()
+    }
+
+    /// Whether a connection the front shuts gets a lingering close (P2): in the drain, so that a
+    /// client reads a clean end of stream and not a reset.
+    #[cfg(not(feature = "test-drain-off"))]
+    pub(super) fn lingers(&self) -> bool {
+        !self.is_ready()
+    }
+
+    /// The test build without P1: no answer says `Connection: close`.
+    #[cfg(feature = "test-drain-off")]
+    pub(super) fn closes_answers(&self) -> bool {
+        false
+    }
+
+    /// The test build without P2: every close is a plain close.
+    #[cfg(feature = "test-drain-off")]
+    pub(super) fn lingers(&self) -> bool {
+        false
     }
 
     /// Begins the drain: every answer says `Connection: close` from now on. Once; calling it again,
@@ -139,4 +178,28 @@ impl Drain {
 pub(super) async fn time_to_close(wire: &Wire, mut settled: watch::Receiver<bool>) {
     let _ = settled.wait_for(|settled| *settled).await;
     wire.wait_clear().await;
+}
+
+/// What a node says on stderr as it exits of the connections that sent a request too late in the
+/// drain of its fronts (`tierstore_drain_late_requests_total` and
+/// `tierstore_oci_drain_late_requests_total`, which count connections, once each): a line for
+/// each front that counted any, nothing when none did. A count can rise from the moment the drain
+/// begins (a connection that an answer with `Connection: close` ended lingers from then on), but
+/// its last value is only reached after the settle, when the S3 listener that serves `/metricz`
+/// has closed and no scrape can read it. A node without the OCI front counts none there.
+pub(super) fn late_note(s3: u64, oci: u64) -> String {
+    let mut note = String::new();
+    for (front, late) in [("S3", s3), ("OCI", oci)] {
+        if late > 0 {
+            note.push_str(&format!(
+                "tierstore: {late} connections sent a request too late in the drain of the {front} front\n"
+            ));
+        }
+    }
+    note
+}
+
+/// [`late_note`] of the S3 front `server` and of the OCI front `oci`, if the node has one.
+pub(super) fn late_of(server: &Server, oci: Option<&OciDrain>) -> String {
+    late_note(server.late_requests(), oci.map_or(0, OciDrain::late))
 }

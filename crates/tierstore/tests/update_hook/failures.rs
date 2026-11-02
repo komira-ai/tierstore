@@ -3,7 +3,7 @@
 
 use tierstore::server::update_hook::{GUARD_TABLE, Record};
 
-use crate::rig::{APPLY, LIST_GUARD, Rig, Setup, start, stop};
+use crate::rig::{APPLY, Host, LIST_GUARD, Rig, Setup, start, stop};
 
 /// Asserts that a guard table `nft` will not load defers `prepare` (exit 75, `host_not_ready`,
 /// class `environment`, the retry delay) with nothing recorded, linked or started, and that the
@@ -124,6 +124,6 @@ fn a_second_hook_finds_the_lock_held_and_does_nothing() {
     assert_eq!(rig.calls(), calls);
     assert_eq!(rig.record_bytes(), record);
     rig.world.release();
-    Rig::finish(holder).ok();
+    Host::finish(holder).ok();
     assert_eq!(rig.running(), [a, b]);
 }
