@@ -364,3 +364,46 @@ async fn a_dropped_put_removes_its_hot_object_by_tag_first_and_then_releases() {
         assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 1, "{path}");
     }
 }
+
+/// Asserts that a put whose journal cannot be written and whose own object cannot be found again
+/// (the hot tier fails the HEAD that gives the tag to delete by) still fails with the journal's
+/// error and releases its reservation: the object it made stays in the hot tier, as the limits
+/// of the proxy say, and the cold tier holds nothing.
+#[tokio::test(start_paused = true)]
+async fn a_put_that_cannot_find_its_own_object_again_still_releases_its_reservation() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    let down = Error::Unavailable("journal".to_owned());
+    rig.hot.fail_next_on(Op::Put, "_journal/", down.clone());
+    rig.hot
+        .fail_next_on(Op::Head, "k", Error::Unavailable("head".to_owned()));
+
+    let failed = proxy.put("k", body("value")).await;
+
+    assert_eq!(failed, Err(down));
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
+    assert_absent(&*rig.cold_mem, "k").await;
+    assert_eq!(rig.hot.calls(Op::DeleteIfMatch), 0);
+    assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 1);
+}
+
+/// Asserts that a copy-back whose journal entry cannot be written removes the copy it made in
+/// the hot tier (an object the journals do not name would never be evicted), journals nothing,
+/// and does not fail the read that made it.
+#[tokio::test(start_paused = true)]
+async fn a_copy_back_whose_journal_entry_cannot_be_written_removes_the_copy() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+    let down = Error::Unavailable("journal".to_owned());
+    rig.hot.fail_next_on(Op::Put, "_journal/", down);
+
+    assert_eq!(proxy.get("k", None).await, Ok(body("value")));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_absent(&*rig.hot_mem, "k").await;
+    assert_eq!(
+        journal_keys(&*rig.hot_mem, "p1").await,
+        Vec::<String>::new()
+    );
+}

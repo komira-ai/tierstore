@@ -40,6 +40,12 @@ enum Way {
     KeepsOnDeleteIfMatch,
     /// A HEAD of an empty object says it is a reservation.
     EmptyIsMarked,
+    /// A reservation of the key the racers use fails with an error that is not a refusal.
+    RaceFails,
+    /// A reservation of the key whose delete is checked fails with an error.
+    ReserveBeforeDeleteFails,
+    /// A HEAD of the key whose delete is checked fails with an error that is not "not found".
+    HeadAfterDeleteFails,
 }
 
 /// A memory backend that does one thing wrongly about reservations.
@@ -78,6 +84,11 @@ impl Backend for Odd {
         }
         let again = key.ends_with("/reservation");
         let racing = key.ends_with("/reservation-race");
+        if (self.is(Way::RaceFails) && racing)
+            || (self.is(Way::ReserveBeforeDeleteFails) && key.ends_with("/reservation-delete"))
+        {
+            return Err(Error::Other("broke".to_owned()));
+        }
         if (self.is(Way::ReplacesOnReserve) && again) || (self.is(Way::EveryRacerWins) && racing) {
             let _ = self.inner.delete(key).await;
         }
@@ -113,6 +124,9 @@ impl Backend for Odd {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
+        if self.is(Way::HeadAfterDeleteFails) && key.ends_with("/reservation-delete") {
+            return Err(Error::Other("head broke".to_owned()));
+        }
         let mut meta = self.inner.head(key).await?;
         if self.is(Way::WrongSize) && meta.reservation {
             meta.size += 1;
@@ -223,6 +237,18 @@ async fn a_backend_that_answers_a_reservation_question_wrongly_is_refused_with_t
             "a HEAD found a reservation after its delete on its ETag",
         ),
         (Way::EmptyIsMarked, "the mark of an empty object gave true"),
+        (
+            Way::RaceFails,
+            "a racing reservation write failed with: backend error: broke",
+        ),
+        (
+            Way::ReserveBeforeDeleteFails,
+            "a reservation write failed with: backend error: broke",
+        ),
+        (
+            Way::HeadAfterDeleteFails,
+            "a HEAD failed with: backend error: head broke",
+        ),
     ];
     for (way, said) in cases {
         let (failure, backend) = refused(way).await;

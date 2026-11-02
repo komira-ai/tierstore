@@ -322,3 +322,68 @@ async fn a_journal_object_whose_delete_fails_is_pruned_by_the_next_pass() {
     assert_absent(&*rig.hot_mem, &journal_key("p1", 1)).await;
     assert_absent(&*rig.hot_mem, &journal_key("p1", 2)).await;
 }
+
+/// The entry that a proxy of an earlier release journals for a put: a plain `Put`, which names no
+/// reservation.
+fn legacy_put(key: &str, size: u64) -> JournalEntry {
+    JournalEntry {
+        op: JournalOp::Put,
+        key: key.to_owned(),
+        size,
+        time: 0,
+        cold_tag: None,
+    }
+}
+
+/// Asserts that the copy of a plain `Put` entry whose hot object is gone between the look at it
+/// and the read of it (the hot tier answers the read with not found) is skipped without a
+/// failure: nothing is written to the cold tier, and the checkpoint moves past the entry.
+#[tokio::test(start_paused = true)]
+async fn a_plain_put_whose_hot_object_vanishes_before_the_read_is_skipped() {
+    let rig = Rig::new();
+    let _proxy = rig.proxy("p1", 1000).await;
+    rig.hot_mem.put("x", body("1")).await.unwrap();
+    let entries = encode_journal(&[legacy_put("x", 1)]);
+    rig.hot_mem
+        .put(&journal_key("p1", 1), entries)
+        .await
+        .unwrap();
+    let gone = Error::NotFound("x".to_owned());
+    rig.hot.fail_next_on(Op::Get, "x", gone);
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 0);
+    assert_eq!(keys(&*rig.cold_mem).await, Vec::<String>::new());
+    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+}
+
+/// Asserts that the copy of a plain `Put` entry whose create in the cold tier fails is reported,
+/// leaves the checkpoint before the entry and the cold tier without the key, and is done by the
+/// next pass.
+#[tokio::test(start_paused = true)]
+async fn a_plain_put_whose_cold_create_fails_is_retried_by_the_next_pass() {
+    let rig = Rig::new();
+    let _proxy = rig.proxy("p1", 1000).await;
+    rig.hot_mem.put("x", body("1")).await.unwrap();
+    let entries = encode_journal(&[legacy_put("x", 1)]);
+    rig.hot_mem
+        .put(&journal_key("p1", 1), entries)
+        .await
+        .unwrap();
+    rig.cold.fail_next_on(Op::Put, "x", down());
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_absent(&*rig.cold_mem, "x").await;
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*rig.cold_mem, "x").await, body("1"));
+}
