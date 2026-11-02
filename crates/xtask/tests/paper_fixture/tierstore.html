@@ -812,7 +812,7 @@ credentials_file = "/etc/tierstore/cold.credentials"
 <section id="open">
 <span class="bar" aria-hidden="true"></span>
 <h2>7. Limits</h2>
-<p>This paper measures how many reads reached the cold store for one build only, on one node, one run per arm (section 5). Measurement 1 bounds what a cache could serve without measuring one. We did not measure a day of builds or any other workload. We did not measure the hit rate of each tier, put latency, copy lag, failover, throughput, TLS or the cost of the cold tier. The list below holds what we do know, and how far to trust it.</p>
+<p>This paper measures how many reads reached the cold store for one build only, on one node, one run per arm (section 5). Measurement 1 bounds what a cache could serve without measuring one. We did not measure a day of builds or any other workload. We did not measure the hit rate of each tier, put latency, copy lag, failover, the throughput of many clients at once or under failover, TLS or the cost of the cold tier; the read throughput of section 2 is from single-node probes. The list below holds what we do know, and how far to trust it.</p>
 <details class="method"><summary>The full list: each question, what we know and how far to trust it</summary>
 <div class="tblw"><table class="tbl">
 <thead><tr><th>Question</th><th>Answer</th><th>Confidence</th></tr></thead>

@@ -7,8 +7,8 @@
 # meta: a fact of the setup. The tierstore rows are the difference of the node tierstore's own counters read before
 # and after each run. The MinIO rows are the difference of MinIO's cluster-wide GET counter (the per-bucket counter is
 # not exposed), so they include any other client of that MinIO during the run.
-# The test the_attempt_5_cells_hold_the_measured_numbers in tests/paper.rs holds these values and the cells to the
-# run's record: change a value here and that test fails until it is changed there as well.
+# tests/paper/attempt5.rs holds every row of this file (id, value and unit, and no other row) and the cells that print
+# them to the run's record: change, add or delete a row here and its tests fail until the record there changes too.
 meta	actions	5194	count	actions of the build in every arm; every one executed remotely, none from the action cache, none locally	att5.setup.komira_sdk_exec.one_node, att5.actions.komira_sdk_exec.baseline, att5.actions.komira_sdk_exec.cold, att5.actions.komira_sdk_exec.warm
 meta	node_cores	88	count	cores of the one node that executed every action of every arm	att5.setup.komira_sdk_exec.one_node
 meta	baseline_age_h	9.0	h	hours from the end of the baseline run to the start of the cold run	att5.setup.komira_sdk_exec.one_node, att5.no_time_claim.komira_sdk_exec.baseline_cold_warm
