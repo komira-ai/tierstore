@@ -94,7 +94,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 
 use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
@@ -117,10 +117,10 @@ use super::listen::{bind_all, has_duplicate, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
 use super::lock::{self, LockFile, check_lock_path};
 use super::oci::{
-    self, OciDrain, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
+    self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
 };
+use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::stop_watcher::stop_watcher;
 use super::update_hook;
 use super::{Drained, Server, ServerConfig};
 
@@ -1172,36 +1172,6 @@ pub(super) async fn bind_oci(
     let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
-}
-
-/// Begins the drain of the S3 front `server` and of the OCI front, if there is one. The OCI front's
-/// first, so that an answer of either front that comes after `/readyz` said 503 says
-/// `Connection: close`.
-pub(super) fn begin_drains(server: &Server, oci: Option<&OciDrain>) {
-    if let Some(oci) = oci {
-        oci.begin();
-    }
-    server.begin_drain();
-}
-
-/// Serves the OCI front until `stopped` says so, the end of the settle; the connections it cut. 0
-/// when there is none.
-pub(super) async fn serve_oci(
-    listener: Option<OciListener>,
-    stopped: watch::Receiver<bool>,
-) -> usize {
-    match listener {
-        Some(listener) => listener.serve(stopped).await,
-        None => 0,
-    }
-}
-
-/// The same for the connections of the OCI front.
-pub(super) fn oci_cut_note(cut: usize) -> String {
-    match cut {
-        0 => String::new(),
-        cut => format!("tierstore: {cut} OCI connections were cut at the drain deadline\n"),
-    }
 }
 
 /// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns.
