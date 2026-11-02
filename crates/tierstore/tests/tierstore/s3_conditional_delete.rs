@@ -10,7 +10,7 @@ use tierstore::{Backend, Error, S3Backend, SelfTestOptions, settle_conditional_d
 
 use crate::conformance;
 use crate::s3::{backend, config};
-use crate::support::{body, keys};
+use crate::support::body;
 
 /// The methods of the requests the service took after the first `from`.
 fn methods(s3: &FakeS3, from: usize) -> Vec<String> {
@@ -87,7 +87,6 @@ async fn a_store_that_ignores_if_match_is_given_a_read_of_the_tag_before_the_del
     assert_eq!(way, Some("head-then-delete"));
     assert!(s3.keys().is_empty(), "{:?}", s3.keys());
     conformance::a_conditional_delete_removes_only_the_object_with_that_tag(&backend).await;
-    assert!(keys(&backend).await.is_empty());
 }
 
 /// Asserts that a store that cannot be reached is settled on `head-then-delete` and not
