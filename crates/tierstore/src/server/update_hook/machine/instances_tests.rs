@@ -183,3 +183,96 @@ fn a_path_that_could_forge_a_request_is_refused() {
         assert!(text.contains("is not a path"), "{text}");
     }
 }
+
+/// A server for one connection whose answer comes in `pieces`: before each piece it moves the
+/// shared clock on by that piece's seconds, then writes it; after the last it holds the
+/// connection open until `release` says so, or closes it at once when `hold` is `None`. Time
+/// moves only here, however the client's reads split the bytes. A piece the client no longer
+/// takes (it gave up and closed) ends the server quietly: whether that write lands depends on
+/// when the client closed, so the tests assert the client's outcome, never the write's.
+fn serve_in_pieces(
+    pieces: Vec<(u64, &'static [u8])>,
+    clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    hold: Option<mpsc::Receiver<()>>,
+) -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let thread = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        for (seconds, bytes) in pieces {
+            clock.fetch_add(seconds, std::sync::atomic::Ordering::SeqCst);
+            // A client that has already given up may have closed its end: a piece it no longer
+            // reads is not the server's failure, and the test asserts what the client says.
+            if stream
+                .write_all(bytes)
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
+    });
+    (port, thread)
+}
+
+/// Asserts that one deadline of 5 s bounds the whole request, the write and every read of the
+/// answer together, on a clock that moves only when the server says (before each piece it
+/// sends), so that how the client's reads split the bytes does not matter: an answer sent in
+/// four pieces over 4 s is read whole; an answer whose head comes and whose next byte comes after
+/// the clock has passed the deadline fails at the next look with an error that names the
+/// deadline, though the server still holds the connection and a read could wait; nothing is
+/// timed. It would catch a client whose reads each wait their own timeout, so that an answer
+/// that comes a piece at a time keeps a look going past its bound.
+#[test]
+fn one_deadline_bounds_the_whole_request() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+    let clocked = |seconds: &Arc<AtomicU64>| {
+        let base = Instant::now();
+        let seconds = Arc::clone(seconds);
+        LoopbackInstances::new(Duration::from_secs(5), Duration::from_secs(5))
+            .with_clock(move || base + Duration::from_secs(seconds.load(Ordering::SeqCst)))
+    };
+    let seconds = Arc::new(AtomicU64::new(0));
+    let (port, server) = serve_in_pieces(
+        vec![
+            (1, b"HTTP/1.1 200 OK\r\n"),
+            (1, b"Content-Length: 5\r\n\r\n"),
+            (1, b"rea"),
+            (1, b"dy"),
+        ],
+        Arc::clone(&seconds),
+        None,
+    );
+    let reply = clocked(&seconds).get(port, "/readyz").unwrap();
+    server.join().unwrap();
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    let seconds = Arc::new(AtomicU64::new(0));
+    let (release, hold) = mpsc::channel::<()>();
+    let (port, server) = serve_in_pieces(
+        vec![
+            (0, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"),
+            (6, b"r"),
+        ],
+        Arc::clone(&seconds),
+        Some(hold),
+    );
+    let error = clocked(&seconds).get(port, "/readyz").unwrap_err();
+    // The server may have ended already, its last piece refused by the closed connection.
+    let _ = release.send(());
+    server.join().unwrap();
+    assert_eq!(
+        message(error),
+        format!("GET 127.0.0.1:{port}/readyz: no whole answer within 5s")
+    );
+}
