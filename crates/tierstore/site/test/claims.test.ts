@@ -90,8 +90,12 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
   if (!/# TYPE tierstore_build_info gauge\\n/.test(info) || !/tierstore_build_info\{\{version=/.test(info)) {
     out.push('server/build_info.rs no longer prints the type line and the sample of tierstore_build_info: update content/why.html ("Where it stops")');
   }
-  // What content/demo.html ("Stop it: the drain") says the drain does.
-  if (!/if !self\.is_ready\(\) \{[^}]*from_static\("close"\)[^}]*insert\(CONNECTION/.test(mod)) {
+  // What content/demo.html ("Stop it: the drain") says the drain does: an answer says `Connection: close` when the
+  // drain says so, and the drain (server/drain.rs) says so, in every build but the test-only `test-drain-off`, once
+  // it is not ready.
+  const drainSrc = code(src.get('server/drain.rs') ?? '');
+  const closes = /#\[cfg\(not\(feature = "test-drain-off"\)\)\]\s*pub\(super\) fn closes_answers\(&self\) -> bool \{\s*!self\.is_ready\(\)\s*\}/.test(drainSrc);
+  if (!closes || !/if self\.drain\.closes_answers\(\) \{[^}]*from_static\("close"\)[^}]*insert\(CONNECTION/.test(mod)) {
     out.push('server/mod.rs no longer sets Connection: close on an answer while not ready: update content/demo.html ("Stop it: the drain")');
   }
   // The lingering close is server/linger.rs, used by server/mod.rs; its bound is the drain's (server/drain.rs), which
@@ -152,6 +156,9 @@ test('the check can fail: a literal in a test or a comment does not stand for wh
   assert.match(staleClaims(noInfo).join('\n'), /tierstore_build_info.*content\/why\.html/);
   // The drain: no Connection: close while not ready, and no lingering close.
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('response.headers_mut().insert(CONNECTION, close);', ''))).join('\n'), /Connection: close.*content\/demo\.html/);
+  // ... nor when the shipped build's drain no longer says so once it is not ready, or says so only in the test build.
+  assert.match(staleClaims(with_('server/drain.rs', (s) => s.replace(/(fn closes_answers\(&self\) -> bool \{\s*)!self\.is_ready\(\)/, '$1false'))).join('\n'), /Connection: close.*content\/demo\.html/);
+  assert.match(staleClaims(with_('server/drain.rs', (s) => s.replace('#[cfg(not(feature = "test-drain-off"))]\n    pub(super) fn closes_answers', '#[cfg(feature = "test-drain-off")]\n    pub(super) fn closes_answers'))).join('\n'), /Connection: close.*content\/demo\.html/);
   assert.match(staleClaims(with_('server/mod.rs', (s) => s.replace('Lingering::new(', 'Wrapped::new('))).join('\n'), /lingering close.*content\/demo\.html/);
   assert.match(staleClaims(new Map([...real].filter(([k]) => k !== 'server/linger.rs'))).join('\n'), /lingering close.*content\/demo\.html/);
   // Its bound: the drain made from something else than the header timeout, a linger that no longer sleeps for the

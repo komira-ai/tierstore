@@ -357,7 +357,7 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   As a user who may `sudo` (cargo builds as that user; only the test binary runs as root):
 
   ```sh
-  cargo build -p tierstore --features server,test-drain-off --bin tierstore --target-dir target/drain-off && TIERSTORE_T1_DRAIN_OFF=$PWD/target/drain-off/debug/tierstore cargo test -p tierstore --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo -E'"
+  cargo build -p tierstore --features server,test-drain-off --bin tierstore --target-dir target/drain-off && TIERSTORE_T1_DRAIN_OFF=$PWD/target/drain-off/debug/tierstore cargo test -p tierstore --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo --preserve-env=TIERSTORE_T1_DRAIN_OFF'"
   ```
 - **T2 lock and self-take.** Two processes on one directory: the second is read-only and its retry count rises while the
   first holds the lock (an injected clock ticks the retries); after the first is killed it takes the lock, runs

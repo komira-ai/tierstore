@@ -225,10 +225,10 @@ jobs:
         run: sudo apt-get install --yes --no-install-recommends nftables || { sudo apt-get update && sudo apt-get install --yes --no-install-recommends nftables; }
       - run: cargo build -p tierstore --locked --features server,test-drain-off --bin tierstore --target-dir target/drain-off
       # Cargo builds the test binary as the runner's user; its runner runs only that binary, as
-      # root (`sudo -E` keeps the variable that names the build without the drain).
+      # root (`sudo --preserve-env` keeps the variable that names the build without the drain).
       - name: T1 (the test binary runs as root)
         run: |
-          TIERSTORE_T1_DRAIN_OFF="$PWD/target/drain-off/debug/tierstore" cargo test -p tierstore --locked --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo -E'" -- --nocapture
+          TIERSTORE_T1_DRAIN_OFF="$PWD/target/drain-off/debug/tierstore" cargo test -p tierstore --locked --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo --preserve-env=TIERSTORE_T1_DRAIN_OFF'" -- --nocapture
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:
