@@ -1,4 +1,4 @@
-# The paper checks (crates/xtask/tests/paper.rs). They read a COPY of the paper kept in the
+# The paper checks (crates/xtask/tests/paper.rs, with its modules in crates/xtask/tests/paper/). They read a COPY of the paper kept in the
 # repository (crates/xtask/tests/paper_fixture), so a run speaks for the copy, not for the
 # published page: refreshing the copy from the page is the only guard, and a stale copy can be
 # green while the page is not. The first step runs every test of the file except the completion
@@ -13,6 +13,7 @@ on:
   pull_request:
     paths:
       - crates/xtask/tests/paper.rs
+      - crates/xtask/tests/paper/**
       - crates/xtask/tests/paper_fixture/**
       - .github/workflows/paper.yml
   workflow_dispatch:
