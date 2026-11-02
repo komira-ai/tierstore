@@ -296,17 +296,18 @@ async fn a_put_over_two_tiers_is_still_checked_with_a_head_first() {
     }
 }
 
-/// Asserts that an object replaced by one of another size during a fill is not kept by a cache
-/// over two tiers, although it compares versions by size alone: the read is answered from the
-/// upstream and the cache holds nothing.
+/// Asserts that an object replaced by one of another size during a fill is refused as written
+/// over by a cache over two tiers, although it compares versions by size alone, and that the
+/// cache keeps nothing of it.
 #[tokio::test]
-async fn a_fill_of_an_object_replaced_by_one_of_another_size_keeps_nothing() {
+async fn a_fill_of_an_object_replaced_by_one_of_another_size_is_refused_as_written_over() {
     let rig = Rig::new("tscache-resized");
     let data = pattern(3000);
     rig.put("cas/b/obj", &data).await;
     let upstream: Arc<dyn Backend> = rig.upstream.clone();
     let resized = Probe::resizing(upstream);
     let cache = cache_over(&rig, &resized, |config| config.tiered_upstream = true);
-    assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
+    let refused = cache.get("cas/b/obj", None).await;
+    assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
     assert_eq!(cache.held(), (0, 0));
 }
