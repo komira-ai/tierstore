@@ -33,6 +33,13 @@
 //! filled, and runs with every test. The other tests plant each defect in a small page and show
 //! the check refusing it.
 //!
+//! `the_attempt_5_cells_hold_the_measured_numbers` holds the attempt-5 cells (one build of
+//! `komira_sdk_exec`: a MinIO baseline, a cold and a warm run through tierstore) and their result
+//! file `ts-farm-a5.tsv` to the run's record, written a second time in this file, so a number
+//! edited in the page and the result file together still fails. It also refuses, anywhere in the
+//! page, a sentence about a build or a wall time that compares times: one run per arm, on a
+//! baseline 9 h older and on an older kbf, supports no build-time speedup or slowdown.
+//!
 //! The fixture is a copy and a run speaks for the copy, not for the published page. Nothing here
 //! compares the copy with the page: refreshing the copy from the published page is the only guard,
 //! and a copy that is not refreshed can be green while the page is not. When the paper moves into
@@ -632,8 +639,645 @@ fn the_measured_cells_trace_to_their_results() {
         .filter(|t| attr(t.attrs, "data-result").is_some())
         .count();
     assert!(
-        measured >= 4,
-        "the paper has {measured} measured cells, not the 4 filled so far"
+        measured >= 14,
+        "the paper has {measured} measured cells, not the 14 filled so far"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attempt 5: one build of komira_sdk_exec, a baseline on MinIO and a cold and a warm run through
+// tierstore. The trace rule above only says that a number a cell prints is a value of some row
+// naming the cell; it would pass a result file edited together with the page. The numbers below
+// are the run's record, written here a second time, so an edit to the page or to its result file
+// that changes one fails until it is made here as well. One run per arm: the page may report the
+// wall times and must not turn them into a build-time comparison.
+
+/// The result file of the attempt-5 cells.
+const ATTEMPT5_RESULTS: &str = "ts-farm-a5.tsv";
+
+/// The id of the element that holds the attempt-5 subsection.
+const ATTEMPT5_BLOCK: &str = "attempt5";
+
+/// Each attempt-5 cell with `data-result`, and the numbers it prints, in order, as measured.
+const ATTEMPT5_CELLS: &[(&str, &[f64])] = &[
+    // 5,194 actions, one node with 88 cores, the baseline 9.0 h earlier.
+    ("att5.setup.komira_sdk_exec.one_node", &[5194.0, 88.0, 9.0]),
+    // The table, one cell per arm: baseline, cold, warm.
+    ("att5.actions.komira_sdk_exec.baseline", &[5194.0]),
+    ("att5.actions.komira_sdk_exec.cold", &[5194.0]),
+    ("att5.actions.komira_sdk_exec.warm", &[5194.0]),
+    ("att5.minio_get.komira_sdk_exec.baseline", &[306_488.0]),
+    ("att5.minio_get.komira_sdk_exec.cold", &[177_930.0]),
+    ("att5.minio_get.komira_sdk_exec.warm", &[140_509.0]),
+    // The only comparison the page may draw: fewer GETs reached MinIO.
+    ("att5.minio_get_cut.komira_sdk_exec.cold", &[42.0]),
+    ("att5.minio_get_cut.komira_sdk_exec.warm", &[54.0]),
+    // Object hit rate: 22,928 of 55,430 lookups, and 20,045 of 45,589.
+    (
+        "att5.lc_object_hit_rate.komira_sdk_exec.cold",
+        &[41.4, 22_928.0, 55_430.0],
+    ),
+    (
+        "att5.lc_object_hit_rate.komira_sdk_exec.warm",
+        &[44.0, 20_045.0, 45_589.0],
+    ),
+    // Bytes served from the cache, of all served, and the share.
+    ("att5.lc_bytes.komira_sdk_exec.cold", &[11.5, 84.1, 13.7]),
+    ("att5.lc_bytes.komira_sdk_exec.warm", &[6.3, 53.1, 11.8]),
+    // Wall seconds. Reported, not compared.
+    ("att5.wall_s.komira_sdk_exec.baseline", &[6219.0]),
+    ("att5.wall_s.komira_sdk_exec.cold", &[6519.0]),
+    ("att5.wall_s.komira_sdk_exec.warm", &[6748.0]),
+    ("att5.claim.komira_sdk_exec.cold_warm", &[]),
+    // Why there is no build-time claim: 9.0 h older baseline, kbf's 100 GiB hot tier.
+    (
+        "att5.no_time_claim.komira_sdk_exec.baseline_cold_warm",
+        &[9.0, 100.0],
+    ),
+    // The cell of section 5 that the run fills: hit rates, and GETs at MinIO cold and warm.
+    (
+        "lc.hit_rate_cold_reads_per_build.na.local_cache_over_cold",
+        &[41.4, 44.0, 177_930.0, 140_509.0],
+    ),
+];
+
+/// The attempt-5 cell that states what changed between the two kbf versions (code reading),
+/// and the phrases of that note it must keep.
+const ATTEMPT5_KBF_NOTE: (&str, &[&str]) = (
+    "att5.kbf_versions.na.v0_0_49_vs_v0_0_52",
+    &[
+        "between v0.0.49 and v0.0.52 the storage read path was not changed in what it reads, from where, how many requests it makes, or in what order",
+        "the object-store client crates are byte-identical",
+        "counters of requests, errors and latency around every cold-store request",
+        "a key-file option that affects start-up only",
+    ],
+);
+
+/// The rows of the attempt-5 result file the run fixes, with their values.
+const ATTEMPT5_ROWS: &[(&str, f64)] = &[
+    ("actions", 5194.0),
+    ("node_cores", 88.0),
+    ("baseline_age_h", 9.0),
+    ("kbf_hot_tier_gib", 100.0),
+    ("wall_s.baseline", 6219.0),
+    ("wall_s.cold", 6519.0),
+    ("wall_s.warm", 6748.0),
+    ("minio_get.baseline", 306_488.0),
+    ("minio_get.cold", 177_930.0),
+    ("minio_get.warm", 140_509.0),
+    ("minio_get_cut_pct.cold", 42.0),
+    ("minio_get_cut_pct.warm", 54.0),
+    ("lc.hits.cold", 22_928.0),
+    ("lc.lookups.cold", 55_430.0),
+    ("lc.hits.warm", 20_045.0),
+    ("lc.lookups.warm", 45_589.0),
+    ("lc.hit_rate_obj_pct.cold", 41.4),
+    ("lc.hit_rate_obj_pct.warm", 44.0),
+    ("lc.bytes_local.cold", 11_517_872.0),
+    ("lc.bytes_served.cold", 84_119_989.0),
+    ("lc.bytes_local.warm", 6_289_943.0),
+    ("lc.bytes_served.warm", 53_127_706.0),
+    ("lc.mb_local.cold", 11.5),
+    ("lc.mb_served.cold", 84.1),
+    ("lc.mb_local.warm", 6.3),
+    ("lc.mb_served.warm", 53.1),
+    ("lc.hit_rate_bytes_pct.cold", 13.7),
+    ("lc.hit_rate_bytes_pct.warm", 11.8),
+];
+
+/// The byte offset of the end tag of the element whose start tag is `tags[k]`, or `None` when it
+/// is never closed.
+fn element_end(tags: &[Tag<'_>], k: usize) -> Option<usize> {
+    let first = &tags[k];
+    let mut depth = 1usize;
+    for tag in &tags[k + 1..] {
+        if tag.name != first.name {
+            continue;
+        }
+        if tag.closing {
+            depth -= 1;
+            if depth == 0 {
+                return Some(tag.start);
+            }
+        } else if tag.open {
+            depth += 1;
+        }
+    }
+    None
+}
+
+/// The indexes of the start tags whose `data-cell` is `cell`.
+fn cells_named(tags: &[Tag<'_>], cell: &str) -> Vec<usize> {
+    (0..tags.len())
+        .filter(|&k| !tags[k].closing && attr(tags[k].attrs, "data-cell") == Some(cell))
+        .collect()
+}
+
+/// `text` lower-cased with its runs of white space made one space.
+fn squeeze(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// One line per way the attempt-5 cells and their result file disagree with the run's record:
+/// a cell missing, doubled, not traced to `ATTEMPT5_RESULTS`, or printing other numbers than it
+/// should; an `att5.` cell this check does not know; a number in the attempt-5 block outside a
+/// cell; a row of the result file with another value; a wall-time row the run does not have; and
+/// a kbf-version note that lost a phrase or says that nothing on the read path changed.
+fn attempt5_problems(html: &str, results: &Path) -> Vec<String> {
+    let all = tags(html);
+    let mut problems = Vec::new();
+    for (cell, want) in ATTEMPT5_CELLS {
+        let found = cells_named(&all, cell);
+        let [k] = found[..] else {
+            problems.push(format!(
+                "{cell}: {} elements carry this cell, not one",
+                found.len()
+            ));
+            continue;
+        };
+        if attr(all[k].attrs, "data-result") != Some(ATTEMPT5_RESULTS) {
+            problems.push(format!("{cell}: not traced to {ATTEMPT5_RESULTS}"));
+        }
+        let Some(text) = element_text(html, &all, k) else {
+            problems.push(format!("{cell}: the element is never closed"));
+            continue;
+        };
+        let got = numbers(&text);
+        let same =
+            got.len() == want.len() && got.iter().zip(*want).all(|(a, b)| (a - b).abs() < 1e-9);
+        if !same {
+            problems.push(format!("{cell}: prints {got:?}, the run measured {want:?}"));
+        }
+    }
+    // The GET cells say which way the count moved; a number alone would pass "42% more".
+    for cell in [
+        "att5.minio_get_cut.komira_sdk_exec.cold",
+        "att5.minio_get_cut.komira_sdk_exec.warm",
+    ] {
+        if let [k] = cells_named(&all, cell)[..] {
+            let text = squeeze(&element_text(html, &all, k).unwrap_or_default());
+            if !text.ends_with("% fewer") {
+                problems.push(format!("{cell}: says {text:?}, not a share fewer"));
+            }
+        }
+    }
+    let (note, phrases) = ATTEMPT5_KBF_NOTE;
+    match cells_named(&all, note)[..] {
+        [k] => {
+            if attr(all[k].attrs, "data-basis") != Some("code-reading") {
+                problems.push(format!("{note}: not data-basis=\"code-reading\""));
+            }
+            let text = squeeze(&element_text(html, &all, k).unwrap_or_default());
+            for phrase in phrases {
+                if !text.contains(phrase) {
+                    problems.push(format!("{note}: lost the phrase {phrase:?}"));
+                }
+            }
+            if !numbers(&text).is_empty() {
+                problems.push(format!("{note}: prints a number a basis cell cannot trace"));
+            }
+        }
+        ref other => problems.push(format!(
+            "{note}: {} elements carry this cell, not one",
+            other.len()
+        )),
+    }
+    if squeeze(&plain(html)).contains("nothing on the storage read path changed") {
+        problems.push(
+            "the page says nothing on the storage read path changed; the cold-store counters did"
+                .to_owned(),
+        );
+    }
+    let known = |id: &str| ATTEMPT5_CELLS.iter().any(|(c, _)| *c == id) || id == note;
+    for tag in all.iter().filter(|t| !t.closing) {
+        if let Some(id) = attr(tag.attrs, "data-cell")
+            && id.starts_with("att5.")
+            && !known(id)
+        {
+            problems.push(format!("{id}: an attempt-5 cell this check does not hold"));
+        }
+    }
+    // Every number in the attempt-5 block sits in one of its cells, so the trace rule and the
+    // table above see it; a number in the prose around them would be read by neither.
+    let block: Vec<usize> = (0..all.len())
+        .filter(|&k| !all[k].closing && attr(all[k].attrs, "id") == Some(ATTEMPT5_BLOCK))
+        .collect();
+    match block[..] {
+        [b] => match element_end(&all, b) {
+            Some(end) => {
+                let mut outside = String::new();
+                let mut at = all[b].end;
+                for k in b + 1..all.len() {
+                    let tag = &all[k];
+                    if tag.start >= end {
+                        break;
+                    }
+                    if tag.closing || tag.start < at || attr(tag.attrs, "data-cell").is_none() {
+                        continue;
+                    }
+                    outside.push_str(&html[at..tag.start]);
+                    outside.push(' ');
+                    at = element_end(&all, k).unwrap_or(end).min(end);
+                }
+                outside.push_str(&html[at.min(end)..end]);
+                let stray = numbers(&plain(&outside));
+                if !stray.is_empty() {
+                    problems.push(format!(
+                        "the attempt-5 block prints {stray:?} outside its cells"
+                    ));
+                }
+                let words = squeeze(&plain(&html[all[b].end..end]));
+                for word in SPEED_WORDS {
+                    if has_word(&words, word) {
+                        problems.push(format!(
+                            "the attempt-5 block says {word:?}: one run per arm supports no comparison of time"
+                        ));
+                    }
+                }
+            }
+            None => problems.push("the attempt-5 block is never closed".to_owned()),
+        },
+        ref other => problems.push(format!(
+            "{} elements have id=\"{ATTEMPT5_BLOCK}\", not one",
+            other.len()
+        )),
+    }
+    match std::fs::read_to_string(results.join(ATTEMPT5_RESULTS))
+        .map_err(|e| e.to_string())
+        .and_then(|text| result_rows(&text))
+    {
+        Ok(rows) => {
+            for (id, want) in ATTEMPT5_ROWS {
+                match rows.iter().filter(|r| r.id == *id).collect::<Vec<_>>()[..] {
+                    [row] if (row.value - want).abs() < 1e-9 => {}
+                    [row] => problems.push(format!(
+                        "{ATTEMPT5_RESULTS}: {id} is {}, the run measured {want}",
+                        row.value
+                    )),
+                    ref other => problems.push(format!(
+                        "{ATTEMPT5_RESULTS}: {} rows {id}, not one",
+                        other.len()
+                    )),
+                }
+            }
+            for row in &rows {
+                let timed =
+                    row.id.contains("wall") || row.id.contains("speed") || row.id.contains("time");
+                let measured = ["wall_s.baseline", "wall_s.cold", "wall_s.warm"];
+                if timed && !measured.contains(&row.id.as_str()) {
+                    problems.push(format!(
+                        "{ATTEMPT5_RESULTS}: {} derives from the wall times, which one run per arm does not support",
+                        row.id
+                    ));
+                }
+            }
+        }
+        Err(why) => problems.push(format!("{ATTEMPT5_RESULTS}: {why}")),
+    }
+    problems
+}
+
+/// Words that compare two times. A sentence of the page that has one of them and speaks of a
+/// build or a wall time claims a build-time speedup or slowdown.
+const SPEED_WORDS: &[&str] = &[
+    "faster",
+    "slower",
+    "quicker",
+    "speedup",
+    "speed-up",
+    "speed up",
+    "speeds up",
+    "sped up",
+    "slowdown",
+    "slow-down",
+    "slows down",
+    "slowed down",
+    "less time",
+    "more time",
+    "shorter",
+    "longer",
+    "improve",
+    "improved",
+    "improves",
+    "improvement",
+    "regressed",
+    "regression",
+];
+
+/// What the attempt-5 wall times would turn into if they were compared: the differences in
+/// seconds (300, 529, 229), the changes in percent (4.8, 8.5, 3.5) and the ratios (1.05, 1.09,
+/// 1.04, 1.08, 0.95, 0.92, 0.97). A sentence that names a build and prints one of them compares
+/// the runs, whatever its words.
+const WALL_DERIVED: &[f64] = &[
+    300.0, 529.0, 229.0, 4.8, 8.5, 3.5, 1.05, 1.09, 1.04, 1.08, 0.95, 0.92, 0.97,
+];
+
+/// Whether `phrase` occurs in `text` (both lower case) with no letter or digit on either side.
+fn has_word(text: &str, phrase: &str) -> bool {
+    text.match_indices(phrase).any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let after = text[at + phrase.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
+}
+
+/// Whether a sentence names a build: the word build or builds, not as in a build node.
+fn names_build(sentence: &str) -> bool {
+    sentence.match_indices("build").any(|(at, _)| {
+        let rest = &sentence[at + "build".len()..];
+        let rest = rest.strip_prefix('s').unwrap_or(rest);
+        let before = sentence[..at].chars().next_back();
+        !before.is_some_and(char::is_alphanumeric)
+            && !rest.chars().next().is_some_and(char::is_alphanumeric)
+            && !rest.starts_with(" node")
+            && !rest.starts_with("-node")
+    })
+}
+
+/// Whether a sentence speaks of a build's time: it names a build, or a wall time.
+fn about_build_time(sentence: &str) -> bool {
+    names_build(sentence) || has_word(sentence, "wall") || sentence.contains("wall-clock")
+}
+
+/// The text a reader of the page sees, as sentences: the page without its style and script, a
+/// space for every tag, and the text of the attributes a reader is shown (`content`,
+/// `aria-label`, `title`, `alt`). A sentence ends at `.`, `!`, `?`, `;` or `:` before white space.
+fn sentences(html: &str) -> Vec<String> {
+    let all = tags(html);
+    let mut text = String::new();
+    let mut at = 0;
+    for (k, tag) in all.iter().enumerate() {
+        // What looks like a tag inside a skipped style or script is not one.
+        if tag.start < at {
+            continue;
+        }
+        text.push_str(&html[at..tag.start]);
+        text.push(' ');
+        at = tag.end;
+        if !tag.closing
+            && (tag.name == "style" || tag.name == "script")
+            && let Some(end) = element_end(&all, k)
+        {
+            at = end;
+        }
+        if !tag.closing {
+            for a in attributes(tag.attrs) {
+                if let Value::Double(value) = a.value
+                    && ["content", "aria-label", "title", "alt"].contains(&a.name)
+                {
+                    text.push_str(value);
+                    text.push_str(". ");
+                }
+            }
+        }
+    }
+    text.push_str(&html[at..]);
+    let text = squeeze(&strip_entities(&text));
+    let mut out = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    for (i, c) in text.char_indices() {
+        let ends = ".!?;:".contains(c) && bytes.get(i + 1).is_none_or(|b| *b == b' ');
+        if ends {
+            out.push(text[start..i].trim().to_owned());
+            start = i + 1;
+        }
+    }
+    out.push(text[start..].trim().to_owned());
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// One line per sentence of the page that claims a build-time speedup or slowdown: it speaks of a
+/// build or a wall time and compares times in words, or prints a number derived from the
+/// attempt-5 wall times.
+fn time_claims(html: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for sentence in sentences(html) {
+        if !about_build_time(&sentence) {
+            continue;
+        }
+        let word = SPEED_WORDS.iter().find(|w| has_word(&sentence, w));
+        // A derived number is read only in a sentence that names a build: the page prints the
+        // same figures for other runs (a tree read whose median rose 3.5 times).
+        let derived = numbers(&sentence)
+            .into_iter()
+            .filter(|_| names_build(&sentence))
+            .find(|n| WALL_DERIVED.iter().any(|d| (d - n).abs() < 1e-9));
+        if let Some(word) = word {
+            found.push(format!(
+                "{word:?} in a sentence about build time: {sentence}"
+            ));
+        } else if let Some(n) = derived {
+            found.push(format!(
+                "{n}, a comparison of the wall times, in a sentence about build time: {sentence}"
+            ));
+        }
+    }
+    found
+}
+
+#[test]
+fn the_attempt_5_cells_hold_the_measured_numbers() {
+    // Catches: a filled attempt-5 cell, or a row of its result file, edited away from what the
+    // run measured; an attempt-5 cell dropped, doubled, untraced or added unchecked; a number in
+    // the attempt-5 prose that no rule reads; the kbf-version note weakened or overstated; and
+    // any sentence of the page that claims a build-time speedup or slowdown. Holds today.
+    let html = paper();
+    let problems = attempt5_problems(&html, &fixture().join("results"));
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    let claims = time_claims(&html);
+    assert!(claims.is_empty(), "{}", claims.join("\n"));
+}
+
+/// The fixture's results copied to a scratch directory, with `edit` applied to the attempt-5
+/// file.
+fn results_with(name: &str, edit: impl Fn(&str) -> String) -> PathBuf {
+    let dir = scratch(name);
+    for entry in std::fs::read_dir(fixture().join("results")).expect("results") {
+        let path = entry.expect("entry").path();
+        let text = std::fs::read_to_string(&path).expect("result file");
+        let file = path.file_name().expect("name");
+        let text = if file == ATTEMPT5_RESULTS {
+            edit(&text)
+        } else {
+            text
+        };
+        std::fs::write(dir.join(file), text).expect("write");
+    }
+    dir
+}
+
+/// `html` with the one occurrence of `old` replaced by `new`.
+fn once(html: &str, old: &str, new: &str) -> String {
+    assert_eq!(
+        html.matches(old).count(),
+        1,
+        "{old:?} occurs once in the page"
+    );
+    html.replacen(old, new, 1)
+}
+
+#[test]
+fn an_attempt_5_cell_that_disagrees_with_the_run_is_refused() {
+    // Catches: a check that accepts a wrong wall time, a wrong hit rate, a dropped cell, an
+    // unchecked new attempt-5 cell, a number added to the prose of the block, a stronger kbf
+    // note, and a result file whose row was edited together with the page (which the trace rule
+    // alone accepts).
+    let html = paper();
+    let results = fixture().join("results");
+    let wall = once(&html, ">6,519</td>", ">6,159</td>");
+    let joined = attempt5_problems(&wall, &results).join("\n");
+    assert!(
+        joined.contains(
+            "att5.wall_s.komira_sdk_exec.cold: prints [6159.0], the run measured [6519.0]"
+        ),
+        "{joined}"
+    );
+    let rate = once(&html, "41.4% (22,928", "41.9% (22,928");
+    let joined = attempt5_problems(&rate, &results).join("\n");
+    assert!(
+        joined.contains(
+            "att5.lc_object_hit_rate.komira_sdk_exec.cold: prints [41.9, 22928.0, 55430.0]"
+        ),
+        "{joined}"
+    );
+    let gone = once(
+        &html,
+        "data-cell=\"att5.minio_get_cut.komira_sdk_exec.warm\" ",
+        "",
+    );
+    let joined = attempt5_problems(&gone, &results).join("\n");
+    assert!(
+        joined.contains("att5.minio_get_cut.komira_sdk_exec.warm: 0 elements"),
+        "{joined}"
+    );
+    let extra = once(
+        &html,
+        "<div id=\"attempt5\" class=\"attempt5\">",
+        "<div id=\"attempt5\" class=\"attempt5\"><p data-cell=\"att5.extra.na.na\" data-result=\"ts-farm-a5.tsv\">x</p>",
+    );
+    let joined = attempt5_problems(&extra, &results).join("\n");
+    assert!(
+        joined.contains("att5.extra.na.na: an attempt-5 cell this check does not hold"),
+        "{joined}"
+    );
+    let stray = once(
+        &html,
+        "<p><strong>What this shows.</strong>",
+        "<p><strong>What this shows.</strong> In 12 of 13 runs.",
+    );
+    let joined = attempt5_problems(&stray, &results).join("\n");
+    assert!(
+        joined.contains("the attempt-5 block prints [12.0, 13.0] outside its cells"),
+        "{joined}"
+    );
+    let more = once(&html, ">54% fewer<", ">54% more<");
+    let joined = attempt5_problems(&more, &results).join("\n");
+    assert!(
+        joined.contains("att5.minio_get_cut.komira_sdk_exec.warm: says \"54% more\""),
+        "{joined}"
+    );
+    let note = once(
+        &html,
+        "the object-store client crates are byte-identical",
+        "nothing on the storage read path changed",
+    );
+    let joined = attempt5_problems(&note, &results).join("\n");
+    assert!(joined.contains("lost the phrase"), "{joined}");
+    assert!(
+        joined.contains("nothing on the storage read path changed"),
+        "{joined}"
+    );
+    // The page and its result file edited together: the trace rule passes, this check does not.
+    let both = once(&html, ">306,488</td>", ">306,000</td>");
+    let edited = results_with("a5-rows", |t| {
+        t.replace("minio_get.baseline\t306488", "minio_get.baseline\t306000")
+    });
+    assert!(trace_problems(&both, &edited).is_empty());
+    let joined = attempt5_problems(&both, &edited).join("\n");
+    assert!(
+        joined.contains("ts-farm-a5.tsv: minio_get.baseline is 306000, the run measured 306488"),
+        "{joined}"
+    );
+    let ratio = results_with("a5-ratio", |t| {
+        format!("{t}derived\twall_ratio.warm\t1.09\tratio\t6748 / 6219\n")
+    });
+    let joined = attempt5_problems(&html, &ratio).join("\n");
+    assert!(
+        joined.contains("wall_ratio.warm derives from the wall times"),
+        "{joined}"
+    );
+}
+
+#[test]
+fn a_build_time_claim_is_refused() {
+    // Catches: a sentence anywhere on the page, its attributes included, that turns the
+    // attempt-5 wall times into a speedup or slowdown, in words or as a derived number; and a
+    // comparative word inside the attempt-5 block. A sentence about a build node, or a number
+    // with no build or wall time in its sentence, is not a claim.
+    let claims = time_claims(
+        "<p>With tierstore the build ran faster.</p>\n\
+         <p>The warm build took 8.5% more wall time.</p>\n\
+         <p>Cold against baseline: the build was 300 s behind.</p>\n\
+         <meta name=\"description\" content=\"tierstore gives a build speedup\">\n\
+         <svg aria-label=\"Wall-clock regression of 4.8%\"></svg>\n\
+         <p>A read on a build node is faster when it hits. The median rose 3.5 times.</p>\n\
+         <p>We make no claim about build time, in either direction.</p>",
+    );
+    let joined = claims.join("\n");
+    assert!(
+        joined.contains(
+            "\"faster\" in a sentence about build time: with tierstore the build ran faster"
+        ),
+        "{joined}"
+    );
+    assert!(
+        joined.contains(
+            "8.5, a comparison of the wall times, in a sentence about build time: the warm build took 8.5% more wall time"
+        ),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("300, a comparison of the wall times"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains(
+            "\"speedup\" in a sentence about build time: tierstore gives a build speedup"
+        ),
+        "{joined}"
+    );
+    assert!(
+        joined.contains(
+            "\"regression\" in a sentence about build time: wall-clock regression of 4.8%"
+        ),
+        "{joined}"
+    );
+    assert_eq!(claims.len(), 5, "{joined}");
+    let html = paper();
+    let inside = once(
+        &html,
+        "The wall times are in the table as recorded",
+        "The cold run was quicker per action. The wall times are in the table as recorded",
+    );
+    let joined = attempt5_problems(&inside, &fixture().join("results")).join("\n");
+    assert!(
+        joined.contains("the attempt-5 block says \"quicker\""),
+        "{joined}"
+    );
+    let joined = time_claims(&once(
+        &html,
+        "We make no claim about build time from these runs, in either direction.",
+        "The warm build was slower than the baseline.",
+    ))
+    .join("\n");
+    assert!(
+        joined.contains("\"slower\" in a sentence about build time"),
+        "{joined}"
     );
 }
 
