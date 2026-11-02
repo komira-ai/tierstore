@@ -256,8 +256,8 @@ pub struct Cli {
     /// The percent of `--hot-bytes` down to which the eviction goes on.
     #[arg(long, default_value_t = 70, value_parser = clap::value_parser!(u8).range(1..=100))]
     pub low_water: u8,
-    /// The percent of `--hot-bytes` above which a put waits a little first, and a read of a
-    /// cold object does not copy it back into the hot tier.
+    /// The percent of `--hot-bytes` above which a read of a cold object does not copy
+    /// it back into the hot tier.
     #[arg(long, default_value_t = 95, value_parser = clap::value_parser!(u8).range(1..=100))]
     pub critical: u8,
     /// The name of the bucket served.

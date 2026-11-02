@@ -20,7 +20,7 @@
 <p>That is a write-back arrangement: the cold copy trails the acknowledgement. When the hot tier is full, the proxy writes new objects straight to the cold tier instead, which is write-through for those objects.</p>
 
 <h2 id="eviction">Freeing the hot tier</h2>
-<p>When the hot tier passes its high-water mark (80 percent of <code>--hot-bytes</code> by default), the reconciler evicts the oldest objects from it, only those its checkpoint says the cold tier already holds, until usage is down to the low-water mark (70 percent by default). Above the critical mark (95 percent by default) a put waits a little and a read of a cold object is not copied back. The reconciler never lists the data prefixes: what to copy comes from the journals, so neither tier is scanned.</p>
+<p>When the hot tier passes its high-water mark (80 percent of <code>--hot-bytes</code> by default), the reconciler evicts the oldest objects from it, only those its checkpoint says the cold tier already holds, until usage is down to the low-water mark (70 percent by default). Above the critical mark (95 percent by default) a read of a cold object is not copied back. The reconciler never lists the data prefixes: what to copy comes from the journals, so neither tier is scanned.</p>
 
 <h2 id="reads">Reads: hot, then cold, and copy back</h2>
 <p>A get reads the hot tier, then the cold tier, and copies what it found in the cold tier back into the hot tier. A head does not copy. A listing merges both tiers. A ranged read that misses the hot tier reads the whole object from the cold tier, because the hot tier takes whole objects, and cuts the range from it.</p>
