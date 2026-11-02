@@ -4,11 +4,12 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use tierstore::server::update_hook::{Marker, Mode, Record, SingleKind, SingleRecord};
+use tierstore::server::update_hook::{Marker, Mode, Record, RecordError, SingleKind, SingleRecord};
 
 const RECORD: &[u8] = include_bytes!("fixtures/hook_record.json");
 const RECORD_IDLE: &[u8] = include_bytes!("fixtures/hook_record_idle.json");
 const RECORD_FIRST_RELEASE: &[u8] = include_bytes!("fixtures/hook_record_first_release.json");
+const RECORD_NEWER: &[u8] = include_bytes!("fixtures/hook_record_newer.json");
 const SINGLE: &[u8] = include_bytes!("fixtures/hook_record_single.json");
 
 fn in_flight() -> Record {
@@ -87,4 +88,13 @@ fn the_single_instance_record_ignores_a_key_added_later() {
     let text = String::from_utf8(SINGLE.to_vec()).unwrap();
     let added = text.replace("\"kind\"", "\"added_later\": 1,\n  \"kind\"");
     assert_eq!(SingleRecord::decode(added.as_bytes()).unwrap(), single());
+}
+
+/// Asserts that a two-slot record of a raised schema that carries a key this hook does not know
+/// (the fixture of a newer hook) is refused as `Newer` with the schema it has, not as a corrupt
+/// record: the hook reads it as newer than it understands and leaves it alone.
+#[test]
+fn a_two_slot_record_of_a_raised_schema_with_a_new_key_reads_as_newer() {
+    let error = Record::decode(RECORD_NEWER).unwrap_err();
+    assert_eq!(error, RecordError::Newer { found: 2 });
 }

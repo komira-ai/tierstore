@@ -8,7 +8,9 @@ use tierstore::{Backend as _, JournalEntry, JournalOp, PassReport, encode_journa
 use crate::support::Tiers;
 
 const CHECKPOINT: &[u8] = include_bytes!("fixtures/checkpoint.json");
+const CHECKPOINT_NEWER: &[u8] = include_bytes!("fixtures/checkpoint_newer.json");
 const USAGE: &[u8] = include_bytes!("fixtures/usage.json");
+const USAGE_NEWER: &[u8] = include_bytes!("fixtures/usage_newer.json");
 const LEASE: &str = include_str!("fixtures/lease_body.txt");
 const PROXY_MARKER: &[u8] = include_bytes!("fixtures/proxy_marker.bin");
 
@@ -38,16 +40,13 @@ async fn a_pass_writes_the_checkpoint_and_the_usage_of_the_fixtures() {
     assert_eq!(tiers.stored("_tiering/usage").await, USAGE);
 }
 
-/// Asserts that a reconciler that finds the checkpoint of the fixture (journal objects up to 5
-/// applied, entries before object 3 done with) over journal objects 3 to 6 starts from it: it
-/// copies only the entry of object 6, counts the four objects the journals say the hot tier
-/// holds, and stores the checkpoint moved to 6. Catches a checkpoint field that is read
-/// as another, or ignored.
-#[tokio::test(start_paused = true)]
-async fn a_reconciler_resumes_from_the_checkpoint_fixture() {
+/// Seeds journal objects 3 to 6 and `checkpoint` for `p1`, runs one pass and checks what the
+/// resume test of the fixture says: only the entry of object 6 is copied, four objects are
+/// counted in the hot tier, and the checkpoint is stored moved to 6.
+async fn resume_from(checkpoint: &[u8]) {
     let tiers = Tiers::new();
     tiers.seed("_tiering/proxies/p1", PROXY_MARKER).await;
-    tiers.seed("_tiering/checkpoint/p1", CHECKPOINT).await;
+    tiers.seed("_tiering/checkpoint/p1", checkpoint).await;
     for seq in 3..=6_u64 {
         let key = format!("k{seq}");
         tiers.seed(&key, b"x").await;
@@ -75,14 +74,30 @@ async fn a_reconciler_resumes_from_the_checkpoint_fixture() {
     assert_eq!(tiers.stored("_tiering/checkpoint/p1").await, moved);
 }
 
-/// Asserts that a proxy that finds the usage of the fixture (63 bytes in a hot tier of 63,
-/// published at time 50) reads it: it says the usage is 30 milliseconds old at time 80, and
-/// writes a new object straight to the cold tier because the hot tier is full. Catches a usage
-/// field that is read as another, or ignored.
+/// Asserts that a reconciler that finds the checkpoint of the fixture (journal objects up to 5
+/// applied, entries before object 3 done with) over journal objects 3 to 6 starts from it: it
+/// copies only the entry of object 6, counts the four objects the journals say the hot tier
+/// holds, and stores the checkpoint moved to 6. Catches a checkpoint field that is read
+/// as another, or ignored.
 #[tokio::test(start_paused = true)]
-async fn a_proxy_reads_the_usage_fixture() {
+async fn a_reconciler_resumes_from_the_checkpoint_fixture() {
+    resume_from(CHECKPOINT).await;
+}
+
+/// Asserts that a checkpoint with a field this release does not know (the fixture of a newer
+/// release) is read as if the field were not there: the reconciler resumes exactly as from the
+/// checkpoint fixture, and the checkpoint it stores has the three fields it knows.
+#[tokio::test(start_paused = true)]
+async fn a_reconciler_resumes_from_a_checkpoint_with_a_field_added_later() {
+    resume_from(CHECKPOINT_NEWER).await;
+}
+
+/// Reads `usage` as a proxy with a hot tier of 63 bytes at time 80 and checks what the usage
+/// fixture says: the usage is 30 milliseconds old, and a new object goes straight to the cold
+/// tier because the hot tier is full.
+async fn read_usage(usage: &[u8]) {
     let tiers = Tiers::new();
-    tiers.seed("_tiering/usage", USAGE).await;
+    tiers.seed("_tiering/usage", usage).await;
     tiers.clock.set(80);
     let proxy = tiers.proxy("p1", 63).await.unwrap();
 
@@ -91,6 +106,23 @@ async fn a_proxy_reads_the_usage_fixture() {
     assert_eq!(tiers.cold_keys().await, ["k"]);
     let in_hot = tiers.hot_keys("k").await;
     assert!(in_hot.is_empty(), "{in_hot:?}");
+}
+
+/// Asserts that a proxy that finds the usage of the fixture (63 bytes in a hot tier of 63,
+/// published at time 50) reads it: it says the usage is 30 milliseconds old at time 80, and
+/// writes a new object straight to the cold tier because the hot tier is full. Catches a usage
+/// field that is read as another, or ignored.
+#[tokio::test(start_paused = true)]
+async fn a_proxy_reads_the_usage_fixture() {
+    read_usage(USAGE).await;
+}
+
+/// Asserts that a usage with a field this release does not know (the fixture of a newer
+/// release) is read as if the field were not there: the proxy reads the same age and the same
+/// full hot tier as from the usage fixture.
+#[tokio::test(start_paused = true)]
+async fn a_proxy_reads_a_usage_with_a_field_added_later() {
+    read_usage(USAGE_NEWER).await;
 }
 
 /// Asserts that opening a proxy writes the marker of the fixture, an empty object, under

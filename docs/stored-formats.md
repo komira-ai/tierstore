@@ -17,9 +17,9 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 
 ## The rule
 
-A format changes only additively: a new optional field, a new operation word that a reader may skip, a new object under a new key. A field is never renamed, removed or given another meaning, and a field a reader needs is never added without a default. A reader ignores what it does not know and never refuses a file for it.
+A format changes only additively: a new optional field, a new operation word that a reader may skip, a new object under a new key. A field is never renamed, removed or given another meaning, and a field a reader needs is never added without a default. A reader ignores what it does not know and never refuses a file for it, with one exception: the two-slot hook record, below.
 
-A journal object with an operation this release does not know is read, and the entry is skipped. A cache sidecar or a checkpoint with a field this release does not know is read as if it were not there. The single-instance hook record ignores a key it does not know. The two-slot hook record does not: it refuses a key it does not know, so a key added to it raises its `schema`, which an older hook reads as newer than it understands and leaves alone.
+A journal object with an operation this release does not know is read, and the entry is skipped. A cache sidecar, a checkpoint or a usage object with a field this release does not know is read as if it were not there. The single-instance hook record ignores a key it does not know. The two-slot hook record does not: it refuses a key it does not know, so a key added to it raises its `schema`, which an older hook reads as newer than it understands and leaves alone. A test holds that: a record of schema 2 with a new key reads as newer, not as corrupt.
 
 ## The fixtures
 
