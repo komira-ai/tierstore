@@ -201,7 +201,7 @@ fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
 impl Scrubber {
     /// The hex of the SHA-256 of what `file` holds, in chunks, and the bytes read; none if the walk
     /// was told to stop first. `chunk` runs after each chunk is hashed.
-    fn hash(&self, file: &mut File, chunk: &impl Fn()) -> io::Result<Option<(String, u64)>> {
+    fn hash(&self, file: &mut File, chunk: &dyn Fn()) -> io::Result<Option<(String, u64)>> {
         let mut hasher = Sha256::new();
         let mut buffer = Vec::with_capacity(CHUNK);
         let mut total = 0;
@@ -276,7 +276,7 @@ impl Inner {
     }
 
     /// Hashes the object `hex` again and drops it if it does not match.
-    fn scrub_object(&self, hex: &str, state: &Scrubber, chunk: &impl Fn()) -> Verdict {
+    fn scrub_object(&self, hex: &str, state: &Scrubber, chunk: &dyn Fn()) -> Verdict {
         self.scrub_object_judging(hex, state, chunk, || {})
     }
 
@@ -298,7 +298,7 @@ impl Inner {
         &self,
         hex: &str,
         state: &Scrubber,
-        chunk: &impl Fn(),
+        chunk: &dyn Fn(),
         between: impl FnOnce(),
     ) -> Verdict {
         if self.filling(hex) {
@@ -340,7 +340,7 @@ impl Inner {
 
     /// One tick: scrubs objects while there is credit, and counts them. `chunk` runs after each
     /// chunk of an object is hashed.
-    pub(super) fn scrub_tick(&self, state: &mut Scrubber, chunk: &impl Fn()) -> ScrubPass {
+    pub(super) fn scrub_tick(&self, state: &mut Scrubber, chunk: &dyn Fn()) -> ScrubPass {
         // A cache that is read-only (it does not hold the lock of its directory) leaves the files
         // to the holder: no pass reads or drops anything. A tick still counts, and the pass
         // starts when the cache takes the lock.
@@ -413,7 +413,7 @@ impl LocalCache {
             return;
         };
         let state = Scrubber::new(per_tick).with_min_round(min_round);
-        self.scrub_with(state, ticker, halt, || {}).await;
+        self.scrub_with(state, ticker, halt, Arc::new(|| {})).await;
     }
 
     /// [`scrub`](Self::scrub) from a walk that is already made, running `chunk` after each chunk
@@ -423,7 +423,7 @@ impl LocalCache {
         mut state: Scrubber,
         mut ticker: impl Ticker,
         halt: Arc<Notify>,
-        chunk: impl Fn() + Clone + Send + 'static,
+        chunk: Arc<dyn Fn() + Send + Sync>,
     ) {
         loop {
             let more = tokio::select! {
@@ -437,9 +437,9 @@ impl LocalCache {
             let inner = Arc::clone(&self.inner);
             let stop = Arc::clone(&state.stop);
             let (per_tick, min_round) = (state.per_tick, state.min_round);
-            let chunk = chunk.clone();
+            let chunk = Arc::clone(&chunk);
             let mut running = tokio::task::spawn_blocking(move || {
-                let pass = inner.scrub_tick(&mut state, &chunk);
+                let pass = inner.scrub_tick(&mut state, &*chunk);
                 (state, pass)
             });
             let finished = tokio::select! {

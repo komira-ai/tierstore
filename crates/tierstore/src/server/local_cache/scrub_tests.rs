@@ -438,7 +438,11 @@ async fn a_halt_in_the_middle_of_a_big_object_ends_the_pass_at_the_next_chunk() 
     let cache = rig.cache.clone();
     let halt = Arc::new(Notify::new());
     let halting = Arc::clone(&halt);
-    let running = tokio::spawn(async move { cache.scrub_with(state, ticker, halting, hold).await });
+    let running = tokio::spawn(async move {
+        cache
+            .scrub_with(state, ticker, halting, Arc::new(hold))
+            .await
+    });
     asks.recv().await.unwrap();
     tick.send(()).await.unwrap();
     reaches.recv().await.unwrap();
