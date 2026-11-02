@@ -109,10 +109,15 @@ reboot it would not): if not, `1`, nothing changed. Then write intent to the rec
 idle port in one `nft -f -` (the ruleset on standard input, no file written), then probe through 9300 until a request is answered by v-next (its build gauge names the slot
 and the version), a counted number of times. A probe that never succeeds swaps back and exits `1`. Records `swapped` and
 sets `serving` to the new port. *Idempotent*: the file replaces the table and names the target port, so a second apply
-changes nothing; a crash before `swapped` is re-run. *Restart mode*: stop v-current, start v-next, wait for readiness,
-then the same swap. Going back in restart mode (a failed `cutover`'s own compensation, or `rollback`) stops v-next
+changes nothing; a crash before `swapped` is re-run. *Restart mode*: point the redirect at v-next's port first, where
+nothing listens yet, then stop v-current, start v-next, wait for readiness, then the same swap. A new connection in
+between is refused (its SYN finds no listener), and none reaches v-current after its stop begins, so its listening
+sockets never close on a connection whose client saw its connect succeed (section 7). **The restart's gap is v-current's
+settle** (`--drain-lb-wait`, 70 s in the slot template) and its exit, then v-next's start: new connections are refused
+for all of it, while the connections v-current already has are served to the end of its drain. Going back in restart
+mode (a failed `cutover`'s own compensation, or `rollback`) points the redirect at v-current first, then stops v-next
 **before** it starts v-current, because a release without `handover-v1` must never run beside another instance; in
-handover mode the old unit is started first.
+handover mode the old unit is started first. In both modes no unit is stopped while the redirect names it.
 
 **`verify`** (the gate; run again and again). Before `cleanup`: v-next is ready, a counted series of probes through 9300
 is answered by v-next with the staged version, the redirect names v-next, and v-current still serves. It exits `0` with
@@ -247,8 +252,27 @@ established keep-alive connection still reaches v-current and would get a 503 wh
   from the start of the drain, but reaches its last value only after the S3 listener that serves `/metricz` has closed,
   so a node that counted any says so on stderr as it exits (`late_note`, `server/drain.rs`), for each front.
 
+At the end of the settle the front closes its listening sockets, and the kernel resets every connection it still holds
+for them: those set up and not yet accepted, and those whose handshake is in flight, whose client saw its connect
+succeed. So the hook never stops a slot while the redirect names it: in a hand-over `cleanup` stops v-current after the
+swap, and in a plain restart `cutover` points the redirect at v-next's port before it stops v-current (section 4), so
+that a connect in the restart's gap is refused, never reset. What the kernel still holds when the settle ends (a
+connection set up just before the redirect moved, and not yet accepted) is taken rather than reset. The idle
+connections close first (P2), so that a client waiting for the end of its stream frees what it holds (the OCI front's
+slots); then the door is closed in steps (`server/door.rs`): the connections the kernel set up and the handshakes in
+flight (`SYN_RECV` in `/proc/self/net/tcp` and `tcp6`) are taken and served, and the sockets close once two looks 10 ms
+apart find none, or after 3 s. The looks end the wait early only while the count sees every handshake: once the
+namespace has sent any SYN cookie (`SyncookiesSent` in `/proc/self/net/netstat` is not 0; such a handshake has no
+entry, and nothing says which listener it was for or when), and on any system but Linux, the count is an error and the
+door waits the 3 s. A new connection
+that has not sent its first bytes yet is given the same 3 s to send them, and its request is then served whole, rather
+than closed as an idle one; a shorter header timeout or drain deadline wins. Left open: a handshake still in flight after
+3 s, and a connection that comes as the sockets close, which only a redirect that still names the stopping slot could
+bring. The door needs no privilege: a socket filter that dropped SYNs would need `CAP_NET_ADMIN` on some kernels, which
+the slot unit does not grant.
+
 The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
-`server/linger.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
+`server/linger.rs`, `server/door.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
 blob) sent in full and its connection closed the same way after it, and its late requests counted in
 `tierstore_oci_drain_late_requests_total`, so that its clients see no gap either (question 4).
 
@@ -313,8 +337,8 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   clears the flag; a wrong version or slot through 9300 is `1`; with `updater.promotion_ceiling_secs` in the params file
   and the lock never taken it still exits `0` (red: a hook that exits `1` at the ceiling).
 - **C4 `rollback`**: after `cutover` it returns the fake to its earlier state, with the idle slot's link absent; after
-  `cleanup`'s `stopping` marker it exits `1` with `reversible:false` and changes nothing; in restart mode it stops v-next
-  before it starts v-current; it removes the guard only when `guard_placed` is set.
+  `cleanup`'s `stopping` marker it exits `1` with `reversible:false` and changes nothing; in restart mode it points the redirect at
+  v-current, then stops v-next before it starts v-current; it removes the guard only when `guard_placed` is set.
 - **C5 `cleanup`**: without `verified`, with a `verified` marker holding another boot id, or with v-next not serving
   through 9300, it exits `1` with `reversible:true` and stops nothing (red: a hook that stops v-current); with a fresh one, twice and
   killed at each boundary, it ends with the unit stopped, link absent, `previous` cleared, and every exit
@@ -343,7 +367,7 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   and an idle S3 and OCI connection to v-current each write a request after its end of stream and close, which the
   lingering close reads and counts. The runs, one test each:
   - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
-    `handover-v1`, so `CAPABILITIES` is unchanged): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
+    `handover-v1`, so the run does not depend on the server's own `CAPABILITIES`): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
     requests; the held transfers complete; every acknowledged write, empty ones included, reads back with its bytes and
     hash; each client on new connections met both slots (`/metricz` through 9300); a direct connect from the veth peer
     to a private slot is dropped by the guard, IPv4 and IPv6 (counted by a watch table of the test's own around the
@@ -352,15 +376,11 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
     fresh start on the directory discard nothing.
   - (b) the same ending in `rollback` before `cleanup`: zero failures; v-current serves read-write through the rule,
     with no late request; v-next is stopped and its link removed.
-  - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
-    v-next, so a new connection in between is refused. The bound asserted: every failed request is an S3 connect into
-    that gap (from just before `cutover` until it returned), refused or reset in its handshake, counted and printed; no
-    request whose connect succeeded fails, whatever it reads. A plain restart has a race this bound does not admit, and
-    T1 reports it when it happens: the redirect still names v-current while it settles, so a connection that reaches it
-    as its listener closes at the end of the settle is reset (the listener's queue held it) or, accepted an instant
-    before with its request not yet read, closed idle. It is rare; closing it means moving the redirect off v-current
-    before its settle, which turns the whole settle into refused connects, or changing the end of the settle, and neither
-    is done here. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
+  - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` points the redirect at v-next's port,
+    then stops v-current before it starts v-next, so a new connection in between (v-current's settle, its exit and
+    v-next's start) is refused. The bound asserted: every failed request is an S3 connect into that gap (between just
+    before `cutover` and its return), refused or reset in its handshake, counted and printed; no request whose connect
+    succeeded fails, whatever it reads. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
     connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
     requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two
     slots' proxy ids and hold each acknowledged key once; once both slots have stopped, no lease is left.

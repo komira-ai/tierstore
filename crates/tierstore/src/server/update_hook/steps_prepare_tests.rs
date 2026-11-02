@@ -132,8 +132,9 @@ fn a_declared_restart_wins_over_the_capabilities() {
     fake.advance(&[Step::Cutover]);
     let changes = fake.changes()[mark..].to_vec();
     assert_eq!(
-        changes[..2],
+        changes[..3],
         [
+            "nft.apply kbf_forward_tierstore",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service"
         ]

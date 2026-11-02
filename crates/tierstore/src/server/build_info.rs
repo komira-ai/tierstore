@@ -22,13 +22,15 @@ pub const RELEASE_VERSION: &str = concat!(
 /// The capabilities `tierstore --capabilities` prints, one to a line, in this order. A name is
 /// lowercase letters, digits and `-`.
 ///
-/// **This list is empty on purpose, and it must not name `handover-v1` yet.** `handover-v1` says
-/// the release has the lock-based read-only mode, the lingering close in the drain and the
-/// wildcard listeners; the host updater's `prepare` step reads it to choose a handover over a
-/// plain restart, so a release that names it without all three would be handed over to and fail.
-/// Those three arrive in other changes, and the one that completes them adds `handover-v1` here,
-/// in this one place and nowhere else.
-pub const CAPABILITIES: &[&str] = &[];
+/// `handover-v1` says the release has the lock-based read-only mode, the lingering close in the
+/// drain of both fronts and the wildcard listeners of both fronts, and this build has all three.
+/// The host updater's `prepare` step reads it to choose a hand-over over a plain restart, so a
+/// release that named it without all three would be handed over to and fail; the test
+/// `handover_v1_is_listed_with_the_three_behaviours_it_promises` (tests/oci_front) runs the
+/// binary against each of them. This list is all `--capabilities` prints. The hook looks for the
+/// same name as `update_hook::HANDOVER_CAPABILITY`, and `the_pages_say_the_build_lists_handover_v1`
+/// holds the two equal.
+pub const CAPABILITIES: &[&str] = &["handover-v1"];
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]

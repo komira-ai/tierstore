@@ -29,6 +29,13 @@ pub(crate) fn ca() -> Ca {
     Ca { issuer }
 }
 
+impl Ca {
+    /// The CA's certificate, in PEM, for a client that trusts it.
+    pub(crate) fn pem(&self) -> String {
+        AsRef::<rcgen::Certificate>::as_ref(&self.issuer).pem()
+    }
+}
+
 pub(crate) fn ip(text: &str) -> SanType {
     SanType::IpAddress(text.parse::<IpAddr>().expect("an address"))
 }
