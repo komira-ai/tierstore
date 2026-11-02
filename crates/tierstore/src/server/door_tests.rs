@@ -406,16 +406,17 @@ fn outside_linux_the_count_is_an_error() {
 mod kernel {
     use std::io::{ErrorKind, Read as _, Write as _};
     use std::net::TcpStream;
-    use std::sync::Arc;
 
     use tierstore_testkit::dir::TestDir;
 
-    use super::super::{handshakes, handshakes_in, handshakes_under, syn_cookies, syn_cookies_in};
+    use super::super::{
+        Closing, TABLES, handshakes, handshakes_in, handshakes_under, syn_cookies_in,
+        syn_cookies_under,
+    };
     use super::{HEALTHZ, assert_served, short_settle};
     use crate::server::Incoming as _;
     use crate::server::listen::{Listeners, bind};
     use crate::server::testing::Rig;
-    use crate::server::{Drained, Server};
 
     /// A bound on a client's read, so that a server that never answers fails the test rather than
     /// hang it. No test passes by the end of it.
@@ -442,6 +443,11 @@ TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed
 TcpExt: 7 3 0
 ";
 
+    /// The same, with no SYN cookie sent.
+    const NO_COOKIES: &str = "TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed
+TcpExt: 0 0 0
+";
+
     /// Asserts that the count of a table takes the lines in state `SYN_RECV` on the given ports, of
     /// either family, and nothing else: not an open connection, not another port, and not a line it
     /// cannot read (which counts for nothing).
@@ -464,40 +470,42 @@ TcpExt: 7 3 0
         assert_eq!(syn_cookies_in("TcpExt: SyncookiesSent\nTcpExt: x\n"), None);
     }
 
-    /// Asserts that the count reads both tables, IPv4 and IPv6, and adds them up while the count of
-    /// SYN cookies sent is the one the listeners were taken with, and that it is an error (which
-    /// the door takes for handshakes in flight, and waits out the grace) when a table is missing,
-    /// when `netstat` is missing or has no count of cookies, when that count could not be read when
-    /// the listeners were taken, and when a cookie has been sent since: such a handshake has no
-    /// entry in the tables. It would catch a count of zero that the door trusts while the kernel
-    /// answers handshakes it does not list.
+    /// Asserts that the count reads both tables, IPv4 and IPv6, and adds them up while the
+    /// namespace has sent no SYN cookie, and that it is an error (which the door takes for
+    /// handshakes in flight, and waits out the grace) when a table is missing, when `netstat` is
+    /// missing or has no count of cookies, and when any cookie has been sent, whenever that was:
+    /// before the listeners were taken as well as after, since a cookie's handshake has no entry
+    /// and nothing tells which listener it was for. It would catch a count of zero that the door
+    /// trusts while the kernel answers handshakes it does not list.
     #[test]
-    fn the_count_reads_both_tables_and_fails_once_a_cookie_is_sent() {
+    fn the_count_reads_both_tables_and_fails_once_any_cookie_was_sent() {
         let dir = TestDir::under(std::env::temp_dir(), "door-tables");
         std::fs::write(dir.path().join("tcp"), TABLE).unwrap();
         std::fs::write(dir.path().join("tcp6"), TABLE).unwrap();
-        let no_netstat = handshakes_under(dir.path(), &[9301], Some(7)).unwrap_err();
+        let no_netstat = handshakes_under(dir.path(), &[9301]).unwrap_err();
         assert_eq!(no_netstat.kind(), ErrorKind::NotFound);
         std::fs::write(dir.path().join("netstat"), "TcpExt: Other\nTcpExt: 1\n").unwrap();
-        let no_count = handshakes_under(dir.path(), &[9301], Some(7)).unwrap_err();
+        let no_count = handshakes_under(dir.path(), &[9301]).unwrap_err();
         assert_eq!(no_count.kind(), ErrorKind::InvalidData);
+        std::fs::write(dir.path().join("netstat"), NO_COOKIES).unwrap();
+        assert_eq!(handshakes_under(dir.path(), &[9301]).unwrap(), 4);
         std::fs::write(dir.path().join("netstat"), NETSTAT).unwrap();
-        assert_eq!(handshakes_under(dir.path(), &[9301], Some(7)).unwrap(), 4);
-        let sent_since = handshakes_under(dir.path(), &[9301], Some(6)).unwrap_err();
+        let sent = handshakes_under(dir.path(), &[9301]).unwrap_err();
         assert_eq!(
-            sent_since.to_string(),
-            "SYN cookies have been sent since the listeners were taken, and their handshakes have no entry to count"
+            sent.to_string(),
+            "this network namespace has sent 7 SYN cookies, and their handshakes have no entry to count"
         );
-        assert!(handshakes_under(dir.path(), &[9301], None).is_err());
+        std::fs::write(dir.path().join("netstat"), NO_COOKIES).unwrap();
         std::fs::remove_file(dir.path().join("tcp6")).unwrap();
-        let missing = handshakes_under(dir.path(), &[9301], Some(7)).unwrap_err();
+        let missing = handshakes_under(dir.path(), &[9301]).unwrap_err();
         assert_eq!(missing.kind(), ErrorKind::NotFound);
     }
 
     /// Asserts that the count reads this network namespace's own tables: on a real loopback
-    /// listener whose connection is set up and waits in the accept queue, it is `Ok(0)`, since a
-    /// connection whose handshake is over is not in flight, and the listeners' count over their
-    /// own ports is the same. It would catch a door that looks for the tables where they are not
+    /// listener whose connection is set up and waits in the accept queue, the listeners' count over
+    /// their own ports is `Ok(0)` (a connection whose handshake is over is not in flight) where the
+    /// namespace has sent no SYN cookie, and else the error that names the cookies, whichever this
+    /// host's own count says. It would catch a door that looks for the tables where they are not
     /// (it would then wait out the grace at every stop) and a count that takes a set-up connection
     /// for a handshake.
     #[tokio::test]
@@ -505,15 +513,24 @@ TcpExt: 7 3 0
         let listeners = Listeners::new(vec![bind("127.0.0.1:0".parse().unwrap()).unwrap()]);
         let addr = listeners.local_addrs().unwrap()[0];
         let client = TcpStream::connect(addr).unwrap();
-        assert_eq!(handshakes(&[addr.port()], syn_cookies()).unwrap(), 0);
-        assert_eq!(listeners.handshakes().unwrap(), 0);
+        let sent = syn_cookies_under(std::path::Path::new(TABLES)).unwrap();
+        let counted = (listeners.handshakes(), handshakes(&[addr.port()]));
+        if sent == 0 {
+            assert_eq!(counted.0.unwrap(), 0);
+            assert_eq!(counted.1.unwrap(), 0);
+        } else {
+            let said = format!("this network namespace has sent {sent} SYN cookies");
+            assert!(counted.0.unwrap_err().to_string().starts_with(&said));
+        }
         drop(client);
     }
 
-    /// Asserts that connections set up on two listeners of one front, waiting in their accept
-    /// queues when the drain begins, are all served, each its whole answer with `Connection: close`,
-    /// before the sockets close, and that the drain then ends with nothing cut. It would catch an end of the settle that takes from one socket of a front and closes
-    /// the other on its queue.
+    /// Asserts that the closing door of a front with two listeners takes every connection set up
+    /// on either of them and waiting in its accept queue when the door begins (each client has
+    /// said that its connect succeeded and its request is written before the door begins), two
+    /// from each socket, and that each is served its whole answer with `Connection: close`; then
+    /// the door closes. It would catch a door that takes from one socket of a front and closes the
+    /// other on its queue.
     #[tokio::test]
     async fn connections_queued_on_two_listeners_are_all_served() {
         let mut sockets = vec![bind("127.0.0.1:0".parse().unwrap()).unwrap()];
@@ -524,28 +541,53 @@ TcpExt: 7 3 0
             "127.0.0.1:0"
         };
         sockets.push(bind(second.parse().unwrap()).unwrap());
-        let addrs: Vec<_> = sockets
+        let ports: Vec<u16> = sockets
             .iter()
-            .map(|socket| socket.local_addr().unwrap())
+            .map(|s| s.local_addr().unwrap().port())
             .collect();
+        let addrs: Vec<_> = sockets.iter().map(|s| s.local_addr().unwrap()).collect();
+        let (queued, waiting) = std::sync::mpsc::channel();
         let clients: Vec<_> = addrs
             .iter()
             .flat_map(|addr| [*addr, *addr])
             .map(|addr| {
+                let queued = queued.clone();
                 std::thread::spawn(move || {
                     let mut stream = TcpStream::connect(addr).expect("the connect succeeds");
                     // A bound on a server that never answers, so that the test fails, not hangs.
                     stream.set_read_timeout(Some(SAFETY)).unwrap();
                     stream.write_all(HEALTHZ.as_bytes()).unwrap();
+                    queued.send(()).unwrap();
                     let mut answer = String::new();
                     stream.read_to_string(&mut answer).map(|_| answer)
                 })
             })
             .collect();
+        tokio::task::spawn_blocking(move || {
+            for _ in 0..4 {
+                waiting
+                    .recv_timeout(SAFETY)
+                    .expect("a client's request is queued");
+            }
+        })
+        .await
+        .unwrap();
+
         let rig = Rig::with(1 << 20, short_settle).await;
         rig.server.begin_drain();
-        let server: Arc<Server> = Arc::clone(&rig.server);
-        let served = tokio::spawn(async move { server.serve_all(sockets).await });
+        rig.server.drain.settle();
+        let mut door = Closing::begin(Listeners::new(sockets));
+        let mut taken = Vec::new();
+        while let Some(accepted) = door.next().await {
+            let (stream, _) = accepted.as_ref().expect("an accept");
+            taken.push(stream.local_addr().unwrap().port());
+            rig.server.take(accepted).await;
+        }
+        drop(door);
+        taken.sort_unstable();
+        let mut wanted = [ports[0], ports[0], ports[1], ports[1]];
+        wanted.sort_unstable();
+        assert_eq!(taken, wanted);
         for client in clients {
             let answer = tokio::task::spawn_blocking(move || client.join().unwrap())
                 .await
@@ -553,6 +595,5 @@ TcpExt: 7 3 0
                 .expect("an answer, not a reset");
             assert_served(&answer);
         }
-        assert_eq!(served.await.unwrap(), Drained { abandoned: 0 });
     }
 }

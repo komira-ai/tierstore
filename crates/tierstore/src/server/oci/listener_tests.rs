@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
@@ -420,30 +420,95 @@ fn plain_loop(
 const BASE: &[u8] = b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n";
 
 /// Reads one whole answer from `client`, which may leave the connection open: the head, and the
-/// body its `content-length` gives.
-async fn read_one(client: &mut TcpStream) -> String {
+/// body its `content-length` gives. A read that fails, or the end of the stream, before the
+/// answer is whole is an error: an answer cut after its head is not taken for one served.
+async fn read_one<R: AsyncRead + Unpin>(client: &mut R) -> io::Result<String> {
     let mut bytes = Vec::new();
     let mut piece = [0_u8; 4096];
     loop {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         if let Some((head, body)) = text.split_once("\r\n\r\n") {
-            let length = head
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length: ")?
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                })
-                .unwrap_or(0);
+            let length = head.lines().find_map(|line| {
+                let line = line.to_ascii_lowercase();
+                line.strip_prefix("content-length: ")?
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            });
+            let Some(length) = length else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("no content-length: {text}"),
+                ));
+            };
             if body.len() >= length {
-                return text;
+                return Ok(text);
             }
         }
-        let read = client.read(&mut piece).await.unwrap();
-        assert!(read > 0, "the connection ended inside an answer: {text}");
+        let read = client.read(&mut piece).await?;
+        if read == 0 {
+            let cut = format!("the connection ended inside an answer: {text}");
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, cut));
+        }
         bytes.extend_from_slice(&piece[..read]);
+    }
+}
+
+/// Asserts that `answer` is the whole answer of the API base: 200, `Connection: close` when
+/// `closed`, and the body `{}` of exactly the length its head gives.
+#[track_caller]
+fn assert_ping(answer: &str, closed: bool) {
+    let (head, body) = answer.split_once("\r\n\r\n").expect("a head");
+    assert!(head.starts_with("HTTP/1.1 200 "), "{answer}");
+    assert_eq!(head.contains("connection: close"), closed, "{answer}");
+    assert!(head.contains("content-length: 2"), "{answer}");
+    assert_eq!(body, "{}", "{answer}");
+}
+
+/// Asserts that the reader the OCI tests read answers with refuses an answer cut after its head
+/// (its body short of the length the head gives, then the end of the stream), and one whose
+/// transport fails there, and takes a whole one: a reset or a truncation after the headers is not
+/// taken for a served request. It would catch a reader that lets the ping test pass on a
+/// connection the server cut.
+#[tokio::test]
+async fn an_answer_cut_after_its_head_is_not_taken_for_a_served_one() {
+    let whole = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 2\r\n\r\n{}";
+    let (mut client, mut server) = tokio::io::duplex(1024);
+    server.write_all(whole.as_bytes()).await.unwrap();
+    drop(server);
+    let answer = read_one(&mut client).await.expect("a whole answer");
+    assert_ping(&answer, true);
+
+    let (mut client, mut server) = tokio::io::duplex(1024);
+    server
+        .write_all(&whole.as_bytes()[..whole.len() - 1])
+        .await
+        .unwrap();
+    drop(server);
+    let cut = read_one(&mut client).await.unwrap_err();
+    assert_eq!(cut.kind(), io::ErrorKind::UnexpectedEof);
+
+    let mut failing = cut_by_reset(whole.len() - 1, whole.as_bytes());
+    let reset = read_one(&mut failing).await.unwrap_err();
+    assert_eq!(reset.kind(), io::ErrorKind::ConnectionReset);
+}
+
+/// A stream that gives the first `upto` bytes of `bytes` and then fails as a reset connection.
+fn cut_by_reset(upto: usize, bytes: &[u8]) -> impl AsyncRead + Unpin {
+    let given = io::Cursor::new(bytes[..upto].to_vec());
+    given.chain(Resetting)
+}
+
+/// A reader that fails as a reset connection.
+struct Resetting;
+
+impl AsyncRead for Resetting {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
     }
 }
 
@@ -466,10 +531,8 @@ async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
         .write_all(b"GET /v2/ HTTP/1.1\r\nhost: oci.test\r\n\r\n")
         .await
         .unwrap();
-    let mut answer = String::new();
-    client.read_to_string(&mut answer).await.unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.contains("connection: close"), "{answer}");
+    let answer = read_one(&mut client).await.expect("a whole answer");
+    assert_ping(&answer, true);
     drop(client);
     assert_eq!(looping.await.expect("the loop ended"), 0);
 }
@@ -528,9 +591,8 @@ async fn an_idle_connection_in_every_slot_closes_and_frees_one_for_the_held() {
     };
     let (looping, stop, drain) = closing_loop(held, 1, None);
     idle.write_all(BASE).await.unwrap();
-    let kept = read_one(&mut idle).await;
-    assert!(kept.starts_with("HTTP/1.1 200"), "{kept}");
-    assert!(!kept.contains("connection: close"), "kept alive: {kept}");
+    let kept = read_one(&mut idle).await.expect("a whole answer");
+    assert_ping(&kept, false);
 
     drain.begin();
     stop.send(true).expect("a loop");
@@ -539,10 +601,8 @@ async fn an_idle_connection_in_every_slot_closes_and_frees_one_for_the_held() {
     idle.read_to_end(&mut rest).await.unwrap();
     assert!(rest.is_empty(), "closed with nothing more sent");
     drop(idle);
-    let mut answer = String::new();
-    queued.read_to_string(&mut answer).await.unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.contains("connection: close"), "{answer}");
+    let answer = read_one(&mut queued).await.expect("a whole answer");
+    assert_ping(&answer, true);
     drop(queued);
     assert_eq!(looping.await.expect("the loop ended"), 0);
 }
@@ -573,9 +633,7 @@ async fn tls_client(connector: TlsConnector, tcp: TcpStream) -> io::Result<Strin
     let name = rustls::pki_types::ServerName::from(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let mut stream = connector.connect(name, tcp).await?;
     stream.write_all(BASE).await?;
-    let mut answer = Vec::new();
-    let _ = stream.read_to_end(&mut answer).await;
-    Ok(String::from_utf8_lossy(&answer).into_owned())
+    read_one(&mut stream).await
 }
 
 /// Asserts, on a TLS front with one slot, that a connection the door takes whose client then fails
@@ -601,9 +659,10 @@ async fn a_failed_tls_handshake_frees_its_slot_and_a_later_one_is_served() {
     bad.write_all(b"not a TLS record\r\n\r\n").await.unwrap();
     let mut nothing = Vec::new();
     let _ = bad.read_to_end(&mut nothing).await;
-    let answer = tls_client(connector, good).await.expect("a TLS handshake");
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.contains("connection: close"), "{answer}");
+    let answer = tls_client(connector, good)
+        .await
+        .expect("a whole answer over TLS");
+    assert_ping(&answer, true);
     assert_eq!(looping.await.expect("the loop ended"), 0);
 }
 
@@ -626,10 +685,8 @@ async fn a_connection_reset_before_its_first_request_frees_its_slot() {
     reset.set_zero_linger().unwrap();
     drop(reset);
     next.write_all(BASE).await.unwrap();
-    let mut answer = String::new();
-    next.read_to_string(&mut answer).await.unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    assert!(answer.contains("connection: close"), "{answer}");
+    let answer = read_one(&mut next).await.expect("a whole answer");
+    assert_ping(&answer, true);
     drop(next);
     assert_eq!(looping.await.expect("the loop ended"), 0);
 }

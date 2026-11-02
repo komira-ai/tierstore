@@ -17,9 +17,9 @@
 //!
 //! The looks can end the wait early only when the count sees every handshake. A handshake the
 //! kernel answered with a SYN cookie (it does so when the listen queue is full) has no entry to
-//! count, so once this network namespace has sent a SYN cookie since the sockets were taken, and
-//! on a system whose handshakes cannot be counted at all (any but Linux), the count is an error
-//! and the door waits out [`GRACE`].
+//! count, and the kernel keeps no record of which listener a cookie was for or when, so once this
+//! network namespace has sent any SYN cookie, and on a system whose handshakes cannot be counted
+//! at all (any but Linux), the count is an error and the door waits out [`GRACE`].
 //!
 //! The drain closes the idle connections when the door begins (see
 //! [`time_to_close`](super::drain::time_to_close)), so that a client waiting for the end of its
@@ -139,26 +139,13 @@ impl<I: Incoming> Closing<I> {
 #[cfg(target_os = "linux")]
 const TABLES: &str = "/proc/self/net";
 
-/// The SYN cookies this network namespace has sent, if the count can be read.
-#[cfg(target_os = "linux")]
-pub(super) fn syn_cookies() -> Option<u64> {
-    syn_cookies_under(Path::new(TABLES)).ok()
-}
-
-/// The handshakes in flight on the listening sockets of `ports`, in this network namespace, whose
-/// count of SYN cookies sent was `cookies` when the sockets were taken.
+/// The handshakes in flight on the listening sockets of `ports`, in this network namespace.
 ///
 /// # Errors
-/// A table cannot be read, or a SYN cookie has been sent since (its handshake has no entry).
+/// A table cannot be read, or the namespace has sent a SYN cookie (its handshake has no entry).
 #[cfg(target_os = "linux")]
-pub(super) fn handshakes(ports: &[u16], cookies: Option<u64>) -> io::Result<usize> {
-    handshakes_under(Path::new(TABLES), ports, cookies)
-}
-
-/// No count of SYN cookies outside Linux.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn syn_cookies() -> Option<u64> {
-    None
+pub(super) fn handshakes(ports: &[u16]) -> io::Result<usize> {
+    handshakes_under(Path::new(TABLES), ports)
 }
 
 /// No table of handshakes outside Linux: the count is an error, and the door waits out [`GRACE`].
@@ -166,7 +153,7 @@ pub(super) fn syn_cookies() -> Option<u64> {
 /// # Errors
 /// Always.
 #[cfg(not(target_os = "linux"))]
-pub(super) fn handshakes(_ports: &[u16], _cookies: Option<u64>) -> io::Result<usize> {
+pub(super) fn handshakes(_ports: &[u16]) -> io::Result<usize> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "this system's handshakes in flight cannot be counted",
@@ -174,18 +161,19 @@ pub(super) fn handshakes(_ports: &[u16], _cookies: Option<u64>) -> io::Result<us
 }
 
 /// The handshakes in flight on the listening sockets of `ports`: the entries in state `SYN_RECV`
-/// of the tables `tcp` and `tcp6` in `dir` whose local port is one of them, if the count of SYN
-/// cookies sent in `dir`'s `netstat` is still `cookies`.
+/// of the tables `tcp` and `tcp6` in `dir` whose local port is one of them, if `dir`'s `netstat`
+/// says that no SYN cookie has been sent.
 ///
 /// # Errors
-/// A table cannot be read, or a SYN cookie has been sent since `cookies` was read.
+/// A table cannot be read, or a SYN cookie has been sent: its handshake, if it is still under
+/// way, has no entry, and nothing tells which listener it was for or when it was sent.
 #[cfg(target_os = "linux")]
-fn handshakes_under(dir: &Path, ports: &[u16], cookies: Option<u64>) -> io::Result<usize> {
+fn handshakes_under(dir: &Path, ports: &[u16]) -> io::Result<usize> {
     let sent = syn_cookies_under(dir)?;
-    if cookies != Some(sent) {
-        return Err(io::Error::other(
-            "SYN cookies have been sent since the listeners were taken, and their handshakes have no entry to count",
-        ));
+    if sent != 0 {
+        return Err(io::Error::other(format!(
+            "this network namespace has sent {sent} SYN cookies, and their handshakes have no entry to count"
+        )));
     }
     let mut count = 0;
     for table in ["tcp", "tcp6"] {

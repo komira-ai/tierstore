@@ -180,19 +180,12 @@ pub(crate) struct Listeners {
     listeners: Vec<TcpListener>,
     /// The socket the next ask begins at.
     next: usize,
-    /// The SYN cookies this network namespace had sent when the sockets were taken, if the count
-    /// could be read ([`door::syn_cookies`]).
-    cookies: Option<u64>,
 }
 
 impl Listeners {
     /// The source of the connections of `listeners`.
     pub(crate) fn new(listeners: Vec<TcpListener>) -> Self {
-        Self {
-            listeners,
-            next: 0,
-            cookies: door::syn_cookies(),
-        }
+        Self { listeners, next: 0 }
     }
 
     /// The address of each socket, in the order they were given.
@@ -220,10 +213,10 @@ impl Incoming for Listeners {
     }
 
     /// The handshakes in flight on the ports of the sockets ([`door::handshakes`]); an error once
-    /// a SYN cookie has been sent since the sockets were taken.
+    /// the network namespace has sent a SYN cookie.
     fn handshakes(&self) -> io::Result<usize> {
         let ports: Vec<u16> = self.local_addrs()?.iter().map(SocketAddr::port).collect();
-        door::handshakes(&ports, self.cookies)
+        door::handshakes(&ports)
     }
 }
 

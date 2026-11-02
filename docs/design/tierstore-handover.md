@@ -262,8 +262,9 @@ connections close first (P2), so that a client waiting for the end of its stream
 slots); then the door is closed in steps (`server/door.rs`): the connections the kernel set up and the handshakes in
 flight (`SYN_RECV` in `/proc/self/net/tcp` and `tcp6`) are taken and served, and the sockets close once two looks 10 ms
 apart find none, or after 3 s. The looks end the wait early only while the count sees every handshake: once the
-namespace has sent a SYN cookie since the sockets were taken (`SyncookiesSent` in `/proc/self/net/netstat`; such a
-handshake has no entry), and on any system but Linux, the count is an error and the door waits the 3 s. A new connection
+namespace has sent any SYN cookie (`SyncookiesSent` in `/proc/self/net/netstat` is not 0; such a handshake has no
+entry, and nothing says which listener it was for or when), and on any system but Linux, the count is an error and the
+door waits the 3 s. A new connection
 that has not sent its first bytes yet is given the same 3 s to send them, and its request is then served whole, rather
 than closed as an idle one; a shorter header timeout or drain deadline wins. Left open: a handshake still in flight after
 3 s, and a connection that comes as the sockets close, which only a redirect that still names the stopping slot could
