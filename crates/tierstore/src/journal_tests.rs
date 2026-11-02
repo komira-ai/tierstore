@@ -1,12 +1,14 @@
 //! The checkpoint of a proxy: how two are joined, and that what is stored never goes down.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::{Checkpoint, checkpoint_key, store_checkpoint, to_body};
-use crate::{Backend, Error, MemoryBackend};
+use crate::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta};
 
 fn at(seq: u64, evict_seq: u64, evict_idx: u64) -> Checkpoint {
     Checkpoint {
@@ -127,4 +129,79 @@ async fn a_checkpoint_changed_since_the_head_is_not_overwritten() {
     let error = store_checkpoint(&hot, "p", &at(2, 0, 0)).await.unwrap_err();
     assert_eq!(error, refused);
     assert_eq!(stored(&mem).await, to_body(&at(1, 0, 0)));
+}
+
+/// Asserts that a create that fails (the object is absent after the HEAD, and the write is
+/// refused) is given back and nothing is stored.
+#[tokio::test]
+async fn a_create_that_fails_is_given_back_and_nothing_is_stored() {
+    let mem = Arc::new(MemoryBackend::new());
+    let hot = FaultyBackend::new(mem.clone());
+    let refused = Error::Full("on purpose".to_owned());
+    hot.fail_next_on(Op::Put, "_tiering/checkpoint/", refused.clone());
+    let error = store_checkpoint(&hot, "p", &at(1, 0, 0)).await.unwrap_err();
+    assert_eq!(error, refused);
+    assert!(mem.head(&checkpoint_key("p")).await.is_err());
+}
+
+/// A backend that, on the first GET of the checkpoint of `p`, first replaces the stored
+/// checkpoint with `body`, as another writer would between the HEAD and the GET of the caller.
+struct ReplaceBeforeGet {
+    under: Arc<MemoryBackend>,
+    body: Bytes,
+    spent: AtomicBool,
+}
+
+#[async_trait]
+impl Backend for ReplaceBeforeGet {
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.under.put(key, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.under.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        if key == checkpoint_key("p") && !self.spent.swap(true, Ordering::SeqCst) {
+            let tag = self.under.head(key).await.unwrap().tag;
+            self.under
+                .put_if_match(key, self.body.clone(), &tag)
+                .await
+                .unwrap();
+        }
+        self.under.get(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        self.under.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.under.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.under.list(prefix).await
+    }
+}
+
+/// Asserts that a checkpoint written between the HEAD and the GET is not overwritten by a merge
+/// of the newer content: the write is conditional on the HEAD's older tag, so it fails with the
+/// precondition error and what the other writer stored stays.
+#[tokio::test]
+async fn a_checkpoint_written_between_the_head_and_the_get_is_kept() {
+    let mem = Arc::new(MemoryBackend::new());
+    store_checkpoint(mem.as_ref(), "p", &at(1, 0, 0))
+        .await
+        .unwrap();
+    let newer = at(5, 2, 0);
+    let hot = ReplaceBeforeGet {
+        under: mem.clone(),
+        body: to_body(&newer),
+        spent: AtomicBool::new(false),
+    };
+    let error = store_checkpoint(&hot, "p", &at(7, 0, 0)).await.unwrap_err();
+    assert!(matches!(error, Error::PreconditionFailed(_)), "{error:?}");
+    assert_eq!(stored(&mem).await, to_body(&newer));
 }

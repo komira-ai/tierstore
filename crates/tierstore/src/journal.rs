@@ -168,8 +168,8 @@ pub(crate) async fn load_checkpoint(
     }
 }
 
-/// Writes a small object that is rewritten in place (the usage, not a checkpoint): create-only the first time, and then
-/// only over the object whose content tag a HEAD just gave.
+/// Writes a small object that is rewritten in place (the usage, not a checkpoint): create-only
+/// the first time, and then only over the object whose content tag a HEAD just gave.
 pub(crate) async fn write_object(hot: &dyn Backend, key: &str, body: Bytes) -> Result<(), Error> {
     match hot.head(key).await {
         Ok(meta) => hot.put_if_match(key, body, &meta.tag).await.map(|_| ()),

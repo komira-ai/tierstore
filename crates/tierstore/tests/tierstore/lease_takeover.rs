@@ -96,9 +96,7 @@ async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
 /// gone, so it forgets what it read and stores no checkpoint and prunes nothing (the test of the
 /// checkpoint below says what is stored). Defects it catches: a take over while the old holder's
 /// lease is young; an old holder that renews a lease another holder replaced; an overlap that
-/// loses an object; a stale pass that keeps its books. (Renamed from
-/// `a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_next_renewal`: the
-/// assertions of that test all stand, with one added.)
+/// loses an object; a stale pass that keeps its books.
 #[tokio::test(start_paused = true)]
 async fn a_pass_longer_than_the_lease_copies_beside_the_new_holder_and_stores_nothing() {
     let rig = Rig::new();
