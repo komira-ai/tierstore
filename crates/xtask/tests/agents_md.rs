@@ -160,7 +160,7 @@ fn imports_agents(claude: &str) -> bool {
                 fence = None
             }
             (Some(_), _) => {}
-            (None, false) if line.trim().is_empty() => {
+            (None, false) if line.chars().all(|c| c == ' ' || c == '\t') => {
                 if imports_in_block(&block) {
                     return true;
                 }
@@ -173,40 +173,10 @@ fn imports_agents(claude: &str) -> bool {
 }
 
 /// Whether one of `block` (consecutive non-blank lines outside a fence) is exactly
-/// `@AGENTS.md` and outside every code span. A span opens at a run of backticks and closes
-/// at the next run of the same length; a run with no such closer is literal text. Backslash
-/// escapes are not read, which can only make a span where Markdown has none, so an import
-/// is never accepted that Markdown would not read.
+/// `@AGENTS.md` and outside every code span.
 fn imports_in_block(block: &[&str]) -> bool {
     let text = block.join("\n");
-    // The backtick runs of the text: (start, length).
-    let mut runs = Vec::new();
-    let mut i = 0;
-    let bytes = text.as_bytes();
-    while i < bytes.len() {
-        if bytes[i] == b'`' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == b'`' {
-                i += 1;
-            }
-            runs.push((start, i - start));
-        } else {
-            i += 1;
-        }
-    }
-    // The spans, as the byte ranges between their opening and closing runs.
-    let mut spans = Vec::new();
-    let mut k = 0;
-    while k < runs.len() {
-        let (start, len) = runs[k];
-        match runs[k + 1..].iter().position(|&(_, l)| l == len) {
-            Some(j) => {
-                spans.push((start + len, runs[k + 1 + j].0));
-                k += j + 2;
-            }
-            None => k += 1,
-        }
-    }
+    let spans = code_spans(&text);
     let mut offset = 0;
     for line in block {
         let (s, e) = (offset, offset + line.len());
@@ -216,6 +186,56 @@ fn imports_in_block(block: &[&str]) -> bool {
         offset = e + 1;
     }
     false
+}
+
+/// The code spans of `text`, as the byte ranges between their opening and closing runs of
+/// backticks. Outside a span, a backtick after an odd number of backslashes is escaped:
+/// it is literal, and the rest of its run may open a span. A span closes at the next run of
+/// exactly its opener's length; inside a span a backslash is literal, so it escapes nothing.
+/// An opener with no such closer is literal text.
+fn code_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    // The end of the run of backticks that starts at `i`.
+    let run_end = |i: usize| {
+        (i..bytes.len())
+            .find(|&j| bytes[j] != b'`')
+            .unwrap_or(bytes.len())
+    };
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        let end = run_end(i);
+        let slashes = bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count();
+        let start = if slashes % 2 == 1 { i + 1 } else { i };
+        let len = end - start;
+        // The first run after the opener with the opener's length.
+        let mut j = end;
+        let mut closer = None;
+        while len > 0 && j < bytes.len() {
+            if bytes[j] == b'`' {
+                let e = run_end(j);
+                if e - j == len {
+                    closer = Some((j, e));
+                    break;
+                }
+                j = e;
+            } else {
+                j += 1;
+            }
+        }
+        match closer {
+            Some((c, e)) => {
+                spans.push((end, c));
+                i = e;
+            }
+            None => i = end,
+        }
+    }
+    spans
 }
 
 /// The headings of the shared core, and one rule of each, that the copy must hold.
@@ -561,5 +581,41 @@ fn a_closing_fence_has_only_spaces_and_tabs_after_it() {
         "```\nx\n```\r\n@AGENTS.md\n",
     ] {
         assert!(!imports_agents(bad), "{bad:?}");
+    }
+}
+
+/// Catches an escaped backtick read as a span's opener, and a line of other white space
+/// read as a blank line: either would close the span early and let an import inside it
+/// count. Only spaces and tabs make a blank line, and a backslash inside a span escapes
+/// nothing.
+#[test]
+fn escapes_and_blank_lines_are_read_as_markdown_reads_them() {
+    for bad in [
+        // The escaped backtick is literal; the next one opens a span around the import.
+        "\\`\n`\n@AGENTS.md\n`\n",
+        // Three backslashes: the last escapes the backtick.
+        "\\\\\\`\n`\n@AGENTS.md\n`\n",
+        // An escaped backtick, and the rest of its run opens a span.
+        "\\``\n@AGENTS.md\n`\n",
+        // Inside a span a backslash escapes nothing, so the backtick after it closes the
+        // span; the next span holds the import.
+        "`a\\`\n`\n@AGENTS.md\n`\n",
+        // Lines of other white space do not end the paragraph.
+        "`\n\u{a0}\n@AGENTS.md\n`\n",
+        "`\n\u{2003}\n@AGENTS.md\n`\n",
+    ] {
+        assert!(!imports_agents(bad), "{bad:?}");
+    }
+    for good in [
+        // Two backslashes are an escaped backslash; the backtick opens a span that closes
+        // on the next line.
+        "\\\\`\n`\n@AGENTS.md\n",
+        // An escaped backtick with no span after it.
+        "\\`\n@AGENTS.md\n",
+        "\\`\n@AGENTS.md\n\\`\n",
+        // A line of spaces and tabs is blank and ends the paragraph.
+        "`\n \t \n@AGENTS.md\n`\n",
+    ] {
+        assert!(imports_agents(good), "{good:?}");
     }
 }
