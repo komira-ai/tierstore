@@ -133,6 +133,12 @@ const TIME_WORDS: &[&str] = &[
     "hour",
     "hours",
     "duration",
+    "durations",
+    "runtime",
+    "runtimes",
+    "run-time",
+    "elapsed",
+    "turnaround",
     "took",
     "take",
     "takes",
@@ -384,8 +390,11 @@ fn claim(sentence: &str, clause: &str) -> Option<String> {
     // A word that compares amounts is a claim of a build, or of a wall time tied to the measured
     // runs or to tierstore: "wall time fell" alone is said of other runs on the page (a tree read
     // at 1 and 64 requests in flight).
-    let runs = RUN_WORDS.iter().any(|w| sentence.contains(w));
-    if (build || (wall && runs))
+    // The tie to the runs is read in the clause that compares, not the whole sentence: "tierstore
+    // doubled the hit rate; the wall time is in the table" ties nothing to the wall time.
+    let wall_here = has_word(clause, "wall") || clause.contains("wall-clock");
+    let runs = wall_here && RUN_WORDS.iter().any(|w| clause.contains(w));
+    if (build || runs)
         && let Some(word) = AMOUNT_WORDS.iter().find(|w| has_word(clause, w))
     {
         return Some(format!("{word:?}"));
@@ -499,6 +508,16 @@ fn a_build_time_claim_is_refused_in_every_form() {
         ),
         ("<p>Wall time fell by half with tierstore.</p>", "\"fell\""),
         ("<p>Wall time doubled with tierstore.</p>", "\"doubled\""),
+        // A judging word with a runtime, the time word spelled as one.
+        ("<p>Tierstore improved build runtime.</p>", "\"improved\""),
+        (
+            "<p>Tierstore improved the runtimes of the builds.</p>",
+            "\"improved\"",
+        ),
+        (
+            "<p>Tierstore improved elapsed build time.</p>",
+            "\"improved\"",
+        ),
         (
             "<p>The warm run's wall time was lower than the baseline.</p>",
             "\"lower\"",
@@ -590,6 +609,8 @@ fn a_disclaimer_or_an_unrelated_quantity_is_not_a_claim() {
         // Words that judge without a time: a cache's quality, not a build's speed.
         "<p>The cache hit rate improved for this build.</p>",
         "<p>This build has better cache locality.</p>",
+        // A wall time in another clause is not tied to an amount compared in this one.
+        "<p>Tierstore doubled the hit rate; the wall time is in the table.</p>",
         "<p>The warm run had a better hit rate than the cold run for the build.</p>",
     ] {
         let claims = time_claims(page);
