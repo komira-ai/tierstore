@@ -43,6 +43,8 @@ test('downloads point to this repository\'s releases and no page sends the reade
   assert.match(pages[2][1], /github\.com\/komira-ai\/tierstore\/releases/);
   for (const [name, text] of pages) {
     assert.doesNotMatch(text, /komira-ai\/(?!tierstore\/)[\w.-]+\/(releases|blob)/, `${name} links to a release or document of another repository`);
+    const outsideTheHistoryNote = text.split(/(?<=\.)\s+/).filter((sentence) => !sentence.includes('0.2.0')).join(' ');
+    assert.doesNotMatch(outsideTheHistoryNote, /(another|other|separate) repository/i, `${name} sends the reader to another repository outside the 0.2.0 note`);
   }
 });
 

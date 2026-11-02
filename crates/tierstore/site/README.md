@@ -31,7 +31,7 @@ the header; a change to it there is made here in the same step.
 | `static/site.css` | this site's own rules, loaded after the theme |
 | `src/copy.ts` | copy buttons on command blocks |
 | `tools/` | `pages.ts` (routes, titles, the white-paper URL), `layout.ts` (the page shell, with the `> tierstore` mark), `build.ts`, `check-dist.ts`, `links.ts`, `csp.ts`, `publish.ts` (uploads a built `dist/`; see Deploying) |
-| `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the white-paper slot, the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
+| `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the optional footer link (`footer-slot.test.ts`), the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
 
 ## The demo
 
