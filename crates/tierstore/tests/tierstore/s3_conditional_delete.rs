@@ -132,13 +132,17 @@ async fn a_request_that_fails_mid_probe_is_told_from_a_store_that_ignores_if_mat
     }
 }
 
-/// Asserts that a probe key the client cannot name is settled on `head-then-delete` without a
-/// request, and that a conditional delete of such a key is an error before any request.
+/// Asserts that a probe key the client cannot name is settled on `head-then-delete`, as one that
+/// could not be asked, without a request, and that a conditional delete of such a key is an error before any request.
 #[tokio::test]
 async fn a_key_the_client_cannot_name_sends_no_request() {
     let (s3, backend) = backend().await;
     let way = backend.settle_conditional_delete("a b").await;
-    assert_eq!(way.as_deref(), Some("head-then-delete"));
+    let way = way.unwrap();
+    assert!(
+        way.starts_with("head-then-delete (could not ask: "),
+        "{way}"
+    );
     let refused = backend.delete_if_match("a b", "tag").await.unwrap_err();
     assert!(matches!(refused, Error::Other(_)), "{refused}");
     assert_eq!(s3.requests(), Vec::<String>::new());
