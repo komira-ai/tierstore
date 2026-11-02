@@ -195,6 +195,8 @@ mod ruleset_tests;
 #[cfg(test)]
 mod single_crash_tests;
 #[cfg(test)]
+mod single_record_tests;
+#[cfg(test)]
 mod single_testing;
 #[cfg(test)]
 mod single_tests;

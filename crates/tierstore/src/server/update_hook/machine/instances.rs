@@ -43,8 +43,9 @@ impl LoopbackInstances {
     }
 
     /// The same, telling the time with `now` instead of the monotonic clock: a test moves it on.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_clock(mut self, now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+    pub(crate) fn with_clock(mut self, now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
         self.now = Box::new(now);
         self
     }

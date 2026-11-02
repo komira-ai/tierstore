@@ -184,27 +184,18 @@ fn a_path_that_could_forge_a_request_is_refused() {
     }
 }
 
-/// Asserts that one deadline bounds the whole request, the write and every read of the answer
-/// together: with a clock that moves 2 s on at each look at it and a deadline of 5 s, an answer
-/// whose head comes in a first read and whose body never comes fails at the next look, before a
-/// read waits for it, with an error that names the deadline; and that the same client with the
-/// same clock reads an answer that comes whole within its time. The server sends when the test
-/// tells it to; nothing is timed. It would catch a client whose reads each wait their own timeout,
-/// so that an answer that comes a piece at a time keeps a look going past its bound.
-#[test]
-fn one_deadline_bounds_the_whole_request() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
-    let ticking = || {
-        let base = Instant::now();
-        let looks = Arc::new(AtomicU64::new(0));
-        move || base + Duration::from_secs(2 * looks.fetch_add(1, Ordering::SeqCst))
-    };
+/// A server for one connection whose answer comes in `pieces`: before each piece it moves the
+/// shared clock on by that piece's seconds, then writes it; after the last it holds the
+/// connection open until `release` says so, or closes it at once when `hold` is false. Time moves
+/// only here, however the client's reads split the bytes.
+fn serve_in_pieces(
+    pieces: Vec<(u64, &'static [u8])>,
+    clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    hold: Option<mpsc::Receiver<()>>,
+) -> (u16, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let (release, wait) = mpsc::channel::<()>();
-    let holder = std::thread::spawn(move || {
+    let thread = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = Vec::new();
         let mut byte = [0u8; 1];
@@ -212,25 +203,66 @@ fn one_deadline_bounds_the_whole_request() {
             stream.read_exact(&mut byte).unwrap();
             request.push(byte[0]);
         }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
-            .unwrap();
-        // The body is held until the test has its answer: the client must not wait for it.
-        let _ = wait.recv();
+        for (seconds, bytes) in pieces {
+            clock.fetch_add(seconds, std::sync::atomic::Ordering::SeqCst);
+            stream.write_all(bytes).unwrap();
+            stream.flush().unwrap();
+        }
+        if let Some(hold) = hold {
+            let _ = hold.recv();
+        }
     });
-    let slow = LoopbackInstances::new(Duration::from_secs(5), Duration::from_secs(5))
-        .with_clock(ticking());
-    let error = slow.get(port, "/readyz").unwrap_err();
+    (port, thread)
+}
+
+/// Asserts that one deadline of 5 s bounds the whole request, the write and every read of the
+/// answer together, on a clock that moves only when the server says (before each piece it
+/// sends), so that how the client's reads split the bytes does not matter: an answer sent in
+/// four pieces over 4 s is read whole; an answer whose head comes and whose next byte comes after
+/// the clock has passed the deadline fails at the next look with an error that names the
+/// deadline, though the server still holds the connection and a read could wait; nothing is
+/// timed. It would catch a client whose reads each wait their own timeout, so that an answer
+/// that comes a piece at a time keeps a look going past its bound.
+#[test]
+fn one_deadline_bounds_the_whole_request() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
+    let clocked = |seconds: &Arc<AtomicU64>| {
+        let base = Instant::now();
+        let seconds = Arc::clone(seconds);
+        LoopbackInstances::new(Duration::from_secs(5), Duration::from_secs(5))
+            .with_clock(move || base + Duration::from_secs(seconds.load(Ordering::SeqCst)))
+    };
+    let seconds = Arc::new(AtomicU64::new(0));
+    let (port, server) = serve_in_pieces(
+        vec![
+            (1, b"HTTP/1.1 200 OK\r\n"),
+            (1, b"Content-Length: 5\r\n\r\n"),
+            (1, b"rea"),
+            (1, b"dy"),
+        ],
+        Arc::clone(&seconds),
+        None,
+    );
+    let reply = clocked(&seconds).get(port, "/readyz").unwrap();
+    server.join().unwrap();
+    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
+    let seconds = Arc::new(AtomicU64::new(0));
+    let (release, hold) = mpsc::channel::<()>();
+    let (port, server) = serve_in_pieces(
+        vec![
+            (0, b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n"),
+            (6, b"r"),
+        ],
+        Arc::clone(&seconds),
+        Some(hold),
+    );
+    let error = clocked(&seconds).get(port, "/readyz").unwrap_err();
     release.send(()).unwrap();
-    holder.join().unwrap();
+    server.join().unwrap();
     assert_eq!(
         message(error),
         format!("GET 127.0.0.1:{port}/readyz: no whole answer within 5s")
     );
-    let (port, server) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nready".to_vec());
-    let whole = LoopbackInstances::new(Duration::from_secs(5), Duration::from_secs(9))
-        .with_clock(ticking());
-    let reply = whole.get(port, "/readyz").unwrap();
-    server.join().unwrap();
-    assert_eq!((reply.status, reply.body.as_str()), (200, "ready"));
 }
