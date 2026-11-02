@@ -382,19 +382,20 @@ async fn a_marked_create_sends_if_none_match_and_the_mark() {
     let again = s.put_new_marked(&key(), Bytes::from("abc")).await;
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(k)) if k == key()));
 
-    let heads = seen.lock().unwrap();
-    let put = heads[0].to_ascii_lowercase();
-    assert!(
-        put.starts_with("put /test-bucket/cas/seg-1 http/1.1\r\n"),
-        "{put}"
-    );
-    assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
-    assert!(put.contains(&format!("\r\n{MARK}\r\n")), "{put}");
-    assert!(!put.contains("if-match:"), "{put}");
-    let signed = "signedheaders=host;if-none-match;x-amz-content-sha256;x-amz-date;\
+    {
+        let heads = seen.lock().unwrap();
+        let put = heads[0].to_ascii_lowercase();
+        assert!(
+            put.starts_with("put /test-bucket/cas/seg-1 http/1.1\r\n"),
+            "{put}"
+        );
+        assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
+        assert!(put.contains(&format!("\r\n{MARK}\r\n")), "{put}");
+        assert!(!put.contains("if-match:"), "{put}");
+        let signed = "signedheaders=host;if-none-match;x-amz-content-sha256;x-amz-date;\
                   x-amz-meta-tierstore-reservation";
-    assert!(put.contains(signed), "{put}");
-    drop(heads);
+        assert!(put.contains(signed), "{put}");
+    }
 
     let (endpoint, seen) = script(vec![]).await;
     let refused = store(endpoint).put_new_marked(&key(), Bytes::new()).await;
