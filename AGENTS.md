@@ -72,7 +72,7 @@ Severity: BLOCK must be fixed before merge. SHOULD is fixed unless the author gi
 tierstore is a Cargo workspace of Rust crates; these are the rules of its code. The tool of T11 is a Rust test or a `cargo xtask` verb here.
 
 - R1 BLOCK. `cargo fmt --all --check` and `cargo clippy --workspace --all-targets --locked -- -D warnings` are green. No new `#[allow(...)]`/`#![allow(...)]` without a stated reason.
-- R2 BLOCK. No new `unsafe`. The `unsafe` this workspace has is the libc calls and environment edits of the test helper `tierstore-testkit`, each with a `// SAFETY:` comment; a change adds none, and `tierstore`, which has `#![forbid(unsafe_code)]`, keeps it.
+- R2 BLOCK. No new `unsafe`. The `unsafe` this workspace has is the libc calls and environment edits of the test helper `tierstore-testkit`, each with a `// SAFETY:` comment; a change adds none, and `tierstore`, which has `#![forbid(unsafe_code)]`, keeps it. Enforced by `unsafe_code = "deny"` in the root `Cargo.toml`; the two testkit sites `expect` it with a reason (`reaped.rs`, and one test in `dir.rs`).
 - R3 BLOCK. No new `.unwrap()` or `.expect(` in production paths. Libraries use `thiserror` enums with context; `anyhow` only in binaries; no `Box<dyn Error>` in library signatures.
 - R6 BLOCK. Dependencies come from crates.io (or pinned sibling-repo revisions) with a permissive licence; `cargo deny` licences, bans, and sources pass. Advisories (RUSTSEC) never block a PR.
 - R7 BLOCK. Manifests parse after the merge: no duplicate keys or merge artifacts in changed `Cargo.toml`.
@@ -87,7 +87,9 @@ tierstore is a Cargo workspace of Rust crates; these are the rules of its code. 
 - B17 SHOULD. Host updates use one generic updater with per-service update-hook subcommands declared in a root-owned file; no per-roll scripts or per-service logic in the updater.
 - B10 BLOCK (this repository). Every workflow also has a top-level `permissions: {}`, and a write scope is held only by the jobs, and under the `if:`, that the workflow lint lists for it.
 
-Where the rules above are checked in this repository: format, licences, bans and sources, and clippy (R1, R6) by CI's `lint` job;
+Where the rules above are checked in this repository: format, licences, bans and sources, and clippy (R1, R6) by CI's `lint` job,
+which also enforces R2 (`unsafe_code` in `[workspace.lints]`) and the environment reads of S2 (`disallowed-methods` in `clippy.toml`;
+each allowed read carries an `#[expect(..., reason = "...")]`); the formatting options are in `rustfmt.toml`;
 coverage (T1, T3) by `coverage-gate` in CI's `test` job, which judges every crate of the workspace at 99.00% of its lines and of its
 branches with no exclusion; workflow runners, triggers, permissions and action pins (B10) by the workflow lint,
 `cargo test -p xtask --test workflows`; this file and `CLAUDE.md` by `cargo test -p xtask --test agents_md`.

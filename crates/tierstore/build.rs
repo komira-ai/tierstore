@@ -34,6 +34,11 @@ fn git_path(name: &str) -> Option<PathBuf> {
     git(&["rev-parse", "--git-path", name]).map(PathBuf::from)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a build script is handed its inputs by cargo as environment variables; the two \
+              build overrides are read here until they become flags of the release tooling"
+)]
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed={}", build_commit::OVERRIDE);

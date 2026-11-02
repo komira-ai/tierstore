@@ -151,6 +151,11 @@ const PROXIES: [&str; 6] = [
 ];
 
 /// How the command line departs from what `expect.txt` says, if it does.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test double of `gh` checks the proxy variables its caller must hand it; reading \
+              them is what it tests"
+)]
 fn departure(expect: &str, flags: &BTreeMap<&str, &str>) -> Option<String> {
     let want: BTreeMap<&str, &str> = expect.lines().filter_map(|l| l.split_once('=')).collect();
     let flag = |name: &str| flags.get(name).copied();

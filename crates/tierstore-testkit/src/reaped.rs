@@ -13,6 +13,12 @@
 //! [`crate::forked`] (a child held between `fork` and `exec`): they cover the other ways a
 //! forked child touches a test's descriptors.
 
+#![expect(
+    unsafe_code,
+    reason = "libc calls (fcntl, sysconf, prctl, kill, close_range) the standard library has no \
+              safe form of; each has a SAFETY comment"
+)]
+
 use std::io::{self, BufRead as _, BufReader};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::process::CommandExt as _;
