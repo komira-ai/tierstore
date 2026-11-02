@@ -82,8 +82,9 @@ async fn a_put_whose_journal_append_fails_is_not_acknowledged_and_its_object_rem
 }
 
 /// Asserts that the removal of the object of a put whose journal append failed is best
-/// effort: when the hot tier fails that delete too, the put still returns the journal's
-/// error, and the object stays in the hot tier, so a retry is refused as existing.
+/// effort: when the hot tier fails that delete too (the put removes its object by its content
+/// tag, a conditional delete), the put still returns the journal's error, and the object stays
+/// in the hot tier, so a retry is refused as existing.
 #[tokio::test(start_paused = true)]
 async fn the_removal_after_a_failed_journal_append_is_best_effort() {
     let rig = Rig::new();
@@ -91,7 +92,7 @@ async fn the_removal_after_a_failed_journal_append_is_best_effort() {
     let down = Error::Unavailable("journal".to_owned());
     rig.hot.fail_next_on(Op::Put, "_journal/", down.clone());
     let stuck = Error::Other("stuck".to_owned());
-    rig.hot.fail_next_on(Op::Delete, "k", stuck);
+    rig.hot.fail_next_on(Op::DeleteIfMatch, "k", stuck);
 
     let failed = proxy.put("k", body("value")).await;
     assert_eq!(failed, Err(down));

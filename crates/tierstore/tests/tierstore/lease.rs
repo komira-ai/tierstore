@@ -2,7 +2,7 @@
 
 use tierstore::{Backend, Error, Op, PassReport};
 
-use crate::support::{Rig, assert_absent, body, keys, text};
+use crate::support::{Rig, assert_absent, assert_reserved, body, keys, text};
 
 fn down() -> Error {
     Error::Unavailable("on purpose".to_owned())
@@ -37,7 +37,9 @@ async fn one_reconciler_holds_the_lease_and_the_other_does_nothing() {
 
     proxy.put("b", body("2")).await.unwrap();
     assert_eq!(two.pass().await, PassReport::default());
-    assert_eq!(keys(&*rig.cold_mem).await, ["a"]);
+    // b is not copied: the cold tier holds its reservation.
+    assert_eq!(keys(&*rig.cold_mem).await, ["a", "b"]);
+    assert_reserved(&*rig.cold_mem, "b").await;
     assert_eq!(two.hot_bytes(), 0);
 
     assert!(one.pass().await.held);

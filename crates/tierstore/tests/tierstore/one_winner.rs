@@ -8,13 +8,13 @@
 //!
 //! The testkit has no model of a set of storage nodes, and these tests do not pretend to have
 //! one. "Part of the set is down" is modelled as the hot tier's create failing
-//! (`Error::Unavailable`, which the front answers 503). Only the writer that won the reservation
-//! reaches the hot tier's create, so a failing create leaves no winner at all: the writer whose
-//! create failed is answered `Unavailable`, the seven that lost the reservation are refused, and
-//! nothing is stored (the reservation is released). That shows that the proxy neither turns a
-//! failed create into a second winner nor leaves a partial object or a reservation; it does not
-//! show that a real distributed store keeps `If-None-Match: *` atomic with part of its members
-//! down, which only a run against the store can.
+//! (`Error::Unavailable`, which the front answers 503). Only a writer that won the reservation
+//! reaches the hot tier's create, and it releases the reservation if the create fails, so the
+//! writers that lost the reservation are refused and one that reserves later can win: at most one
+//! winner, and nothing stored if there is none (the reservations are released). That shows that
+//! the proxy neither turns a failed create into a second winner nor leaves a partial object or a
+//! reservation; it does not show that a real distributed store keeps `If-None-Match: *` atomic
+//! with part of its members down, which only a run against the store can.
 //!
 //! The memory rounds only show that the proxy adds no second path to the create: the memory
 //! backend's create is a check and insert under one mutex, so it is atomic by construction. The
@@ -228,16 +228,18 @@ fn winners(done: &[(Bytes, Result<(), Error>)]) -> Vec<Bytes> {
 /// Asserts that eight concurrent create-only puts of one key through two nodes, with 0, 1 and 2
 /// of the hot tier's creates set to fail as if a member were down, have at most one winner, for
 /// a held body, a streamed body and a presigned (hot-only) body, in memory and in a directory.
-/// Only the writer that won the reservation reaches the hot tier's create. With 0 failing it
-/// wins: its bytes are what is stored whole in the hot tier, the cold tier holds its
-/// reservation, and the journals hold exactly one reserved-put entry for the key, of the
-/// winner's size. With 1 or 2 failing its create fails: it is answered `Unavailable`, no one
-/// wins, and neither tier holds the key (the reservation is released) and nothing is journaled.
-/// The seven that lost the reservation are answered `AlreadyExists` in every case. No temporary
-/// file is left. Defects it catches: a create that does not refuse the second writer (more than
-/// one winner), a proxy that retries a failed create into the cold tier or writes it twice, a
-/// body mixed from two writers (the bytes), a winner that is not journaled (the entries), a
-/// reservation left by a put that failed.
+/// Only a writer that won the reservation reaches the hot tier's create, and a writer whose
+/// create fails releases the reservation, which a writer that has not yet reserved can then
+/// win: so with none failing exactly one writer wins, and with 1 or 2 failing there are at most
+/// as many `Unavailable` answers as failures set and at most one winner. Whatever the
+/// interleaving, every writer is answered by exactly one of those, the winner's bytes are what
+/// is stored whole in the hot tier with its reservation in the cold tier and exactly one
+/// reserved-put entry of the winner's size in the journals; with no winner neither tier holds
+/// the key (every reservation was released) and nothing is journaled. No temporary file is left.
+/// Defects it catches: a create that does not refuse the second writer (more than one winner),
+/// a proxy that retries a failed create into the cold tier or writes it twice, a body mixed from
+/// two writers (the bytes), a winner that is not journaled (the entries), a reservation left by
+/// a put that failed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eight_writers_of_one_key_have_one_winner_with_part_of_the_hot_tier_failing() {
     for round in 0..3 {
@@ -250,13 +252,19 @@ async fn eight_writers_of_one_key_have_one_winner_with_part_of_the_hot_tier_fail
                     let done = race(&setup, mode, key).await;
                     let label = format!("{kind} {mode:?} down={down} round={round}");
 
-                    let owner_fails = down > 0;
                     let won = winners(&done);
-                    assert_eq!(won.len(), usize::from(!owner_fails), "{label}: {done:?}");
+                    assert!(won.len() <= 1, "{label}: {done:?}");
                     let unavailable = count(&done, |e| matches!(e, Error::Unavailable(_)));
-                    assert_eq!(unavailable, usize::from(owner_fails), "{label}: {done:?}");
+                    assert!(unavailable <= down, "{label}: {done:?}");
                     let exists = count(&done, |e| matches!(e, Error::AlreadyExists(_)));
-                    assert_eq!(exists, WRITERS - 1, "{label}: {done:?}");
+                    assert_eq!(
+                        exists + unavailable + won.len(),
+                        WRITERS,
+                        "{label}: {done:?}"
+                    );
+                    if down == 0 {
+                        assert_eq!(won.len(), 1, "{label}: {done:?}");
+                    }
 
                     let entries = setup.entries(key).await;
                     if let Some(winner) = won.first() {
@@ -277,26 +285,29 @@ async fn eight_writers_of_one_key_have_one_winner_with_part_of_the_hot_tier_fail
     }
 }
 
-/// Asserts that when the create fails for the writer that holds the reservation there is no
-/// winner and no object: the key is in neither tier (the reservation is released), nothing is
-/// journaled, no temporary file is left, the seven writers that lost the reservation are
-/// refused, and a put of the key afterwards is stored whole. Defect it catches: a failed create
-/// that leaves a partial or an unjournaled object, or a key that stays taken after the writer
-/// that held it failed.
+/// Asserts that when the create fails for every writer that reaches it there is no winner and
+/// no object: eight writers race with as many failures set as there are writers, so every
+/// writer that wins the reservation fails its create and releases it, and none is acknowledged;
+/// the key is in neither tier, nothing is journaled, no temporary file is left, and the key is
+/// free afterwards: puts of it fail with `Unavailable` (the failures left over) and never with
+/// `AlreadyExists`, until a put of it is stored whole. Defect it catches: a failed create that
+/// leaves a partial or an unjournaled object, or a key that stays taken after the writer that
+/// held it failed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn when_the_create_of_the_key_holder_fails_nothing_is_stored_and_a_retry_wins() {
+async fn when_every_create_that_is_made_fails_nothing_is_stored_and_the_key_stays_free() {
     for kind in KINDS {
         for mode in MODES {
             let key = "contended";
             let setup = Setup::new(Tiers::of(kind), key, false).await;
-            setup.down(key, 1);
+            setup.down(key, WRITERS);
             let done = race(&setup, mode, key).await;
             let label = format!("{kind} {mode:?}");
 
             assert!(winners(&done).is_empty(), "{label}: {done:?}");
-            assert_eq!(count(&done, |e| matches!(e, Error::Unavailable(_))), 1);
+            let unavailable = count(&done, |e| matches!(e, Error::Unavailable(_)));
             let exists = count(&done, |e| matches!(e, Error::AlreadyExists(_)));
-            assert_eq!(exists, WRITERS - 1, "{label}: {done:?}");
+            assert!(unavailable >= 1, "{label}: {done:?}");
+            assert_eq!(unavailable + exists, WRITERS, "{label}: {done:?}");
             assert_absent(&*setup.tiers.hot, key).await;
             assert_absent(&*setup.tiers.cold, key).await;
             assert_eq!(setup.entries(key).await, Vec::<JournalEntry>::new());
@@ -304,7 +315,15 @@ async fn when_the_create_of_the_key_holder_fails_nothing_is_stored_and_a_retry_w
 
             let retry = body_of(3);
             let node = setup.proxy("p1").await;
-            put_as(&node, mode, key, &retry).await.unwrap();
+            let mut refused = 0;
+            loop {
+                match put_as(&node, mode, key, &retry).await {
+                    Ok(()) => break,
+                    Err(Error::Unavailable(_)) => refused += 1,
+                    Err(other) => panic!("{label}: the key was taken after the failures: {other}"),
+                }
+                assert!(refused <= WRITERS, "{label}");
+            }
             assert_eq!(read(&*setup.tiers.hot, key).await, retry, "{label}");
         }
     }
@@ -343,13 +362,14 @@ async fn presigned_race(
 
 /// Asserts the one-winner claim on the presigned path, over HTTP: eight presigned `PUT`s of one
 /// key with different bodies, four to each of two servers over the same tiers, with 0, 1 and 2
-/// of the hot tier's creates set to fail. Only the writer that won the reservation reaches the
-/// create. With 0 failing exactly one is answered 200 and the object stored is its body whole,
-/// with its reservation in the cold tier and one journal entry; with 1 or 2 failing that writer
-/// is answered 503 `ServiceUnavailable`, no one is answered 200, and nothing is stored. The
-/// other seven are 412 `PreconditionFailed` in every case. Defect it catches: a front that
-/// answers 200 to a writer whose create was refused, or that maps the refusal to anything but
-/// 412.
+/// of the hot tier's creates set to fail. Only a writer that won the reservation reaches the
+/// create, and a writer whose create fails releases the reservation, which a writer that has not
+/// yet reserved can then win. So at most one is answered 200 (exactly one with none failing),
+/// as many as are 503 `ServiceUnavailable` are at most the failures set, and the rest are 412
+/// `PreconditionFailed`; with a 200 the object stored is its body whole with its reservation in
+/// the cold tier and one journal entry, and without one nothing is stored. Defect it catches: a
+/// front that answers 200 to a writer whose create was refused, or that maps the refusal to
+/// anything but 412.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eight_presigned_puts_from_two_nodes_have_one_winner_and_it_is_what_is_stored() {
     for kind in KINDS {
@@ -361,17 +381,18 @@ async fn eight_presigned_puts_from_two_nodes_have_one_winner_and_it_is_what_is_s
             let done = presigned_race(&servers, key).await;
             let label = format!("{kind} down={down}");
 
-            let owner_fails = down > 0;
             let status = |code: StatusCode| done.iter().filter(|(_, s, _)| *s == code).count();
-            assert_eq!(
+            let (ok, unavailable) = (
                 status(StatusCode::OK),
-                usize::from(!owner_fails),
-                "{label}: {done:?}"
+                status(StatusCode::SERVICE_UNAVAILABLE),
             );
-            let unavailable = status(StatusCode::SERVICE_UNAVAILABLE);
-            assert_eq!(unavailable, usize::from(owner_fails), "{label}");
             let refused = status(StatusCode::PRECONDITION_FAILED);
-            assert_eq!(refused, WRITERS - 1, "{label}: {done:?}");
+            assert!(ok <= 1, "{label}: {done:?}");
+            assert!(unavailable <= down, "{label}: {done:?}");
+            assert_eq!(ok + unavailable + refused, WRITERS, "{label}: {done:?}");
+            if down == 0 {
+                assert_eq!(ok, 1, "{label}: {done:?}");
+            }
             for (_, code, text) in &done {
                 if *code == StatusCode::PRECONDITION_FAILED {
                     assert!(text.contains("<Code>PreconditionFailed</Code>"), "{text}");

@@ -125,7 +125,7 @@ impl Inner {
             Poll::Ready(Err(error)) => Some(error),
             Poll::Ready(Ok(())) => self.append(entry).await.err(),
             Poll::Pending => {
-                let (created, journaled) = tokio::join!(create, self.append(entry));
+                let (created, journaled) = futures::join!(create, self.append(entry));
                 created.err().or(journaled.err())
             }
         };
