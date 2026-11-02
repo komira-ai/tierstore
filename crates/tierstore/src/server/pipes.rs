@@ -78,29 +78,19 @@ pub(super) async fn until(server: &Server, ready: impl Fn(&Server) -> bool) {
 }
 
 /// What the kernel under a [`Serving`] does at the end of the settle (see `door`): the
-/// handshakes in flight, which a test begins and ends, whether the server has stopped new ones,
-/// and whether stopping or counting them fails.
+/// handshakes in flight, which a test begins and ends, whether the server has begun to count
+/// them (its door is closing), and whether counting them fails.
 #[derive(Default)]
 pub(super) struct Kernel {
     in_flight: AtomicUsize,
-    stopped: AtomicBool,
-    /// Notified when the server stops new handshakes.
-    stopping: Notify,
-    /// Whether stopping the handshakes fails.
-    stop_fails: bool,
+    counted: AtomicBool,
+    /// Notified when the server first counts the handshakes.
+    counting: Notify,
     /// Whether counting the handshakes fails.
     count_fails: bool,
 }
 
 impl Kernel {
-    /// A kernel on which the filter that stops new handshakes cannot be put.
-    pub(super) fn stop_failing() -> Self {
-        Self {
-            stop_fails: true,
-            ..Self::default()
-        }
-    }
-
     /// A kernel whose handshakes in flight cannot be counted.
     pub(super) fn count_failing() -> Self {
         Self {
@@ -153,16 +143,10 @@ impl Incoming for Pipes {
         arrived.map(|stream| Ok((stream.expect(door), peer())))
     }
 
-    fn stop_handshakes(&mut self) -> io::Result<()> {
-        self.kernel.stopped.store(true, Ordering::SeqCst);
-        self.kernel.stopping.notify_waiters();
-        if self.kernel.stop_fails {
-            return Err(io::Error::other("a filter that cannot be attached"));
-        }
-        Ok(())
-    }
-
     fn handshakes(&self) -> io::Result<usize> {
+        if !self.kernel.counted.swap(true, Ordering::SeqCst) {
+            self.kernel.counting.notify_waiters();
+        }
         if self.kernel.count_fails {
             return Err(io::Error::other("a table that cannot be read"));
         }
@@ -218,12 +202,8 @@ impl Serving {
         }
     }
 
-    /// A connection to the server, or none once the server has stopped taking connections: its
-    /// door is closed, or closing and takes no new handshake.
+    /// A connection to the server, or none once the server has stopped taking connections.
     pub(super) fn connect(&self) -> Option<DuplexStream> {
-        if self.kernel.stopped.load(Ordering::SeqCst) {
-            return None;
-        }
         let (client, far) = duplex(PIPE);
         self.door.send(far).ok().map(|()| client)
     }
@@ -237,21 +217,18 @@ impl Serving {
         }
     }
 
-    /// Waits until the settle is over: the server has begun to close its door (it stopped new
-    /// handshakes), or has closed it.
+    /// Waits until the settle is over: the server has begun to close its door, which counts the
+    /// handshakes in flight before anything else.
     pub(super) async fn settle_over(&self) {
         let waiting = async {
             loop {
-                let stopping = self.kernel.stopping.notified();
-                tokio::pin!(stopping);
-                let _ = stopping.as_mut().enable();
-                if self.kernel.stopped.load(Ordering::SeqCst) || self.door.is_closed() {
+                let counting = self.kernel.counting.notified();
+                tokio::pin!(counting);
+                let _ = counting.as_mut().enable();
+                if self.kernel.counted.load(Ordering::SeqCst) {
                     return;
                 }
-                tokio::select! {
-                    () = stopping => {}
-                    () = self.door.closed() => {}
-                }
+                counting.await;
             }
         };
         bounded(waiting).await;

@@ -117,11 +117,15 @@ impl Ctx<'_, '_> {
 
     /// Puts v-current back in front: starts its unit (a no-op when it runs) and points the
     /// redirect at it. In restart mode the release that runs has no lock, so v-next is stopped
-    /// first: two instances of it must never run side by side, whatever the outage costs.
+    /// first: two instances of it must never run side by side, whatever the outage costs. The
+    /// redirect leaves v-next before it is stopped, so that a new connection is refused until
+    /// v-current is up rather than reset by v-next's closing listener.
     fn back_to_current(&self, record: &Record) -> Result<(), PortError> {
         let current = record.current();
         if record.mode == Mode::Restart {
+            self.redirect(current)?;
             self.ports.units.stop(&unit_name(record.serving))?;
+            return self.ports.units.start(&unit_name(current));
         }
         self.ports.units.start(&unit_name(current))?;
         self.redirect(current)

@@ -57,11 +57,12 @@ pub fn no_failures(reports: &[Report]) {
 }
 
 /// What the bound of a restart admits: an S3 request that failed in its connect (refused, or reset
-/// in its handshake) while the run said the gap was open, from just before the step that stops the
-/// old slot until that step returned, or whose connect began then ([`Failure::in_gap`]). A request
-/// whose connect succeeded and that then failed is beyond the bound, whatever it read (a reset, a
-/// clean end of stream, nothing): the bound is a failed connect on a new connection, never a
-/// failure on a connection the server may have accepted. Nothing else is admitted either: no timeout, no OCI failure, nothing outside the gap.
+/// in its handshake) while the run said the gap was open, from just before the step that moves the
+/// redirect off the old slot and stops it until that step returned. A request whose connect
+/// succeeded and that then failed is beyond the bound, whatever it read (a reset, a clean end of
+/// stream, nothing): the bound is a failed connect on a new connection, never a failure on a
+/// connection the server may have accepted. Nothing else is admitted either: no timeout, no OCI
+/// failure, nothing outside the gap.
 pub fn in_restart_gap(failure: &Failure) -> bool {
     failure.kind == Kind::S3
         && failure.in_gap
@@ -72,8 +73,9 @@ pub fn in_restart_gap(failure: &Failure) -> bool {
 }
 
 /// Asserts the bound of a restart (design sections 3, 9 and 11 question 5), [`in_restart_gap`]:
-/// every failed request is a connect into the gap between the stop of v-current and the start of
-/// v-next, and nothing else failed. Prints and returns the number of those connects.
+/// every failed request is a connect into the gap from the redirect's move to v-next's port
+/// (before v-current is stopped) to the start of v-next, and nothing else failed. Prints and
+/// returns the number of those connects.
 pub fn restart_bound(reports: &[Report]) -> usize {
     let failures: Vec<&Failure> = reports.iter().flat_map(|report| &report.failures).collect();
     let beyond: Vec<String> = failures

@@ -212,11 +212,6 @@ impl Incoming for Listeners {
         Poll::Pending
     }
 
-    /// Puts the filter that drops SYNs on every socket ([`door::stop_handshakes`]).
-    fn stop_handshakes(&mut self) -> io::Result<()> {
-        self.listeners.iter().try_for_each(door::stop_handshakes)
-    }
-
     /// The handshakes in flight on the ports of the sockets ([`door::handshakes`]).
     fn handshakes(&self) -> io::Result<usize> {
         let ports: Vec<u16> = self.local_addrs()?.iter().map(SocketAddr::port).collect();

@@ -5,27 +5,24 @@
 //! the connection, and when the socket is closed it resets every connection it still holds: those
 //! whose handshake is over and that wait in the accept queue, and those whose handshake is in
 //! flight (the SYN answered, the client's ACK not yet come), whose client then reads a reset on a
-//! connection it saw open. While the port still sends new connections to the front (a plain
-//! restart, whose redirect names the stopping instance until its successor is up), a socket closed
-//! at once at the end of the settle resets the few that are in between. [`Closing`] closes the
-//! door in three moves instead:
+//! connection it saw open. Whoever stops the instance moves new connections off it first (the
+//! update hook points the redirect elsewhere before it stops a slot, in both modes), so by the
+//! end of the settle the kernel holds at most the few that came just before; [`Closing`] takes
+//! them rather than close the sockets on them:
 //!
-//! 1. No new handshake: each listening socket gets a socket filter that drops a segment with the
-//!    SYN flag ([`Incoming::stop_handshakes`]). The client of a dropped SYN sends it again a
-//!    second later and finds the port closed: its connect is refused, which it can tell apart
-//!    from a request lost.
-//! 2. Every connection the kernel holds is taken and served as any other: those in the accept
+//! 1. Every connection the kernel holds is taken and served as any other: those in the accept
 //!    queue, and those whose handshake was in flight, once it ends ([`Incoming::handshakes`]).
-//! 3. The sockets are closed once two looks [`LOOK`] apart have found no handshake in flight and
+//! 2. The sockets are closed once two looks [`LOOK`] apart have found no handshake in flight and
 //!    the accept queue empty, or once [`GRACE`] has passed.
 //!
 //! Each connection taken this way is a new one, whose first request the drain waits for
 //! ([`time_to_close`](super::drain::time_to_close)), for [`GRACE`] too.
 //!
 //! What this does not close: a handshake still in flight when [`GRACE`] has passed (its client
-//! lost the server's SYN-ACK and its retransmit), and a handshake answered with a SYN cookie (the
+//! lost the server's SYN-ACK and its retransmit), a handshake answered with a SYN cookie (the
 //! kernel keeps no entry for it while its accept queue is full) whose ACK takes longer than
-//! [`LOOK`] to come. The client of either is reset as before.
+//! [`LOOK`] to come, and a connection that begins as the sockets close, which only a port that
+//! still sends new connections to the instance can bring. The client of any of them is reset.
 
 use std::future::poll_fn;
 use std::io;
@@ -35,7 +32,6 @@ use std::path::Path;
 use std::task::Poll;
 use std::time::Duration;
 
-use tokio::net::TcpListener;
 use tokio::time::Instant;
 
 use super::Incoming;
@@ -50,7 +46,7 @@ pub(super) const GRACE: Duration = Duration::from_secs(3);
 /// accept queue, and a round trip on a local network.
 const LOOK: Duration = Duration::from_millis(10);
 
-/// The door of a front, closing: the listening sockets, which take no new handshake.
+/// The door of a front, closing: its listening sockets, from the end of the settle.
 pub(super) struct Closing<I> {
     incoming: I,
     /// When the door closes on the handshakes still in flight.
@@ -62,14 +58,8 @@ pub(super) struct Closing<I> {
 }
 
 impl<I: Incoming> Closing<I> {
-    /// Stops the new handshakes of `incoming`. A failure to stop them is said on stderr: the door
-    /// then closes once nothing waits to be accepted.
-    pub(super) fn begin(mut incoming: I) -> Self {
-        if let Err(error) = incoming.stop_handshakes() {
-            eprintln!(
-                "tierstore: the end of the settle: new connections are not held back: {error}"
-            );
-        }
+    /// The door of `incoming`, from the end of its settle.
+    pub(super) fn begin(incoming: I) -> Self {
         Self {
             incoming,
             deadline: Instant::now() + GRACE,
@@ -83,7 +73,7 @@ impl<I: Incoming> Closing<I> {
     /// or once [`GRACE`] has passed.
     ///
     /// Each look counts the handshakes before it looks at the queue: a handshake that ends after
-    /// the count is in the queue at the next look, and none begins once the filter is on.
+    /// the count is in the queue at the next look.
     pub(super) async fn next(&mut self) -> Option<io::Result<(I::Stream, SocketAddr)>> {
         loop {
             if Instant::now() >= self.deadline {
@@ -136,37 +126,6 @@ impl<I: Incoming> Closing<I> {
             }
         }
     }
-}
-
-/// The socket filter of [`stop_handshakes`], in classic BPF. A TCP socket's filter sees the
-/// segment from its TCP header on, whose byte 13 holds the flags: a segment with SYN (`0x02`) is
-/// dropped, and any other kept whole. The connections a listening socket makes inherit its
-/// filter, and an open connection gets no SYN, so they lose nothing.
-#[cfg(target_os = "linux")]
-const NO_SYN: [socket2::SockFilter; 4] = [
-    // ldb [13]: the flags.
-    socket2::SockFilter::new(0x30, 0, 0, 13),
-    // jset #0x02: SYN goes on to the drop, anything else skips it.
-    socket2::SockFilter::new(0x45, 0, 1, 0x02),
-    // ret #0: dropped.
-    socket2::SockFilter::new(0x06, 0, 0, 0),
-    // ret #-1: kept whole.
-    socket2::SockFilter::new(0x06, 0, 0, u32::MAX),
-];
-
-/// Stops new handshakes on `listener`: a SYN that comes to it from now on is dropped.
-///
-/// # Errors
-/// The filter cannot be attached.
-#[cfg(target_os = "linux")]
-pub(super) fn stop_handshakes(listener: &TcpListener) -> io::Result<()> {
-    socket2::SockRef::from(listener).attach_filter(&NO_SYN)
-}
-
-/// No socket filter outside Linux: the door closes once nothing waits to be accepted.
-#[cfg(not(target_os = "linux"))]
-pub(super) fn stop_handshakes(_listener: &TcpListener) -> io::Result<()> {
-    Ok(())
 }
 
 /// Where the tables of this network namespace's TCP sockets are.

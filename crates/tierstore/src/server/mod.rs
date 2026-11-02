@@ -514,12 +514,6 @@ trait Incoming {
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<(Self::Stream, SocketAddr)>>;
 
-    /// Stops the handshakes of new connections, at the end of the settle (see `door`). A source
-    /// without handshakes has nothing to stop.
-    fn stop_handshakes(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
     /// The handshakes in flight: begun, and not yet ready to be taken. A source without
     /// handshakes has none.
     fn handshakes(&self) -> io::Result<usize> {

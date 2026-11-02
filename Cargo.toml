@@ -55,8 +55,6 @@ rustix = "1.1.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-# The socket filter a listener gets at the end of a drain's settle (Linux); already in the tree through tokio.
-socket2 = "0.6.5"
 thiserror = "2.0.21"
 # The `--config` file of the `tierstore` binary; no datetime or display support.
 toml = { version = "1.1.8", default-features = false, features = ["display", "parse", "serde", "std"] }

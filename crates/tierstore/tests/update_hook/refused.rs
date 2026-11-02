@@ -161,10 +161,11 @@ fn a_start_whose_condition_fails_is_not_taken_for_a_running_instance() {
     assert_eq!(kinds(&rig.effects()), ["set kbf_guard_tierstore"]);
 }
 
-/// Asserts the same in a restart (forced by `mode = "restart"`), where `cutover` stops the old
-/// unit before it starts the new one: a start of the new slot that systemd skips (its condition
-/// fails, for that slot only) exits 0, `/readyz` never answers, and `cutover` fails with
-/// `not_ready`, stopping the new unit and starting the old one again behind the redirect, with no
+/// Asserts the same in a restart (forced by `mode = "restart"`), where `cutover` moves the redirect
+/// to the new slot's port and stops the old unit before it starts the new one: a start of the new
+/// slot that systemd skips (its condition fails, for that slot only) exits 0, `/readyz` never
+/// answers, and `cutover` fails with `not_ready`, pointing the redirect back at the old slot, then
+/// stopping the new unit and starting the old one again behind the redirect, with no
 /// `swapped` on record; once the condition holds, `cutover` run again goes through. It would catch
 /// a restart that leaves no instance running when the new one did not start.
 #[test]
@@ -183,11 +184,12 @@ fn a_skipped_start_in_a_restart_puts_the_old_slot_back() {
     assert_eq!(
         rig.calls_since(mark),
         [
+            APPLY,
             stop(a).as_str(),
             start(b).as_str(),
+            APPLY,
             stop(b).as_str(),
-            start(a).as_str(),
-            APPLY
+            start(a).as_str()
         ]
     );
     assert_eq!(rig.running(), [a]);

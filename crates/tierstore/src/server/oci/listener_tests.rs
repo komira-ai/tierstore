@@ -4,7 +4,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -290,15 +290,15 @@ async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither
     drop(bind(v6).expect("the v6 wildcard is free again"));
 }
 
-/// A source whose connections the kernel holds as handshakes in flight until the end of the
-/// settle stops new handshakes: then they wait to be taken, in order. Each is a real loopback
-/// connection, and an entry may be an accept that fails.
+/// A source whose connections the kernel holds as handshakes in flight until the door that ends
+/// the settle has counted them: then their handshakes end and they wait to be taken, in order.
+/// Each is a real loopback connection, and an entry may be an accept that fails.
 struct Held {
-    /// What the source gives once the handshakes are stopped.
+    /// What the source gives once the handshakes have been counted.
     held: Vec<io::Result<(TcpStream, SocketAddr)>>,
     /// What it gives at once, before the end of the settle.
     ready: Vec<(TcpStream, SocketAddr)>,
-    stopped: bool,
+    counted: AtomicBool,
 }
 
 impl Incoming for Held {
@@ -312,7 +312,7 @@ impl Incoming for Held {
             return Poll::Ready(Ok(ready));
         }
         match self.held.pop() {
-            Some(accepted) if self.stopped => Poll::Ready(accepted),
+            Some(accepted) if self.counted.load(Ordering::SeqCst) => Poll::Ready(accepted),
             Some(accepted) => {
                 self.held.push(accepted);
                 Poll::Pending
@@ -321,13 +321,9 @@ impl Incoming for Held {
         }
     }
 
-    fn stop_handshakes(&mut self) -> io::Result<()> {
-        self.stopped = true;
-        Ok(())
-    }
-
     fn handshakes(&self) -> io::Result<usize> {
-        Ok(if self.stopped { 0 } else { self.held.len() })
+        let counted = self.counted.swap(true, Ordering::SeqCst);
+        Ok(if counted { 0 } else { self.held.len() })
     }
 }
 
@@ -374,7 +370,7 @@ async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
     let held = Held {
         held: vec![Ok(server), Err(io::Error::other("an accept that failed"))],
         ready: Vec::new(),
-        stopped: false,
+        counted: AtomicBool::new(false),
     };
     let (looping, stop) = plain_loop(held, 4);
     stop.send(true).expect("a loop");
@@ -397,14 +393,14 @@ async fn the_connections_held_at_the_end_of_the_settle_are_taken_and_served() {
 /// limit the module states), the connection in the slot is closed in turn, and the loop ends with
 /// nothing cut. It would catch a door that waits for a slot for ever, and one that takes a
 /// connection past the front's limit.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn the_door_waits_for_a_free_slot_no_longer_than_its_grace() {
     let (first, mut in_slot) = pair().await;
     let (second, mut waiting) = pair().await;
     let held = Held {
         held: vec![Ok(second)],
         ready: vec![first],
-        stopped: false,
+        counted: AtomicBool::new(false),
     };
     // The first connection takes the slot, before the stop or once the door is closing.
     let (looping, stop) = plain_loop(held, 1);
