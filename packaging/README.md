@@ -214,9 +214,11 @@ These files put the slot units and the hook's rights in place; they do not by th
 updates without a gap. Two things outside them must hold first:
 
 - **The releases.** `prepare` hands over only when both the running release and the new one list
-  `handover-v1` in `tierstore --capabilities`; otherwise the update is a plain restart, the old
-  slot stopped before the new one starts, with a gap. No release lists it yet, so every update
-  through the hook is a restart for now.
+  `handover-v1` in `tierstore --capabilities`; otherwise the update is a plain restart: the
+  redirect moves to the new slot, the old slot is stopped, and the new one is started, with a gap.
+  Builds from the commit that added the capability on list it; a release built before it does
+  not, so the first update of a host from such a release is a restart, and only the updates after
+  it hand over.
 - **The updater.** The host updater must run the steps and the boot entry from this declaration.
   It does not yet fetch the declaration from a release: it reads the copy placed under
   `/etc/updater.d`, so the file is placed by hand as above, and replaced by hand when it changes.

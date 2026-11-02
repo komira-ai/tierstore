@@ -172,6 +172,6 @@ The old unit and slot 9301 run side by side between steps 5 and 8, which is safe
 
 ### What these files do not do yet
 
-- An update is a hand-over only when both releases list `handover-v1` in `tierstore --capabilities`; otherwise it is a plain restart, with a gap. No release lists it yet, so every update through the hook is a restart for now.
+- An update is a hand-over only when both releases list `handover-v1` in `tierstore --capabilities`; otherwise it is a plain restart, with a gap. A release built before the capability was added does not list it, so the first update of a host from such a release is a restart, and only the updates after it hand over.
 - The host updater reads the declaration placed under `/etc/updater.d` and does not yet take it from a release: it is placed, and replaced, by hand.
 - A slot stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease), but the hook waits at most 300 s for `systemctl stop`, and `rollback` has 600 s. A drain past 300 s makes `cleanup` fail while systemd goes on stopping the unit; `cleanup` run again waits for that stop and finishes. Until the hook waits as long as the unit allows, a host that needs every step to succeed the first time keeps `--drain-deadline` at most 220s.
