@@ -4,7 +4,9 @@
 //! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id), with S3's rules on
 //! part sizes enforced at completion and conditional writes (`If-None-Match: *`) on a
 //! PUT and a completion, a PUT that replaces an object only if it has the entity tag in
-//! `If-Match` (412 for another tag, 404 if there is no object), and DELETE of a plain object.
+//! `If-Match` (412 for another tag, 404 if there is no object), and DELETE, which with `If-Match`
+//! takes the object only if it has that entity tag (412 for another, 404 if there is none) unless a
+//! test asks the service to ignore the header ([`FakeS3::ignore_delete_condition`]).
 //!
 //! Every object has a time of last write: the system clock until a test sets one
 //! ([`FakeS3::set_time`]), in whole seconds as S3 keeps them. The entity tag of an object is
@@ -278,6 +280,8 @@ struct State {
     /// The least size of a part that is not the last of its upload, when a test set one
     /// ([`FakeS3::set_min_part_bytes`]); [`super::MIN_PART_BYTES`] otherwise.
     min_part: Option<u64>,
+    /// A DELETE takes the object whatever its `If-Match` says ([`FakeS3::ignore_delete_condition`]).
+    ignore_delete_condition: bool,
     /// The next AbortMultipartUpload is to be held ([`FakeS3::hold_next_abort`]).
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
@@ -381,6 +385,13 @@ impl FakeS3 {
     /// completed. For a test that sends parts of a few bytes.
     pub fn set_min_part_bytes(&self, bytes: u64) {
         self.lock().min_part = Some(bytes);
+    }
+
+    /// From now on takes a DELETE that carries `If-Match` as one that does not: the object is
+    /// removed whatever its tag. For a test of a store that does not enforce the header (several
+    /// S3-compatible stores accept it and ignore it).
+    pub fn ignore_delete_condition(&self) {
+        self.lock().ignore_delete_condition = true;
     }
 
     /// Holds the next AbortMultipartUpload request unanswered and unhandled: the
@@ -650,10 +661,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         }
         ("GET", Some(_), None, None) if key.is_empty() => list_uploads(state, request),
         ("PUT", None, None, None) => put_object(state, key, conditional, request),
-        ("DELETE", None, None, None) => {
-            state.objects.remove(&key);
-            answer("204 No Content", &[], b"")
-        }
+        ("DELETE", None, None, None) => delete_object(state, &key, request),
         ("GET", None, None, None) if key.is_empty() => list(state, request),
         ("GET", None, None, None) => get(state, &key, request.headers.get("range")),
         ("HEAD", None, None, None) => head(state, &key),
@@ -685,6 +693,24 @@ fn put_object(state: &mut State, key: String, conditional: bool, request: &Reque
     state.store(key, kept, None);
     state.stats.single_puts += 1;
     answer("200 OK", &headers, b"")
+}
+
+/// A DELETE of a whole object: with `If-Match` it takes the object only if it has that entity tag
+/// (412 for another tag, 404 if there is no object), unless a test told the service to ignore
+/// the header ([`FakeS3::ignore_delete_condition`]), as some stores do; without it, or with an
+/// absent key and no header, 204.
+fn delete_object(state: &mut State, key: &str, request: &Request) -> Vec<u8> {
+    let expected = request.headers.get("if-match");
+    if let Some(expected) = expected.filter(|_| !state.ignore_delete_condition) {
+        let Some(stored) = state.objects.get(key) else {
+            return error("404 Not Found", "NoSuchKey");
+        };
+        if stored.etag() != *expected {
+            return error("412 Precondition Failed", "PreconditionFailed");
+        }
+    }
+    state.objects.remove(key);
+    answer("204 No Content", &[], b"")
 }
 
 /// The region in `AWS4-HMAC-SHA256 Credential=<id>/<date>/<region>/s3/aws4_request, ..`.
