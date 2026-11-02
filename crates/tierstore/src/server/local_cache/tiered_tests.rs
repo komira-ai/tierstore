@@ -139,10 +139,10 @@ async fn versions_are_told_apart_by_tag_and_size_unless_the_upstream_has_two_tie
     assert!(!tiered.inner.same_version(&meta(3, "a"), &meta(4, "a")));
 }
 
-/// Asserts that a read of an object whose tag moves between the HEAD and the read is refused as
-/// written over by a cache of the default kind, and filled and served by one over two tiers,
-/// which then answers the next read from its directory. The first half is the failure the
-/// option removes.
+/// Asserts that a read of an object whose tag moves between the HEAD and the read is answered
+/// from the upstream and kept nowhere by a cache of the default kind (its fill ends as changed,
+/// and each read goes to the upstream again), and filled and kept by one over two tiers, which
+/// then answers the next read from its directory. The first half is what the option removes.
 #[tokio::test]
 async fn a_fill_of_an_object_whose_tag_moves_is_served_only_when_the_upstream_has_two_tiers() {
     let rig = Rig::new("tscache-moved");
@@ -151,10 +151,12 @@ async fn a_fill_of_an_object_whose_tag_moves_is_served_only_when_the_upstream_ha
     let upstream: Arc<dyn Backend> = rig.upstream.clone();
 
     let plain = Probe::over(Arc::clone(&upstream));
-    let refused = cache_over(&rig, &plain, |_| {})
-        .get("cas/b/obj", None)
-        .await;
-    assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
+    let unkept = cache_over(&rig, &plain, |_| {});
+    assert_eq!(unkept.get("cas/b/obj", None).await.unwrap(), data);
+    assert_eq!(unkept.held(), (0, 0));
+    let reads = plain.reads.load(Ordering::SeqCst);
+    assert_eq!(unkept.get("cas/b/obj", None).await.unwrap(), data);
+    assert!(plain.reads.load(Ordering::SeqCst) > reads);
 
     let moving = Probe::over(upstream);
     let cache = cache_over(&rig, &moving, |config| {
@@ -162,6 +164,7 @@ async fn a_fill_of_an_object_whose_tag_moves_is_served_only_when_the_upstream_ha
         config.tiered_upstream = true;
     });
     assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
+    assert_eq!(cache.held(), (3000, 1));
     let reads = moving.reads.load(Ordering::SeqCst);
     assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
     assert_eq!(moving.reads.load(Ordering::SeqCst), reads);
