@@ -154,6 +154,9 @@ x509-parser = { workspace = true, optional = true }
 # build of the library or the binary has them.
 aws-sdk-s3.workspace = true
 aws-smithy-http-client.workspace = true
+# Runs packaging/polkit/50-tierstore-update.rules, the JavaScript polkit evaluates, in
+# tests/packaging.rs, against stand-ins of polkit's action and subject.
+boa_engine.workspace = true
 # Signs the requests the tests of the S3 front send by hand, apart from the code that checks them.
 hmac.workspace = true
 # The S3 client, which the tests of the S3 front drive it with, and the loopback
@@ -176,6 +179,8 @@ rustix = { workspace = true, features = ["process", "thread"] }
 # hook's flags that tests/update_hook runs the update hook with.
 tierstore = { workspace = true, features = ["server", "hook-conformance"] }
 tokio = { workspace = true, features = ["io-util", "macros", "test-util"] }
+# Reads the updater declaration of tests/packaging.rs as a table, beside the hook's own parser.
+toml.workspace = true
 
 [lints]
 workspace = true

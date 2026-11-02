@@ -1,0 +1,66 @@
+# /etc/updater.d/tierstore.toml: tierstore's declaration for the host updater. root:root, mode
+# 0644. It names the hook (`tierstore update-hook <step>`, crates/tierstore/docs/update-hook.md),
+# the account it runs as, the rights it is given and the two slot units it may start and stop.
+# The hook reads uid, health_ports, state_dir and hook.units from this file before every step;
+# the rest is the updater's.
+#
+# Top-level keys come first: in TOML a key after a table header belongs to that table.
+name = "tierstore"
+# The hook executable, inside the verified release; the updater runs `tierstore update-hook`.
+binary = "tierstore"
+# Whose attestation the release must carry: this repository's artifacts workflow.
+signer = { repository = "komira-ai/tierstore", workflow = "artifacts.yml" }
+# The account the service runs as (packaging/tierstore.conf). It must be in the state
+# directory's group, which the hook checks.
+uid = "tierstore"
+registration_ttl_secs = 300
+# The two slots' private ports; the public port 9300 is redirected to the serving one.
+health_ports = [9301, 9302]
+# After cutover, verify must succeed by then (at least verify plus rollback), or the updater
+# rolls back.
+verify_deadline_secs = 1600
+# The one ceiling on a pending promotion: the updater applies it, the hook never does.
+promotion_ceiling_secs = 3600
+# A cleanup that fails after its commit is run again forward this many times.
+cleanup_retries = 3
+# The hook's record, lock and slot links (packaging/tmpfiles.d/tierstore-update.conf): owner
+# and group tierstore-update, mode 0750, outside every path the service may write.
+state_dir = "/var/lib/updater/hooks/tierstore"
+# At the updater's start, before any unit: `tierstore update-hook restore` starts the one slot
+# the record names. The slot units have no [Install] section.
+boot = "restore"
+# No min_version yet: the first release that carries this file sets it.
+
+[hook]
+# Not uid: the hook's own account owns the record, and the service cannot write it
+# (packaging/tierstore-update.conf).
+user = "tierstore-update"
+group = "tierstore-update"
+# Hook-wide, with no per-step table: every step and the boot entry list or change nftables
+# rules over netlink, which needs CAP_NET_ADMIN, and the boot entry runs with the hook-wide set.
+capabilities = ["CAP_NET_ADMIN"]
+read_paths = ["/usr/sbin/nft", "/etc/updater.d/tierstore.toml"]
+# state_dir is writable by the hook implicitly; no step touches the service's state or cache.
+write_paths = []
+# The only units the hook may start and stop (packaging/tierstore@.service, %i the port), as
+# packaging/polkit/50-tierstore-update.rules grants.
+units = ["tierstore@9301.service", "tierstore@9302.service"]
+# Netlink for nft; the inet families for the probes on 127.0.0.1.
+address_families = ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"]
+environment = {}
+
+[hook.timeout_secs]
+# The self-test of the tiers at start (--backend-check-wait) and the readiness of the new slot.
+prepare = 600
+cutover = 300
+# promotion_bound_secs and a margin.
+verify = 1000
+rollback = 600
+# The settle (--drain-lb-wait 70 s), --drain-deadline (900 s) and the lease (5 s) of the old
+# slot's stop, with a margin above the unit's TimeoutStopSec=1100.
+cleanup = 1300
+
+[hook.params]
+# How long verify waits, once cleanup has stopped the old slot, for the new one to say
+# read-write.
+promotion_bound_secs = 900
