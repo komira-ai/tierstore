@@ -1,4 +1,4 @@
-//! Requests signed by hand and sent with a plain HTTP client: what the client of kbf does not
+//! Requests signed by hand and sent with a plain HTTP client: what the `S3Store` client does not
 //! send, and the answers as they are on the wire.
 
 use base64::Engine as _;

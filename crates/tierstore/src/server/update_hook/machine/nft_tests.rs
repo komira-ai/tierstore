@@ -7,7 +7,7 @@ use super::super::ports::{Nft, PortError, PortKind};
 use super::testing::{FakeRunner, LIMIT, exit, signalled};
 use super::{Call, NftTool, RunError};
 
-const ABSENT: &str = "Error: No such file or directory\nlist table inet kbf_x\n          ^^^^^^^\n";
+const ABSENT: &str = "Error: No such file or directory\nlist table inet tbl_x\n          ^^^^^^^\n";
 
 fn tool(runner: &FakeRunner) -> NftTool<'_> {
     NftTool::new(runner, LIMIT)
@@ -87,7 +87,7 @@ fn list_table_returns_the_listing() {
 #[test]
 fn list_table_says_none_for_a_table_that_is_not_there() {
     let runner = FakeRunner::replying(vec![exit(1, "", ABSENT)]);
-    assert_eq!(tool(&runner).list_table("kbf_x").unwrap(), None);
+    assert_eq!(tool(&runner).list_table("tbl_x").unwrap(), None);
 }
 
 /// Asserts that only a non-zero exit counts as absence: a zero exit whose standard error happens
@@ -131,7 +131,7 @@ fn delete_table_runs_nft_delete() {
 #[test]
 fn delete_table_of_an_absent_table_is_ok() {
     let runner = FakeRunner::replying(vec![exit(1, "", ABSENT)]);
-    tool(&runner).delete_table("kbf_x").unwrap();
+    tool(&runner).delete_table("tbl_x").unwrap();
 }
 
 /// Asserts that another failure of the delete, and a timeout, are errors.

@@ -25,15 +25,15 @@ export interface Page {
 
 export const SITE_NAME = 'tierstore';
 export const DOMAIN = 'tierstore.dev';
-/** Where the source is today: tierstore ships from the kbf repository for now. */
-export const REPO_URL = 'https://github.com/komira-ai/kbf';
+/** Where the source and the releases are. */
+export const REPO_URL = 'https://github.com/komira-ai/tierstore';
 export const CRATE_URL = `${REPO_URL}/tree/main/crates/tierstore`;
-export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/tierstore/README.md`;
+export const PACKAGING_URL = `${REPO_URL}/blob/main/packaging/README.md`;
 export const RELEASES_URL = `${REPO_URL}/releases`;
 
 /**
  * The white paper. null while there is no final version: nothing on the site links to it, names it or reserves room
- * for it (test/hygiene.test.ts checks that). Set to the paper's URL, and the footer gains the link.
+ * for it. Set to the paper's URL, and the footer gains the link.
  */
 export const WHITE_PAPER_URL: string | null = null;
 
@@ -54,7 +54,7 @@ export const PAGES: readonly Page[] = [
     scripts: ['copy.js'],
     bands: true,
   },
-  { route: '/install/', source: 'install', title: 'Install', description: 'Get tierstore from a kbf release and run it.', nav: 'install', scripts: ['copy.js'], bands: false },
+  { route: '/install/', source: 'install', title: 'Install', description: 'Get tierstore from a release and run it.', nav: 'install', scripts: ['copy.js'], bands: false },
   { route: '/demo/', source: 'demo', title: 'Demo', description: 'A start, the probes and a drain of tierstore, as the code prints them.', nav: 'demo', scripts: ['copy.js'], bands: false },
   { route: '/why/', source: 'why', title: 'Why tierstore', description: 'The problem tierstore solves and how the tiers work.', nav: 'why', scripts: ['copy.js'], bands: false },
   {
