@@ -31,8 +31,8 @@ raw	lc.bytes_served.cold	84119989	bytes	local plus upstream
 raw	lc.bytes_local.warm	6289943	bytes	bytes served from the local_cache (cache_bytes_served_local_total)
 raw	lc.bytes_upstream.warm	46837763	bytes	bytes served from the cold store through tierstore (cache_bytes_served_upstream_total)
 raw	lc.bytes_served.warm	53127706	bytes	local plus upstream
-derived	minio_get_cut_pct.cold	42	percent	(306488 - 177930) / 306488 = 41.9%, rounded	att5.minio_get_cut.komira_sdk_exec.cold
-derived	minio_get_cut_pct.warm	54	percent	(306488 - 140509) / 306488 = 54.2%, rounded	att5.minio_get_cut.komira_sdk_exec.warm
+derived	minio_get_cut_pct.cold	42	percent	(306488 - 177930) / 306488 = 41.9%, rounded	att5.minio_get_cut.komira_sdk_exec.cold, concl.minio_get_cut.komira_sdk_exec.cold_warm
+derived	minio_get_cut_pct.warm	54	percent	(306488 - 140509) / 306488 = 54.2%, rounded	att5.minio_get_cut.komira_sdk_exec.warm, concl.minio_get_cut.komira_sdk_exec.cold_warm
 derived	lc.hit_rate_obj_pct.cold	41.4	percent	22928 / 55430	att5.lc_object_hit_rate.komira_sdk_exec.cold, lc.hit_rate_cold_reads_per_build.na.local_cache_over_cold
 derived	lc.hit_rate_obj_pct.warm	44.0	percent	20045 / 45589	att5.lc_object_hit_rate.komira_sdk_exec.warm, lc.hit_rate_cold_reads_per_build.na.local_cache_over_cold
 derived	lc.mb_local.cold	11.5	MB	11517872 bytes / 10^6	att5.lc_bytes.komira_sdk_exec.cold

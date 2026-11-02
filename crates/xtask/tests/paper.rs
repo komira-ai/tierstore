@@ -694,6 +694,11 @@ const ATTEMPT5_CELLS: &[(&str, &[f64])] = &[
         "att5.no_time_claim.komira_sdk_exec.baseline_cold_warm",
         &[9.0, 100.0],
     ),
+    // The conclusion quotes the GET cut.
+    (
+        "concl.minio_get_cut.komira_sdk_exec.cold_warm",
+        &[42.0, 54.0],
+    ),
     // The cell of section 5 that the run fills: hit rates, and GETs at MinIO cold and warm.
     (
         "lc.hit_rate_cold_reads_per_build.na.local_cache_over_cold",
