@@ -173,10 +173,11 @@
 //! `Connection: close`, so that a client does not send its next request on a connection that is
 //! about to end. For [`ServerConfig::drain_lb_wait`], the settle, the server goes on accepting
 //! and serving everything, so that a load balancer or a client that has not seen the 503 yet is
-//! not refused. At the end of the settle it stops accepting connections and closes each
-//! connection that has no request on the wire with a lingering close: it shuts its end for
-//! writing, so that the client reads a clean end of stream, and goes on reading, and dropping
-//! what it reads, until the client closes its end or [`ServerConfig::header_timeout`] has
+//! not refused. At the end of the settle it stops accepting connections, without resetting one
+//! the kernel has set up for it (`door`), and closes each connection that has no request on the
+//! wire (a new one once it has had a moment to send its first) with a lingering close: it shuts
+//! its end for writing, so that the client reads a clean end of stream, and goes on reading, and
+//! dropping what it reads, until the client closes its end or [`ServerConfig::header_timeout`] has
 //! passed. A request that is on the wire (begun, and not answered in full) is served, with
 //! `Connection: close`, and its connection is closed in the same way when the answer is out.
 //! The bytes that arrive after the server shut its end, a request that came within one round trip
@@ -196,6 +197,7 @@ pub mod cli;
 mod config;
 mod config_cache;
 mod config_print;
+mod door;
 mod drain;
 mod front;
 pub mod gc;
@@ -408,7 +410,8 @@ pub struct ServerConfig {
     /// `/readyz` said 503.
     pub drain_lb_wait: Duration,
     /// How long the server waits for requests in flight, for the answers it is sending, and for
-    /// the connections it closes to be closed by their clients, after the settle.
+    /// the connections it closes to be closed by their clients, after the settle and its closing
+    /// door (see `door`).
     pub drain_deadline: Duration,
     /// The proxy whose usage object `/usagez` judges: none by default, and then `/usagez` says
     /// the usage is not watched. The binary sets the proxy it serves.
@@ -511,16 +514,11 @@ trait Incoming {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<(Self::Stream, SocketAddr)>>;
-}
 
-impl Incoming for TcpListener {
-    type Stream = tokio::net::TcpStream;
-
-    fn poll_incoming(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<(tokio::net::TcpStream, SocketAddr)>> {
-        self.poll_accept(cx)
+    /// The handshakes in flight: begun, and not yet ready to be taken. A source without
+    /// handshakes has none.
+    fn handshakes(&self) -> io::Result<usize> {
+        Ok(0)
     }
 }
 
@@ -661,7 +659,7 @@ impl Server {
     /// Serves the connections of `listener` until the drain has run its course (see the module
     /// docs): the drain begins when [`Server::begin_drain`] is called.
     pub async fn serve(self: &Arc<Self>, listener: TcpListener) -> Drained {
-        self.serve_from(listener).await
+        self.serve_all(vec![listener]).await
     }
 
     /// [`Server::serve`] over several listeners: the one server, so one drain and one count of
@@ -690,15 +688,28 @@ impl Server {
                 () = &mut wait => break,
             }
         }
-        drop(incoming);
+        // The idle connections close as the door does, so that a client that waits for the end
+        // of its stream frees what it holds.
         self.drain.settle();
+        let mut door = door::Closing::begin(incoming);
+        while let Some(accepted) = door.next().await {
+            self.take(accepted).await;
+        }
+        drop(door);
         self.finish_by_deadline().await
     }
 
-    /// Takes the next connection `incoming` gives and serves it; after an accept that failed,
-    /// waits a moment.
+    /// Takes the next connection `incoming` gives and serves it (see [`Server::take`]).
     async fn accept_one<I: Incoming>(self: &Arc<Self>, incoming: &mut I) {
         let accepted = poll_fn(|cx| incoming.poll_incoming(cx)).await;
+        self.take(accepted).await;
+    }
+
+    /// Serves a connection that was `accepted`; after an accept that failed, waits a moment.
+    async fn take<S>(self: &Arc<Self>, accepted: io::Result<(S, SocketAddr)>)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let failed = accepted
             .map(|(stream, peer)| self.connection(stream, peer))
             .is_err();

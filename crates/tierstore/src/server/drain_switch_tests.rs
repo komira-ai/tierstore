@@ -88,7 +88,7 @@ fn no_release_and_no_test_run_has_the_switch() {
         .lines()
         .filter(|line| line.contains("cargo build"))
         .collect();
-    // One per release platform: linux-x86_64, linux-arm64 and macos-arm64.
+    // One build for each release platform: linux-x86_64, linux-arm64 and macos-arm64.
     assert_eq!(builds.len(), 3, "{builds:?}");
     for build in builds {
         assert!(
