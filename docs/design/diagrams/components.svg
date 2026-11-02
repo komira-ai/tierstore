@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" width="960" height="620" role="img" aria-label="Clients reach stateless proxies; a hot tier and a cold tier hold the data; one lease-holding reconciler copies, evicts and publishes usage.">
+<title>tierstore components</title>
+<defs><marker id="components-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="components-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="620" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">One tierstore: proxies, two tiers, one reconciler</text>
+<rect x="20" y="70" width="140" height="56" rx="5" class="box"/>
+<text x="90" y="94" class="b" text-anchor="middle">S3 clients</text>
+<text x="90" y="112" class="t-m" text-anchor="middle">(S3 front)</text>
+<rect x="20" y="250" width="140" height="56" rx="5" class="box"/>
+<text x="90" y="274" class="b" text-anchor="middle">Image clients</text>
+<text x="90" y="292" class="t-m" text-anchor="middle">(OCI, read-only)</text>
+<rect x="190" y="50" width="200" height="160" rx="5" class="box"/>
+<text x="205" y="74" class="b">Proxy</text>
+<text x="260" y="74" class="t-m">id: p1</text>
+<text x="205" y="96" class="t-m">S3 front + OCI front</text>
+<text x="205" y="113" class="t-m">Stateless; in memory only:</text>
+<text x="205" y="130" class="t-m">open journal batch,</text>
+<text x="205" y="147" class="t-m">next journal number,</text>
+<text x="205" y="164" class="t-m">capacity cache</text>
+<rect x="190" y="230" width="200" height="100" rx="5" class="box"/>
+<text x="205" y="254" class="b">Proxy</text>
+<text x="260" y="254" class="t-m">id: p2</text>
+<text x="205" y="276" class="t-m">Same shape, own id.</text>
+<text x="205" y="293" class="t-m">Any number of proxies.</text>
+<rect x="480" y="50" width="240" height="290" rx="5" class="box-b"/>
+<text x="495" y="74" class="b">Hot tier</text>
+<text x="495" y="92" class="t-m">S3-compatible bucket (or dir:)</text>
+<text x="495" y="118" class="b">State kept here:</text>
+<text x="495" y="140">client objects (verbatim keys)</text>
+<text x="495" y="162">_journal/&lt;proxy&gt;/&lt;seq&gt;</text>
+<text x="495" y="184">_tiering/proxies/&lt;id&gt;</text>
+<text x="495" y="206">_tiering/checkpoint/&lt;id&gt;</text>
+<text x="495" y="228">_tiering/usage</text>
+<text x="495" y="250">_tiering/lease</text>
+<text x="495" y="272">_tiering/selftest/&lt;run&gt;/</text>
+<rect x="770" y="50" width="170" height="290" rx="5" class="box"/>
+<text x="785" y="74" class="b">Cold tier</text>
+<text x="785" y="92" class="t-m">S3-compatible bucket</text>
+<text x="785" y="109" class="t-m">(or dir:)</text>
+<text x="785" y="132" class="b">Holds:</text>
+<text x="785" y="152" class="t-m">client objects, same</text>
+<text x="785" y="167" class="t-m">key names. No journal,</text>
+<text x="785" y="182" class="t-m">usage, checkpoint or</text>
+<text x="785" y="197" class="t-m">lease; start-up probe</text>
+<text x="785" y="212" class="t-m">keys may show under</text>
+<text x="785" y="227" class="t-m">_tiering/selftest/.</text>
+<text x="785" y="252" class="t-m">Arrive by copy</text>
+<text x="785" y="267" class="t-m">(reconciler), a direct</text>
+<text x="785" y="282" class="t-m">put when hot is full,</text>
+<text x="785" y="297" class="t-m">or multipart upload.</text>
+<rect x="330" y="420" width="370" height="150" rx="5" class="box-o"/>
+<text x="345" y="444" class="b">Reconciler: the process holding the lease</text>
+<text x="345" y="466" class="t-m">Runs in every storage-node process;</text>
+<text x="345" y="483" class="t-m">a pass is done only by the lease holder</text>
+<text x="345" y="500" class="t-m">(and, with --lock-file, the lock holder).</text>
+<text x="345" y="517" class="t-m">In memory only (rebuilt from journals and</text>
+<text x="345" y="534" class="t-m">checkpoints): index of hot objects, usage,</text>
+<text x="345" y="551" class="t-m">copy lag, position in each proxy journal.</text>
+<line x1="160" y1="98" x2="190" y2="98" class="ln" marker-end="url(#components-ak)"/>
+<line x1="160" y1="278" x2="190" y2="278" class="ln" marker-end="url(#components-ak)"/>
+<line x1="390" y1="125" x2="480" y2="125" class="ln" marker-end="url(#components-ak)"/>
+<text x="396" y="105" class="t-m">put, journal,</text>
+<text x="396" y="122" class="t-m">get, head</text>
+<line x1="390" y1="275" x2="480" y2="275" class="ln" marker-end="url(#components-ak)"/>
+<polyline points="290,330 290,392 855,392 855,340" class="ln" marker-end="url(#components-ak)"/>
+<text x="20" y="410" class="t-m">To cold: head on every put</text>
+<text x="20" y="426" class="t-m">and hot-miss head; get on a</text>
+<text x="20" y="442" class="t-m">hot miss; put when hot is</text>
+<text x="20" y="458" class="t-m">full; delete, list, multipart.</text>
+<line x1="520" y1="340" x2="520" y2="420" class="ln-d" marker-end="url(#components-ak)"/>
+<text x="512" y="354" class="t-m" text-anchor="end">reads journals,</text>
+<text x="512" y="369" class="t-m" text-anchor="end">checkpoints, lease, and</text>
+<text x="512" y="384" class="t-m" text-anchor="end">objects to copy</text>
+<line x1="640" y1="420" x2="640" y2="340" class="ln" marker-end="url(#components-ak)"/>
+<text x="648" y="356" class="t-m">deletes (evict, prune); writes</text>
+<text x="648" y="373" class="t-m">checkpoint, usage, lease</text>
+<polyline points="700,500 900,500 900,340" class="ln" marker-end="url(#components-ak)"/>
+<text x="710" y="520" class="t-m">copy: get from hot,</text>
+<text x="710" y="537" class="t-m">create-only put to cold</text>
+<text x="20" y="598" class="t-m">Orange border: only one process works at a time. Dashed line: read. Solid line: request or write.</text>
+</svg>

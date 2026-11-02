@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 810" width="960" height="810" role="img" aria-label="Flow of one reconciler pass: lease, discover, read journals, apply puts, apply deletes, evict, checkpoint, prune, publish usage.">
+<title>One reconciler pass</title>
+<defs><marker id="reconciler-pass-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="reconciler-pass-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="810" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">One reconciler pass, in order</text>
+<rect x="30" y="56" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="78" class="b">1  Lease: renew or acquire</text>
+<text x="44" y="98" class="t-m">held: renew with If-Match; else create-only, or take over</text>
+<text x="480" y="72" class="t-m">Store: put_if_match with the last tag; or create-only put,</text>
+<text x="480" y="88" class="t-m">or HEAD and If-Match once Last-Modified + ttl has passed.</text>
+<text x="480" y="104" class="t-m">Fails: books cleared, pass ends (held = false)</text>
+<line x1="245" y1="112" x2="245" y2="130" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="130" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="152" class="b">2  Discover proxies</text>
+<text x="44" y="172" class="t-m">list _tiering/proxies/; load the checkpoint of each new id</text>
+<text x="480" y="152" class="t-m">hot.list of the prefix; hot.get _tiering/checkpoint/&lt;id&gt;</text>
+<text x="480" y="169" class="t-m">(missing = 0,0,0; a read failure is reported, retried next pass)</text>
+<line x1="245" y1="186" x2="245" y2="204" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="204" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="226" class="b">3  Read journals</text>
+<text x="44" y="246" class="t-m">per proxy, in id order, from the last number read</text>
+<text x="480" y="226" class="t-m">list_page _journal/&lt;id&gt;/ after the last number, get each object.</text>
+<text x="480" y="243" class="t-m">Stops silently at a gap; a corrupt object is reported every pass</text>
+<line x1="245" y1="260" x2="245" y2="278" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="278" width="430" height="56" rx="5" class="box-b"/>
+<text x="44" y="300" class="b">4  Apply puts (copy)</text>
+<text x="44" y="320" class="t-m">per journal object, in order: all its puts first</text>
+<text x="480" y="300" class="t-m">hot.get (whole body), then create-only cold put; AlreadyExists</text>
+<text x="480" y="317" class="t-m">counts as copied, unchecked; up to 16 at once; a gone key is skipped</text>
+<line x1="245" y1="334" x2="245" y2="352" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="352" width="430" height="56" rx="5" class="box-b"/>
+<text x="44" y="374" class="b">5  Apply deletes</text>
+<text x="44" y="394" class="t-m">then the deletes of that same journal object</text>
+<text x="480" y="374" class="t-m">delete_cold: hot HEAD; absent: cold.delete; present and cold</text>
+<text x="480" y="391" class="t-m">content differs: cold.delete. An error stops that proxy</text>
+<line x1="245" y1="408" x2="245" y2="426" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="426" width="430" height="56" rx="5" class="box-b"/>
+<text x="44" y="448" class="b">6  Evict (high and low water)</text>
+<text x="44" y="468" class="t-m">only if usage is above 0.8 x budget; down to 0.7 x budget</text>
+<text x="480" y="448" class="t-m">Re-read journals, drop superseded entries, take the oldest copied</text>
+<text x="480" y="465" class="t-m">entry across proxies, then hot.delete (unconditional)</text>
+<line x1="245" y1="482" x2="245" y2="500" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="500" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="522" class="b">7  Checkpoint</text>
+<text x="44" y="542" class="t-m">per proxy, only if it changed</text>
+<text x="480" y="522" class="t-m">HEAD, then If-Match on that tag (create-only if absent).</text>
+<text x="480" y="539" class="t-m">Not a fence: a stale holder can overwrite a newer checkpoint</text>
+<line x1="245" y1="556" x2="245" y2="574" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="574" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="596" class="b">8  Prune journal objects</text>
+<text x="44" y="616" class="t-m">those behind the eviction position and old enough</text>
+<text x="480" y="596" class="t-m">hot.delete when seq &lt; evict_seq and Last-Modified + retention</text>
+<text x="480" y="613" class="t-m">(24 h in the binary) &lt;= now; none while the cursor stays put</text>
+<line x1="245" y1="630" x2="245" y2="648" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="648" width="430" height="56" rx="5" class="box"/>
+<text x="44" y="670" class="b">9  Publish usage</text>
+<text x="44" y="690" class="t-m">every pass that holds the lease, even after failures</text>
+<text x="480" y="670" class="t-m">write _tiering/usage {hot_bytes, copy_lag, time}:</text>
+<text x="480" y="687" class="t-m">HEAD; absent: create-only; else If-Match on that tag</text>
+<polyline points="18,278 10,278 10,408 18,408" class="ln"/>
+<line x1="245" y1="704" x2="245" y2="730" class="ln" marker-end="url(#reconciler-pass-ak)"/>
+<rect x="30" y="730" width="430" height="40" rx="5" class="box"/>
+<text x="44" y="755" class="b">Sleep --reconcile-interval (5 s), then the next pass</text>
+<polyline points="30,750 4,750 4,42 245,42 245,56" class="ln-d" marker-end="url(#reconciler-pass-ak)"/>
+<text x="480" y="755" class="t-m">back to step 1 (renewal happens once per pass)</text>
+</svg>

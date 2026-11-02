@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 590" width="960" height="590" role="img" aria-label="Table of key kinds in the hot bucket with writer, write mode and readers.">
+<title>Keys in the hot bucket</title>
+<defs><marker id="hot-bucket-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="hot-bucket-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="590" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">The hot bucket: which keys, who writes them, how</text>
+<rect x="16" y="42" width="928" height="28" rx="3" class="box-b"/>
+<text x="24" y="61" class="b">Key and body</text>
+<text x="258" y="61" class="b">Writer</text>
+<text x="418" y="61" class="b">Write mode</text>
+<text x="648" y="61" class="b">Read by, deleted by</text>
+<rect x="16" y="76" width="928" height="64" rx="3" class="box"/>
+<text x="24" y="96" class="b">&lt;client key&gt;</text>
+<text x="24" y="114" class="t-m">client objects, verbatim names</text>
+<text x="258" y="96" class="b">Proxy</text>
+<text x="258" y="114" class="t-m">(put, copy-back of a cold read)</text>
+<text x="418" y="96">create-only</text>
+<text x="648" y="96" class="t-m">Read: proxy get, head; reconciler (copy)</text>
+<text x="648" y="113">Deleted: client delete, eviction</text>
+<rect x="16" y="140" width="928" height="64" rx="3" class="box-b"/>
+<text x="24" y="160" class="b">_journal/&lt;proxy&gt;/&lt;seq&gt;</text>
+<text x="24" y="178" class="t-m">seq is 20 digits, zero padded</text>
+<text x="24" y="194" class="t-m">body: JSON array of entries</text>
+<text x="258" y="160" class="b">Proxy</text>
+<text x="258" y="178" class="t-m">(one object per batch)</text>
+<text x="418" y="160">create-only</text>
+<text x="418" y="177">AlreadyExists: next number</text>
+<text x="648" y="160">Read: reconciler (list, get)</text>
+<text x="648" y="177">Deleted: reconciler prune only</text>
+<rect x="16" y="204" width="928" height="64" rx="3" class="box"/>
+<text x="24" y="224" class="b">_tiering/proxies/&lt;id&gt;</text>
+<text x="24" y="242" class="t-m">empty body</text>
+<text x="258" y="224" class="b">Proxy at open</text>
+<text x="418" y="224">create-only, once per id</text>
+<text x="418" y="241">AlreadyExists is ignored</text>
+<text x="648" y="224">Read: reconciler lists the prefix</text>
+<text x="648" y="241">Never deleted</text>
+<rect x="16" y="268" width="928" height="64" rx="3" class="box-b"/>
+<text x="24" y="288" class="b">_tiering/checkpoint/&lt;id&gt;</text>
+<text x="24" y="306" class="t-m">JSON {seq, evict_seq, evict_idx}</text>
+<text x="258" y="288" class="b">Reconciler</text>
+<text x="418" y="288">HEAD first: absent, create-only;</text>
+<text x="418" y="305">else If-Match on that tag</text>
+<text x="648" y="288">Read: reconciler; proxy at open (seq)</text>
+<text x="648" y="305">Never deleted</text>
+<rect x="16" y="332" width="928" height="64" rx="3" class="box"/>
+<text x="24" y="352" class="b">_tiering/usage</text>
+<text x="24" y="370" class="t-m">JSON {hot_bytes, copy_lag, time}</text>
+<text x="258" y="352" class="b">Reconciler</text>
+<text x="258" y="370" class="t-m">(each pass, lease held)</text>
+<text x="418" y="352">HEAD first: absent, create-only;</text>
+<text x="418" y="369">else If-Match on that tag</text>
+<text x="648" y="352">Read: proxy, at most once a second</text>
+<text x="648" y="369">Never deleted</text>
+<rect x="16" y="396" width="928" height="64" rx="3" class="box-b"/>
+<text x="24" y="416" class="b">_tiering/lease</text>
+<text x="24" y="434" class="t-m">text: holder, nonce, generation</text>
+<text x="258" y="416" class="b">Reconciler (Lease)</text>
+<text x="418" y="416">acquire: create-only</text>
+<text x="418" y="433">renew, take-over: If-Match</text>
+<text x="648" y="416">Others use its tag and Last-Modified</text>
+<text x="648" y="433">Deleted: release, if the tag is own</text>
+<rect x="16" y="460" width="928" height="64" rx="3" class="box"/>
+<text x="24" y="480" class="b">_tiering/selftest/&lt;run&gt;/...</text>
+<text x="24" y="498" class="t-m">probe keys; also in the cold bucket</text>
+<text x="258" y="480" class="b">Server start-up</text>
+<text x="258" y="498" class="t-m">start-up self-test</text>
+<text x="418" y="480">create-only; If-Match in the</text>
+<text x="418" y="497">head and if-match checks</text>
+<text x="648" y="480">Same run, deleted after each check</text>
+<text x="648" y="497">Swept when older than one hour</text>
+<text x="20" y="546" class="t-m">Reserved: put, delete and multipart under _journal/ or _tiering/ are refused (403 at the S3 front). Names without the slash are not reserved.</text>
+<text x="20" y="563" class="t-m">The proxy hides these keys from hot listings; the cold listing is not filtered, so a start-up probe left in the cold bucket can show.</text>
+</svg>

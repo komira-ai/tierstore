@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 760" width="960" height="760" role="img" aria-label="Timeline: A acquires create-only, renews with If-Match, stops; expiry is judged on the store Last-Modified plus ttl; B takes over with If-Match; A late renewal is refused.">
+<title>Lease: acquire, renew, expire, take over</title>
+<defs><marker id="lease-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="lease-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="760" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">The lease object: two reconcilers, one holder at a time</text>
+<rect x="130" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="190" y="65" class="b" text-anchor="middle">Reconciler A</text>
+<line x1="190" y1="76" x2="190" y2="690" class="ln-d"/>
+<rect x="395" y="44" width="190" height="32" rx="5" class="box-b"/>
+<text x="490" y="65" class="b" text-anchor="middle">Hot tier: _tiering/lease</text>
+<line x1="490" y1="76" x2="490" y2="690" class="ln-d"/>
+<rect x="730" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="790" y="65" class="b" text-anchor="middle">Reconciler B</text>
+<line x1="790" y1="76" x2="790" y2="690" class="ln-d"/>
+<line x1="190" y1="108" x2="490" y2="108" class="ln" marker-end="url(#lease-ak)"/>
+<text x="340" y="102" class="t-m lbl" text-anchor="middle">put, create-only (If-None-Match: *)</text>
+<line x1="490" y1="134" x2="190" y2="134" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="340" y="128" class="t-m lbl" text-anchor="middle">ok</text>
+<line x1="190" y1="166" x2="490" y2="166" class="ln" marker-end="url(#lease-ak)"/>
+<text x="340" y="160" class="t-m lbl" text-anchor="middle">HEAD: learn tag T1 (put returns none)</text>
+<line x1="490" y1="192" x2="190" y2="192" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="340" y="186" class="t-m lbl" text-anchor="middle">tag T1</text>
+<line x1="190" y1="228" x2="490" y2="228" class="ln" marker-end="url(#lease-ak)"/>
+<text x="340" y="222" class="t-m lbl" text-anchor="middle">renew: put_if_match(T1)</text>
+<line x1="490" y1="254" x2="190" y2="254" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="340" y="248" class="t-m lbl" text-anchor="middle">new tag T2; Last-Modified moves on</text>
+<text x="500" y="228" class="t-m">Renewal: once per pass,</text>
+<text x="500" y="245" class="t-m">about every 5 s (pass + interval)</text>
+<rect x="70" y="290" width="250" height="60" rx="5" class="box-o"/>
+<text x="92" y="312" class="t-m">A stops renewing (crash, hang, or</text>
+<text x="92" y="329" class="t-m">a pass longer than the ttl)</text>
+<text x="498" y="300" class="t-m">last write: Last-Modified = M</text>
+<line x1="790" y1="384" x2="490" y2="384" class="ln" marker-end="url(#lease-ak)"/>
+<text x="640" y="378" class="t-m lbl" text-anchor="middle">put, create-only</text>
+<line x1="490" y1="410" x2="790" y2="410" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="640" y="404" class="t-m lbl" text-anchor="middle">AlreadyExists</text>
+<line x1="790" y1="444" x2="490" y2="444" class="ln" marker-end="url(#lease-ak)"/>
+<text x="640" y="438" class="t-m lbl" text-anchor="middle">HEAD</text>
+<line x1="490" y1="470" x2="790" y2="470" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="640" y="464" class="t-m lbl" text-anchor="middle">tag T2, Last-Modified M</text>
+<text x="200" y="440" class="t-m">B: M + ttl is still in the</text>
+<text x="200" y="457" class="t-m">future on B clock: not held</text>
+<polyline points="470,290 460,290 460,520 470,520" class="ln"/>
+<text x="450" y="410" class="b" text-anchor="end">ttl (30 s)</text>
+<text x="640" y="508" class="t-m lbl" text-anchor="middle">next pass: create-only put, AlreadyExists</text>
+<line x1="790" y1="530" x2="490" y2="530" class="ln" marker-end="url(#lease-ak)"/>
+<text x="640" y="524" class="t-m lbl" text-anchor="middle">HEAD: M + ttl &lt;= now: expired</text>
+<line x1="490" y1="556" x2="790" y2="556" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="640" y="550" class="t-m lbl" text-anchor="middle">tag T2</text>
+<line x1="790" y1="590" x2="490" y2="590" class="ln" marker-end="url(#lease-ak)"/>
+<text x="640" y="584" class="t-m lbl" text-anchor="middle">take over: put_if_match(T2)</text>
+<line x1="490" y1="616" x2="790" y2="616" class="ln-d" marker-end="url(#lease-ak)"/>
+<text x="640" y="610" class="t-m lbl" text-anchor="middle">ok, new tag T3: B holds the lease</text>
+<line x1="190" y1="654" x2="490" y2="654" class="ln-o" marker-end="url(#lease-ao)"/>
+<text x="340" y="648" class="t-m lbl" text-anchor="middle">renew: put_if_match(T2)</text>
+<line x1="490" y1="678" x2="190" y2="678" class="ln-od" marker-end="url(#lease-ao)"/>
+<text x="340" y="672" class="t-m lbl" text-anchor="middle">412 PreconditionFailed: refused</text>
+<text x="80" y="704" class="t-m">A: tag dropped, books cleared, pass ends.</text>
+<text x="20" y="732" class="t-m">Expiry uses the store Last-Modified (whole seconds on S3) against the contender's own clock; skew moves the take-over time.</text>
+<text x="20" y="748" class="t-m">A pass already running when the lease changes hands is not stopped; its checkpoint write is not fenced by the lease.</text>
+</svg>
