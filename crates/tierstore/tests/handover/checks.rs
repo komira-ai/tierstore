@@ -56,53 +56,19 @@ pub fn no_failures(reports: &[Report]) {
     );
 }
 
-/// A new connection whose first request read a clean end of stream before any byte of an answer:
-/// the old slot accepted it in the last moment of its settle, before the request came, and closed
-/// it, idle, with its lingering close. The request is then read and counted late: the residual race
-/// of design section 7 (question 6), which a restart meets because new connections reach the old
-/// slot until it stops. Each one must appear in the old slot's late count ([`late_note`]).
-pub fn closed_at_the_settle(failure: &Failure) -> bool {
+/// What the bound of a restart admits: an S3 request that failed in its connect (refused, or reset
+/// in its handshake) while the run said the gap was open, from just before the step that stops the
+/// old slot until that step returned. A request whose connect succeeded and that then failed is
+/// beyond the bound, whatever it read (a reset, a clean end of stream, nothing): the bound is a
+/// failed connect on a new connection, never a failure on a connection the server may have
+/// accepted. Nothing else is admitted either: no timeout, no OCI failure, nothing outside the gap.
+pub fn in_restart_gap(failure: &Failure) -> bool {
     failure.kind == Kind::S3
         && failure.in_gap
         && matches!(
             failure.fault,
-            Fault::Broke(Broke::BeforeAnswer {
-                fresh: true,
-                eof: true,
-                ..
-            })
+            Fault::Broke(Broke::Refused | Broke::ConnectReset)
         )
-}
-
-/// What the bound of a restart admits: an S3 request that failed while the run said the gap was
-/// open (from just before the step that stops the old slot until that step returned), as a
-/// connect into the gap:
-/// - refused, or reset in its handshake;
-/// - reset before any byte of an answer on a new connection: a connect that the old slot's kernel
-///   completed and that its listener, closing at the end of its settle, never accepted;
-/// - [`closed_at_the_settle`], which the run matches one for one with the old slot's late count.
-///
-/// That tierstore reset no connection it had accepted is asserted on the server's side: the old
-/// slot exits 0 with nothing cut at its deadline. Nothing else is admitted: no timeout, no failure
-/// on a connection that had carried an answer, no cut answer, no status, no OCI failure, nothing
-/// outside the gap.
-pub fn in_restart_gap(failure: &Failure) -> bool {
-    closed_at_the_settle(failure)
-        || failure.kind == Kind::S3
-            && failure.in_gap
-            && matches!(
-                failure.fault,
-                Fault::Broke(
-                    Broke::Refused
-                        | Broke::ConnectReset
-                        | Broke::BeforeAnswer {
-                            fresh: true,
-                            eof: false,
-                            reset: true,
-                            ..
-                        }
-                )
-            )
 }
 
 /// Asserts the bound of a restart (design sections 3, 9 and 11 question 5), [`in_restart_gap`]:
@@ -110,21 +76,13 @@ pub fn in_restart_gap(failure: &Failure) -> bool {
 /// v-next, and nothing else failed. Prints and returns the number of those connects.
 pub fn restart_bound(reports: &[Report]) -> usize {
     let failures: Vec<&Failure> = reports.iter().flat_map(|report| &report.failures).collect();
-    let refused = failures
-        .iter()
-        .filter(|f| matches!(f.fault, Fault::Broke(Broke::Refused | Broke::ConnectReset)))
-        .count();
     let beyond: Vec<String> = failures
         .iter()
         .filter(|f| !in_restart_gap(f))
         .map(ToString::to_string)
         .collect();
     let gap = failures.len() - beyond.len();
-    eprintln!(
-        "T1: restart gap: {gap} connects failed ({refused} refused or reset in the handshake, {} \
-         reset before any answer byte on a new connection)",
-        gap - refused.min(gap)
-    );
+    eprintln!("T1: restart gap: {gap} connects failed, refused or reset in the handshake");
     assert!(
         beyond.is_empty(),
         "T1: {} failures beyond the restart's bound; the first ones:\n{}",
@@ -464,35 +422,23 @@ mod tests {
         })
     }
 
-    /// Asserts that the bound admits, for an S3 client in the gap, a refused connect and a reset
-    /// of a new connection before any answer byte, and nothing else: not the same outside the
-    /// gap, not from an OCI client, not a clean end of stream or a timeout of a new connection,
-    /// not a reset of a kept-alive connection, not a cut answer, a 503 or a wrong answer. It
-    /// would catch a bound that admits a reset of an established connection, or a refusal at any
-    /// other moment of the run.
+    /// Asserts that the bound admits, for an S3 client in the gap, only a failed connect (refused,
+    /// or reset in its handshake), and nothing else: not the same outside the gap or from an OCI
+    /// client, and no failure after a connect succeeded, whatever it read (a reset or a clean end
+    /// of stream before any answer byte, on a new or a kept-alive connection), no timeout, no cut
+    /// answer, no 503 and no wrong answer. It would catch a bound that admits a failure on a
+    /// connection the server may have accepted, or a refusal at any other moment of the run.
     #[test]
-    fn the_restart_bound_admits_only_connects_into_the_gap() {
+    fn the_restart_bound_admits_only_failed_connects_into_the_gap() {
         let s3 = |in_gap, fault| failure(Kind::S3, in_gap, fault);
         assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::Refused))));
         assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::ConnectReset))));
-        // A new connection closed idle at the end of the settle: admitted in the gap, and then
-        // matched against the old slot's late count by the run.
-        assert!(in_restart_gap(&s3(true, before(true, true, false))));
-        assert!(!in_restart_gap(&s3(false, before(true, true, false))));
-        assert!(!in_restart_gap(&failure(
-            Kind::Oci,
-            true,
-            before(true, true, false)
-        )));
-        assert!(!in_restart_gap(&s3(
-            false,
-            Fault::Broke(Broke::ConnectReset)
-        )));
-        assert!(in_restart_gap(&s3(true, before(true, false, true))));
         for refused in [
             s3(false, Fault::Broke(Broke::Refused)),
+            s3(false, Fault::Broke(Broke::ConnectReset)),
             failure(Kind::Oci, true, Fault::Broke(Broke::Refused)),
-            s3(false, before(true, false, true)),
+            s3(true, before(true, false, true)),
+            s3(true, before(true, true, false)),
             s3(true, before(true, false, false)),
             s3(true, before(false, false, true)),
             s3(true, before(false, true, false)),

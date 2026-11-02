@@ -354,13 +354,14 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
     with no late request; v-next is stopped and its link removed.
   - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` stops v-current before it starts
     v-next, so a new connection in between is refused. The bound asserted: every failed request is an S3 connect into
-    that gap (from just before `cutover` until it returned): refused, reset in its handshake, reset before any byte of
-    an answer on a new connection (one the old listener's queue held when it closed at the end of its settle), or a
-    clean end of stream before any byte of an answer on a new connection (accepted in the last moment of the settle and
-    closed idle: the residual race of section 7, whose request the old slot must count as late, one for each, in its exit
-    note), counted and printed; no
-    failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established connection, no
-    acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
+    that gap (from just before `cutover` until it returned), refused or reset in its handshake, counted and printed; no
+    request whose connect succeeded fails, whatever it reads. A plain restart has a race this bound does not admit, and
+    T1 reports it when it happens: the redirect still names v-current while it settles, so a connection that reaches it
+    as its listener closes at the end of the settle is reset (the listener's queue held it) or, accepted an instant
+    before with its request not yet read, closed idle. It is rare; closing it means moving the redirect off v-current
+    before its settle, which turns the whole settle into refused connects, or changing the end of the settle, and neither
+    is done here. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
+    connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
     requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two
     slots' proxy ids and hold each acknowledged key once; once both slots have stopped, no lease is left.
   - The hook killed by its `nft` right after `cutover` applied the swap, before `swapped`: `restore` puts the rule back

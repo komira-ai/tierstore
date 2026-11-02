@@ -408,16 +408,7 @@ fn a_restart_under_load_fails_only_connects_in_its_gap() {
         );
         checks::lease_held_by(site, B);
         site.services.stop_slot(B);
-        // A connection the old slot closed idle at the end of its settle, just after accepting
-        // it, has its request read and counted late: one late connection for each, beside the
-        // idle probe's.
-        let closed = reports
-            .iter()
-            .flat_map(|report| &report.failures)
-            .filter(|failure| checks::closed_at_the_settle(failure))
-            .count();
-        let note = checks::late_note(1 + closed, 1);
-        checks::exits_are(site, &[(A, &note), (B, "")]);
+        checks::exits_are(site, &[(A, &checks::probes_note()), (B, "")]);
         checks::journals_and_lease(site, &reports, &acked);
     });
 }
