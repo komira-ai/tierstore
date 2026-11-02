@@ -186,8 +186,10 @@ fn a_path_that_could_forge_a_request_is_refused() {
 
 /// A server for one connection whose answer comes in `pieces`: before each piece it moves the
 /// shared clock on by that piece's seconds, then writes it; after the last it holds the
-/// connection open until `release` says so, or closes it at once when `hold` is false. Time moves
-/// only here, however the client's reads split the bytes.
+/// connection open until `release` says so, or closes it at once when `hold` is `None`. Time
+/// moves only here, however the client's reads split the bytes. A piece the client no longer
+/// takes (it gave up and closed) ends the server quietly: whether that write lands depends on
+/// when the client closed, so the tests assert the client's outcome, never the write's.
 fn serve_in_pieces(
     pieces: Vec<(u64, &'static [u8])>,
     clock: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -205,8 +207,15 @@ fn serve_in_pieces(
         }
         for (seconds, bytes) in pieces {
             clock.fetch_add(seconds, std::sync::atomic::Ordering::SeqCst);
-            stream.write_all(bytes).unwrap();
-            stream.flush().unwrap();
+            // A client that has already given up may have closed its end: a piece it no longer
+            // reads is not the server's failure, and the test asserts what the client says.
+            if stream
+                .write_all(bytes)
+                .and_then(|()| stream.flush())
+                .is_err()
+            {
+                break;
+            }
         }
         if let Some(hold) = hold {
             let _ = hold.recv();
@@ -259,7 +268,8 @@ fn one_deadline_bounds_the_whole_request() {
         Some(hold),
     );
     let error = clocked(&seconds).get(port, "/readyz").unwrap_err();
-    release.send(()).unwrap();
+    // The server may have ended already, its last piece refused by the closed connection.
+    let _ = release.send(());
     server.join().unwrap();
     assert_eq!(
         message(error),
