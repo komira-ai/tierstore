@@ -18,7 +18,9 @@
 //! A sentence about a build or a wall time that prints two of the wall times sets the runs side
 //! by side and is refused, and a sentence about GETs at the object store may print only the
 //! shares the run measured. A wall time alone (wall-clock, wall time) is the recorded runs' time,
-//! so it is context enough for a speed word. The attempt-5 block's own text is left to the
+//! so it is context enough for a speed word, and for an amount word when the sentence ties it
+//! to tierstore or the runs. Words that judge without a time (improved, better, beat) are a
+//! claim only in a sentence that speaks of time, so the page can say a hit rate improved. The attempt-5 block's own text is left to the
 //! attempt5 module, which holds it word for word; its tags' attributes are still read here.
 //!
 //! A clause that disclaims ("we make no claim", "claim no", "not evidence", "in either
@@ -49,6 +51,12 @@ pub(super) const SPEED_WORDS: &[&str] = &[
     "lengthens",
     "snappier",
     "sluggish",
+];
+
+/// Words that judge one run better or worse than another. They say nothing of time on their own
+/// ("the hit rate improved for this build"), so with a build or a wall time named they are a
+/// claim only when the sentence speaks of time.
+const QUALITY_WORDS: &[&str] = &[
     "beat",
     "beats",
     "outperform",
@@ -64,6 +72,19 @@ pub(super) const SPEED_WORDS: &[&str] = &[
     "improvement",
     "regressed",
     "regression",
+];
+
+/// Words that tie a wall time to the measured runs or to tierstore: with one of them, a wall time
+/// compared in amount words is the runs' time.
+const RUN_WORDS: &[&str] = &[
+    "tierstore",
+    "baseline",
+    "cold run",
+    "warm run",
+    "the runs",
+    "these runs",
+    "the cache",
+    "local_cache",
 ];
 
 /// Words that compare amounts; with a build named and time spoken of they are a claim.
@@ -357,9 +378,16 @@ fn claim(sentence: &str, clause: &str) -> Option<String> {
     if !TIME_WORDS.iter().any(|w| has_word(sentence, w)) {
         return None;
     }
-    // A word that compares amounts is a claim only of a build: "wall time fell" alone is said of
-    // other runs on the page (a tree read at 1 and 64 requests in flight).
-    if build && let Some(word) = AMOUNT_WORDS.iter().find(|w| has_word(clause, w)) {
+    if let Some(word) = QUALITY_WORDS.iter().find(|w| has_word(clause, w)) {
+        return Some(format!("{word:?}"));
+    }
+    // A word that compares amounts is a claim of a build, or of a wall time tied to the measured
+    // runs or to tierstore: "wall time fell" alone is said of other runs on the page (a tree read
+    // at 1 and 64 requests in flight).
+    let runs = RUN_WORDS.iter().any(|w| sentence.contains(w));
+    if (build || (wall && runs))
+        && let Some(word) = AMOUNT_WORDS.iter().find(|w| has_word(clause, w))
+    {
         return Some(format!("{word:?}"));
     }
     derived_numbers(clause)
@@ -462,10 +490,25 @@ fn a_build_time_claim_is_refused_in_every_form() {
             "<svg aria-label=\"Wall-clock regression of 4.8%\"></svg>",
             "\"regression\"",
         ),
+        ("<p>Wall time rose by 8.5% with tierstore.</p>", "\"rose\""),
+        // Amount words about a wall time tied to tierstore or the runs, with no build named.
+        // A derived number alone, with no comparison word, about a wall time.
         (
-            "<p>Wall time rose by 8.5% with tierstore.</p>",
+            "<p>Wall time was 8.5% of the tierstore runs.</p>",
             "8.5, a comparison",
         ),
+        ("<p>Wall time fell by half with tierstore.</p>", "\"fell\""),
+        ("<p>Wall time doubled with tierstore.</p>", "\"doubled\""),
+        (
+            "<p>The warm run's wall time was lower than the baseline.</p>",
+            "\"lower\"",
+        ),
+        // Words that judge, with time in the sentence.
+        (
+            "<p>The build time improved with tierstore.</p>",
+            "\"improved\"",
+        ),
+        ("<p>Tierstore gave better wall times.</p>", "\"better\""),
         // Forms found by trying to get past the guard.
         (
             "<p>Tierstore shortened the builds by five minutes.</p>",
@@ -544,6 +587,10 @@ fn a_disclaimer_or_an_unrelated_quantity_is_not_a_claim() {
         "<p>At 64 in flight wall time fell 14 times while the median rose 3.5 times.</p>",
         "<p>Each distinct byte was read 111 to 133 times in one build.</p>",
         "<p>In a build, all 12 disks were 87 to 100% busy writing 0.9 MB/s; one upload took 5 minutes.</p>",
+        // Words that judge without a time: a cache's quality, not a build's speed.
+        "<p>The cache hit rate improved for this build.</p>",
+        "<p>This build has better cache locality.</p>",
+        "<p>The warm run had a better hit rate than the cold run for the build.</p>",
     ] {
         let claims = time_claims(page);
         assert!(claims.is_empty(), "{page}:\n{}", claims.join("\n"));
