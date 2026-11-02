@@ -22,7 +22,7 @@ use tierstore::{
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Barrier;
 
-use crate::support::{Rig, assert_absent, body, chunks, journal_keys, read};
+use crate::support::{Rig, assert_absent, assert_reserved, body, chunks, journal_keys, read};
 
 pub(crate) const SECRET: &str = "presign-secret-0123456789";
 pub(crate) const BUCKET: &str = "tier-bucket";
@@ -30,11 +30,9 @@ pub(crate) const BUCKET: &str = "tier-bucket";
 /// A backend over another that can be told to misbehave in one way each.
 struct Fake {
     inner: Arc<dyn Backend>,
-    /// The first `head` of this key says it is not there, whatever the inner backend holds.
-    forget_first_head: Option<(&'static str, AtomicU32)>,
     /// A streamed put takes the first chunk of its body and then answers that there is no room.
     take_then_full: bool,
-    /// Streamed puts of this key wait here for the other party before they go on.
+    /// Reservations of this key wait here for the other party before they go on.
     gate: Option<(&'static str, Arc<Barrier>)>,
     /// How many streamed puts reached this backend.
     streams: AtomicU32,
@@ -44,7 +42,6 @@ impl Fake {
     fn over(inner: Arc<dyn Backend>) -> Self {
         Self {
             inner,
-            forget_first_head: None,
             take_then_full: false,
             gate: None,
             streams: AtomicU32::new(0),
@@ -73,12 +70,25 @@ impl Backend for Fake {
             let _first = body.next().await;
             return Err(Error::Full("hot".to_owned()));
         }
+        self.inner.put_stream(key, len, body).await
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
         if let Some((name, barrier)) = &self.gate
             && *name == key
         {
             barrier.wait().await;
         }
-        self.inner.put_stream(key, len, body).await
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.put_reservation_if_match(key, body, etag).await
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
@@ -90,12 +100,6 @@ impl Backend for Fake {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
-        if let Some((name, asked)) = &self.forget_first_head
-            && *name == key
-            && asked.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            return Err(Error::NotFound(key.to_owned()));
-        }
         self.inner.head(key).await
     }
 
@@ -112,22 +116,18 @@ impl Backend for Fake {
     }
 }
 
-/// Asserts that a create whose first ask of the cold tier was stale is refused: the key is in the
-/// cold tier (it was demoted after the first ask), the cold tier's first HEAD says it is not
-/// there and the second says it is, and a held put, a streamed put and a streamed hot-only put (the
-/// presigned path) each answer `AlreadyExists`, leave no object in the hot tier (the one they
-/// created is removed), leave the cold object as it was, and journal nothing. It catches a proxy
-/// that trusts its first ask, which would leave two objects under one key.
+/// Asserts that a put of a key the cold tier holds as an object is refused when the key is no
+/// longer in the hot tier (it was demoted: copied to the cold tier and evicted): the cold tier's
+/// create-only reservation says the key exists, and a held put, a streamed put and a streamed
+/// hot-only put (the presigned path) each answer `AlreadyExists`, leave no object in the hot
+/// tier, leave the cold object as it was, and journal nothing. It catches a proxy that does not
+/// reserve before it writes, which would leave two objects under one key.
 #[tokio::test(start_paused = true)]
-async fn a_key_demoted_between_the_first_ask_and_the_create_is_refused() {
+async fn a_put_of_a_key_demoted_to_the_cold_tier_is_refused_by_its_reservation() {
     for path in ["put", "stream", "hot_only"] {
         let rig = Rig::new();
         rig.cold_mem.put("k", body("old")).await.unwrap();
-        let mut cold = Fake::over(rig.cold_mem.clone());
-        cold.forget_first_head = Some(("k", AtomicU32::new(0)));
-        let proxy = Proxy::open(rig.hot.clone(), Arc::new(cold), rig.config("p1", 1000))
-            .await
-            .unwrap();
+        let proxy = rig.proxy("p1", 1000).await;
         let outcome = match path {
             "put" => proxy.put("k", body("new")).await,
             "stream" => proxy.put_stream("k", None, chunks(&["ne", "w"])).await,
@@ -295,18 +295,18 @@ async fn a_body_that_runs_past_the_cap_while_streaming_leaves_nothing() {
     }
 }
 
-/// Two proxies (or one) over a hot tier whose streamed put of `cas/b/race` waits until both
+/// Two proxies (or one) over a cold tier whose reservation of `cas/b/race` waits until both
 /// presigned puts are inside it: a real race, in which both have passed every check before either
-/// creates the object. Exactly one answers 200, the other 412, the object is the winner's, and
-/// the cold tier holds nothing.
+/// reserves the key. Exactly one answers 200, the other 412, the object is the winner's, and the
+/// cold tier holds the winner's reservation.
 async fn race(two_proxies: bool) {
     let rig = Rig::new();
-    let mut hot = Fake::over(rig.hot_mem.clone());
-    hot.gate = Some(("cas/b/race", Arc::new(Barrier::new(2))));
-    let hot = Arc::new(hot);
+    let mut cold = Fake::over(rig.cold_mem.clone());
+    cold.gate = Some(("cas/b/race", Arc::new(Barrier::new(2))));
+    let cold = Arc::new(cold);
     let open = |id: &'static str| {
-        let hot = hot.clone();
-        let cold = rig.cold.clone();
+        let hot = rig.hot.clone();
+        let cold = cold.clone();
         async move {
             let config = ProxyConfig::new(id, 1 << 30, Arc::new(SystemClock));
             Proxy::open(hot, cold, config).await.unwrap()
@@ -331,17 +331,18 @@ async fn race(two_proxies: bool) {
         body("BBBB")
     };
     assert_eq!(read(&*rig.hot_mem, "cas/b/race").await, winner);
-    assert_absent(&*rig.cold_mem, "cas/b/race").await;
+    assert_reserved(&*rig.cold_mem, "cas/b/race").await;
 }
 
-/// Asserts the race through one proxy: one winner, the winner's bytes, one tier.
+/// Asserts the race through one proxy: one winner, the winner's bytes in the hot tier, its
+/// reservation in the cold tier.
 #[tokio::test(start_paused = true)]
-async fn two_presigned_puts_inside_the_create_at_once_have_one_winner() {
+async fn two_presigned_puts_inside_the_reservation_at_once_have_one_winner() {
     race(false).await;
 }
 
 /// Asserts the race through two proxies that share the tiers.
 #[tokio::test(start_paused = true)]
-async fn two_proxies_with_presigned_puts_inside_the_create_at_once_have_one_winner() {
+async fn two_proxies_with_presigned_puts_inside_the_reservation_at_once_have_one_winner() {
     race(true).await;
 }

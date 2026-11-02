@@ -21,7 +21,9 @@ use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
 use crate::hold::Stall;
-use crate::support::{Rig, assert_absent, body, chunks, journal_keys, keys, read, text};
+use crate::support::{
+    Rig, assert_absent, assert_reserved, body, chunks, journal_keys, keys, read, text,
+};
 
 /// Two directories as the tiers of a proxy.
 struct Dirs {
@@ -98,7 +100,8 @@ async fn entries_about(hot: &dyn Backend, key: &str) -> Vec<JournalEntry> {
 /// listing holds only the objects there were, no journal entry names it, no temporary file is
 /// left, an object stored before is whole, and a put of the same key afterwards is stored whole.
 /// Before the kill the partial body is on disk as a temporary file, so the test looks at the
-/// moment it claims to. Defect it catches: a directory backend that links the name before the
+/// moment it claims to. The reservation the put made is released, so the key is free again.
+/// Defect it catches: a directory backend that links the name before the
 /// last piece, or that leaves the temporary file when the call is dropped; a proxy that journals
 /// a put before its body has ended.
 #[tokio::test(start_paused = true)]
@@ -125,6 +128,9 @@ async fn a_put_killed_with_part_of_its_body_taken_leaves_nothing_visible() {
         assert_eq!(temporary_files(dirs.hot_dir.path()).len(), 1, "{key}");
         writer.abort();
         assert!(writer.await.unwrap_err().is_cancelled());
+        // The dropped put releases its reservation in the background: the paused clock moves
+        // on only when that task, and every other, has nothing left to do.
+        tokio::time::sleep(Duration::from_millis(1)).await;
 
         assert_eq!(temporary_files(dirs.hot_dir.path()), Vec::<String>::new());
         assert_eq!(temporary_files(dirs.cold_dir.path()), Vec::<String>::new());
@@ -166,16 +172,19 @@ async fn a_temporary_file_left_by_a_crashed_process_is_not_an_object() {
     assert_eq!(read(&*proxy, "k").await, body("whole"));
 }
 
-/// Asserts what the proxy guarantees when the writer is killed after the object was created in
-/// the hot tier and before its journal object was written: the object is whole, never a part of
-/// the body; it was never acknowledged (the task did not return); nothing journals it, so a
-/// reconciler never copies it; and a put of the key after a restart is refused as existing. This
-/// PINS A DOCUMENTED LIMIT, the first of the `Proxy` known limits: an unacknowledged object is
-/// left in the hot tier with no entry. If the limit is closed this test must change to assert
-/// that the object is gone. Defect it catches the other way: an object that is partial at this
-/// point, or a journal entry written for an unacknowledged put.
+/// Asserts what the proxy guarantees when a put is dropped (its caller went away) after the
+/// object was created in the hot tier and before its journal object was written: the object was
+/// whole, never a part of the body, and was never acknowledged (the task did not return); the
+/// put removes it, by its tag, and releases its reservation, so neither tier holds the key, no
+/// entry was written, and a put of the key after a restart is stored and copied. This FLIPS THE
+/// PIN of the first of the `Proxy` known limits, which said that an unacknowledged object was
+/// left in the hot tier with no entry and made a retry fail as existing: the drop guard of a put
+/// closes it for a put that is dropped (a process that is killed leaves its reservation, see
+/// `a_reservation_left_by_a_put_killed_after_it_reserved_refuses_the_key_and_stays`). Defect it
+/// catches: an object that is partial at this point, a journal entry written for an
+/// unacknowledged put, or an object or a reservation left behind by a dropped put.
 #[tokio::test(start_paused = true)]
-async fn a_put_killed_before_its_journal_entry_leaves_a_whole_object_that_is_never_copied() {
+async fn a_put_dropped_before_its_journal_entry_removes_its_object_and_its_reservation() {
     let dirs = Dirs::new();
     let entered = Arc::new(Notify::new());
     let hot: Arc<dyn Backend> = Arc::new(Stall::new(
@@ -196,23 +205,26 @@ async fn a_put_killed_before_its_journal_entry_leaves_a_whole_object_that_is_nev
         })
     };
     entered.notified().await;
+    assert_eq!(read(&*dirs.hot, "k").await, body("whole object"));
+    assert_reserved(&*dirs.cold, "k").await;
     writer.abort();
     assert!(writer.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(1)).await;
 
-    assert_eq!(read(&*dirs.hot, "k").await, body("whole object"));
+    assert_absent(&*dirs.hot, "k").await;
+    assert_absent(&*dirs.cold, "k").await;
     assert_eq!(journal_keys(&*dirs.hot, "p1").await, Vec::<String>::new());
     assert_eq!(temporary_files(dirs.hot_dir.path()), Vec::<String>::new());
 
     let restarted = dirs.proxy("p1").await;
-    let again = restarted.put("k", body("again")).await;
-    assert_eq!(again, Err(Error::AlreadyExists("k".to_owned())));
+    restarted.put("k", body("again")).await.unwrap();
     let clock = Arc::new(TestClock::new());
     let config = ReconcilerConfig::new("r1", 1 << 30, clock);
     let mut reconciler = Reconciler::new(dirs.hot.clone(), dirs.cold.clone(), config);
     let report = reconciler.pass().await;
     assert!(report.held);
-    assert_eq!(report.copied, 0);
-    assert_absent(&*dirs.cold, "k").await;
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*dirs.cold, "k").await, body("again"));
 }
 
 /// Asserts that every put that was acknowledged is in a journal object in the hot tier, once, as
@@ -239,7 +251,7 @@ async fn every_acknowledged_put_is_in_a_journal_and_a_restart_copies_it() {
     for name in &names {
         let entries = entries_about(&*rig.hot_mem, name).await;
         assert_eq!(entries.len(), 1, "{name}");
-        assert_eq!(entries[0].op, JournalOp::Put, "{name}");
+        assert_eq!(entries[0].op, JournalOp::PutReserved, "{name}");
         assert_eq!(entries[0].size, 6, "{name}");
     }
     let report = rig.reconciler("r1", 1 << 20).pass().await;
@@ -278,7 +290,7 @@ async fn a_reconciler_killed_mid_pass_is_replaced_and_the_cold_tier_converges() 
         () = entered.notified() => true,
     };
     assert!(stuck_there, "the pass was to be stuck at the copy of k3");
-    assert_absent(&*rig.cold_mem, "k3").await;
+    assert_reserved(&*rig.cold_mem, "k3").await;
 
     let mut two = rig.reconciler("r2", 1 << 20);
     assert_eq!(two.pass().await, PassReport::default());

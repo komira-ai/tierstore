@@ -80,7 +80,10 @@ async fn a_delete_a_tier_fails_is_an_error_and_can_be_retried() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("value")).await.unwrap();
-    rig.cold_mem.put("k", body("value")).await.unwrap();
+    // The reconciler's copy: the object replaces the reservation, on its tag.
+    let reserved = rig.cold_mem.head("k").await.unwrap().tag;
+    let copy = rig.cold_mem.put_if_match("k", body("value"), &reserved);
+    copy.await.unwrap();
 
     rig.cold.fail_next(Op::DeleteIfMatch, 1);
     assert!(proxy.delete("k").await.unwrap_err().is_unavailable());

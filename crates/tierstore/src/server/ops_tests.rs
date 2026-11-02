@@ -367,7 +367,7 @@ async fn the_failures_of_the_store_are_answered_with_their_codes() {
     let full = rig.put("a", b"x").await;
     assert_eq!(full.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(full.code(), "SlowDown");
-    rig.cold.fail_next(Op::Head, 1);
+    rig.cold.fail_next(Op::PutReservation, 1);
     let down = rig.put("b", b"x").await;
     assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(down.code(), "ServiceUnavailable");
@@ -559,7 +559,8 @@ async fn a_part_needs_its_arguments_and_a_completion_needs_a_free_key() {
     let refused = complete(&rig, "big", &id, &body).await;
     assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
     assert_eq!(rig.get("big", None).await.body, "taken");
-    assert!(rig.cold_mem.get("big", None).await.is_err());
+    // The cold tier holds the reservation of the put, not an object.
+    assert!(rig.cold_mem.head("big").await.unwrap().reservation);
     let cold = Bytes::from_static(b"c");
     rig.cold_mem.put("cold", cold).await.unwrap();
     let id = start(&rig, "cold").await;

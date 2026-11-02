@@ -94,8 +94,8 @@ async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
 /// lease only when it renews. Defects it catches: a take over while the old holder's lease is
 /// young; an old holder that renews a lease another holder replaced; an overlap that loses an
 /// object. It also pins the old holder's own work: its resumed pass copies all four objects
-/// and reports no failure (its copies are create-only and find the new holder's, and its
-/// checkpoint write is not conditioned on the lease). A fencing fix that makes the stale pass's
+/// and reports no failure (its copies replace a reservation on its tag and find the new
+/// holder's object, and its checkpoint write is not conditioned on the lease). A fencing fix that makes the stale pass's
 /// copy or checkpoint fail turns this test red, and the test is then to be changed to say so.
 #[tokio::test(start_paused = true)]
 async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_next_renewal() {

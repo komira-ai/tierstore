@@ -97,6 +97,21 @@ impl Backend for Gate {
         self.inner.put_if_match(key, body, etag).await
     }
 
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.wait(key).await;
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.arrive(key).await;
+        self.inner.put_reservation_if_match(key, body, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.inner.get(key, range).await
     }
@@ -118,8 +133,9 @@ impl Backend for Gate {
     }
 }
 
-/// A backend that stops the first write whose key starts with a prefix: the call says it has
-/// arrived (`entered`), and then either never goes on (`release` is None, the writer is to be
+/// A backend that stops the first write whose key starts with a prefix (a create or a replace on a
+/// content tag, which is how the reconciler copies an object over its reservation, but not the
+/// write of a reservation): the call says it has arrived (`entered`), and then either never goes on (`release` is None, the writer is to be
 /// killed here) or goes on when `release` is notified. Nothing reaches the backend it wraps from
 /// that call until then. Later calls, and calls on other keys, go straight through.
 pub struct Stall {
@@ -189,7 +205,21 @@ impl Backend for Stall {
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.stop(key).await;
         self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.put_reservation_if_match(key, body, etag).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
@@ -249,6 +279,19 @@ impl Backend for HoldDelete {
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.put_reservation_if_match(key, body, etag).await
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {

@@ -817,14 +817,15 @@ async fn the_reconciler_works_every_interval_until_halted() {
         .await
         .unwrap();
     proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
-    cold.fail_next(Op::Put, 1);
+    cold.fail_next(Op::PutIfMatch, 1);
     let settings = ReconcilerConfig::new("p1", MEBIBYTE, clock.clone());
     let reconciler = Reconciler::new(hot.clone(), cold.clone(), settings);
     let halt = Arc::new(Notify::new());
     let working = reconcile(reconciler, Duration::from_secs(5), Arc::clone(&halt));
     let watching = async {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(cold_mem.get("k", None).await.is_err());
+        // Not copied: the cold tier still holds the reservation of the put.
+        assert!(cold_mem.head("k").await.unwrap().reservation);
         tokio::time::sleep(Duration::from_secs(5)).await;
         let copied = cold_mem.get("k", None).await.unwrap();
         assert_eq!(copied, Bytes::from_static(b"v"));
@@ -850,7 +851,7 @@ async fn a_halt_cuts_the_pass_that_is_running() {
         .await
         .unwrap();
     proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
-    cold.set_delay(Op::Put, Some(Duration::from_secs(3600)));
+    cold.set_delay(Op::PutIfMatch, Some(Duration::from_secs(3600)));
     let settings = ReconcilerConfig::new("p1", MEBIBYTE, clock.clone());
     let reconciler = Reconciler::new(hot.clone(), cold.clone(), settings);
     let halt = Arc::new(Notify::new());
@@ -864,7 +865,7 @@ async fn a_halt_cuts_the_pass_that_is_running() {
     let done = tokio::time::timeout(Duration::from_secs(60), both).await;
     assert!(done.is_ok());
     assert!(hot.get("_tiering/lease", None).await.is_err());
-    assert!(cold_mem.get("k", None).await.is_err());
+    assert!(cold_mem.head("k").await.unwrap().reservation);
 }
 
 /// Asserts that `--skip-backend-check` takes `multipart-conditional` and a reason, may be given

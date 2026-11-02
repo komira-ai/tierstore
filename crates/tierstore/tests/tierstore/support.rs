@@ -117,6 +117,15 @@ pub async fn assert_absent(backend: &dyn Backend, key: &str) {
     assert_eq!(error, Error::NotFound(key.to_owned()));
 }
 
+/// Asserts that the backend holds a reservation under `key`: an object that heads as marked, of
+/// 56 bytes, which is what a put that was acknowledged and not yet copied leaves in the cold
+/// tier.
+pub async fn assert_reserved(backend: &dyn Backend, key: &str) {
+    let meta = backend.head(key).await.unwrap();
+    assert!(meta.reservation, "{key} is an object, not a reservation");
+    assert_eq!(meta.size, 56, "{key}");
+}
+
 /// The keys of the journal objects of proxy `id` in the backend.
 pub async fn journal_keys(backend: &dyn Backend, id: &str) -> Vec<String> {
     keys_under(backend, &format!("_journal/{id}/")).await

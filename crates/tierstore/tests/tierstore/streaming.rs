@@ -15,7 +15,8 @@ use tierstore::{
 };
 
 use crate::support::{
-    Rig, assert_absent, body, broken, chunks, journal, journal_key, journal_keys, read, set_usage,
+    Rig, assert_absent, assert_reserved, body, broken, chunks, journal, journal_key, journal_keys,
+    read, set_usage,
 };
 
 /// A body that says whether it was asked for a chunk.
@@ -34,9 +35,10 @@ fn cut() -> Error {
 }
 
 /// Asserts that a streamed put is acknowledged after the journal object that holds its entry is
-/// in the hot tier: when it returns, the whole body is in the hot tier as one object and not in
-/// the cold tier, and journal object 1 holds one put entry whose size is the number of bytes
-/// the chunks came to, which the caller did not tell.
+/// in the hot tier: when it returns, the whole body is in the hot tier as one object and the cold
+/// tier holds its reservation, and journal object 1 holds one reserved-put entry that names the
+/// reservation's tag and whose size is the number of bytes the chunks came to, which the caller
+/// did not tell.
 #[tokio::test(start_paused = true)]
 async fn a_streamed_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_tier() {
     let rig = Rig::new();
@@ -49,14 +51,14 @@ async fn a_streamed_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_ti
         .unwrap();
 
     assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
-    assert_absent(&*rig.cold_mem, "k").await;
+    assert_reserved(&*rig.cold_mem, "k").await;
     let entries = journal(&*rig.hot_mem, "p1", 1).await;
     let want = JournalEntry {
-        op: JournalOp::Put,
+        op: JournalOp::PutReserved,
         key: "k".to_owned(),
         size: 5,
         time: 42,
-        cold_tag: None,
+        cold_tag: Some(rig.cold_mem.head("k").await.unwrap().tag),
     };
     assert_eq!(entries, [want]);
 }

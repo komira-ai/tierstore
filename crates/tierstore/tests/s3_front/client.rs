@@ -214,7 +214,7 @@ async fn a_full_store_answers_slow_down() {
     let body = Bytes::from_static(b"x");
     let full = store.put_new(&key("cas/full"), body.clone(), None).await;
     assert_refused(full, 503, "SlowDown");
-    h.cold.fail_next(Op::Head, 1);
+    h.cold.fail_next(Op::PutReservation, 1);
     let down = store.put_new(&key("cas/down"), body, None).await;
     assert_refused(down, 503, "ServiceUnavailable");
     put(&store, "cas/after", b"x").await;

@@ -7,7 +7,8 @@ use tierstore::{Backend, ByteRange, Error, Op};
 use tokio::time::Instant;
 
 use crate::support::{
-    Rig, assert_absent, body, journal_entry_keys, journal_key, journal_keys, read, set_usage,
+    Rig, assert_absent, assert_reserved, body, journal_entry_keys, journal_key, journal_keys, read,
+    set_usage,
 };
 
 /// Asserts that a put is delayed by the back-pressure while the published usage is at or above
@@ -97,7 +98,7 @@ async fn a_usage_that_is_missing_unreadable_or_stale_counts_as_not_full() {
     rig.clock.set(100_000);
     proxy.put("c", body("stale")).await.unwrap();
     for key in ["a", "b", "c"] {
-        assert_absent(&*rig.cold_mem, key).await;
+        assert_reserved(&*rig.cold_mem, key).await;
         assert!(rig.hot_mem.head(key).await.is_ok());
     }
 
@@ -132,7 +133,7 @@ async fn a_capacity_error_from_the_hot_tier_sends_puts_to_cold_until_the_refresh
     tokio::time::sleep(Duration::from_secs(11)).await;
     proxy.put("k3", body("3")).await.unwrap();
     assert_eq!(read(&*rig.hot_mem, "k3").await, body("3"));
-    assert_absent(&*rig.cold_mem, "k3").await;
+    assert_reserved(&*rig.cold_mem, "k3").await;
     let objects = journal_keys(&*rig.hot_mem, "p1").await;
     assert_eq!(objects, [journal_key("p1", 1)]);
     let entry_keys = journal_entry_keys(&*rig.hot_mem, "p1", 1).await;

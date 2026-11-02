@@ -55,6 +55,11 @@ impl Tiers {
         (tiers, reconciler)
     }
 
+    /// Whether the cold tier holds the object `k` (copied), and not just its reservation.
+    async fn copied(&self) -> bool {
+        matches!(self.cold_mem.head("k").await, Ok(meta) if !meta.reservation)
+    }
+
     /// The calls the reconciler has made to the hot tier that read or write.
     fn hot_calls(&self) -> u64 {
         let ops = [Op::Put, Op::PutIfMatch, Op::Get, Op::Head, Op::List];
@@ -97,12 +102,12 @@ async fn a_reconciler_under_a_held_lock_file_does_nothing_until_it_takes_the_loc
             tokio::time::advance(Duration::from_secs(1)).await;
         }
         assert_eq!(tiers.hot_calls(), 0);
-        assert!(tiers.cold_mem.get("k", None).await.is_err());
+        assert!(!tiers.copied().await);
         drop(holder);
         tiers.lease(true, Duration::from_secs(1)).await;
         let mut copied = false;
         for _ in 0..100_000 {
-            copied = tiers.cold_mem.get("k", None).await.is_ok();
+            copied = tiers.copied().await;
             if copied {
                 break;
             }

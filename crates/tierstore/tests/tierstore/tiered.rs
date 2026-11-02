@@ -5,7 +5,8 @@ use std::time::Duration;
 use tierstore::{Backend, Error, JournalEntry, JournalOp, Op};
 
 use crate::support::{
-    Rig, assert_absent, body, check_ranges, journal, journal_key, journal_keys, keys, page, read,
+    Rig, assert_absent, assert_reserved, body, check_ranges, journal, journal_key, journal_keys,
+    keys, page, read,
 };
 
 fn entry(op: JournalOp, key: &str, size: u64, time: u64) -> JournalEntry {
@@ -19,8 +20,9 @@ fn entry(op: JournalOp, key: &str, size: u64, time: u64) -> JournalEntry {
 }
 
 /// Asserts that a put is acknowledged after the journal object that holds its entry is in the
-/// hot tier: when the put returns, the object is in the hot tier and not in the cold tier,
-/// and journal object 1 of the proxy holds one put entry with the key, the size and the time.
+/// hot tier: when the put returns, the object is in the hot tier and the cold tier holds its
+/// reservation (and not the object), and journal object 1 of the proxy holds one reserved-put
+/// entry with the key, the size, the time and the content tag of that reservation.
 #[tokio::test(start_paused = true)]
 async fn a_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_tier() {
     let rig = Rig::new();
@@ -29,9 +31,12 @@ async fn a_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_tier() {
     proxy.put("k", body("value")).await.unwrap();
 
     assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
-    assert_absent(&*rig.cold_mem, "k").await;
+    assert_reserved(&*rig.cold_mem, "k").await;
+    let tag = rig.cold_mem.head("k").await.unwrap().tag;
     let entries = journal(&*rig.hot_mem, "p1", 1).await;
-    assert_eq!(entries, [entry(JournalOp::Put, "k", 5, 42)]);
+    let mut want = entry(JournalOp::PutReserved, "k", 5, 42);
+    want.cold_tag = Some(tag);
+    assert_eq!(entries, [want]);
 }
 
 /// Asserts that a put is refused when the key exists only in the cold tier (the hot tier may
@@ -73,13 +78,14 @@ async fn a_get_of_a_hot_object_does_not_touch_the_cold_tier() {
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("value")).await.unwrap();
 
-    // The put asked the cold tier twice (before the create, and again after it).
+    // The put asked the cold tier for neither a get nor a head: it reserved the key with one
+    // create-only write.
     let (gets, heads) = (rig.cold.calls(Op::Get), rig.cold.calls(Op::Head));
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
     assert_eq!(proxy.head("k").await.unwrap().size, 5);
     assert_eq!(rig.cold.calls(Op::Get), gets);
     assert_eq!(rig.cold.calls(Op::Head), heads);
-    assert_eq!((gets, heads), (0, 2));
+    assert_eq!((gets, heads), (0, 0));
 }
 
 /// Asserts that a get of an object only the cold tier holds returns it and copies it back into
@@ -141,7 +147,13 @@ async fn a_delete_removes_both_copies_and_is_journaled() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("value")).await.unwrap();
-    rig.cold_mem.put("k", body("value")).await.unwrap();
+    // The reconciler's copy: the object replaces the reservation, on its tag.
+    let reserved = rig.cold_mem.head("k").await.unwrap().tag;
+    let copied = rig
+        .cold_mem
+        .put_if_match("k", body("value"), &reserved)
+        .await;
+    copied.unwrap();
 
     proxy.delete("k").await.unwrap();
     assert_absent(&*rig.hot_mem, "k").await;
@@ -186,7 +198,11 @@ async fn a_listing_merges_the_tiers_and_leaves_out_the_reserved_keys() {
     proxy.put("x/1", body("one")).await.unwrap();
     proxy.put("x/3", body("three")).await.unwrap();
     rig.cold_mem.put("x/2", body("two")).await.unwrap();
-    rig.cold_mem.put("x/3", body("3")).await.unwrap();
+    // x/3 is in both tiers: the object replaced the reservation of the put, on its tag, as a
+    // copy of the reconciler does.
+    let reserved = rig.cold_mem.head("x/3").await.unwrap().tag;
+    let copied = rig.cold_mem.put_if_match("x/3", body("3"), &reserved);
+    copied.await.unwrap();
     rig.cold_mem.put("y/1", body("other")).await.unwrap();
 
     assert_eq!(keys(&proxy).await, ["x/1", "x/2", "x/3", "y/1"]);

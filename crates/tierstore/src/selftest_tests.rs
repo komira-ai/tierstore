@@ -137,6 +137,24 @@ impl Backend for Flawed {
         self.inner.put_if_match(key, body, &etag).await
     }
 
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.put_error(key)?;
+        self.inner.put_reservation(key, body).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.inner.put_reservation_if_match(key, body, etag).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let range = range.filter(|_| !self.is(Flaw::WholeObjectForRange));
         self.inner.get(key, range).await
@@ -487,11 +505,11 @@ async fn a_pause_of_zero_still_ends() {
 }
 
 /// Asserts that a store that is full passes without being asked anything that needs a write: each
-/// check that needs one is skipped with a note that says the tier is full (five on a hot tier, six
+/// check that needs one is skipped with a note that says the tier is full (five on a hot tier, seven
 /// on a cold one), and nothing is left behind.
 #[tokio::test]
 async fn a_full_store_passes_with_a_note_for_each_check_it_skipped() {
-    for (multipart, skipped) in [(false, 5), (true, 6)] {
+    for (multipart, skipped) in [(false, 5), (true, 7)] {
         let backend = Flawed::new(Flaw::Full);
         let (outcome, notes) = go(&backend, &options("run-1", multipart, &[])).await;
         assert_eq!(outcome, Ok(()));
@@ -508,7 +526,7 @@ async fn a_full_store_passes_with_a_note_for_each_check_it_skipped() {
         let (warned, cold) = (warned.count(), cold.count());
         assert_eq!(
             (warned, cold),
-            if multipart { (6, 6) } else { (0, 0) },
+            if multipart { (7, 7) } else { (0, 0) },
             "{notes:?}"
         );
     }
@@ -930,7 +948,8 @@ fn checks_have_names_that_parse_back() {
             "if-match",
             "range",
             "paging",
-            "multipart-conditional"
+            "multipart-conditional",
+            "reservation"
         ]
     );
     for check in Check::ALL {

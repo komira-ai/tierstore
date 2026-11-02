@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use tierstore::{Backend, Error, JournalEntry, JournalOp, Op, encode_journal};
 
-use crate::support::{Rig, assert_absent, body, journal_key, keys, read, text};
+use crate::support::{Rig, assert_absent, assert_reserved, body, journal_key, keys, read, text};
 
 fn down() -> Error {
     Error::Unavailable("on purpose".to_owned())
@@ -92,7 +92,11 @@ async fn a_corrupt_journal_object_stops_the_journal_of_its_proxy() {
         assert_eq!(report.copied, copied);
         assert_eq!(report.failed.len(), 1);
         assert!(matches!(report.failed[0], Error::Other(_)));
-        assert_eq!(keys(&*rig.cold_mem).await, ["k1"]);
+        // k1 was copied (its reservation replaced by the object); k2 is after the corrupt
+        // object and keeps its reservation.
+        assert_eq!(keys(&*rig.cold_mem).await, ["k1", "k2"]);
+        assert!(!rig.cold_mem.head("k1").await.unwrap().reservation);
+        assert_reserved(&*rig.cold_mem, "k2").await;
     }
 }
 
@@ -142,7 +146,7 @@ async fn a_copy_whose_hot_read_fails_is_retried_by_the_next_pass() {
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);
-    assert_absent(&*rig.cold_mem, "k1").await;
+    assert_reserved(&*rig.cold_mem, "k1").await;
     assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
 
     let report = reconciler.pass().await;
@@ -151,9 +155,7 @@ async fn a_copy_whose_hot_read_fails_is_retried_by_the_next_pass() {
 }
 
 /// Asserts that a copy whose look at the hot tier fails is reported, leaves the checkpoint
-/// before it, and is done by the next pass. (A delete entry makes no look of its own any more
-/// unless the same journal object puts the key with a plain `Put`: see
-/// `a_delete_with_a_plain_put_in_its_object_whose_hot_check_fails_is_applied_by_the_next_pass`.)
+/// before it, leaves the key's reservation in the cold tier, and is done by the next pass.
 #[tokio::test(start_paused = true)]
 async fn a_copy_whose_hot_check_fails_is_retried_by_the_next_pass() {
     let rig = Rig::new();
@@ -165,7 +167,7 @@ async fn a_copy_whose_hot_check_fails_is_retried_by_the_next_pass() {
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);
     assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
-    assert_absent(&*rig.cold_mem, "k").await;
+    assert_reserved(&*rig.cold_mem, "k").await;
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
@@ -203,7 +205,8 @@ async fn an_eviction_whose_journal_read_fails_is_retried_by_the_next_pass() {
     for key in ["k1", "k2", "k3", "k4", "k5"] {
         proxy.put(key, body(&value)).await.unwrap();
     }
-    rig.cold.set_delay(Op::Put, Some(Duration::from_secs(10)));
+    rig.cold
+        .set_delay(Op::PutIfMatch, Some(Duration::from_secs(10)));
     let mut reconciler = rig.reconciler("r1", 100);
 
     let fail_the_next_listing = async {
@@ -215,7 +218,7 @@ async fn an_eviction_whose_journal_read_fails_is_retried_by_the_next_pass() {
     assert_eq!(report.failed, [down()]);
     assert_eq!(rig.hot_mem.head("k1").await.unwrap().size, 21);
 
-    rig.cold.set_delay(Op::Put, None);
+    rig.cold.set_delay(Op::PutIfMatch, None);
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(report.evicted, 2);

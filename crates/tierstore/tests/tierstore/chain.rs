@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 use crate::hold::Gate;
 use crate::recheck::{BUCKET, SECRET, answered, put_request};
-use crate::support::{assert_absent, body, read};
+use crate::support::{assert_absent, assert_reserved, body, read};
 
 const KEY_ID: &str = "AKIDSTORAGE";
 const KEY_SECRET: &str = "storage-secret-0123456789";
@@ -45,11 +45,11 @@ async fn storage(hot_full: bool) -> Storage {
     let mut config = ProxyConfig::new("storage", 1000, Arc::new(TestClock::new()));
     config.linger = Duration::from_millis(1);
     config.usage_refresh = Duration::ZERO;
-    // All eight puts are inside the storage tier's create (hot, or cold when hot is full) before
-    // any of them goes on, so the create-only write there is what decides.
-    let gated_hot: Arc<dyn Backend> = Arc::new(Gate::new(hot.clone(), KEY, WRITERS));
+    // All eight puts are inside the storage tier's create-only write in the cold tier (the
+    // reservation of the key, or the object itself when hot is full) before any of them goes on,
+    // so that write is what decides.
     let gated_cold: Arc<dyn Backend> = Arc::new(Gate::new(cold.clone(), KEY, WRITERS));
-    let proxy = Proxy::open(gated_hot, gated_cold, config).await.unwrap();
+    let proxy = Proxy::open(hot.clone(), gated_cold, config).await.unwrap();
     let served = ServerConfig::new(BUCKET, KEY_ID, KEY_SECRET, Arc::new(SystemClock));
     let server = Server::new(Arc::new(proxy), served);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -125,7 +125,7 @@ fn the_winner(done: &[(Bytes, StatusCode, String)]) -> Bytes {
 /// Asserts the claim for the hop when the storage tier's hot tier has room: eight presigned
 /// `PUT`s of one key to the build node, which forwards them to the storage tier, are answered
 /// one 200 and seven 412, and the storage tier's hot tier holds the winner's bytes whole while
-/// its cold tier holds nothing. Defect it catches: a hop that turns the storage tier's refusal
+/// its cold tier holds the winner's reservation. Defect it catches: a hop that turns the storage tier's refusal
 /// into a success, or that cannot tell the winner's body from a loser's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn eight_presigned_puts_through_a_hop_have_one_winner_in_the_storage_hot_tier() {
@@ -135,7 +135,7 @@ async fn eight_presigned_puts_through_a_hop_have_one_winner_in_the_storage_hot_t
 
     let winner = the_winner(&done);
     assert_eq!(read(&*storage.hot, KEY).await, winner);
-    assert_absent(&*storage.cold, KEY).await;
+    assert_reserved(&*storage.cold, KEY).await;
 }
 
 /// Asserts what the code does through the hop when the storage tier's hot tier is full, which

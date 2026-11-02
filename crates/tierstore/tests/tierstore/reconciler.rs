@@ -5,7 +5,9 @@ use std::time::Duration;
 use tierstore::{Backend, Error, Op, PassReport};
 use tokio::time::Instant;
 
-use crate::support::{Rig, assert_absent, body, journal_key, journal_keys, keys, read, text};
+use crate::support::{
+    Rig, assert_absent, assert_reserved, body, journal_key, journal_keys, keys, read, text,
+};
 
 fn count(prefixes: &[String], wanted: &str) -> usize {
     prefixes.iter().filter(|p| p.as_str() == wanted).count()
@@ -58,7 +60,8 @@ async fn a_pass_with_no_proxies_publishes_an_empty_usage() {
 }
 
 /// Asserts that the copies of one journal object run at most `parallel` at a time: with a
-/// cold tier that takes 10 seconds for a put, four objects take 20 seconds when two copies
+/// cold tier that takes 10 seconds to replace a reservation by its object (the copy), four
+/// objects take 20 seconds when two copies
 /// run at once and 10 seconds when four do.
 #[tokio::test(start_paused = true)]
 async fn copies_run_in_parallel_up_to_the_configured_number() {
@@ -77,7 +80,8 @@ async fn copies_run_in_parallel_up_to_the_configured_number() {
         b.unwrap();
         c.unwrap();
         d.unwrap();
-        rig.cold.set_delay(Op::Put, Some(Duration::from_secs(10)));
+        rig.cold
+            .set_delay(Op::PutIfMatch, Some(Duration::from_secs(10)));
         let mut settings = rig.reconciler_config("r1", 1000);
         settings.parallel = parallel;
         let mut reconciler = rig.reconciler_with(settings);
@@ -101,13 +105,20 @@ async fn a_reconciler_that_dies_mid_batch_is_resumed_without_loss() {
         proxy.put(key, body(key)).await.unwrap();
     }
     let down = Error::Unavailable("cold".to_owned());
-    rig.cold.fail_next_on(Op::Put, "c", down.clone());
+    rig.cold.fail_next_on(Op::PutIfMatch, "c", down.clone());
 
     let mut first = rig.reconciler("r1", 1000);
     let report = first.pass().await;
     assert_eq!(report.copied, 2);
     assert_eq!(report.failed, [down]);
-    assert_eq!(keys(&*rig.cold_mem).await, ["a", "b"]);
+    // a and b are copied; c, d and e keep their reservations.
+    assert_eq!(keys(&*rig.cold_mem).await, ["a", "b", "c", "d", "e"]);
+    for key in ["a", "b"] {
+        assert_eq!(read(&*rig.cold_mem, key).await, body(key));
+    }
+    for key in ["c", "d", "e"] {
+        assert_reserved(&*rig.cold_mem, key).await;
+    }
     let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
     assert_eq!(stored, r#"{"seq":2,"evict_seq":0,"evict_idx":0}"#);
     drop(first);
@@ -119,7 +130,7 @@ async fn a_reconciler_that_dies_mid_batch_is_resumed_without_loss() {
     assert_eq!(report.copied, 3);
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(keys(&*rig.cold_mem).await, ["a", "b", "c", "d", "e"]);
-    assert_eq!(rig.cold.calls(Op::Put), 6);
+    assert_eq!(rig.cold.calls(Op::PutIfMatch), 6);
 }
 
 /// Asserts that an object the cold tier holds already counts as copied, and that the cold
@@ -129,7 +140,10 @@ async fn an_object_the_cold_tier_holds_already_counts_as_copied() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("a", body("hot")).await.unwrap();
-    rig.cold_mem.put("a", body("cold")).await.unwrap();
+    // Another copy got there first: the object replaced the reservation, on its tag.
+    let reserved = rig.cold_mem.head("a").await.unwrap().tag;
+    let other = rig.cold_mem.put_if_match("a", body("cold"), &reserved);
+    other.await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
 
     let report = reconciler.pass().await;
@@ -158,22 +172,24 @@ async fn a_key_the_hot_tier_no_longer_holds_is_skipped() {
     let report = reconciler.pass().await;
     assert_eq!(report.copied, 1);
     assert_eq!(report.failed, Vec::<Error>::new());
+    // The reservations of the objects the hot tier lost are released.
     assert_eq!(keys(&*rig.cold_mem).await, ["b"]);
     assert_eq!((reconciler.hot_bytes(), reconciler.copy_lag()), (2, 0));
     let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
     assert_eq!(stored, r#"{"seq":5,"evict_seq":0,"evict_idx":0}"#);
 }
 
-/// Asserts that a delete entry removes the cold copy that a copy under way made after the
-/// delete: the object is deleted while the cold tier takes 10 seconds to store the copy,
-/// the copy lands, and the next pass applies the delete entry and removes it, so the object is
-/// not resurrected.
+/// Asserts that an object deleted while the cold tier takes 10 seconds to copy it is not
+/// resurrected by the copy: the delete removes the reservation, the copy (a replace of that
+/// reservation, on its tag) finds it gone and writes nothing, the delete entry applied by the
+/// next pass finds nothing to do, and no object is left in either tier.
 #[tokio::test(start_paused = true)]
-async fn a_delete_entry_removes_a_cold_copy_made_while_the_delete_ran() {
+async fn a_delete_while_the_cold_tier_copies_leaves_no_object_for_the_copy_to_resurrect() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("value")).await.unwrap();
-    rig.cold.set_delay(Op::Put, Some(Duration::from_secs(10)));
+    rig.cold
+        .set_delay(Op::PutIfMatch, Some(Duration::from_secs(10)));
     let mut reconciler = rig.reconciler("r1", 1000);
 
     let delete = async {
@@ -181,11 +197,12 @@ async fn a_delete_entry_removes_a_cold_copy_made_while_the_delete_ran() {
         proxy.delete("k").await.unwrap();
     };
     let (report, ()) = tokio::join!(reconciler.pass(), delete);
-    assert_eq!(report.copied, 1);
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
+    assert_eq!(report.copied, 0);
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_absent(&*rig.cold_mem, "k").await;
     assert_absent(&*rig.hot_mem, "k").await;
 
-    rig.cold.set_delay(Op::Put, None);
+    rig.cold.set_delay(Op::PutIfMatch, None);
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_absent(&*rig.cold_mem, "k").await;
@@ -205,8 +222,10 @@ async fn a_delete_entry_keeps_the_cold_copy_of_a_key_that_was_put_again() {
     proxy.put("k", body("new")).await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
 
+    // The entry of the old put names a reservation that is gone: it copies nothing. The entry
+    // of the new put replaces the new reservation.
     let report = reconciler.pass().await;
-    assert_eq!(report.copied, 2);
+    assert_eq!(report.copied, 1);
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
     assert_eq!(read(&*rig.hot_mem, "k").await, body("new"));
@@ -317,7 +336,7 @@ async fn an_object_the_cold_tier_does_not_hold_is_never_evicted() {
         proxy.put(key, body(&value)).await.unwrap();
     }
     let down = Error::Unavailable("cold".to_owned());
-    rig.cold.fail_next_on(Op::Put, "k2", down);
+    rig.cold.fail_next_on(Op::PutIfMatch, "k2", down);
     let mut reconciler = rig.reconciler("r1", 100);
 
     let report = reconciler.pass().await;
@@ -381,7 +400,7 @@ async fn a_proxy_with_nothing_copied_is_passed_over_by_the_eviction() {
     }
     two.put("z", body("zzzzzzzzzz")).await.unwrap();
     let down = Error::Unavailable("cold".to_owned());
-    rig.cold.fail_next_on(Op::Put, "z", down);
+    rig.cold.fail_next_on(Op::PutIfMatch, "z", down);
     let mut reconciler = rig.reconciler("r1", 100);
 
     let report = reconciler.pass().await;
@@ -428,7 +447,7 @@ async fn a_restarted_reconciler_rebuilds_the_usage_and_the_copy_lag() {
     proxy.put("f", body("12345")).await.unwrap();
     proxy.put("g", body("12345")).await.unwrap();
     let down = Error::Unavailable("cold".to_owned());
-    rig.cold.fail_next_on(Op::Put, "f", down);
+    rig.cold.fail_next_on(Op::PutIfMatch, "f", down);
     let mut second = rig.reconciler("r2", 100);
     let report = second.pass().await;
     assert_eq!(
@@ -494,8 +513,9 @@ async fn an_object_put_again_is_not_evicted_by_its_old_entry() {
 
 /// Asserts that an object that a proxy deletes and puts again while the reconciler is copying
 /// is not evicted by its old entry: the pass reads the journals again before it evicts, so the
-/// new object stays in the hot tier. And that the next pass replaces the cold tier's copy of
-/// the first object, which landed after the delete, with the new object.
+/// new object stays in the hot tier. The copy under way, which replaces the first reservation
+/// on its tag, finds another reservation and writes nothing, so the cold tier holds the new
+/// reservation and never the old object; the next pass replaces it with the new object.
 #[tokio::test(start_paused = true)]
 async fn an_object_replaced_while_the_reconciler_copies_is_not_evicted() {
     let rig = Rig::new();
@@ -505,7 +525,8 @@ async fn an_object_replaced_while_the_reconciler_copies_is_not_evicted() {
     for key in ["k1", "k2", "k3", "k4", "k5"] {
         proxy.put(key, body(&value)).await.unwrap();
     }
-    rig.cold.set_delay(Op::Put, Some(Duration::from_secs(10)));
+    rig.cold
+        .set_delay(Op::PutIfMatch, Some(Duration::from_secs(10)));
     let mut reconciler = rig.reconciler("r1", 100);
 
     let replace = async {
@@ -514,13 +535,13 @@ async fn an_object_replaced_while_the_reconciler_copies_is_not_evicted() {
         proxy.put("k1", body(&newer)).await.unwrap();
     };
     let (report, ()) = tokio::join!(reconciler.pass(), replace);
-    assert_eq!((report.copied, report.evicted), (5, 2));
+    assert_eq!((report.copied, report.evicted), (4, 2));
     assert_eq!(read(&*rig.hot_mem, "k1").await, body(&newer));
     assert_absent(&*rig.hot_mem, "k2").await;
     assert_absent(&*rig.hot_mem, "k3").await;
-    assert_eq!(read(&*rig.cold_mem, "k1").await, body(&value));
+    assert_reserved(&*rig.cold_mem, "k1").await;
 
-    rig.cold.set_delay(Op::Put, None);
+    rig.cold.set_delay(Op::PutIfMatch, None);
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(report.copied, 1);

@@ -246,7 +246,12 @@ async fn the_cache_works_in_front_of_a_proxy() {
     assert_eq!(rig.hot.calls(Op::Get), reads + 1);
     assert_eq!(rig.cold.calls(Op::Get), 0);
 
-    rig.cold_mem.put("k", body("0123456789")).await.unwrap();
+    // The reconciler's copy: the object replaces the reservation, on its tag.
+    let reserved = rig.cold_mem.head("k").await.unwrap().tag;
+    let copy = rig
+        .cold_mem
+        .put_if_match("k", body("0123456789"), &reserved);
+    copy.await.unwrap();
     cached.delete("k").await.unwrap();
     assert_absent(&*rig.hot_mem, "k").await;
     assert_absent(&*rig.cold_mem, "k").await;

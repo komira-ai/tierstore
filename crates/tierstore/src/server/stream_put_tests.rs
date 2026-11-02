@@ -426,11 +426,11 @@ async fn a_hash_that_fails_at_the_last_byte_leaves_nothing_visible() {
         hex::decode(&claim).unwrap()
     );
     let entry = JournalEntry {
-        op: JournalOp::Put,
+        op: JournalOp::PutReserved,
         key: "k".to_owned(),
         size: (PIECES * PIECE) as u64,
         time: NOW,
-        cold_tag: None,
+        cold_tag: Some(tiers.cold.head("k").await.unwrap().tag),
     };
     assert_eq!(tiers.journal().await, [entry]);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));
@@ -902,7 +902,9 @@ async fn two_streamed_puts_of_one_key_make_one_object_and_one_journal_entry() {
     statuses.sort_unstable();
     assert_eq!(statuses, [200, 412]);
     assert_eq!(Tiers::data_keys(&tiers.hot).await, ["k"]);
-    assert_eq!(Tiers::data_keys(&tiers.cold).await, Vec::<String>::new());
+    // The cold tier holds the reservation of the winner's put.
+    assert_eq!(Tiers::data_keys(&tiers.cold).await, ["k"]);
+    assert!(tiers.cold.head("k").await.unwrap().reservation);
     assert_eq!(tiers.hot.get("k", None).await.unwrap().len(), 4 * PIECE);
     assert_eq!(tiers.journal().await.len(), 1);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));
