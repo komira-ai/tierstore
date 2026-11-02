@@ -307,3 +307,21 @@ async fn a_copy_back_whose_conditional_delete_finds_another_state_journals_nothi
     let objects = journal_keys(&*rig.hot_mem, "p1").await;
     assert_eq!(objects, Vec::<String>::new());
 }
+
+/// Asserts that a put entry whose object is no longer in the hot tier, as when a copy-back's
+/// journal write lands after the delete that removed its copy, copies nothing to the cold
+/// tier: the reconciler skips the entry, so the deleted key does not come back.
+#[tokio::test(start_paused = true)]
+async fn a_put_entry_whose_hot_object_is_gone_copies_nothing() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("value")).await.unwrap();
+    rig.hot_mem.delete("k").await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.copied, 0);
+    assert!(report.failed.is_empty());
+    assert_absent(&*rig.cold_mem, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
+}
