@@ -461,11 +461,13 @@ the key. A number above 9223372036854775807 (the largest TOML integer) cannot go
 is accepted, and `--print-config` refuses it with exit 2. A `--print-config` that cannot write its output
 (a closed pipe, a full disk) exits 1; a refusal of the file or the flags exits 2.
 
-A file has one of two shapes, told apart by its tables: a storage node (`[server]`, `[hot_store]`
+A file has one of three shapes, told apart by its tables: a storage node (`[server]`, `[hot_store]`
 and `[cold_store]`, as the flags are, and an optional `[oci]` (the read-only registry front) and
-`[[policy]]`) and a build node (`[server]`, `[local_cache]` and `[cold_store]` with no
+`[[policy]]`), a build node (`[server]`, `[local_cache]` and `[cold_store]` with no
 `[hot_store]`, an optional `[oci]`, and `[[policy]]`), which is a read cache and has no flag form (see
-"A build node" below). Both shapes take the same `[oci]` table. A file for a storage node:
+"A build node" below), and, on main, a storage node with a cache in front of its own proxy (all
+three tables, no flag form either; see the end of "A build node"). All three take the same `[oci]`
+table. A file for a storage node:
 
 ```toml
 [server]
@@ -714,8 +716,13 @@ put 403.
 `[cold_store]` is the upstream: any `kind` (an `s3` bucket, with `endpoint` and a `credentials_file`
 of a read-only key, in practice, or of a key that writes with `write_through`), and without `skip_checks` and the keys of the reconciler. `[server]`
 is as for a storage node, without `backend_check_wait`. A `[[policy]]` with `cache = true` is needed.
-The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are refused: the hot
-store is already local disk.
+The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are a storage node with
+a cache in front of its own proxy (on main, not in v0.0.41): the S3 and OCI fronts read through the
+cache, the cache reads from and writes to the proxy, `write_through` is true (left out or given;
+`false` is refused), and the start does not run the upstream's self-test (the upstream is the
+proxy, whose tiers the start tests), so the table's `write_through` row below does not apply to it.
+The cache path may not be a tier's directory, inside it or around it. The start line says
+`mode=storage-cache`. The node's tables are a storage node's, and the cache's those of this section.
 
 At start the process makes the directory, removes what a fill that was running left in `.stage/`,
 reads `obj/` back (an object whose sidecar does not say what the file holds is deleted), and asks
@@ -898,9 +905,9 @@ Each of these exits with status 2 and names the file and the key:
   one), that does not end in `/`, or that is under `_journal/` or `_tiering/`, which tierstore
   keeps for itself.
 
-`[[policy]]` has a `prefix` (empty for all the rest) and `cache`. On a build node `cache = true`
-keeps the keys under the prefix; on a storage node a policy is read and checked and has no effect,
-and `cache = true` is refused, since a storage node keeps no cache. The empty prefix may be listed
+`[[policy]]` has a `prefix` (empty for all the rest) and `cache`. With `[local_cache]` `cache = true`
+keeps the keys under the prefix; without it a policy is read and checked and has no effect,
+and `cache = true` is refused, since a node without `[local_cache]` keeps no cache. The empty prefix may be listed
 along with others (it is the rest); two non-empty prefixes may not nest.
 
 ### Moving from flags to a file

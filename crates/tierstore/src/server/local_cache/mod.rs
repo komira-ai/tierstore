@@ -159,9 +159,9 @@ mod start_tests;
 #[cfg(test)]
 mod stream_tests;
 #[cfg(test)]
-mod tiered_tests;
-#[cfg(test)]
 pub(in crate::server) mod testing;
+#[cfg(test)]
+mod tiered_tests;
 #[cfg(test)]
 mod write_front_tests;
 #[cfg(test)]

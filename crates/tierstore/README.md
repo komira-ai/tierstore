@@ -81,9 +81,9 @@ exits 2.
 Prometheus text of the counters of the process. All are counters since the process started.
 `/metricz` renders whichever blocks the process has: the proxy's (a storage node, with a hot and
 a cold tier; the block below), the OCI read front's, and the local cache's `tierstore_cache_*`
-block (a build node; see "Local cache" below). A cache node and a storage node are different
-processes: a file with `[local_cache]` is refused together with `[hot_store]`, so one process does
-not have both the proxy's and the cache's block.
+block (a build node, or a storage node with a cache in front of its proxy; see "Local cache"
+below). A file with `[local_cache]`, `[hot_store]` and `[cold_store]` is one process with both the
+proxy's block and the cache's.
 
 The block of the proxy is one labelled family per measure, so one query serves every tier. The
 labels have a few fixed values, never a key or a client: `tier` is `hot` or `cold` here (`local`

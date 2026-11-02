@@ -4,6 +4,7 @@
 mod binary;
 mod cache_node;
 mod client;
+mod combined_node;
 mod config_file;
 mod drain;
 mod files;
