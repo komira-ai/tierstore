@@ -56,6 +56,7 @@ use super::cli::{
     open_tier, probe_run_id, serve_oci, signals,
 };
 use super::config_cache::CacheSettings;
+use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
 use super::listen::{LoopbackBind, bind, bind_set, joined, local_addrs};
 use super::local_cache::{
@@ -254,6 +255,7 @@ pub(super) async fn serve_cache(
     });
     let stopping = Arc::clone(&server);
     let oci_drain = oci.as_ref().map(OciListener::drain);
+    let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (oci_stop, oci_stopped) = watch::channel(false);
     let lb_wait = settings.front.drain_lb_wait;
     let watcher = tokio::spawn(async move {
@@ -300,6 +302,7 @@ pub(super) async fn serve_cache(
         sweeping.abort();
     }
     eprint!("{}", oci_cut_note(oci_cut));
+    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 

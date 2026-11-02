@@ -236,6 +236,8 @@ mod config_testing;
 #[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
+mod drain_switch_tests;
+#[cfg(test)]
 mod drain_tests;
 #[cfg(test)]
 mod gc_server_tests;
@@ -645,7 +647,6 @@ impl Server {
 
     /// The connections whose peer wrote after the server shut its end, in the drain: the
     /// requests that came too late to be answered.
-    #[cfg(test)]
     pub(super) fn late_requests(&self) -> u64 {
         self.drain.late()
     }
@@ -811,7 +812,7 @@ impl Server {
         response
             .headers_mut()
             .insert(name, HeaderValue::from_str(&id).expect("hex digits"));
-        if !self.is_ready() {
+        if self.drain.closes_answers() {
             let close = HeaderValue::from_static("close");
             response.headers_mut().insert(CONNECTION, close);
         }
