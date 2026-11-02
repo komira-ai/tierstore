@@ -51,7 +51,9 @@ impl<T> Watched<T> {
         match timer.as_mut().poll(cx) {
             Poll::Ready(()) => {
                 let peer = self.peer;
-                eprintln!("tierstore: {peer}: no byte of the answer taken for {idle:?}, closed");
+                tracing::warn!(
+                    "tierstore: {peer}: no byte of the answer taken for {idle:?}, closed"
+                );
                 Poll::Ready(Err(io::Error::from(io::ErrorKind::TimedOut)))
             }
             Poll::Pending => Poll::Pending,

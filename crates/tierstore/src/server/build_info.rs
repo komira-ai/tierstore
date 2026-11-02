@@ -1,6 +1,11 @@
 //! What this build says of itself: its version, the commit it was built from, and the
 //! capabilities a host updater may ask for with `tierstore --capabilities`.
 
+pub mod stderr_log;
+
+#[cfg(test)]
+mod stderr_log_tests;
+
 /// The version of this build, which `--version`, the start line and `tierstore_build_info` name:
 /// the crate's version, or the one the build was given (`TIERSTORE_BUILD_VERSION_OVERRIDE`, which
 /// the release workflow sets to the version of the tag). `build.rs` embeds it.
