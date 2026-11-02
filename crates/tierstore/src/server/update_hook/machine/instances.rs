@@ -3,10 +3,14 @@
 //! The probes ask for small, known paths (`/readyz`, `/metricz`) of a server of this very
 //! program, so the client is the little that needs: HTTP/1.1, `Connection: close`, the answer
 //! read to its end. A chunked answer is refused, not decoded: the servers send a length.
+//!
+//! A connect is bounded by its own timeout; then the whole request, the write and every read of
+//! the answer together, is bounded by one deadline, so that an answer that comes a byte at a
+//! time cannot keep a look going past it. Each write and read waits at most what is left.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::super::ports::{Instances, PortError, PortKind, Reply};
 use super::Fault;
@@ -16,21 +20,41 @@ const KIND: PortKind = PortKind::Instances;
 const MAX_ANSWER: usize = 1 << 20;
 const HEAD_END: &[u8] = b"\r\n\r\n";
 
+/// What tells the time to the deadline of a request.
+type Now = Box<dyn Fn() -> Instant + Send + Sync>;
+
 /// A client of the instances' loopback ports.
 pub struct LoopbackInstances {
     connect_timeout: Duration,
     read_timeout: Duration,
+    now: Now,
 }
 
 impl LoopbackInstances {
-    /// A connect that takes longer than `connect_timeout` fails, and so does a read (or a
-    /// write) that waits longer than `read_timeout` for a byte.
+    /// A connect that takes longer than `connect_timeout` fails, and so does a request whose
+    /// write and answer together take longer than `read_timeout`.
     #[must_use]
     pub fn new(connect_timeout: Duration, read_timeout: Duration) -> LoopbackInstances {
         LoopbackInstances {
             connect_timeout,
             read_timeout,
+            now: Box::new(Instant::now),
         }
+    }
+
+    /// The same, telling the time with `now` instead of the monotonic clock: a test moves it on.
+    #[must_use]
+    pub fn with_clock(mut self, now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        self.now = Box::new(now);
+        self
+    }
+
+    /// What is left of the request's time until `deadline`; an error once there is none.
+    fn left(&self, deadline: Instant) -> Result<Duration, Fault> {
+        deadline
+            .checked_duration_since((self.now)())
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| Fault(format!("no whole answer within {:?}", self.read_timeout)))
     }
 
     fn fetch(&self, port: u16, path: &str) -> Result<Reply, Fault> {
@@ -39,16 +63,23 @@ impl LoopbackInstances {
         }
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let mut stream = TcpStream::connect_timeout(&addr, self.connect_timeout)?;
-        stream.set_read_timeout(Some(self.read_timeout))?;
-        stream.set_write_timeout(Some(self.read_timeout))?;
+        let deadline = (self.now)() + self.read_timeout;
         let request =
             format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+        stream.set_write_timeout(Some(self.left(deadline)?))?;
         stream.write_all(request.as_bytes())?;
         let mut raw = Vec::new();
-        // One more than the limit, to tell a full answer from one that is too large.
-        stream.take(MAX_ANSWER as u64 + 1).read_to_end(&mut raw)?;
-        if raw.len() > MAX_ANSWER {
-            return Err("the answer is larger than 1 MiB".into());
+        let mut piece = [0u8; 16 * 1024];
+        loop {
+            stream.set_read_timeout(Some(self.left(deadline)?))?;
+            let read = stream.read(&mut piece)?;
+            if read == 0 {
+                break;
+            }
+            raw.extend_from_slice(&piece[..read]);
+            if raw.len() > MAX_ANSWER {
+                return Err("the answer is larger than 1 MiB".into());
+            }
         }
         parse(&raw)
     }

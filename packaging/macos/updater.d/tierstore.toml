@@ -52,7 +52,7 @@ environment = {}
 [hook.timeout_secs]
 # Each is at least the longest the step may take within the hook's own bounds: every launchctl
 # call to its time limit (10 s; a bootout 120 s, then up to 30 looks for the job to go), every
-# look at the instance to its connect and read timeouts and its pause (8 s), 120 looks for
+# look at the instance to its connect timeout, its whole-request deadline and its pause (8 s), 120 looks for
 # /readyz and 60 for the probe. src/server/update_hook/launchd_system_tests.rs adds them up and
 # holds these numbers to them.
 # Only files are read and written.

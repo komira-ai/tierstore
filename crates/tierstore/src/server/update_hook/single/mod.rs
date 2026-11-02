@@ -33,9 +33,10 @@
 //!   update. Valid only before the commit.
 //! - `cleanup` confirms afresh what `verify` saw, writes `stopping` (the commit), removes
 //!   `previous` and clears the update. There is no previous instance to stop
-//!   ([`SKIPPED_CLEANUP`]). When `cleanup` fails, the record is read back, so that a write of
-//!   `stopping` that reached the disk and then reported a failure (a rename made, its sync
-//!   failed) is reported as the commit it is.
+//!   ([`SKIPPED_CLEANUP`]). When the write of `stopping` fails, the record is read back, so that
+//!   a write that reached the disk and then reported a failure (a rename made, its sync failed)
+//!   is reported as the commit it is; when it cannot be read back the commit is undecided, and
+//!   counts as made (`"reversible":false`): the updater then runs `cleanup` again, forward.
 //! - `restore`, the boot entry, starts the service if it is not running. launchd starts the job
 //!   at boot by itself (`RunAtLoad`), so this is a no-op there.
 //!
@@ -45,6 +46,7 @@ mod record;
 
 pub use record::{Kind, SingleRecord};
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use super::args::Step;
@@ -70,6 +72,9 @@ pub const SKIPPED_CLEANUP: &str = "skipped: stopping a previous instance (there 
 struct Ctx<'a, 'b> {
     ports: &'b SinglePorts<'a>,
     port: u16,
+    /// Whether this step began to write `stopping`: from then on, a failure leaves the commit
+    /// undecided until the record on disk says otherwise.
+    commit_written: Cell<bool>,
 }
 
 impl Ctx<'_, '_> {
@@ -227,6 +232,7 @@ fn attempt(
     let c = Ctx {
         ports,
         port: decl.port,
+        commit_written: Cell::new(false),
     };
     let done = match (step, params, record.as_mut()) {
         (Step::Restore, _, record) => restore(&c, record.as_deref()),
@@ -246,13 +252,15 @@ fn attempt(
     }
     .unwrap_or_else(std::convert::identity);
     let mut committed = record.is_some_and(|r| r.committed());
-    if step == Step::Cleanup && !committed && done.outcome != Outcome::Success {
-        // A failed write of `stopping` may have reached the disk (a rename made, its sync
-        // failed): the record on disk says what was decided. One that cannot be read leaves
-        // the answer as the step saw it; a `rollback` refuses a commit it finds on disk anyway.
-        if let Ok(Some(bytes)) = ports.state.load() {
-            committed = SingleRecord::decode(&bytes).is_ok_and(|r| r.committed());
-        }
+    if c.commit_written.get() && !committed && done.outcome != Outcome::Success {
+        // The write of `stopping` failed, and may have reached the disk all the same (a rename
+        // made, its sync failed): the record on disk says what was decided. A record that cannot
+        // be read leaves it undecided, which counts as committed: the updater then goes forward
+        // with `cleanup`, which finishes a commit or makes it, and never rolls back one.
+        committed = match ports.state.load() {
+            Ok(Some(bytes)) => SingleRecord::decode(&bytes).map_or(true, |r| r.committed()),
+            Ok(None) | Err(_) => true,
+        };
     }
     Ok((done, committed))
 }
@@ -438,6 +446,7 @@ fn cleanup(c: &Ctx<'_, '_>, params: &Params, record: &mut SingleRecord) -> Resul
             )));
         }
         let stopping = record.with(Marker::Stopping);
+        c.commit_written.set(true);
         c.save(&stopping)?;
         *record = stopping;
     }

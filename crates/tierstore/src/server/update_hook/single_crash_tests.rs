@@ -76,6 +76,28 @@ fn start(s: &Scenario) -> SingleFake {
     fake
 }
 
+/// What a failed first run may say of the commit: never `"reversible":true` once the record on
+/// disk says `stopping`, and `"reversible":false` without it only for a `cleanup` that began to
+/// write `stopping` and could not read back whether the write reached the disk (an undecided
+/// commit counts as made). Such a host is finished by the next `cleanup`, forward, which each
+/// sweep runs.
+fn check_reversible(s: &Scenario, fake: &SingleFake, first: &Done, n: usize, from_log: usize) {
+    let committed = fake.snapshot().record.is_some_and(|r| r.committed());
+    // The write of `stopping` is this run's only save before its failure: a cleanup writes
+    // nothing else until the commit is on disk.
+    let undecided = s.act == Cleanup
+        && !committed
+        && !first.report.reversible
+        && fake.log()[from_log..]
+            .iter()
+            .any(|call| call == "state.save");
+    assert!(
+        first.report.reversible != committed || undecided,
+        "{} at {n}: {first:?}",
+        s.name
+    );
+}
+
 fn check_line(done: &Done) {
     let line: serde_json::Value = serde_json::from_str(&done.report.to_line()).unwrap();
     assert!(line["reversible"].is_boolean() && line["class"].is_string());
@@ -101,16 +123,12 @@ fn each_single_step_converges_after_a_failure_at_every_call() {
         for n in 1..=calls {
             let fake = start(s);
             fake.fail_at(Some(n));
+            let from_log = fake.log().len();
             let first = fake.run(s.act);
             check_line(&first);
             assert_eq!(fake.live_locks(), 0, "{} at {n}", s.name);
             if first.outcome != Outcome::Success && !was_committed {
-                let committed = fake.snapshot().record.is_some_and(|r| r.committed());
-                assert_eq!(
-                    first.report.reversible, !committed,
-                    "{} at {n}: {first:?}",
-                    s.name
-                );
+                check_reversible(s, &fake, &first, n, from_log);
             }
             fake.fail_at(None);
             let second = fake.run(s.act);
@@ -158,6 +176,7 @@ fn each_single_step_converges_after_the_world_stops_at_any_call() {
         for n in 1..=calls {
             let fake = start(s);
             fake.halt_at(Some(n));
+            let from_log = fake.log().len();
             let first = fake.run(s.act);
             check_line(&first);
             assert_ne!(
@@ -168,12 +187,7 @@ fn each_single_step_converges_after_the_world_stops_at_any_call() {
             );
             assert_eq!(fake.live_locks(), 0, "{} at {n}", s.name);
             if !was_committed {
-                let committed = fake.snapshot().record.is_some_and(|r| r.committed());
-                assert_eq!(
-                    first.report.reversible, !committed,
-                    "{} at {n}: {first:?}",
-                    s.name
-                );
+                check_reversible(s, &fake, &first, n, from_log);
             }
             fake.halt_at(None);
             let second = fake.run(s.act);
@@ -254,18 +268,14 @@ fn each_single_step_converges_after_a_failure_reported_after_its_effect() {
         for n in 1..=calls {
             let fake = start(s);
             fake.fail_late_at(Some(n));
+            let from_log = fake.log().len();
             let first = fake.run(s.act);
             check_line(&first);
             assert_eq!(fake.live_locks(), 0, "{} at {n}", s.name);
             // A step that fails before it can read the record says nothing of a commit that an
             // earlier run made.
             if first.outcome != Outcome::Success && !was_committed {
-                let committed = fake.snapshot().record.is_some_and(|r| r.committed());
-                assert_eq!(
-                    first.report.reversible, !committed,
-                    "{} at {n}: {first:?}",
-                    s.name
-                );
+                check_reversible(s, &fake, &first, n, from_log);
             }
             fake.fail_late_at(None);
             let second = fake.run(s.act);

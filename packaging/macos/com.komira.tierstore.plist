@@ -17,9 +17,10 @@
   launchd sends SIGTERM on bootout. The process drains: /readyz says 503 for the settle of the
   drain (drain-lb-wait, 1 s: on loopback there is no load balancer to wait for), then it stops
   accepting and waits for requests in flight for at most the drain's deadline (drain-deadline,
-  60 s), and exits 0. ExitTimeOut (90 s) is the
-  1 s, the 60 s and a margin, so that launchd never sends SIGKILL to a drain in progress; the
-  hook waits at most 300 s for a bootout. KeepAlive starts the process again whenever it exits
+  60 s), and exits 0. ExitTimeOut (90 s) is the 1 s, the 60 s and a margin, so that launchd
+  never sends SIGKILL to a drain in progress. The hook gives launchctl bootout at most 120 s,
+  more than ExitTimeOut, and then looks up to 30 times, a second apart, until launchd no longer
+  has the job; only then does it move the link current. KeepAlive starts the process again whenever it exits
   while the job is loaded, at most once in ThrottleInterval (30 s, as the Linux unit's
   RestartSec=30); a bootout unloads the job, so a stop is a stop.
 

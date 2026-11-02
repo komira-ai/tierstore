@@ -554,8 +554,8 @@ fn the_launchd_config_is_the_hosts_own() {
 }
 
 /// The longest each piece of a step's work may take, from the hook's own bounds: every call
-/// running to its time limit and every look at the instance taking its connect and read
-/// timeouts and its pause.
+/// running to its time limit and every look at the instance taking its connect timeout, its
+/// whole-request deadline and its pause.
 struct Bounds {
     look: Duration,
     stop: Duration,
@@ -584,7 +584,8 @@ impl Bounds {
 
 /// Asserts that each timeout of the declaration packaging ships for a Mac covers the longest
 /// the hook's step may take, computed from the hook's own bounds (each `launchctl` call to its
-/// time limit, each look at the instance to its connect and read timeouts and its pause): a
+/// time limit, each look at the instance to its connect timeout, its whole-request deadline
+/// (`LoopbackInstances` bounds the write and every read together) and its pause): a
 /// `cutover` that looks again at a swap a re-run finds, swaps, probes and rolls back; a `verify`
 /// that probes and waits for the promotion for `promotion_bound_secs`; a `cleanup` that confirms;
 /// a `rollback` that restarts the previous release and waits for it; a `prepare`, which only

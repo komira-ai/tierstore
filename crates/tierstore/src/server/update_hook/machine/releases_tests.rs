@@ -270,3 +270,24 @@ fn a_host_root_that_cannot_be_opened_fails_the_check() {
     let text = checked(&root.join("absent"), "/opt/r/one", me()).unwrap_err();
     assert!(text.contains("the host root "), "{text}");
 }
+
+/// Asserts that a release whose `tierstore` is a FIFO with no writer is refused as not a regular
+/// file, and that the check returns rather than waiting for a writer: the binary is opened
+/// without blocking and its type checked on the descriptor. The FIFO is made with `mkfifo`. It
+/// would catch a `prepare` that hangs on an entry another account placed there.
+#[test]
+fn a_binary_that_is_a_fifo_is_refused_without_waiting() {
+    let (_guard, root) = host_with_a_release("links-check-fifo");
+    let binary = root.join("opt/r/one/tierstore");
+    fs::remove_file(&binary).unwrap();
+    let made = std::process::Command::new("mkfifo")
+        .args(["-m", "0644"])
+        .arg(&binary)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert_eq!(
+        checked(&root, "/opt/r/one", me()).unwrap_err(),
+        "the release /opt/r/one is not trusted: /opt/r/one/tierstore is not a regular file"
+    );
+}

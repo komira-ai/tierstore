@@ -852,24 +852,45 @@ fn an_interrupted_prepare_over_a_stale_previous_rolls_back_to_the_release_that_r
 }
 
 /// Asserts that a write of `stopping` that reaches the disk and then reports a failure (a rename
-/// made, its sync failed) is reported as the commit it is: `"reversible":false`, and the next
-/// `cleanup` finishes it. It would catch a report that tells the updater it may still roll back
-/// a commit that is on disk.
+/// made, its sync failed) is reported as the commit it is: `"reversible":false`, whether the
+/// record then reads back or its read-back fails too; that a write of `stopping` that fails and
+/// cannot be read back is undecided and so reported `"reversible":false` as well; and that in each
+/// case the next `cleanup` goes forward and finishes. It would catch a report that tells the
+/// updater it may still roll back a commit that may be on disk.
 #[test]
-fn a_commit_on_disk_whose_write_reported_a_failure_is_irreversible() {
-    let fake = SingleFake::new();
-    fake.advance(&[Prepare, Cutover, Verify]);
+fn a_commit_whose_write_reported_a_failure_is_irreversible() {
     // The lock, the declaration, the record, the link current, /readyz and the three probes:
-    // the ninth call is the write of `stopping`.
-    fake.fail_late_at(Some(9));
-    let done = fake.run(Cleanup);
-    assert_eq!(done.report.reason, Some(Reason::StateIo), "{done:?}");
-    assert!(!done.report.reversible);
-    assert!(fake.record().committed());
-    fake.fail_late_at(None);
-    fake.advance(&[Cleanup]);
-    assert!(!fake.record().updating);
-    assert_eq!(fake.snapshot().previous, None);
+    // the ninth call is the write of `stopping`, and the tenth the read-back.
+    let cases: [(&str, Option<usize>, Option<usize>, bool); 3] = [
+        ("written, read back", Some(9), None, true),
+        ("written, read-back failed", Some(9), Some(10), true),
+        ("not written, read-back failed", None, Some(9), false),
+    ];
+    for (name, late, fail, on_disk) in cases {
+        let fake = SingleFake::new();
+        fake.advance(&[Prepare, Cutover, Verify]);
+        fake.fail_late_at(late);
+        if let Some(n) = fail {
+            // A failure from `fail` on: the write (when it is the ninth) and the read-back.
+            fake.halt_at(Some(n));
+        }
+        let done = fake.run(Cleanup);
+        assert_eq!(
+            done.report.reason,
+            Some(Reason::StateIo),
+            "{name}: {done:?}"
+        );
+        assert!(!done.report.reversible, "{name}");
+        assert_eq!(fake.record().committed(), on_disk, "{name}");
+        fake.fail_late_at(None);
+        fake.halt_at(None);
+        fake.advance(&[Cleanup]);
+        assert!(
+            fake.record().committed() && !fake.record().updating,
+            "{name}"
+        );
+        assert_eq!(fake.snapshot().previous, None, "{name}");
+    }
 }
 
 /// Asserts that every step after `prepare` refuses params that are not the update on record,

@@ -43,7 +43,7 @@ pub(super) const GONE_ATTEMPTS: u32 = 30;
 const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a connect to the instance may take.
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-/// The longest the instance may leave a request unanswered.
+/// The longest a whole request to the instance may take: its write and every read of the answer.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// The pause between two looks at launchd or the instance, unless the command line sets one.
 pub(super) const POLL: Duration = Duration::from_secs(1);

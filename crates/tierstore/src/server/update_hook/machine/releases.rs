@@ -135,7 +135,14 @@ impl ReleaseLinks {
             self.trusted(&dir, &at)?;
         }
         at.push(RELEASE_BINARY);
-        let binary = Self::open_in(dir.as_fd(), OsStr::new(RELEASE_BINARY), OFlags::RDONLY, &at)?;
+        // Without blocking: a FIFO there must be refused for not being a file, not wait for a
+        // writer.
+        let binary = Self::open_in(
+            dir.as_fd(),
+            OsStr::new(RELEASE_BINARY),
+            OFlags::RDONLY | OFlags::NONBLOCK,
+            &at,
+        )?;
         if self.trusted(&binary, &at)? != FileType::RegularFile {
             return Err(format!("{} is not a regular file", at.display()));
         }
