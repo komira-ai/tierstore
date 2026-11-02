@@ -6,7 +6,7 @@ other crate of this workspace unless the `s3` feature is on.
 - The library: the `Backend` trait (create-only put, `If-Match` put, ranged get, head, delete, list,
   multipart), an in-memory and a directory backend, `Proxy` (a journal per proxy, a get that copies a
   cold hit back, a full hot tier sending puts to the cold tier), `Reconciler` (copies puts to the
-  cold tier, applies deletes, evicts what the cold tier holds, publishes usage) and `CachedStore`.
+  cold tier, forgets deleted objects, evicts what the cold tier holds, publishes usage) and `CachedStore`.
 - Feature `s3`: `S3Backend`, a bucket of an S3-compatible store as a `Backend`.
 - Feature `server` (turns `s3` on): `server`, the S3 API front of a proxy, and the `tierstore`
   binary that runs a proxy, that front and a reconciler in one process.

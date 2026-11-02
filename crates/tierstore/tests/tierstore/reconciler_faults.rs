@@ -1,9 +1,11 @@
 //! The reconciler when the hot tier, the cold tier or a journal object fails.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, Error, JournalEntry, JournalOp, Op, encode_journal};
+use tierstore::{Backend, Error, JournalEntry, JournalOp, Op, Reconciler, encode_journal};
 
+use crate::hold::{AtHead, OnHead, Reads};
 use crate::support::{Rig, assert_absent, body, journal_key, keys, read, text};
 
 fn down() -> Error {
@@ -149,49 +151,263 @@ async fn a_copy_whose_hot_read_fails_is_retried_by_the_next_pass() {
     assert_eq!(read(&*rig.cold_mem, "k1").await, body("1"));
 }
 
-/// Asserts that a delete entry whose check of the hot tier fails is reported, leaves the
-/// checkpoint before it, and is applied by the next pass.
+/// A reconciler `r1` over the rig whose tiers do `hot` and `cold` at the HEADs of `key`.
+fn scripted(
+    rig: &Rig,
+    key: &str,
+    hot: Vec<Option<AtHead>>,
+    cold: Vec<Option<AtHead>>,
+) -> Reconciler {
+    let hot_tier: Arc<dyn Backend> = Arc::new(OnHead::new(rig.hot.clone(), key, hot));
+    let cold_tier: Arc<dyn Backend> = Arc::new(OnHead::new(rig.cold.clone(), key, cold));
+    Reconciler::new(hot_tier, cold_tier, rig.reconciler_config("r1", 1000))
+}
+
+/// Asserts that a copy whose first read of the hot tier's tag fails is reported, leaves the
+/// object for the next pass, and does not move the checkpoint past it.
 #[tokio::test(start_paused = true)]
-async fn a_delete_whose_hot_check_fails_is_applied_by_the_next_pass() {
+async fn a_copy_whose_hot_tag_read_fails_is_retried_by_the_next_pass() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k1", body("1")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+    rig.hot.fail_next_on(Op::Head, "k1", down());
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_absent(&*rig.cold_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*rig.cold_mem, "k1").await, body("1"));
+}
+
+/// Asserts that a copy whose object is deleted from the hot tier between the read of its tag
+/// and the read of its bytes is skipped without a failure, writes nothing to the cold tier, and
+/// lets the checkpoint move past it.
+#[tokio::test(start_paused = true)]
+async fn a_copy_whose_object_is_deleted_between_the_tag_and_the_read_is_skipped() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("1")).await.unwrap();
-    proxy.delete("k").await.unwrap();
-    rig.cold_mem.put("k", body("1")).await.unwrap();
-    let mut reconciler = rig.reconciler("r1", 1000);
-    rig.hot.fail_next_on(Op::Head, "k", down());
-
-    let report = reconciler.pass().await;
-    assert_eq!(report.failed, [down()]);
-    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
-    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("1"));
+    let mut reconciler = scripted(&rig, "k", vec![Some(AtHead::After(None))], vec![]);
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 0);
+    assert_eq!(keys(&*rig.cold_mem).await, Vec::<String>::new());
+    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+}
+
+/// Asserts that a copy whose second read of the hot tier's tag fails, while the object is still
+/// there, takes its cold copy back, reports the failure, and leaves the object to the next pass,
+/// which copies it.
+#[tokio::test(start_paused = true)]
+async fn a_copy_whose_second_tag_read_fails_is_copied_by_the_next_pass() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("1")).await.unwrap();
+    let hot = vec![None, Some(AtHead::Fail(down()))];
+    let mut reconciler = scripted(&rig, "k", hot, vec![]);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_absent(&*rig.cold_mem, "k").await;
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("1"));
+}
+
+/// Asserts that a copy whose second read of the hot tier's tag fails after the object was deleted
+/// leaves no copy in the cold tier: the failure is reported, the cold tier is empty already, and
+/// the next pass, which finds the hot tier without the key, has nothing to copy.
+#[tokio::test(start_paused = true)]
+async fn a_copy_whose_second_tag_read_fails_after_a_delete_leaves_no_cold_copy() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("1")).await.unwrap();
+    let hot = vec![None, Some(AtHead::Lost(down()))];
+    let mut reconciler = scripted(&rig, "k", hot, vec![]);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_absent(&*rig.hot_mem, "k").await;
+    assert_absent(&*rig.cold_mem, "k").await;
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 0);
     assert_absent(&*rig.cold_mem, "k").await;
 }
 
-/// Asserts that a delete entry of a key that was put again, whose check of the cold tier
-/// fails, is reported, leaves the checkpoint before it, and is applied by the next pass.
+/// Asserts that a copy finds the cold object it wrote gone, or replaced by another writer, when
+/// it comes to take it back after the hot object was deleted, and leaves the other writer's
+/// object alone: no failure, nothing counted as copied, and the cold tier holds what the other
+/// writer left (or nothing).
 #[tokio::test(start_paused = true)]
-async fn a_delete_whose_cold_check_fails_is_applied_by_the_next_pass() {
+async fn a_copy_takes_back_only_the_cold_object_it_wrote() {
+    let cases = [
+        (Some(AtHead::Before(None)), None),
+        (
+            Some(AtHead::Before(Some("other-bytes"))),
+            Some("other-bytes"),
+        ),
+        (
+            Some(AtHead::After(Some("other-bytes"))),
+            Some("other-bytes"),
+        ),
+        (Some(AtHead::After(None)), None),
+    ];
+    for (step, want) in cases {
+        let rig = Rig::new();
+        let proxy = rig.proxy("p1", 1000).await;
+        proxy.put("k", body("1")).await.unwrap();
+        let hot = vec![None, Some(AtHead::Before(None))];
+        let mut reconciler = scripted(&rig, "k", hot, vec![step]);
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new());
+        assert_eq!(report.copied, 0);
+        match want {
+            Some(content) => assert_eq!(read(&*rig.cold_mem, "k").await, body(content)),
+            None => assert_absent(&*rig.cold_mem, "k").await,
+        }
+    }
+}
+
+/// Asserts that a copy that cannot delete its own cold object when it takes the copy back (the
+/// cold tier's conditional delete fails) reports the failure and does not move the checkpoint.
+#[tokio::test(start_paused = true)]
+async fn a_copy_whose_take_back_fails_is_reported() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
-    proxy.put("k", body("old")).await.unwrap();
-    proxy.delete("k").await.unwrap();
-    proxy.put("k", body("new")).await.unwrap();
-    let mut reconciler = rig.reconciler("r1", 1000);
-    rig.cold.fail_next_on(Op::Head, "k", down());
+    proxy.put("k", body("1")).await.unwrap();
+    let hot = vec![None, Some(AtHead::Before(None))];
+    let mut reconciler = scripted(&rig, "k", hot, vec![]);
+    rig.cold.fail_next_on(Op::DeleteIfMatch, "k", down());
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);
-    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
-    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+}
+
+/// Asserts that a copy that finds the cold tier holding the key with other bytes and cannot
+/// read the cold object's tag, or cannot compare it because the read fails (before the first
+/// chunk or after it), reports the failure, leaves the cold object alone, and replaces it in
+/// the next pass.
+#[tokio::test(start_paused = true)]
+async fn a_comparison_that_fails_is_retried_by_the_next_pass() {
+    for stage in ["head", "read"] {
+        let rig = Rig::new();
+        let proxy = rig.proxy("p1", 1000).await;
+        proxy.put("k", body("hot")).await.unwrap();
+        rig.cold_mem.put("k", body("hat")).await.unwrap();
+        let mut reconciler = rig.reconciler("r1", 1000);
+        match stage {
+            "head" => rig.cold.fail_next_on(Op::Head, "k", down()),
+            _ => rig.cold.fail_next_on(Op::Get, "k", down()),
+        }
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, [down()], "{stage}");
+        assert_eq!(read(&*rig.cold_mem, "k").await, body("hat"));
+        assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new(), "{stage}");
+        assert_eq!(report.copied, 1);
+        assert_eq!(read(&*rig.cold_mem, "k").await, body("hot"));
+    }
+}
+
+/// Asserts that a copy whose comparison with the cold object fails in the middle of the cold
+/// object's bytes reports that failure and leaves the cold object alone.
+#[tokio::test(start_paused = true)]
+async fn a_comparison_whose_cold_read_breaks_midway_is_reported() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("hot")).await.unwrap();
+    rig.cold_mem.put("k", body("hat")).await.unwrap();
+    let cold: Arc<dyn Backend> = Arc::new(Reads::new(rig.cold.clone(), 1, Some(down())));
+    let mut reconciler = Reconciler::new(rig.hot.clone(), cold, rig.reconciler_config("r1", 1000));
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("hat"));
+    assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 0);
+}
+
+/// Asserts that a copy that must replace a cold object of other bytes, and whose read of the hot
+/// tier's tag (to see that the hot object is still there) or whose conditional delete of the cold
+/// object fails, reports the failure, leaves the cold object, and replaces it in the next pass.
+#[tokio::test(start_paused = true)]
+async fn a_replace_that_fails_is_retried_by_the_next_pass() {
+    for stage in ["hot tag", "delete"] {
+        let rig = Rig::new();
+        let proxy = rig.proxy("p1", 1000).await;
+        proxy.put("k", body("hot")).await.unwrap();
+        rig.cold_mem.put("k", body("cold")).await.unwrap();
+        let mut reconciler = match stage {
+            "hot tag" => {
+                let hot = vec![None, Some(AtHead::Fail(down()))];
+                scripted(&rig, "k", hot, vec![])
+            }
+            _ => {
+                rig.cold.fail_next_on(Op::DeleteIfMatch, "k", down());
+                rig.reconciler("r1", 1000)
+            }
+        };
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, [down()], "{stage}");
+        assert_eq!(read(&*rig.cold_mem, "k").await, body("cold"));
+
+        let report = reconciler.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new(), "{stage}");
+        assert_eq!(read(&*rig.cold_mem, "k").await, body("hot"));
+    }
+}
+
+/// Asserts that a cold object that another writer replaces after the copy read its tag, and
+/// before the copy deletes it, is not deleted: the conditional delete is refused, the copy's own
+/// write is then refused as existing and reported, and the next pass replaces the new object.
+#[tokio::test(start_paused = true)]
+async fn a_cold_object_replaced_before_the_conditional_delete_is_not_deleted() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("hot")).await.unwrap();
+    rig.cold_mem.put("k", body("cold")).await.unwrap();
+    let cold = vec![Some(AtHead::After(Some("other-bytes")))];
+    let mut reconciler = scripted(&rig, "k", vec![], cold);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [Error::AlreadyExists("k".to_owned())]);
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("other-bytes"));
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("new"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("hot"));
+}
+
+/// Asserts that a cold object that is removed after the copy read its tag, and before the copy
+/// deletes it, does not fail the copy: the object is written and counted as copied.
+#[tokio::test(start_paused = true)]
+async fn a_cold_object_removed_before_the_conditional_delete_is_written_over() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k", body("hot")).await.unwrap();
+    rig.cold_mem.put("k", body("cold")).await.unwrap();
+    let mut reconciler = scripted(&rig, "k", vec![], vec![Some(AtHead::After(None))]);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("hot"));
 }
 
 /// Asserts that an eviction whose last read of the journals fails is reported and evicts

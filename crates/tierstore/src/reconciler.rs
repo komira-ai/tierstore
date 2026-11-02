@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::TryStreamExt;
 use futures::stream::{self, StreamExt};
 
 use crate::journal::{
@@ -12,7 +14,7 @@ use crate::journal::{
 };
 use crate::lease::Lease;
 use crate::state::{Books, Stream};
-use crate::{Backend, Clock, Error, JournalEntry, JournalOp};
+use crate::{Backend, Clock, Error, JournalEntry, JournalOp, Meta};
 
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
@@ -67,7 +69,9 @@ impl ReconcilerConfig {
 pub struct PassReport {
     /// Whether this reconciler held the lease. If not, nothing else was done.
     pub held: bool,
-    /// The objects copied to the cold tier, or found there already.
+    /// The objects copied to the cold tier, or found there with the same content. An object
+    /// whose copy was taken back because the hot tier no longer holds that object is not
+    /// counted.
     pub copied: usize,
     /// The objects removed from the hot tier.
     pub evicted: usize,
@@ -81,6 +85,9 @@ pub struct PassReport {
 /// The outcome of the copies of one journal object: the key if it is in the cold tier now,
 /// or nothing if the hot tier no longer holds it.
 type Copies = Vec<Result<Option<String>, Error>>;
+
+/// How many times a copy starts over when the hot object changes while it is copied.
+const COPY_ATTEMPTS: usize = 3;
 
 fn millis(duration: Duration) -> u64 {
     duration.as_millis() as u64
@@ -101,11 +108,18 @@ fn millis(duration: Duration) -> u64 {
 ///
 /// 1. **Tail the journals.** For each proxy, in the order of the journal objects from its
 ///    checkpoint, a journal object is read and applied: its puts are copied from the hot tier
-///    to the cold tier, up to [`ReconcilerConfig::parallel`] at a time, create-only (an
-///    object the cold tier holds already counts as copied, and a key the hot tier no longer
-///    holds is skipped); then its deletes are applied, by deleting the key from the cold tier
-///    unless the hot tier holds it again and the cold tier's copy is of that object (the same
-///    size and content tag). Then the object counts as applied.
+///    to the cold tier, up to [`ReconcilerConfig::parallel`] at a time, create-only. A copy
+///    reads the hot object's tag, then its bytes, writes them, and reads the tag again. If the
+///    object is gone, the copy removes the cold object it wrote (the one with its own bytes);
+///    if another object is there, it does the same and starts over (three times at most, then
+///    the copy fails and the next pass tries again). A key the hot tier no longer holds is
+///    skipped. A cold tier that holds the key already is compared: the same bytes count as
+///    copied (the same size and tag, or, where the two tiers tag differently, the same bytes
+///    read from the cold tier), and other bytes are replaced by the hot tier's, which is what a
+///    get returns first, as long as the hot tier still holds the object that was read. A
+///    delete entry changes only what the reconciler knows of the hot tier: the proxy's own
+///    delete removed the key from both tiers, the hot tier first, and a copy that finished
+///    after that took itself back. Then the journal object counts as applied.
 /// 2. **Evict.** The reconciler adds up the bytes of the objects the hot tier holds from the
 ///    journals alone: the sizes of the puts, less the deletes and the evictions. Above
 ///    [`ReconcilerConfig::high_water`] of the budget it deletes objects from the hot tier,
@@ -143,8 +157,16 @@ fn millis(duration: Duration) -> u64 {
 ///   it may store an older checkpoint over the one of the reconciler that took over. Keep a
 ///   pass shorter than the ttl (set `parallel` and the ttl accordingly), and do not cancel a
 ///   pass.
-/// - A put that went straight to the cold tier because the hot tier was full is not
-///   journaled, so a delete entry of the same key that is applied after it deletes it.
+/// - A copy whose outcome the reconciler never learns (the process died, or the lease was lost,
+///   between its write to the cold tier and its second read of the hot tier, or the cold
+///   tier took the write after the call timed out) can leave a cold copy of a key that was
+///   deleted meanwhile. Nothing removes it afterwards, because a delete entry does not touch
+///   the cold tier, and a get of the key then finds it. An operator removes it by hand.
+/// - A copy removes its own cold object by the tag it reads between its write and the delete,
+///   so a put that went straight to the cold tier with the same bytes inside that window is
+///   removed too.
+/// - A copy that cannot replace a cold object of other bytes (the cold tier refuses the
+///   delete) fails in every pass, and the journal of its proxy stops there.
 /// - After a restart the journal objects before the position of the stored checkpoint that
 ///   are still younger than the retention are not read again, and are never deleted.
 pub struct Reconciler {
@@ -301,8 +323,9 @@ impl Reconciler {
         }
     }
 
-    /// Copies the puts of one journal object, then applies its deletes. Says which keys are
-    /// in the cold tier now.
+    /// Copies the puts of one journal object. Says which keys are in the cold tier now. Its
+    /// deletes change nothing here: the books forget the key when they read the entry, and
+    /// the proxy already removed the key from both tiers.
     async fn apply_object(&self, entries: &[JournalEntry]) -> Result<BTreeSet<String>, Error> {
         let puts = entries.iter().filter(|entry| entry.op == JournalOp::Put);
         let keys: BTreeSet<&str> = puts.map(|entry| entry.key.as_str()).collect();
@@ -315,40 +338,130 @@ impl Reconciler {
                 copied.insert(key);
             }
         }
-        for entry in entries.iter().filter(|e| e.op == JournalOp::Delete) {
-            self.delete_cold(&entry.key).await?;
-        }
         Ok(copied)
     }
 
-    /// Copies one object from the hot tier to the cold tier, create-only.
+    /// Copies one object from the hot tier to the cold tier, create-only, and says whether the
+    /// cold tier holds it now (`None`: the hot tier no longer holds the key).
+    ///
+    /// The tag is read before the bytes and again after the write. A proxy deletes from the
+    /// hot tier before the cold tier, so a copy that lands in the cold tier after the proxy's
+    /// delete of the cold tier finds, at its second read, that the hot tier has no such
+    /// object, and removes what it wrote. That order of the proxy's two deletes is what makes
+    /// this sound, and the hot tier must show a delete to the next read.
     async fn copy_key(&self, key: &str) -> Result<Option<String>, Error> {
-        let body = match self.hot.get(key, None).await {
-            Ok(body) => body,
-            Err(Error::NotFound(_)) => return Ok(None),
+        for _ in 0..COPY_ATTEMPTS {
+            let seen = match self.hot.head(key).await {
+                Ok(meta) => meta,
+                Err(Error::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            let body = match self.hot.get(key, None).await {
+                Ok(body) => body,
+                Err(Error::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            self.store_cold(key, &body, &seen).await?;
+            match self.hot.head(key).await {
+                Ok(now) if now.same_content(&seen) => return Ok(Some(key.to_owned())),
+                // Another object is there, and the bytes read may be of either: take the copy
+                // back and start over with what the hot tier holds now.
+                Ok(_) => self.remove_own_cold_copy(key, &body).await?,
+                Err(Error::NotFound(_)) => {
+                    self.remove_own_cold_copy(key, &body).await?;
+                    return Ok(None);
+                }
+                Err(error) => {
+                    // The hot tier may have lost the object, and a retry would then skip the
+                    // key and never look at the cold tier: take the copy back now. If the
+                    // object is still there, the next pass copies it again.
+                    let _ = self.remove_own_cold_copy(key, &body).await;
+                    return Err(error);
+                }
+            }
+        }
+        Err(Error::Other(format!(
+            "{key} changed in the hot tier at each of {COPY_ATTEMPTS} attempts to copy it"
+        )))
+    }
+
+    /// Writes `body` to the cold tier, create-only. A cold tier that holds the key is
+    /// compared with `body` ([`Reconciler::settle_existing`]).
+    async fn store_cold(&self, key: &str, body: &Bytes, seen: &Meta) -> Result<(), Error> {
+        match self.cold.put(key, body.clone()).await {
+            Err(Error::AlreadyExists(_)) => self.settle_existing(key, body, seen).await,
+            other => other,
+        }
+    }
+
+    /// The cold tier holds `key` already. If its bytes are `body`'s there is nothing to do (a
+    /// copy that was done before a crash, or a copy-back whose source is the cold tier).
+    /// Otherwise the hot tier's object replaces it, because a get returns the hot tier's, but
+    /// only if the hot tier still holds the object that was read: if it does not, the cold
+    /// object may be a put that was acknowledged after a delete, and it is left alone (the
+    /// caller reads the hot tier again and decides what the copy is).
+    async fn settle_existing(&self, key: &str, body: &Bytes, seen: &Meta) -> Result<(), Error> {
+        let there = self.cold.head(key).await?;
+        if self.same_bytes(key, body, &there, Some(seen)).await? {
+            return Ok(());
+        }
+        match self.hot.head(key).await {
+            Ok(now) if now.same_content(seen) => {}
+            Ok(_) | Err(Error::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error),
+        }
+        match self.cold.delete_if_match(key, &there.tag).await {
+            Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => {}
+            Err(error) => return Err(error),
+        }
+        self.cold.put(key, body.clone()).await
+    }
+
+    /// Removes the cold tier's object under `key` if its bytes are `body`'s, by its tag, so
+    /// that an object that replaced it meanwhile stays. An object of other bytes is somebody
+    /// else's and stays.
+    async fn remove_own_cold_copy(&self, key: &str, body: &Bytes) -> Result<(), Error> {
+        let there = match self.cold.head(key).await {
+            Ok(meta) => meta,
+            Err(Error::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        match self.cold.put(key, body).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => Ok(Some(key.to_owned())),
+        if !self.same_bytes(key, body, &there, None).await? {
+            return Ok(());
+        }
+        match self.cold.delete_if_match(key, &there.tag).await {
+            Ok(()) | Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => Ok(()),
             Err(error) => Err(error),
         }
     }
 
-    /// Makes sure the cold tier does not hold a key that was deleted, unless the hot tier
-    /// holds the key again and the cold tier's copy, if it has one, is of that object. A copy
-    /// of another content (one that was under way when the key was deleted) is deleted; the
-    /// entry that put the key again copies the new object.
-    async fn delete_cold(&self, key: &str) -> Result<(), Error> {
-        let in_hot = match self.hot.head(key).await {
-            Ok(meta) => meta,
-            Err(Error::NotFound(_)) => return self.cold.delete(key).await,
-            Err(error) => return Err(error),
-        };
-        match self.cold.head(key).await {
-            Ok(in_cold) if !in_cold.same_content(&in_hot) => self.cold.delete(key).await,
-            Ok(_) | Err(Error::NotFound(_)) => Ok(()),
-            Err(error) => Err(error),
+    /// Whether the cold object `there` has the bytes of `body`. The sizes are compared first.
+    /// With the tag of the hot object that `body` was read as (`hot`), equal tags settle it
+    /// (the tiers tag by the same function); otherwise the cold object is read, chunk by
+    /// chunk, and compared with `body`, so that it is never held whole.
+    async fn same_bytes(
+        &self,
+        key: &str,
+        body: &Bytes,
+        there: &Meta,
+        hot: Option<&Meta>,
+    ) -> Result<bool, Error> {
+        if there.size != body.len() as u64 {
+            return Ok(false);
         }
+        if hot.is_some_and(|hot| hot.tag == there.tag) {
+            return Ok(true);
+        }
+        let mut chunks = self.cold.get_stream(key, None).await?;
+        let mut at = 0;
+        while let Some(chunk) = chunks.try_next().await? {
+            let end = at + chunk.len();
+            if body.get(at..end) != Some(&chunk[..]) {
+                return Ok(false);
+            }
+            at = end;
+        }
+        Ok(at == body.len())
     }
 
     /// Deletes objects from the hot tier, oldest first, while it holds more than the low

@@ -1,9 +1,12 @@
 //! The proxy: puts, gets, heads, deletes and listings over the two tiers.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, Error, JournalEntry, JournalOp, Op};
+use tierstore::{Backend, Error, JournalEntry, JournalOp, Op, Proxy};
+use tokio::sync::Notify;
 
+use crate::hold::HoldDelete;
 use crate::support::{
     Rig, assert_absent, body, check_ranges, journal, journal_key, journal_keys, keys, page, read,
 };
@@ -240,4 +243,30 @@ async fn a_conditional_delete_through_the_proxy_is_unsupported_and_changes_nothi
     assert_eq!(read(&*rig.hot_mem, "k").await, body("v"));
     let objects = journal_keys(&*rig.hot_mem, "p1").await;
     assert_eq!(objects, [journal_key("p1", 1)]);
+}
+
+/// Asserts that a delete removes the object from the hot tier before it removes it from the
+/// cold tier: while the cold tier's delete is held, the hot tier no longer holds the key and the
+/// cold tier still does. The reconciler's check of a copy relies on this order.
+#[tokio::test(start_paused = true)]
+async fn a_delete_removes_the_hot_copy_before_the_cold_copy() {
+    let rig = Rig::new();
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let held = HoldDelete::new(rig.cold.clone(), "k", entered.clone(), release.clone());
+    let cold: Arc<dyn Backend> = Arc::new(held);
+    let proxy = Proxy::open(rig.hot.clone(), cold, rig.config("p1", 1000))
+        .await
+        .unwrap();
+    proxy.put("k", body("value")).await.unwrap();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+
+    let watch = async {
+        entered.notified().await;
+        assert_absent(&*rig.hot_mem, "k").await;
+        assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
+        release.notify_one();
+    };
+    let (deleted, ()) = tokio::join!(proxy.delete("k"), watch);
+    deleted.unwrap();
+    assert_absent(&*rig.cold_mem, "k").await;
 }

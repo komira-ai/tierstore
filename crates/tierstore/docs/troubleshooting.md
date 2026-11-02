@@ -100,3 +100,7 @@ On main, not in v0.0.41. From the moment a stop begins every answer carries `Con
 ## At drain deadline
 
 `tierstore: <N> requests were cut at the drain deadline` on stderr means clients were still sending or reading when `--drain-deadline` ran out. Raise it, with `TimeoutStopSec=` in the unit.
+
+## A deleted object is back
+
+A get returns a key that was deleted. A delete removes the key from the hot tier and then the cold tier, and a reconciler's copy that was under way takes itself back when it finds the hot object gone. The one case left is a copy whose outcome the reconciler never learned: it was killed, or lost the lease, between its write to the cold tier and its second read of the hot tier, or the cold tier took the write after the call had timed out. The cold object is then not removed by a later delete entry (a delete entry changes only the reconciler's books). Delete the key through the proxy, which removes it from both tiers.

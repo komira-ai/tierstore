@@ -7,6 +7,7 @@ mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
 mod conformance;
+mod edge_cases;
 mod faults;
 mod hold;
 mod journal;

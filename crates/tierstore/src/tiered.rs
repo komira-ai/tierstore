@@ -159,8 +159,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   after it took some of the body, the bytes cannot be offered to the cold tier, so the put
 ///   fails with [`Error::Full`] (the tier is latched full, and the client's retry goes to the
 ///   cold tier); if it took none, the cold tier gets the whole body as for a held put.
-/// - **Delete** removes the object from the hot tier and from the cold tier, then appends a
-///   delete entry, which lets the reconciler undo a copy to the cold tier that was under way.
+/// - **Delete** removes the object from the hot tier and then from the cold tier (in that order,
+///   which the reconciler's check of a copy relies on), then appends a delete entry, which only
+///   tells the reconciler to forget the key. A copy that was under way takes itself back.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
 ///   `_tiering/`. [`Backend::list_page`] pages through the merged listing: the last key of a
@@ -207,8 +208,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   tier, may both succeed, whether through one proxy or two; a presigned PUT of the S3 front
 ///   never takes that path ([`Backend::put_stream_hot_only`] answers [`Error::Full`] instead), so the
 ///   hot tier's create-only write alone decides it. For the other keys the race remains: the
-///   reconciler then counts the cold tier's object as the copy of the hot tier's, and the object
-///   of the cold tier is the one that stays.
+///   reconciler then compares the two, and the hot tier's object replaces the cold tier's, so
+///   the one the hot tier took is the one that stays.
 /// - A get that copies an object back into the hot tier while it is deleted may put it back
 ///   there, with a put entry after the delete entry.
 pub struct Proxy {
@@ -740,6 +741,8 @@ impl Inner {
 
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
+        // The hot tier first: the reconciler's copy checks the hot tier after its write to the
+        // cold tier, and takes its copy back if the object is gone.
         self.hot.delete(key).await?;
         self.cold.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0)).await

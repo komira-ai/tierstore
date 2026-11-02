@@ -12,7 +12,7 @@ One `tierstore` process runs three things over the same pair of tiers:
 
 - a proxy, which answers reads and takes writes;
 - the S3 front of that proxy, which checks signatures and serves one bucket, path-style, over plain HTTP;
-- a reconciler, which copies written objects to the cold tier, applies deletes, evicts from the hot tier and publishes the hot tier's usage. Only one reconciler works at a time: it holds a lease in the hot tier, so any number of processes may run over the same tiers.
+- a reconciler, which copies written objects to the cold tier, forgets deleted ones (a delete removes both tiers' copies at once, and a copy that lands after it takes itself back), evicts from the hot tier and publishes the hot tier's usage. Only one reconciler works at a time: it holds a lease in the hot tier, so any number of processes may run over the same tiers.
 
 A tier is `memory` (lost when the process stops, for tests), `dir:<path>` (a directory of the local file system) or `s3:<bucket>` (a bucket of an S3-compatible store).
 
