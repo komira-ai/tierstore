@@ -653,10 +653,11 @@ impl Reconciler {
                     Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
                     Err(error) => return Err(error),
                 };
-                if !self.cold_holds_copy(&victim.key, &hot).await? {
-                    return Ok(Eviction::Kept);
+                match self.cold_holds_copy(&victim.key, &hot).await? {
+                    Some(true) => hot.tag,
+                    Some(false) => return Ok(Eviction::Kept),
+                    None => return Ok(Eviction::Gone),
                 }
-                hot.tag
             }
         };
         match self.hot.delete_if_match(&victim.key, &tag).await {
@@ -670,20 +671,31 @@ impl Reconciler {
     /// Whether the cold tier holds a real object under `key` of the content of `hot`: not a
     /// reservation, not nothing, and not another object. The tags are not compared (two tiers of
     /// different kinds tag the same bytes differently): the sizes are, and if they agree the bytes.
-    async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<bool, Error> {
+    /// `None` if the hot object is gone by the time it is read.
+    async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         match self.cold.head(key).await {
             Ok(cold) if !cold.reservation && cold.size == hot.size => self.same_bytes(key).await,
-            Ok(_) => Ok(false),
-            Err(Error::NotFound(_)) => Ok(false),
+            Ok(_) => Ok(Some(false)),
+            Err(Error::NotFound(_)) => Ok(Some(false)),
             Err(error) => Err(error),
         }
     }
 
     /// Whether both tiers hold the same bytes under `key`, read as the chunks they come in (one
-    /// chunk of each at a time, and a read stops at the first difference).
-    async fn same_bytes(&self, key: &str) -> Result<bool, Error> {
-        let mut hot = self.hot.get_stream(key, None).await?;
-        let mut cold = self.cold.get_stream(key, None).await?;
+    /// chunk of each at a time, and a read stops at the first difference). An object that is not
+    /// there to be read is not an error: the cold one is not held (`Some(false)`), and the hot
+    /// one is gone (`None`).
+    async fn same_bytes(&self, key: &str) -> Result<Option<bool>, Error> {
+        let mut hot = match self.hot.get_stream(key, None).await {
+            Ok(stream) => stream,
+            Err(Error::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let mut cold = match self.cold.get_stream(key, None).await {
+            Ok(stream) => stream,
+            Err(Error::NotFound(_)) => return Ok(Some(false)),
+            Err(error) => return Err(error),
+        };
         let (mut mine, mut theirs) = (Bytes::new(), Bytes::new());
         loop {
             if mine.is_empty() {
@@ -693,11 +705,11 @@ impl Reconciler {
                 theirs = next_chunk(&mut cold).await?;
             }
             if mine.is_empty() || theirs.is_empty() {
-                return Ok(mine.is_empty() && theirs.is_empty());
+                return Ok(Some(mine.is_empty() && theirs.is_empty()));
             }
             let len = mine.len().min(theirs.len());
             if mine.split_to(len) != theirs.split_to(len) {
-                return Ok(false);
+                return Ok(Some(false));
             }
         }
     }

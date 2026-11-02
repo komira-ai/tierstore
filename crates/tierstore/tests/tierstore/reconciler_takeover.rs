@@ -107,3 +107,46 @@ async fn a_takeover_whose_read_of_either_tier_fails_reports_it_and_evicts_on_the
         assert_absent(&*rig.hot_mem, "k1").await;
     }
 }
+
+/// Asserts that an object that is not there when the bytes are read does not abort the pass: a hot
+/// object that vanished is forgotten (nothing is lost) and a cold object that vanished leaves the
+/// hot object in place, with the objects after it evicted and no failure reported.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_whose_read_finds_an_object_gone_goes_on_with_the_next_candidate() {
+    for hot_gone in [true, false] {
+        let (rig, mut second) = after_a_takeover().await;
+        let tier = if hot_gone { &rig.hot } else { &rig.cold };
+        tier.fail_next_on(Op::Get, "k1", Error::NotFound("k1".to_owned()));
+
+        let report = second.pass().await;
+        assert_eq!(report.failed, Vec::<Error>::new(), "hot: {hot_gone}");
+        assert_eq!(
+            report.evicted,
+            if hot_gone { 1 } else { 2 },
+            "hot: {hot_gone}"
+        );
+        assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+        assert_absent(&*rig.hot_mem, "k2").await;
+    }
+}
+
+/// Asserts that a candidate left in the hot tier is asked again by a reconciler that takes over
+/// from the checkpoint the pass stored: the stored cursor stays on the candidate, so the journal
+/// is read from it, and the candidate is evicted once the cold tier holds its object.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_after_a_pass_that_kept_a_candidate_asks_again_from_the_stored_cursor() {
+    let (rig, mut second) = after_a_takeover().await;
+    let held = rig.cold_mem.get("k1", None).await.unwrap();
+    rig.cold_mem.delete("k1").await.unwrap();
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    second.stop().await;
+
+    rig.cold_mem.put("k1", held).await.unwrap();
+    let mut third = rig.reconciler("r3", 40);
+    let report = third.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+}
