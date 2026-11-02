@@ -120,7 +120,7 @@ struct Harness {
 
 impl Harness {
     /// Runs `test` on a current-thread runtime started paused, with the clock held and what
-    /// the client takes counted from zero. Each idle park first turns `relay`, if there is
+    /// the client takes counted from zero. Each idle park also turns `relay`, if there is
     /// one.
     fn run<F: Future<Output = ()>>(relay: Option<Arc<Relay>>, test: impl FnOnce(Self) -> F) {
         let parks = Arc::new(Parks::default());
@@ -129,10 +129,11 @@ impl Harness {
             .enable_all()
             .start_paused(true)
             .on_thread_park(move || {
+                // Counted first: a relay that fails then fails the test, not a turn waiting.
+                counted.parked();
                 if let Some(relay) = &relay {
                     relay.turn();
                 }
-                counted.parked();
             })
             .build()
             .unwrap();
