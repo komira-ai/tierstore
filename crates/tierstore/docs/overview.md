@@ -1,6 +1,6 @@
 # What tierstore is
 
-tierstore is an S3-compatible object store server that puts a small, fast tier in front of a large, slow one. Clients speak S3 to one bucket. New objects are written to the hot tier, copied to the cold tier in the background, and removed from the hot tier when it fills. It is a Linux binary, `tierstore`, with no package and no container image.
+tierstore is an S3-compatible object store server that puts a small, fast tier in front of a large, slow one. Clients speak S3 to one bucket. New objects are written to the hot tier, copied to the cold tier in the background, and removed from the hot tier when it fills. It is a binary, `tierstore`, for Linux (x86_64, arm64) and macOS (Apple silicon), with no package and no container image.
 
 This guide is for the person who installs and runs it. It describes what is on the main branch of the source today. A piece that is planned and not in the code is described only under a heading titled "Not in a release yet", so you can tell the two apart.
 

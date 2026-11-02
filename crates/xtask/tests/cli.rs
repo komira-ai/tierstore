@@ -145,12 +145,12 @@ fn fetch_over_http_is_refused_before_any_connection() {
 #[test]
 fn package_sums_and_verify_assets_sums_chain() {
     // Catches: the flags of `package`, `sums assemble` and `verify-assets sums` reaching the
-    // wrong arguments: the chain a release job runs, over two platforms.
+    // wrong arguments: the chain a release job runs, over every platform.
     let d = dir("chain");
     put(&d, "tierstore", "the binary");
     put(&d, "sbom.json", "{\"bomFormat\":\"CycloneDX\"}");
     std::fs::create_dir_all(d.join("out")).expect("out");
-    for platform in ["linux-x86_64", "linux-arm64"] {
+    for platform in ["linux-x86_64", "linux-arm64", "macos-arm64"] {
         let o = run(
             &d,
             &[
@@ -248,8 +248,9 @@ fn release_locate_prints_the_run_and_appends_it_to_the_output_file() {
     let names = [
         "assets-linux-x86_64",
         "assets-linux-arm64",
+        "assets-macos-arm64",
         "sha256sums",
-        "bundles-linux",
+        "bundles",
     ];
     let artifacts: Vec<String> = names
         .iter()
