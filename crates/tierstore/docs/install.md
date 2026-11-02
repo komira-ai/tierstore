@@ -64,7 +64,7 @@ Every check above names one signer: the workflow file `.github/workflows/artifac
 
 ## macOS (Apple silicon)
 
-The macOS binary is `tierstore-<commit>-macos-arm64.tar.gz`, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This section covers taking and verifying it; running tierstore as a service on macOS is not described here, and the update hook (`tierstore update-hook`) is Linux only.
+The macOS binary is `tierstore-<commit>-macos-arm64.tar.gz`, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This section covers taking and verifying it. A Mac runs it as a LaunchDaemon, one build node on loopback that the host updater updates by a plain restart through `tierstore update-hook`: the files and the layout are in [The update hook](update-hook.md#on-a-mac).
 
 Take the tarball, its bundle and `SHA256SUMS` from one release, with `gh` (Homebrew's `gh` has `gh attestation`) or with `curl` from the release page:
 
@@ -88,7 +88,7 @@ tar -xzf tierstore-<commit>-macos-arm64.tar.gz tierstore
 ./tierstore --version
 ```
 
-On a Mac this is the last step: the sections after it (the placement under `/usr/libexec`, the account, the systemd unit and its start) are for a Linux host.
+On a Mac this is the last step of this page: the sections after it (the placement under `/usr/libexec`, the account, the systemd unit and its start) are for a Linux host. The release goes in its own directory, `/usr/local/tierstore/current` is a link to it, and the job is placed as [On a Mac](update-hook.md#on-a-mac) lists.
 
 ## Place the binary
 

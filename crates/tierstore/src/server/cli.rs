@@ -119,7 +119,7 @@ use super::lock::{self, LockFile, check_lock_path};
 use super::oci::{
     self, OciDrain, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
 use super::{Drained, Server, ServerConfig};
 
@@ -1257,7 +1257,7 @@ fn capabilities(args: &[OsString]) -> ExitCode {
 #[must_use]
 pub fn main(args: Vec<OsString>) -> ExitCode {
     // The host updater's hook: a verb of its own, answered before any flag is parsed.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     if args.get(1).is_some_and(|verb| verb == update_hook::VERB) {
         return update_hook::main(&args);
     }

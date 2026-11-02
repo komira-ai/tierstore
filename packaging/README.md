@@ -15,6 +15,9 @@ no package and no container image. These files, for Linux hosts, go beside the b
 | `tierstore-update.conf` | the sysusers.d entry of the hook's own account, `tierstore-update`, with `tierstore` listed in its group |
 | `tmpfiles.d/tierstore-update.conf` | the tmpfiles.d entry of the hook's state directory, `/var/lib/updater/hooks/tierstore`, and its `slots` directory: mode 0750, owner and group `tierstore-update` |
 | `polkit/50-tierstore-update.rules` | the polkit rule that lets `tierstore-update` start and stop the two slot units, and nothing else |
+| `macos/com.komira.tierstore.plist` | the LaunchDaemon of a Mac: one instance, a build node on loopback, as `_tierstore`, started at load and kept alive ([A Mac](#a-mac)) |
+| `macos/tierstore.toml` | that build node's file: `[local_cache]` in front of the cold store, on `127.0.0.1:9300` |
+| `macos/updater.d/tierstore.toml` | the declaration the host updater of a Mac reads: the hook, the launchd job it stops and starts, the one port and the state directory |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads these files and
@@ -232,6 +235,32 @@ stopping the unit, and `cleanup` run again (the updater retries it) waits for th
 finishes; a `rollback` that stops a slot still draining can fail the same way. Until the hook
 waits for a stop as long as the unit allows, a host that needs every step to succeed the first
 time keeps `--drain-deadline` at most 220s, which brings the stop within 295 s.
+
+## A Mac
+
+A Mac runs one instance as a LaunchDaemon, a build node (a read cache in front of the cold store) that only the processes of that Mac reach, on `127.0.0.1:9300`; the host updater updates it through `tierstore update-hook` by a plain restart, with a gap in serving while the job restarts. [The update hook](../crates/tierstore/docs/update-hook.md#on-a-mac) lists where each file goes, who owns it, and what each step does. In short, as root:
+
+```sh
+dscl . -read /Users/_tierstore >/dev/null   # the account exists (made with dscl or sysadminctl)
+install -d -m 0755 -o root -g wheel /usr/local/tierstore /usr/local/tierstore/releases
+install -d -m 0750 -o root -g _tierstore /usr/local/tierstore/etc
+install -d -m 0700 -o _tierstore -g _tierstore /usr/local/tierstore/cache /usr/local/tierstore/log
+install -d -m 0700 -o root -g wheel /var/db/updater/hooks/tierstore
+install -d -m 0755 -o root -g wheel /usr/local/tierstore/releases/<commit>
+install -m 0755 -o root -g wheel tierstore /usr/local/tierstore/releases/<commit>/tierstore
+ln -s /usr/local/tierstore/releases/<commit> /usr/local/tierstore/current
+install -m 0640 -o root -g _tierstore macos/tierstore.toml /usr/local/tierstore/etc/tierstore.toml
+install -m 0644 -o root -g wheel macos/updater.d/tierstore.toml /usr/local/etc/updater.d/tierstore.toml
+install -m 0644 -o root -g wheel macos/com.komira.tierstore.plist /Library/LaunchDaemons/com.komira.tierstore.plist
+```
+
+Then the key files in `/usr/local/tierstore/etc` (each `_tierstore`, mode 0600), the hook's first record as `/var/db/updater/hooks/tierstore/state.json` (root, mode 0600):
+
+```json
+{"schema":1,"kind":"single","updating":false,"markers":[]}
+```
+
+and `launchctl bootstrap system /Library/LaunchDaemons/com.komira.tierstore.plist`, which starts the job. `crates/tierstore/tests/packaging_macos.rs` reads the three files and checks that the plist runs the binary of `current` as `_tierstore` with `KeepAlive` and `RunAtLoad`, that the binary accepts its command line and the file, that the file serves `[local_cache]` on loopback only, that `ExitTimeOut` covers the drain, and that the plist, the declaration, the file and the hook name the same job, program, account and port.
 
 ## Presigned PUT URLs
 

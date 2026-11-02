@@ -6,7 +6,7 @@ use super::super::ports::{Nft, PortError, PortKind};
 use super::runner::{Call, Output, Runner, checked, run};
 
 /// Where the Debian and Ubuntu package puts `nft`.
-pub const DEFAULT_PROGRAM: &str = "/usr/sbin/nft";
+pub const DEFAULT_PROGRAM: &str = super::NFT_PROGRAM;
 const KIND: PortKind = PortKind::Nft;
 /// What `nft` says on standard error when the table it was asked about is not there
 /// (`Error: No such file or directory`, the text of ENOENT).

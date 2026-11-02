@@ -1,0 +1,66 @@
+# /usr/local/etc/updater.d/tierstore.toml: tierstore's declaration for the host updater on a Mac.
+# root:wheel, mode 0644, in directories root owns that no group or others can write (the hook
+# refuses it otherwise; /etc is a link on macOS, so the declaration is not under it). It names
+# the hook (`tierstore update-hook <step>`, crates/tierstore/docs/update-hook.md), the account
+# the service runs as, and the one launchd job the hook stops and starts. The hook reads uid,
+# health_ports, state_dir and hook.service before every step; the rest is the updater's.
+#
+# A Mac runs one instance (com.komira.tierstore.plist), and an update is a plain restart: the
+# hook stops the job, points /usr/local/tierstore/current at the staged release and starts it
+# again, so the instance does not serve for the length of that restart.
+#
+# Top-level keys come first: in TOML a key after a table header belongs to that table.
+name = "tierstore"
+# The hook executable, inside the verified release; the updater runs `tierstore update-hook`.
+binary = "tierstore"
+# Whose attestation the release must carry: this repository's artifacts workflow.
+signer = { repository = "komira-ai/tierstore", workflow = "artifacts.yml" }
+# The account the service runs as (the plist's UserName). Required here.
+uid = "_tierstore"
+registration_ttl_secs = 300
+# The one port of the one instance, on loopback (`listen` and `slot` in tierstore.toml).
+health_ports = [9300]
+# After cutover, verify must succeed by then (at least verify plus rollback), or the updater
+# rolls back.
+verify_deadline_secs = 1600
+# The one ceiling on a pending promotion: the updater applies it, the hook never does.
+promotion_ceiling_secs = 3600
+# A cleanup that fails after its commit is run again forward this many times.
+cleanup_retries = 3
+# The hook's record and lock: owner root, mode 0700. The service never reads it: it runs from
+# the release links, which are in /usr/local/tierstore (owner root, mode 0755).
+state_dir = "/var/db/updater/hooks/tierstore"
+# At the updater's start: `tierstore update-hook restore` starts the job if it is not running
+# (launchd starts it at boot by itself, RunAtLoad).
+boot = "restore"
+
+[hook]
+# The hook runs as root: only root may bootstrap and boot out a job of the system domain.
+user = "root"
+group = "wheel"
+# The launchd label of the one job the hook may stop and start. No slot units: there are none.
+service = "com.komira.tierstore"
+read_paths = [
+    "/bin/launchctl",
+    "/usr/local/etc/updater.d/tierstore.toml",
+    "/Library/LaunchDaemons/com.komira.tierstore.plist",
+]
+# The release links current and previous; no step touches the service's cache or its keys.
+write_paths = ["/usr/local/tierstore"]
+environment = {}
+
+[hook.timeout_secs]
+prepare = 60
+# The bootout (the drain: ExitTimeOut is 90 s), the start, the wait for /readyz (120 looks) and
+# the probe (60 looks), with a margin.
+cutover = 600
+# promotion_bound_secs and a margin.
+verify = 1000
+rollback = 600
+cleanup = 120
+
+[hook.params]
+# How long verify waits, after the restart, for the new instance to say read-write.
+promotion_bound_secs = 900
+# One instance: a plain restart, whatever the releases can do.
+mode = "restart"

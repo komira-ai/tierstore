@@ -3,7 +3,9 @@
 //! The directory is opened once, with `O_DIRECTORY | O_NOFOLLOW`, and every check is made on
 //! that descriptor: it must be a directory owned by the hook's own user and group with mode
 //! exactly 0750 (the group, which holds the service account, may read and search it, and nobody
-//! may write to it but the hook), and the service account must be in that group: its primary group, or listed in it. Every
+//! may write to it but the hook), and the service account must be in that group: its primary group, or listed in it. A
+//! private directory ([`StateFiles::private`], a launchd host's) must be owned by the hook's
+//! user with mode exactly 0700, and its group is not looked at. Every
 //! later open, the lock file, `state.json` and its temporary file, the rename and the sync, is
 //! made relative to that descriptor, so a swap of the path after the check changes nothing.
 //! The record must be a regular file of the hook's user that no group or others can write. The
@@ -33,10 +35,20 @@ pub const LOCK_FILE: &str = "lock";
 /// The record, in the state directory.
 pub const STATE_FILE: &str = "state.json";
 const TEMP_FILE: &str = "state.json.tmp";
-/// The one mode the state directory may have.
-const DIR_MODE: u32 = 0o750;
-/// The mode bits that let a group or others write.
-const OTHERS_WRITE: u32 = 0o022;
+/// The one mode the state directory may have when the service's group may reach it.
+const DIR_MODE: Mode = Mode::from_bits_truncate(0o750);
+/// The one mode a private state directory may have: the hook's alone.
+const PRIVATE_MODE: Mode = Mode::from_bits_truncate(0o700);
+
+/// The permission bits of `stat` (`mode_t` is `u16` on macOS and `u32` on Linux).
+pub(super) fn permissions(stat: &rustix::fs::Stat) -> Mode {
+    Mode::from_raw_mode(stat.st_mode)
+}
+
+/// Whether `mode` lets a group or others write.
+pub(super) fn others_write(mode: Mode) -> bool {
+    mode.intersects(Mode::WGRP | Mode::WOTH)
+}
 
 /// Who the state directory belongs to and who must be able to reach it.
 pub struct Account {
@@ -51,10 +63,19 @@ pub struct Account {
     pub group_file: PathBuf,
 }
 
+/// Who besides the hook reaches the state directory.
+enum Reach {
+    /// The service, through the directory's group (the slot links of Linux): mode 0750.
+    Shared(Account),
+    /// Nobody: the hook's user alone, the user id given (a launchd host, whose service runs
+    /// from the release links and never reads the state directory): mode 0700, no group check.
+    Private(u32),
+}
+
 /// The state directory `dir`.
 pub struct StateFiles {
     dir: PathBuf,
-    account: Account,
+    reach: Reach,
     fd: OnceCell<OwnedFd>,
 }
 
@@ -99,14 +120,61 @@ fn primary_group(text: &str, name: &str) -> Option<u32> {
     })
 }
 
+/// Whether the service account is a member of the directory's group: the service reaches the
+/// slot links through that membership. It is a member when the group is its primary group
+/// (the `gid` field of its line in `passwd`, next to the group file) or when the group's
+/// member list names it. Only those two files are read, not the name service switch.
+fn check_service(account: &Account) -> Result<(), Fault> {
+    let file = &account.group_file;
+    let text = fs::read_to_string(file)
+        .map_err(|error| Fault(format!("cannot read {}: {error}", file.display())))?;
+    let service = account.service.as_str();
+    if members_of(&text, account.group).any(|member| member == service) {
+        return Ok(());
+    }
+    let passwd = file.with_file_name("passwd");
+    let primary = fs::read_to_string(&passwd)
+        .ok()
+        .and_then(|lines| primary_group(&lines, service));
+    if primary == Some(account.group) {
+        return Ok(());
+    }
+    Err(format!(
+        "the service account {service} is not a member of group {} in {} and its primary group in {} is not that group",
+        account.group,
+        file.display(),
+        passwd.display()
+    )
+    .into())
+}
+
 impl StateFiles {
     /// The directory `dir`, held by `account`.
     #[must_use]
     pub fn new(dir: PathBuf, account: Account) -> StateFiles {
         StateFiles {
             dir,
-            account,
+            reach: Reach::Shared(account),
             fd: OnceCell::new(),
+        }
+    }
+
+    /// The directory `dir`, the hook's alone: owned by `owner` with mode 0700. Its group is not
+    /// checked, since the mode gives the group nothing.
+    #[must_use]
+    pub fn private(dir: PathBuf, owner: u32) -> StateFiles {
+        StateFiles {
+            dir,
+            reach: Reach::Private(owner),
+            fd: OnceCell::new(),
+        }
+    }
+
+    /// The user that must own the directory and the record: the hook's.
+    fn owner(&self) -> u32 {
+        match &self.reach {
+            Reach::Shared(account) => account.owner,
+            Reach::Private(owner) => *owner,
         }
     }
 
@@ -146,57 +214,40 @@ impl StateFiles {
             }
         })?;
         let stat = fstat(&fd).map_err(io_error)?;
-        if stat.st_uid != self.account.owner {
+        if stat.st_uid != self.owner() {
             return Err(format!(
                 "{shown} is owned by user {}, not {}",
-                stat.st_uid, self.account.owner
+                stat.st_uid,
+                self.owner()
             )
             .into());
         }
-        if stat.st_gid != self.account.group {
+        let (mode, account) = match &self.reach {
+            Reach::Shared(account) => (DIR_MODE, Some(account)),
+            Reach::Private(_) => (PRIVATE_MODE, None),
+        };
+        if let Some(account) = account
+            && stat.st_gid != account.group
+        {
             return Err(format!(
                 "{shown} belongs to group {}, not {}",
-                stat.st_gid, self.account.group
+                stat.st_gid, account.group
             )
             .into());
         }
-        if stat.st_mode & 0o7777 != DIR_MODE {
+        let found = permissions(&stat);
+        if found != mode {
             return Err(format!(
-                "{shown} has mode {:04o}, not {DIR_MODE:04o}",
-                stat.st_mode & 0o7777
+                "{shown} has mode {:04o}, not {:04o}",
+                found.bits(),
+                mode.bits()
             )
             .into());
         }
-        self.check_service()?;
+        if let Some(account) = account {
+            check_service(account)?;
+        }
         Ok(fd)
-    }
-
-    /// Whether the service account is a member of the directory's group: the service reaches the
-    /// slot links through that membership. It is a member when the group is its primary group
-    /// (the `gid` field of its line in `passwd`, next to the group file) or when the group's
-    /// member list names it. Only those two files are read, not the name service switch.
-    fn check_service(&self) -> Result<(), Fault> {
-        let file = &self.account.group_file;
-        let text = fs::read_to_string(file)
-            .map_err(|error| Fault(format!("cannot read {}: {error}", file.display())))?;
-        let service = self.account.service.as_str();
-        if members_of(&text, self.account.group).any(|member| member == service) {
-            return Ok(());
-        }
-        let passwd = file.with_file_name("passwd");
-        let primary = fs::read_to_string(&passwd)
-            .ok()
-            .and_then(|lines| primary_group(&lines, service));
-        if primary == Some(self.account.group) {
-            return Ok(());
-        }
-        Err(format!(
-            "the service account {service} is not a member of group {} in {} and its primary group in {} is not that group",
-            self.account.group,
-            file.display(),
-            passwd.display()
-        )
-        .into())
     }
 
     /// Checks the record opened as `fd`: a regular file of the hook's user that no group or
@@ -206,14 +257,10 @@ impl StateFiles {
         if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
             return Err("is not a regular file".into());
         }
-        if stat.st_uid != self.account.owner {
-            return Err(format!(
-                "is owned by user {}, not {}",
-                stat.st_uid, self.account.owner
-            )
-            .into());
+        if stat.st_uid != self.owner() {
+            return Err(format!("is owned by user {}, not {}", stat.st_uid, self.owner()).into());
         }
-        if stat.st_mode & OTHERS_WRITE != 0 {
+        if others_write(permissions(&stat)) {
             return Err("can be written by a group or others".into());
         }
         Ok(())
