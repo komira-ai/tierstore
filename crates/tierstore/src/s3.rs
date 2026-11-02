@@ -30,10 +30,11 @@
 //!   `x-amz-meta-tierstore-reservation: 1`, and gives the `ETag` of the answer without its quotes;
 //!   a store that does not claim conditional puts is refused (the backend always claims them, see
 //!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
-//!   metadata. A write the store answers with 409 is sent again, up to three times in all. A
+//!   metadata. A write is sent once: one the store answers with 409 (see below) is
+//!   [`Error::Unavailable`], and the caller reads the key to see whether its write landed. A
 //!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_marked` is
-//!   one GET for the whole object, whose answer carries the metadata; a ranged read is a ranged
-//!   GET and a HEAD.
+//!   one GET for the whole object, whose answer carries the metadata; a ranged read is a HEAD, a
+//!   ranged GET and a HEAD (see [`Backend::get_marked`]).
 //! - `delete` is a DELETE; a 404 is a success.
 //! - `delete_if_match` is best effort, in one of two ways, which
 //!   [`Backend::settle_conditional_delete`] picks once at start-up by asking the store. Where the store enforces `If-Match` on a DELETE
@@ -103,8 +104,10 @@
 //!   (Insufficient Storage, which is how MinIO reports a full drive) is [`Error::Full`]. 501 (Not
 //!   Implemented: the store does not do what was asked) and anything else that is not a success
 //!   is [`Error::Other`]. A 409 `ConditionalRequestConflict` (two writers racing a conditional
-//!   write of one key; the store does not say which won) is [`Error::Unavailable`]: a retry is
-//!   answered 412 if the other writer won.
+//!   write of one key; the store does not say which won) is [`Error::Unavailable`]: the write may
+//!   have landed, so the caller reads the key to see whether the tag is the one it wrote, and does
+//!   not send the write again as if it had not been applied (a retry is answered 412 if the other
+//!   writer won, and also if this one did).
 //!
 //! Each request is bounded by the `request_timeout` of the [`S3Config`], and a read is sent
 //! again after a failure in transport; a write never is. A part is the exception to the bound:
@@ -125,7 +128,7 @@ use objstore_s3::{
 };
 use tokio::sync::mpsc;
 
-use crate::backend::get_then_head;
+use crate::backend::get_between_heads;
 use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
 
 pub use objstore_s3::Capabilities;
@@ -304,8 +307,9 @@ fn map_error(error: ObjectStoreError, key: &str) -> Error {
         // 409 `ConditionalRequestConflict`: another write of the key was in flight when this
         // conditional write arrived (S3 and MinIO both answer it for two writers racing a
         // create-only put). Neither the store's documentation nor its answer says which writer
-        // won, so the outcome is unknown, and the answer is the one the documentation gives for
-        // it: try again. A retry gets a plain 412 if the other writer won.
+        // won, so the outcome is unknown (this write may have landed), and the answer is the one
+        // the documentation gives for it: try again. A retry gets a 412 if the other writer won,
+        // and also if this one did, so a caller reads the key before it believes a 412.
         ObjectStoreError::Service { ref code, .. } if code == "ConditionalRequestConflict" => {
             Error::Unavailable(message)
         }
@@ -491,7 +495,7 @@ impl Backend for S3Backend {
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool), Error> {
         if range.is_some() {
-            return get_then_head(self, key, range).await;
+            return get_between_heads(self, key, range).await;
         }
         let object = object_key(key)?;
         let all = self.store.get_all_marked(&object);

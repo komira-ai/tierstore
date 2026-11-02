@@ -157,17 +157,33 @@ pub(crate) fn upload_page(
     page
 }
 
-/// The bytes of a read and then the reservation mark of a HEAD, for a backend that cannot give
-/// both from one object. A replacement between the two calls shows: the mark is that of the object
-/// the HEAD found.
-pub(crate) async fn get_then_head<B: Backend + ?Sized>(
+/// How many times in all [`get_between_heads`] reads before it gives up.
+const MARKED_READ_TRIES: usize = 3;
+
+/// The bytes of a read and the reservation mark of the object they were read from, for a backend
+/// that cannot give both from one object: a HEAD, the read, and a HEAD. The read is given only if
+/// both HEADs found the same tag and the same mark, so the bytes are not those of a reservation
+/// that was replaced by a real object (or the other way round) while they were read; if they
+/// differ the three calls are made again, `MARKED_READ_TRIES` times in all.
+///
+/// # Errors
+/// An error of any of the calls. [`Error::Unavailable`] if the key was replaced during every try.
+pub(crate) async fn get_between_heads<B: Backend + ?Sized>(
     backend: &B,
     key: &str,
     range: Option<ByteRange>,
 ) -> Result<(Bytes, bool), Error> {
-    let bytes = backend.get(key, range).await?;
-    let head = backend.head(key).await?;
-    Ok((bytes, head.reservation))
+    for _ in 0..MARKED_READ_TRIES {
+        let before = backend.head(key).await?;
+        let bytes = backend.get(key, range).await?;
+        let after = backend.head(key).await?;
+        if before.tag == after.tag && before.reservation == after.reservation {
+            return Ok((bytes, after.reservation));
+        }
+    }
+    Err(Error::Unavailable(format!(
+        "{key}: replaced during each of {MARKED_READ_TRIES} reads"
+    )))
 }
 
 /// The error of a reservation call that a backend does not override.
@@ -312,19 +328,22 @@ pub trait Backend: Send + Sync {
 
     /// As [`Backend::get`], and whether the object is a reservation ([`Meta::reservation`]).
     ///
-    /// The provided implementation reads, then asks [`Backend::head`], which costs a request and
-    /// leaves a window in which the object is replaced between the two: the mark is that of the
-    /// object the HEAD found. The in-memory, directory and S3 backends read both from one object
-    /// (S3 for a read of the whole object; a ranged read takes the provided way).
+    /// The provided implementation is a [`Backend::head`], the read and a second HEAD, and gives
+    /// the read only if the two HEADs agree on the tag and the mark: bytes read while a
+    /// reservation was replaced by a real object (or the other way round) are never given with
+    /// the mark of the other. If they disagree it tries again, three times in all. It costs two
+    /// requests more than a read. The in-memory, directory and S3 backends read both from one
+    /// object (S3 for a read of the whole object; a ranged read takes the provided way).
     ///
     /// # Errors
-    /// As [`Backend::get`], and [`Error::NotFound`] if the object was removed after the read.
+    /// As [`Backend::get`], [`Error::NotFound`] if the object was removed meanwhile, and
+    /// [`Error::Unavailable`] if the key was replaced during each of the three tries.
     async fn get_marked(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool), Error> {
-        get_then_head(self, key, range).await
+        get_between_heads(self, key, range).await
     }
 
     /// As [`Backend::get`], for a read that is given as the chunks of the bytes: the bytes of

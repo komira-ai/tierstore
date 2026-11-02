@@ -61,10 +61,11 @@ async fn a_conditional_delete_takes_a_reservation_only_on_its_tag() {
     conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag(&backend).await;
 }
 
-/// Asserts that a whole read with the mark is one GET and no HEAD, and that a ranged one is a
-/// ranged GET and a HEAD.
+/// Asserts that a whole read with the mark is one GET and no HEAD, and that a ranged one is a HEAD,
+/// a ranged GET and a HEAD, so that the bytes are given only for an object the two HEADs agree on.
 #[tokio::test]
-async fn a_read_with_the_mark_is_one_get_for_a_whole_object_and_a_get_and_a_head_for_a_range() {
+async fn a_read_with_the_mark_is_one_get_for_a_whole_object_and_a_get_between_two_heads_for_a_range()
+ {
     let (s3, backend) = backend().await;
     backend.put_reservation("k", reservation(1)).await.unwrap();
     let before = s3.requests().len();
@@ -83,7 +84,7 @@ async fn a_read_with_the_mark_is_one_get_for_a_whole_object_and_a_get_and_a_head
         .iter()
         .map(|line| line.split(' ').next().unwrap_or(""))
         .collect();
-    assert_eq!(methods, ["GET", "HEAD"]);
+    assert_eq!(methods, ["HEAD", "GET", "HEAD"]);
 }
 
 /// Asserts that a key the client cannot name is `Other` for each reservation call and for a read

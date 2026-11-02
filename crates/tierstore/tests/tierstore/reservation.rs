@@ -2,7 +2,8 @@
 //! checks every backend passes, the calls the trait provides for a backend that does not do them,
 //! and the wrappers that pass them on (the fault injector, the RAM cache).
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -131,6 +132,104 @@ async fn a_backend_without_reservations_refuses_them_and_reads_the_mark_by_a_hea
     assert_eq!(absent, Err(Error::NotFound("absent".to_owned())));
     let vanished = Bare.get_marked("gone", None).await;
     assert_eq!(vanished, Err(Error::NotFound("gone".to_owned())));
+}
+
+/// A backend whose key `k` is replaced while it is read: each HEAD gives the next of `heads`
+/// (the last one again once they are used up), and a read gives the bytes `held` and counts itself.
+struct Replaced {
+    heads: Mutex<VecDeque<Meta>>,
+    reads: Mutex<usize>,
+}
+
+impl Replaced {
+    /// A backend whose HEADs are `(tag, reservation)` in turn.
+    fn heads(heads: &[(&str, bool)]) -> Self {
+        let metas = heads.iter().map(|(tag, reservation)| Meta {
+            size: 4,
+            tag: (*tag).to_owned(),
+            modified: 0,
+            reservation: *reservation,
+        });
+        Self {
+            heads: Mutex::new(metas.collect()),
+            reads: Mutex::new(0),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        *self.reads.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl Backend for Replaced {
+    async fn put(&self, key: &str, _body: Bytes) -> Result<(), Error> {
+        Err(Error::AlreadyExists(key.to_owned()))
+    }
+
+    async fn put_if_match(&self, key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {
+        Err(Error::NotFound(key.to_owned()))
+    }
+
+    async fn get(&self, _key: &str, _range: Option<ByteRange>) -> Result<Bytes, Error> {
+        *self.reads.lock().unwrap() += 1;
+        Ok(body("held"))
+    }
+
+    async fn head(&self, _key: &str) -> Result<Meta, Error> {
+        let mut heads = self.heads.lock().unwrap();
+        let next = if heads.len() > 1 {
+            heads.pop_front()
+        } else {
+            heads.front().cloned()
+        };
+        Ok(next.unwrap())
+    }
+
+    async fn delete(&self, _key: &str) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn list(&self, _prefix: &str) -> Result<Vec<Listed>, Error> {
+        Ok(Vec::new())
+    }
+}
+
+/// Asserts that a read with the mark, for a backend that takes the provided way, is a HEAD, a read
+/// and a HEAD, and gives the bytes with the mark only when the two HEADs found the same tag and
+/// the same mark: a reservation replaced by a real object during the read (a new tag), or a new
+/// mark on the same tag, makes the three calls again, and the bytes of the try that the HEADs
+/// agree on are the ones given. A key replaced during all three tries is `Unavailable`, with no
+/// bytes.
+#[tokio::test]
+async fn a_read_with_the_mark_is_given_only_if_the_key_was_not_replaced_while_it_was_read() {
+    let calm = Replaced::heads(&[("a", true)]);
+    let read = calm.get_marked("k", None).await.unwrap();
+    assert_eq!(read, (body("held"), true));
+    assert_eq!(calm.reads(), 1);
+
+    let swapped = Replaced::heads(&[("a", true), ("b", false), ("b", false), ("b", false)]);
+    let read = swapped.get_marked("k", None).await.unwrap();
+    assert_eq!(read, (body("held"), false));
+    assert_eq!(swapped.reads(), 2);
+
+    let remarked = Replaced::heads(&[("a", true), ("a", false), ("a", false)]);
+    let read = remarked.get_marked("k", None).await.unwrap();
+    assert_eq!(read, (body("held"), false));
+    assert_eq!(remarked.reads(), 2);
+
+    let churning = [
+        ("a", true),
+        ("b", true),
+        ("c", true),
+        ("d", true),
+        ("e", true),
+        ("f", true),
+    ];
+    let always = Replaced::heads(&churning);
+    let failed = always.get_marked("k", None).await.unwrap_err();
+    assert!(failed.is_unavailable(), "{failed}");
+    assert_eq!(always.reads(), 3);
 }
 
 fn faulty() -> FaultyBackend {

@@ -19,9 +19,12 @@
 //! ([`ObjectHead::reservation`]) and so does a read of the whole object
 //! ([`get_all_marked`](S3Store::get_all_marked)). A write without the header, a replace
 //! included, leaves the object unmarked, since S3 takes the metadata of an object from the
-//! request that writes it. A conditional write that the store answers with 409 (two writers
-//! racing for one key, which the store does not rank) was not applied, so it is sent again, at
-//! most three times in all.
+//! request that writes it. A conditional write is sent once, as the replace and the delete are:
+//! an answer of 409 `ConditionalRequestConflict` (two writers racing for one key, which the store
+//! does not rank) does not say which of them won, so the write may or may not have landed, and
+//! sending it again could be answered 412 to a writer that had won. The 409 is returned as it is
+//! (an [`ObjectStoreError::Service`] with status 409), and the caller reads the object to see
+//! whether the tag is the one it wrote.
 
 use std::future::Future;
 
@@ -33,9 +36,6 @@ use crate::{KeyPrefix, ListToken, ObjectKey, ObjectStoreError, PageSize};
 
 /// The user metadata header that marks an object as a reservation.
 const RESERVATION_HEADER: &str = "x-amz-meta-tierstore-reservation";
-
-/// How many times in all a conditional write that the store answers with 409 is sent.
-const CONFLICT_TRIES: u32 = 3;
 
 /// What a HEAD says about an object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -156,8 +156,8 @@ impl S3Store {
     }
 
     /// A PUT that carries `condition` (`If-Match` or `If-None-Match`) and, if `marked`, the
-    /// reservation mark, sent again while the store answers 409, up to `CONFLICT_TRIES`
-    /// times in all. Gives the `ETag` of the answer.
+    /// reservation mark, sent once (a 409 leaves it unknown whether it was applied, see the module
+    /// docs). Gives the `ETag` of the answer.
     async fn conditional_write(
         &self,
         key: &ObjectKey,
@@ -165,21 +165,15 @@ impl S3Store {
         condition: (&'static str, String),
         marked: bool,
     ) -> Result<String, ObjectStoreError> {
-        let mut tries = 1;
-        let resp = loop {
-            let mut headers = vec![condition.clone()];
-            if marked {
-                headers.push((RESERVATION_HEADER, "1".to_owned()));
-            }
-            let sent = self
-                .conn
-                .send(Method::PUT, Some(key), &[], headers, body.clone())
-                .await?;
-            if sent.status() != StatusCode::CONFLICT || tries == CONFLICT_TRIES {
-                break sent;
-            }
-            tries += 1;
-        };
+        let (name, value) = condition;
+        let mut headers = vec![(name, value)];
+        if marked {
+            headers.push((RESERVATION_HEADER, "1".to_owned()));
+        }
+        let resp = self
+            .conn
+            .send(Method::PUT, Some(key), &[], headers, body)
+            .await?;
         let bad = |what: &str| ObjectStoreError::Protocol(format!("PUT of {key}: {what}"));
         match resp.status() {
             StatusCode::OK => {
@@ -187,7 +181,7 @@ impl S3Store {
                 tag.map(str::to_owned).ok_or_else(|| bad("no ETag"))
             }
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
-            StatusCode::PRECONDITION_FAILED if condition.0 == "if-none-match" => {
+            StatusCode::PRECONDITION_FAILED if name == "if-none-match" => {
                 Err(ObjectStoreError::AlreadyExists(key.clone()))
             }
             _ => Err(failure(resp).await),

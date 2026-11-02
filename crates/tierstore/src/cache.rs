@@ -114,7 +114,8 @@ impl Cache {
 /// afterwards. Everything but `get`, `delete`, `put_if_match` and `put_reservation_if_match`
 /// goes to the backend as it is, the calls of multipart uploads and `put_reservation` included
 /// (a completion and a create-only reservation make an object, which no read has cached). A
-/// read with the mark (`get_marked`) is a `get` and a HEAD, as the trait provides it.
+/// read with the mark (`get_marked`) is a HEAD, a `get` and a HEAD, as the trait provides it: the
+/// bytes come with the mark only if the key was not replaced between the two HEADs.
 pub struct CachedStore {
     inner: Arc<dyn Backend>,
     budget: u64,
