@@ -307,7 +307,12 @@ impl Host {
 
     /// Starts `step` and returns at once: the running hook, its output piped.
     pub fn spawn_step(&self, step: &str) -> Child {
-        let words = self.words(step, "");
+        self.spawn_step_with(step, "")
+    }
+
+    /// Starts `step` with `extra` in the params file, and returns at once.
+    pub fn spawn_step_with(&self, step: &str, extra: &str) -> Child {
+        let words = self.words(step, extra);
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         self.command(Some(uid()), &words)
             .stdout(Stdio::piped())

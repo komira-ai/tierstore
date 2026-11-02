@@ -83,8 +83,11 @@ impl fmt::Display for Fault {
 #[derive(Clone, Debug)]
 pub struct Failure {
     pub client: String,
+    pub kind: Kind,
     pub op: String,
     pub fault: Fault,
+    /// The run said a restart's gap was open ([`Load::open_gap`]) when the request failed.
+    pub in_gap: bool,
 }
 
 impl fmt::Display for Failure {
@@ -105,6 +108,8 @@ pub struct Acked {
 pub struct Report {
     pub name: String,
     pub kind: Kind,
+    /// The client keeps its connection alive.
+    pub keep: bool,
     pub requests: u64,
     pub answered: u64,
     pub failures: Vec<Failure>,
@@ -115,17 +120,32 @@ pub struct Report {
     pub ended: Option<String>,
 }
 
+/// What one client has done so far, for [`Load::wait_more`].
+#[derive(Clone, Copy, Default)]
+struct Progress {
+    finished: u64,
+    /// An OCI client's sequence has ended.
+    ended: bool,
+}
+
 struct Shared {
     stop: AtomicBool,
-    /// The S3 clients' finished requests.
-    done: Mutex<u64>,
+    /// Set by the run while a restart's gap is open: from just before the step that stops the
+    /// old slot until that step has returned.
+    gap: AtomicBool,
+    /// Set by the run just before the step that drains the slot the OCI clients call: an OCI
+    /// sequence may end only after it.
+    draining: AtomicBool,
+    /// Each client's progress, in the order of the specs.
+    progress: Mutex<Vec<Progress>>,
     changed: Condvar,
 }
 
 impl Shared {
-    fn finished_one(&self) {
-        let mut done = self.done.lock().expect("the count");
-        *done += 1;
+    fn record(&self, index: usize, ended: bool) {
+        let mut progress = self.progress.lock().expect("the progress");
+        progress[index].finished += 1;
+        progress[index].ended |= ended;
         self.changed.notify_all();
     }
 }
@@ -242,9 +262,12 @@ pub fn clients(names: &Names, slot: u16) -> Vec<Spec> {
     ]
 }
 
-/// The bytes of the `seq`-th object of the client `name`: a size from 1 byte to 32 KiB, the
-/// content a digest of the name and the number, repeated.
+/// The bytes of the `seq`-th object of the client `name`: empty for every sixteenth number, else
+/// a size from 1 byte to 32 KiB, the content a digest of the name and the number, repeated.
 pub fn object(name: &str, seq: u64) -> Vec<u8> {
+    if seq % 16 == 1 {
+        return Vec::new();
+    }
     let seed = Sha256::digest(format!("{name}/{seq}").as_bytes());
     let size = 1 + usize::from(u16::from_be_bytes([seed[0], seed[1]])) % (32 << 10);
     seed.iter().copied().cycle().take(size).collect()
@@ -260,14 +283,17 @@ struct Client {
     spec: Spec,
     kept: Option<Conn>,
     report: Report,
+    shared: Arc<Shared>,
 }
 
 impl Client {
     fn fail(&mut self, op: &str, fault: Fault) {
         self.report.failures.push(Failure {
             client: self.spec.name.clone(),
+            kind: self.spec.kind,
             op: op.to_owned(),
             fault,
+            in_gap: self.shared.gap.load(Ordering::SeqCst),
         });
     }
 
@@ -345,9 +371,14 @@ impl Client {
         }
     }
 
-    /// The OCI client's `seq`-th request; false once its sequence has ended.
+    /// The OCI client's `seq`-th request; false once its sequence has ended. Its sequence may
+    /// end only on the drain of its slot: an end before the run said the drain begins is a
+    /// failure.
     fn oci(&mut self, seq: u64, registry: &Registry) -> bool {
-        let mut reads = vec![("GET", String::from("/v2/"), None)];
+        let mut reads = vec![
+            ("GET", String::from("/v2/"), None),
+            ("HEAD", String::from("/v2/"), None),
+        ];
         let (hex, size) = &registry.manifest;
         for method in ["GET", "HEAD"] {
             let path = format!("/v2/t1/app/manifests/sha256:{hex}");
@@ -364,10 +395,11 @@ impl Client {
         let op = format!("{method} {path}");
         let answer = match self.exchange(method, path, &self.host(), b"") {
             Ok(answer) => answer,
-            Err(Broke::BeforeAnswer { fresh: false, what }) if what.contains("end of stream") => {
-                self.report.ended = Some("a clean end of stream".to_owned());
-                return false;
-            }
+            Err(Broke::BeforeAnswer {
+                fresh: false,
+                eof: true,
+                ..
+            }) => return !self.end(&op, "a clean end of stream"),
             Err(broke) => {
                 self.fail(&op, Fault::Broke(broke));
                 return true;
@@ -376,18 +408,35 @@ impl Client {
         if answer.status != 200 {
             self.fail(&op, status(&answer));
         } else if let Some((hex, size)) = expected {
-            let length = answer.header("content-length").and_then(|n| n.parse().ok());
-            if length != Some(*size) {
-                self.fail(&op, Fault::Wrong(format!("content-length {length:?}")));
+            if answer.length() != Some(*size) {
+                self.fail(
+                    &op,
+                    Fault::Wrong(format!("content-length {:?}", answer.length())),
+                );
+            }
+            let digest = format!("sha256:{hex}");
+            if answer.header("docker-content-digest") != Some(digest.as_str()) {
+                let said = answer.header("docker-content-digest").map(str::to_owned);
+                self.fail(&op, Fault::Wrong(format!("docker-content-digest {said:?}")));
             }
             if *method == "GET" && hex_sha256(&answer.body) != *hex {
                 self.fail(&op, Fault::Wrong("not the digest asked for".into()));
             }
         }
         if answer.closes() {
-            self.report.ended = Some("Connection: close".to_owned());
-            return false;
+            return !self.end(&op, "Connection: close");
         }
+        true
+    }
+
+    /// Ends an OCI client's sequence by `why`; a failure if the drain of its slot has not begun.
+    /// Always true: the sequence is over either way.
+    fn end(&mut self, op: &str, why: &str) -> bool {
+        if !self.shared.draining.load(Ordering::SeqCst) {
+            let fault = Fault::Wrong(format!("{why} before the drain of its slot began"));
+            self.fail(op, fault);
+        }
+        self.report.ended = Some(why.to_owned());
         true
     }
 }
@@ -398,13 +447,14 @@ fn status(answer: &Answer) -> Fault {
     Fault::Status(answer.status, body.chars().take(200).collect())
 }
 
-fn run(spec: Spec, registry: &Registry, shared: &Shared) -> Report {
+fn run(index: usize, spec: Spec, registry: &Registry, shared: Arc<Shared>) -> Report {
     if let Some(remote) = &spec.remote {
         netns::enter(remote);
     }
     let report = Report {
         name: spec.name.clone(),
         kind: spec.kind,
+        keep: spec.keep,
         requests: 0,
         answered: 0,
         failures: Vec::new(),
@@ -416,20 +466,21 @@ fn run(spec: Spec, registry: &Registry, shared: &Shared) -> Report {
         spec,
         kept: None,
         report,
+        shared: Arc::clone(&shared),
     };
     let mut seq = 0;
     while !shared.stop.load(Ordering::SeqCst) {
         seq += 1;
-        match client.spec.kind {
+        let going = match client.spec.kind {
             Kind::S3 => {
                 client.s3(seq);
-                shared.finished_one();
+                true
             }
-            Kind::Oci => {
-                if !client.oci(seq, registry) {
-                    break;
-                }
-            }
+            Kind::Oci => client.oci(seq, registry),
+        };
+        shared.record(index, !going);
+        if !going {
+            break;
         }
     }
     client.report
@@ -440,26 +491,46 @@ impl Load {
     pub fn start(specs: Vec<Spec>, registry: &Registry) -> Load {
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
-            done: Mutex::new(0),
+            gap: AtomicBool::new(false),
+            draining: AtomicBool::new(false),
+            progress: Mutex::new(vec![Progress::default(); specs.len()]),
             changed: Condvar::new(),
         });
         let threads = specs
             .into_iter()
-            .map(|spec| {
+            .enumerate()
+            .map(|(index, spec)| {
                 let (shared, registry) = (Arc::clone(&shared), registry.clone());
-                thread::spawn(move || run(spec, &registry, &shared))
+                thread::spawn(move || run(index, spec, &registry, shared))
             })
             .collect();
         Load { shared, threads }
     }
 
-    /// Returns once the S3 clients have finished `n` more requests, answered or failed.
+    /// Returns once every client has finished `n` more requests, answered or failed, or (an OCI
+    /// client) has ended its sequence: each client takes part in each phase, not only the
+    /// fastest.
     pub fn wait_more(&self, n: u64) {
-        let mut done = self.shared.done.lock().expect("the count");
-        let target = *done + n;
-        while *done < target {
-            done = self.shared.changed.wait(done).expect("the count");
+        let mut progress = self.shared.progress.lock().expect("the progress");
+        let targets: Vec<u64> = progress.iter().map(|p| p.finished + n).collect();
+        while !progress
+            .iter()
+            .zip(&targets)
+            .all(|(p, &target)| p.ended || p.finished >= target)
+        {
+            progress = self.shared.changed.wait(progress).expect("the progress");
         }
+    }
+
+    /// Opens (`true`) or closes a restart's gap: the failures in between are marked
+    /// [`Failure::in_gap`].
+    pub fn gap(&self, open: bool) {
+        self.shared.gap.store(open, Ordering::SeqCst);
+    }
+
+    /// Says the slot the OCI clients call is about to drain: their sequences may end from now.
+    pub fn draining(&self) {
+        self.shared.draining.store(true, Ordering::SeqCst);
     }
 
     /// Stops the clients after the request each is sending, and returns what they did.

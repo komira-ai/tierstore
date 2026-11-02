@@ -18,14 +18,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rustix::thread::{LinkNameSpaceType, move_into_link_name_space};
 
-/// The address of the host on the veth.
-pub const LOCAL_V4: &str = "10.203.0.1";
+/// The address of the host on the veth: a documentation address (RFC 5737), which the run's own
+/// namespaces hold and nothing routes.
+pub const LOCAL_V4: &str = "192.0.2.1";
 /// The address of the remote end.
-pub const REMOTE_V4: &str = "10.203.0.2";
-/// The IPv6 address of the host on the veth.
-pub const LOCAL_V6: &str = "fd00:203::1";
+pub const REMOTE_V4: &str = "192.0.2.2";
+/// The IPv6 address of the host on the veth: a documentation address (RFC 3849).
+pub const LOCAL_V6: &str = "2001:db8:203::1";
 /// The IPv6 address of the remote end.
-pub const REMOTE_V6: &str = "fd00:203::2";
+pub const REMOTE_V6: &str = "2001:db8:203::2";
 
 /// The bit of `CAP_NET_ADMIN` in a capability set.
 const CAP_NET_ADMIN: u32 = 12;
@@ -96,9 +97,10 @@ pub struct Names {
     pub remote: String,
 }
 
-/// The two namespaces, deleted on drop.
+/// The two namespaces, deleted by [`Namespaces::close`], or on drop.
 pub struct Namespaces {
     pub names: Names,
+    closed: bool,
 }
 
 impl Namespaces {
@@ -119,7 +121,10 @@ impl Namespaces {
             local: format!("{id}-l"),
             remote: format!("{id}-r"),
         };
-        let made = Namespaces { names };
+        let made = Namespaces {
+            names,
+            closed: false,
+        };
         let (l, r) = (made.names.local.as_str(), made.names.remote.as_str());
         run("ip", &["netns", "add", l]);
         run("ip", &["netns", "add", r]);
@@ -155,44 +160,151 @@ impl Namespaces {
         made
     }
 
-    /// The tables loaded in the host's namespace, as `family name`.
-    fn tables(&self) -> Vec<String> {
-        let nft = nft_program();
-        let out = Command::new("ip")
-            .args(["netns", "exec", &self.names.local])
-            .arg(nft)
-            .args(["list", "tables"])
-            .output();
-        let Ok(out) = out else { return Vec::new() };
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|line| line.strip_prefix("table "))
-            .map(str::to_owned)
-            .collect()
+    /// Deletes every table of the host namespace and then both namespaces, and says what could
+    /// not be done: a completed run asserts it is nothing.
+    pub fn close(mut self) -> Vec<String> {
+        self.closed = true;
+        clean(&self.names, &mut run_checked)
     }
 }
 
+/// Runs `ip` with `args`: what it printed, or why it failed.
+fn run_checked(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| format!("ip: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(format!(
+            "ip {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+}
+
+/// The cleanup of the namespaces `names`, through `ip` (given as `run`, so that a test can make it
+/// fail): list the tables of the host namespace, delete each, delete both namespaces, then list
+/// the namespaces and find neither. Every failure is a problem, and none stops the rest.
+fn clean(names: &Names, run: &mut dyn FnMut(&[&str]) -> Result<String, String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let nft = nft_program();
+    let nft = nft.to_str().unwrap_or("nft");
+    let local = names.local.as_str();
+    match run(&["netns", "exec", local, nft, "list", "tables"]) {
+        Ok(listing) => {
+            for table in listing
+                .lines()
+                .filter_map(|line| line.strip_prefix("table "))
+            {
+                let mut words = vec!["netns", "exec", local, nft, "delete", "table"];
+                words.extend(table.split_whitespace());
+                if let Err(why) = run(&words) {
+                    problems.push(why);
+                }
+            }
+        }
+        Err(why) => problems.push(why),
+    }
+    for name in [local, names.remote.as_str()] {
+        if let Err(why) = run(&["netns", "del", name]) {
+            problems.push(why);
+        }
+    }
+    match run(&["netns", "list"]) {
+        Ok(listing) => {
+            for name in [local, names.remote.as_str()] {
+                if listing.split_whitespace().any(|word| word == name) {
+                    problems.push(format!("the namespace {name} is still there"));
+                }
+            }
+        }
+        Err(why) => problems.push(why),
+    }
+    problems
+}
+
 impl Drop for Namespaces {
+    /// The cleanup of a run that did not get to [`Namespaces::close`] (it panicked): best effort,
+    /// each problem printed.
     fn drop(&mut self) {
-        let nft = nft_program();
-        for table in self.tables() {
-            let mut words = vec!["netns", "exec", &self.names.local];
-            let nft = nft.to_str().unwrap_or("nft");
-            words.extend([nft, "delete", "table"]);
-            words.extend(table.split_whitespace());
-            let deleted = Command::new("ip").args(&words).status();
-            if !deleted.is_ok_and(|status| status.success()) {
-                eprintln!(
-                    "T1: could not delete the table {table} of {}",
-                    self.names.local
-                );
-            }
+        if self.closed {
+            return;
         }
-        for name in [&self.names.local, &self.names.remote] {
-            let deleted = Command::new("ip").args(["netns", "del", name]).status();
-            if !deleted.is_ok_and(|status| status.success()) {
-                eprintln!("T1: could not delete the namespace {name}");
-            }
+        for problem in clean(&self.names, &mut run_checked) {
+            eprintln!("T1: cleanup: {problem}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The cleanup, through a stand-in for `ip` that fails where it is told to.
+
+    use super::{Names, clean};
+
+    fn names() -> Names {
+        Names {
+            local: "t1-l".to_owned(),
+            remote: "t1-r".to_owned(),
+        }
+    }
+
+    /// Runs the cleanup with an `ip` that answers `listing` to `list tables`, an empty list to
+    /// `netns list`, and fails each call whose words contain `fail`.
+    fn with(listing: &str, fail: &str) -> (Vec<String>, Vec<String>) {
+        let mut calls = Vec::new();
+        let problems = clean(&names(), &mut |args| {
+            let line = args.join(" ");
+            calls.push(line.clone());
+            if !fail.is_empty() && line.contains(fail) {
+                return Err(format!("failed: {line}"));
+            }
+            Ok(if line.ends_with("list tables") {
+                listing.to_owned()
+            } else {
+                String::new()
+            })
+        });
+        (problems, calls)
+    }
+
+    /// Asserts that a cleanup that works deletes every table and both namespaces and reports
+    /// nothing, and that a failure to list the tables, to delete a table or to delete a namespace
+    /// is reported (and the rest is still done), as is a namespace still listed afterwards. It
+    /// would catch a cleanup whose failures a passing run could hide.
+    #[test]
+    fn every_failure_of_the_cleanup_is_reported() {
+        let tables = "table inet kbf_forward_tierstore\ntable inet kbf_guard_tierstore\n";
+        let (problems, calls) = with(tables, "");
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(
+            calls.iter().filter(|c| c.contains("delete table")).count(),
+            2
+        );
+        assert_eq!(calls.iter().filter(|c| c.contains("netns del")).count(), 2);
+        for fail in [
+            "list tables",
+            "delete table inet kbf_guard",
+            "netns del t1-r",
+            "netns list",
+        ] {
+            let (problems, calls) = with(tables, fail);
+            assert_eq!(problems.len(), 1, "{fail}: {problems:?}");
+            assert!(calls.iter().any(|c| c.contains("netns del t1-l")), "{fail}");
+        }
+        let mut problems = clean(&names(), &mut |args| {
+            Ok(if args == ["netns", "list"] {
+                "t1-l (id: 3)\n".to_owned()
+            } else {
+                String::new()
+            })
+        });
+        assert_eq!(
+            problems.pop(),
+            Some("the namespace t1-l is still there".to_owned())
+        );
     }
 }

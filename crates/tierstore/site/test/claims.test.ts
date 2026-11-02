@@ -102,7 +102,11 @@ export function staleClaims(src: ReadonlyMap<string, string>): string[] {
   // server/mod.rs makes from the header timeout, and the lingering close sleeps for that bound.
   const linger = code(src.get('server/linger.rs') ?? '');
   const drain = code(src.get('server/drain.rs') ?? '');
-  const lingers = /^mod linger;$/m.test(mod) && /\bLingering::new\(/.test(mod) && /^mod drain;$/m.test(mod);
+  // The lingering close begins when the drain says so, and in the shipped build (not the test-only `test-drain-off`) it
+  // says so once it is not ready.
+  const lingersInDrain = /#\[cfg\(not\(feature = "test-drain-off"\)\)\]\s*pub\(super\) fn lingers\(&self\) -> bool \{\s*!self\.is_ready\(\)\s*\}/.test(drain)
+    && /if this\.drain\.lingers\(\) \{/.test(linger);
+  const lingers = /^mod linger;$/m.test(mod) && /\bLingering::new\(/.test(mod) && /^mod drain;$/m.test(mod) && lingersInDrain;
   const bounded = /Drain::new\(config\.header_timeout\b/.test(mod) && /fn linger_bound\(&self\) -> Duration \{\s*self\.linger_bound\s*\}/.test(drain)
     && /sleep\(drain\.linger_bound\(\)\)/.test(linger);
   if (!lingers || !bounded) {
@@ -167,6 +171,9 @@ test('the check can fail: a literal in a test or a comment does not stand for wh
   assert.match(staleClaims(with_('server/linger.rs', (s) => s.replace('sleep(drain.linger_bound())', 'sleep(Duration::MAX)'))).join('\n'), /lingering close.*content\/demo\.html/);
   assert.match(staleClaims(with_('server/linger.rs', (s) => s.replace('sleep(drain.linger_bound())', 'sleep(Duration::MAX)') + '\n// sleep(drain.linger_bound())\n')).join('\n'), /lingering close.*content\/demo\.html/);
   assert.match(staleClaims(with_('server/drain.rs', (s) => s.replace(/(fn linger_bound\(&self\) -> Duration \{\s*)self\.linger_bound/, '$1Duration::MAX'))).join('\n'), /lingering close.*content\/demo\.html/);
+  // A shipped `lingers` that no longer reads the drain, or a lingering close that no longer asks it.
+  assert.match(staleClaims(with_('server/drain.rs', (s) => s.replace(/(fn lingers\(&self\) -> bool \{\s*)!self\.is_ready\(\)/, '$1false'))).join('\n'), /lingering close.*content\/demo\.html/);
+  assert.match(staleClaims(with_('server/linger.rs', (s) => s.replace('if this.drain.lingers() {', 'if false {'))).join('\n'), /lingering close.*content\/demo\.html/);
 });
 
 test('code() drops cfg(test) items and comment lines and keeps the rest', () => {

@@ -200,8 +200,7 @@ jobs:
   # The first build is the server without the two properties of its drain (the test-only feature
   # `test-drain-off`), in a target directory of its own so that it never mixes with the build the
   # hook and the other runs use: one test runs the hand-over with it and must see requests fail.
-  # nftables comes from the runner's package lists, which are refreshed only if they are too old
-  # to install it.
+  # nftables comes from the runner's package lists, refreshed first.
   handover-t1:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -221,14 +220,16 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+      - name: Refresh the package lists
+        run: sudo apt-get update
       - name: Install nftables
-        run: sudo apt-get install --yes --no-install-recommends nftables || { sudo apt-get update && sudo apt-get install --yes --no-install-recommends nftables; }
+        run: sudo apt-get install --yes --no-install-recommends nftables
       - run: cargo build -p tierstore --locked --features server,test-drain-off --bin tierstore --target-dir target/drain-off
       # Cargo builds the test binary as the runner's user; its runner runs only that binary, as
-      # root (`sudo --preserve-env` keeps the variable that names the build without the drain).
+      # root. The test finds the build without the drain in target/drain-off, beside its own.
       - name: T1 (the test binary runs as root)
         run: |
-          TIERSTORE_T1_DRAIN_OFF="$PWD/target/drain-off/debug/tierstore" cargo test -p tierstore --locked --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo --preserve-env=TIERSTORE_T1_DRAIN_OFF'" -- --nocapture
+          cargo test -p tierstore --locked --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo'" -- --nocapture
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: ${{ github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true' }}
         with:

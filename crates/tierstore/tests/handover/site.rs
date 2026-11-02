@@ -28,6 +28,7 @@ use crate::netns::nft_program;
 use crate::services::{Exec, Services};
 use crate::signer::{Request, sign};
 use crate::wire::{Answer, Broke, Conn};
+use std::process::Child;
 
 /// The slot that serves at first.
 pub const A: u16 = 9301;
@@ -236,14 +237,43 @@ impl Site {
         }
     }
 
-    /// Runs the step `step` as the updater would, printing what it said.
-    pub fn step(&self, step: &str) -> Ran {
-        let extra = if self.restart {
+    /// What the params file has besides the update: `mode = "restart"` in a restart.
+    fn extra(&self) -> &'static str {
+        if self.restart {
             "mode = \"restart\"\n"
         } else {
             ""
-        };
-        let ran = self.host.step_with(step, extra);
+        }
+    }
+
+    /// Starts the step `step` as the updater would, and returns at once.
+    pub fn spawn_step(&self, step: &str) -> Child {
+        self.host.spawn_step_with(step, self.extra())
+    }
+
+    /// Waits for a step [`Site::spawn_step`] started, printing what it said.
+    pub fn finish_step(&self, step: &str, child: Child) -> Ran {
+        Self::print(step, Host::finish(child))
+    }
+
+    /// Returns once the settle of the drain of `slot` is over: its S3 and its OCI listener refuse
+    /// connections. Looks again until they do, as the repository's tests wait for a `/readyz`
+    /// they expect; never by a timer.
+    pub fn wait_settled(&self, slot: u16) {
+        for port in [slot, oci_port(slot)] {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            while !matches!(Conn::open(addr), Err(Broke::Refused)) {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// Runs the step `step` as the updater would, printing what it said.
+    pub fn step(&self, step: &str) -> Ran {
+        Self::print(step, self.host.step_with(step, self.extra()))
+    }
+
+    fn print(step: &str, ran: Ran) -> Ran {
         eprintln!(
             "T1: {step}: exit {:?} {}",
             ran.code.or(ran.signal.map(|signal| -signal)),
@@ -347,7 +377,8 @@ fn amz_now() -> String {
         .expect("after the epoch")
         .as_secs();
     let (days, rest) = (secs / 86_400, secs % 86_400);
-    // Howard Hinnant's civil_from_days.
+    // Days since the epoch to a civil date, in the proleptic Gregorian calendar (eras of 400
+    // years from 0000-03-01).
     let z = i64::try_from(days).expect("a day") + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;

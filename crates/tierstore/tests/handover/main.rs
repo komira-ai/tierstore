@@ -11,7 +11,8 @@
 //! without it every test is ignored, so the workspace's test run neither runs nor fails on them.
 //! The CI job `handover-t1` runs it as the design's section 10 says: cargo builds the server
 //! without the drain (`test-drain-off`) into `target/drain-off`, then builds this binary as the
-//! user, and its runner runs only this binary with sudo, keeping `TIERSTORE_T1_DRAIN_OFF`.
+//! user, and its runner runs only this binary with sudo. The test finds the drain-off server in
+//! `target/drain-off`, beside the `target/tmp` cargo gives it.
 //!
 //! Everything privileged happens in the two namespaces a run makes and deletes (netns.rs); the
 //! ruleset of the namespace the test started in is read before and after, and must not change.
@@ -22,6 +23,8 @@
 #![cfg(target_os = "linux")]
 
 mod checks;
+mod guard;
+mod held;
 #[allow(
     dead_code,
     reason = "shared with the conformance rig, which uses all of it"

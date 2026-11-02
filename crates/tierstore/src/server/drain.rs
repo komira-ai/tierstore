@@ -180,17 +180,19 @@ pub(super) async fn time_to_close(wire: &Wire, mut settled: watch::Receiver<bool
     wire.wait_clear().await;
 }
 
-/// What a node says on stderr as it exits of the requests that came too late in the drain of its
-/// fronts (`tierstore_drain_late_requests_total` and `tierstore_oci_drain_late_requests_total`):
-/// a line for each front that counted any, nothing when none did. The counters cannot be scraped
-/// by then: a late request is counted after the settle, when the S3 listener that serves
-/// `/metricz` is closed. A node without the OCI front counts none there.
+/// What a node says on stderr as it exits of the connections that sent a request too late in the
+/// drain of its fronts (`tierstore_drain_late_requests_total` and
+/// `tierstore_oci_drain_late_requests_total`, which count connections, once each): a line for
+/// each front that counted any, nothing when none did. A count can rise from the moment the drain
+/// begins (a connection that an answer with `Connection: close` ended lingers from then on), but
+/// its last value is only reached after the settle, when the S3 listener that serves `/metricz`
+/// has closed and no scrape can read it. A node without the OCI front counts none there.
 pub(super) fn late_note(s3: u64, oci: u64) -> String {
     let mut note = String::new();
     for (front, late) in [("S3", s3), ("OCI", oci)] {
         if late > 0 {
             note.push_str(&format!(
-                "tierstore: {late} requests came too late in the drain of the {front} front\n"
+                "tierstore: {late} connections sent a request too late in the drain of the {front} front\n"
             ));
         }
     }

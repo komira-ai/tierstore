@@ -53,6 +53,12 @@ struct Process {
     stderr: PathBuf,
 }
 
+impl Process {
+    fn pid(&self) -> Pid {
+        Pid::from_raw(self.child.id().cast_signed()).expect("a pid")
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// The process of each running slot.
@@ -115,8 +121,13 @@ impl Inner {
 
     fn start(self: &Arc<Self>, port: u16) -> (u8, String) {
         let mut state = self.lock();
-        if state.running.contains_key(&port) {
-            return (0, String::new());
+        if let Some(process) = state.running.get(&port) {
+            if !process.ended {
+                return (0, String::new());
+            }
+            // It ended by itself: the unit is inactive, and this start starts it anew.
+            let process = state.running.remove(&port).expect("the process");
+            state.exits.push(Self::reap(port, process));
         }
         let binary = self.slots.join(port.to_string()).join("tierstore");
         if !binary.exists() {
@@ -183,23 +194,40 @@ impl Inner {
         self.changed.notify_all();
     }
 
-    fn stop(&self, port: u16) {
-        let taken = {
-            let mut state = self.lock();
-            state.calls.push(format!("stop {port}"));
-            state.running.remove(&port)
-        };
-        let Some(mut process) = taken else { return };
-        let pid = Pid::from_raw(process.child.id().cast_signed()).expect("a pid");
-        let _ = kill_process(pid, Signal::TERM);
+    /// Waits for a process that has ended (or is killed) and says how it ended.
+    fn reap(port: u16, mut process: Process) -> Exit {
         let status = process.child.wait().expect("wait for the process");
-        let stderr = fs::read_to_string(&process.stderr).unwrap_or_default();
-        let mut state = self.lock();
-        state.exits.push(Exit {
+        let stderr = fs::read_to_string(&process.stderr)
+            .unwrap_or_else(|e| panic!("the stderr of {port}: {e}"));
+        Exit {
             port,
             code: status.code(),
             stderr,
-        });
+        }
+    }
+
+    /// SIGTERM, then waits for the end of the process's stdout (it exits), then reaps it. The
+    /// process stays in the map meanwhile, so that a cleanup that comes while the drain runs can
+    /// kill it.
+    fn stop(&self, port: u16) {
+        let mut state = self.lock();
+        state.calls.push(format!("stop {port}"));
+        let Some(process) = state.running.get(&port) else {
+            return;
+        };
+        let _ = kill_process(process.pid(), Signal::TERM);
+        while state.running.get(&port).is_some_and(|p| !p.ended) {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        let Some(process) = state.running.remove(&port) else {
+            return;
+        };
+        drop(state);
+        let exit = Self::reap(port, process);
+        self.lock().exits.push(exit);
         self.changed.notify_all();
     }
 
@@ -278,9 +306,11 @@ impl Services {
         }
     }
 
-    /// The ports whose process runs.
+    /// The ports whose process runs: started, and not ended.
     pub fn running(&self) -> Vec<u16> {
-        self.inner.lock().running.keys().copied().collect()
+        let state = self.inner.lock();
+        let running = state.running.iter().filter(|(_, p)| !p.ended);
+        running.map(|(port, _)| *port).collect()
     }
 
     /// The calls so far.
@@ -295,17 +325,163 @@ impl Services {
 }
 
 impl Drop for Services {
-    /// Kills what still runs (a passing run has stopped it), and closes the socket.
+    /// Kills what still runs (a passing run has stopped it), a process in the middle of a stop
+    /// included, so that a stop the answering thread waits in ends; then closes the socket and
+    /// reaps what is left.
     fn drop(&mut self) {
         self.inner.closing.store(true, Ordering::SeqCst);
+        for process in self.inner.lock().running.values() {
+            let _ = kill_process(process.pid(), Signal::KILL);
+        }
         let _ = UnixStream::connect(&self.socket);
         if let Some(answering) = self.answering.take() {
             let _ = answering.join();
         }
         let running = std::mem::take(&mut self.inner.lock().running);
         for (_, mut process) in running {
-            let _ = process.child.kill();
             let _ = process.child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The manager's unit semantics, with shell scripts for the slots' binaries: no privilege,
+    //! so these run in the workspace's test run.
+
+    use std::fs;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::path::Path;
+    use std::thread;
+
+    use tierstore::server::update_hook::unit_name;
+    use tierstore_testkit::dir::TestDir;
+
+    use std::sync::{Arc, Mutex};
+
+    use super::{Exec, Services};
+
+    /// Gives the slot `port` a binary: a link to `/bin/sh`, which the manager runs with `-c` and
+    /// the run's script. No file is written and then executed, so no other test's fork can hold
+    /// it open for writing (ETXTBSY).
+    fn slot(state: &Path, port: u16) {
+        let dir = state.join("slots").join(port.to_string());
+        fs::create_dir_all(&dir).expect("a slot");
+        let binary = dir.join("tierstore");
+        if !binary.exists() {
+            std::os::unix::fs::symlink("/bin/sh", &binary).expect("a link");
+        }
+    }
+
+    /// A script that prints a start line and then waits for a signal.
+    const LIVES: &str = "echo ready; exec tail -f /dev/null";
+    /// The same, deaf to SIGTERM.
+    const DEAF: &str = "trap '' TERM; echo ready; exec tail -f /dev/null";
+    /// One that exits 1 before it prints anything.
+    const DIES: &str = "exit 1";
+
+    /// A manager whose slots run `sh -c` with the script `script` holds when they start.
+    fn services(dir: &TestDir, script: &Arc<Mutex<&'static str>>) -> Services {
+        let tools = dir.join("tools");
+        fs::create_dir_all(&tools).expect("tools");
+        let script = Arc::clone(script);
+        let exec: Exec = Box::new(move |_| {
+            let script = *script.lock().expect("the script");
+            vec!["-c".to_owned(), script.to_owned()]
+        });
+        Services::start(
+            &tools,
+            &dir.join("state"),
+            [9301, 9302],
+            exec,
+            &dir.join("logs"),
+        )
+    }
+
+    fn call(services: &Services, verb: &str, port: u16) -> u8 {
+        services.inner.call(&[verb, "--", &unit_name(port)]).0
+    }
+
+    /// Asserts the unit semantics the hook relies on: a start whose binary (its link) is absent
+    /// starts nothing and succeeds; a second start of a running unit starts nothing more; a stop
+    /// waits for the exit and a second stop does nothing; an unknown unit is not found. It would
+    /// catch a double that starts a slot with no link, or that runs a slot twice.
+    #[test]
+    fn a_start_without_a_link_is_skipped_and_starts_and_stops_are_idempotent() {
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-idempotent");
+        let services = services(&dir, &Arc::new(Mutex::new(LIVES)));
+        assert_eq!(call(&services, "start", 9302), 0);
+        assert!(services.running().is_empty());
+        slot(&dir.join("state"), 9301);
+        assert_eq!(call(&services, "start", 9301), 0);
+        assert_eq!(call(&services, "start", 9301), 0);
+        services.wait_listening(9301);
+        assert_eq!(services.running(), [9301]);
+        assert_eq!(call(&services, "stop", 9301), 0);
+        assert_eq!(call(&services, "stop", 9301), 0);
+        assert!(services.running().is_empty());
+        assert_eq!(services.exits().len(), 1);
+        assert_eq!(
+            services.calls(),
+            ["skip 9302", "start 9301", "stop 9301", "stop 9301"]
+        );
+        let (code, said) = services.inner.call(&["start", "--", "other.service"]);
+        assert_eq!(code, 5, "{said}");
+    }
+
+    /// Asserts that a process that exits before it prints its start line is reported by
+    /// `wait_listening` (a panic, not a hang), counts as stopped, and that the next start
+    /// launches a new process, as systemd starts an inactive unit anew.
+    #[test]
+    fn a_process_that_dies_before_it_listens_is_reported_and_started_anew() {
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-dies");
+        let script = Arc::new(Mutex::new(DIES));
+        let services = services(&dir, &script);
+        slot(&dir.join("state"), 9301);
+        assert_eq!(call(&services, "start", 9301), 0);
+        let waited = catch_unwind(AssertUnwindSafe(|| services.wait_listening(9301)));
+        assert!(
+            waited.is_err(),
+            "a process that died was waited for as listening"
+        );
+        assert!(services.running().is_empty());
+        *script.lock().expect("the script") = LIVES;
+        assert_eq!(call(&services, "start", 9301), 0);
+        services.wait_listening(9301);
+        assert_eq!(services.running(), [9301]);
+        let exits = services.exits();
+        assert_eq!((exits.len(), exits[0].code), (1, Some(1)));
+    }
+
+    /// Asserts that dropping the manager while a stop waits for a process that ignores SIGTERM
+    /// (a hung drain) ends: the process is killed, the stop the double asked for returns, and the
+    /// drop does not hang. It would catch a cleanup that cannot reach a process being stopped.
+    #[test]
+    fn dropping_the_manager_ends_a_stop_that_hangs() {
+        let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "t1-services-hung");
+        let services = services(&dir, &Arc::new(Mutex::new(DEAF)));
+        slot(&dir.join("state"), 9301);
+        assert_eq!(call(&services, "start", 9301), 0);
+        services.wait_listening(9301);
+        let socket = dir.join("tools/manager.sock");
+        let asking = thread::spawn(move || {
+            let mut stream = UnixStream::connect(socket).expect("the manager");
+            stream
+                .write_all(format!("stop\n--\n{}", unit_name(9301)).as_bytes())
+                .expect("ask");
+            stream.shutdown(std::net::Shutdown::Write).expect("ask");
+            let mut answer = String::new();
+            let _ = stream.read_to_string(&mut answer);
+            answer
+        });
+        // The stop is under way once it is logged; it cannot end while the process ignores TERM.
+        while !services.calls().contains(&"stop 9301".to_owned()) {
+            thread::yield_now();
+        }
+        drop(services);
+        let answer = asking.join().expect("the double's call");
+        assert!(answer.is_empty() || answer.starts_with("0\n"), "{answer:?}");
     }
 }

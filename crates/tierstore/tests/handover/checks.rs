@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tierstore::{Backend, DirBackend, decode_journal};
 use tierstore_testkit::reaped::{first_line, spawn};
 
-use crate::load::{Fault, Kind, Report, hex_sha256};
+use crate::load::{Acked, Failure, Fault, Kind, Report, hex_sha256};
 use crate::site::{A, B, Node, Site};
 use crate::wire::Broke;
 
@@ -56,26 +56,49 @@ pub fn no_failures(reports: &[Report]) {
     );
 }
 
-/// Asserts the bound of a restart (design sections 3, 9 and 11 question 5): every failed request
-/// is a connect that failed on a new connection, refused or broken before any byte of the answer,
-/// in the gap between the stop of v-current and the start of v-next; no 5xx, no reset or cut
-/// answer on a connection that had carried an answer, no wrong answer. Returns the number of the
-/// connects that failed, and prints it.
+/// What the bound of a restart admits: an S3 request that failed while the run said the gap was
+/// open (from just before the step that stops the old slot until that step returned), as a
+/// connect into the gap: refused; reset in its handshake; or reset before any byte of an answer
+/// on a new connection, which is a connect that the old slot's kernel completed and that its
+/// listener, closing at the end of its settle, never accepted. Nothing else: no clean end of stream or timeout, no failure on a connection that had
+/// carried an answer, no cut answer, no status, no OCI failure, nothing outside the gap.
+pub fn in_restart_gap(failure: &Failure) -> bool {
+    failure.kind == Kind::S3
+        && failure.in_gap
+        && matches!(
+            failure.fault,
+            Fault::Broke(
+                Broke::Refused
+                    | Broke::ConnectReset
+                    | Broke::BeforeAnswer {
+                        fresh: true,
+                        eof: false,
+                        reset: true,
+                        ..
+                    }
+            )
+        )
+}
+
+/// Asserts the bound of a restart (design sections 3, 9 and 11 question 5), [`in_restart_gap`]:
+/// every failed request is a connect into the gap between the stop of v-current and the start of
+/// v-next, and nothing else failed. Prints and returns the number of those connects.
 pub fn restart_bound(reports: &[Report]) -> usize {
-    let mut refused = 0;
-    let mut broken = 0;
-    let mut beyond = Vec::new();
-    for failure in reports.iter().flat_map(|report| &report.failures) {
-        match &failure.fault {
-            Fault::Broke(Broke::Refused) => refused += 1,
-            Fault::Broke(Broke::BeforeAnswer { fresh: true, .. }) => broken += 1,
-            _ => beyond.push(failure.to_string()),
-        }
-    }
+    let failures: Vec<&Failure> = reports.iter().flat_map(|report| &report.failures).collect();
+    let refused = failures
+        .iter()
+        .filter(|f| matches!(f.fault, Fault::Broke(Broke::Refused | Broke::ConnectReset)))
+        .count();
+    let beyond: Vec<String> = failures
+        .iter()
+        .filter(|f| !in_restart_gap(f))
+        .map(ToString::to_string)
+        .collect();
+    let gap = failures.len() - beyond.len();
     eprintln!(
-        "T1: restart gap: {} connects failed ({refused} refused, {broken} broken before any \
-         answer byte on a new connection)",
-        refused + broken
+        "T1: restart gap: {gap} connects failed ({refused} refused or reset in the handshake, {} \
+         reset before any answer byte on a new connection)",
+        gap - refused.min(gap)
     );
     assert!(
         beyond.is_empty(),
@@ -88,7 +111,7 @@ pub fn restart_bound(reports: &[Report]) -> usize {
             .collect::<Vec<_>>()
             .join("\n")
     );
-    refused + broken
+    gap
 }
 
 /// Asserts that each OCI client ended by the drain of its slot, when `drained` says that slot
@@ -100,9 +123,21 @@ pub fn oci_ends(reports: &[Report], drained: bool) {
     }
 }
 
-/// Asserts that both slots answered `/metricz` through the public port. Catches a swap that never
-/// moved the traffic.
+/// Asserts that both slots answered `/metricz` through the public port, and each S3 client that
+/// opens a new connection for each request saw both (those that keep one alive may stay on one
+/// slot until its drain). Catches a swap that never moved the traffic, for any address family or
+/// namespace.
 pub fn both_slots(reports: &[Report]) {
+    for report in reports.iter().filter(|r| r.kind == Kind::S3 && !r.keep) {
+        for slot in [A, B] {
+            assert!(
+                report.slots.get(&slot).is_some_and(|&n| n > 0),
+                "{} never had an answer of {slot}: {:?}",
+                report.name,
+                report.slots
+            );
+        }
+    }
     let mut slots: BTreeMap<u16, u64> = BTreeMap::new();
     for (slot, count) in reports.iter().flat_map(|report| &report.slots) {
         *slots.entry(*slot).or_default() += count;
@@ -118,9 +153,10 @@ pub fn both_slots(reports: &[Report]) {
 
 /// Asserts that every object a client was told it wrote reads back through the public port with
 /// the bytes it wrote. Catches a write lost or cut in the swap. Returns how many were read.
-pub fn read_back(site: &Site, reports: &[Report]) -> usize {
+pub fn read_back(site: &Site, reports: &[Report], more: &[Acked]) -> usize {
     let mut read = 0;
-    for acked in reports.iter().flat_map(|report| &report.acked) {
+    let mut empty = 0;
+    for acked in reports.iter().flat_map(|report| &report.acked).chain(more) {
         let answer = site
             .s3("GET", &acked.key, b"")
             .unwrap_or_else(|broke| panic!("read back {}: {broke}", acked.key));
@@ -132,9 +168,11 @@ pub fn read_back(site: &Site, reports: &[Report]) -> usize {
             acked.key
         );
         read += 1;
+        empty += usize::from(answer.body.is_empty());
     }
-    eprintln!("T1: {read} acknowledged writes read back");
+    eprintln!("T1: {read} acknowledged writes read back, {empty} of them empty objects");
     assert!(read > 0, "no write was acknowledged");
+    assert!(empty > 0, "no empty object was acknowledged");
     read
 }
 
@@ -157,15 +195,36 @@ pub fn no_late_live(site: &Site, port: u16) {
     }
 }
 
-/// Asserts that every server process that stopped exited 0 after its drain and left no note of a
-/// late request (the exit note of `tierstore_drain_late_requests_total` and its OCI twin, which
-/// cannot be scraped once the drain has closed `/metricz`) and none of a request cut at the
-/// deadline. Catches requests that arrived after the drain boundary (P2). Returns the exits.
-pub fn exits_clean(site: &Site) -> usize {
+/// The exit note's lines of late requests in `stderr` (`late_note`, server/drain.rs).
+pub fn late_lines(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|line| line.contains("too late in the drain"))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
+/// The note of a drain that read exactly the late request of each idle probe (held.rs) and of
+/// nothing else, on a node with both fronts.
+pub const PROBES_NOTE: &str = "tierstore: 1 connections sent a request too late in the drain \
+of the S3 front\ntierstore: 1 connections sent a request too late in the drain of the OCI front\n";
+
+/// Asserts that every server process that stopped exited 0 after its drain, cut nothing at its
+/// deadline, and left the note of late requests that `late` gives for its port (the exit note of
+/// `tierstore_drain_late_requests_total` and its OCI twin, which cannot be scraped once the drain
+/// has closed `/metricz`): [`PROBES_NOTE`] for the one drained with the idle probes, none for any
+/// other. Catches requests of the clients that arrived after the drain boundary (P2), and a note
+/// not tied to the real counters. Returns the number of exits.
+pub fn exits_clean(site: &Site, late: impl Fn(usize, u16) -> &'static str) -> usize {
     let exits = site.services.exits();
-    for exit in &exits {
+    for (index, exit) in exits.iter().enumerate() {
         assert_eq!(exit.code, Some(0), "the stop of {}: {exit:?}", exit.port);
-        assert!(!exit.stderr.contains("came too late"), "{exit:?}");
+        assert_eq!(
+            late_lines(&exit.stderr),
+            late(index, exit.port),
+            "the late requests of stop {index}, of {}: {exit:?}",
+            exit.port
+        );
         assert!(
             !exit.stderr.contains("were cut at the drain deadline"),
             "{exit:?}"
@@ -249,8 +308,10 @@ pub fn lease_held_by(site: &Site, port: u16) {
     let (runtime, hot) = hot_tier(site);
     let body = runtime.block_on(async {
         loop {
-            if let Ok(body) = hot.get("_tiering/lease", None).await {
-                return body;
+            match hot.get("_tiering/lease", None).await {
+                Ok(body) => return body,
+                Err(tierstore::Error::NotFound(_)) => {}
+                Err(other) => panic!("read the lease: {other}"),
             }
         }
     });
@@ -297,10 +358,11 @@ pub fn journals_and_lease(site: &Site, reports: &[Report]) {
                 *journaled.entry(entry.key).or_default() += 1;
             }
         }
-        assert!(
-            hot.head("_tiering/lease").await.is_err(),
-            "a lease is left after both slots stopped"
-        );
+        match hot.head("_tiering/lease").await {
+            Err(tierstore::Error::NotFound(_)) => {}
+            Ok(meta) => panic!("a lease is left after both slots stopped: {meta:?}"),
+            Err(other) => panic!("look for the lease: {other}"),
+        }
     });
     assert_eq!(writers, ids, "the journals' writers");
     for acked in reports.iter().flat_map(|report| &report.acked) {
@@ -327,4 +389,66 @@ async fn read(hot: &dyn Backend, key: &str) -> Vec<u8> {
         .await
         .unwrap_or_else(|e| panic!("{key}: {e}"))
         .to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    //! The restart's bound, on failures made by hand: each kind it admits, and each it must not.
+
+    use super::in_restart_gap;
+    use crate::load::{Failure, Fault, Kind};
+    use crate::wire::Broke;
+
+    fn failure(kind: Kind, in_gap: bool, fault: Fault) -> Failure {
+        Failure {
+            client: "c".to_owned(),
+            kind,
+            op: "PUT k".to_owned(),
+            fault,
+            in_gap,
+        }
+    }
+
+    fn before(fresh: bool, eof: bool, reset: bool) -> Fault {
+        Fault::Broke(Broke::BeforeAnswer {
+            fresh,
+            eof,
+            reset,
+            what: String::new(),
+        })
+    }
+
+    /// Asserts that the bound admits, for an S3 client in the gap, a refused connect and a reset
+    /// of a new connection before any answer byte, and nothing else: not the same outside the
+    /// gap, not from an OCI client, not a clean end of stream or a timeout of a new connection,
+    /// not a reset of a kept-alive connection, not a cut answer, a 503 or a wrong answer. It
+    /// would catch a bound that admits a reset of an established connection, or a refusal at any
+    /// other moment of the run.
+    #[test]
+    fn the_restart_bound_admits_only_connects_into_the_gap() {
+        let s3 = |in_gap, fault| failure(Kind::S3, in_gap, fault);
+        assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::Refused))));
+        assert!(in_restart_gap(&s3(true, Fault::Broke(Broke::ConnectReset))));
+        assert!(!in_restart_gap(&s3(
+            false,
+            Fault::Broke(Broke::ConnectReset)
+        )));
+        assert!(in_restart_gap(&s3(true, before(true, false, true))));
+        for refused in [
+            s3(false, Fault::Broke(Broke::Refused)),
+            failure(Kind::Oci, true, Fault::Broke(Broke::Refused)),
+            s3(false, before(true, false, true)),
+            s3(true, before(true, true, false)),
+            s3(true, before(true, false, false)),
+            s3(true, before(false, false, true)),
+            s3(true, before(false, true, false)),
+            s3(true, Fault::Broke(Broke::TimedOut { fresh: true })),
+            s3(true, Fault::Broke(Broke::Cut("reset".to_owned()))),
+            s3(true, Fault::Broke(Broke::Connect("unreachable".to_owned()))),
+            s3(true, Fault::Status(503, String::new())),
+            s3(true, Fault::Wrong("bytes".to_owned())),
+        ] {
+            assert!(!in_restart_gap(&refused), "{refused:?}");
+        }
+    }
 }
