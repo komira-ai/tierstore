@@ -39,7 +39,6 @@ A write goes to the hot tier and is acknowledged once a journal entry for it is 
 - [Configuration](configuration.md): every flag and every key of the file.
 - [Operations](operations.md): probes, usage, drain, eviction, a full disk, metrics.
 - [Troubleshooting](troubleshooting.md): the messages the process prints and what to do.
-- [Stored formats](stored-formats.md): what tierstore writes to disk and to the tiers, and the rule for changing it.
 - [Limits](limits.md).
 
 ## Not in a release yet

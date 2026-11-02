@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use tierstore::server::local_cache::{CacheConfig, LocalCache, SystemDisk};
 use tierstore::{Backend, MemoryBackend, TestClock};
-use tierstore_testkit::TestDir;
+use tierstore_testkit::dir::TestDir;
 
 const SIDECAR: &[u8] = include_bytes!("fixtures/cache_sidecar.json");
 const SIDECAR_NEWER: &[u8] = include_bytes!("fixtures/cache_sidecar_newer.json");

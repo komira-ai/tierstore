@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use tierstore::{JournalEntry, JournalOp, PassReport, encode_journal};
+use tierstore::{Backend as _, JournalEntry, JournalOp, PassReport, encode_journal};
 
 use crate::support::Tiers;
 
