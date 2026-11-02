@@ -15,14 +15,21 @@
 //! 2. The sockets are closed once two looks [`LOOK`] apart have found no handshake in flight and
 //!    the accept queue empty, or once [`GRACE`] has passed.
 //!
-//! Each connection taken this way is a new one, whose first request the drain waits for
-//! ([`time_to_close`](super::drain::time_to_close)), for [`GRACE`] too.
+//! The looks can end the wait early only when the count sees every handshake. A handshake the
+//! kernel answered with a SYN cookie (it does so when the listen queue is full) has no entry to
+//! count, so once this network namespace has sent a SYN cookie since the sockets were taken, and
+//! on a system whose handshakes cannot be counted at all (any but Linux), the count is an error
+//! and the door waits out [`GRACE`].
+//!
+//! The drain closes the idle connections when the door begins (see
+//! [`time_to_close`](super::drain::time_to_close)), so that a client waiting for the end of its
+//! stream frees what it holds (the OCI front's slots) while the door is open. Each connection the
+//! door takes is a new one, whose first request the drain waits for, for [`GRACE`] too.
 //!
 //! What this does not close: a handshake still in flight when [`GRACE`] has passed (its client
-//! lost the server's SYN-ACK and its retransmit), a handshake answered with a SYN cookie (the
-//! kernel keeps no entry for it while its accept queue is full) whose ACK takes longer than
-//! [`LOOK`] to come, and a connection that begins as the sockets close, which only a port that
-//! still sends new connections to the instance can bring. The client of any of them is reset.
+//! lost the server's SYN-ACK and its retransmits), and a connection that begins as the sockets
+//! close, which only a port that still sends new connections to the instance can bring. The
+//! client of either is reset.
 
 use std::future::poll_fn;
 use std::io;
@@ -132,33 +139,86 @@ impl<I: Incoming> Closing<I> {
 #[cfg(target_os = "linux")]
 const TABLES: &str = "/proc/self/net";
 
-/// The handshakes in flight on the listening sockets of `ports`, in this network namespace.
-///
-/// # Errors
-/// A table cannot be read.
+/// The SYN cookies this network namespace has sent, if the count can be read.
 #[cfg(target_os = "linux")]
-pub(super) fn handshakes(ports: &[u16]) -> io::Result<usize> {
-    handshakes_under(Path::new(TABLES), ports)
+pub(super) fn syn_cookies() -> Option<u64> {
+    syn_cookies_under(Path::new(TABLES)).ok()
 }
 
-/// No table of handshakes outside Linux: none is counted.
+/// The handshakes in flight on the listening sockets of `ports`, in this network namespace, whose
+/// count of SYN cookies sent was `cookies` when the sockets were taken.
+///
+/// # Errors
+/// A table cannot be read, or a SYN cookie has been sent since (its handshake has no entry).
+#[cfg(target_os = "linux")]
+pub(super) fn handshakes(ports: &[u16], cookies: Option<u64>) -> io::Result<usize> {
+    handshakes_under(Path::new(TABLES), ports, cookies)
+}
+
+/// No count of SYN cookies outside Linux.
 #[cfg(not(target_os = "linux"))]
-pub(super) fn handshakes(_ports: &[u16]) -> io::Result<usize> {
-    Ok(0)
+pub(super) fn syn_cookies() -> Option<u64> {
+    None
+}
+
+/// No table of handshakes outside Linux: the count is an error, and the door waits out [`GRACE`].
+///
+/// # Errors
+/// Always.
+#[cfg(not(target_os = "linux"))]
+pub(super) fn handshakes(_ports: &[u16], _cookies: Option<u64>) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this system's handshakes in flight cannot be counted",
+    ))
 }
 
 /// The handshakes in flight on the listening sockets of `ports`: the entries in state `SYN_RECV`
-/// of the tables `tcp` and `tcp6` in `dir` whose local port is one of them.
+/// of the tables `tcp` and `tcp6` in `dir` whose local port is one of them, if the count of SYN
+/// cookies sent in `dir`'s `netstat` is still `cookies`.
 ///
 /// # Errors
-/// A table cannot be read.
+/// A table cannot be read, or a SYN cookie has been sent since `cookies` was read.
 #[cfg(target_os = "linux")]
-fn handshakes_under(dir: &Path, ports: &[u16]) -> io::Result<usize> {
+fn handshakes_under(dir: &Path, ports: &[u16], cookies: Option<u64>) -> io::Result<usize> {
+    let sent = syn_cookies_under(dir)?;
+    if cookies != Some(sent) {
+        return Err(io::Error::other(
+            "SYN cookies have been sent since the listeners were taken, and their handshakes have no entry to count",
+        ));
+    }
     let mut count = 0;
     for table in ["tcp", "tcp6"] {
         count += handshakes_in(&std::fs::read_to_string(dir.join(table))?, ports);
     }
     Ok(count)
+}
+
+/// The SYN cookies sent, from the `netstat` table in `dir`.
+///
+/// # Errors
+/// The table cannot be read, or has no count of them.
+#[cfg(target_os = "linux")]
+fn syn_cookies_under(dir: &Path) -> io::Result<u64> {
+    let table = std::fs::read_to_string(dir.join("netstat"))?;
+    syn_cookies_in(&table).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no count of the SYN cookies sent (TcpExt SyncookiesSent)",
+        )
+    })
+}
+
+/// `SyncookiesSent` of a table in the format of `/proc/net/netstat`: a line of names and a line of
+/// values, each beginning with `TcpExt:`.
+#[cfg(target_os = "linux")]
+fn syn_cookies_in(table: &str) -> Option<u64> {
+    let mut lines = table.lines().filter(|line| line.starts_with("TcpExt:"));
+    let (names, values) = (lines.next()?, lines.next()?);
+    let at = names
+        .split_whitespace()
+        .position(|name| name == "SyncookiesSent")?;
+    values.split_whitespace().nth(at)?.parse().ok()
 }
 
 /// The entries of a table in the format of `/proc/net/tcp` that are in state `SYN_RECV` (`03`)

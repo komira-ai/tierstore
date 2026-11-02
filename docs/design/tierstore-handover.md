@@ -257,14 +257,18 @@ for them: those set up and not yet accepted, and those whose handshake is in fli
 succeed. So the hook never stops a slot while the redirect names it: in a hand-over `cleanup` stops v-current after the
 swap, and in a plain restart `cutover` points the redirect at v-next's port before it stops v-current (section 4), so
 that a connect in the restart's gap is refused, never reset. What the kernel still holds when the settle ends (a
-connection set up just before the redirect moved, and not yet accepted) is taken rather than reset: the door is closed
-in steps (`server/door.rs`): the connections the kernel set up and the handshakes in flight (`SYN_RECV` in
-`/proc/self/net/tcp` and `tcp6`) are taken and served, and the sockets close once two looks 10 ms apart find none, or
-after 3 s. A new connection that has not sent its first request yet is given the same 3 s to send it, and served, rather
-than closed as an idle one. Left open: a handshake still in flight after 3 s, one answered with a SYN cookie whose ACK
-takes longer than the 10 ms between the looks, and a connection that comes as the sockets close, which only a redirect
-that still names the stopping slot could bring. The door needs no privilege: a socket filter that dropped SYNs would
-need `CAP_NET_ADMIN` on some kernels, which the slot unit does not grant.
+connection set up just before the redirect moved, and not yet accepted) is taken rather than reset. The idle
+connections close first (P2), so that a client waiting for the end of its stream frees what it holds (the OCI front's
+slots); then the door is closed in steps (`server/door.rs`): the connections the kernel set up and the handshakes in
+flight (`SYN_RECV` in `/proc/self/net/tcp` and `tcp6`) are taken and served, and the sockets close once two looks 10 ms
+apart find none, or after 3 s. The looks end the wait early only while the count sees every handshake: once the
+namespace has sent a SYN cookie since the sockets were taken (`SyncookiesSent` in `/proc/self/net/netstat`; such a
+handshake has no entry), and on any system but Linux, the count is an error and the door waits the 3 s. A new connection
+that has not sent its first bytes yet is given the same 3 s to send them, and its request is then served whole, rather
+than closed as an idle one; a shorter header timeout or drain deadline wins. Left open: a handshake still in flight after
+3 s, and a connection that comes as the sockets close, which only a redirect that still names the stopping slot could
+bring. The door needs no privilege: a socket filter that dropped SYNs would need `CAP_NET_ADMIN` on some kernels, which
+the slot unit does not grant.
 
 The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
 `server/linger.rs`, `server/door.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long

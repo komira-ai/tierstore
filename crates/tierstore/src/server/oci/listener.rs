@@ -73,7 +73,8 @@ pub struct OciListener {
 /// The start of the drain of an [`OciListener`], which the S3 front's drain begins at the same
 /// time: from [`OciDrain::begin`] on, every answer carries `Connection: close`, and the listener
 /// goes on accepting and serving. The stop given to [`OciListener::serve`] ends the settle (and
-/// begins the drain, if it had not begun): the listener takes no new connection, closes each
+/// begins the drain, if it had not begun): the listener takes only the connections the kernel
+/// already holds for it, through its closing door (see `door`), closes each
 /// connection that has no request on the wire with a lingering close (it shuts its end for
 /// writing, so that the client reads a clean end of stream, and reads and drops what the client
 /// still sends until the client closes its end, for [`OciLimits::header_timeout`] at most), and
@@ -188,7 +189,8 @@ impl OciListener {
         self.listeners.local_addrs()
     }
 
-    /// Serves connections until `stop` turns true, the end of the settle: then it takes no more,
+    /// Serves connections until `stop` turns true, the end of the settle: then it takes only what
+    /// the kernel holds for it (see `door`),
     /// lets the connections that are open finish the request they are answering and closes them
     /// with a lingering close (its write half shut, then what the client sends read and dropped
     /// until it closes, for [`OciLimits::header_timeout`] at most), waits for all of that for
@@ -309,8 +311,11 @@ where
             () = stopped(&mut stop) => break,
         }
     }
-    // The connections the kernel holds for the listener are taken before it closes (see `door`),
-    // each in a slot as before, for as long as the door waits.
+    // The settle is over: the idle connections close now, with a lingering close, so that their
+    // slots free as their clients leave. The connections the kernel holds for the listener are
+    // then taken before it closes (see `door`), each in a slot as before, for as long as the door
+    // waits.
+    drain.settle();
     let mut door = Closing::begin(incoming);
     loop {
         let slot = tokio::select! {
@@ -325,7 +330,6 @@ where
         }
     }
     drop(door);
-    drain.settle();
     // A connection's task runs its lingering close too, so that the deadline cuts it.
     let finished = async { while connections.join_next().await.is_some() {} };
     if tokio::time::timeout(limits.drain_deadline, finished)

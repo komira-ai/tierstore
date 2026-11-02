@@ -410,7 +410,8 @@ pub struct ServerConfig {
     /// `/readyz` said 503.
     pub drain_lb_wait: Duration,
     /// How long the server waits for requests in flight, for the answers it is sending, and for
-    /// the connections it closes to be closed by their clients, after the settle.
+    /// the connections it closes to be closed by their clients, after the settle and its closing
+    /// door (see `door`).
     pub drain_deadline: Duration,
     /// The proxy whose usage object `/usagez` judges: none by default, and then `/usagez` says
     /// the usage is not watched. The binary sets the proxy it serves.
@@ -687,12 +688,14 @@ impl Server {
                 () = &mut wait => break,
             }
         }
+        // The idle connections close as the door does, so that a client that waits for the end
+        // of its stream frees what it holds.
+        self.drain.settle();
         let mut door = door::Closing::begin(incoming);
         while let Some(accepted) = door.next().await {
             self.take(accepted).await;
         }
         drop(door);
-        self.drain.settle();
         self.finish_by_deadline().await
     }
 

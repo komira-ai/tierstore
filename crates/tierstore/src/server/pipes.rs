@@ -79,22 +79,28 @@ pub(super) async fn until(server: &Server, ready: impl Fn(&Server) -> bool) {
 
 /// What the kernel under a [`Serving`] does at the end of the settle (see `door`): the
 /// handshakes in flight, which a test begins and ends, whether the server has begun to count
-/// them (its door is closing), and whether counting them fails.
+/// them (its door is closing), and how many of the counts fail.
 #[derive(Default)]
 pub(super) struct Kernel {
     in_flight: AtomicUsize,
     counted: AtomicBool,
     /// Notified when the server first counts the handshakes.
     counting: Notify,
-    /// Whether counting the handshakes fails.
-    count_fails: bool,
+    /// How many of the next counts fail (`usize::MAX`: all of them).
+    count_fails: AtomicUsize,
 }
 
 impl Kernel {
-    /// A kernel whose handshakes in flight cannot be counted.
+    /// A kernel whose handshakes in flight cannot be counted, as when a SYN cookie has been sent
+    /// or the system keeps no table of them.
     pub(super) fn count_failing() -> Self {
+        Self::count_failing_for(usize::MAX)
+    }
+
+    /// A kernel whose first `counts` counts of the handshakes fail, and whose later ones do not.
+    pub(super) fn count_failing_for(counts: usize) -> Self {
         Self {
-            count_fails: true,
+            count_fails: AtomicUsize::new(counts),
             ..Self::default()
         }
     }
@@ -105,6 +111,8 @@ impl Kernel {
 pub(super) struct Handshake {
     kernel: Arc<Kernel>,
     door: mpsc::UnboundedSender<DuplexStream>,
+    /// Whether the kernel keeps an entry for it, which the count sees (not a SYN cookie's).
+    counted: bool,
 }
 
 impl Handshake {
@@ -114,7 +122,9 @@ impl Handshake {
     pub(super) fn complete(self) -> Option<DuplexStream> {
         let (client, far) = duplex(PIPE);
         let queued = self.door.send(far).ok().map(|()| client);
-        self.kernel.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if self.counted {
+            self.kernel.in_flight.fetch_sub(1, Ordering::SeqCst);
+        }
         queued
     }
 }
@@ -147,7 +157,11 @@ impl Incoming for Pipes {
         if !self.kernel.counted.swap(true, Ordering::SeqCst) {
             self.kernel.counting.notify_waiters();
         }
-        if self.kernel.count_fails {
+        let failing = &self.kernel.count_fails;
+        if failing.load(Ordering::SeqCst) > 0 {
+            if failing.load(Ordering::SeqCst) != usize::MAX {
+                failing.fetch_sub(1, Ordering::SeqCst);
+            }
             return Err(io::Error::other("a table that cannot be read"));
         }
         Ok(self.kernel.in_flight.load(Ordering::SeqCst))
@@ -214,6 +228,17 @@ impl Serving {
         Handshake {
             kernel: Arc::clone(&self.kernel),
             door: self.door.clone(),
+            counted: true,
+        }
+    }
+
+    /// A connection whose handshake begins now and that the count does not see: the kernel
+    /// answered its SYN with a cookie and keeps no entry for it.
+    pub(super) fn cookie_handshake(&self) -> Handshake {
+        Handshake {
+            kernel: Arc::clone(&self.kernel),
+            door: self.door.clone(),
+            counted: false,
         }
     }
 
