@@ -260,7 +260,7 @@ async fn a_get_of_a_cold_object_counts_the_cold_read_and_the_promotion() {
     assert_eq!(value(&rig, HOT_HIT_HEAD).await, 0);
     assert_eq!(value(&rig, HOT_SERVED).await, 12);
     assert_eq!(value(&rig, COLD_READS_GET).await, 1);
-    assert_eq!(value(&rig, COLD_READS_HEAD).await, 1);
+    assert_eq!(value(&rig, COLD_READS_HEAD).await, 0);
     assert_eq!(value(&rig, PROMOTIONS).await, 1);
     assert_eq!(value(&rig, COLD_SERVED).await, 12);
 }

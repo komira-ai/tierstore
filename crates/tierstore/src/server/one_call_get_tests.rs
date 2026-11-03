@@ -9,6 +9,9 @@ use super::testing::{BUCKET, Rig};
 
 const MEBIBYTE: u64 = 1 << 20;
 
+/// A request's extra headers, the status of its answer and the body it is answered with.
+type Case<'a> = (&'a [(&'a str, &'a str)], StatusCode, &'a str);
+
 fn tag_of(body: &[u8]) -> String {
     hex::encode(<sha2::Sha256 as sha2::Digest>::digest(body))
 }
@@ -22,7 +25,7 @@ async fn a_get_of_a_hot_object_is_one_call_to_the_hot_tier() {
     rig.put("k", b"0123456789").await;
     let own = format!("\"{}\"", tag_of(b"0123456789"));
     let uri = format!("/{BUCKET}/k");
-    let requests: [(&[(&str, &str)], StatusCode, &str); 5] = [
+    let requests: [Case<'_>; 5] = [
         (&[], StatusCode::OK, "0123456789"),
         (
             &[("range", "bytes=2-4")],
