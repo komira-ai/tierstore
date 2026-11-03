@@ -6,10 +6,10 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::faulty::{FaultyBackend, Op};
-use crate::journal::{journal_key, proxy_key};
+use crate::journal::{journal_key, journal_prefix, proxy_key};
 use crate::registration::{PROTO, Registration};
 use crate::registrations::{Registrations, remove_if_departed};
-use crate::{Backend, Error, Listed, MemoryBackend};
+use crate::{Backend, Error, GateBackend, Listed, MemoryBackend, Phase};
 
 const WAIT: Duration = Duration::from_secs(600);
 
@@ -135,11 +135,11 @@ async fn a_registration_that_is_already_gone_is_not_removed_again() {
     assert_eq!(remove_if_departed(&hot, "p").await, Ok(false));
 }
 
-/// Asserts that the errors of the read, of the listing of the journal and of the delete are given
+/// Asserts that the errors of the heads, the read, the listing of the journal and of the delete are given
 /// to the caller, and that the registration stays when the delete failed.
 #[tokio::test]
 async fn the_errors_of_the_store_are_given_and_the_registration_stays() {
-    for op in [Op::Get, Op::List, Op::Delete] {
+    for op in [Op::Head, Op::Get, Op::List, Op::DeleteIfMatch] {
         let memory = hot_with("p", beating()).await;
         let hot = FaultyBackend::new(memory.clone());
         hot.fail_next(op, 1);
@@ -150,4 +150,46 @@ async fn the_errors_of_the_store_are_given_and_the_registration_stays() {
         );
         assert!(is_there(&memory, "p").await, "{op:?}");
     }
+}
+
+/// Asserts that a registration that changes between the read and the delete is kept: a new
+/// process of the same proxy id opens over it (its body is the zero count, with another tag) while
+/// the cleanup is held at the listing of the journal, and the registration is still there, as the
+/// new process wrote it, once the cleanup goes on. One that is deleted in between is no error.
+#[tokio::test]
+async fn a_registration_replaced_or_removed_after_it_was_read_is_kept_or_not_an_error() {
+    let memory = hot_with("p", beating()).await;
+    let gated = GateBackend::new(memory.clone());
+    let held = gated.gate(Op::List, &journal_prefix("p"), Phase::Pre);
+    let reopened = Registration {
+        proto: PROTO,
+        boot: "new".into(),
+        hb: 0,
+    };
+    let tag = memory.head(&proxy_key("p")).await.unwrap().tag;
+    let cleanup = remove_if_departed(&gated, "p");
+    let reopen = async {
+        held.parked().await;
+        memory
+            .put_if_match(&proxy_key("p"), reopened.encode(), &tag)
+            .await
+            .unwrap();
+        assert!(held.release());
+    };
+    let (answer, ()) = tokio::join!(cleanup, reopen);
+    assert_eq!(answer, Ok(false));
+    let kept = memory.get(&proxy_key("p"), None).await.unwrap();
+    assert_eq!(Registration::decode(&kept), Some(reopened));
+
+    let memory = hot_with("p", beating()).await;
+    let gated = GateBackend::new(memory.clone());
+    let held = gated.gate(Op::List, &journal_prefix("p"), Phase::Pre);
+    let cleanup = remove_if_departed(&gated, "p");
+    let remove = async {
+        held.parked().await;
+        memory.delete(&proxy_key("p")).await.unwrap();
+        assert!(held.release());
+    };
+    let (answer, ()) = tokio::join!(cleanup, remove);
+    assert_eq!(answer, Ok(false));
 }

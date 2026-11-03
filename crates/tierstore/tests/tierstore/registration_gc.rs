@@ -131,7 +131,7 @@ async fn a_failed_removal_is_reported_and_tried_again_only_after_the_retention()
     leader.pass().await;
     mono.advance(RETENTION);
 
-    rig.hot.fail_next(Op::Delete, 1);
+    rig.hot.fail_next(Op::DeleteIfMatch, 1);
     let report = leader.pass().await;
     assert!(
         matches!(report.failed[..], [Error::Unavailable(_)]),
@@ -168,7 +168,9 @@ async fn a_process_that_opens_over_a_beating_registration_and_never_beats_is_not
     assert!(there(&rig, "_tiering/proxies/p1").await);
 
     proxy.put("a", Bytes::from_static(b"1")).await.unwrap();
+    leader.stop().await;
     let report = rig.reconciler("r2", 1000).pass().await;
+    assert!(report.held);
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(report.copied, 1);
 }

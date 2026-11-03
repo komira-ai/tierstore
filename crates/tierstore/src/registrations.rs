@@ -84,14 +84,21 @@ impl Registrations {
 ///
 /// A registration of a process that never beats (an empty one of an older release, or the body of
 /// a proxy that did not start the heartbeat) is never removed: it never changes while its owner
-/// runs, and the reconciler would stop finding the journals of a live proxy. A registration
-/// removed under a proxy that is alive after all (it beat once more than the leader saw) is
-/// written again by that proxy's next beat.
+/// runs, and the reconciler would stop finding the journals of a live proxy. The delete names the
+/// tag of the object that was read, so a registration that was replaced in between (a new process
+/// of the same proxy id opened over it) is kept. One removed under a proxy that is alive after all
+/// (it beat once more than the leader saw) is written again by that proxy's next beat.
 ///
 /// # Errors
-/// What the reads and the delete give, a registration that is gone at the read excepted.
+/// What the reads and the delete give, a registration that is gone or replaced excepted.
 pub(crate) async fn remove_if_departed(hot: &dyn Backend, id: &str) -> Result<bool, Error> {
-    let body = match hot.get(&proxy_key(id), None).await {
+    let key = proxy_key(id);
+    let tag = match hot.head(&key).await {
+        Ok(meta) => meta.tag,
+        Err(Error::NotFound(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let body = match hot.get(&key, None).await {
         Ok(body) => body,
         Err(Error::NotFound(_)) => return Ok(false),
         Err(error) => return Err(error),
@@ -102,5 +109,9 @@ pub(crate) async fn remove_if_departed(hot: &dyn Backend, id: &str) -> Result<bo
     if !hot.list(&journal_prefix(id)).await?.is_empty() {
         return Ok(false);
     }
-    hot.delete(&proxy_key(id)).await.map(|()| true)
+    match hot.delete_if_match(&key, &tag).await {
+        Ok(()) => Ok(true),
+        Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
 }
