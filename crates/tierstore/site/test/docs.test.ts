@@ -80,7 +80,7 @@ test('a page added to docs/ is built, and a change to the guide changes its page
   assert.match(readFileSync(join(out, 'docs', 'metrics', 'index.html'), 'utf8'), /<h2 id="names">Names<\/h2>/);
   assert.match(readFileSync(join(out, 'docs', 'index.html'), 'utf8'), /href="\/docs\/metrics\/"/);
   const text = readFileSync(join(dir, 'limits.md'), 'utf8');
-  writeFileSync(join(dir, 'limits.md'), text.replace('No TLS on the S3 listener.', 'A planted sentence.'));
+  writeFileSync(join(dir, 'limits.md'), text.replace('One bucket, path-style, SigV4 in the header.', 'A planted sentence.'));
   assert.match(readFileSync(join(buildWith('docs-change', dir), 'docs', 'limits', 'index.html'), 'utf8'), /A planted sentence\./);
 });
 
