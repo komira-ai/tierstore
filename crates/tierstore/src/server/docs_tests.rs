@@ -24,8 +24,9 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 
 use super::cli::Cli;
-use super::config::{KEYS, Policy, settings_from_text};
+use super::config::{KEYS, settings_from_text};
 use super::config_cache::LocalCacheTable;
+use super::config_policy::Policy;
 use super::config_testing::DEFAULTS;
 
 /// The title of the sections that the exists-in-code checks leave out.

@@ -8,8 +8,8 @@ use futures::stream::{self, StreamExt};
 
 use crate::backend::ByteRange;
 use crate::journal::{
-    PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
-    load_checkpoint, seq_of, to_body, write_object,
+    PROXIES_PREFIX, USAGE_KEY, Usage, decode_journal, journal_key, journal_prefix, load_checkpoint,
+    seq_of, store_checkpoint, to_body, write_object,
 };
 use crate::lease::Lease;
 use crate::state::Candidate;
@@ -70,7 +70,12 @@ impl ReconcilerConfig {
 /// What one [`Reconciler::pass`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
-    /// Whether this reconciler held the lease. If not, nothing else was done.
+    /// Whether this reconciler held the lease at the start of the pass. If not, nothing else was
+    /// done. If the check made after the copies and evictions finds the lease gone, nothing is
+    /// stored after that check (no checkpoint, no pruning, no usage), and that is not in
+    /// `failed`; `copied` and `evicted` still count the work done before the check. A takeover
+    /// after the check is not seen. The next pass tries to take or renew the lease again, and
+    /// takes it at once if it was deleted.
     pub held: bool,
     /// The objects copied to the cold tier, or found there already.
     pub copied: usize,
@@ -240,11 +245,15 @@ fn millis(duration: Duration) -> u64 {
 ///    read from the hot tier just before the delete, and only if the cold tier holds a real
 ///    object of that content then (not nothing, not a reservation, not another object: the hot
 ///    object may be the only copy, and stays, and is asked about again by the next pass).
-/// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
-///    put, after the first): every journal object up to a number is applied, and every entry
-///    before a position is done with (the eviction folds its progress into the checkpoint,
-///    so a restart does not count an eviction twice). After a crash the reconciler resumes
-///    from the checkpoints; whatever it had done since is done again, which is harmless.
+/// 3. **Checkpoint.** The lease is checked once more first (a HEAD, no renewal): a pass that
+///    finds it lost stores nothing more, and forgets what it read. Then, for each proxy,
+///    `_tiering/checkpoint/<proxy_id>` is read back, joined with what this pass has (the
+///    larger of each number), and written (an `If-Match` put, after the first) only if that is
+///    more than what is stored, so a stored checkpoint never moves backwards: every journal
+///    object up to a number is applied, and every entry before a position is done with (the
+///    eviction folds its progress into the checkpoint, so a restart does not count an eviction
+///    twice). After a crash the reconciler resumes from the checkpoints; whatever it had done
+///    since is done again, which is harmless.
 /// 4. **Prune.** A journal object is deleted when the stored checkpoint has applied it and
 ///    moved past its entries, and it was written at least [`ReconcilerConfig::retention`]
 ///    ago. A journal object that holds an object the hot tier may still hold is kept: the
@@ -264,10 +273,16 @@ fn millis(duration: Duration) -> u64 {
 ///   deletes on, and is deleted from the hot tier unless its own journal entry shows in the
 ///   read that precedes the eviction. It is in the cold tier by then in the common case (the
 ///   copy found it), so only the hot copy goes.
-/// - A pass that takes longer than the lease ttl loses the lease, and goes on to the end:
-///   it may store an older checkpoint over the one of the reconciler that took over. Keep a
-///   pass shorter than the ttl (set `parallel` and the ttl accordingly), and do not cancel a
-///   pass.
+/// - A pass that takes longer than the lease ttl loses the lease. It still copies, and may still
+///   evict, beside the reconciler that took over (there is no fencing token; copies are
+///   create-only), but once it finds the lease gone, before the checkpoint, it stores no
+///   checkpoint, prunes nothing and publishes no usage. A checkpoint is never stored lower. The
+///   check is a HEAD, not a fence: a pass that takes the lease over between the check and the
+///   stores can still prune or publish usage, and the checkpoint it stores is joined with the
+///   stored one. Keep a pass shorter than the ttl (set `parallel` and the ttl accordingly), and
+///   do not cancel a pass.
+/// - A checkpoint object that does not decode fails the pass of its proxy each time, until the
+///   object is deleted (the proxy then starts over from journal object 1).
 /// - A delete entry of a key that a reserved put or a mirror last put (by what the reconciler read
 ///   in the last retention) is not applied to the cold tier: the proxy removed the cold object
 ///   itself. One that is applied after more than the retention since that put is applied as a
@@ -342,6 +357,17 @@ impl Reconciler {
         let now = self.config.clock.now();
         self.books.forget_reserved_before(now.saturating_sub(kept));
         self.evict(&ids, &mut report).await;
+        match self.lease.still_held().await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.books = Books::default();
+                return report;
+            }
+            Err(error) => {
+                report.failed.push(error);
+                return report;
+            }
+        }
         for id in &ids {
             self.persist(id, &mut report).await;
             self.prune(id, &mut report).await;
@@ -802,15 +828,16 @@ impl Reconciler {
         Ok(Some(true))
     }
 
-    /// Stores the checkpoint of a proxy if it moved.
+    /// Stores the checkpoint of a proxy if it moved past the stored one. What is stored after
+    /// the call (the join of the two) is what the prune follows.
     async fn persist(&mut self, id: &str, report: &mut PassReport) {
         let wanted = self.books.stream(id).snapshot();
-        if wanted == self.books.stream(id).persisted {
+        let persisted = self.books.stream(id).persisted.clone();
+        if persisted.joined(&wanted) == persisted {
             return;
         }
-        let key = checkpoint_key(id);
-        match write_object(self.hot.as_ref(), &key, to_body(&wanted)).await {
-            Ok(()) => self.books.stream(id).persisted = wanted,
+        match store_checkpoint(self.hot.as_ref(), id, &wanted).await {
+            Ok(stored) => self.books.stream(id).persisted = stored,
             Err(error) => report.failed.push(error),
         }
     }

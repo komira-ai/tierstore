@@ -396,7 +396,7 @@ impl Chunks {
         if self
             .expect
             .as_ref()
-            .is_some_and(|had| !meta.same_content(had))
+            .is_some_and(|had| !self.inner.same_version(&meta, had))
         {
             return Err(written_over());
         }
@@ -413,7 +413,7 @@ impl Chunks {
             return Ok(());
         };
         let now = self.inner.upstream.head(&self.key).await?;
-        if now.same_content(pinned) {
+        if self.inner.same_version(&now, pinned) {
             return Ok(());
         }
         Err(written_over())

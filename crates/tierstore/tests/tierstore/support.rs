@@ -3,11 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use tierstore::{
-    Backend, ByteRange, Error, FaultyBackend, JournalEntry, MemoryBackend, PartBody, Proxy,
-    ProxyConfig, Reconciler, ReconcilerConfig, TestClock, decode_journal,
+    Backend, ByteRange, Error, FaultyBackend, JournalEntry, Listed, MemoryBackend, Meta, PartBody,
+    Proxy, ProxyConfig, Reconciler, ReconcilerConfig, TestClock, decode_journal,
 };
 
 /// A hot and a cold in-memory backend, each behind a fault injector, with one clock that
@@ -186,4 +187,87 @@ pub fn broken(texts: &[&'static str], error: &Error) -> PartBody<'static> {
     let mut items: Vec<Result<Bytes, Error>> = texts.iter().map(|text| Ok(body(text))).collect();
     items.push(Err(error.clone()));
     stream::iter(items).boxed()
+}
+
+/// A backend over another whose tags are a different function of the content than the inner
+/// backend's (the way an S3 ETag differs from a SHA-256): every tag it reports is prefixed.
+pub struct Retagged {
+    inner: Arc<dyn Backend>,
+}
+
+impl Retagged {
+    pub fn over(inner: Arc<dyn Backend>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl Backend for Retagged {
+    fn needs_length(&self) -> bool {
+        self.inner.needs_length()
+    }
+
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.inner.put(key, body).await
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_stream(key, len, body).await
+    }
+
+    async fn put_stream_hot_only(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_stream_hot_only(key, len, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.inner.get(key, range).await
+    }
+
+    /// The read of the inner backend, with the tag prefixed as [`Backend::head`] prefixes it:
+    /// the trait says the tag of a marked read is the one `head` gives for that object.
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool, String), Error> {
+        let (bytes, reservation, tag) = self.inner.get_marked(key, range).await?;
+        Ok((bytes, reservation, format!("cold-etag:{tag}")))
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        let mut meta = self.inner.head(key).await?;
+        meta.tag = format!("cold-etag:{}", meta.tag);
+        Ok(meta)
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.inner.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.inner.list(prefix).await
+    }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        self.inner.list_page(prefix, start_after, max_keys).await
+    }
 }

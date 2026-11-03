@@ -94,6 +94,8 @@ mod dir;
 mod error;
 mod faulty;
 mod journal;
+#[cfg(test)]
+mod journal_tests;
 mod lease;
 #[cfg(test)]
 mod lease_tests;
