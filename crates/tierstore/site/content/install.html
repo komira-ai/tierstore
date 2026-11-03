@@ -56,8 +56,8 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
     <h3>Place the binary <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>The tarball holds one member, the binary under its own name.</p>
     <div class="code"><pre><span class="p">$</span> tar -xzf tierstore-&lt;commit&gt;-linux-x86_64.tar.gz tierstore
-<span class="p">$</span> install -d -m 0755 /usr/libexec/kbf
-<span class="p">$</span> install -m 0755 -o root -g root tierstore /usr/libexec/kbf/tierstore</pre></div>
+<span class="p">$</span> install -d -m 0755 /usr/libexec/tierstore
+<span class="p">$</span> install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore</pre></div>
     <p>The host updater (<code>kbf-updater</code>, <code>kbf-host-install</code>) does not manage tierstore yet. To move to the next release, place the next binary the same way and restart the unit.</p>
   </li>
   <li>
