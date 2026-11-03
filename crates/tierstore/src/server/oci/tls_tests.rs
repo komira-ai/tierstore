@@ -290,8 +290,8 @@ fn the_s3_front_names_its_own_flags_in_every_refusal() {
     let good = leaf(dir.path(), "good", &ca, names());
     let stranger = leaf(dir.path(), "stranger", &ca, names());
     let expired = leaf_with(dir.path(), "expired", &ca, names(), |params| {
-        params.not_before = date_time_ymd(2020, 1, 1);
-        params.not_after = date_time_ymd(2021, 1, 1);
+        params.not_before = date_time_ymd(2026, 9, 1);
+        params.not_after = date_time_ymd(2026, 9, 2);
     });
     let missing = dir.path().join("missing");
     let text = dir.path().join("text");
