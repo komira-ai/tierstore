@@ -82,12 +82,12 @@ impl Running {
         &self.addr
     }
 
-    /// The client of kbf with the key of the key file.
+    /// The `S3Store` client with the key of the key file.
     pub(crate) fn store(&self) -> S3Store {
         self.store_as(BIN_KEY_ID, BIN_SECRET)
     }
 
-    /// The client of kbf with this key.
+    /// The `S3Store` client with this key.
     fn store_as(&self, key_id: &str, secret: &str) -> S3Store {
         let config = S3Config {
             endpoint: format!("http://{}", self.addr),

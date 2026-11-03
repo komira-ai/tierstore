@@ -3,7 +3,7 @@
 //! Tests used to make `<root>/<name>-<pid>` and never remove it, so every run left a
 //! directory per test behind. A `TestDir` is unique per test (name, process id and a
 //! counter), exists from [`TestDir::under`] on, and is removed on drop, except when the
-//! thread is panicking and `KBF_KEEP_TMP` is set (a failed test's files are then left
+//! thread is panicking and `TIERSTORE_KEEP_TMP` is set (a failed test's files are then left
 //! for a person to read; the path is printed to stderr).
 //!
 //! Drop order matters when a test starts processes that write into the directory: a
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The variable that keeps the directory of a test that panicked.
-pub const KEEP_ENV: &str = "KBF_KEEP_TMP";
+pub const KEEP_ENV: &str = "TIERSTORE_KEEP_TMP";
 
 /// A directory removed (with everything in it) on drop.
 #[derive(Debug)]

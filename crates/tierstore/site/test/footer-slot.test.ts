@@ -1,8 +1,8 @@
-// The white-paper slot.
+// The optional footer link.
 //
-// Catches: a link, a name or a placeholder for a white paper reaching a built page before the paper is final, and a
-// footer that stops showing the link once WHITE_PAPER_URL is set. While the paper is a draft the site says nothing
-// about it: no visible placeholder, no hidden element, no navigation entry.
+// Catches: a link, a name or a placeholder for the optional footer document reaching a built page while WHITE_PAPER_URL
+// is null, and a footer that stops showing the link once the URL is set. While it is null the site says nothing about
+// it: no visible placeholder, no hidden element, no navigation entry.
 
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -13,10 +13,10 @@ import { footer } from '../tools/layout';
 import { NAV, WHITE_PAPER_URL } from '../tools/pages';
 import { buildReal } from './support';
 
-const dist = buildReal('whitepaper');
+const dist = buildReal('footer-slot');
 
-test('while WHITE_PAPER_URL is null, no built file mentions a white paper', () => {
-  assert.equal(WHITE_PAPER_URL, null, 'the paper is final: also add a page that links to it, and update this test');
+test('while WHITE_PAPER_URL is null, no built file mentions the footer document', () => {
+  assert.equal(WHITE_PAPER_URL, null, 'the URL is set: also add a page that links to it, and update this test');
   const hits = listFiles(dist).filter((f) => /white[\s_-]*paper/i.test(readFileSync(join(dist, f), 'utf8')));
   assert.deepEqual(hits, []);
   assert.equal(NAV.some((n) => /paper/i.test(n.label + n.route)), false);

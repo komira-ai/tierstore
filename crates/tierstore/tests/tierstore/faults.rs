@@ -72,9 +72,9 @@ async fn a_put_the_hot_tier_fails_is_not_acknowledged() {
     assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
 }
 
-/// Asserts that a delete the hot tier fails removes nothing, and that a delete the cold tier
-/// fails after the hot tier removed its copy is an error that a retry finishes, journaling the
-/// delete once.
+/// Asserts that a delete the cold tier fails (the cold tier is deleted from first, on the
+/// object's content tag) removes nothing, and that a delete the hot tier fails after the cold
+/// tier removed its object is an error that a retry finishes, journaling the delete once.
 #[tokio::test(start_paused = true)]
 async fn a_delete_a_tier_fails_is_an_error_and_can_be_retried() {
     let rig = Rig::new();
@@ -82,18 +82,18 @@ async fn a_delete_a_tier_fails_is_an_error_and_can_be_retried() {
     proxy.put("k", body("value")).await.unwrap();
     rig.cold_mem.put("k", body("value")).await.unwrap();
 
-    rig.hot.fail_next(Op::Delete, 1);
+    rig.cold.fail_next(Op::DeleteIfMatch, 1);
     assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
     assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
     assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
 
-    rig.cold.fail_next(Op::Delete, 1);
+    rig.hot.fail_next(Op::Delete, 1);
     assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
-    assert_absent(&*rig.hot_mem, "k").await;
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
+    assert_absent(&*rig.cold_mem, "k").await;
 
     proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.cold_mem, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
     let objects = journal_keys(&*rig.hot_mem, "p1").await;
     assert_eq!(objects, [journal_key("p1", 1), journal_key("p1", 2)]);
 }

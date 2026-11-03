@@ -2,8 +2,8 @@
 //! under and the commit it was built from.
 //!
 //! `tierstore --version` prints `tierstore <version>+<commit>`. The build gives the binary its
-//! version (`TIERSTORE_BUILD_VERSION_OVERRIDE`, from `cargo xtask release version`, the same
-//! computation that names the tag), so for a release the text is exactly
+//! version (the crate's, set by `cargo xtask release set-version` from `cargo xtask release
+//! version`, the same computation that names the tag), so for a release the text is exactly
 //! `tierstore <tag without v>+<first 12 digits of the commit>`. A release whose binary says
 //! anything else (a crate version nobody bumped, another commit, no commit) is refused before
 //! it is published. The binary is run, so this is made on a runner of its architecture:
