@@ -575,14 +575,19 @@ async fn a_delete_just_before_the_index_insert_is_caught_by_the_check_after_it()
 /// Asserts that the observer of a cache is called once for a keep that put its object in the
 /// index, and for no put that was not kept: a put under a kept prefix calls it once, a put under
 /// a prefix the cache does not keep and a put of no declared length (counted as `budget`) call it
-/// no more. Every other test of the module runs with no observer.
-#[tokio::test]
+/// no more. The test runs on a paused clock and waits for the observer's own notice of the keep
+/// before it asserts, and never advances the clock, so neither `keep_wait` nor `keep_deadline` can
+/// pass first. Every other test of the module runs with no observer.
+#[tokio::test(start_paused = true)]
 async fn the_observer_is_called_once_for_each_keep_that_reached_the_index() {
     let rig = Rig::writing("tscache-keep-observer");
     let called = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&called);
+    let kept = Arc::new(tokio::sync::Notify::new());
+    let told = Arc::clone(&kept);
     let observer: super::KeepObserver = Arc::new(move || {
         let _ = count.fetch_add(1, Ordering::SeqCst);
+        told.notify_one();
     });
     let upstream: Arc<dyn Backend> = rig.upstream.clone();
     let opened = super::LocalCache::open_observed(
@@ -596,6 +601,7 @@ async fn the_observer_is_called_once_for_each_keep_that_reached_the_index() {
 
     let one = cache.put_stream("cas/b/one", Some(3), whole(b"one")).await;
     assert_eq!(one, Ok(()));
+    kept.notified().await;
     assert_eq!(called.load(Ordering::SeqCst), 1);
     assert_eq!(cache.held(), (3, 1));
     let two = cache.put_stream("other/two", Some(3), whole(b"two")).await;
