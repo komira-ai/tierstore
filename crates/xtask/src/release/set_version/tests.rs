@@ -52,6 +52,93 @@ fn the_lock_version_is_that_of_the_tierstore_package_alone() {
     assert!(got.contains("name = \"zed\"\nversion = \"2.0.0\""));
 }
 
+const REMOTE_REF: &str = " \"tierstore 0.3.0 (git+https://example.invalid/tierstore?rev=abc)\",\n";
+const REMOTE_BARE: &str = " \"tierstore 0.3.0\",\n";
+const REMOTE_PKG: &str = "[[package]]\nname = \"tierstore\"\nversion = \"0.3.0\"\nsource = \"git+https://example.invalid/tierstore?rev=abc#abc\"\n\n";
+
+/// The local package entry at `version`.
+fn local_pkg(version: &str) -> String {
+    format!(
+        "[[package]]\nname = \"tierstore\"\nversion = \"{version}\"\ndependencies = [\n \"x\",\n]\n\n"
+    )
+}
+
+/// The entry of a package that depends on tierstore, with the dependency lines `refs`.
+fn compat(refs: &str) -> String {
+    format!(
+        "[[package]]\nname = \"tierstore-compat\"\nversion = \"0.1.0\"\ndependencies = [\n \"bytes\",\n{refs} \"tierstore-testkit\",\n]\n"
+    )
+}
+
+fn local_ref(version: &str) -> String {
+    format!(" \"tierstore {version}\",\n")
+}
+
+/// Asserts that with both packages present, the local one (the one without a `source`) and the
+/// exact references to it get the new version, the remote package keeps its version, its
+/// references lose the source suffix (versions now differ), and the entries and references are in the order cargo writes (by version), so
+/// the `--locked` build accepts the lock.
+#[test]
+fn the_local_package_and_its_references_move_and_the_remote_package_stays() {
+    let text = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{}{REMOTE_REF}", local_ref("0.3.0")))
+    );
+    let expected = format!(
+        "{REMOTE_PKG}{}{}",
+        local_pkg("1.2.3"),
+        compat(&format!("{REMOTE_BARE}{}", local_ref("1.2.3")))
+    );
+    assert_eq!(set_lock(&text, "1.2.3").expect("set"), expected);
+}
+
+/// Asserts that a version below the remote package's keeps the local entry and reference first,
+/// so the order follows the versions and is not a fixed swap.
+#[test]
+fn a_local_version_below_the_remote_one_keeps_the_local_entries_first() {
+    let text = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{REMOTE_REF}{}", local_ref("0.3.0")))
+    );
+    let expected = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.2.9"),
+        compat(&format!("{}{REMOTE_BARE}", local_ref("0.2.9")))
+    );
+    assert_eq!(set_lock(&text, "0.2.9").expect("set"), expected);
+}
+
+/// Asserts that a lock whose references name only the remote package changes in the local
+/// package alone: its version and its place after the remote entry.
+#[test]
+fn references_to_the_remote_package_alone_leave_the_rest_unchanged() {
+    let text = format!("{}{REMOTE_PKG}{}", local_pkg("0.3.0"), compat(REMOTE_REF));
+    let expected = format!("{REMOTE_PKG}{}{}", local_pkg("1.2.3"), compat(REMOTE_BARE));
+    assert_eq!(set_lock(&text, "1.2.3").expect("set"), expected);
+}
+
+/// Asserts that a release version equal to the remote package's changes nothing, the source
+/// suffix staying on the remote references because the two packages share a version.
+#[test]
+fn a_version_shared_with_the_remote_package_keeps_the_source_suffix() {
+    let text = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{}{REMOTE_REF}", local_ref("0.3.0")))
+    );
+    assert_eq!(set_lock(&text, "0.3.0").expect("set"), text);
+}
+
+/// Asserts that a lock holding only a remote tierstore is refused as having no local package,
+/// rather than rewriting the remote one.
+#[test]
+fn a_lock_with_only_a_remote_tierstore_is_refused() {
+    let err = set_lock(REMOTE_PKG, "1.2.3").expect_err("no local");
+    assert!(err.to_string().contains("no tierstore package"), "{err}");
+}
+
 /// Asserts that a lock without the package, or whose entry has no version line, is refused
 /// with words naming what is missing.
 #[test]
