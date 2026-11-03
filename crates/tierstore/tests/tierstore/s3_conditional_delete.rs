@@ -84,3 +84,16 @@ async fn the_setting_is_not_checked_against_the_store() {
     backend.delete_if_match("j", &tag).await.unwrap();
     assert_eq!(methods(&s3, before), ["DELETE"]);
 }
+
+/// Asserts that a conditional delete of a key the client cannot name is an error before any
+/// request, with the setting off and with it on.
+#[tokio::test]
+async fn a_key_the_client_cannot_name_sends_no_request() {
+    let (s3, backend) = backend().await;
+    let refused = backend.delete_if_match("a b", "tag").await.unwrap_err();
+    assert!(matches!(refused, Error::Other(_)), "{refused}");
+    let backend = backend.with_conditional_delete(true);
+    let refused = backend.delete_if_match("a b", "tag").await.unwrap_err();
+    assert!(matches!(refused, Error::Other(_)), "{refused}");
+    assert_eq!(s3.requests(), Vec::<String>::new());
+}
