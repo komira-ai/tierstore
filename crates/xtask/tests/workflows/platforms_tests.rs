@@ -649,7 +649,10 @@ fn a_build_job_without_its_set_version_or_lock_commands_is_named() {
     let text = text_of("artifacts.yml");
     for b in BUILDS {
         for (command, with) in [
-            (SET_VERSION, "cargo xtask release set-version --version 0.0.0"),
+            (
+                SET_VERSION,
+                "cargo xtask release set-version --version 0.0.0",
+            ),
             (SET_VERSION, "true"),
             (KEEP_LOCK, "true"),
             (CHECK_LOCK, "git diff --exit-code -- Cargo.lock"),
