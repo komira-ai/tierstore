@@ -367,8 +367,9 @@ async fn a_failed_journal_entry_removes_the_copy_by_its_tag_and_leaves_a_replace
 /// from the stored checkpoint: a first reconciler applies journal object 1 (a plain put of `j`,
 /// then the tagless mirror of `k`), stores its checkpoint, which keeps the cursor at `j`, and
 /// stops; a second one resumes from it and reads the object again, as applied, under eviction
-/// pressure. It evicts `j` and leaves the hot object of `k`: the mirror is not an eviction
-/// candidate, and no current tag of the hot tier stands in for the one it lacks.
+/// pressure. It evicts `j` and `m` (a mirror that names its hot tag, which stays a candidate) and
+/// leaves the hot object of `k`: the tagless mirror is not an eviction candidate, and no current
+/// tag of the hot tier stands in for the one it lacks.
 #[tokio::test(start_paused = true)]
 async fn a_mirror_without_a_hot_tag_stays_unowned_when_the_books_are_rebuilt_from_a_checkpoint() {
     let tag = tag_of("hot!!").await;
@@ -380,23 +381,30 @@ async fn a_mirror_without_a_hot_tag_stays_unowned_when_the_books_are_rebuilt_fro
         cold_tag: None,
         hot_tag: None,
     };
-    let rig = with_journal(&[plain, mirror("k", Some(&tag), None)]).await;
-    rig.hot_mem.put("j", body("jjjjj")).await.unwrap();
-    rig.hot_mem.put("k", body("hot!!")).await.unwrap();
-    rig.cold_mem.put("j", body("jjjjj")).await.unwrap();
-    rig.cold_mem.put("k", body("hot!!")).await.unwrap();
+    let tag_m = tag_of("mmmmm").await;
+    let entries = [
+        plain,
+        mirror("k", Some(&tag), None),
+        mirror("m", Some(&tag_m), Some(&tag_m)),
+    ];
+    let rig = with_journal(&entries).await;
+    for (key, text) in [("j", "jjjjj"), ("k", "hot!!"), ("m", "mmmmm")] {
+        rig.hot_mem.put(key, body(text)).await.unwrap();
+        rig.cold_mem.put(key, body(text)).await.unwrap();
+    }
 
     let mut first = rig.reconciler("r1", 1000);
     let report = first.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(report.copied, 1);
+    assert_eq!(report.copied, 2);
     assert_eq!(report.evicted, 0);
     first.stop().await;
 
     let mut second = rig.reconciler("r2", 5);
     let report = second.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(report.evicted, 1);
+    assert_eq!(report.evicted, 2);
     assert_absent(&*rig.hot_mem, "j").await;
+    assert_absent(&*rig.hot_mem, "m").await;
     assert_eq!(read(&*rig.hot_mem, "k").await, body("hot!!"));
 }
