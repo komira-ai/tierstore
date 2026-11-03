@@ -161,10 +161,10 @@ async fn an_injector_counts_and_fails_reservations_as_a_kind_of_their_own() {
 #[tokio::test]
 async fn an_injector_counts_a_read_with_the_mark_as_a_get() {
     let backend = faulty();
-    backend.put_reservation("k", reservation(1)).await.unwrap();
+    let tag = backend.put_reservation("k", reservation(1)).await.unwrap();
     let range = Some(ByteRange::new(2, 3));
     let read = backend.get_marked("k", range).await.unwrap();
-    assert_eq!(read, (reservation(1).slice(2..5), true));
+    assert_eq!(read, (reservation(1).slice(2..5), true, tag));
     assert_eq!(backend.calls(Op::Get), 1);
     assert_eq!(backend.get_ranges(), [Some((2, 3))]);
 
@@ -233,7 +233,7 @@ impl Backend for Pausing {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         self.inner.get_marked(key, range).await
     }
 
@@ -277,13 +277,14 @@ async fn a_read_with_the_mark_through_a_cache_is_the_backends_read_and_not_its_c
     inner.committed.notified().await;
     assert_eq!(cache.get("k", None).await.unwrap(), body("plain a"));
     let whole = cache.get_marked("k", None).await.unwrap();
-    assert_eq!(whole, (reservation(2), true));
+    assert_eq!((whole.0, whole.1), (reservation(2), true));
     let range = Some(ByteRange::new(0, 4));
     let part = cache.get_marked("k", range).await.unwrap();
-    assert_eq!(part, (reservation(2).slice(0..4), true));
+    assert_eq!((part.0, part.1), (reservation(2).slice(0..4), true));
 
     inner.release.notify_one();
     let new = replacing.await.unwrap().unwrap();
+    assert_eq!((whole.2, part.2), (new.clone(), new.clone()));
     assert_eq!(cache.get("k", None).await.unwrap(), reservation(2));
     assert_eq!(cache.head("k").await.unwrap().tag, new);
 }

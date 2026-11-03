@@ -328,11 +328,15 @@ pub trait Backend: Send + Sync {
     /// [`Error::NotFound`] if no object has the key.
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error>;
 
-    /// As [`Backend::get`], and whether the object is a reservation ([`Meta::reservation`]), both
-    /// from one read of one object: the mark is the one of the object the bytes were read from,
-    /// never that of an object that was in the key before or after. A backend that cannot give
-    /// that (one that reads the bytes and asks for the mark in another call, where the key may be
-    /// replaced, and replaced back, in between) must not make the call up from a HEAD and a read.
+    /// As [`Backend::get`], with whether the object is a reservation ([`Meta::reservation`]) and
+    /// its content tag ([`Meta::tag`]), all from one read of one object: the mark and the tag are
+    /// those of the object the bytes were read from, never those of an object that was in the key
+    /// before or after (a key that holds A, then B, then A again gives the tag of the A or of the
+    /// B whose bytes it gives, not of the other). A backend that cannot give that (one that reads
+    /// the bytes and asks for the mark or the tag in another call, where the key may be replaced,
+    /// and replaced back, in between) must not make the call up from a HEAD and a read. The tag
+    /// is the one [`Backend::head`] gives for that object, so a caller may use it as `etag` of
+    /// the conditional calls.
     ///
     /// The provided implementation is [`Error::Unsupported`], so that a backend or a wrapper that
     /// forgets to forward the call fails loudly: a wrapper over another backend forwards it, and
@@ -346,7 +350,7 @@ pub trait Backend: Send + Sync {
         &self,
         _key: &str,
         _range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         Err(no_reservations("get_marked"))
     }
 

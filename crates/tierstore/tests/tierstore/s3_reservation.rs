@@ -63,14 +63,21 @@ async fn a_conditional_delete_takes_a_reservation_only_on_its_tag() {
 }
 
 /// Reads key `k` with the mark, whole and by range, and asserts that each read gave `held` (or its
-/// first four bytes) with `marked`, and that the two reads were two GETs and no other request.
-async fn two_reads_are_two_gets(s3: &FakeS3, backend: &S3Backend, held: Bytes, marked: bool) {
+/// first four bytes) with `marked` and the content tag `tag`, and that the two reads were two GETs
+/// and no other request.
+async fn two_reads_are_two_gets(
+    s3: &FakeS3,
+    backend: &S3Backend,
+    held: Bytes,
+    marked: bool,
+    tag: &str,
+) {
     let before = s3.requests().len();
     let whole = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(whole, (held.clone(), marked));
+    assert_eq!(whole, (held.clone(), marked, tag.to_owned()));
     let range = Some(ByteRange::new(0, 4));
     let part = backend.get_marked("k", range).await.unwrap();
-    assert_eq!(part, (held.slice(0..4), marked));
+    assert_eq!(part, (held.slice(0..4), marked, tag.to_owned()));
     let sent = s3.requests();
     let methods: Vec<&str> = sent[before..]
         .iter()
@@ -87,13 +94,13 @@ async fn two_reads_are_two_gets(s3: &FakeS3, backend: &S3Backend, held: Bytes, m
 async fn a_read_with_the_mark_is_one_get_whole_or_by_range() {
     let (s3, backend) = backend().await;
     let tag = backend.put_reservation("k", reservation(1)).await.unwrap();
-    two_reads_are_two_gets(&s3, &backend, reservation(1), true).await;
+    two_reads_are_two_gets(&s3, &backend, reservation(1), true, &tag).await;
     let real = backend.put_if_match("k", body("a real object"), &tag);
-    real.await.unwrap();
-    two_reads_are_two_gets(&s3, &backend, body("a real object"), false).await;
+    let real = real.await.unwrap();
+    two_reads_are_two_gets(&s3, &backend, body("a real object"), false, &real).await;
     backend.delete("k").await.unwrap();
-    backend.put_reservation("k", reservation(3)).await.unwrap();
-    two_reads_are_two_gets(&s3, &backend, reservation(3), true).await;
+    let again = backend.put_reservation("k", reservation(3)).await.unwrap();
+    two_reads_are_two_gets(&s3, &backend, reservation(3), true, &again).await;
 }
 
 /// Asserts that a key the client cannot name is `Other` for each reservation call and for a read
@@ -148,5 +155,50 @@ async fn a_store_that_resets_connections_fails_the_reservation_calls_as_unavaila
         ranged.unwrap_err(),
     ] {
         assert!(failed.is_unavailable(), "{failed}");
+    }
+}
+
+/// An endpoint on loopback that answers each request, whole or ranged, with the bytes `abcd` and
+/// no `ETag`, and stays bound for the whole test.
+async fn endpoint_without_etags() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            let ranged = text.contains("range: bytes=0-3");
+            let (status, extra) = if ranged {
+                ("206 Partial Content", "content-range: bytes 0-3/4\r\n")
+            } else {
+                ("200 OK", "")
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nconnection: close\r\ncontent-length: 4\r\n{extra}\r\nabcd"
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        }
+    });
+    endpoint
+}
+
+/// Asserts that a read with the mark, whole or by range, whose answer carries no `ETag` is an
+/// error and not bytes with a made-up tag: the read cannot say which object it read.
+#[tokio::test]
+async fn a_read_with_the_mark_whose_answer_has_no_etag_is_an_error() {
+    let endpoint = endpoint_without_etags().await;
+    let backend = S3Backend::new(config(&endpoint)).unwrap();
+    let whole = backend.get_marked("k", None).await.unwrap_err();
+    let ranged = backend.get_marked("k", Some(ByteRange::new(0, 4)));
+    let ranged = ranged.await.unwrap_err();
+    for failed in [whole, ranged] {
+        assert_eq!(
+            failed,
+            Error::Other("k: the read's answer has no ETag".to_owned())
+        );
     }
 }
