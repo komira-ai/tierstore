@@ -38,8 +38,8 @@
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
-//! `_entries/`, `_journal/` or `_tiering/` is refused with `AccessDenied` by the backend behind the
-//! front (the proxy, or the local cache over a plain bucket), which has no other answer for it.
+//! `_entries/`, `_journal/` or `_tiering/` is refused with `AccessDenied`, before the rest of the
+//! request is looked at.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
 //! when the client goes away before the answer, so that no object is left without the journal

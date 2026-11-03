@@ -1,6 +1,6 @@
-//! The S3 front over a proxy: the keys the proxy keeps for itself are out of reach. The proxy
-//! refuses them and leaves them out of its listings; the front checks only the completion of an
-//! upload, before it reads the body, so that a malformed body is refused as well.
+//! The S3 front over a proxy: the keys the proxy keeps for itself are out of reach. The front
+//! refuses every call on them before it looks at the rest of the request, and the proxy behind it
+//! refuses them too and leaves them out of its listings.
 
 use bytes::Bytes;
 use hyper::StatusCode;
@@ -12,9 +12,9 @@ use super::testing::{Rig, texts};
 const MEBIBYTE: u64 = 1 << 20;
 
 /// Asserts that no call can name a key under `_entries/`, `_journal/` or `_tiering/`: get, head,
-/// a create-only put, delete and the multipart calls are `AccessDenied` (the proxy behind the
-/// front refuses them; the front itself refuses the completion of an upload, with a malformed
-/// body too, before it reads the body), and a listing leaves those keys out
+/// a create-only put, delete and the multipart calls are `AccessDenied` (the front
+/// refuses them before it looks at the rest of the request, so also a completion with a
+/// malformed body), and a listing leaves those keys out
 /// though the hot tier and the cold tier hold them.
 #[tokio::test(start_paused = true)]
 async fn the_keys_of_the_proxy_are_out_of_reach() {

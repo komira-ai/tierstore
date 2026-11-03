@@ -193,8 +193,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
 ///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
 ///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
-///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 and OCI fronts
-///   rely on it; the local cache of a build node keeps its own check.
+///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
+///   local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
