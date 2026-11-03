@@ -814,6 +814,8 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--bucket` | `server.bucket` | the name of the bucket served |
 | `--region` | `server.region` | the region of a request's signature |
 | `--access-key-file` | `server.access_key_file` | the full key file |
+| `--tls-cert` | `server.tls_cert_file` | on main, not in v0.0.41: the certificate chain (PEM) that makes the S3 front serve HTTPS; with `server.tls_key_file`, or neither |
+| `--tls-key` | `server.tls_key_file` | on main, not in v0.0.41: the private key (PEM) of the S3 front's certificate |
 | `--read-only-key-file` | `server.read_only_key_files` | a list of read-only key files |
 | `--presign-key-file` | `server.presign_key_files` | a list of presigning key files |
 | `--gc-key-file` | `server.gc_key_files` | a list of GC key files |
@@ -872,7 +874,7 @@ self-test) and not by the check. It does not look at the disk either: the start'
 `budget` over the size of the file system less `free_floor` (exit status 2), the cache directory
 and the credentials file of a tier are checked by a start only. For a storage node with an `[oci]`
 table the check does validate the OCI front as a start does (the prefix, the connection lifetime,
-and the TLS certificate and key files, which it reads and parses), without binding the address
+and the TLS certificate and key files, which it reads and parses; the S3 front's `--tls-cert` and `--tls-key` are checked the same way, for either shape), without binding the address
 and without the warning that a start gives for plain HTTP off loopback. A TLS file that is not
 there or cannot be used is exit status 2 under `--check-config`, where a start exits 1.
 
@@ -936,6 +938,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. On main, not in v0.0.41: give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server, one drain and one limit on connections serve them all, an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
 | `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
+| `--tls-cert`, `--tls-key` | on main, not in v0.0.41. Both or neither (one without the other is refused, exit 2). The certificate chain (leaf first) and the private key, PEM, that make every socket of the S3 front serve HTTPS; without them it serves plain HTTP, and off loopback the start prints one warning line on stderr naming the addresses. The leaf may name the front by a DNS name (any), by an IP address, or both; with no DNS name it needs an IP name for each `--listen` address. A key file that any user can read, a key that is not the certificate's and a leaf that is expired are refused. The files are read once. Tier endpoints are still `http://`, so a build node cannot use an HTTPS front as its upstream |
 | `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
 | `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL; see Presigned PUT URLs |
 | `--gc-key-file` | a GC key (given once for each key); see GC keys |
@@ -952,7 +955,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style, over plain HTTP (on main, not in v0.0.41, over HTTPS when it is given `--tls-cert` and `--tls-key`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -960,7 +963,7 @@ what "tested" means below.
 
 | setting | value | why |
 |---|---|---|
-| endpoint | `http://<host>:<port>` of `--listen` | the front has no TLS; an `https://` endpoint fails |
+| endpoint | `http://<host>:<port>` of `--listen` (on main, not in v0.0.41, `https://` when the front has `--tls-cert` and `--tls-key`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
 | addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
 | bucket | the `--bucket` name | there is one; other names are not served |
 | region | tierstore's own `--region` (not `--hot-region` or `--cold-region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
