@@ -12,12 +12,16 @@ fn entries() -> Vec<JournalEntry> {
             key: "models/a.bin".to_owned(),
             size: 1_048_576,
             time: 1_790_000_000_000,
+            cold_tag: None,
+            hot_tag: None,
         },
         JournalEntry {
             op: JournalOp::Delete,
             key: "models/b.bin".to_owned(),
             size: 0,
             time: 1_790_000_000_500,
+            cold_tag: None,
+            hot_tag: None,
         },
     ]
 }
@@ -49,12 +53,16 @@ fn a_journal_object_with_an_added_field_and_an_added_operation_still_reads() {
             key: "models/a.bin".to_owned(),
             size: 5,
             time: 1_790_000_000_000,
+            cold_tag: None,
+            hot_tag: None,
         },
         JournalEntry {
             op: JournalOp::Unknown,
             key: "models/b.bin".to_owned(),
             size: 0,
             time: 1_790_000_000_500,
+            cold_tag: None,
+            hot_tag: None,
         },
     ];
     assert_eq!(read, want);

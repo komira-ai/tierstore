@@ -55,6 +55,8 @@ async fn resume_from(checkpoint: &[u8]) {
             key,
             size: 1,
             time: seq,
+            cold_tag: None,
+            hot_tag: None,
         };
         let journal_key = format!("_journal/p1/{seq:020}");
         tiers.seed(&journal_key, &encode_journal(&[entry])).await;
