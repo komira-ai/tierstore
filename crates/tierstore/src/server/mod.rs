@@ -296,6 +296,8 @@ mod testing;
 #[cfg(test)]
 mod time_tests;
 #[cfg(test)]
+mod unlistable_key_tests;
+#[cfg(test)]
 mod uploads_tests;
 #[cfg(test)]
 mod xml_tests;

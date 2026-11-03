@@ -1048,6 +1048,10 @@ ls` and `list_objects_v2` fail against the front, and the calls that name a key 
 `put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
 client before relying on either.
 
+A put or a CreateMultipartUpload of a key with a control character, U+FFFE or U+FFFF is answered
+400 `InvalidArgument` and stores nothing: the front's listings are XML 1.0, which cannot carry those
+characters, and with no `encoding-type=url` there is no other way to list such a key.
+
 ## The OCI read front
 
 With `--oci-listen`, the process also serves the objects of the store as a read-only container

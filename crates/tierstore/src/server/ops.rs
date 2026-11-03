@@ -128,6 +128,19 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
+/// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
+/// which has no character for a control character or for U+FFFE and U+FFFF, and this front does
+/// not support `encoding-type=url`. A key with one would make every page that lists it malformed.
+fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
+    let bad = |c: char| c.is_control() || matches!(c, '\u{FFFE}' | '\u{FFFF}');
+    if key.chars().any(bad) {
+        return Err(S3Error::invalid(
+            "a key may not have a control character or U+FFFE or U+FFFF",
+        ));
+    }
+    Ok(())
+}
+
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
 /// know, and a copy.
 fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(), S3Error> {
@@ -408,6 +421,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
+        refuse_unlistable(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
@@ -509,6 +523,7 @@ impl Server {
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        refuse_unlistable(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);
