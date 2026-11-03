@@ -197,35 +197,41 @@ impl S3Backend {
     /// What the store does with a DELETE of `object` that carries `If-Match`, asked of the
     /// object this writes: `Ok(true)` if the store enforces the header (a wrong tag refused
     /// with 412, the object still there after it, the right tag accepted, the object gone
-    /// after it), `Ok(false)` if it answered and did otherwise, and the text of the error if a
-    /// request failed in a way that says nothing of the header, so that the store was not
-    /// asked.
-    async fn enforces_if_match(&self, object: &ObjectKey) -> Result<bool, String> {
+    /// after it), `Ok(false)` if it answered and did otherwise, and the [`ProbeError`] naming
+    /// the request if one failed in a way that says nothing of the header, so that the store
+    /// was not asked.
+    async fn enforces_if_match(&self, object: &ObjectKey) -> Result<bool, ProbeError> {
         let store = &self.store;
         let probe = Bytes::from_static(b"probe");
         let put = store.put_new(object, probe, None).await;
-        put.map_err(|e| e.to_string())?;
-        let head = store.head(object).await.map_err(|e| e.to_string())?;
+        put.map_err(|e| ProbeError::request("write", e))?;
+        let head = store.head(object).await;
+        let head = head.map_err(|e| ProbeError::request("read of the tag", e))?;
         let tag = head.etag;
         match store.delete_if_match(object, "\"wrong\"").await {
             Err(ObjectStoreError::Service { status: 412, .. }) => {}
             Ok(()) => return Ok(false),
-            Err(other) => return Err(other.to_string()),
+            Err(other) => return Err(ProbeError::request("delete with a wrong tag", other)),
         }
-        let kept = self.tag_of(object).await? == Some(tag.clone());
+        let after_wrong = self.tag_of(object, "read after the wrong tag").await?;
+        let kept = after_wrong == Some(tag.clone());
         let right = store.delete_if_match(object, &tag).await;
-        right.map_err(|e| e.to_string())?;
-        let gone = self.tag_of(object).await?.is_none();
-        Ok([kept, gone] == [true; 2])
+        right.map_err(|e| ProbeError::request("delete with the right tag", e))?;
+        let after_right = self.tag_of(object, "read after the right tag").await?;
+        Ok([kept, after_right.is_none()] == [true; 2])
     }
 
-    /// The tag of `object`, or `None` if there is no such object, or the text of the error of
-    /// any other failure.
-    async fn tag_of(&self, object: &ObjectKey) -> Result<Option<String>, String> {
+    /// The tag of `object`, or `None` if there is no such object, or the [`ProbeError`] of any
+    /// other failure, naming the `stage` of the probe it was.
+    async fn tag_of(
+        &self,
+        object: &ObjectKey,
+        stage: &'static str,
+    ) -> Result<Option<String>, ProbeError> {
         match self.store.head(object).await {
             Ok(head) => Ok(Some(head.etag)),
             Err(ObjectStoreError::NotFound(_)) => Ok(None),
-            Err(other) => Err(other.to_string()),
+            Err(other) => Err(ProbeError::request(stage, other)),
         }
     }
 
@@ -257,6 +263,26 @@ impl S3Backend {
         }
         listed.truncate(limit);
         Ok(listed)
+    }
+}
+
+/// Why the probe of the conditional delete could not ask the store.
+#[derive(Debug, thiserror::Error)]
+enum ProbeError {
+    /// The probe key cannot be named, so no request was sent.
+    #[error("{0}")]
+    Key(Error),
+    /// The request of the named stage of the probe failed.
+    #[error("{stage}: {source}")]
+    Request {
+        stage: &'static str,
+        source: ObjectStoreError,
+    },
+}
+
+impl ProbeError {
+    fn request(stage: &'static str, source: ObjectStoreError) -> Self {
+        Self::Request { stage, source }
     }
 }
 
@@ -496,9 +522,9 @@ impl Backend for S3Backend {
                 let _ = self.store.delete(object).await;
                 asked
             }
-            Err(why) => Err(why.to_string()),
+            Err(why) => Err(ProbeError::Key(why)),
         };
-        let enforced = asked == Ok(true);
+        let enforced = matches!(asked, Ok(true));
         self.if_match_delete.store(enforced, Ordering::Release);
         Some(match asked {
             Ok(true) => "if-match".to_owned(),
