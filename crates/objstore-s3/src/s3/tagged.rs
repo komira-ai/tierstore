@@ -264,18 +264,26 @@ impl S3Store {
     /// [`ObjectStoreError::NotFound`] if no object has the key.
     pub async fn get_all(&self, key: &ObjectKey) -> Result<Bytes, ObjectStoreError> {
         let read = retrying(move || self.get_all_once(key)).await;
-        read.map(|(bytes, _)| bytes)
+        read.map(|(bytes, _, _)| bytes)
     }
 
-    /// The whole object, and whether it carries the reservation mark, from the one answer.
+    /// The whole object, whether it carries the reservation mark, and its entity tag (quotes
+    /// included, if the answer has one), all from the one answer, so that they belong to one
+    /// object whatever is written to the key meanwhile.
     ///
     /// # Errors
     /// [`ObjectStoreError::NotFound`] if no object has the key.
-    pub async fn get_all_marked(&self, key: &ObjectKey) -> Result<(Bytes, bool), ObjectStoreError> {
+    pub async fn get_all_marked(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(Bytes, bool, Option<String>), ObjectStoreError> {
         retrying(move || self.get_all_once(key)).await
     }
 
-    async fn get_all_once(&self, key: &ObjectKey) -> Result<(Bytes, bool), ObjectStoreError> {
+    async fn get_all_once(
+        &self,
+        key: &ObjectKey,
+    ) -> Result<(Bytes, bool, Option<String>), ObjectStoreError> {
         let resp = self
             .conn
             .send(Method::GET, Some(key), &[], Vec::new(), Bytes::new())
@@ -283,8 +291,9 @@ impl S3Store {
         match resp.status() {
             StatusCode::OK => {
                 let marked = header(&resp, RESERVATION_HEADER) == Some("1");
+                let etag = header(&resp, "etag").map(str::to_owned);
                 let bytes = resp.bytes().await.map_err(transport)?;
-                Ok((bytes, marked))
+                Ok((bytes, marked, etag))
             }
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
             _ => Err(failure(resp).await),

@@ -366,13 +366,13 @@ impl Backend for Tamper {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         if !self.marks.load(Ordering::SeqCst) {
             return Err(Error::Unsupported("get_marked".to_owned()));
         }
         let body = self.get(key, range).await?;
-        let marked = self.memory.head(key).await?.reservation;
-        Ok((body, marked))
+        let meta = self.memory.head(key).await?;
+        Ok((body, meta.reservation, meta.tag))
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {

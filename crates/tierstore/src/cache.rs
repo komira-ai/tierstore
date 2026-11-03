@@ -244,7 +244,7 @@ impl Backend for CachedStore {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         self.inner.get_marked(key, range).await
     }
 

@@ -65,7 +65,7 @@ impl Backend for Held {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         if let Some(gate) = &self.gets {
             let _ = gate.wait().await;
         }
