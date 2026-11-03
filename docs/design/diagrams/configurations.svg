@@ -98,5 +98,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="620" y1="772" x2="700" y2="732" stroke="#FFFFFF" stroke-width="6"/>
 <line x1="620" y1="772" x2="700" y2="732" class="ln-d" marker-end="url(#configurations-ak)"/>
 <text x="20" y="872" class="t-m" text-anchor="start">Use when: one node should both serve reads from local NVMe and own the data.</text>
-<text x="20" y="890" class="t-m" text-anchor="start">Cache in front of the proxy is the proposal (design open question 11). Until C exists, chain: a node of shape A whose cold_store is a node of shape B.</text>
+<text x="20" y="890" class="t-m" text-anchor="start">Cache in front of the proxy is the proposal (design open question 12). Until C exists, chain: a node of shape A whose cold_store is a node of shape B.</text>
 </svg>
