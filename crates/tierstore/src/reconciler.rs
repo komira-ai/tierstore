@@ -740,10 +740,26 @@ impl Reconciler {
     async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         match self.cold.head(key).await {
             Ok(cold) if !cold.reservation && cold.size == hot.size => {
-                self.same_bytes(key, hot).await
+                match self.same_bytes(key, hot).await? {
+                    Some(true) => self.still_the_object(key, &cold).await.map(Some),
+                    other => Ok(other),
+                }
             }
             Ok(_) => Ok(Some(false)),
             Err(Error::NotFound(_)) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier still holds, under `key`, the real object of `seen` (what the HEAD
+    /// before the comparison gave): the same content tag and not a reservation. The comparison
+    /// read is of a stream that carries no mark, so an object that a reservation replaced between
+    /// the HEAD and the read (of the same bytes, a reservation's status being independent of its
+    /// content) is caught here: its tag is not `seen`'s, or it is marked.
+    async fn still_the_object(&self, key: &str, seen: &Meta) -> Result<bool, Error> {
+        match self.cold.head(key).await {
+            Ok(now) => Ok(!now.reservation && now.tag == seen.tag),
+            Err(Error::NotFound(_)) => Ok(false),
             Err(error) => Err(error),
         }
     }

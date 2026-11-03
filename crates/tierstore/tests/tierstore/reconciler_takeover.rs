@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 
 use tierstore::{Backend, Error, Op, Reconciler};
 
-use crate::churn::{Change, Churn};
+use crate::churn::{Change, Churn, Flaky};
 
 use crate::chunked::{Chunked, Ending};
 use crate::reconciler_reservations::{after_a_takeover, five_objects};
@@ -212,6 +212,49 @@ async fn a_takeover_keeps_a_hot_object_replaced_and_put_back_around_the_read_of_
     assert_eq!(read(&*rig.hot_mem, "k1").await, body(&a));
     assert_absent(&*rig.hot_mem, "k2").await;
     assert_absent(&*rig.hot_mem, "k3").await;
+}
+
+/// Asserts that a takeover keeps a hot object whose cold object is replaced, between the HEAD and
+/// the read of its bytes, by a reservation of the same bytes: the read passes the comparison, but
+/// the look after it finds a reservation, so the hot object (maybe the only real copy) survives
+/// and the objects after it are evicted.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_whose_cold_object_became_an_equal_reservation_before_the_read()
+ {
+    let rig = five_objects().await;
+    let same = "x".repeat(21);
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    let swap = Change::Reservation(body(&same));
+    let cold = Churn::before_a_read(rig.cold_mem.clone(), swap).on_key("k1");
+    let config = rig.reconciler_config("r2", 100);
+    let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&same));
+    assert!(rig.cold_mem.head("k1").await.unwrap().reservation);
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
+}
+
+/// Asserts that a takeover whose second look at the cold object (after the comparison) fails
+/// reports that error and keeps the hot object, which it has no proof the cold tier still holds.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_when_the_look_after_the_comparison_fails() {
+    let rig = five_objects().await;
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    let cold = Flaky::head_fails_at(rig.cold_mem.clone(), "k1", 2);
+    let config = rig.reconciler_config("r2", 100);
+    let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, [Flaky::error()]);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
 }
 
 /// Asserts that a hot object larger than one range is compared range by range: of two objects of
