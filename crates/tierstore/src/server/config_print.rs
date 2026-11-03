@@ -8,8 +8,9 @@ use std::path::Path;
 
 use super::cli::Cli;
 use super::config::{
-    ConfigError, Dur, File, Kind, OciTable, PerRun, ServerTable, Size, TierTable, from_text,
+    ConfigError, Dur, File, Kind, PerRun, ServerTable, Size, TierTable, from_text,
 };
+use super::config_oci::OciTable;
 use super::listen::Addrs;
 
 /// What the file starts with.
@@ -101,6 +102,8 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         bucket: cli.bucket.clone(),
         region: Some(cli.region.clone()),
         access_key_file: cli.access_key_file.clone(),
+        tls_cert_file: cli.tls.tls_cert.clone(),
+        tls_key_file: cli.tls.tls_key.clone(),
         read_only_key_files: cli.read_only_key_file.clone(),
         presign_key_files: cli.presign_key_file.clone(),
         gc_key_files: cli.gc_key_file.clone(),

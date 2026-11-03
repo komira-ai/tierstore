@@ -231,7 +231,7 @@ pub(super) async fn serve_cache(
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let mut config = server_config(&settings.front, Arc::clone(&clock))?;
+    let mut config = server_config(&settings.front, Arc::clone(&clock), true)?;
     // The front's flags and files are checked before the cache is opened, as the storage node's.
     let oci = oci_setup_of(&settings.oci, &config, true)?;
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));

@@ -108,7 +108,7 @@ pub use body::{BodyError, OciBody};
 pub(crate) use listener::OciDrain;
 pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
-pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
+pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning, s3_acceptor};
 
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};

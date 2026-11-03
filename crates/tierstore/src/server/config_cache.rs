@@ -58,12 +58,11 @@ use std::time::Duration;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
-    ConfigError, Dur, OciFlags, OciTable, PerRun, ServerTable, Size, TierParts, TierTable,
-    duration, front_of, invalid, oci as oci_of, parse_size, refuse, refuse_hot_keys, require, tier,
-    within,
+    ConfigError, Dur, PerRun, ServerTable, Size, TierParts, TierTable, duration, front_of, invalid,
+    parse_size, refuse, refuse_hot_keys, require, tier, within,
 };
+use super::config_oci::{DEFAULT_OCI_PREFIX, OciFlags, OciTable, oci as oci_of};
 use super::config_policy::{Policy, check_policies, require_keeping};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};

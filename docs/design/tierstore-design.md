@@ -39,7 +39,7 @@ Non-goals:
 - Recovery of a lost hot tier: objects not yet copied to the cold tier are lost with it.
 - Scrubbing stored objects for bit rot.
 - Protection against clock skew larger than the lease ttl.
-- TLS on the S3 listener (the OCI front has it).
+- Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`--tls-cert`, `--tls-key`, as on the OCI front).
 
 ## 3. The design in one picture
 
