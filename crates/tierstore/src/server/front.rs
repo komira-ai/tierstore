@@ -43,6 +43,8 @@ pub(super) struct FrontSettings {
     pub gc_key_file: Vec<PathBuf>,
     pub scoped_key_file: Vec<PathBuf>,
     pub presign_max_expires: Duration,
+    pub grant_key_file: Vec<PathBuf>,
+    pub grant_max_lifetime: Option<Duration>,
     pub max_request_bytes: u64,
     pub max_concurrent_puts: u32,
     pub put_permit_wait: Duration,
@@ -68,6 +70,8 @@ impl Cli {
             gc_key_file: self.gc_key_file.clone(),
             scoped_key_file: self.scoped_key_file.clone(),
             presign_max_expires: self.presign_max_expires,
+            grant_key_file: self.grant_key_file.clone(),
+            grant_max_lifetime: self.grant_max_lifetime,
             max_request_bytes: self.max_request_bytes,
             max_concurrent_puts: self.max_concurrent_puts,
             put_permit_wait: self.put_permit_wait,
@@ -77,6 +81,23 @@ impl Cli {
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
         }
+    }
+}
+
+/// Why the settings of the removed read grant are ignored; the end of the operator's warning.
+const GRANT_IGNORED: &str = "is ignored: the read grant was removed; use a presigned GET URL";
+
+/// Says on the operator's stderr, once for each setting, that a setting of the removed read grant
+/// is accepted and ignored: an old unit or file still starts, and its owner is told to move on.
+/// The key files are not read.
+fn warn_grant_ignored(front: &FrontSettings) {
+    if !front.grant_key_file.is_empty() {
+        tracing::warn!("tierstore: --grant-key-file (server.grant_key_files) {GRANT_IGNORED}");
+    }
+    if front.grant_max_lifetime.is_some() {
+        tracing::warn!(
+            "tierstore: --grant-max-lifetime (server.grant_max_lifetime) {GRANT_IGNORED}"
+        );
     }
 }
 
@@ -93,6 +114,7 @@ pub(super) fn server_config(
         let name = &front.bucket;
         return Err(format!("--bucket {name:?} is the name of a probe path").into());
     }
+    warn_grant_ignored(front);
     if front.body_idle_timeout.is_zero() {
         return Err("--body-idle-timeout must be longer than zero".into());
     }

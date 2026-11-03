@@ -308,6 +308,14 @@ pub struct Cli {
     /// says: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub presign_max_expires: Duration,
+    /// Deprecated, and ignored: the read grant was removed (use a presigned GET URL). The flag is
+    /// still accepted, and its files are not read, so that a unit that sets it still starts; the
+    /// server says on stderr that it is ignored.
+    #[arg(long)]
+    pub grant_key_file: Vec<PathBuf>,
+    /// Deprecated, and ignored, like `--grant-key-file`: a number and `ms`, `s`, `m` or `h`.
+    #[arg(long, value_parser = parse_duration)]
+    pub grant_max_lifetime: Option<Duration>,
     /// How long, after the drain began, the server goes on serving everything, so that the
     /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]

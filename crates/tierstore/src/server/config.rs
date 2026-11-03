@@ -99,6 +99,9 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("gc-key-file", &["server.gc_key_files"]),
     ("scoped-key-file", &["server.scoped_key_files"]),
     ("presign-max-expires", &["server.presign_max_expires"]),
+    // Deprecated no-ops: accepted so that a file written for the release before still loads.
+    ("grant-key-file", &["server.grant_key_files"]),
+    ("grant-max-lifetime", &["server.grant_max_lifetime"]),
     ("journal-linger", &["hot_store.journal_linger"]),
     ("journal-retention", &["hot_store.journal_retention"]),
     ("copy-parallel", &["hot_store.copy_parallel"]),
@@ -369,6 +372,13 @@ pub(super) struct ServerTable {
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
     pub presign_max_expires: Option<Dur>,
+    /// Deprecated and ignored (the read grant was removed): accepted so that a file written for
+    /// the release before still loads, and never written by `--print-config`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_key_files: Vec<PathBuf>,
+    /// Deprecated and ignored, like `grant_key_files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
     pub put_permit_wait: Option<Dur>,
@@ -943,6 +953,8 @@ fn storage(
         gc_key_file: front.gc_key_file,
         scoped_key_file: front.scoped_key_file,
         presign_max_expires: front.presign_max_expires,
+        grant_key_file: front.grant_key_file,
+        grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
         journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
@@ -1019,6 +1031,8 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         gc_key_file: server.gc_key_files,
         scoped_key_file: server.scoped_key_files,
         presign_max_expires: duration(server.presign_max_expires, Duration::from_secs(15 * 60)),
+        grant_key_file: server.grant_key_files,
+        grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),

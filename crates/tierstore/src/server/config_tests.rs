@@ -47,6 +47,32 @@ fn a_storage_node_file_makes_the_settings_its_flags_make() {
     assert!(!from_file.print_config);
 }
 
+/// Asserts that a file written for the release before, which sets the two keys of the removed read
+/// grant, still loads: the settings are those the same flags make (the keys and the flags are
+/// accepted and kept, to be ignored with a warning at the start), and every other key is read as
+/// it was.
+#[test]
+fn a_file_with_the_keys_of_the_removed_read_grant_still_loads() {
+    let old = golden_with(
+        "presign_max_expires   = \"10m\"",
+        "presign_max_expires   = \"10m\"\n\
+         grant_key_files       = [\"/etc/tierstore/grant.key\"]\n\
+         grant_max_lifetime    = \"5m\"",
+    );
+    let from_file = from_text(&old, DEFAULTS).unwrap();
+    let mut flags = golden_flags();
+    flags.extend([
+        "--grant-key-file=/etc/tierstore/grant.key",
+        "--grant-max-lifetime=5m",
+    ]);
+    let from_flags = Cli::try_parse_from(flags).unwrap();
+    assert_eq!(from_file, from_flags);
+    assert_eq!(from_file.grant_max_lifetime, Some(Duration::from_secs(300)));
+    let without = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert!(without.grant_key_file.is_empty());
+    assert_eq!(without.grant_max_lifetime, None);
+}
+
 /// Asserts that a file that gives the least a start needs gets, for every key it leaves out, the
 /// value the flag has when it is left out, so there is one set of defaults.
 #[test]

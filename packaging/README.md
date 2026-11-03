@@ -775,6 +775,8 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--gc-key-file` | `server.gc_key_files` | a list of GC key files |
 | `--scoped-key-file` | `server.scoped_key_files` | a list of scoped key files |
 | `--presign-max-expires` | `server.presign_max_expires` | the longest expiry of any presigned URL, a PUT or a GET (see Presigned GET URLs) |
+| `--grant-key-file` | `server.grant_key_files` | deprecated and ignored (the read grant was removed): accepted so that an old unit or file starts; the server logs a warning and does not read the files |
+| `--grant-max-lifetime` | `server.grant_max_lifetime` | deprecated and ignored, like `--grant-key-file` |
 | `--journal-linger` | `hot_store.journal_linger` | how long a batch of journal entries waits for more |
 | `--journal-retention` | `hot_store.journal_retention` | how long an applied journal object is kept |
 | `--copy-parallel` | `hot_store.copy_parallel` | the most objects the reconciler copies at once |

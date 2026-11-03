@@ -12,7 +12,7 @@ use crate::{Backend, TestClock};
 
 use super::presign::tests::{NOW, request};
 use super::presign::{PresignRequest, presign_get, presign_url};
-use super::testing::{KEY_ID, Reply, Rig, SECRET};
+use super::testing::{BUCKET, KEY_ID, Reply, Rig, SECRET, texts};
 use super::{AccessKey, GcKey, Prefixes, ScopedKey, Server};
 
 const MEBIBYTE: u64 = 1 << 20;
@@ -77,6 +77,21 @@ fn refused(reply: &Reply) -> (u16, String) {
 fn access_denied() -> (u16, String) {
     (403, "AccessDenied".to_owned())
 }
+
+/// The whole text of the `Message` of an error answer.
+fn message(reply: &Reply) -> String {
+    texts(&reply.body, "Message").concat()
+}
+
+/// The message of a URL of a key that reads, for anything but GET or HEAD of one object.
+const READ_URL_ONLY: &str =
+    "Access Denied: a presigned URL of this key is good for GET or HEAD of one object only.";
+/// The message of a scoped key's call on an object outside its prefixes.
+const OUT_OF_SCOPE: &str = "Access Denied: the key, or the listing prefix, is outside the prefixes this access key has for this call.";
+/// The message for a key id, or a region, that signs no URL.
+const UNKNOWN_KEY: &str = "The access key id or the region is not one this server accepts.";
+/// The message for a signature that is not the one of the request.
+const MISMATCH: &str = "The request signature does not match the one calculated from the request.";
 
 /// `len` bytes that depend on `seed` and on the place, so that a part in the wrong place, or of
 /// another object, is not the bytes expected.
@@ -160,14 +175,14 @@ async fn a_presigned_get_has_the_rights_of_its_key_and_no_more() {
     }
     let outside = f.send("GET", &get_url(SCOPED, "other/b", 300), None).await;
     assert_eq!(refused(&outside), access_denied());
-    assert!(!outside.body.contains("CONTENT-OF-B"));
+    assert_eq!(message(&outside), OUT_OF_SCOPE);
     let inside = f.send("GET", &get_url(SCOPED, "cas/a", 300), None).await;
     assert_eq!(inside.body, "CONTENT-OF-A");
     for key in [GC, ("not-held", "any-secret-0123456789")] {
         let reply = f.send("GET", &get_url(key, "cas/a", 300), None).await;
         let wanted = (403, "InvalidAccessKeyId".to_owned());
         assert_eq!(refused(&reply), wanted, "{}", key.0);
-        assert!(!reply.body.contains("CONTENT-OF-A"));
+        assert_eq!(message(&reply), UNKNOWN_KEY, "{}", key.0);
     }
     let west = PresignRequest {
         region: "eu-west-1",
@@ -176,9 +191,11 @@ async fn a_presigned_get_has_the_rights_of_its_key_and_no_more() {
     let west = presign_get(&AccessKey::new(FULL.0, FULL.1), &west).unwrap();
     let reply = f.send("GET", &west, None).await;
     assert_eq!(refused(&reply), (403, "InvalidAccessKeyId".to_owned()));
+    assert_eq!(message(&reply), UNKNOWN_KEY);
     let wrong = get_url((FULL.0, "another-secret"), "cas/a", 300);
     let reply = f.send("GET", &wrong, None).await;
     assert_eq!(refused(&reply), (403, "SignatureDoesNotMatch".to_owned()));
+    assert_eq!(message(&reply), MISMATCH);
 }
 
 /// Asserts that a presigned URL of a key that reads does nothing but read one object: the URL of
@@ -189,12 +206,13 @@ async fn a_presigned_get_has_the_rights_of_its_key_and_no_more() {
 async fn a_presigned_url_of_a_key_that_reads_does_nothing_but_read_one_object() {
     let f = fixture().await;
     f.put("cas/a", b"CONTENT-OF-A").await;
-    let id = f.rig.cold_mem.create_upload("cas/open").await.unwrap();
+    f.rig.cold_mem.create_upload("cas/open").await.unwrap();
     let full = AccessKey::new(FULL.0, FULL.1);
     for method in ["PUT", "DELETE", "POST"] {
         let url = presign_url(method, &full, &request("cas/new", 300), &[]).unwrap();
         let reply = f.send(method, &url, None).await;
         assert_eq!(refused(&reply), access_denied(), "{method}");
+        assert_eq!(message(&reply), READ_URL_ONLY, "{method}");
     }
     let delete = presign_url("DELETE", &full, &request("cas/a", 300), &[]).unwrap();
     let reply = f.send("DELETE", &delete, None).await;
@@ -216,9 +234,70 @@ async fn a_presigned_url_of_a_key_that_reads_does_nothing_but_read_one_object() 
         let url = presign_url("GET", &full, &request(key, 300), extra).unwrap();
         let reply = f.send("GET", &url, None).await;
         assert_eq!(refused(&reply), access_denied(), "{key} {extra:?}");
-        let shown = reply.body.contains("CONTENT-OF-A") || reply.body.contains(&id);
-        assert!(!shown, "{key} {extra:?}");
+        assert_eq!(message(&reply), READ_URL_ONLY, "{key} {extra:?}");
     }
+}
+
+/// Asserts that the URL of a read-only key and of a scoped key is good for GET and HEAD only, whatever
+/// the key may do in a signed request: each URL signed for a PUT, a DELETE or a POST of an object
+/// the key reads is 403 with the one message for such a URL, and the object is as it was; a URL
+/// signed for a GET and sent with another method is `SignatureDoesNotMatch` (the method is part
+/// of the signature) and changes nothing; and a scoped key's URL for an object outside its
+/// prefixes is `AccessDenied` for GET and for HEAD.
+#[tokio::test(start_paused = true)]
+async fn a_read_only_and_a_scoped_key_sign_urls_for_get_and_head_and_nothing_else() {
+    let f = fixture().await;
+    f.put("cas/a", b"CONTENT-OF-A").await;
+    f.put("other/b", b"CONTENT-OF-B").await;
+    for key in [READER, SCOPED] {
+        let signer = AccessKey::new(key.0, key.1);
+        for method in ["PUT", "DELETE", "POST"] {
+            let url = presign_url(method, &signer, &request("cas/a", 300), &[]).unwrap();
+            let reply = f.send(method, &url, None).await;
+            assert_eq!(refused(&reply), access_denied(), "{} {method}", key.0);
+            assert_eq!(message(&reply), READ_URL_ONLY, "{} {method}", key.0);
+            let wrong = f.send(method, &get_url(key, "cas/a", 300), None).await;
+            let wanted = (403, "SignatureDoesNotMatch".to_owned());
+            assert_eq!(refused(&wrong), wanted, "{} {method}", key.0);
+            assert_eq!(message(&wrong), MISMATCH, "{} {method}", key.0);
+        }
+        assert_eq!(f.rig.get("cas/a", None).await.body, "CONTENT-OF-A");
+        assert_eq!(f.rig.get("other/b", None).await.body, "CONTENT-OF-B");
+    }
+    let signer = AccessKey::new(SCOPED.0, SCOPED.1);
+    let head = presign_url("HEAD", &signer, &request("other/b", 300), &[]).unwrap();
+    let head = f.send("HEAD", &head, None).await;
+    assert_eq!(head.status, StatusCode::FORBIDDEN);
+    let moved = get_url(SCOPED, "cas/a", 300).replace("cas/a?", "other/b?");
+    let moved = f.send("GET", &moved, None).await;
+    assert_eq!(refused(&moved), (403, "SignatureDoesNotMatch".to_owned()));
+    assert_eq!(message(&moved), MISMATCH);
+}
+
+/// Asserts that the header of the removed read grant, `x-tierstore-grant`, is no credential: a GET of
+/// an object with that header and nothing else is answered 403 `AccessDenied` with the message of
+/// an unsigned request, word for word as the same GET without the header is, and shows nothing.
+#[tokio::test(start_paused = true)]
+async fn a_request_with_the_removed_grant_header_is_refused_like_an_unsigned_one() {
+    let f = fixture().await;
+    f.put("cas/a", b"CONTENT-OF-A").await;
+    let get = |grant: Option<&str>| {
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(format!("/{BUCKET}/cas/a"))
+            .header("host", "tier.test");
+        if let Some(token) = grant {
+            builder = builder.header("x-tierstore-grant", token);
+        }
+        builder.body(Full::new(Bytes::new())).unwrap()
+    };
+    let bare = f.rig.send_raw(get(None)).await;
+    let granted = f.rig.send_raw(get(Some("v1.any-token-it-once-was"))).await;
+    let unsigned = "Access Denied: requests must be signed with AWS Signature Version 4.";
+    assert_eq!(refused(&bare), access_denied());
+    assert_eq!(message(&bare), unsigned);
+    assert_eq!(refused(&granted), access_denied());
+    assert_eq!(message(&granted), unsigned);
 }
 
 /// Asserts the lifetime of a presigned GET URL, on the clock of the server: good until the second
@@ -239,8 +318,7 @@ async fn a_presigned_get_is_good_until_it_expires_and_never_beyond_the_cap() {
     f.clock.set(NOW + 300_000);
     let expired = f.send("GET", &url, None).await;
     assert_eq!(refused(&expired), access_denied());
-    assert!(expired.body.contains("Request has expired"));
-    assert!(!expired.body.contains("CONTENT-OF-A"));
+    assert_eq!(message(&expired), "Request has expired.");
 
     f.clock.set(NOW);
     let capped = f.send("GET", &get_url(FULL, "cas/a", 600), None).await;
