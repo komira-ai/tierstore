@@ -3,6 +3,8 @@
 
 mod backends;
 mod cache;
+#[cfg(feature = "server")]
+mod cache_over_proxy;
 mod capacity;
 #[cfg(feature = "s3")]
 mod chain;

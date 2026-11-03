@@ -54,7 +54,8 @@
 //! at most 64 MiB waits for the whole fill before its last chunk.
 //!
 //! - A fill that fails because the data is bad (the bytes do not hash to the name, the object was
-//!   written over: a changed tag, or a short or long body) ends the readers' bodies with an
+//!   written over: a changed tag, or a changed size when `tiered_upstream` is set, or a short or long
+//!   body) ends the readers' bodies with an
 //!   error, never cleanly.
 //! - A fill that a write or a delete through the cache marks (`forget`), or that fails for a
 //!   reason of the cache (no room, the directory), is finished for each reader from the
@@ -71,8 +72,8 @@
 //! A fill is skipped, and counted, when the object is larger than the budget or the cache, with the
 //! bytes of the fills that are running, would pass its critical mark; the reader is served from
 //! the upstream. A key that is not named by its content is read twice by HEAD, before the first
-//! chunk and after the last: if the size or the tag changed, the object was written over during
-//! the fill and is not kept, and the readers get an error. A key named by its content whose bytes
+//! chunk and after the last: if the size or the tag changed (the size alone with `tiered_upstream`), the object was
+//! written over during the fill and is not kept, and the readers get an error. A key named by its content whose bytes
 //! do not hash to the name is the reader's error, not passed through. A hit is not hashed again:
 //! the scrub does that.
 //!
@@ -161,6 +162,8 @@ mod stream_tests;
 #[cfg(test)]
 pub(in crate::server) mod testing;
 #[cfg(test)]
+mod tiered_tests;
+#[cfg(test)]
 mod write_front_tests;
 #[cfg(test)]
 mod write_race_tests;
@@ -227,6 +230,7 @@ const READ_ONLY: &str = "this tierstore is a read cache";
 
 /// The settings of a [`LocalCache`].
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct CacheConfig {
     /// The directory of the cache: made if it is not there.
     pub path: PathBuf,
@@ -273,6 +277,17 @@ pub struct CacheConfig {
     /// The most keys a read-only cache remembers it deleted or replaced through the upstream
     /// (see the module `hold`). Past it the cache is emptied when it takes the lock.
     pub forget_limit: usize,
+    /// Whether the upstream is a proxy of two tiers (a hot and a cold one). The tag of an object
+    /// is then the tag of the tier that answers, and moves when the proxy copies the object from
+    /// one tier to the other, so the versions of an object are told apart by size alone (the
+    /// proxy never replaces an object). A create-only put is still checked with a HEAD first.
+    ///
+    /// Default `false`: versions are told apart by size and tag. Set it only for keys that are
+    /// written once and never replaced. Limit: another process that deletes a key and puts it
+    /// again with a body of the same size during one fill is not seen, and the fill keeps the
+    /// mixed bytes. A key named by its content (`cas/l/<digest>`) is not affected, as its bytes
+    /// are checked against the digest.
+    pub tiered_upstream: bool,
 }
 
 impl CacheConfig {
@@ -297,6 +312,7 @@ impl CacheConfig {
             keep_queue_bytes: keep::KEEP_QUEUE_BYTES,
             write_through: false,
             forget_limit: FORGET_LIMIT,
+            tiered_upstream: false,
         }
     }
 
@@ -529,6 +545,16 @@ impl LocalCache {
 }
 
 impl Inner {
+    /// Whether `a` and `b` are one version of an object: the same size and tag, or, when the
+    /// upstream is a proxy of two tiers (see `CacheConfig::tiered_upstream`), the same size.
+    pub(super) fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        if self.config.tiered_upstream {
+            a.size == b.size
+        } else {
+            a.same_content(b)
+        }
+    }
+
     /// The on-disk name of `key` if the cache keeps it.
     fn cacheable(&self, key: &str) -> Option<Name> {
         if is_reserved(key) {
@@ -586,7 +612,16 @@ impl Backend for LocalCache {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_through(key, len, body).await
+        self.inner.put_through(key, len, body, false).await
+    }
+
+    async fn put_stream_hot_only(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_through(key, len, body, true).await
     }
 
     async fn put_if_match(&self, _key: &str, _body: Bytes, _etag: &str) -> Result<String, Error> {
