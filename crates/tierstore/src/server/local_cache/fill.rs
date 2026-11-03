@@ -520,7 +520,7 @@ impl Inner {
         staged.finish().await?;
         // A key named by its content is checked by the hash below. Any other key could have been
         // written over while it was read, and the file would hold bytes of two versions.
-        if name.content.is_none() && !self.upstream.head(key).await?.same_content(&meta) {
+        if name.content.is_none() && !self.same_version(&self.upstream.head(key).await?, &meta) {
             return Err(Stop::Changed);
         }
         let digest = hex::encode(hasher.finalize());

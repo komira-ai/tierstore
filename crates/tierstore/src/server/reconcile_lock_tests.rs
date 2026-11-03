@@ -9,10 +9,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
-use super::cli::{Gate, reconcile_gated};
+use super::cli::{Cli, Gate, open_gate, reconcile_gated};
 use super::lock::try_take;
 use crate::{
     Backend, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,
@@ -416,4 +417,52 @@ async fn a_failed_release_lets_the_lock_go_and_v_next_takes_the_lease_when_it_ex
 #[tokio::test(start_paused = true)]
 async fn a_release_that_hangs_lets_the_lock_go_and_v_next_takes_the_lease_when_it_expires() {
     hand_over_after_a_spoiled_release(Spoiled::Hangs).await;
+}
+
+/// The flags of a start that names `lock_file`, if any (`open_gate` reads no key file).
+fn cli_with_lock(lock_file: Option<&std::path::Path>) -> Cli {
+    let mut args: Vec<String> = [
+        "tierstore",
+        "--listen=127.0.0.1:0",
+        "--proxy-id=p1",
+        "--hot=memory",
+        "--cold=memory",
+        "--hot-bytes=1000",
+        "--bucket=tier-bucket",
+        "--access-key-file=key",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    if let Some(path) = lock_file {
+        args.push(format!("--lock-file={}", path.display()));
+    }
+    Cli::try_parse_from(args).unwrap()
+}
+
+/// Asserts that `open_gate` makes no gate when the flags name no lock file, and a gate over the
+/// named file when they do: the file is made and the lock is taken at once.
+#[test]
+fn open_gate_makes_a_gate_only_when_a_lock_file_is_named() {
+    assert!(open_gate(&cli_with_lock(None)).unwrap().is_none());
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-open-gate");
+    let path = dir.path().join("instance.lock");
+    let gate = open_gate(&cli_with_lock(Some(&path))).unwrap();
+    assert!(gate.is_some());
+    assert!(path.exists());
+    assert!(try_take(&path).unwrap().is_none());
+}
+
+/// Asserts that a lock file that cannot be opened is refused by `open_gate` with the flag and the
+/// path first, as the start said before, and that the system's error is the source.
+#[test]
+fn open_gate_names_the_flag_and_the_path_and_keeps_the_io_error() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-open-gate-refused");
+    let missing = dir.path().join("none/instance.lock");
+    let refused = open_gate(&cli_with_lock(Some(&missing))).unwrap_err();
+    let source = std::error::Error::source(&refused).expect("the I/O error is the source");
+    assert!(source.downcast_ref::<std::io::Error>().is_some());
+    assert_eq!(
+        refused.to_string(),
+        format!("--lock-file {}: {source}", missing.display())
+    );
 }
