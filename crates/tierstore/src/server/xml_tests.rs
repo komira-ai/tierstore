@@ -76,7 +76,7 @@ fn the_last_page_has_no_token() {
     assert!(texts(&xml, "Contents").is_empty());
 }
 
-/// Asserts that the answers of a multipart upload have the root elements that kbf's client
+/// Asserts that the answers of a multipart upload have the root elements that the `S3Store` client
 /// checks, the upload id, and the escaped names.
 #[test]
 fn the_multipart_answers_have_the_elements_a_client_reads() {

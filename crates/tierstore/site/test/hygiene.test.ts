@@ -4,7 +4,7 @@
 // that is not a public one this site links to, a cloud account's resource name, an internal repository name, or a date
 // from before the project went public. The site is built from page copy and recorded data (a terminal recording and a
 // memory trace), and recordings are where such things leak, so the scan reads every built file, data included.
-// The repository lints (crates/kbf-integration-test/tests/repo_lints.rs) scan the sources; this scans what is deployed.
+// This scans what is deployed.
 
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -18,7 +18,7 @@ import { buildReal, copyTree, plant } from './support';
  * The hosts a page may name in a URL: the project's own, GitHub, the two build tools it serves, the SVG namespace, and
  * GitHub Actions' OIDC issuer, which the cosign check of the install pages names as the signer's issuer.
  */
-const PUBLIC_HOSTS = new Set(['tierstore.dev', 'kbf.dev', 'github.com', 'buck2.build', 'bazel.build', 'www.w3.org', 'token.actions.githubusercontent.com']);
+const PUBLIC_HOSTS = new Set(['tierstore.dev', 'github.com', 'buck2.build', 'bazel.build', 'www.w3.org', 'token.actions.githubusercontent.com']);
 /** Placeholders and loopback the configuration reference uses as examples. */
 const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1', 'frontend', 'FRONTEND', 'bucket', 's3-hot.example', 's3-cold.example', 'tierstore.example']);
 
@@ -80,7 +80,7 @@ function scanText(text: string, code = false, deny: ReadonlySet<string> = INTERN
     }
   }
   for (const m of text.matchAll(/(?<![.\/-])\/(?:home|Users|root)\/[A-Za-z0-9._-]+/g)) found.push(`a home path, ${m[0]}`);
-  for (const m of text.matchAll(/\bbuck-out\/\S*/g)) found.push(`a build-farm path, ${m[0]}`);
+  for (const m of text.matchAll(/\bbuck-out\/\S*/g)) found.push(`a build output path, ${m[0]}`);
   for (const m of text.matchAll(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,}/g)) found.push(`an email address or user@host, ${m[0]}`);
   for (const m of text.matchAll(/\b[a-z][a-z0-9+.-]*:\/\/([A-Za-z0-9.-]+)/g)) {
     const host = m[1];
@@ -109,8 +109,8 @@ test('the scan finds each kind of leak (it can fail)', () => {
   const cases: [string, RegExp][] = [
     [`ssh ${ip}`, /an address/],
     [`cd ${home}/src`, /a home path/],
-    ['at /kbf' + '/root/komira/x.zig:1', /a home path/],
-    ['in buck-' + 'out/v2/tmp/x', /a build-farm path/],
+    ['at /' + 'root/komira/x.zig:1', /a home path/],
+    ['in buck-' + 'out/v2/tmp/x', /a build output path/],
     ['mail ' + 'a@b' + '.example', /an email address/],
     ['see https://build-7.example.org/x', /a host, build-7\.example\.org/],
     ['at ip-1-2-3-4.compute.internal', /a private or cloud host name/],
@@ -121,7 +121,7 @@ test('the scan finds each kind of leak (it can fail)', () => {
     ['at ' + 'abcdef0123456789abcdef0123456789abcdef01', /a commit SHA/],
   ];
   for (const [text, why] of cases) assert.match(scanText(text).join('\n'), why, text);
-  assert.deepEqual(scanText('https://github.com/komira-ai/kbf and http://127.0.0.1:8990 and 2026-10-01 and ' + EXAMPLE_SHA), []);
+  assert.deepEqual(scanText('https://github.com/komira-ai/tierstore and http://127.0.0.1:8990 and 2026-10-01 and ' + EXAMPLE_SHA), []);
 });
 
 test('the Actions issuer is the one githubusercontent.com host a page may name', () => {

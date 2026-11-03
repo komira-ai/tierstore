@@ -1,4 +1,4 @@
-//! The S3 client of kbf against the S3 front, over loopback: the calls kbf makes, and what it
+//! The `S3Store` client against the S3 front, over loopback: the calls it makes, and what it
 //! gets back for them.
 
 use std::fmt::Debug;

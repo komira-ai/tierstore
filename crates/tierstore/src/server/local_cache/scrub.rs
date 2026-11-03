@@ -334,7 +334,7 @@ impl Inner {
         if !self.drop_if_unchanged(hex, opened) {
             return Verdict::Left;
         }
-        eprintln!("tierstore: scrub dropped {key}: its bytes no longer match their digest");
+        tracing::warn!("tierstore: scrub dropped {key}: its bytes no longer match their digest");
         Verdict::Dropped(read)
     }
 
@@ -456,7 +456,7 @@ impl LocalCache {
             // does not take the cache down.
             state = done.map_or_else(
                 |error| {
-                    eprintln!("tierstore: a scrub tick failed, the walk starts over: {error}");
+                    tracing::warn!("tierstore: a scrub tick failed, the walk starts over: {error}");
                     let fresh = Scrubber::new(per_tick).with_min_round(min_round);
                     Scrubber { stop, ..fresh }
                 },

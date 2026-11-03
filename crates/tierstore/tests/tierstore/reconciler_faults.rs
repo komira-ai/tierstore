@@ -109,6 +109,8 @@ async fn a_gap_in_the_journal_stops_the_reading_until_it_is_filled() {
         key: "x".to_owned(),
         size: 1,
         time: 0,
+        cold_tag: None,
+        hot_tag: None,
     };
     let third = encode_journal(&[put_x]);
     rig.hot_mem.put(&journal_key("p1", 3), third).await.unwrap();
@@ -149,45 +151,46 @@ async fn a_copy_whose_hot_read_fails_is_retried_by_the_next_pass() {
     assert_eq!(read(&*rig.cold_mem, "k1").await, body("1"));
 }
 
-/// Asserts that a delete entry whose check of the hot tier fails is reported, leaves the
-/// checkpoint before it, and is applied by the next pass.
+/// Asserts that a copy whose look at the hot tier fails is reported, leaves the checkpoint
+/// before it, and is done by the next pass. (A delete entry makes looks of its own only if it is
+/// applied to the cold tier: the same journal object puts the key with a plain `Put`, or has no put
+/// of the key and the reconciler's books do not classify the key as one that a reserved put or a
+/// mirror put, as a standalone delete of a plain key. Their failing looks are
+/// `each_failing_call_of_an_applied_delete_entry_fails_the_pass` and
+/// `a_delete_entry_alone_is_applied_to_a_plain_key_and_not_to_a_reserved_one`.)
 #[tokio::test(start_paused = true)]
-async fn a_delete_whose_hot_check_fails_is_applied_by_the_next_pass() {
+async fn a_copy_whose_hot_check_fails_is_retried_by_the_next_pass() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("k", body("1")).await.unwrap();
-    proxy.delete("k").await.unwrap();
-    rig.cold_mem.put("k", body("1")).await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
     rig.hot.fail_next_on(Op::Head, "k", down());
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);
-    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
-    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("1"));
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_absent(&*rig.cold_mem, "k").await;
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_absent(&*rig.cold_mem, "k").await;
+    assert_eq!(report.copied, 1);
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("1"));
 }
 
-/// Asserts that a delete entry of a key that was put again, whose check of the cold tier
-/// fails, is reported, leaves the checkpoint before it, and is applied by the next pass.
+/// Asserts that a copy whose look at the cold tier fails is reported, leaves the checkpoint
+/// before it and the hot object where it is, and is done by the next pass.
 #[tokio::test(start_paused = true)]
-async fn a_delete_whose_cold_check_fails_is_applied_by_the_next_pass() {
+async fn a_copy_whose_cold_check_fails_is_retried_by_the_next_pass() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
-    proxy.put("k", body("old")).await.unwrap();
-    proxy.delete("k").await.unwrap();
     proxy.put("k", body("new")).await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
     rig.cold.fail_next_on(Op::Head, "k", down());
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);
-    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
-    assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("new"));
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
@@ -223,8 +226,9 @@ async fn an_eviction_whose_journal_read_fails_is_retried_by_the_next_pass() {
     assert_absent(&*rig.hot_mem, "k1").await;
 }
 
-/// Asserts that an eviction whose delete from the hot tier fails is reported and leaves the
-/// object in the hot tier and in the count, and that the next pass evicts it.
+/// Asserts that an eviction whose delete from the hot tier (a delete on the content tag the
+/// copy found) fails is reported and leaves the object in the hot tier and in the count, and
+/// that the next pass evicts it.
 #[tokio::test(start_paused = true)]
 async fn an_eviction_whose_delete_fails_is_retried_by_the_next_pass() {
     let rig = Rig::new();
@@ -234,7 +238,7 @@ async fn an_eviction_whose_delete_fails_is_retried_by_the_next_pass() {
         proxy.put(key, body(&value)).await.unwrap();
     }
     let mut reconciler = rig.reconciler("r1", 100);
-    rig.hot.fail_next_on(Op::Delete, "k1", down());
+    rig.hot.fail_next_on(Op::DeleteIfMatch, "k1", down());
 
     let report = reconciler.pass().await;
     assert_eq!(report.failed, [down()]);

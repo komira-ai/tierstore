@@ -94,7 +94,7 @@ cache  = true
     }
 }
 
-/// A client of kbf for the server at `addr`.
+/// An `S3Store` client for the server at `addr`.
 pub(super) fn client(addr: SocketAddr) -> S3Store {
     let config = S3Config {
         endpoint: format!("http://{addr}"),
