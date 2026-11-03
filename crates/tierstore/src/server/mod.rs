@@ -198,6 +198,7 @@ mod cache_cli;
 pub mod cli;
 mod config;
 mod config_cache;
+mod config_policy;
 mod config_print;
 mod door;
 mod drain;
@@ -218,6 +219,7 @@ pub mod presign;
 mod reply;
 mod request;
 pub mod scoped;
+mod stop_watcher;
 mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;

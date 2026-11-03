@@ -35,7 +35,7 @@ pub enum Change {
 /// what a racing writer left, as it would between the look that gave the caller the tag and the
 /// call; and, if asked to, whose first read with the mark is preceded and followed by a change,
 /// so that the read finds, and a look after it finds, what a racing writer left, or whose first
-/// plain read is preceded by one, so that the read finds what a racing writer left. Everything else is the memory backend's
+/// plain read is preceded by one. Everything else is the memory backend's
 /// own.
 pub struct Churn {
     mem: Arc<MemoryBackend>,
@@ -64,6 +64,13 @@ impl Churn {
     pub fn before_a_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
         let churn = Self::new(mem, Vec::new());
         *churn.before_read.lock().unwrap() = Some(change);
+        churn
+    }
+
+    /// A backend whose first read with the mark is preceded by `change`.
+    pub fn before_a_marked_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
+        let churn = Self::new(mem, Vec::new());
+        *churn.before_marked_read.lock().unwrap() = Some(change);
         churn
     }
 
@@ -175,6 +182,9 @@ impl Backend for Churn {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
+        if self.only.as_deref().is_some_and(|only| only != key) {
+            return self.mem.get_marked(key, range).await;
+        }
         let before = self.before_marked_read.lock().unwrap().take();
         if let Some(change) = before {
             self.apply(key, change).await;

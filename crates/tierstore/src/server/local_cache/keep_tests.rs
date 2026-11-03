@@ -572,6 +572,47 @@ async fn a_delete_just_before_the_index_insert_is_caught_by_the_check_after_it()
     at_rest(&rig).await;
 }
 
+/// Asserts that the observer of a cache is called once for a keep that put its object in the
+/// index, and for no put that was not kept: a put under a kept prefix calls it once, a put under
+/// a prefix the cache does not keep and a put of no declared length (counted as `budget`) call it
+/// no more. The test runs on a paused clock and waits for the observer's own notice of the keep
+/// before it asserts, and never advances the clock, so neither `keep_wait` nor `keep_deadline` can
+/// pass first. Every other test of the module runs with no observer.
+#[tokio::test(start_paused = true)]
+async fn the_observer_is_called_once_for_each_keep_that_reached_the_index() {
+    let rig = Rig::writing("tscache-keep-observer");
+    let called = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&called);
+    let kept = Arc::new(tokio::sync::Notify::new());
+    let told = Arc::clone(&kept);
+    let observer: super::KeepObserver = Arc::new(move || {
+        let _ = count.fetch_add(1, Ordering::SeqCst);
+        told.notify_one();
+    });
+    let upstream: Arc<dyn Backend> = rig.upstream.clone();
+    let opened = super::LocalCache::open_observed(
+        rig.config.clone(),
+        upstream,
+        rig.disk.clone(),
+        rig.clock.clone(),
+        Some(observer),
+    );
+    let cache = opened.expect("a cache");
+
+    let one = cache.put_stream("cas/b/one", Some(3), whole(b"one")).await;
+    assert_eq!(one, Ok(()));
+    kept.notified().await;
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.held(), (3, 1));
+    let two = cache.put_stream("other/two", Some(3), whole(b"two")).await;
+    assert_eq!(two, Ok(()));
+    let three = cache.put_stream("cas/b/three", None, whole(b"three")).await;
+    assert_eq!(three, Ok(()));
+    assert_eq!(called.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.held(), (3, 1));
+    assert_eq!(cache.counters().keeps_skipped(SkippedKeep::Budget), 1);
+}
+
 /// Asserts that a keep that is held past `keep_wait` does not hold the put: the put is answered
 /// 200 at exactly `keep_wait` of the (paused) clock, counted as expired, with nothing in the cache
 /// yet; and when the keep is let go it ends alone with the object whole in the cache (one data

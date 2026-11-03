@@ -838,3 +838,20 @@ fn the_readme_documents_the_build_node_file() {
     let listed: BTreeSet<&str> = LOCAL_CACHE_KEYS.iter().copied().collect();
     assert_eq!(keys, listed);
 }
+
+/// Asserts which defect a build-node file with two is refused for: the `[local_cache]` one is
+/// named before an `[oci]` table with no `listen`, and with the `[local_cache]` defect mended the
+/// `[oci]` one is named.
+#[test]
+fn a_local_cache_defect_is_named_before_an_oci_one() {
+    let oci = "[oci]\nprefix = \"oci/\"\n";
+    let broken = LEAST.replacen(
+        "budget = 1000",
+        "budget = 1000\nmax_concurrent_fills = 0",
+        1,
+    );
+    let why = refusal(&format!("{broken}\n{oci}"));
+    assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
+    let why = refusal(&format!("{LEAST}\n{oci}"));
+    assert!(why.contains("oci.listen"), "{why}");
+}

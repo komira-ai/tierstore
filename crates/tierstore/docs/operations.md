@@ -43,12 +43,22 @@ The first two are 200 and the last two 503. The limit is `--usage-stale-after` (
 The hot tier's size is measured against `--hot-bytes` (`hot_store.budget`). Three shares of it matter:
 
 - Above `--high-water` (80% by default) the reconciler evicts the oldest objects that the cold tier already holds, until the hot tier is down to `--low-water` (70%). It never evicts an object it has not copied.
-- Above `--critical` (95%) a put waits a short time before it is written, and a read of an object that is only in the cold tier is served but not copied back into the hot tier.
+- Above `--critical` (95%) a read of an object that is only in the cold tier is served but not copied back into the hot tier.
 - At the budget, or when the hot tier says it is full, new objects are written straight to the cold tier.
 
 Eviction frees the hot tier only as fast as the cold tier takes copies, which `--copy-parallel` bounds. If the cold tier is slow or down, copies stall, nothing becomes evictable, and the hot tier climbs to the budget.
 
-An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A tag names content: an object put again with the same bytes has the same tag.
+## The reconciler's checkpoint
+
+The reconciler keeps one small object for each proxy, `_tiering/checkpoint/<proxy_id>` in the hot tier, that says how far it has worked through that proxy's journal. It never stores a checkpoint that is behind the one that is stored: it reads the stored one, keeps the larger of each number, and writes only if that is more. Before it stores anything in a pass it checks, with a read that does not renew it, that it still holds the lease; a pass whose check finds the lease gone (it took longer than `--lease-ttl`, and another process took over, or the object was deleted) stores no checkpoint, deletes no journal object and publishes no usage after the check; its copies and evictions before the check stand, and it is not reported as a failure. The check is a read: a takeover after it can still let that pass store. The next pass tries to take or renew the lease, and starts from the stored checkpoint.
+
+The check is not a fence. A pass that outlasts the lease still copies, and may still evict, beside the new holder, and a takeover that falls between the check and the writes can still let that pass prune or publish usage; keep passes shorter than `--lease-ttl`.
+
+Lowering a checkpoint by hand does not stick, because the reconciler keeps the larger value. Deleting the checkpoint object does not by itself make a running reconciler read a proxy's journal again: it keeps its progress in memory, and a pass writes that progress back as the checkpoint. To replay a journal, stop every reconciler, delete the checkpoint object, and start them again; the journal is then read from object 1, and that works only if the journal is still complete from object 1. Journal objects that were pruned leave a gap, and the reader stops at a gap without an error, so after a prune a replay from 1 would not reach later puts; in that case do not delete the checkpoint, and restore the missing journal objects first. Copies find what the cold tier holds. A checkpoint object that does not decode fails that proxy's pass each time, with `corrupt checkpoint of <proxy_id>`, until it is deleted the same way.
+
+Rolling upgrade: the guarantee that a checkpoint never moves backwards holds once every process that runs a reconciler runs this version. While an older process is among them, it can still store a lower checkpoint.
+
+An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A reconciler that took over from another has no tag for the objects the other copied: it reads the hot object's tag just before the delete, and first checks that the cold tier holds a real object of the key with the same size and the same bytes as the hot object (not nothing, not a reservation, not another object). The bytes are compared (both objects read in ranges of at most 1 MiB, each read with its content tag, which must be the one the delete uses, so a key replaced and put back around the read is not deleted), and not the tags across tiers, since tiers of different kinds tag the same bytes differently. If it does not, the hot object stays, since it may be the only copy, and it remains a candidate that the next pass asks about again. A tag names content: an object put again with the same bytes has the same tag.
 
 ## Reservations
 
