@@ -23,6 +23,6 @@ A journal object with an operation this release does not know is read, and the e
 
 ## The fixtures
 
-The bytes of each format as a release wrote them are in `crates/tierstore/tests/stored_formats/fixtures/`. The tests in `crates/tierstore/tests/stored_formats/` do two things with each one: the current code reads the fixture to the value the test expects, and the current code writes that value as exactly the bytes of the fixture. The lease body holds a random nonce, so its test puts the fixture's nonce in before it compares.
+The bytes of each format as a release wrote them are in `crates/tierstore/tests/stored_formats/fixtures/`. The tests in `crates/tierstore/tests/stored_formats/` use them in two ways. For a fixture the current release writes (each format's plain fixture), the current code reads it to the value the test expects, and writes that value as exactly the bytes of the fixture. The compatibility fixtures are read only: the `*_newer` fixtures (a key or operation added later) and the first-release hook record are read to the value the test expects and are not written back, and the newer two-slot hook record is refused as newer, not read as a value. The lease body holds a random nonce, so its test puts the fixture's nonce in before it compares.
 
 A change that renames, removes or re-means a field fails one of those tests. Do not edit a fixture to make it pass: add a second fixture for the new field, keep the old one, and let both tests read the old fixture too. A change to an existing fixture in a diff is the thing to look at.

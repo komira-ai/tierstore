@@ -16,7 +16,7 @@ const KEY: &str = "models/a.bin";
 /// The SHA-256 of the key, which names the files of an object that is not named by its content.
 const HEX: &str = "bad625a3890ea33470a191b8cf197639d3565ab738e4d040304dbf4c1707d7af";
 const SHA256_OF_HELLO: &str = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
-const MODIFIED: u64 = 1_700_000_000_000;
+const MODIFIED: u64 = 1_790_000_000_000;
 
 fn data_path(root: &Path) -> PathBuf {
     root.join("obj").join("ba").join("d6").join(HEX)
