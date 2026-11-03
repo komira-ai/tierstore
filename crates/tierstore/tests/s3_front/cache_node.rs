@@ -221,8 +221,9 @@ fn check_config_accepts_a_good_write_through_file_and_prints_nothing() {
 }
 
 /// Asserts that `--check-config` makes no call to the network: the upstream of the file is an
-/// address nothing listens on (a port that was bound and let go), and the check still exits 0,
-/// where a start of the same file with `write_through` cannot reach it.
+/// address nothing listens on (a port that was bound and let go), and the check still exits 0
+/// with no output. (A start does not call the upstream either: see
+/// `a_start_makes_no_call_of_the_upstream_and_leaves_it_no_key` in the crate.)
 #[test]
 fn check_config_does_not_call_the_upstream() {
     let files = Files::new("bin-check-offline");
@@ -232,8 +233,6 @@ fn check_config_does_not_call_the_upstream() {
     let cache_dir = files.key.with_file_name("cache");
     let config = check_file(&files, "write_through = true", &endpoint, &cache_dir);
     assert_eq!(run(&checking(&config)), (0, String::new(), String::new()));
-    let (code, _, _) = run(&["--config".to_owned(), config]);
-    assert_eq!(code, 1);
 }
 
 /// Asserts that a file a start refuses is refused by `--check-config` with the same message and
