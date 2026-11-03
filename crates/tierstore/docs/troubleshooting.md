@@ -72,7 +72,7 @@ An address given twice (on main, not in v0.0.41) exits 2 before anything is boun
 <key>: it needs at least one address
 ```
 
-A tier that answers a self-test question wrongly exits 3 and names the tier, the check and what it answered: the store overwrites on a create-only put, ignores `If-Match`, answers a range with the whole object, or completes a multipart upload over an existing object. Use a store that does these properly. `--skip-backend-check multipart-conditional=<reason>` is for the last only.
+A tier that answers a self-test question wrongly exits 3 and names the tier, the check and what it answered: the store overwrites on a create-only put, ignores `If-Match`, creates a key on an `If-Match` put of a key that does not exist (hot tier, the `if-match-missing` check), answers a range with the whole object, or completes a multipart upload over an existing object. Use a store that does these properly. `--skip-backend-check multipart-conditional=<reason>` is for the last only.
 
 ## Errors a client sees
 

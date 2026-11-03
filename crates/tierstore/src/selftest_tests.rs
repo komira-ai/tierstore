@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// The prefix the probe keys are under.
-const PROBE: &str = "_tiering/selftest/";
+pub(crate) const PROBE: &str = "_tiering/selftest/";
 
 /// How a [`Flawed`] backend differs from a memory backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,15 @@ pub(crate) enum Flaw {
     RejectsConditionalHeader,
     /// A replace on a wrong content tag takes effect, as a store that ignores `If-Match`.
     IgnoresIfMatch,
+    /// A replace with a tag of a key that does not exist creates it, as a store that ignores
+    /// `If-Match` when there is no object.
+    CreatesOnIfMatchMissing,
+    /// A replace of a key that does not exist is answered 412, as a store that judges the tag
+    /// before the key.
+    PreconditionOnIfMatchMissing,
+    /// A replace of a key that does not exist is answered 403, an error that is no refusal of a
+    /// precondition.
+    ErrorsOnIfMatchMissing,
     /// A ranged read gives the whole object, as a store that answers 200 to a `Range` request.
     WholeObjectForRange,
     /// A HEAD fails as the S3 backend does for an answer with no `Last-Modified`.
@@ -130,6 +139,18 @@ impl Backend for Flawed {
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        if self.inner.head(key).await.is_err() {
+            if self.is(Flaw::CreatesOnIfMatchMissing) {
+                self.inner.put(key, body).await?;
+                return Ok(self.inner.head(key).await?.tag);
+            }
+            if self.is(Flaw::PreconditionOnIfMatchMissing) {
+                return Err(Error::PreconditionFailed(key.to_owned()));
+            }
+            if self.is(Flaw::ErrorsOnIfMatchMissing) {
+                return Err(Error::Other("403 Forbidden: If-Match".to_owned()));
+            }
+        }
         let mut etag = etag.to_owned();
         if self.is(Flaw::IgnoresIfMatch) {
             etag = self.inner.head(key).await?.tag;
@@ -217,7 +238,11 @@ impl Backend for Flawed {
 /// The options of a run: a store that does not answer is asked again for 20 seconds, after
 /// pauses of 1, 2 and then 4 seconds. Tests that make a store not answer run on a paused clock,
 /// so that no time is waited.
-fn options<'a>(run_id: &'a str, multipart: bool, skip: &'a [Check]) -> SelfTestOptions<'a> {
+pub(crate) fn options<'a>(
+    run_id: &'a str,
+    multipart: bool,
+    skip: &'a [Check],
+) -> SelfTestOptions<'a> {
     SelfTestOptions {
         name: "the backend",
         run_id,
@@ -230,7 +255,7 @@ fn options<'a>(run_id: &'a str, multipart: bool, skip: &'a [Check]) -> SelfTestO
 }
 
 /// Runs the self-test and gives its outcome and the notes it made.
-async fn go(
+pub(crate) async fn go(
     backend: &dyn Backend,
     options: &SelfTestOptions<'_>,
 ) -> (Result<(), SelfTestError>, Vec<String>) {
@@ -242,7 +267,7 @@ async fn go(
 
 /// The failure of a self-test that must have found a backend answering wrongly; no probe key is
 /// left in the backend whatever the answer.
-async fn refused(flaw: Flaw, multipart: bool) -> SelfTestFailure {
+pub(crate) async fn refused(flaw: Flaw, multipart: bool) -> SelfTestFailure {
     let backend = Flawed::new(flaw);
     let (outcome, _) = go(&backend, &options("run-1", multipart, &[])).await;
     let failure = match outcome {
@@ -928,6 +953,7 @@ fn checks_have_names_that_parse_back() {
             "create-only",
             "head",
             "if-match",
+            "if-match-missing",
             "range",
             "paging",
             "multipart-conditional"

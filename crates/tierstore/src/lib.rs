@@ -107,6 +107,8 @@ mod reservation;
 pub mod s3;
 mod selftest;
 #[cfg(test)]
+mod selftest_missing_tests;
+#[cfg(test)]
 mod selftest_tests;
 #[cfg(feature = "server")]
 pub mod server;

@@ -399,6 +399,7 @@ Before binding any address the server runs a self-test against each tier, hot fi
 | Create-only put refuses a second put | One winner per key; the lease is taken create-only | yes (`create-only`; does not read the object back) |
 | HEAD gives size and a non-empty tag, and the tag `put_if_match` returns equals the next HEAD tag | Lease and checkpoint use the tag from HEAD | yes (`head`) |
 | `If-Match` refuses a wrong tag and accepts the right one | Lease take-over, renewal, checkpoint | yes (`if-match`) |
+| `If-Match` put of a missing key is refused (404 or 412) and does not create it | A late replace of a deleted key must not bring it back | yes, hot tier only (`if-match-missing`) |
 | Ranged read returns the exact bytes | Ranged gets | yes (`range`, one in-range read) |
 | Listing is ordered, paged, honours `start_after` | Reading the journal | yes (`paging`) |
 | Delete of a missing key succeeds | Repeated and re-applied deletes, eviction, prune, restart rebuild | no |

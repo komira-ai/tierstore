@@ -3,8 +3,9 @@
 //! The proxy, the lease and the journal rest on answers that a store must give exactly: a
 //! create-only put that refuses a key that exists, a put that replaces only on the right content
 //! tag, a ranged read that gives the range and nothing else, a head that gives the size and the
-//! tag of what was written, a listing that pages by `start_after`, and (on the tier that takes
-//! multipart uploads) a completion that is create-only. A store that answers one of them wrongly
+//! tag of what was written, a listing that pages by `start_after`, (on the tier that takes
+//! multipart uploads) a completion that is create-only, and (on the tier that does not) a
+//! replace on a tag of a key that does not exist that is refused and does not create the key. A store that answers one of them wrongly
 //! does not fail: it overwrites silently, and the guarantees built on it are gone.
 //! [`self_test`] asks each question on a key of its own, and says which answer was wrong.
 //!
@@ -77,6 +78,7 @@ const CREATE_KEY: &str = "create";
 const HEAD_KEY: &str = "head";
 const CLOCK_KEY: &str = "clock";
 const MATCH_KEY: &str = "match";
+const MISSING_KEY: &str = "if-match-missing";
 const RANGE_KEY: &str = "range";
 const PAGE_KEYS: [&str; 3] = ["page/a", "page/b", "page/c"];
 const MULTIPART_KEY: &str = "multipart";
@@ -96,6 +98,10 @@ pub enum Check {
     /// A replace on a wrong content tag is refused, and one on the right tag takes effect
     /// (`If-Match`).
     IfMatch,
+    /// A replace with a tag of a key that does not exist is refused (`If-Match` answers 412 or
+    /// 404) and does not create the key. A late replace on an entry that was deleted must not
+    /// bring it back. Run on the tier that takes no multipart uploads only (the hot tier).
+    IfMatchMissing,
     /// A ranged read gives exactly the range (206 with the range, not 200 with the object).
     Range,
     /// A listing, whole or after a key (`start-after`), a page at a time, gives the right keys.
@@ -108,10 +114,11 @@ pub enum Check {
 
 impl Check {
     /// Every check, in the order they run.
-    pub const ALL: [Check; 6] = [
+    pub const ALL: [Check; 7] = [
         Check::CreateOnly,
         Check::Head,
         Check::IfMatch,
+        Check::IfMatchMissing,
         Check::Range,
         Check::Paging,
         Check::MultipartConditional,
@@ -124,6 +131,7 @@ impl Check {
             Check::CreateOnly => "create-only",
             Check::Head => "head",
             Check::IfMatch => "if-match",
+            Check::IfMatchMissing => "if-match-missing",
             Check::Range => "range",
             Check::Paging => "paging",
             Check::MultipartConditional => "multipart-conditional",
@@ -142,6 +150,7 @@ impl Check {
             Check::CreateOnly => &[CREATE_KEY],
             Check::Head => &[HEAD_KEY],
             Check::IfMatch => &[MATCH_KEY],
+            Check::IfMatchMissing => &[MISSING_KEY],
             Check::Range => &[RANGE_KEY],
             Check::Paging => &PAGE_KEYS,
             Check::MultipartConditional => &[MULTIPART_KEY],
@@ -324,7 +333,8 @@ pub async fn self_test(
     };
     for check in Check::ALL {
         let multipart_only = check == Check::MultipartConditional && !options.multipart;
-        if options.skip.contains(&check) || multipart_only {
+        let hot_only = check == Check::IfMatchMissing && options.multipart;
+        if options.skip.contains(&check) || multipart_only || hot_only {
             continue;
         }
         let verdict = probe.attempt(check).await;
@@ -465,6 +475,7 @@ impl Probe<'_> {
             Check::CreateOnly => self.create_only().await,
             Check::Head => self.head().await,
             Check::IfMatch => self.if_match().await,
+            Check::IfMatchMissing => self.if_match_missing().await,
             Check::Range => self.range().await,
             Check::Paging => self.paging().await,
             Check::MultipartConditional => self.multipart_conditional().await,
@@ -587,6 +598,24 @@ impl Probe<'_> {
         let replaced = saw("a GET", self.backend.get(&key, None).await)?;
         let what = "the object after the replace on the right ETag";
         expect_eq(what, text_of(&replaced).as_str(), "v2")
+    }
+
+    /// A replace with a tag of a key that does not exist must be refused (404 or 412), not
+    /// create the key.
+    async fn if_match_missing(&self) -> Verdict {
+        let key = self.key(MISSING_KEY);
+        let what = "a replace on a key that does not exist";
+        match self
+            .backend
+            .put_if_match(&key, text("late"), WRONG_TAG)
+            .await
+        {
+            Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => Ok(()),
+            Ok(_) => Err(Fault::Wrong(format!(
+                "{what} was accepted; it must be refused with 412 or 404, not create the key"
+            ))),
+            Err(other) => Err(fault(what, other)),
+        }
     }
 
     async fn range(&self) -> Verdict {

@@ -235,7 +235,7 @@ fn refusing_writes(status: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
 }
 
 /// Asserts that a 507 from a store, through the real S3 mapping, is a full tier and not a wrong
-/// answer: the hot tier's checks that need a write are each skipped with a note (five), the test
+/// answer: the hot tier's checks that need a write are each skipped with a note (six), the test
 /// passes, and nothing but writes and deletes were sent.
 #[tokio::test]
 async fn a_507_from_the_store_skips_the_write_checks_through_the_s3_mapping() {
@@ -251,7 +251,7 @@ async fn a_507_from_the_store_skips_the_write_checks_through_the_s3_mapping() {
     let full = notes
         .iter()
         .filter(|note| note.contains("the tier is full"));
-    assert_eq!(full.count(), 5, "{notes:?}");
+    assert_eq!(full.count(), 6, "{notes:?}");
     let seen = seen.lock().unwrap();
     assert!(seen.iter().all(|line| !line.starts_with("GET")), "{seen:?}");
 }
