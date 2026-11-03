@@ -123,3 +123,37 @@ async fn a_cache_gives_an_open_read_from_its_own_get() {
     assert_eq!(inner.calls(Op::Head), 2);
     assert_eq!(inner.calls(Op::Get), 1);
 }
+
+/// Asserts that a tagged streamed put creates the object from its chunks and gives the tag a head
+/// gives, refuses a key that exists and leaves nothing for a body that fails, on the in-memory and
+/// the directory backend.
+#[tokio::test]
+async fn a_streamed_tagged_put_gives_the_tag_of_its_object() {
+    over_each!(conformance::a_streamed_tagged_put_gives_the_tag_of_its_object);
+}
+
+/// Asserts that the fault injector counts a tagged streamed put as a call of kind `Put`, passes
+/// it on and gives the wrapped backend's tag, and fails the next one when told to, leaving
+/// nothing; and that a RAM cache passes it on as it is.
+#[tokio::test]
+async fn the_wrappers_pass_a_tagged_streamed_put_on() {
+    let backend = FaultyBackend::new(Arc::new(MemoryBackend::new()));
+    let made = backend.put_stream_tagged("k", None, chunks(&["ab", "c"]));
+    let tag = made.await.unwrap();
+    assert_eq!(backend.calls(Op::Put), 1);
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+    backend.fail_next(Op::Put, 1);
+    let failed = backend.put_stream_tagged("j", None, chunks(&["x"])).await;
+    assert!(failed.unwrap_err().is_unavailable());
+    assert_eq!(backend.calls(Op::Put), 2);
+    assert_eq!(
+        backend.head("j").await.unwrap_err(),
+        Error::NotFound("j".to_owned())
+    );
+
+    let cache = CachedStore::new(Arc::new(MemoryBackend::new()), 1 << 20);
+    let made = cache.put_stream_tagged("k", Some(3), chunks(&["ab", "c"]));
+    let tag = made.await.unwrap();
+    assert_eq!(cache.head("k").await.unwrap().tag, tag);
+    assert_eq!(cache.get("k", None).await.unwrap(), body("abc"));
+}

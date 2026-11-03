@@ -687,14 +687,26 @@ impl Backend for DirBackend {
     async fn put_stream(
         &self,
         key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.put_stream_tagged(key, len, body).await.map(drop)
+    }
+
+    /// As [`Backend::put_stream`], and gives the tag of the file it published: the SHA-256 of the
+    /// bytes written.
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
         _len: Option<u64>,
         mut body: PartBody<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let path = self.path(key)?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
-        write_object_stream(&temp, &mut body).await?;
-        self.publish(&temp, &path, key).await
+        let tag = write_object_stream(&temp, &mut body).await?;
+        self.publish(&temp, &path, key).await?;
+        Ok(hex::encode(tag))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

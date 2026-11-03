@@ -42,6 +42,14 @@ async fn a_streamed_replace_takes_the_tag_and_a_whole_body() {
     conformance::a_streamed_replace_takes_the_tag_and_a_whole_body(&backend).await;
 }
 
+/// Asserts that a tagged streamed put to S3 gives the tag a head gives, refuses a key that exists
+/// and leaves nothing for a body that fails, over the S3 service.
+#[tokio::test]
+async fn a_streamed_tagged_put_gives_the_tag_of_its_object() {
+    let (_s3, backend) = backend().await;
+    conformance::a_streamed_tagged_put_gives_the_tag_of_its_object(&backend).await;
+}
+
 /// A body of 16 MiB of zeros and one byte more, as one-MiB chunks, which is more than one PUT
 /// carries; it ends with `error` instead of the last byte if there is one.
 fn over_one_put(error: Option<&Error>) -> PartBody<'static> {
@@ -213,4 +221,31 @@ async fn an_open_read_whose_answer_lacks_part_of_the_meta_is_an_error() {
             "{lacks}: {failed}"
         );
     }
+}
+
+/// Asserts that a tagged streamed put of more than 16 MiB is a multipart upload completed once,
+/// giving the tag a head gives; that a body that fails leaves no upload open and no object; and
+/// that a key that exists is refused with no upload left open.
+#[tokio::test]
+async fn a_tagged_streamed_put_of_more_than_one_put_is_completed_with_its_tag() {
+    let (s3, backend) = backend().await;
+    let cut = Error::Other("cut".to_owned());
+    let failing = over_one_put(Some(&cut));
+    let failed = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), failing);
+    assert_eq!(failed.await, Err(cut));
+    assert_eq!(s3.incomplete_uploads(), 0);
+    assert_eq!(
+        backend.head("k").await.unwrap_err(),
+        Error::NotFound("k".to_owned())
+    );
+
+    let made = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), over_one_put(None));
+    let tag = made.await.unwrap();
+    let head = backend.head("k").await.unwrap();
+    assert_eq!((head.tag.as_str(), head.size), (tag.as_str(), OVER_ONE_PUT));
+    assert_eq!(s3.stats().completed, 1);
+
+    let again = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), over_one_put(None));
+    assert_eq!(again.await, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(s3.incomplete_uploads(), 0);
 }

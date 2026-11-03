@@ -16,7 +16,7 @@ use tierstore::{
 use tierstore_testkit::dir::TestDir;
 
 use crate::conformance::{joined, reservation};
-use crate::support::{Rig, assert_absent, body, read, set_usage};
+use crate::support::{Rig, assert_absent, body, copied, read, set_usage};
 
 /// The bytes the objects of these tests hold.
 const TEN: &str = "0123456789";
@@ -104,6 +104,8 @@ impl Backend for Counted {
             .map(|piece| Ok(Bytes::copy_from_slice(piece)))
             .collect();
         if self.cut {
+            // Cut: two of the chunks, and then the error.
+            pieces.truncate(2);
             pieces.push(Err(Error::Unavailable("cut".to_owned())));
         }
         let body = stream::iter(pieces).inspect(move |_| {
@@ -315,6 +317,7 @@ async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
     assert_eq!(opened.meta, head);
     assert_eq!(opened.window, Window::Whole);
     assert_eq!(joined(opened).await, body(TEN));
+    copied(&rig, "k").await;
     assert_eq!(read(&*rig.hot_mem, "k").await, body(TEN));
 
     let before = calls(&rig);
@@ -326,6 +329,7 @@ async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
     assert_eq!(opened.window, Window::Part(ByteRange::new(7, 3)));
     assert_eq!(opened.meta.size, 10);
     assert_eq!(joined(opened).await, body("789"));
+    copied(&rig, "r").await;
     assert_eq!(read(&*rig.hot_mem, "r").await, body(TEN));
 }
 
@@ -399,10 +403,11 @@ async fn a_tier_that_fails_fails_the_read() {
     assert_absent(&*rig.hot_mem, "cold").await;
 }
 
-/// Asserts that a cold body that ends with an error fails the read with that error, and that no
-/// copy of the cut bytes is made into the hot tier.
+/// Asserts that a cold body that is cut gives the client the bytes that came and then the error
+/// of the cut, and that the cold tier was opened once. (That nothing is copied into the hot tier
+/// is asserted in `cold_stream.rs`, where the end of the write can be waited for.)
 #[tokio::test(start_paused = true)]
-async fn a_cold_body_that_is_cut_fails_the_read_and_copies_nothing() {
+async fn a_cold_body_that_is_cut_fails_the_read() {
     let rig = Rig::new();
     let mem = Arc::new(MemoryBackend::with_clock(rig.clock.clone()));
     mem.put("k", body(TEN)).await.unwrap();
@@ -411,10 +416,13 @@ async fn a_cold_body_that_is_cut_fails_the_read_and_copies_nothing() {
         .await
         .unwrap();
 
-    let failed = proxy.open_read("k", None).await.err().unwrap();
+    let mut stream = proxy.open_read("k", None).await.unwrap().body;
+    assert_eq!(stream.next().await.unwrap().unwrap(), body("01"));
+    assert_eq!(stream.next().await.unwrap().unwrap(), body("23"));
+    let failed = stream.next().await.unwrap().unwrap_err();
     assert!(failed.is_unavailable(), "{failed}");
+    assert!(stream.next().await.is_none());
     assert_eq!(cold.opens(), 1);
-    assert_absent(&*rig.hot_mem, "k").await;
 }
 
 /// Asserts that an object much larger than one chunk, in a directory hot tier, reaches the

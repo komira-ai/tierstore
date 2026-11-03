@@ -193,6 +193,37 @@ pub async fn a_streamed_put_of_an_existing_key_is_refused(backend: &dyn Backend)
     assert_eq!(keys(backend).await, ["k"]);
 }
 
+/// A tagged streamed put creates the object from its chunks, whose length is told or not, and
+/// gives the tag a head of it gives; a body that ends with an error leaves nothing, and a key that
+/// exists is refused with `AlreadyExists` and keeps its object.
+pub async fn a_streamed_tagged_put_gives_the_tag_of_its_object(backend: &dyn Backend) {
+    let told = chunks(&["streamed", " ", "body"]);
+    let first = backend.put_stream_tagged("told", Some(13), told).await;
+    let untold = chunks(&["streamed ", "body"]);
+    let second = backend.put_stream_tagged("untold", None, untold).await;
+    for (key, tag) in [("told", first.unwrap()), ("untold", second.unwrap())] {
+        assert_eq!(backend.get(key, None).await.unwrap(), body("streamed body"));
+        assert_eq!(backend.head(key).await.unwrap().tag, tag, "{key}");
+    }
+    let cut = Error::Other("cut".to_owned());
+    let failed = backend
+        .put_stream_tagged("cut", Some(9), broken(&["abc"], &cut))
+        .await;
+    assert_eq!(failed, Err(cut));
+    assert_eq!(
+        backend.head("cut").await.unwrap_err(),
+        Error::NotFound("cut".to_owned())
+    );
+    let again = backend
+        .put_stream_tagged("told", Some(3), chunks(&["two"]))
+        .await;
+    assert_eq!(again, Err(Error::AlreadyExists("told".to_owned())));
+    assert_eq!(
+        backend.get("told", None).await.unwrap(),
+        body("streamed body")
+    );
+}
+
 /// The body of reservation `n` in the checks below: 56 bytes, as a proxy's reservation is, and
 /// different for each `n`, so that two reservations of a key have two tags.
 pub fn reservation(n: u32) -> Bytes {

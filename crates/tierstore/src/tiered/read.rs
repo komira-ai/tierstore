@@ -3,21 +3,12 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 
+use super::relay::{Tee, relay};
 use super::{Inner, Level};
 use crate::metrics::{Read, Skipped, Tier};
 use crate::{ByteRange, Error, Opened, ReadBody, Span, Window};
-
-/// The bytes of `body`, collected.
-async fn collect(mut body: ReadBody) -> Result<Bytes, Error> {
-    let mut whole = BytesMut::new();
-    while let Some(chunk) = body.next().await {
-        whole.extend_from_slice(&chunk?);
-    }
-    Ok(whole.freeze())
-}
 
 impl Inner {
     /// Opens the read of `span` of the object `key` (all of it without one).
@@ -29,9 +20,13 @@ impl Inner {
     ///
     /// A miss goes to the cold tier. A read of a span, with the hot tier at its critical mark, is
     /// the cold tier's own stream of that span and copies nothing back. Any other read of the
-    /// cold tier reads the whole object, which is copied back as [`Inner::copy_back`] says (the
-    /// copy is held whole, as it is put in one call), and the answer is the window of the held
-    /// bytes. A cold object that is a reservation is not an object: a miss.
+    /// cold tier is one read of the whole object, whose body is given to the caller as it
+    /// arrives, cut to the window asked for, and, unless the hot tier is at its critical mark,
+    /// fed at the same time to a streamed create-only write into the hot tier (see
+    /// [`relay`](super::relay)): the cold object is read once, nothing is held whole, and the
+    /// copy neither delays nor fails the read. A cold object that is a reservation is not an
+    /// object: a miss. Bytes of the cold read are counted when it opens, from the meta, and a
+    /// body that fails later counts an error as well.
     pub(super) async fn open_object(
         self: &Arc<Self>,
         key: &str,
@@ -65,26 +60,16 @@ impl Inner {
             self.counters.served(Tier::Cold, served);
             return Ok(opened);
         }
-        let whole = self.cold_open(key, None).await?;
-        let meta = whole.meta;
-        let held = match collect(whole.body).await {
-            Ok(held) => held,
-            Err(error) => {
-                self.counters.error(Tier::Cold, Read::Get);
-                return Err(error);
-            }
-        };
-        self.counters.hit(Tier::Cold, Read::Get);
-        self.counters.bytes_read(Tier::Cold, held.len());
-        if !critical {
-            // The tag is that of the very bytes read, so the copy is journaled under it
-            // whatever the key holds by then.
-            self.copy_back(key, &held, meta.tag.clone()).await;
-        }
+        let Opened { meta, body, .. } = self.cold_open(key, None).await?;
         let window = Window::of(span, meta.size);
-        let served = window.slice(&held);
-        self.counters.served(Tier::Cold, served.len());
-        let body = futures::stream::once(std::future::ready(Ok(served))).boxed();
+        self.counters.hit(Tier::Cold, Read::Get);
+        self.counters.bytes_read(Tier::Cold, meta.size as usize);
+        self.counters
+            .served(Tier::Cold, window.bytes(meta.size) as usize);
+        // The tag is that of the very bytes read, so the copy is journaled under it whatever the
+        // key holds by then.
+        let tee = (!critical).then(|| Tee::new(self, key, meta.size, meta.tag.clone()));
+        let body = relay(self, body, window, tee);
         Ok(Opened { meta, window, body })
     }
 

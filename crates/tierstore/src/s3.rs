@@ -578,6 +578,22 @@ impl Backend for S3Backend {
         sent.map_err(|e| map_error(e, key))
     }
 
+    /// The tag is the `ETag` of the answer to the write that made the object (the PUT, or the
+    /// completion of the multipart upload).
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let store = &self.store;
+        let sending = |len, source| store.put_stream_new_tagged(&object, len, source);
+        let sent = streamed(body, len, sending).await?;
+        let tag = sent.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let object = object_key(key)?;
         let etag = quoted(etag);

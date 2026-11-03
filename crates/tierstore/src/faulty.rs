@@ -239,6 +239,17 @@ impl Backend for FaultyBackend {
     }
 
     /// As `put_stream`, a call of kind [`Op::Put`].
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        self.enter(Op::Put, key).await?;
+        self.inner.put_stream_tagged(key, len, body).await
+    }
+
+    /// As `put_stream`, a call of kind [`Op::Put`].
     async fn put_stream_hot_only(
         &self,
         key: &str,

@@ -200,6 +200,7 @@ async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.body, "234");
     assert_eq!(part.header("content-range"), "bytes 2-4/10");
+    rig.copied("cold").await;
     let copy = rig.hot_mem.get("cold", None).await.unwrap();
     assert_eq!(copy, body);
 }

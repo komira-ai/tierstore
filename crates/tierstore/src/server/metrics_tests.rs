@@ -93,6 +93,14 @@ pub(super) fn skipped(reason: &str) -> String {
     format!("tierstore_promotions_skipped_total{{reason=\"{reason}\"}}")
 }
 
+/// Lets the runtime's other tasks run until `series` is at least `n`: the copy of a cold read ends
+/// beside its response, so its promotion or skip is counted a little after the body was sent.
+async fn reached(rig: &Rig, series: &str, n: u64) {
+    while value(rig, series).await < n {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// A rig with the object `key` in the cold tier only.
 async fn cold_only(key: &str, body: &'static [u8]) -> Rig {
     let rig = Rig::new(BUDGET).await;
@@ -248,6 +256,7 @@ async fn a_get_of_a_cold_object_counts_the_cold_read_and_the_promotion() {
     assert_eq!(value(&rig, COLD_BYTES).await, 12);
     assert_eq!(value(&rig, COLD_SERVED).await, 12);
     assert_eq!(value(&rig, HOT_SERVED).await, 0);
+    reached(&rig, PROMOTIONS, 1).await;
     assert_eq!(value(&rig, PROMOTIONS).await, 1);
     assert_eq!(value(&rig, PROMOTED_BYTES).await, 12);
     // The front opens the read with one call per tier: no head is made.
@@ -314,6 +323,7 @@ async fn a_ranged_get_of_a_cold_object_serves_the_range_and_reads_the_whole() {
     assert_eq!(reply.body, "234");
     assert_eq!(value(&rig, COLD_SERVED).await, 3);
     assert_eq!(value(&rig, COLD_BYTES).await, 10);
+    reached(&rig, PROMOTIONS, 1).await;
     assert_eq!(value(&rig, PROMOTED_BYTES).await, 10);
     let again = rig.get("obj", Some("bytes=5-9")).await;
     assert_eq!(again.body, "56789");
@@ -360,17 +370,20 @@ async fn a_cold_read_that_is_not_copied_back_counts_why() {
     let rig = cold_only("a", b"aaaa").await;
     rig.hot.fail_next_with(Op::Put, Error::Full("a".to_owned()));
     assert_eq!(rig.get("a", None).await.body, "aaaa");
+    reached(&rig, &skipped("full"), 1).await;
     assert_eq!(value(&rig, &skipped("full")).await, 1);
 
     let rig = cold_only("a", b"aaaa").await;
     let exists = Error::AlreadyExists("a".to_owned());
     rig.hot.fail_next_with(Op::Put, exists);
     assert_eq!(rig.get("a", None).await.body, "aaaa");
+    reached(&rig, &skipped("raced"), 1).await;
     assert_eq!(value(&rig, &skipped("raced")).await, 1);
 
     let rig = cold_only("a", b"aaaa").await;
     rig.hot.fail_next(Op::Put, 1);
     assert_eq!(rig.get("a", None).await.body, "aaaa");
+    reached(&rig, &skipped("failed"), 1).await;
     assert_eq!(value(&rig, &skipped("failed")).await, 1);
     assert_eq!(value(&rig, PROMOTIONS).await, 0);
     for reason in ["critical", "full", "raced"] {

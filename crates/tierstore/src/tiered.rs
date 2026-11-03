@@ -35,6 +35,7 @@ const DELETE_ROUNDS: u32 = 3;
 mod copy_back;
 mod put;
 mod read;
+mod relay;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -150,9 +151,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
 ///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
-///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
-///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
+///   A failed copy-back does not fail the read. A read through [`Backend::open_read`] or
+///   [`Backend::get_stream`] reads the cold object once and gives its body to the caller as it
+///   arrives, never held whole; the same chunks are queued for a streamed create-only write into
+///   the hot tier (`put_stream_tagged`, which gives the hot tag of the object it made), in a task
+///   of its own. The caller is never made to wait for that write: if it falls more than 16 MiB
+///   behind, fails, or the caller drops the body before the last byte (a client that went away),
+///   the write is abandoned and leaves no object, and a body of another length than the cold
+///   meta's is not copied. A read that is not given its body (a 304, a 412, a 416) copies
+///   nothing. A ranged read that misses the hot tier reads the whole object from the cold tier,
+///   since the hot tier takes the whole of it, and gives the range from that. A *reservation* in the cold tier (a marked 56-byte object, see
 ///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
 ///   copied back.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is

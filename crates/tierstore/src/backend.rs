@@ -391,6 +391,34 @@ pub trait Backend: Send + Sync {
         self.put_stream(key, len, body).await
     }
 
+    /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it
+    /// is to give, or `None` if the caller does not know): create-only, and gives the content
+    /// tag of the object this write made, with no read after it.
+    ///
+    /// As for [`Backend::put_stream`], the object becomes visible only after `body` has ended
+    /// without an error, and a body that ends with an error, or a call that is dropped half way,
+    /// leaves nothing. The directory and S3 backends do not hold the body whole (S3 gathers a
+    /// body of at most 16 MiB for one PUT, and sends a longer one as a multipart upload).
+    ///
+    /// The provided implementation collects the chunks and calls [`Backend::put_tagged`]; it
+    /// serves a backend that holds its objects in memory anyway, and the wrappers of other
+    /// backends override the call to pass the stream on.
+    ///
+    /// # Errors
+    /// As [`Backend::put_tagged`], and the error of `body`, if it ends with one.
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        let mut whole = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            whole.extend_from_slice(&chunk?);
+        }
+        self.put_tagged(key, whole.freeze()).await
+    }
+
     /// Replaces the object, only if its content tag is `etag` (`If-Match`), and gives the
     /// content tag of the new object.
     ///

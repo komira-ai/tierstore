@@ -159,6 +159,33 @@ impl S3Store {
         done.ok_or_else(|| bad(key, "the completion carries no ETag"))
     }
 
+    /// Creates the object, unmarked, only if the key has none, with `len` bytes taken from `body`
+    /// as they are sent, and gives the tag of the new object as the store sends it (the `ETag` of
+    /// the answer to the write that made it, as [`put_new_tagged`](Self::put_new_tagged) does).
+    ///
+    /// A body of at most [`MULTIPART_THRESHOLD`] bytes is gathered and sent as one PUT with
+    /// `If-None-Match: *`; a longer one is a multipart upload whose completion carries it, so the
+    /// object appears only in the last request, after the whole body was read, and the upload is
+    /// aborted on any failure. A body that fails or has another length than `len` creates
+    /// nothing.
+    ///
+    /// # Errors
+    /// As [`put_new_tagged`](Self::put_new_tagged), and the body's error, or
+    /// [`ObjectStoreError::Body`] for a body of another length than `len`.
+    pub async fn put_stream_new_tagged(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+    ) -> Result<String, ObjectStoreError> {
+        if len <= MULTIPART_THRESHOLD {
+            let bytes = crate::gather(body, len).await?;
+            return self.put_new_tagged(key, bytes).await;
+        }
+        let done = multipart::put(&self.conn, key, len, body, None).await?;
+        done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+    }
+
     /// [`put_stream_if_match`](Self::put_stream_if_match) for a body whose length is not known,
     /// which is never held whole: the first [`PART_BYTES`](super::PART_BYTES) of it are read, and if the body ends
     /// there it is one PUT with `If-Match`; if it has more, it is a multipart upload whose parts
