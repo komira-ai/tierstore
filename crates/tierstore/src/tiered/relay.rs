@@ -117,13 +117,22 @@ impl Tee {
     /// back until the body ends; a chunk that goes past the size abandons the write.
     fn offer(&mut self, chunk: &Bytes) {
         let len = chunk.len() as u64;
+        if len == 0 {
+            // A chunk of no bytes adds nothing, and must not take the place of the held one.
+            return;
+        }
         self.seen += len;
         let (size, seen) = (self.size, self.seen);
         let Some(live) = self.live() else { return };
         if seen > size {
             self.abandon();
         } else if seen == size {
-            self.held = Some(chunk.clone());
+            // The held chunk waits for the write like the queued ones, so it counts in the bound.
+            if live.queued.load(Ordering::SeqCst) + len > BACKLOG_BYTES {
+                self.abandon();
+            } else {
+                self.held = Some(chunk.clone());
+            }
         } else {
             let waiting = live.queued.fetch_add(len, Ordering::SeqCst) + len;
             if waiting > BACKLOG_BYTES || live.chunks.send(chunk.clone()).is_err() {

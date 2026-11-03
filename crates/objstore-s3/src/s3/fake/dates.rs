@@ -19,7 +19,7 @@ pub(super) fn http_date(seconds: u64) -> String {
     )
 }
 
-/// `2009-10-12T17:50:30.000Z`, the form of a `<LastModified>` of a listing.
+/// `2026-11-03T08:49:37.000Z`, the form of a `<LastModified>` of a listing.
 pub(super) fn iso_date(seconds: u64) -> String {
     let utc = Utc::of(UNIX_EPOCH + Duration::from_secs(seconds), false);
     utc.iso8601().replace('Z', ".000Z")

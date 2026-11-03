@@ -33,6 +33,8 @@ struct Cold {
     gate: Option<(usize, Arc<Notify>)>,
     /// A body that fails instead of giving the chunk with this index, and gives no more.
     cut_after: Option<usize>,
+    /// Whether a chunk of no bytes follows every chunk of the body.
+    empties: bool,
     /// A size for the meta other than the object's, for a cold tier whose meta and body differ.
     claims: Option<u64>,
 }
@@ -84,7 +86,14 @@ impl Backend for Cold {
         let mut meta = self.mem.head(key).await?;
         let object = self.mem.get(key, None).await?;
         let window = Window::of(span, meta.size);
-        let held = Arc::new(pieces(&window.slice(&object), self.chunk));
+        let mut held = pieces(&window.slice(&object), self.chunk);
+        if self.empties {
+            held = held
+                .into_iter()
+                .flat_map(|piece| [piece, Bytes::new()])
+                .collect();
+        }
+        let held = Arc::new(held);
         if let Some(size) = self.claims {
             meta.size = size;
         }
@@ -236,6 +245,7 @@ async fn start(
         others: AtomicUsize::new(0),
         gate: None,
         cut_after: None,
+        empties: false,
         claims: None,
     };
     let mut hot = Hot {
@@ -631,4 +641,46 @@ async fn a_cold_body_that_fails_after_the_range_counts_a_cold_error() {
         assert!(run.ended.recv().await.unwrap().is_err());
         assert_eq!(metric(&run.proxy, errors), format!("{errors} 1"));
     }
+}
+
+/// Asserts that the bytes held for the hot write count in its bound: with the hot write held back,
+/// an object of 17 MiB (the last 1 MiB chunk would make 17 MiB wait) is abandoned and leaves no
+/// object, while one of exactly 16 MiB waits for the write and then makes the exact copy.
+#[tokio::test(start_paused = true)]
+async fn the_last_chunk_counts_in_the_bound_on_what_waits_for_the_hot_write() {
+    const MIB: usize = 1 << 20;
+    for (mib, whole) in [(17, false), (16, true)] {
+        let object = patterned(mib * MIB);
+        let release = Arc::new(Notify::new());
+        let gate = Arc::clone(&release);
+        let mut run = start(&[("k", object.clone())], MIB, |_, hot| {
+            hot.gate = Some(gate)
+        })
+        .await;
+        let opened = run.proxy.open_read("k", None).await.unwrap();
+        let (got, error) = drained(opened.body).await;
+        assert!(error.is_none());
+        assert!(got == object.as_ref(), "{mib}: the client's bytes differ");
+        release.notify_one();
+        let ended = run.ended.recv().await.unwrap();
+        assert_eq!(ended.is_ok(), whole, "{mib}: {ended:?}");
+        if whole {
+            assert!(run.hot.mem.get("k", None).await.unwrap() == object);
+        } else {
+            assert_absent(&*run.hot.mem, "k").await;
+        }
+    }
+}
+
+/// Asserts that a chunk of no bytes after the chunk that reaches the size does not take the place
+/// of that chunk: the object that is copied has every byte of the cold body.
+#[tokio::test(start_paused = true)]
+async fn an_empty_chunk_after_the_last_one_does_not_lose_it() {
+    let object = patterned(10);
+    let mut run = start(&[("k", object.clone())], 10, |cold, _| cold.empties = true).await;
+    let opened = run.proxy.open_read("k", None).await.unwrap();
+    let (got, error) = drained(opened.body).await;
+    assert!((got.as_slice(), error) == (object.as_ref(), None));
+    assert!(run.ended.recv().await.unwrap().is_ok());
+    assert_eq!(run.hot.mem.get("k", None).await.unwrap(), object);
 }
