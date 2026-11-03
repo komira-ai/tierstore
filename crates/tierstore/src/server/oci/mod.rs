@@ -468,7 +468,7 @@ fn unsatisfiable(size: u64) -> (Outcome, Response<OciBody>) {
 /// The answer for an object whose bytes are not the digest it is named by.
 fn mismatch(metrics: &OciMetrics, wanted: &Digest, found: &Digest) -> (Outcome, Response<OciBody>) {
     metrics.mismatch();
-    eprintln!(
+    tracing::warn!(
         "tierstore: oci: {} holds bytes that hash to {}",
         wanted.text(),
         found.text()
@@ -507,7 +507,7 @@ fn store_failed(
             (Outcome::NotFound, failed)
         }
         other => {
-            eprintln!("tierstore: oci: reading {key}: {other}");
+            tracing::warn!("tierstore: oci: reading {key}: {other}");
             let (status, code) = if other.is_unavailable() {
                 (StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE")
             } else {

@@ -2805,6 +2805,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "tracing",
  "x509-parser",
 ]
 
