@@ -162,4 +162,6 @@ machine. It is not in a release and has no configuration keys yet.
 
 ## Contributing
 
-The rules every change is written and reviewed against are in [AGENTS.md](AGENTS.md).
+How to build, test and send a change is in [CONTRIBUTING.md](CONTRIBUTING.md); the full rules every change is reviewed
+against are in [AGENTS.md](AGENTS.md). Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). Report a vulnerability
+through [private vulnerability reporting](https://github.com/komira-ai/tierstore/security/advisories/new), not an issue.
