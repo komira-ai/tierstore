@@ -200,6 +200,7 @@ async fn the_hot_object_goes_to_the_cold_tier_as_a_stream_whether_it_replaces_or
         .unwrap();
     add_journal(
         &rig,
+        "p1",
         1,
         &[
             entry(JournalOp::PutReserved, "k", 9, Some(&tag)),
