@@ -199,9 +199,9 @@ pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backen
     assert_eq!((head.size, head.tag.as_str()), (56, tag.as_str()));
     assert_eq!(backend.get("k", None).await.unwrap(), held);
     let whole = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(whole, (held.clone(), true));
+    assert_eq!(whole, (held.clone(), true, tag.clone()));
     let part = backend.get_marked("k", Some(ByteRange::new(4, 10))).await;
-    assert_eq!(part.unwrap(), (held.slice(4..14), true));
+    assert_eq!(part.unwrap(), (held.slice(4..14), true, tag.clone()));
     let listed = backend.list("").await.unwrap();
     let rows: Vec<(&str, u64)> = listed.iter().map(|o| (o.key.as_str(), o.size)).collect();
     assert_eq!(rows, [("k", 56)]);
@@ -235,9 +235,10 @@ pub async fn a_reservation_and_a_put_each_refuse_a_key_the_other_holds(backend: 
     backend.put("real", body("x")).await.unwrap();
     let refused = backend.put_reservation("real", reservation(3)).await;
     assert_eq!(refused, Err(Error::AlreadyExists("real".to_owned())));
+    let real = backend.head("real").await.unwrap().tag;
     assert_eq!(
         backend.get_marked("real", None).await.unwrap(),
-        (body("x"), false)
+        (body("x"), false, real)
     );
 }
 
@@ -269,9 +270,9 @@ pub async fn a_plain_replace_of_a_reservation_makes_a_real_object(backend: &dyn 
 
     let new = backend.put_if_match("k", body("real"), &tag).await.unwrap();
     let head = backend.head("k").await.unwrap();
-    assert_eq!((head.reservation, head.tag), (false, new));
+    assert_eq!((head.reservation, head.tag), (false, new.clone()));
     let read = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(read, (body("real"), false));
+    assert_eq!(read, (body("real"), false, new));
 }
 
 /// A marked replace with the reservation's tag keeps it a reservation with the new bytes and
@@ -374,7 +375,7 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
         .await;
     assert_eq!(failed, Err(cut));
     let kept = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(kept, (reservation(1), true));
+    assert_eq!(kept, (reservation(1), true, old.clone()));
     assert_eq!(backend.head("k").await.unwrap().tag, old);
 
     let told = backend.put_stream_if_match("k", Some(8), chunks(&["abcd", "efgh"]), &old);

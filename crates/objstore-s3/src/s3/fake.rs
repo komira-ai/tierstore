@@ -975,7 +975,8 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     };
     let object = &stored.kept;
     let Some(range) = range else {
-        let headers = meta::echoed(stored.marked);
+        let mut headers = meta::echoed(stored.marked);
+        headers.push(("etag", stored.etag()));
         return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
@@ -989,7 +990,7 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
     let bytes = object.read(first, end);
     let mut headers = meta::echoed(stored.marked);
-    headers.push(("content-range", content_range));
+    headers.extend([("etag", stored.etag()), ("content-range", content_range)]);
     answer("206 Partial Content", &headers, &bytes)
 }
 

@@ -387,16 +387,20 @@ fn window(size: u64, range: Option<ByteRange>) -> Result<(u64, u64), Error> {
     }
 }
 
-/// The bytes of `range` of the object `stored` was opened from, and its mark. The mark and the
-/// bytes are those of the one open file, so a replacement of the object that comes meanwhile (a
-/// new file under the name, whatever its mark) is not seen by this read.
-async fn read_marked(mut stored: Stored, range: Option<ByteRange>) -> Result<(Bytes, bool), Error> {
+/// The bytes of `range` of the object `stored` was opened from, its mark and its content tag. All
+/// three are those of the one open file (the tag is the header of that file), so a replacement of
+/// the object that comes meanwhile (a new file under the name, whatever its mark and tag) is not
+/// seen by this read.
+async fn read_marked(
+    mut stored: Stored,
+    range: Option<ByteRange>,
+) -> Result<(Bytes, bool, String), Error> {
     let (offset, len) = window(stored.size, range)?;
     stored.seek_body(offset).await?;
     let mut body = Vec::new();
     let read = (&mut stored.file).take(len).read_to_end(&mut body).await;
     read.map_err(io_error(&stored.path))?;
-    Ok((Bytes::from(body), stored.marked))
+    Ok((Bytes::from(body), stored.marked, hex::encode(stored.tag)))
 }
 
 /// The `left` bytes of the body that `stored` is positioned at, as chunks of at most
@@ -724,12 +728,11 @@ impl Backend for DirBackend {
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         Ok(self.get_marked(key, range).await?.0)
     }
-
     async fn get_marked(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         read_marked(self.stored(key).await?, range).await
     }
 

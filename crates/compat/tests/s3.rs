@@ -122,7 +122,8 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
         (head.reservation, head.tag.as_str()),
         (false, swapped.as_str())
     );
-    assert_eq!(now.get_marked("held", None).await.unwrap(), (real, false));
+    let marked = now.get_marked("held", None).await.unwrap();
+    assert_eq!(marked, (real, false, swapped.clone()));
 
     before.delete("plain").await.unwrap();
     let gone = now.head("plain").await;
@@ -163,7 +164,7 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_s3() 
         let whole = before.get(key, None).await.unwrap();
         assert_eq!(now.get(key, None).await.unwrap(), whole, "{key}");
         let marked = now.get_marked(key, None).await.unwrap();
-        assert_eq!(marked, (whole.clone(), false), "{key}");
+        assert_eq!(marked, (whole.clone(), false, read.tag.clone()), "{key}");
         let range = Some(ByteRange::new(3, 20));
         assert!(!now.get_marked(key, range).await.unwrap().1, "{key}");
         let part = now.get(key, range).await.unwrap();
