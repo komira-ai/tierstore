@@ -160,7 +160,7 @@ async fn a_listing_pages_through_both_tiers() {
 }
 
 /// Asserts that an object only the cold tier holds is read with the client's ranged reads, and
-/// that the first read copies it into the hot tier.
+/// that a ranged read copies nothing into the hot tier.
 #[tokio::test]
 async fn an_object_of_the_cold_tier_is_read() {
     let h = Harness::start(|_| {}).await;
@@ -168,7 +168,7 @@ async fn an_object_of_the_cold_tier_is_read() {
     let body = Bytes::from_static(b"0123456789");
     h.cold_mem.put("cas/cold", body.clone()).await.unwrap();
     assert_eq!(read(&store, "cas/cold", 2, 4).await, "2345");
-    assert_eq!(h.hot_mem.get("cas/cold", None).await.unwrap(), body);
+    assert!(h.hot_mem.get("cas/cold", None).await.is_err());
 }
 
 /// Asserts that an access key the server does not know, a wrong secret and a request without a

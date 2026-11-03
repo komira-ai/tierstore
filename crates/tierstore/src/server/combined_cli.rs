@@ -4,11 +4,14 @@
 //!
 //! The settings come from a file with `[hot_store]`, `[cold_store]` and `[local_cache]` (see
 //! [`config_combined`](super::config_combined)). The start runs, in this order: the flags'
-//! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers,
-//! the proxy, then the cache directory (its lock, the file-system probe if this process holds the
-//! lock, the budget against the file system), and last the addresses. Each check that can refuse
-//! comes before anything that writes, as for the other starts, and has the exit status it has
-//! there.
+//! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
+//! (which writes probe keys under `_tiering/selftest/` and deletes them), the proxy (which writes
+//! its marker `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
+//! file-system probe if this process holds the lock, the budget against the file system), and
+//! last the addresses. Only the flags' checks and the lock file come before a write. A refusal
+//! of the cache directory, its file system, its budget or an address comes after the self-test
+//! and the proxy's marker, so it leaves the marker (an empty object, with no lease) in the hot
+//! tier; the exit status is the one the same refusal has in the other starts.
 //!
 //! Left out, because the upstream of the cache is this node's own proxy: the HEAD of a probe key
 //! and the write self-test of the upstream, which a build node makes (the tiers have just been

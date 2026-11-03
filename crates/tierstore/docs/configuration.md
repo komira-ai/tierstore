@@ -291,8 +291,8 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 - a key or a table the format does not have, and a value of the wrong type;
 - a key that holds a secret: keys and credentials are paths of files whose names end in `_file` or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the like are refused anywhere;
 - a file that is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`) and a storage node's with a cache (all three tables);
-- in a storage node's file with a cache, `write_through = false`, a relative cache `path` or `dir` tier directory, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of `[oci]`);
-- in the file of a build node or of a storage node with a cache, an `[oci]` table, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
+- in a storage node's file with a cache, `write_through = false`, a relative cache `path`, `dir` tier directory, `lock_file` or `[oci]` key file, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of `[oci]`);
+- in the file of a build node or of a storage node with a cache, an `[oci]` table whose blobs no `[[policy]]` with `cache = true` keeps, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
 - a key a tier's `kind` does not take, a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);
 - a water mark outside 1 to 100, and a budget, count or limit of zero;
 - an `[oci]` table without `listen`, with only one of the certificate and the key, or with `max_connections = 0`;

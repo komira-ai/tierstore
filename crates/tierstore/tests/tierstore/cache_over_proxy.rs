@@ -79,9 +79,9 @@ fn cache_over(
 }
 
 /// Asserts that an object only the cold tier holds, whose tag there is not the tag the hot tier
-/// gives it once the proxy has copied it up, is read through a cache over the two tiers: the
-/// bytes come back, the proxy promoted the object, and the next read is a hit that makes no call
-/// to either tier.
+/// gives it, is read through a cache over the two tiers: the bytes come back, the proxy copied
+/// nothing up (the fill's reads are ranged), and the next read is a hit that makes no call to
+/// either tier.
 #[tokio::test]
 async fn a_cold_only_object_with_another_tag_function_is_filled_and_served() {
     let tiers = Tiers::new();
@@ -95,18 +95,52 @@ async fn a_cold_only_object_with_another_tag_function_is_filled_and_served() {
 
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
     assert_eq!(cache.held(), (10, 1));
-    assert_eq!(read(&*tiers.hot_mem, "img/a").await, body("cold bytes"));
+    assert_absent(&*tiers.hot_mem, "img/a").await;
     let before = tiers.reads();
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
     assert_eq!(tiers.reads(), before);
 }
 
-/// Asserts that the same read through a cache that compares tags is answered, but the object is
-/// kept nowhere: the tag the first HEAD gave (the cold tier's) is not the one the proxy gives
-/// after it has copied the object up, so the fill ends as changed, and the next read goes to the
-/// tiers again. This is what `tiered_upstream` removes.
+/// Asserts that a cold tier that refuses every read of a whole object still fills a cache over
+/// the proxy, whole-limit and windowed reads alike: the fill reads the object in chunks of its
+/// range each, the cold tier is asked for those ranges only, and the proxy copies nothing into
+/// the hot tier. It catches a proxy that reads the whole object from the cold tier to serve a
+/// range of it.
 #[tokio::test]
-async fn without_the_tiered_option_a_cold_only_object_is_not_kept() {
+async fn a_ranged_fill_asks_the_cold_tier_for_ranges_only_and_copies_nothing_up() {
+    let data = "0123456789abcdef0123456789abcdef";
+    let asked = Some(ByteRange::new(0, 24));
+    for whole_limit in [1 << 20, 4] {
+        let clock = Arc::new(TestClock::new());
+        let hot_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
+        let cold_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
+        let cold = Arc::new(FaultyBackend::new(Arc::new(
+            Retagged::over(cold_mem.clone()).ranged_only(),
+        )));
+        let config = ProxyConfig::new("p1", 1 << 20, clock.clone());
+        let proxy = Proxy::open(hot_mem.clone(), cold.clone(), config).await;
+        cold_mem.put("img/big", body(data)).await.unwrap();
+        let (_dir, cache) = cache_over(Arc::new(proxy.unwrap()), true, |config| {
+            config.whole_limit = whole_limit;
+            config.fill_chunk = 8;
+        });
+        let got = cache.get("img/big", asked).await.unwrap();
+        assert_eq!(got, body(&data[..24]), "whole_limit {whole_limit}");
+        assert!(
+            cold.get_ranges().iter().all(Option::is_some),
+            "{:?}",
+            cold.get_ranges()
+        );
+        assert_absent(&*hot_mem, "img/big").await;
+    }
+}
+
+/// Asserts that a read through a cache of an object only the cold tier holds is kept without the
+/// tiered option too, now that the proxy copies nothing up for the ranged reads of a fill (the
+/// tag of the object does not move while it is read), and that the next read is a hit that
+/// makes no call to either tier.
+#[tokio::test]
+async fn without_the_tiered_option_a_cold_only_object_is_kept_since_nothing_moves_its_tag() {
     let tiers = Tiers::new();
     let proxy = tiers.proxy().await;
     tiers
@@ -117,35 +151,10 @@ async fn without_the_tiered_option_a_cold_only_object_is_not_kept() {
     let (_dir, cache) = cache_over(proxy, false, |_| {});
 
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
-    assert_eq!(cache.held(), (0, 0));
+    assert_eq!(cache.held(), (10, 1));
     let before = tiers.reads();
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
-    assert!(tiers.reads() > before);
-}
-
-/// Asserts the same for an object larger than the whole-fill limit, which is read in windows and
-/// checked against the version the read began with: served with the option, refused without it.
-#[tokio::test]
-async fn a_windowed_read_of_a_cold_only_object_succeeds_only_with_the_tiered_option() {
-    let data = "0123456789abcdef0123456789abcdef";
-    let asked = Some(ByteRange::new(0, 24));
-    for (tiered, served) in [(true, true), (false, false)] {
-        let tiers = Tiers::new();
-        let proxy = tiers.proxy().await;
-        tiers.cold_mem.put("img/big", body(data)).await.unwrap();
-        let (_dir, cache) = cache_over(proxy, tiered, |config| {
-            config.whole_limit = 4;
-            config.fill_chunk = 8;
-        });
-        let got = cache.get("img/big", asked).await;
-        match got {
-            Ok(bytes) => assert!(served && bytes == body(&data[..24])),
-            Err(error) => assert!(
-                !served && matches!(error, Error::Unavailable(_)),
-                "{error:?}"
-            ),
-        }
-    }
+    assert_eq!(tiers.reads(), before);
 }
 
 /// Asserts that a put through the cache goes to the proxy, is kept, and is read back without a

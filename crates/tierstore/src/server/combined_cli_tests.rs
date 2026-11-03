@@ -317,11 +317,13 @@ fn check_config_of_a_combined_node_reads_its_key_files() {
     let good = settings_from_text(&node.text(""), QUICK).unwrap();
     assert!(matches!(good, Settings::Combined(_)));
     assert!(checked(&good).is_ok());
+    let missing = node.dir.path().join("absent.key");
+    assert!(!missing.exists());
     let gone = node
         .text("")
-        .replace(&node.key.display().to_string(), "/no/such/access.key");
+        .replace(&node.key.display().to_string(), &missing.display().to_string());
     let gone = settings_from_text(&gone, QUICK).unwrap();
     let why = checked(&gone).unwrap_err();
-    assert!(why.to_string().contains("/no/such/access.key"), "{why}");
+    assert!(why.to_string().contains(&missing.display().to_string()), "{why}");
     assert!(!node.cache_dir().exists());
 }

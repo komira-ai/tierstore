@@ -73,11 +73,12 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
     assert!(given.cache.config.tiered_upstream);
 }
 
-/// Asserts each refusal of the file of a node with a cache, each naming the key and what is wrong,
-/// and none repeating a value: `write_through = false`, no policy that caches, policies that nest,
+/// Asserts each refusal of the file of a node with a cache, by the exact message (the key and what
+/// is wrong, so a value of the file that is repeated or leaked is a difference): `write_through = false`, no policy that caches, policies that nest,
 /// a cache directory that is a tier's directory, inside it or around it (also written with `.` and
-/// `..`, or relative, or with a relative tier directory) (and around the lock file
-/// or a key file of the OCI front), a list of endpoints, the keys of the hot store that are not for
+/// `..`, or relative, or with a relative tier directory), around the lock file or a key file of
+/// the OCI front, a relative lock file or relative key files of the OCI front (which would lead
+/// into the cache directory from the working directory), a list of endpoints, the keys of the hot store that are not for
 /// the cold one, a mark out of order in `[local_cache]`, and an OCI front no policy keeps.
 #[test]
 fn a_combined_file_is_refused_when_it_cannot_be_run() {
@@ -96,77 +97,75 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
                 "budget = \"40GiB\"\nwrite_through = false",
                 1,
             ),
-            "local_cache.write_through",
-            "takes writes",
+            "local_cache.write_through: a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true",
         ),
         (
             text().replacen("cache  = true", "cache  = false", 1),
-            "policy",
-            "no policy has cache = true",
+            "policy: no policy has cache = true, so nothing would be kept",
         ),
         (
             format!("{}\n[[policy]]\nprefix = \"cas/\"\ncache = false\n", text()),
-            "policy[1].prefix",
-            "overlaps",
+            "policy[1].prefix: \"cas/\" overlaps \"cas/b/\" of policy[0]",
         ),
         (
             cache_path("/srv/hot"),
-            "local_cache.path",
-            "must not be the directory of hot_store",
+            "local_cache.path: must not be the directory of hot_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("/srv/hot/cache"),
-            "local_cache.path",
-            "must not be the directory of hot_store",
+            "local_cache.path: must not be the directory of hot_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("/srv/cold/deeper/cache"),
-            "local_cache.path",
-            "must not be the directory of cold_store",
+            "local_cache.path: must not be the directory of cold_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("/srv"),
-            "local_cache.path",
-            "must not be the directory of hot_store",
+            "local_cache.path: must not be the directory of hot_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("/srv/other/../hot/./cache"),
-            "local_cache.path",
-            "must not be the directory of hot_store",
+            "local_cache.path: must not be the directory of hot_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("/../srv/hot"),
-            "local_cache.path",
-            "must not be the directory of hot_store",
+            "local_cache.path: must not be the directory of hot_store, inside it or around it: the tier would list the cache's files as objects",
         ),
         (
             cache_path("./hot/cache"),
-            "local_cache.path",
-            "must be an absolute path (it is compared",
+            "local_cache.path: must be an absolute path (it is compared with the directories of the tiers)",
         ),
         (
             text().replacen("path   = \"/srv/hot\"", "path   = \"hot\"", 1),
-            "local_cache.path",
-            "must be an absolute path to be compared with hot_store",
+            "local_cache.path: must be an absolute path to be compared with hot_store's directory",
         ),
         (
             in_cache("lock_file = \"/var/lib/tierstore-cache/instance.lock\""),
-            "local_cache.path",
-            "must not hold hot_store.lock_file",
+            "local_cache.path: must not hold hot_store.lock_file: it is not a place for the cache's files",
         ),
         (
             oci(
                 "tls_cert_file = \"/var/lib/tierstore-cache/oci.crt\"\ntls_key_file = \"/etc/oci.key\"",
             ),
-            "local_cache.path",
-            "must not hold oci.tls_cert_file",
+            "local_cache.path: must not hold oci.tls_cert_file: it is not a place for the cache's files",
         ),
         (
             oci(
                 "tls_cert_file = \"/etc/oci.crt\"\ntls_key_file = \"/var/lib/tierstore-cache/oci.key\"",
             ),
-            "local_cache.path",
-            "must not hold oci.tls_key_file",
+            "local_cache.path: must not hold oci.tls_key_file: it is not a place for the cache's files",
+        ),
+        (
+            in_cache("lock_file = \"instance.lock\""),
+            "hot_store.lock_file: must be an absolute path in a file with a local cache",
+        ),
+        (
+            oci("tls_cert_file = \".stage/oci.crt\"\ntls_key_file = \"/etc/oci.key\""),
+            "oci.tls_cert_file: must be an absolute path in a file with a local cache",
+        ),
+        (
+            oci("tls_cert_file = \"/etc/oci.crt\"\ntls_key_file = \".stage/oci.key\""),
+            "oci.tls_key_file: must be an absolute path in a file with a local cache",
         ),
         (
             NODE.replacen(
@@ -174,18 +173,15 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
                 "[cold_store]\nendpoints = [\"http://c:1\"]\n",
                 1,
             ) + CACHE,
-            "cold_store.endpoints",
-            "build node",
+            "cold_store.endpoints: only the [cold_store] of a build node takes a list; give endpoint",
         ),
         (
             NODE.replacen("[hot_store]\n", "[hot_store]\nskip_checks = [\"a=b\"]\n", 1) + CACHE,
-            "hot_store.skip_checks",
-            "only [cold_store] has it",
+            "hot_store.skip_checks: only [cold_store] has it: the check it skips runs there",
         ),
         (
             NODE.replacen("[cold_store]\n", "[cold_store]\nlease_ttl = \"10s\"\n", 1) + CACHE,
-            "cold_store.lease_ttl",
-            "only [hot_store] has it",
+            "cold_store.lease_ttl: only [hot_store] has it",
         ),
         (
             text().replacen(
@@ -193,18 +189,15 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
                 "budget = \"40GiB\"\nlow_water = 95",
                 1,
             ),
-            "local_cache.low_water",
-            "below high_water",
+            "local_cache.low_water: must be below high_water",
         ),
-        (oci(""), "oci.prefix", "no [[policy]]"),
+        (
+            oci(""),
+            "oci.prefix: no [[policy]] covers the blobs under \"oci/blobs/sha256/\", so every pull would go to the upstream; give a [[policy]] with prefix = \"oci/\" and cache = true",
+        ),
     ];
-    for (file, key, fragment) in cases {
-        let why = refusal(&file);
-        assert!(why.starts_with(&format!("{key}: ")), "{key}: {why}");
-        assert!(why.contains(fragment), "{key}: {why}");
-        for value in ["/srv", "/var/lib", "/etc/oci", "http://c:1"] {
-            assert!(!why.contains(value), "{key}: {why}");
-        }
+    for (file, expected) in cases {
+        assert_eq!(refusal(&file), expected);
     }
 }
 

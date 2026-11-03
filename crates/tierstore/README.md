@@ -96,9 +96,9 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 | `tierstore_read_errors_total` | `tier`, `op` | reads the tier failed with anything but "not found" (the tier is down, refused, timed out) |
 | `tierstore_reads_total` | `tier`, `op` | reads that reached the tier: hits, misses and errors. For `tier="cold"` these are the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | `tier` | bytes of object data that gets answered, by the tier that gave them (the range, if one was asked) |
-| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, whole objects whatever range was asked (the range alone when the hot tier is critical), so the ratio to `bytes_served` is the read amplification of ranged gets |
+| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, the whole object for a get without a range and the range alone for a ranged get |
 | `tierstore_promotions_total` | none | objects a get copied from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object, whatever range the get asked |
+| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object (only a get without a range copies one) |
 | `tierstore_promotions_skipped_total` | `reason` = `critical`, `full`, `raced`, `failed` | copies not made, by reason |
 
 What the counts mean:

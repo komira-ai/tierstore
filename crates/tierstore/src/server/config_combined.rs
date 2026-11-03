@@ -35,8 +35,10 @@
 //! What it refuses, besides what every file does: the refusals of a storage node's file, those of
 //! a build node's `[local_cache]` table, `write_through = false`, and a cache directory that is
 //! the directory of a `dir` tier, inside it or around it, or around the lock file or a key file of
-//! the `[oci]` table (the tier would list the cache's files as objects). The paths are compared
-//! by component and as written, not through links.
+//! the `[oci]` table (the tier would list the cache's files as objects), and a relative lock file
+//! or `[oci]` key file (a relative path leads from the working directory of the process, which
+//! the file does not name, so it cannot be compared with the cache directory). The paths are
+//! compared by component, `.` and `..` resolved by text, not through links.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -116,8 +118,9 @@ fn normalised(path: &Path) -> Option<PathBuf> {
 
 /// Refuses a cache directory that is, is inside, or holds the directory of a `dir` tier, and one
 /// that holds the lock file or a key file of the OCI front. Paths are compared by component
-/// after `.` and `..` are resolved by text, so the cache path and the directory of a `dir` tier
-/// must be absolute: a relative path cannot be compared with another.
+/// after `.` and `..` are resolved by text, so the cache path, the directory of a `dir` tier, the
+/// lock file and the key files of the `[oci]` table must be absolute: a relative path cannot be
+/// compared with another.
 fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
     let Some(cache) = normalised(cache) else {
         let why = "must be an absolute path (it is compared with the directories of the tiers)";
@@ -144,10 +147,13 @@ fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
         ("oci.tls_key_file", node.oci_tls_key.as_deref()),
     ];
     for (name, file) in files {
-        let held = file
-            .and_then(normalised)
-            .is_some_and(|file| file.starts_with(&cache));
-        if held {
+        let Some(file) = file else { continue };
+        // A relative path would be read from the working directory of the process, which the
+        // file does not say: it could lead into the cache directory, which the start empties.
+        let Some(file) = normalised(file) else {
+            return Err(invalid(name, "must be an absolute path in a file with a local cache"));
+        };
+        if file.starts_with(&cache) {
             let why = format!("must not hold {name}: it is not a place for the cache's files");
             return Err(invalid("local_cache.path", why));
         }
