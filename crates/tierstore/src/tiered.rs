@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, PartBody,
-    UploadsAfter,
+    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, Opened,
+    PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -34,6 +34,7 @@ const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
 mod put;
+mod read;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -808,6 +809,33 @@ impl Backend for Proxy {
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.inner.get_object(key, range).await
+    }
+
+    /// One call to the hot tier on a hit, with the object's meta, and a body that is the hot
+    /// tier's own stream (see `open_object`).
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        self.inner.open_object(key, span).await
+    }
+
+    /// A streamed read: the hot tier's own stream on a hit, and not the object collected as
+    /// [`Backend::get`] gives it. A range of no bytes, or one that starts at or past the end,
+    /// is answered as `get` answers it.
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        let span = match range {
+            None => None,
+            Some(range) if range.size() == 0 => return self.inner.held_stream(key, range).await,
+            Some(range) => Some(Span::From {
+                first: range.offset(),
+                last: Some(range.offset().saturating_add(range.size() - 1)),
+            }),
+        };
+        let opened = self.inner.open_object(key, span).await?;
+        match range {
+            Some(range) if opened.window == Window::Unsatisfiable => {
+                self.inner.held_stream(key, range).await
+            }
+            _ => Ok(opened.body),
+        }
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

@@ -130,9 +130,9 @@ value `local` of `tier` is reserved for the build node's cache.
 
 What they do not count, and how to read them:
 
-- An S3 GET reaches the proxy as a HEAD and then a GET. A GET that is answered at the HEAD shows only under `op="head"`: a key that exists in neither tier, a conditional request that is answered 304 or 412, and a range that cannot be satisfied. So `op="head"` is a lookup rate: it mixes the clients' HEADs with the HEAD that starts every GET. `op="get"` counts only the reads that went on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call), counted under `op="get"` whatever its outcome: a key that exists in neither tier, a conditional request answered 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`, and none of them is counted at `op="head"`. So `op="head"` counts the clients' HEADs alone. A GET answered 304, 412 or 416 has counted its hit and its bytes read and served although the body was never sent.
 - An error is neither a hit nor a miss. A tier that is down does not lower its hit rate; it shows in `read_errors_total`. A hot-tier error ends the read: the cold tier is not asked, so a hot outage does not show as cold reads.
-- Bytes are counted when the proxy hands them to the front, so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied after a cold read has counted the cold hit and the cold bytes read, and no bytes served.
+- Bytes are counted when the proxy hands the read to the front (for a read of the hot tier, when it opens, from the window it covers), so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied after a cold read has counted the cold hit and the cold bytes read, and no bytes served.
 - A ranged GET that misses the hot tier, while the hot tier is at its critical mark, asks the cold tier for the range alone and copies nothing: it counts a `critical` skip, and its `bytes_read` and `bytes_served` are both the range.
 - Otherwise a ranged GET that misses the hot tier reads the whole object from the cold tier, promotes the whole object, and serves the range. Its `bytes_read` and `promoted_bytes` are the object's size, and its `bytes_served` is the range.
 - A HEAD promotes nothing.

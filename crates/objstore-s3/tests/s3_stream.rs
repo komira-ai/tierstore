@@ -125,21 +125,26 @@ async fn whole(body: objstore_s3::s3::ObjectBody) -> Vec<u8> {
 }
 
 /// Asserts that a streamed read of the whole object is a GET with no `Range`, that its body is
-/// given as it arrives, and that the mark is the one of the answer's own header: present on one
-/// answer, absent on the next.
+/// given as it arrives, and that the mark, the size and the time of last write are those of the
+/// answer's own headers: present on one answer (the size is its `Content-Length`, the time its
+/// `Last-Modified`), absent on the next (no time).
 #[tokio::test]
 async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answer() {
-    let marked = answer("200 OK", &[MARK, "etag: \"one\""], "abcdefg");
+    let stamp = "last-modified: Sun, 06 Nov 1994 08:49:37 GMT";
+    let marked = answer("200 OK", &[MARK, "etag: \"one\"", stamp], "abcdefg");
     let plain = answer("200 OK", &[], "xyz");
     let (endpoint, seen) = script(vec![marked, plain]).await;
     let s = store(endpoint);
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"one\""));
+    assert_eq!(read.size, Some(7));
+    assert_eq!(read.modified_millis, Some(784_111_777_000));
     assert_eq!(whole(read.body).await, b"abcdefg");
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(!read.reservation);
     assert_eq!(read.etag, None);
+    assert_eq!(read.modified_millis, None);
     assert_eq!(whole(read.body).await, b"xyz");
 
     let heads = seen.lock().unwrap();
@@ -152,7 +157,9 @@ async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answ
 }
 
 /// Asserts that a streamed ranged read sends the `Range` of the bytes asked for, checks the
-/// `Content-Range` and the length of the 206 against it, and gives the mark of that answer.
+/// `Content-Range` and the length of the 206 against it, and gives the mark of that answer and the
+/// size of the whole object, which is the total of the `Content-Range` and not the length of the
+/// bytes read.
 #[tokio::test]
 async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer() {
     let part = answer(
@@ -167,6 +174,7 @@ async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer
         .unwrap();
     assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"two\""));
+    assert_eq!(read.size, Some(10));
     assert_eq!(whole(read.body).await, b"cde");
     let get = seen.lock().unwrap()[0].to_ascii_lowercase();
     assert!(get.contains("\r\nrange: bytes=2-4\r\n"), "{get}");

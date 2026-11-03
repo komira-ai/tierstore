@@ -17,7 +17,8 @@ use tokio::sync::Mutex;
 
 use crate::backend::upload_page;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter, Window,
 };
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
@@ -750,6 +751,30 @@ impl Backend for DirBackend {
         let (offset, len) = window(stored.size, range)?;
         stored.seek_body(offset).await?;
         Ok(chunks(stored, len))
+    }
+
+    /// Opens the file once: the meta and the chunks are those of that file, as for
+    /// [`Backend::get_stream`], whose bounded chunks the body has.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        let mut stored = self.stored(key).await?;
+        let meta = Meta {
+            size: stored.size,
+            tag: hex::encode(stored.tag),
+            modified: stored.modified,
+            reservation: stored.marked,
+        };
+        let window = Window::of(span, meta.size);
+        let (offset, len) = match window {
+            Window::Whole => (0, meta.size),
+            Window::Part(range) => (range.offset(), range.size()),
+            Window::Unsatisfiable => (0, 0),
+        };
+        stored.seek_body(offset).await?;
+        Ok(Opened {
+            meta,
+            window,
+            body: chunks(stored, len),
+        })
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

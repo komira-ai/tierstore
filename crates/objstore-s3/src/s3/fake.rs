@@ -968,7 +968,8 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     answer("200 OK", &[], body.as_bytes())
 }
 
-/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the mark.
+/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the mark and
+/// the time of last write.
 fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return error("404 Not Found", "NoSuchKey");
@@ -977,6 +978,7 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let Some(range) = range else {
         let mut headers = meta::echoed(stored.marked);
         headers.push(("etag", stored.etag()));
+        headers.push(("last-modified", http_date(stored.modified)));
         return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
@@ -990,7 +992,11 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
     let bytes = object.read(first, end);
     let mut headers = meta::echoed(stored.marked);
-    headers.extend([("etag", stored.etag()), ("content-range", content_range)]);
+    headers.extend([
+        ("etag", stored.etag()),
+        ("last-modified", http_date(stored.modified)),
+        ("content-range", content_range),
+    ]);
     answer("206 Partial Content", &headers, &bytes)
 }
 

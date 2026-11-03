@@ -11,7 +11,7 @@ use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::journal::is_reserved;
-use crate::{ByteRange, Error, Meta, ReadBody};
+use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::handover::hand_over;
@@ -57,41 +57,27 @@ pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
 
-/// What a `Range` header asks for, of an object of a given size.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Window {
-    /// All of it: no range, or one that is not a single valid range.
-    Whole,
-    /// `len` bytes from `start`, the last of which is in the object.
-    Part { start: u64, len: u64 },
-    /// A range that starts at or past the end.
-    Unsatisfiable,
-}
-
-/// The first byte and the last (perhaps past the end) of `bytes=<spec>`, if it is one range.
-fn span(spec: &str, size: u64) -> Option<(u64, u64)> {
+/// The range a `Range` header asks for, if it is one valid single range (`bytes=<first>-<last>`,
+/// `bytes=<first>-` or `bytes=-<count>`); anything else is no range, and asks for the whole
+/// object. What it covers of an object is for the read to say, which knows the size
+/// ([`Span::resolve`]).
+pub(crate) fn asked(range: Option<&str>) -> Option<Span> {
+    let spec = range?.strip_prefix("bytes=")?;
     let (first, last) = spec.split_once('-')?;
     let number = |text: &str| text.parse::<u64>().ok();
     match (first, last) {
-        ("", count) => Some((size.saturating_sub(number(count)?), u64::MAX)),
-        (first, "") => Some((number(first)?, u64::MAX)),
+        ("", count) => Some(Span::Suffix(number(count)?)),
+        (first, "") => Some(Span::From {
+            first: number(first)?,
+            last: None,
+        }),
         (first, last) => {
             let (first, last) = (number(first)?, number(last)?);
-            (first <= last).then_some((first, last))
+            (first <= last).then_some(Span::From {
+                first,
+                last: Some(last),
+            })
         }
-    }
-}
-
-/// What the `Range` header, if there is one, asks for of an object of `size` bytes.
-pub(crate) fn window(range: Option<&str>, size: u64) -> Window {
-    let spec = range.and_then(|text| text.strip_prefix("bytes="));
-    match spec.and_then(|spec| span(spec, size)) {
-        None => Window::Whole,
-        Some((start, _)) if start >= size => Window::Unsatisfiable,
-        Some((start, last)) => Window::Part {
-            start,
-            len: last.min(size - 1) - start + 1,
-        },
     }
 }
 
@@ -299,21 +285,21 @@ impl Server {
         }
     }
 
+    /// One call to the backend, which gives the object's meta and the body as it arrives: the
+    /// headers are made from the meta and the status from the window the body holds. A
+    /// condition that is not met, or a range that is not satisfiable, drops the body unread.
     async fn get_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
-        let meta = self.backend.head(key).await?;
+        let span = asked(header(&parts.headers, "range"));
+        let Opened { meta, window, body } = self.backend.open_read(key, span).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
         }
         let mut headers = object_headers(&meta);
-        match window(header(&parts.headers, "range"), meta.size) {
-            Window::Whole => {
-                let body = self.backend.get_stream(key, None).await?;
-                Ok(read_answer(StatusCode::OK, &headers, meta.size, body))
-            }
-            Window::Part { start, len } => {
-                let range = ByteRange::new(start, len);
-                let body = self.backend.get_stream(key, Some(range)).await?;
+        match window {
+            Window::Whole => Ok(read_answer(StatusCode::OK, &headers, meta.size, body)),
+            Window::Part(range) => {
+                let (start, len) = (range.offset(), range.size());
                 let (last, size) = (start + len - 1, meta.size);
                 headers.push(("content-range", format!("bytes {start}-{last}/{size}")));
                 Ok(read_answer(

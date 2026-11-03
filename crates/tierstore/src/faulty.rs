@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter,
 };
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
@@ -21,7 +22,8 @@ pub enum Op {
     PutIfMatch,
     /// [`Backend::put_reservation`] and [`Backend::put_reservation_if_match`].
     PutReservation,
-    /// [`Backend::get`] and [`Backend::get_marked`].
+    /// [`Backend::get`], [`Backend::get_marked`], [`Backend::get_stream`] and
+    /// [`Backend::open_read`].
     Get,
     /// [`Backend::head`].
     Head,
@@ -310,6 +312,13 @@ impl Backend for FaultyBackend {
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;
         self.inner.get_stream(key, range).await
+    }
+
+    /// An open read is one call of kind [`Op::Get`], as a streamed read is, and is the wrapped
+    /// backend's own open read, so a test can count the calls a read makes.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        self.enter(Op::Get, key).await?;
+        self.inner.open_read(key, span).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

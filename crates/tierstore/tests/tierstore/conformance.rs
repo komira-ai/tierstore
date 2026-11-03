@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
-use tierstore::{Backend, ByteRange, Error};
+use tierstore::{Backend, ByteRange, Error, Opened, Span, Window};
 
 use crate::support::{body, broken, check_ranges, chunks, keys, page};
 
@@ -409,4 +409,69 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
     let absent = backend.put_stream_if_match("none", Some(1), chunks(&["x"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(keys(backend).await, ["k"]);
+}
+
+/// The bytes of the body of an open read, joined.
+pub async fn joined(opened: Opened) -> Bytes {
+    let mut body = opened.body;
+    let mut whole = Vec::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk.unwrap());
+    }
+    Bytes::from(whole)
+}
+
+/// An open read gives the meta a HEAD gives (the size, the tag, the time and the mark) and, as a
+/// body, the bytes of its span, with the window it resolved the span to: all of the object
+/// without a span; a range cut at the end of the object; the last bytes of it (all of it, if it
+/// is shorter than asked); no bytes and the unsatisfiable window for a span that starts at or
+/// past the end, for the last none of it and for any span of an empty object; the mark of a
+/// reservation; `NotFound` for an absent key.
+pub async fn an_open_read_gives_the_meta_and_the_bytes_of_its_span(backend: &dyn Backend) {
+    backend.put("k", body("0123456789")).await.unwrap();
+    let head = backend.head("k").await.unwrap();
+    let from = |first, last| Some(Span::From { first, last });
+    let part = |offset, len| Window::Part(ByteRange::new(offset, len));
+    let cases = [
+        (None, Window::Whole, "0123456789"),
+        (from(3, Some(5)), part(3, 3), "345"),
+        (from(0, Some(0)), part(0, 1), "0"),
+        (from(2, None), part(2, 8), "23456789"),
+        (from(8, Some(100)), part(8, 2), "89"),
+        (Some(Span::Suffix(4)), part(6, 4), "6789"),
+        (Some(Span::Suffix(40)), part(0, 10), "0123456789"),
+        (from(10, None), Window::Unsatisfiable, ""),
+        (from(u64::MAX, None), Window::Unsatisfiable, ""),
+        (Some(Span::Suffix(0)), Window::Unsatisfiable, ""),
+    ];
+    for (span, window, want) in cases {
+        let opened = backend.open_read("k", span).await.unwrap();
+        assert_eq!(opened.meta, head, "{span:?}");
+        assert_eq!(opened.window, window, "{span:?}");
+        assert_eq!(joined(opened).await, body(want), "{span:?}");
+    }
+
+    backend.put("empty", body("")).await.unwrap();
+    for span in [None, from(0, None), Some(Span::Suffix(1))] {
+        let opened = backend.open_read("empty", span).await.unwrap();
+        assert_eq!(opened.meta.size, 0, "{span:?}");
+        let window = if span.is_some() {
+            Window::Unsatisfiable
+        } else {
+            Window::Whole
+        };
+        assert_eq!(opened.window, window, "{span:?}");
+        assert_eq!(joined(opened).await, body(""), "{span:?}");
+    }
+
+    let tag = backend.put_reservation("r", reservation(1)).await.unwrap();
+    let marked = backend.open_read("r", None).await.unwrap();
+    assert_eq!(
+        (marked.meta.reservation, marked.meta.tag.as_str()),
+        (true, tag.as_str())
+    );
+    assert_eq!(joined(marked).await, reservation(1));
+
+    let absent = backend.open_read("absent", None).await;
+    assert_eq!(absent.err(), Some(Error::NotFound("absent".to_owned())));
 }

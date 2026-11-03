@@ -19,6 +19,7 @@ mod list_uploads_reserved;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
+mod open_read;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;

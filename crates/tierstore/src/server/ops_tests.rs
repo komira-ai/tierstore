@@ -9,10 +9,10 @@ use hyper::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use crate::{Backend, Error, MemoryBackend, Op, Proxy, ProxyConfig, TestClock};
+use crate::{Backend, ByteRange, Error, MemoryBackend, Op, Proxy, ProxyConfig, TestClock, Window};
 
 use super::auth::sign;
-use super::ops::{Window, window};
+use super::ops::asked;
 use super::testing::{
     BUCKET, CHECKSUMS, KEY_ID, NOW, Plain, Reply, Rig, SECRET, Scripted, Step, checksum, texts,
 };
@@ -124,16 +124,20 @@ async fn a_put_with_if_match_never_replaces() {
 /// is the whole object.
 #[test]
 fn a_range_header_means_what_s3_says() {
-    let part = |start, len| Window::Part { start, len };
-    assert_eq!(window(None, 10), Window::Whole);
-    assert_eq!(window(Some("bytes=0-4"), 10), part(0, 5));
-    assert_eq!(window(Some("bytes=8-100"), 10), part(8, 2));
-    assert_eq!(window(Some("bytes=3-"), 10), part(3, 7));
-    assert_eq!(window(Some("bytes=-4"), 10), part(6, 4));
-    assert_eq!(window(Some("bytes=-40"), 10), part(0, 10));
-    assert_eq!(window(Some("bytes=10-"), 10), Window::Unsatisfiable);
-    assert_eq!(window(Some("bytes=-0"), 10), Window::Unsatisfiable);
-    assert_eq!(window(Some("bytes=0-0"), 0), Window::Unsatisfiable);
+    let window = |range| Window::of(asked(range), 10);
+    let part = |start, len| Window::Part(ByteRange::new(start, len));
+    assert_eq!(window(None), Window::Whole);
+    assert_eq!(window(Some("bytes=0-4")), part(0, 5));
+    assert_eq!(window(Some("bytes=8-100")), part(8, 2));
+    assert_eq!(window(Some("bytes=3-")), part(3, 7));
+    assert_eq!(window(Some("bytes=-4")), part(6, 4));
+    assert_eq!(window(Some("bytes=-40")), part(0, 10));
+    assert_eq!(window(Some("bytes=10-")), Window::Unsatisfiable);
+    assert_eq!(window(Some("bytes=-0")), Window::Unsatisfiable);
+    assert_eq!(
+        Window::of(asked(Some("bytes=0-0")), 0),
+        Window::Unsatisfiable
+    );
     let not_ranges = [
         "bytes=5-2",
         "bytes=-",
@@ -143,7 +147,7 @@ fn a_range_header_means_what_s3_says() {
         "bytes=0-1,3-4",
     ];
     for whole in not_ranges {
-        assert_eq!(window(Some(whole), 10), Window::Whole, "{whole}");
+        assert_eq!(window(Some(whole)), Window::Whole, "{whole}");
     }
 }
 
