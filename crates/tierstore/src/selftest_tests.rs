@@ -39,6 +39,11 @@ pub(crate) enum Flaw {
     /// A replace of a key that does not exist is answered 403, an error that is no refusal of a
     /// precondition.
     ErrorsOnIfMatchMissing,
+    /// A replace of a key that does not exist creates it and is then answered 412, as a store that
+    /// writes before it judges the tag.
+    CreatesAndRefuses,
+    /// A HEAD of the key of the if-match-missing check fails with an error that is no NotFound.
+    HeadFailsOnMissingKey,
     /// A ranged read gives the whole object, as a store that answers 200 to a `Range` request.
     WholeObjectForRange,
     /// A HEAD fails as the S3 backend does for an answer with no `Last-Modified`.
@@ -144,6 +149,10 @@ impl Backend for Flawed {
                 self.inner.put(key, body).await?;
                 return Ok(self.inner.head(key).await?.tag);
             }
+            if self.is(Flaw::CreatesAndRefuses) {
+                self.inner.put(key, body).await?;
+                return Err(Error::PreconditionFailed(key.to_owned()));
+            }
             if self.is(Flaw::PreconditionOnIfMatchMissing) {
                 return Err(Error::PreconditionFailed(key.to_owned()));
             }
@@ -166,6 +175,9 @@ impl Backend for Flawed {
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         if self.is(Flaw::NoLastModified) {
             return Err(Error::Other("missing or bad Last-Modified".to_owned()));
+        }
+        if self.is(Flaw::HeadFailsOnMissingKey) && key.ends_with("/if-match-missing") {
+            return Err(Error::Other("500 Internal Server Error: HEAD".to_owned()));
         }
         let mut meta = self.inner.head(key).await?;
         if self.is(Flaw::HeadLies) {

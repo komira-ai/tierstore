@@ -605,16 +605,26 @@ impl Probe<'_> {
     async fn if_match_missing(&self) -> Verdict {
         let key = self.key(MISSING_KEY);
         let what = "a replace on a key that does not exist";
-        match self
+        let put = self
             .backend
             .put_if_match(&key, text("late"), WRONG_TAG)
-            .await
-        {
-            Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => Ok(()),
+            .await;
+        match put {
+            Err(Error::NotFound(_) | Error::PreconditionFailed(_)) => {}
+            Ok(_) => {
+                return Err(Fault::Wrong(format!(
+                    "{what} was accepted; it must be refused with 412 or 404, not create the key"
+                )));
+            }
+            Err(other) => return Err(fault(what, other)),
+        }
+        // A refusal is no proof that the key was not written: look for it before the cleanup.
+        match self.backend.head(&key).await {
+            Err(Error::NotFound(_)) => Ok(()),
             Ok(_) => Err(Fault::Wrong(format!(
-                "{what} was accepted; it must be refused with 412 or 404, not create the key"
+                "{what} was refused but the key was created; it must not create the key"
             ))),
-            Err(other) => Err(fault(what, other)),
+            Err(other) => Err(fault("a HEAD after the refused replace", other)),
         }
     }
 

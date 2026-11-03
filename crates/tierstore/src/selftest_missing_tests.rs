@@ -44,6 +44,32 @@ async fn a_replace_on_a_missing_key_answered_with_an_error_is_refused_on_the_hot
     );
 }
 
+/// Asserts that a store that creates the key and then answers 412 is refused: the HEAD after the
+/// refusal finds the key, and the operator line says so.
+#[tokio::test]
+async fn a_replace_on_a_missing_key_refused_after_creating_it_is_refused_on_the_hot_tier() {
+    let failure = refused(Flaw::CreatesAndRefuses, false).await;
+    assert_eq!(failure.check, Check::IfMatchMissing);
+    assert_eq!(
+        failure.to_string(),
+        "refusing to start: the backend failed the if-match-missing check: a replace on a key \
+         that does not exist was refused but the key was created; it must not create the key"
+    );
+}
+
+/// Asserts that a HEAD after the refused replace that fails with an error that is no NotFound is
+/// refused as the if-match-missing check, with the answer in the operator line.
+#[tokio::test]
+async fn a_head_after_the_refused_replace_that_fails_is_refused_on_the_hot_tier() {
+    let failure = refused(Flaw::HeadFailsOnMissingKey, false).await;
+    assert_eq!(failure.check, Check::IfMatchMissing);
+    assert_eq!(
+        failure.to_string(),
+        "refusing to start: the backend failed the if-match-missing check: a HEAD after the \
+         refused replace failed with: backend error: 500 Internal Server Error: HEAD"
+    );
+}
+
 /// Asserts that the if-match-missing check is asked of the hot tier only: a cold tier (the one
 /// that takes multipart uploads) whose store creates on a replace of a missing key passes.
 #[tokio::test]
