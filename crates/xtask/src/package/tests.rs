@@ -114,7 +114,7 @@ fn one_binary_packages_to_the_same_bytes_whenever_and_wherever_it_is_built() {
     // both, and must give byte-identical tarballs and identical SHA256SUMS lines.
     let mut sums = Vec::new();
     let mut tgzs = Vec::new();
-    for (n, at) in [("early", 1_000_000_000), ("late", 1_700_000_000)] {
+    for (n, at) in [("early", 1_800_000_000), ("late", 1_900_000_000)] {
         let dir = scratch(&format!("same-bytes-{n}"));
         let (binary, sbom) = inputs(&dir);
         let when = UNIX_EPOCH + Duration::from_secs(at);
