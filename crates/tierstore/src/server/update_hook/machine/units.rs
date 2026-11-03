@@ -12,7 +12,7 @@ use super::super::ports::{PortError, PortKind, Units};
 use super::runner::{Call, Runner, checked, run};
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
-pub const DEFAULT_PROGRAM: &str = "/usr/bin/systemctl";
+pub const DEFAULT_PROGRAM: &str = super::SYSTEMCTL_PROGRAM;
 const KIND: PortKind = PortKind::Units;
 
 /// `systemctl`, called through a [`Runner`].

@@ -33,6 +33,15 @@
 //! filled, and runs with every test. The other tests plant each defect in a small page and show
 //! the check refusing it.
 //!
+//! The module `attempt5` (`tests/paper/attempt5.rs`) holds the attempt-5 cells (one build of
+//! `komira_sdk_exec`: a MinIO baseline, a cold and a warm run through tierstore) and their result
+//! file `ts-farm-a5.tsv` to the run's record, written a second time there: each cell's whole
+//! text, the table's arm headings and row labels, the caveats, and every result row with its
+//! unit, so a number edited in the page and the result file together still fails. The module
+//! `claims` (`tests/paper/claims.rs`) refuses, anywhere in the page and its shown attributes, a
+//! clause that claims a build-time speedup or slowdown: one run per arm, on a baseline 9 h older
+//! and on an older kbf, supports none.
+//!
 //! The fixture is a copy and a run speaks for the copy, not for the published page. Nothing here
 //! compares the copy with the page: refreshing the copy from the published page is the only guard,
 //! and a copy that is not refreshed can be green while the page is not. When the paper moves into
@@ -632,9 +641,45 @@ fn the_measured_cells_trace_to_their_results() {
         .filter(|t| attr(t.attrs, "data-result").is_some())
         .count();
     assert!(
-        measured >= 4,
-        "the paper has {measured} measured cells, not the 4 filled so far"
+        measured >= 14,
+        "the paper has {measured} measured cells, not the 14 filled so far"
     );
+}
+
+#[path = "paper/attempt5.rs"]
+mod attempt5;
+#[path = "paper/attempt5_tests.rs"]
+mod attempt5_tests;
+#[path = "paper/claims.rs"]
+mod claims;
+
+/// The byte offset of the end tag of the element whose start tag is `tags[k]`, or `None` when it
+/// is never closed.
+fn element_end(tags: &[Tag<'_>], k: usize) -> Option<usize> {
+    let first = &tags[k];
+    let mut depth = 1usize;
+    for tag in &tags[k + 1..] {
+        if tag.name != first.name {
+            continue;
+        }
+        if tag.closing {
+            depth -= 1;
+            if depth == 0 {
+                return Some(tag.start);
+            }
+        } else if tag.open {
+            depth += 1;
+        }
+    }
+    None
+}
+
+/// `text` lower-cased with its runs of white space made one space.
+fn squeeze(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 #[test]

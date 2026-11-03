@@ -44,6 +44,7 @@ pub struct SystemHost<'a> {
     timeout: Duration,
     release_owner: u32,
     declaration_owner: u32,
+    declaration_path: &'static str,
 }
 
 impl<'a> SystemHost<'a> {
@@ -57,7 +58,17 @@ impl<'a> SystemHost<'a> {
             timeout,
             release_owner: 0,
             declaration_owner: 0,
+            declaration_path: DECLARATION_PATH,
         }
+    }
+
+    /// The same, reading the declaration at `path` (an absolute path under the root) instead of
+    /// [`DECLARATION_PATH`]: a macOS host's is
+    /// [`LAUNCHD_DECLARATION_PATH`](super::super::declaration::LAUNCHD_DECLARATION_PATH).
+    #[must_use]
+    pub fn with_declaration_path(mut self, path: &'static str) -> SystemHost<'a> {
+        self.declaration_path = path;
+        self
     }
 
     /// The same, with `uid` as the user that must own the binary of a release (root, 0, unless
@@ -158,9 +169,12 @@ impl Host for SystemHost<'_> {
     /// or other write bit; then the file is opened relative to the last of them with
     /// `O_NOFOLLOW` (a link is refused) and the opened descriptor, not the path, must be a
     /// regular file of that owner with no group or other write bit. The root itself is the
-    /// host's own and is not checked.
+    /// host's own and is not checked. The declaration is at [`DECLARATION_PATH`] unless
+    /// [`SystemHost::with_declaration_path`] says otherwise.
     fn declaration(&self) -> Result<String, PortError> {
-        let path = self.root.join(DECLARATION_PATH.trim_start_matches('/'));
+        let path = self
+            .root
+            .join(self.declaration_path.trim_start_matches('/'));
         let shown = path.display();
         let untrusted = |why: String| {
             PortError::failed(
@@ -168,7 +182,7 @@ impl Host for SystemHost<'_> {
                 format!("the declaration {shown} is not trusted: {why}"),
             )
         };
-        let declared = Path::new(DECLARATION_PATH);
+        let declared = Path::new(self.declaration_path);
         let mut at = self.root.clone();
         let mut dir = open(
             self.root.as_path(),

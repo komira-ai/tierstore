@@ -217,7 +217,7 @@ mod reply;
 mod request;
 pub mod scoped;
 mod time;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
 mod xml;
 

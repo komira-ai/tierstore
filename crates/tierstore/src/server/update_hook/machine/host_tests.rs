@@ -357,3 +357,30 @@ fn a_root_or_parent_that_cannot_be_opened_is_a_failure() {
         "{text}"
     );
 }
+
+/// Asserts that a host told another declaration path reads the declaration there, under the
+/// root, with the same checks of every directory above it: the macOS place,
+/// `/usr/local/etc/updater.d/tierstore.toml`, is read, and a group-writable `usr/local` above it
+/// is refused. It would catch a launchd host that reads the Linux path, or one whose parents
+/// are not checked.
+#[test]
+fn the_declaration_path_can_be_the_macos_one() {
+    use super::super::declaration::LAUNCHD_DECLARATION_PATH;
+    let (_guard, root) = scratch("host-declaration-macos");
+    let runner = FakeRunner::replying(vec![]);
+    write(
+        &root,
+        "usr/local/etc/updater.d/tierstore.toml",
+        "uid = \"_tierstore\"\n",
+    );
+    let mac = host(&root, &runner).with_declaration_path(LAUNCHD_DECLARATION_PATH);
+    assert_eq!(mac.declaration().unwrap(), "uid = \"_tierstore\"\n");
+    let linux = message(host(&root, &runner).declaration().unwrap_err());
+    assert!(linux.contains("etc/updater.d/tierstore.toml"), "{linux}");
+    fs::set_permissions(root.join("usr/local"), fs::Permissions::from_mode(0o775)).unwrap();
+    let text = message(mac.declaration().unwrap_err());
+    assert!(
+        text.ends_with("usr/local can be written by a group or others"),
+        "{text}"
+    );
+}

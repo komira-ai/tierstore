@@ -1,0 +1,33 @@
+# /usr/local/tierstore/etc/tierstore.toml: tierstore on a Mac, a build node (a read cache on local
+# disk in front of the cold store), as com.komira.tierstore.plist starts it. root:_tierstore, mode
+# 0640. crates/tierstore/docs/configuration.md says what every key does.
+#
+# Edit before use: the bucket, the endpoint and the budget. Keep `listen` and `slot` as they are:
+# the update hook probes the instance on 127.0.0.1:9300 (health_ports in
+# updater.d/tierstore.toml) and reads the slot label of its build gauge, and the kbf daemon of
+# this Mac reads through it on that address. Nothing else on the network reaches it.
+#
+# The key files are owned by _tierstore, mode 0600; the process refuses one its group or others
+# can read.
+
+[server]
+listen              = "127.0.0.1:9300"
+proxy_id            = "tierstore-cache"
+slot                = 9300
+bucket              = "tierstore"
+access_key_file     = "/usr/local/tierstore/etc/access.key"
+read_only_key_files = ["/usr/local/tierstore/etc/daemons.key"]
+
+[local_cache]
+path   = "/usr/local/tierstore/cache"
+budget = "200GiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore"
+endpoint         = "http://s3-cold.example:9000"
+credentials_file = "/usr/local/tierstore/etc/upstream-read.key"
+
+[[policy]]
+prefix = "cas/b/"
+cache  = true

@@ -6,15 +6,23 @@
 //! variable. [`super::Machine::system`] builds a [`super::Ports`] from these.
 //!
 //! Programs are called by absolute path (`/usr/sbin/nft`, `/usr/bin/systemctl`, the Debian and
-//! Ubuntu locations); the command line may name others (`--nft`, `--systemctl`).
+//! Ubuntu locations; `/bin/launchctl` on macOS); the command line may name others (`--nft`,
+//! `--systemctl`). `nft`, `systemctl` and the slot links of the two-slot hand-over exist on
+//! Linux alone, and so are built there alone; the launchd service, the release links and
+//! everything else are built on both systems, so that Linux runs their tests.
 
 mod clock;
 mod host;
 mod instances;
+mod launchd;
+#[cfg(target_os = "linux")]
 mod nft;
+mod releases;
 mod runner;
+#[cfg(target_os = "linux")]
 mod slots;
 mod state;
+#[cfg(target_os = "linux")]
 mod units;
 
 use std::fmt;
@@ -23,11 +31,25 @@ use std::io;
 pub use clock::MonotonicClock;
 pub use host::{RELEASE_BINARY, SystemHost};
 pub use instances::LoopbackInstances;
-pub use nft::{DEFAULT_PROGRAM as NFT_PROGRAM, NftTool};
+pub use launchd::{
+    LAUNCHCTL_PROGRAM, LAUNCHD_LABEL, LAUNCHD_LINKS_DIR, LAUNCHD_PLIST, LAUNCHD_PROGRAM,
+    LaunchdService, LaunchdTimes, NOT_FOUND as LAUNCHCTL_NOT_FOUND, bootout_args, bootstrap_args,
+    kickstart_args, print_args,
+};
+#[cfg(target_os = "linux")]
+pub use nft::NftTool;
+pub use releases::ReleaseLinks;
 pub use runner::{Call, Output, RunError, Runner, SystemRunner};
+#[cfg(target_os = "linux")]
 pub use slots::SlotLinks;
 pub use state::{Account, LOCK_FILE, STATE_FILE, StateFiles};
-pub use units::{DEFAULT_PROGRAM as SYSTEMCTL_PROGRAM, SystemdUnits};
+#[cfg(target_os = "linux")]
+pub use units::SystemdUnits;
+
+/// Where the Debian and Ubuntu package puts `nft`.
+pub const NFT_PROGRAM: &str = "/usr/sbin/nft";
+/// Where the Debian and Ubuntu package puts `systemctl`.
+pub const SYSTEMCTL_PROGRAM: &str = "/usr/bin/systemctl";
 
 /// What went wrong, as text, before the port that saw it says which port that is.
 pub(super) struct Fault(pub(super) String);
@@ -63,14 +85,18 @@ mod host_tests;
 #[cfg(test)]
 mod instances_tests;
 #[cfg(test)]
+mod launchd_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod nft_tests;
 #[cfg(test)]
-mod runner_tests;
+mod releases_tests;
 #[cfg(test)]
+mod runner_tests;
+#[cfg(all(test, target_os = "linux"))]
 mod slots_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
 pub(super) mod testing;
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod units_tests;

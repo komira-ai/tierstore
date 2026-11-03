@@ -27,7 +27,7 @@ pub(super) const STOP_TIMEOUT: Duration = Duration::from_secs(300);
 pub(super) const CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(10);
 /// The longest a connect to an instance may take.
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
-/// The longest an instance may leave a request unanswered.
+/// The longest a whole request to an instance may take: its write and every read of the answer.
 pub(super) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where the machine is and who owns its state directory.

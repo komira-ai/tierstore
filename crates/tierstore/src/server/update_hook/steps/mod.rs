@@ -8,6 +8,7 @@
 
 mod cleanup;
 mod cutover;
+pub(super) mod look;
 mod prepare;
 mod restore;
 mod rollback;
@@ -19,11 +20,12 @@ use super::args::Step;
 use super::declaration::{Declaration, unit_name};
 use super::params::Params;
 use super::ports::{PortError, Ports};
-use super::probe::{CacheMode, build_of, readiness};
+use super::probe::CacheMode;
 use super::record::{Mode, Record};
 use super::report::{Done, Reason};
 use super::ruleset::{FORWARD_TABLE, redirect_ruleset};
 use super::validate::{check_params, validate};
+use look::Look;
 
 /// The capability that says a release holds the cache lock, serves read-only beside another
 /// instance, and drains with a lingering close.
@@ -49,49 +51,28 @@ pub(super) struct Ctx<'a, 'b> {
 }
 
 impl Ctx<'_, '_> {
+    /// The looks at the instances, over this step's ports.
+    fn look(&self) -> Look<'_> {
+        Look {
+            instances: self.ports.instances,
+            clock: self.ports.clock,
+        }
+    }
+
     /// One look at `/readyz` of the instance on `port`.
     fn ready(&self, port: u16) -> Option<CacheMode> {
-        readiness(&self.ports.instances.get(port, "/readyz"))
+        self.look().ready(port)
     }
 
     /// Up to `attempts` looks at `/readyz`, a pause between them.
     fn wait_ready(&self, port: u16, attempts: u32) -> Option<CacheMode> {
-        for _ in 0..attempts {
-            if let Some(mode) = self.ready(port) {
-                return Some(mode);
-            }
-            self.ports.clock.pause(POLL_INTERVAL);
-        }
-        None
-    }
-
-    /// Whether one request through the public port was answered by the instance on `slot`
-    /// running `version`.
-    fn answered_by(&self, slot: u16, version: &str) -> bool {
-        match self.ports.instances.get(self.ports.public_port, "/metricz") {
-            Ok(reply) if reply.status == 200 => {
-                build_of(&reply.body).is_some_and(|build| build.is(slot, version))
-            }
-            _ => false,
-        }
+        self.look().wait_ready(port, attempts)
     }
 
     /// Whether [`PROBE_HITS`] requests in a row through the public port were answered by the
     /// instance on `slot` running `version`, within [`PROBE_ATTEMPTS`] looks.
     fn probe_public(&self, slot: u16, version: &str) -> bool {
-        let mut streak = 0;
-        for _ in 0..PROBE_ATTEMPTS {
-            streak = if self.answered_by(slot, version) {
-                streak + 1
-            } else {
-                0
-            };
-            if streak >= PROBE_HITS {
-                return true;
-            }
-            self.ports.clock.pause(POLL_INTERVAL);
-        }
-        false
+        self.look().probe(self.ports.public_port, slot, version)
     }
 
     /// Stores `record`.

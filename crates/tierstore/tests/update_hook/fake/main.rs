@@ -3,8 +3,9 @@
 //! (measured, and tested there); this forwards the program's name, arguments and standard input
 //! to it, writes what it answers, and kills the parent when it says so.
 //!
-//! The update hook is Linux only (systemd, polkit and nft), and so is its conformance test; on
-//! another system this program only says so and fails.
+//! The two-slot hand-over it stands in for is Linux only (systemd, polkit and nft), and so is its
+//! conformance test; on another system (a Mac's hook runs one instance under launchd) this
+//! program only says so and fails.
 
 #[cfg(target_os = "linux")]
 use std::io::{self, Write};
@@ -17,7 +18,7 @@ use tierstore::server::update_hook::fake;
 
 #[cfg(not(target_os = "linux"))]
 fn main() -> ExitCode {
-    eprintln!("tierstore-hook-fake: the update hook is Linux only");
+    eprintln!("tierstore-hook-fake: the two-slot update hook is Linux only");
     ExitCode::FAILURE
 }
 
