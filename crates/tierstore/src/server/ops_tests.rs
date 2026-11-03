@@ -981,3 +981,4 @@ async fn a_cold_tier_without_multipart_uploads_answers_not_implemented() {
         let status = answer.status();
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{method} {uri}");
     }
+}
