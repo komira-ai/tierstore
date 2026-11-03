@@ -845,7 +845,11 @@ fn the_readme_documents_the_build_node_file() {
 #[test]
 fn a_local_cache_defect_is_named_before_an_oci_one() {
     let oci = "[oci]\nprefix = \"oci/\"\n";
-    let broken = LEAST.replacen("budget = 1000", "budget = 1000\nmax_concurrent_fills = 0", 1);
+    let broken = LEAST.replacen(
+        "budget = 1000",
+        "budget = 1000\nmax_concurrent_fills = 0",
+        1,
+    );
     let why = refusal(&format!("{broken}\n{oci}"));
     assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
     let why = refusal(&format!("{LEAST}\n{oci}"));
