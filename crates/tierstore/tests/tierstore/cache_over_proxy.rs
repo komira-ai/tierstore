@@ -68,6 +68,10 @@ fn cache_over(
     let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
     config.write_through = true;
     config.tiered_upstream = tiered;
+    // The put waits for the keep to end, as the real clock cannot be moved here: an hour is
+    // never reached, so a slow disk cannot turn a kept object into a miss.
+    config.keep_wait = std::time::Duration::from_secs(3600);
+    config.keep_deadline = std::time::Duration::from_secs(3600);
     change(&mut config);
     let clock: Arc<dyn Clock> = Arc::new(tierstore::SystemClock);
     let cache = LocalCache::open(config, upstream, Arc::new(SystemDisk), clock).unwrap();
