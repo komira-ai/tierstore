@@ -54,7 +54,8 @@
 //! at most 64 MiB waits for the whole fill before its last chunk.
 //!
 //! - A fill that fails because the data is bad (the bytes do not hash to the name, the object was
-//!   written over: a changed tag, or a short or long body) ends the readers' bodies with an
+//!   written over: a changed tag, or a changed size when `tiered_upstream` is set, or a short or long
+//!   body) ends the readers' bodies with an
 //!   error, never cleanly.
 //! - A fill that a write or a delete through the cache marks (`forget`), or that fails for a
 //!   reason of the cache (no room, the directory), is finished for each reader from the
@@ -71,8 +72,8 @@
 //! A fill is skipped, and counted, when the object is larger than the budget or the cache, with the
 //! bytes of the fills that are running, would pass its critical mark; the reader is served from
 //! the upstream. A key that is not named by its content is read twice by HEAD, before the first
-//! chunk and after the last: if the size or the tag changed, the object was written over during
-//! the fill and is not kept, and the readers get an error. A key named by its content whose bytes
+//! chunk and after the last: if the size or the tag changed (the size alone with `tiered_upstream`), the object was
+//! written over during the fill and is not kept, and the readers get an error. A key named by its content whose bytes
 //! do not hash to the name is the reader's error, not passed through. A hit is not hashed again:
 //! the scrub does that.
 //!
@@ -280,6 +281,12 @@ pub struct CacheConfig {
     /// is then the tag of the tier that answers, and moves when the proxy copies the object from
     /// one tier to the other, so the versions of an object are told apart by size alone (the
     /// proxy never replaces an object). A create-only put is still checked with a HEAD first.
+    ///
+    /// Default `false`: versions are told apart by size and tag. Set it only for keys that are
+    /// written once and never replaced. Limit: another process that deletes a key and puts it
+    /// again with a body of the same size during one fill is not seen, and the fill keeps the
+    /// mixed bytes. A key named by its content (`cas/l/<digest>`) is not affected, as its bytes
+    /// are checked against the digest.
     pub tiered_upstream: bool,
 }
 

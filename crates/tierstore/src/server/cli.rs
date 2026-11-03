@@ -1137,16 +1137,25 @@ pub async fn run_serving(
 ///
 /// # Errors
 /// A lock file that cannot be opened.
-pub(super) fn open_gate(cli: &Cli) -> Result<Option<Gate>, Error> {
+pub(super) fn open_gate(cli: &Cli) -> Result<Option<Gate>, LockFileError> {
     match &cli.lock_file {
-        Some(path) => {
-            let opened = Gate::open(path, LOCK_RETRY);
-            Ok(Some(opened.map_err(|why| {
-                format!("--lock-file {}: {why}", path.display())
-            })?))
-        }
+        Some(path) => match Gate::open(path, LOCK_RETRY) {
+            Ok(gate) => Ok(Some(gate)),
+            Err(source) => Err(LockFileError {
+                path: path.clone(),
+                source,
+            }),
+        },
         None => Ok(None),
     }
+}
+
+/// A lock file that cannot be opened: the file and what the system said.
+#[derive(Debug, thiserror::Error)]
+#[error("--lock-file {}: {source}", path.display())]
+pub(super) struct LockFileError {
+    path: PathBuf,
+    source: std::io::Error,
 }
 
 /// What [`run`] reports on stderr of a drain: a line when the drain deadline cut requests, and
