@@ -79,7 +79,7 @@ The configuration file ([server/config.rs](../../crates/tierstore/src/server/con
 
 ## 5. How each operation works
 
-The sequences below are for configuration B. Every store call is shown in code order. The proxy refuses a reserved key (section 7) for put, delete and multipart before anything else. A get or head of a reserved key is refused by the S3 front (403); the proxy does not check it.
+The sequences below are for configuration B. Every store call is shown in code order. The proxy refuses a reserved key (section 7) for get, head, put, delete and multipart before anything else, and leaves reserved keys out of every listing.
 
 ### Put
 
@@ -141,7 +141,7 @@ All multipart calls go to the cold tier; the proxy holds no part. At completion 
 
 ### What a build node's local cache changes
 
-On configuration A the same S3 calls reach a `LocalCache` instead of a proxy. A get or head of a kept key that is in the cache is answered from disk with no upstream call; a miss fills the cache from the upstream in chunks, hashing as it goes, and keeps the file only if it is whole (and, for a content-addressed key, hashes to its name). A key is kept if the longest matching `[[policy]]` prefix says `cache = true` and it is not reserved; other keys and every listing go to the upstream unchanged. Writes are refused unless `write_through` is set, and then every write goes to the upstream first (nothing is acknowledged before the upstream has it, and nothing is only local). A delete through the cache marks any fill of the key as forgotten, so a reader that was given bytes goes on only while the upstream still has that version.
+On configuration A the same S3 calls reach a `LocalCache` instead of a proxy. A get or head of a kept key that is in the cache is answered from disk with no upstream call; a miss fills the cache from the upstream in chunks, hashing as it goes, and keeps the file only if it is whole (and, for a content-addressed key, hashes to its name). A key is kept if the longest matching `[[policy]]` prefix says `cache = true`; other keys and every listing go to the upstream unchanged. Writes are refused unless `write_through` is set, and then every write goes to the upstream first (nothing is acknowledged before the upstream has it, and nothing is only local). A delete through the cache marks any fill of the key as forgotten, so a reader that was given bytes goes on only while the upstream still has that version.
 
 ## 6. Background work
 
@@ -294,7 +294,7 @@ Each entry is a mechanism and the reason it works.
 - **Journal numbering.** A journal object is written create-only. If its number is taken by a sentinel, the node stops and registers again (above); a node never skips to the next number, because a taken number means the leader has stopped reading its journal. A node that boots takes a fresh id and starts at the first number, so a number is not reused after a prune.
 - **Restart rebuild.** The leader's in-memory books are rebuilt from checkpoints and journals: it reloads each checkpoint and re-reads the journal objects after it, which are exactly the writes not yet applied. Work done since the last stored checkpoint is done again, which is safe because the copy is conditional on the reservation's tag and deletes of missing keys succeed.
 - **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.3).
-- **Reserved prefixes.** `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses put, delete and multipart under them, and the S3 front refuses every call on them (403). The proxy filters them from the hot listing.
+- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket (`_entries/` is set aside for the per-key entries of a later release and is not written yet). The proxy refuses get, head, put, delete and multipart under them (403 through the S3 front), and leaves them out of the listings of both tiers. This is the one place that does it: the S3 front, the OCI front and the local cache have no check of their own and pass the proxy's answer on.
 - **The start-up self-test.** Before any address is bound, each tier is probed (section 9). A store whose create-only put or `If-Match` does not hold is refused with exit status 3, so the lease and the one-winner promise are never built on a store that cannot keep them.
 - **Fail closed.** A put whose reservation cannot be made fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read.
 
@@ -447,7 +447,6 @@ Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tie
 - One failed lease renewal stops reconciliation for up to a ttl.
 - A stalled journal stream (a gap, a corrupt object, a copy that fails for good) is visible only on stderr.
 - The races of section 8 (current code) end in a lost object, a resurrected delete, a double acknowledgement or a checkpoint that moves backwards; the decided fix is in section 12(d), except for the delete protocol (section 13, item 16).
-- Reserved keys can appear in a cold listing (the filter applies to the hot listing).
 
 ## 12. Future work
 
@@ -532,5 +531,5 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 | Copy-back | Writing an object read from cold into hot, journaled so it can be evicted again; its entry carries no reservation tag, so the leader only counts and evicts it. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
-| Reserved prefix | `_journal/` and `_tiering/`; refused to clients. |
+| Reserved prefix | `_entries/`, `_journal/` and `_tiering/`; refused to clients. |
 | Self-test | The start-up check of each tier's contract. |

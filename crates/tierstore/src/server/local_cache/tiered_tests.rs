@@ -247,22 +247,15 @@ async fn a_hot_only_put_reaches_the_upstream_as_a_hot_only_put() {
     assert_eq!(probe.plain.load(Ordering::SeqCst), 2);
 }
 
-/// Asserts that a read cache refuses a hot-only put as it refuses every write, and that a
-/// reserved key is refused as it is for a plain put, with nothing sent to the upstream.
+/// Asserts that a read cache refuses a hot-only put as it refuses every write.
 #[tokio::test]
-async fn a_hot_only_put_is_refused_by_a_read_cache_and_for_a_reserved_key() {
+async fn a_hot_only_put_is_refused_by_a_read_cache() {
     let rig = Rig::new("tscache-hot-only-refused");
     let read_only = rig
         .cache
         .put_stream_hot_only("cas/b/a", Some(1), body(b"a"))
         .await;
     assert!(matches!(read_only, Err(Error::Unsupported(_))));
-
-    let writing = rig.reopen_with(|config| config.write_through = true);
-    let reserved = writing
-        .put_stream_hot_only("_tiering/x", Some(1), body(b"x"))
-        .await;
-    assert_eq!(reserved, Err(Error::Reserved("_tiering/x".to_owned())));
     assert_eq!(rig.calls(Op::Put), 0);
     assert_eq!(rig.calls(Op::Head), 0);
 }

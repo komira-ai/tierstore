@@ -22,9 +22,6 @@
 //!   upstream deletes. A fill that is running for the key does not keep the object it read (see
 //!   [`forget`](Inner::forget)).
 //! - **A put that replaces on a tag** (`put_if_match`) is not done, as on every front.
-//!
-//! The keys under `_journal/` and `_tiering/` belong to a storage node and are refused with
-//! [`Error::Reserved`], as a storage node does.
 
 use std::sync::Arc;
 
@@ -32,20 +29,16 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 
-use crate::journal::is_reserved;
 use crate::{Error, PartBody};
 
 use super::{Inner, READ_ONLY, locked};
 
 impl Inner {
-    /// Whether the cache takes writes of `key`: it was told to, and the key is not one a storage
-    /// node keeps for itself.
-    pub(super) fn writable(&self, key: &str) -> Result<(), Error> {
+    /// Whether the cache takes writes: it was told to. (A key that a storage node keeps for
+    /// itself is refused by the upstream.)
+    pub(super) fn writable(&self) -> Result<(), Error> {
         if !self.config.write_through {
             return Err(Error::Unsupported(READ_ONLY.to_owned()));
-        }
-        if is_reserved(key) {
-            return Err(Error::Reserved(key.to_owned()));
         }
         Ok(())
     }
@@ -63,7 +56,7 @@ impl Inner {
     /// once more when the upstream has deleted it, and any fill still running is told not to
     /// keep what it read.
     pub(super) async fn delete_through(&self, key: &str) -> Result<(), Error> {
-        self.writable(key)?;
+        self.writable()?;
         self.forget(key);
         let deleted = self.upstream.delete(key).await;
         // Also when the upstream answers with an error: a timeout, or a 5xx after the commit,
@@ -75,7 +68,7 @@ impl Inner {
 
     /// Starts a multipart upload of `key` at the upstream.
     pub(super) async fn create_through(&self, key: &str) -> Result<String, Error> {
-        self.writable(key)?;
+        self.writable()?;
         self.upstream.create_upload(key).await
     }
 
@@ -88,7 +81,7 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        self.writable(key)?;
+        self.writable()?;
         let sent = self
             .upstream
             .upload_part_with_len(key, id, number, len, body);
@@ -103,7 +96,7 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        self.writable(key)?;
+        self.writable()?;
         let tag = self.upstream.complete_upload(key, id, parts).await?;
         self.forget(key);
         Ok(tag)
@@ -111,7 +104,7 @@ impl Inner {
 
     /// Aborts the upload at the upstream.
     pub(super) async fn abort_through(&self, key: &str, id: &str) -> Result<(), Error> {
-        self.writable(key)?;
+        self.writable()?;
         self.upstream.abort_upload(key, id).await
     }
 

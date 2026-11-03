@@ -10,7 +10,6 @@ use hyper::header::HeaderMap;
 use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::journal::is_reserved;
 use crate::{ByteRange, Error, Meta, ReadBody};
 
 use super::Server;
@@ -118,14 +117,6 @@ fn read_answer(
         return answer(status, headers, Bytes::new());
     }
     streamed_answer(status, headers, len, body)
-}
-
-/// A client may not name the keys the proxy keeps for itself.
-fn refuse_reserved(key: &str) -> Result<(), S3Error> {
-    if is_reserved(key) {
-        return Err(S3Error::from(Error::Reserved(key.to_owned())));
-    }
-    Ok(())
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
@@ -300,7 +291,6 @@ impl Server {
     }
 
     async fn get_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let meta = self.backend.head(key).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
@@ -328,7 +318,6 @@ impl Server {
     }
 
     async fn head_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let meta = self.backend.head(key).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
@@ -341,7 +330,6 @@ impl Server {
     /// A put that is not a plain create (see [`creates_only`]): `If-Match`, which is refused
     /// because an object cannot be replaced, or an `If-None-Match` other than `*`.
     async fn put_conditional(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         match header(&parts.headers, "if-match") {
             Some(tag) => self.replace_object(key, tag).await,
             None => Err(S3Error::unsupported("only If-None-Match: * is supported")),
@@ -407,7 +395,6 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        refuse_reserved(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
@@ -451,7 +438,6 @@ impl Server {
     }
 
     async fn delete_object(&self, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let (backend, key) = (Arc::clone(&self.backend), key.to_owned());
         let deleted = detached(async move { backend.delete(&key).await }).await;
         deleted.map_err(S3Error::from)?;
@@ -508,7 +494,6 @@ impl Server {
     }
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);
@@ -534,7 +519,6 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        refuse_reserved(key)?;
         let id = query.get("uploadId");
         let parse = |text: &str| text.parse::<u32>().ok();
         let number = query.get("partNumber").and_then(parse);
@@ -566,7 +550,6 @@ impl Server {
         key: &str,
         body: Bytes,
     ) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let id = query.get("uploadId").unwrap_or_default();
         let wanted = xml::parse_complete(&body).filter(|parts| !parts.is_empty());
         let Some(wanted) = wanted else {
@@ -591,7 +574,6 @@ impl Server {
     }
 
     async fn abort_upload(&self, query: &Query, key: &str) -> Result<Answer, S3Error> {
-        refuse_reserved(key)?;
         let id = query.get("uploadId").unwrap_or_default();
         let aborted = self.backend.abort_upload(key, id).await;
         aborted.map_err(upload_error)?;

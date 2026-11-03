@@ -272,6 +272,8 @@ mod reply_tests;
 #[cfg(test)]
 mod request_tests;
 #[cfg(test)]
+mod reserved_tests;
+#[cfg(test)]
 mod role_tests;
 #[cfg(test)]
 mod scoped_server_tests;

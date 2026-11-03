@@ -21,9 +21,11 @@
 //!
 //! # What is kept
 //!
-//! A key is kept if the longest prefix of the policies that holds it says `cache = true` and it
-//! is not under `_journal/` or `_tiering/`. Every other key, and every listing, goes to the
-//! upstream as it is and is never kept.
+//! A key is kept if the longest prefix of the policies that holds it says `cache = true`. Every
+//! other key, and every listing, goes to the upstream as it is and is never kept. The cache
+//! keeps no list of names that a client may not name: the keys under `_entries/`, `_journal/`
+//! and `_tiering/` are refused, and left out of listings, by the proxy that is the upstream (see
+//! [`Proxy`](crate::Proxy)), and the cache passes its answers on.
 //!
 //! - A hit (HEAD, GET, ranged GET of an object that is in the cache) is answered from the disk
 //!   and makes no call to the upstream.
@@ -118,7 +120,6 @@ mod hold;
 mod index;
 mod keep;
 pub(super) mod layout;
-mod listing;
 mod metrics;
 mod scrub;
 mod selfcheck;
@@ -146,11 +147,11 @@ mod keep_tests;
 #[cfg(test)]
 mod limits_tests;
 #[cfg(test)]
-mod listing_tests;
-#[cfg(test)]
 mod lost_tests;
 #[cfg(test)]
 mod read_only_tests;
+#[cfg(test)]
+mod reserved_tests;
 #[cfg(test)]
 mod scrub_tests;
 #[cfg(test)]
@@ -182,7 +183,6 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
 use tokio::sync::Semaphore;
 
-use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
     Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
@@ -582,9 +582,6 @@ impl Inner {
 
     /// The on-disk name of `key` if the cache keeps it.
     fn cacheable(&self, key: &str) -> Option<Name> {
-        if is_reserved(key) {
-            return None;
-        }
         let policies = &self.config.policies;
         let holding = policies
             .iter()
@@ -751,7 +748,7 @@ impl Backend for LocalCache {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        self.inner.list_data(prefix).await
+        self.inner.upstream.list(prefix).await
     }
 
     async fn list_page(
@@ -760,7 +757,7 @@ impl Backend for LocalCache {
         start_after: Option<&str>,
         max_keys: usize,
     ) -> Result<Vec<Listed>, Error> {
-        let page = self.inner.list_data_page(prefix, start_after, max_keys);
+        let page = self.inner.upstream.list_page(prefix, start_after, max_keys);
         page.await
     }
 
@@ -770,7 +767,7 @@ impl Backend for LocalCache {
         after: Option<UploadsAfter<'_>>,
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
-        let found = self.inner.list_data_uploads(prefix, after, max_uploads);
+        let found = self.inner.upstream.list_uploads(prefix, after, max_uploads);
         found.await
     }
 }

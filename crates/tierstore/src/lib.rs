@@ -65,8 +65,10 @@
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
-//! The keys under `_journal/` and `_tiering/` belong to the proxy and the reconciler: a
-//! client put or delete there is refused, and a listing leaves them out.
+//! The keys under `_entries/`, `_journal/` and `_tiering/` belong to the proxy and the
+//! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
+//! a listing of either tier leaves them out. The fronts and the local cache have no check of
+//! their own.
 //!
 //! Every proxy, reconciler and cache takes its settings as constructor parameters.
 //!

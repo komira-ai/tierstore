@@ -532,7 +532,7 @@ read, and answers 412 at once if the object is there; the upstream's conditional
 arbiter of two writers. A full upstream (507) is 503 `SlowDown` with `Retry-After`; an upstream that
 does not answer is 503. A delete drops the cache's copy and then deletes at the upstream, and a fill
 that was reading the object does not keep it; the completion of an upload drops the cache's copy of
-the key. Listings leave out the keys under `_journal/` and `_tiering/`, always. The upstream key
+the key. Listings are the upstream's: a tierstore upstream leaves out the keys under `_entries/`, `_journal/` and `_tiering/` (and refuses them), and the cache does not filter. The upstream key
 must now be one that writes: with `write_through` the start runs the self-test of the storage node
 against the upstream, under `_tiering/selftest/` (a create-only put that refuses a key that exists,
 a replace on a tag, ranged reads, paging, and a multipart completion that refuses a key that
@@ -608,7 +608,7 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_journal/` or `_tiering/`). Every other key, and every listing, goes to the
+(a tierstore upstream refuses the keys under `_entries/`, `_journal/` and `_tiering/`). Every other key, and every listing, goes to the
 upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
 disk and makes no call to the upstream. A GET of an object that is not there reads it from the
 upstream in chunks of 8 MiB into `<path>/.stage/`, hashing the bytes as they pass, and links it into
