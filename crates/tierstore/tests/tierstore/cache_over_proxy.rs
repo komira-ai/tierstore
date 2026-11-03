@@ -2,18 +2,22 @@
 //! content (the hot tier's is a SHA-256, the cold tier's an S3-style ETag): what the cache reads
 //! and writes through the proxy.
 //!
-//! The cache does file I/O on blocking threads, so these tests run on the real clock.
+//! The test that reads what it wrote waits for the cache's own notice that a keep has put its
+//! object in the index, and runs on a paused clock: the keep's wait and deadline are timers that
+//! only the test could advance, and it does not, so the file work on blocking threads can take
+//! as long as it takes. The others run on the real clock and read nothing of it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::{StreamExt as _, stream};
-use tierstore::server::local_cache::{CacheConfig, LocalCache, SystemDisk};
+use tierstore::server::local_cache::{CacheConfig, KeepObserver, LocalCache, SystemDisk};
 use tierstore::{
     Backend, ByteRange, Clock, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig,
     TestClock,
 };
 use tierstore_testkit::dir::TestDir;
+use tokio::sync::Notify;
 
 use crate::support::{Retagged, Rig, assert_absent, body, chunks, read, set_usage};
 
@@ -56,33 +60,22 @@ impl Tiers {
     }
 }
 
-/// The turns of the scheduler [`until_held`] gives the keep of a put before it fails the test: no
-/// real time is read, so the wait ends when the publication has happened, however slow the disk.
-const TURNS: u32 = 10_000_000;
-
-/// Waits until the cache holds `want` (bytes, objects), which is what a keep's publication changes
-/// (the object is put in the index last), by giving up the thread to the keep task and the
-/// blocking file work it waits for. A put may be answered before its keep ends (past
-/// `keep_wait`), so a test that reads what it wrote waits for this event, not for the put.
-async fn until_held(cache: &LocalCache, want: (u64, usize)) {
-    for _ in 0..TURNS {
-        if cache.held() == want {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!(
-        "after {TURNS} turns, the cache holds {:?}, not {want:?}",
-        cache.held()
-    );
-}
-
 /// A cache over `upstream` that keeps what is under `img/` and takes writes, in a scratch
 /// directory kept as long as the returned guard.
 fn cache_over(
     upstream: Arc<dyn Backend>,
     tiered: bool,
     change: impl FnOnce(&mut CacheConfig),
+) -> (TestDir, LocalCache) {
+    cache_observed(upstream, tiered, change, None)
+}
+
+/// [`cache_over`] with an observer of the keeps.
+fn cache_observed(
+    upstream: Arc<dyn Backend>,
+    tiered: bool,
+    change: impl FnOnce(&mut CacheConfig),
+    observer: Option<KeepObserver>,
 ) -> (TestDir, LocalCache) {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "tierstore-cache-over-proxy");
     let policies = vec![("img/".to_owned(), true)];
@@ -91,7 +84,8 @@ fn cache_over(
     config.tiered_upstream = tiered;
     change(&mut config);
     let clock: Arc<dyn Clock> = Arc::new(tierstore::SystemClock);
-    let cache = LocalCache::open(config, upstream, Arc::new(SystemDisk), clock).unwrap();
+    let disk = Arc::new(SystemDisk);
+    let cache = LocalCache::open_observed(config, upstream, disk, clock, observer).unwrap();
     (dir, cache)
 }
 
@@ -174,20 +168,24 @@ async fn without_the_tiered_option_a_cold_only_object_is_kept_since_nothing_move
     assert_eq!(tiers.reads(), before);
 }
 
-/// Asserts that a put through the cache goes to the proxy, is kept (the test waits for the keep's
-/// publication, not for the put to answer after it), and is read back without a read of either
-/// tier.
-#[tokio::test]
+/// Asserts that a put through the cache goes to the proxy, is kept (the test waits for the cache's
+/// notice that the keep put the object in the index, on a paused clock, so that neither the
+/// keep's wait nor its deadline can pass first), and is read back without a read of either tier.
+#[tokio::test(start_paused = true)]
 async fn a_put_through_the_cache_is_kept_and_read_without_a_tier_read() {
     let tiers = Tiers::new();
     let proxy = tiers.proxy().await;
-    let (_dir, cache) = cache_over(proxy, true, |_| {});
+    let kept = Arc::new(Notify::new());
+    let told = Arc::clone(&kept);
+    let observer: KeepObserver = Arc::new(move || told.notify_one());
+    let (_dir, cache) = cache_observed(proxy, true, |_| {}, Some(observer));
 
     cache
         .put_stream("img/p", Some(3), chunks(&["abc"]))
         .await
         .unwrap();
-    until_held(&cache, (3, 1)).await;
+    kept.notified().await;
+    assert_eq!(cache.held(), (3, 1));
     assert_eq!(read(&*tiers.hot_mem, "img/p").await, body("abc"));
     let again = cache.put_stream("img/p", Some(3), chunks(&["xyz"])).await;
     assert_eq!(again, Err(Error::AlreadyExists("img/p".to_owned())));

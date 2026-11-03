@@ -25,6 +25,10 @@
 //! without the trip, which was best effort already. The eviction pass a kept object may call for
 //! runs on a task of its own, after the keep, and the put never waits for it.
 //!
+//! A cache opened with [`open_observed`](super::LocalCache::open_observed) calls its observer
+//! after each keep that has put its object in the index, so a caller that reads what it wrote
+//! waits for that event, whether the put waited for the keep or not.
+//!
 //! The copy is best effort. A put that finds every keep running, no room in the budget, a stage
 //! directory that cannot be written, a disk that falls behind the body, a HEAD that fails, or a
 //! key that a fill is running for, is answered as if the cache kept nothing: the stage file is
@@ -575,6 +579,9 @@ impl Inner {
             return Err(SkippedKeep::Deleted);
         }
         drop(stage);
+        if let Some(observer) = &self.observer {
+            observer();
+        }
         // The pass is not the put's to wait for. A pass that is running makes another return
         // at once (see `evict_pass`), so passes started here cannot run twice at the same time.
         let inner = Arc::clone(self);
