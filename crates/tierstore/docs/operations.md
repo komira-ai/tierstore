@@ -43,7 +43,7 @@ The first two are 200 and the last two 503. The limit is `--usage-stale-after` (
 The hot tier's size is measured against `--hot-bytes` (`hot_store.budget`). Three shares of it matter:
 
 - Above `--high-water` (80% by default) the reconciler evicts the oldest objects that the cold tier already holds, until the hot tier is down to `--low-water` (70%). It never evicts an object it has not copied.
-- Above `--critical` (95%) a put waits a short time before it is written, and a read of an object that is only in the cold tier is served but not copied back into the hot tier.
+- Above `--critical` (95%) a read of an object that is only in the cold tier is served but not copied back into the hot tier.
 - At the budget, or when the hot tier says it is full, new objects are written straight to the cold tier.
 
 Eviction frees the hot tier only as fast as the cold tier takes copies, which `--copy-parallel` bounds. If the cold tier is slow or down, copies stall, nothing becomes evictable, and the hot tier climbs to the budget.

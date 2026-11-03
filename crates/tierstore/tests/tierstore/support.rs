@@ -38,11 +38,10 @@ impl Rig {
     }
 
     /// The settings of a proxy `id` with a hot tier of `budget` bytes: a linger of a
-    /// millisecond, a back-pressure of 5 milliseconds, and the usage read at every put.
+    /// millisecond and the usage read at every put.
     pub fn config(&self, id: &str, budget: u64) -> ProxyConfig {
         let mut config = ProxyConfig::new(id, budget, self.clock.clone());
         config.linger = Duration::from_millis(1);
-        config.back_pressure = Duration::from_millis(5);
         config.usage_refresh = Duration::ZERO;
         config
     }
