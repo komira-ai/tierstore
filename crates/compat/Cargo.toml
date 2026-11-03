@@ -1,0 +1,29 @@
+[package]
+name = "tierstore-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Test support only, and the one place that builds two releases side by side: the tests in
+# `tests/` run the previous release's `tierstore` library (the dev-dependency `tierstore_prev`,
+# pinned to the commit of its tag) and this branch's against the same directory and the same S3
+# service, to show that each reads what the other wrote. `src/lib.rs` holds the fixtures the
+# tests share. It is a dev-dependency of nothing and no release builds it.
+
+[dev-dependencies]
+bytes.workspace = true
+futures.workspace = true
+objstore-s3 = { workspace = true, features = ["testkit"] }
+tierstore = { workspace = true, features = ["s3"] }
+# The previous release: `v0.3.17`, the tag of the commit below, taken from the public repository
+# at that commit alone (the `rev` is what pins it; a tag can be moved). When a release is made,
+# move both to the new release's commit: the tests then hold this branch to the release before.
+tierstore_prev = { package = "tierstore", git = "https://github.com/komira-ai/tierstore", rev = "6b60319efd148fba3d7fc0f7e6217d64b097642e", features = ["s3"] }
+tierstore-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

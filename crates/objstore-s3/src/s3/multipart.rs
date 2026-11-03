@@ -59,21 +59,24 @@ pub fn part_size(len: u64) -> Option<u64> {
     (size <= MAX_PART_BYTES).then_some(size)
 }
 
-/// Writes `body`, `len` bytes, under `key` as a multipart upload.
+/// Writes `body`, `len` bytes, under `key` as a multipart upload: a new object, or, given the
+/// entity tag `matching`, the replacement of the object that has it (`If-Match` on the
+/// completion). Gives the `ETag` of the object, quotes included, if the completion carries one.
 pub(super) async fn put(
     conn: &Arc<Conn>,
     key: &ObjectKey,
     len: u64,
     body: BodyStream,
-) -> Result<(), ObjectStoreError> {
+    matching: Option<&str>,
+) -> Result<Option<String>, ObjectStoreError> {
     let size = part_size(len).ok_or(ObjectStoreError::Unsupported(
         "an object larger than 10,000 parts of 5 GiB",
     ))?;
     let upload = create(conn, key).await?;
-    match send(&upload, len, size, body).await {
-        Ok(()) => {
+    match send(&upload, len, size, body, matching).await {
+        Ok(etag) => {
             upload.finished();
-            Ok(())
+            Ok(etag)
         }
         Err(e) => {
             upload.abort().await;
@@ -152,7 +155,8 @@ async fn send(
     len: u64,
     size: u64,
     body: BodyStream,
-) -> Result<(), ObjectStoreError> {
+    matching: Option<&str>,
+) -> Result<Option<String>, ObjectStoreError> {
     let mut parts = Parts::new(body, len);
     let mut etags = Vec::new();
     // `Parts` answers `None` only after the body has ended with exactly `len` bytes,
@@ -161,7 +165,7 @@ async fn send(
         let number = etags.len() + 1;
         etags.push(upload_part(upload, number, part).await?);
     }
-    complete(upload, &etags).await
+    complete(upload, &etags, matching).await
 }
 
 /// UploadPart: answers the part's ETag.
@@ -201,16 +205,19 @@ pub(super) fn part_etag(
     })
 }
 
-/// CompleteMultipartUpload, conditional as `put_new` is when the store claims it. S3
-/// may answer 200 with an `<Error>` body: that is a failure too.
-async fn complete(upload: &Upload, etags: &[String]) -> Result<(), ObjectStoreError> {
+/// CompleteMultipartUpload, conditional as `put_new` is when the store claims it, or
+/// `If-Match` the tag `matching`. S3 may answer 200 with an `<Error>` body: that is a failure too.
+async fn complete(
+    upload: &Upload,
+    etags: &[String],
+    matching: Option<&str>,
+) -> Result<Option<String>, ObjectStoreError> {
     let request = xml::complete_request(etags);
-    let complete = complete_with(&upload.conn, &upload.key, &upload.id, request);
-    complete.await?;
-    Ok(())
+    let conn = &upload.conn;
+    complete_matching(conn, &upload.key, &upload.id, request, matching).await
 }
 
-/// CompleteMultipartUpload of the upload `id` of `key` with this request body, conditional as
+/// CompleteMultipartUpload of the upload `id` of `key` with this request body, create-only as
 /// `complete` is. Gives the `ETag` of the object, quotes included, if the answer has one.
 pub(super) async fn complete_with(
     conn: &Conn,
@@ -218,8 +225,23 @@ pub(super) async fn complete_with(
     id: &str,
     request: String,
 ) -> Result<Option<String>, ObjectStoreError> {
+    complete_matching(conn, key, id, request, None).await
+}
+
+/// As [`complete_with`], and with `matching` the completion replaces the object that has that
+/// entity tag (`If-Match`, sent as it is): another tag is a 412 [`ObjectStoreError::Service`]
+/// and no object is [`ObjectStoreError::NotFound`], and the upload stays open.
+async fn complete_matching(
+    conn: &Conn,
+    key: &ObjectKey,
+    id: &str,
+    request: String,
+    matching: Option<&str>,
+) -> Result<Option<String>, ObjectStoreError> {
     let mut headers = vec![("content-type", "application/xml".to_owned())];
-    if conn.capabilities.conditional_put {
+    if let Some(etag) = matching {
+        headers.push(("if-match", etag.to_owned()));
+    } else if conn.capabilities.conditional_put {
         headers.push(("if-none-match", "*".to_owned()));
     }
     let query = [("uploadId", id.to_owned())];
@@ -233,7 +255,15 @@ pub(super) async fn complete_with(
             xml::complete_answer(&body)
         }
         // Asked only of a store that claims conditional writes.
-        StatusCode::PRECONDITION_FAILED => Err(ObjectStoreError::AlreadyExists(key.clone())),
+        StatusCode::PRECONDITION_FAILED if matching.is_none() => {
+            Err(ObjectStoreError::AlreadyExists(key.clone()))
+        }
+        StatusCode::NOT_FOUND if matching.is_some() => match failure(resp).await {
+            ObjectStoreError::Service { code, .. } if code == "NoSuchKey" => {
+                Err(ObjectStoreError::NotFound(key.clone()))
+            }
+            other => Err(other),
+        },
         _ => Err(failure(resp).await),
     }
 }

@@ -35,7 +35,7 @@ use super::{READ_RETRIES, READ_RETRY_WAIT, S3Store, failure, is_retryable, times
 use crate::{KeyPrefix, ListToken, ObjectKey, ObjectStoreError, PageSize};
 
 /// The user metadata header that marks an object as a reservation.
-const RESERVATION_HEADER: &str = "x-amz-meta-tierstore-reservation";
+pub(super) const RESERVATION_HEADER: &str = "x-amz-meta-tierstore-reservation";
 
 /// What a HEAD says about an object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,7 +76,7 @@ pub struct StampedPage {
 
 /// Runs `once` until it answers: it is run again after a failure in transport, with the
 /// waits and the count of a ranged read.
-async fn retrying<T, Fut>(mut once: impl FnMut() -> Fut) -> Result<T, ObjectStoreError>
+pub(super) async fn retrying<T, Fut>(mut once: impl FnMut() -> Fut) -> Result<T, ObjectStoreError>
 where
     Fut: Future<Output = Result<T, ObjectStoreError>>,
 {
@@ -95,7 +95,7 @@ where
 }
 
 /// The text of a header of an answer, if it is there, is text, and is not empty.
-fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
+pub(super) fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
     let value = resp.headers().get(name)?.to_str().ok()?;
     (!value.is_empty()).then_some(value)
 }

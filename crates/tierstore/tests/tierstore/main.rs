@@ -27,6 +27,9 @@ mod s3;
 mod s3_conditional_delete;
 #[cfg(feature = "s3")]
 mod s3_reservation;
+#[cfg(feature = "s3")]
+mod s3_streamed;
+mod streamed;
 mod streaming;
 mod support;
 mod tiered;
