@@ -229,6 +229,17 @@ impl Backend for Retagged {
         self.inner.get(key, range).await
     }
 
+    /// The read of the inner backend, with the tag prefixed as [`Backend::head`] prefixes it:
+    /// the trait says the tag of a marked read is the one `head` gives for that object.
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool, String), Error> {
+        let (bytes, reservation, tag) = self.inner.get_marked(key, range).await?;
+        Ok((bytes, reservation, format!("cold-etag:{tag}")))
+    }
+
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         let mut meta = self.inner.head(key).await?;
         meta.tag = format!("cold-etag:{}", meta.tag);
