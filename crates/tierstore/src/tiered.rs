@@ -145,8 +145,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
 ///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
-///   made for it. The hot tag is read from the hot tier right after the create-only write (a
-///   copy whose tag cannot be read is taken out again). The two tags are never compared with each
+///   made for it. The hot tag is the one the create-only write itself returns
+///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
+///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
 ///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
 ///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
