@@ -99,7 +99,6 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("gc-key-file", &["server.gc_key_files"]),
     ("scoped-key-file", &["server.scoped_key_files"]),
     ("presign-max-expires", &["server.presign_max_expires"]),
-    // Deprecated no-ops: accepted so that a file written for the release before still loads.
     ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
     ("journal-linger", &["hot_store.journal_linger"]),
@@ -347,8 +346,7 @@ pub(super) struct File {
     pub policy: Vec<Policy>,
 }
 
-/// `[server]`: what the process is, and its limits. A key that is left out has the default of
-/// the flag it stands for.
+/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
@@ -369,11 +367,8 @@ pub(super) struct ServerTable {
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
     pub presign_max_expires: Option<Dur>,
-    /// Deprecated and ignored (the read grant was removed): accepted so that a file written for
-    /// the release before still loads, and never written by `--print-config`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grant_key_files: Vec<PathBuf>,
-    /// Deprecated and ignored, like `grant_key_files`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,

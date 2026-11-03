@@ -1,21 +1,17 @@
 //! The flags of the binary, the settings made of them, and the reconciler's loop.
 
 use std::fs::Permissions;
-use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
-use tracing::Level;
-use tracing::subscriber::with_default;
 
 use crate::selftest_tests::{Flaw, Flawed};
-use crate::server::build_info::stderr_log::LineLog;
 use crate::server::{AccessKey, Drained};
 use crate::{
     Backend, Check, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler,
@@ -73,10 +69,6 @@ fn key_file(dir: &TestDir, name: &str, text: &str, mode: u32) -> PathBuf {
 /// The flags of a start with a good key file in `dir`.
 fn cli(dir: &TestDir) -> Cli {
     let path = key_file(dir, "key", "AKID\nsecret\n", 0o600);
-    cli_with_key(&path)
-}
-
-fn cli_with_key(path: &Path) -> Cli {
     Cli::try_parse_from(flags(path.to_str().unwrap(), &[])).unwrap()
 }
 
@@ -156,7 +148,9 @@ fn the_flags_have_their_defaults() {
     assert!(cli.presign_key_file.is_empty());
     assert!(cli.gc_key_file.is_empty());
     assert!(cli.scoped_key_file.is_empty());
+    assert!(cli.grant_key_file.is_empty());
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
+    assert_eq!(cli.grant_max_lifetime, None);
     assert!(
         cli.skip_backend_check.is_empty(),
         "no check is skipped by default"
@@ -366,6 +360,7 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     front.presign_key_file = Vec::new();
     front.gc_key_file = Vec::new();
     front.scoped_key_file = Vec::new();
+    front.grant_key_file = Vec::new();
     let server = crate::server::front::server_config(&front, Arc::new(crate::SystemClock))
         .expect("a server");
     assert_eq!(server.put_permit_wait, Duration::from_secs(25));
@@ -520,70 +515,6 @@ fn two_keys_with_one_id_are_invalid_flags_refused_before_a_tier_is_opened() {
         assert!(!text.contains("secret"), "{text}");
         assert!(!made.exists());
     }
-}
-
-/// A writer whose bytes the test reads back: the operator's stderr.
-#[derive(Clone, Default)]
-struct Stderr(Arc<Mutex<Vec<u8>>>);
-
-impl Stderr {
-    fn text(&self) -> String {
-        let bytes = self.0.lock().expect("the buffer is not poisoned").clone();
-        String::from_utf8(bytes).expect("the lines are text")
-    }
-}
-
-impl Write for Stderr {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let mut held = self.0.lock().expect("the buffer is not poisoned");
-        held.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Asserts that the two flags of the removed read grant, which the release before had, are still
-/// accepted so that an old unit starts: with a grant key file that does not exist (it is not read)
-/// and a lifetime, the flags parse, the settings are built, and the operator's stderr gets one
-/// warning for each flag, word for word, naming the flag and its key and saying to use a
-/// presigned GET URL; with neither flag it gets nothing; and a lifetime that is not a duration is
-/// still refused.
-#[test]
-fn the_flags_of_the_removed_read_grant_start_a_server_and_each_warns_once() {
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-flags");
-    let key = key_file(&dir, "key", "AKID\nsecret\n", 0o600);
-    let missing = dir.path().join("no-such-grant.key");
-    let old = flags(
-        key.to_str().unwrap(),
-        &[
-            ("--grant-key-file", missing.to_str().unwrap()),
-            ("--grant-max-lifetime", "5m"),
-        ],
-    );
-    let cli = Cli::try_parse_from(old).expect("the old flags parse");
-    assert_eq!(cli.grant_key_file, vec![missing]);
-    assert_eq!(cli.grant_max_lifetime, Some(Duration::from_secs(300)));
-    let stderr = Stderr::default();
-    let built = with_default(LineLog::new(stderr.clone(), Level::INFO), || build(&cli));
-    assert!(built.is_ok(), "an old unit still starts");
-    let warn = "is ignored: the read grant was removed; use a presigned GET URL";
-    let wanted = format!(
-        "tierstore: --grant-key-file (server.grant_key_files) {warn}\n\
-         tierstore: --grant-max-lifetime (server.grant_max_lifetime) {warn}\n"
-    );
-    assert_eq!(stderr.text(), wanted);
-
-    let quiet = Stderr::default();
-    let plain = cli_with_key(&key);
-    let built = with_default(LineLog::new(quiet.clone(), Level::INFO), || build(&plain));
-    assert!(built.is_ok());
-    assert_eq!(quiet.text(), "");
-
-    let soon = flags(key.to_str().unwrap(), &[("--grant-max-lifetime", "soon")]);
-    assert!(Cli::try_parse_from(soon).is_err());
 }
 
 /// Asserts that `--scoped-key-file` puts the keys of its files on the server, in the order of the

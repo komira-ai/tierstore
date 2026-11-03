@@ -309,9 +309,8 @@ pub struct Cli {
     /// says: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub presign_max_expires: Duration,
-    /// Deprecated, and ignored: the read grant was removed (use a presigned GET URL). The flag is
-    /// still accepted, and its files are not read, so that a unit that sets it still starts; the
-    /// server says on stderr that it is ignored.
+    /// Deprecated and ignored: the read grant was removed (use a presigned GET URL). Accepted, and
+    /// its files are not read, so that a unit that sets it still starts; stderr says it is ignored.
     #[arg(long)]
     pub grant_key_file: Vec<PathBuf>,
     /// Deprecated, and ignored, like `--grant-key-file`: a number and `ms`, `s`, `m` or `h`.
@@ -1366,3 +1365,7 @@ mod tests;
 #[cfg(test)]
 #[path = "oci_cli_tests.rs"]
 mod oci_tests;
+
+#[cfg(test)]
+#[path = "grant_cli_tests.rs"]
+mod grant_tests;
