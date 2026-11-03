@@ -29,8 +29,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="480" y1="172" x2="480" y2="190" class="ln" marker-end="url(#reconciler-pass-ak)"/>
 <rect x="30" y="190" width="900" height="69" rx="5" class="box"/>
 <text x="42" y="212" class="b">3  Pick work by state</text>
-<text x="42" y="230" class="t-m">(PUT,PENDING) replicate. (DEL,PENDING|SEALED) roll forward. (CB,PENDING) copy back. (op,SEALED) release. A HELD entry only if its owner</text>
-<text x="42" y="247" class="t-m">departed: reap.</text>
+<text x="42" y="230" class="t-m">(PUT,PENDING) replicate: CAS to (PUT,HELD,leader) first, copy, then seal. (DEL,PENDING|SEALED) roll forward. (CB,PENDING) copy back.</text>
+<text x="42" y="247" class="t-m">(op,SEALED) release. A HELD entry only if its owner departed: reap.</text>
 <line x1="480" y1="259" x2="480" y2="277" class="ln" marker-end="url(#reconciler-pass-ak)"/>
 <rect x="30" y="277" width="900" height="52" rx="5" class="box"/>
 <text x="42" y="299" class="b">4  Run on a pool of 16</text>

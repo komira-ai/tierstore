@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 546" width="960" height="546" role="img" aria-label="Sequence diagram of a head: Client, Node, Hot tier, Cold tier. Hot is asked first. On a miss the entry is read first and a DEL entry means 404; otherwise cold is asked. A head asks for no copy-back.">
-<title>A head: hot first; on a miss the entry gates the cold read</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 462" width="960" height="462" role="img" aria-label="Sequence diagram of a head: Client, Node, Hot tier, Cold tier. Hot is asked first. On a miss cold is asked directly; no entry is read. A head asks for no copy-back.">
+<title>A head: hot first, then cold on a miss; no entry is read</title>
 <defs><marker id="seq-head-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-head-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
@@ -17,8 +17,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .t-n{fill:#5A5A57;font-size:13px}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="960" height="546" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" font-size="16">A head: hot first; on a miss the entry gates the cold read</text>
+<rect x="0" y="0" width="960" height="462" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A head: hot first, then cold on a miss; no entry is read</text>
 <rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
 <text x="110" y="65" class="b" text-anchor="middle">Client</text>
 <rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
@@ -27,10 +27,10 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
 <rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
 <text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
-<line x1="110" y1="76" x2="110" y2="496" class="ln-d"/>
-<line x1="340" y1="76" x2="340" y2="496" class="ln-d"/>
-<line x1="600" y1="76" x2="600" y2="496" class="ln-d"/>
-<line x1="840" y1="76" x2="840" y2="496" class="ln-d"/>
+<line x1="110" y1="76" x2="110" y2="412" class="ln-d"/>
+<line x1="340" y1="76" x2="340" y2="412" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="412" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="412" class="ln-d"/>
 <text x="225.0" y="112" class="t-m lbl" text-anchor="middle">0  HEAD key</text>
 <line x1="110" y1="124" x2="340" y2="124" class="ln" marker-end="url(#seq-head-ak)"/>
 <text x="470.0" y="150" class="t-m lbl" text-anchor="middle">1  hot open_read key (metadata only)</text>
@@ -41,17 +41,12 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="340" y1="238" x2="110" y2="238" class="ln-o" marker-end="url(#seq-head-ao)"/>
 <line x1="20" y1="256" x2="940" y2="256" class="ln-d"/>
 <text x="20" y="280" class="b lbl">Hot miss</text>
-<text x="470.0" y="308" class="t-m lbl" text-anchor="middle">3  hot GET _entries/&lt;sha256(key)&gt;</text>
-<line x1="340" y1="320" x2="600" y2="320" class="ln" marker-end="url(#seq-head-ak)"/>
-<rect x="30" y="334" width="900" height="32" rx="5" fill="#FFFFFF"/>
-<rect x="30" y="334" width="900" height="32" rx="5" class="box-p"/>
-<text x="40" y="354" class="t-m">A DEL entry in any state: 404, cold is not asked.</text>
-<text x="590.0" y="392" class="t-m lbl" text-anchor="middle">4  cold HEAD key</text>
-<line x1="340" y1="404" x2="840" y2="404" class="ln" marker-end="url(#seq-head-ak)"/>
-<text x="590.0" y="430" class="t-m lbl" text-anchor="middle">found or not found</text>
-<line x1="840" y1="442" x2="340" y2="442" class="ln-d" marker-end="url(#seq-head-ak)"/>
-<text x="225.0" y="468" class="t-m lbl" text-anchor="middle">5  200 from cold, or 404</text>
-<line x1="340" y1="480" x2="110" y2="480" class="ln-o" marker-end="url(#seq-head-ao)"/>
-<rect x="30" y="494" width="900" height="32" rx="5" class="box-o"/>
-<text x="40" y="514" class="t-m">A head creates no copy-back entry. A hot error other than not-found is returned without asking cold.</text>
+<text x="590.0" y="308" class="t-m lbl" text-anchor="middle">3  cold HEAD key (no entry is read)</text>
+<line x1="340" y1="320" x2="840" y2="320" class="ln" marker-end="url(#seq-head-ak)"/>
+<text x="590.0" y="346" class="t-m lbl" text-anchor="middle">found or not found</text>
+<line x1="840" y1="358" x2="340" y2="358" class="ln-d" marker-end="url(#seq-head-ak)"/>
+<text x="225.0" y="384" class="t-m lbl" text-anchor="middle">4  200 from cold, or 404</text>
+<line x1="340" y1="396" x2="110" y2="396" class="ln-o" marker-end="url(#seq-head-ao)"/>
+<rect x="30" y="410" width="900" height="32" rx="5" class="box-o"/>
+<text x="40" y="430" class="t-m">A head creates no copy-back entry. A hot error other than not-found is returned without asking cold.</text>
 </svg>

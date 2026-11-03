@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 694" width="960" height="694" role="img" aria-label="Sequence diagram of a get: Client, Node, Hot tier, Cold tier. A hot hit is one hot read that returns the tag and the body together. On a miss the node reads the entry first; a DEL entry in any state means 404 and cold is not read. Otherwise it reads cold, and below the Critical level may ask for a copy-back by creating a CB entry.">
-<title>A get: one hot round trip on a hit; on a miss the entry is read before cold</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 642" width="960" height="642" role="img" aria-label="Sequence diagram of a get: Client, Node, Hot tier, Cold tier. A hot hit is one hot read that returns the tag and the body together. On a miss the node reads cold directly and never reads the entry. Below the Critical level it may ask for a copy-back by creating a CB entry, best effort.">
+<title>A get: one hot round trip on a hit; one cold read on a miss; no entry is read</title>
 <defs><marker id="seq-get-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-get-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
@@ -17,8 +17,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .t-n{fill:#5A5A57;font-size:13px}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="960" height="694" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" font-size="16">A get: one hot round trip on a hit; on a miss the entry is read before cold</text>
+<rect x="0" y="0" width="960" height="642" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A get: one hot round trip on a hit; one cold read on a miss; no entry is read</text>
 <rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
 <text x="110" y="65" class="b" text-anchor="middle">Client</text>
 <rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
@@ -27,10 +27,10 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
 <rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
 <text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
-<line x1="110" y1="76" x2="110" y2="628" class="ln-d"/>
-<line x1="340" y1="76" x2="340" y2="628" class="ln-d"/>
-<line x1="600" y1="76" x2="600" y2="628" class="ln-d"/>
-<line x1="840" y1="76" x2="840" y2="628" class="ln-d"/>
+<line x1="110" y1="76" x2="110" y2="544" class="ln-d"/>
+<line x1="340" y1="76" x2="340" y2="544" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="544" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="544" class="ln-d"/>
 <text x="225.0" y="112" class="t-m lbl" text-anchor="middle">0  GET key (optionally a range)</text>
 <line x1="110" y1="124" x2="340" y2="124" class="ln" marker-end="url(#seq-get-ak)"/>
 <text x="470.0" y="150" class="t-m lbl" text-anchor="middle">1  hot open_read key: tag and body in one call</text>
@@ -44,23 +44,20 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="40" y="272" class="t-m">A hot error other than not-found is returned as it is; cold is not tried (fail closed).</text>
 <line x1="20" y1="302" x2="940" y2="302" class="ln-d"/>
 <text x="20" y="326" class="b lbl">Hot miss</text>
-<text x="470.0" y="354" class="t-m lbl" text-anchor="middle">3  hot GET _entries/&lt;sha256(key)&gt;, before any cold read</text>
-<line x1="340" y1="366" x2="600" y2="366" class="ln" marker-end="url(#seq-get-ak)"/>
-<rect x="30" y="380" width="900" height="48" rx="5" fill="#FFFFFF"/>
-<rect x="30" y="380" width="900" height="48" rx="5" class="box-p"/>
-<text x="40" y="400" class="t-m">The entry is a DEL in any state (HELD, PENDING, SEALED): 404 now. Cold is not read. This closes the one path by which a cold copy the leader has</text>
-<text x="40" y="416" class="t-m">not yet deleted again could be served after an acknowledged delete.</text>
-<text x="590.0" y="454" class="t-m lbl" text-anchor="middle">4  cold read key (streamed; a range reads only the range)</text>
-<line x1="340" y1="466" x2="840" y2="466" class="ln" marker-end="url(#seq-get-ak)"/>
-<text x="590.0" y="492" class="t-m lbl" text-anchor="middle">bytes, or not found</text>
-<line x1="840" y1="504" x2="340" y2="504" class="ln-d" marker-end="url(#seq-get-ak)"/>
-<text x="470.0" y="530" class="t-m lbl" text-anchor="middle">5  create a (CB, PENDING) entry, create-only, best effort</text>
-<text x="470.0" y="546" class="t-m lbl" text-anchor="middle">only below Critical, with no entry, under the cap of 1000 open</text>
-<text x="470.0" y="562" class="t-m lbl" text-anchor="middle">ones</text>
-<line x1="340" y1="574" x2="600" y2="574" class="ln" marker-end="url(#seq-get-ak)"/>
-<text x="225.0" y="600" class="t-m lbl" text-anchor="middle">6  200 with the cold bytes (or 404)</text>
-<line x1="340" y1="612" x2="110" y2="612" class="ln-o" marker-end="url(#seq-get-ao)"/>
-<rect x="30" y="626" width="900" height="48" rx="5" class="box-o"/>
-<text x="40" y="646" class="t-m">The reply never waits for step 5; any failure there is ignored. The node copies nothing into hot itself: the leader does, later, under the entry</text>
-<text x="40" y="662" class="t-m">(entry lifecycle). LIST is the union of both tiers as before, with _entries/ filtered out like the other reserved prefixes.</text>
+<text x="590.0" y="354" class="t-m lbl" text-anchor="middle">3  cold read key (streamed; a range reads only the range)</text>
+<text x="590.0" y="370" class="t-m lbl" text-anchor="middle">no entry is read: a get never reads the journal entry</text>
+<line x1="340" y1="382" x2="840" y2="382" class="ln" marker-end="url(#seq-get-ak)"/>
+<text x="590.0" y="408" class="t-m lbl" text-anchor="middle">bytes, or not found</text>
+<line x1="840" y1="420" x2="340" y2="420" class="ln-d" marker-end="url(#seq-get-ak)"/>
+<text x="470.0" y="446" class="t-m lbl" text-anchor="middle">4  create a (CB, PENDING) entry, create-only, best effort</text>
+<text x="470.0" y="462" class="t-m lbl" text-anchor="middle">only below Critical, under the cap of 1000 open ones; does nothing</text>
+<text x="470.0" y="478" class="t-m lbl" text-anchor="middle">if an entry exists</text>
+<line x1="340" y1="490" x2="600" y2="490" class="ln" marker-end="url(#seq-get-ak)"/>
+<text x="225.0" y="516" class="t-m lbl" text-anchor="middle">5  200 with the cold bytes (or 404)</text>
+<line x1="340" y1="528" x2="110" y2="528" class="ln-o" marker-end="url(#seq-get-ao)"/>
+<rect x="30" y="542" width="900" height="80" rx="5" class="box-o"/>
+<text x="40" y="562" class="t-m">Why no entry read is needed: a delete that meets a copy in flight is not acknowledged until the leader has released the entry, after the copy</text>
+<text x="40" y="578" class="t-m">ended and both tiers were deleted again. A cold read after that acknowledgement finds nothing. The reply never waits for step 4. The node copies</text>
+<text x="40" y="594" class="t-m">nothing into hot itself: the leader does, later, under the entry (entry lifecycle). LIST is the union of both tiers as before, with _entries/</text>
+<text x="40" y="610" class="t-m">filtered out like the other reserved prefixes.</text>
 </svg>

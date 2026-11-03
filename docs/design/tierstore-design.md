@@ -1,6 +1,6 @@
 # tierstore design
 
-This document says why tierstore exists, what it promises, and how the code keeps those promises. It is a living document: a change to code that this text describes changes the text with it. It states the problem first and then the solution, and it marks what is not built yet, so a reader can tell the design from the plan. The coordination protocol of sections 5 to 8 and 10 (one journal entry per key) is **decided and not built**: the code today still uses per-node journals, and section 14 is the order in which the code moves to the design. Everything outside those sections (the fronts, the tiers, the lease, the local cache, the configurations) describes the code. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the hand-over of a running node is section 6.7. Terms in bold are defined in the glossary (section 16).
+This document says why tierstore exists, what it promises, and how the code keeps those promises. It is a living document: a change to code that this text describes changes the text with it. It states the problem first and then the solution, and it marks what is not built yet, so a reader can tell the design from the plan. The coordination protocol of sections 5 to 8 and 10 (one journal entry per key) is **decided and not built**: the code today still uses per-node journals, and section 14 is the order in which the code moves to the design, and section 15 records the decisions of 2026-11-03 that fixed it. Everything outside those sections (the fronts, the tiers, the lease, the local cache, the configurations) describes the code. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the hand-over of a running node is section 6.7. Terms in bold are defined in the glossary (section 16).
 
 ## 1. The problem
 
@@ -116,39 +116,47 @@ Why this order: one atomic place, the entry, serialises every actor on the key. 
 
 **Presigned puts** are hot-only: at level `Full`, or when the hot tier answers `Full`, the put gets 503 `SlowDown` and nothing is written to cold. A presigned put and a multipart completion follow the same entry path as any put.
 
-**Cold down.** A new-key put needs the cold HEAD under the entry, so while the cold tier is unreachable new-key puts answer 503. Today the hot tier absorbs writes during a cold outage; the design gives that up, because the alternative (checking write-once only at replication) would let two clients both be acknowledged for one key (section 15, question 1).
+**Cold down.** A new-key put needs the cold HEAD under the entry, so while the cold tier is unreachable new-key puts answer 503. Today the hot tier absorbs writes during a cold outage; the design gives that up, because the alternative (checking write-once only at replication) would let two clients both be acknowledged for one key (section 15, decision 2).
 
 **Streaming.** The put holds no body. The front passes chunks through a small queue; `S3Backend` forwards them as one PUT (up to 16 MiB) or a multipart upload, and holds a whole body only when no length is declared, which is why the front requires `Content-Length` when a tier is S3. There is no size cap: a long upload keeps its entry alive by its node's heartbeat (section 6.3). The front runs the proxy call on its own task, so a client that disconnects after the body arrived does not abandon the put half done.
 
 ### Get
 
-![Get: hot first, entry then cold on a miss](diagrams/seq-get.svg)
+![Get: hot first, then cold on a miss; no entry is read](diagrams/seq-get.svg)
 
 1. **Hot hit.** One hot call, `open_read(key, range)`, returns the tag and the body together, at the client's key. The reply is made at once: **a hot hit is one hot round trip and reads no entry.** A hot error other than not-found is returned as it is; cold is not tried (fail closed).
-2. **Hot miss: read the entry first.** One small hot GET of `_entries/<sha256(K)>`. If it is a DEL in any state (HELD, PENDING or SEALED), the answer is 404 and the cold tier is never read.
-3. **Then read cold** (a range reads only the range; the body is streamed). The result stands.
-4. **Ask for a copy-back.** Below level `Critical`, with no entry present and fewer than 1000 copy-back entries open, the proxy creates `(CB, PENDING)` with a create-only write, best effort; any failure is ignored and the reply never waits for it. The proxy copies nothing into hot itself. The leader does, under the entry (section 6.5).
+2. **Hot miss: read cold.** Straight away, with no entry read (a range reads only the range; the body is streamed). The result stands: the bytes, or 404. **A get never reads the journal entry.** A hot miss is one cold read, plus the copy-back request of step 3.
+3. **Ask for a copy-back.** Below level `Critical`, with fewer than 1000 copy-back entries open, the proxy creates `(CB, PENDING)` with a create-only write, best effort; if an entry for the key exists the create does nothing, and any failure is ignored. The reply never waits for it. The proxy copies nothing into hot itself. The leader does, under the entry (section 6.5).
 
-Why the entry is read before cold and not in parallel with it: a DELETE of a pending put leaves a window in which the leader, already in the middle of a copy, can publish a cold copy of the deleted key once more before it deletes both tiers again and releases the entry. A cold read inside that window returns a deleted key's bytes. If the entry were read at the same time as cold, the release could land between the two and the stale bytes would stand. Reading the entry first closes it: the entry exists for exactly as long as such a cold copy can exist. A model of the protocol (section 8) found this; the cost is one extra small hot request, in series, on hot-miss GETs only.
+Why no entry is read: a delete that meets a copy in flight does not answer until that copy has finished (see Delete below). While a copy is running the delete is therefore unacknowledged, and a cold read that returns the key's bytes in that window returns what a not yet acknowledged delete has not covered. Once the delete is acknowledged, both tiers have been deleted after the last cold publish the copy could make, so a cold read answers 404. The earlier draft read the entry first on a hot miss, at the cost of one more hot request in series; the model showed that the wait closes the same window without it (section 8, The model check).
 
 ### Head
 
-![Head: hot, entry, then cold on not-found](diagrams/seq-head.svg)
+![Head: hot, then cold on not-found; no entry is read](diagrams/seq-head.svg)
 
-The same as a get without the body and without a copy-back. `hot.open_read` for metadata; on a miss, the entry first (a DEL in any state is 404), then `cold.head`. A hot error other than not-found is returned without asking cold.
+The same as a get without the body and without a copy-back. `hot.open_read` for metadata; on a miss, `cold.head`. No entry is read. A hot error other than not-found is returned without asking cold.
 
 ### Delete
 
-![Delete: take or amend the entry, delete cold then hot, finish or hand over](diagrams/seq-delete.svg)
+![Delete: take or amend the entry, delete cold and hot, wait for the release when a copy is in flight](diagrams/seq-delete.svg)
 
-A delete takes the entry, removes the key where it exists, and either finishes alone or hands the rest to the leader.
+A delete takes the entry, removes the key from both tiers, and either finishes alone, hands the rest to the leader, or, when a copy of the key may still be running, waits until the leader has released the entry.
 
 0. **Refuse** a reserved key.
-1. **Take the entry** with a create-only write of `(DEL, HELD, this node)`. On `EXISTS`, read it. A `(PUT, PENDING)` or `(CB, PENDING)` entry is **amended** into `(DEL, HELD, this node)` by compare-and-swap; the DELETE takes over the pending put instead of answering 503. A `(DEL, PENDING)` entry (a delete handed over earlier, now retried) is **claimed** the same way. Anything else (HELD, SEALED, or the CAS lost three times) is 503 SlowDown.
-2. **Delete cold, then hot.** `cold.delete(K)`, then `hot.delete(K)`, each bounded by its own timeout and by the node's `live_until` (section 6.3), neither retried. Cold first, so a cold-served read cannot return what hot lost. A call that fails or times out: CAS the entry to `(DEL, PENDING)` and answer 503; the leader finishes the delete.
-3. **Finish.** A **fresh** entry (nothing was pending) is deleted by its owner, and the answer is 204: nothing is left for the leader, and a delete followed by a re-put of the key never waits. An **amended or claimed** entry is moved to `(DEL, PENDING)` by CAS and the answer is 204; the leader rolls it forward and releases it. If that CAS fails the delete still happened: 204.
+1. **Take the entry** with a create-only write of `(DEL, HELD, this node)`. On `EXISTS`, read it, and decide by CAS:
+   - `(PUT, PENDING)` or `(CB, PENDING)`: **amend** it into `(DEL, HELD, this node)`. The leader has not started on it, and its own CAS to HELD (section 6.5) now fails, so no copy starts. This delete does not wait.
+   - `(PUT, HELD, the leader)`: the leader's copy may be in flight. **Amend** it the same way; this delete **waits** (step 3).
+   - `(DEL, PENDING)`: a delete handed over earlier, now retried (it may have been half done, with the leader's copy still running). **Claim** it the same way; this delete **waits**.
+   - Anything else (a client's HELD entry, SEALED, or the CAS lost three times): 503 SlowDown.
+2. **Delete cold, then hot.** `cold.delete(K)`, then `hot.delete(K)`, each bounded by its own timeout and by the node's `live_until` (section 6.3), neither retried. **Cold is always deleted at once by the delete itself**, whatever the entry said. Cold first, so a cold-served read cannot return what hot lost. A call that fails or times out: CAS the entry to `(DEL, PENDING)` and answer 503; the leader finishes the delete, and a retry claims it and waits.
+3. **Finish.**
+   - A **fresh** entry (nothing was pending) is deleted by its owner and the answer is 204: nothing is left for the leader, and a delete followed by a re-put of the key never waits.
+   - An entry **amended from a PENDING put or copy-back** is moved to `(DEL, PENDING)` by CAS and the answer is 204; the leader rolls it forward and releases it.
+   - An entry **amended from the leader's HELD entry, or claimed**, is moved to `(DEL, PENDING)` by CAS (if that CAS fails the delete still happened), and then the delete **polls the entry**, a hot GET at each step of the per-item back-off (1 s, doubling), until the entry is gone or has been replaced by another op's entry. That is the leader's release: its copy has ended and its roll-forward has deleted both tiers once more. Only then is the answer 204. Past the request deadline (a frozen or stalled leader) the answer is a retryable 503: hot and cold are already deleted, and the entry stays `(DEL, PENDING)` for the leader or for the next retry to claim.
 
-From the moment the DEL entry exists in any state, a GET or HEAD of the key that misses hot is answered 404 without reading cold, and a PUT of the key is 503. A LIST may still show the key until the leader has finished (section 11, R5). Deleting an absent key succeeds. The front runs the delete on its own task so a disconnect cannot split it.
+After a delete is acknowledged, a GET or HEAD of the key is 404 and a PUT is allowed once the entry is gone. While the delete is in flight, a PUT of the key is 503, and a GET or HEAD may still return the key's bytes, since the delete is not yet acknowledged. A LIST may show the key until the leader has finished (section 11, R5). Deleting an absent key succeeds. The front runs the delete on its own task so a disconnect cannot split it.
+
+The wait costs latency: a delete that overlaps a copy returns when the copy finishes (a copy has no size cap, so this can be long for a large object), and a frozen leader turns it into a 503. A delete that amends a PENDING put pays none of that.
 
 ### Eviction
 
@@ -208,8 +216,8 @@ Why: the coordination state is in the hot tier because it is small, changes ofte
 
 | state | meaning | who may change it |
 |---|---|---|
-| HELD | the owner is working on the key | the owner (CAS or delete); the leader only if the owner has departed |
-| PENDING | landed or asked for; the leader's turn | the leader (seal); a client delete (amend or claim) |
+| HELD | the owner is working on the key: a client putting or deleting, or the leader copying a put to cold | the owner (CAS or delete); a client delete (amend), only when the leader is the owner; the leader for a departed owner |
+| PENDING | landed or asked for; the leader's turn | the leader (HELD before a copy, or seal); a client delete (amend or claim) |
 | SEALED | the leader is finishing; nobody else may act | the leader only |
 
 **Transitions** (the ids are those of the diagram and the tests):
@@ -222,24 +230,26 @@ Why: the coordination state is in the hot tier because it is small, changes ofte
 | E1''' | absent | `(EVICT, SEALED)` | leader, create | the byte compare already passed |
 | E1'''' | absent | `(PUT, PENDING)` | leader, create | stray: H present, C absent, no entry |
 | E2 | `(PUT, HELD)` | `(PUT, PENDING)` | owner, CAS | landing returned. **The acknowledgement point** |
-| E3 | `(PUT, PENDING)` or `(CB, PENDING)` | `(DEL, HELD)` | client delete, CAS | amend |
-| E4 | `(DEL, PENDING)` | `(DEL, HELD)` | client delete, CAS | claim of a retried delete |
+| E3 | `(PUT, PENDING)` or `(CB, PENDING)` | `(DEL, HELD)` | client delete, CAS | amend; this delete does not wait |
+| E3' | `(PUT, HELD, leader)` | `(DEL, HELD)` | client delete, CAS | amend of a copy that may be in flight; this delete waits for the release |
+| E4 | `(DEL, PENDING)` | `(DEL, HELD)` | client delete, CAS | claim of a retried delete; this delete waits for the release |
 | E5 | `(DEL, HELD)` | `(DEL, PENDING)` | owner, CAS | after an amend or claim, or a failed delete call |
-| E6 | `(op, PENDING)` | `(op, SEALED)` | leader, CAS | per op, section 6.5 |
-| E7 | `(PUT or DEL, HELD)`, owner departed | `(op, PENDING)` | leader, CAS | reap |
+| E6a | `(PUT, PENDING)` | `(PUT, HELD, leader)` | leader, CAS | **before it copies.** If it fails, a delete amended the entry: no copy starts |
+| E6 | `(op, PENDING)`, or `(PUT, HELD, leader)` | `(op, SEALED)` | leader, CAS | per op, section 6.5; the put arm is after the copy |
+| E7 | `(PUT or DEL, HELD)`, owner departed (a client, or a leader that died mid-copy) | `(op, PENDING)` | leader, CAS | reap |
 | E8 | `(PUT or DEL, HELD)` | absent | owner, delete | fresh delete; a put or delete that failed before landing or deleting anything |
 | E8' | `(op, SEALED)` | absent | leader, delete | its work for the op is done |
 
 **Invariants** (the tests of section 8 and the model check these).
 
-- **Exclusion.** The data of K is changed only by the holder of E(K): the owner of a HELD entry, or the leader for PENDING and SEALED. Two stated overlaps: a leader's cold publish for a `(PUT, PENDING)` entry can land after a delete has amended the entry (hidden from readers by the entry gate below and deleted again before release), and the late landings of a reaped actor (section 11, R3).
+- **Exclusion.** The data of K is changed only by the holder of E(K): the owner of a HELD entry (a client, or the leader copying), or the leader for PENDING and SEALED. Two stated overlaps: a copy the leader started before a delete amended its HELD entry can still publish to cold, and the delete does not answer until the leader has ended it and released the entry (the wait below); and the late landings of a reaped actor (section 11, R3).
 - **Write-once.** Objects are created only create-only, and a put lands only after, under its entry, both HEADs were absent.
 - **Acknowledged put.** A put is acknowledged only after its E2 CAS succeeded after the landing. The entry is deleted only after cold holds the object (or after a delete took it).
-- **Acknowledged delete.** A delete is acknowledged only after it held the entry exclusively and both its deletes returned OK. Until the entry is released, GET and HEAD of K answer 404 and PUT answers 503; after release, K is absent until a later put.
-- **Entry gate.** A hot-miss GET or HEAD reads E(K) first and only then reads cold; it answers 404 if E is a DEL in any state.
-- **Hot hit.** A hot hit is one hot read of the client's key and reads no entry.
+- **Acknowledged delete.** A delete is acknowledged only after it held the entry exclusively, both its deletes returned OK and, if it amended the leader's HELD entry or claimed a handed-over delete, the entry was released (or replaced by another op's entry). From the acknowledgement, GET and HEAD of K answer 404 and no copy of K is still running; K is absent until a later put. Before it, GET and HEAD may return K's bytes, and PUT answers 503 while the DEL entry exists.
+- **Delete waits for a copy.** A delete that meets an in-flight copy (an amended `(PUT, HELD, leader)` entry, or a claimed `(DEL, PENDING)` entry) is not acknowledged before the leader releases the entry; past its deadline it answers 503. A delete that amends a PENDING entry makes the leader's CAS to HELD fail, so no copy starts and it does not wait.
+- **Hot hit, hot miss.** A hot hit is one hot read of the client's key. A hot miss is one cold read. A GET or HEAD never reads an entry.
 - **Seal before landing.** The leader's copy-back lands only after E6 to SEALED, so a delete cannot amend it afterwards, and it streams the current cold object, never bytes a get read earlier.
-- **Liveness.** With a live leader every entry reaches deletion: PENDING, then SEALED, then deleted. A HELD entry of a departed owner is reaped to PENDING at the next scan after the departure time.
+- **Liveness.** With a live leader every entry reaches deletion: PENDING, then HELD or SEALED, then deleted, so a waiting delete is released. A HELD entry of a departed owner (a client, or a leader that died mid-copy) is reaped to PENDING at the next scan after the departure time.
 
 ### 6.3 A node's life: boot, heartbeat, stop, silence
 
@@ -284,17 +294,18 @@ The diagram follows one put through its stages; the leader's step for each entry
 
 | entry | the leader's step |
 |---|---|
-| `(PUT, PENDING)` | **Replicate.** H absent: nothing to copy (a reaped put that never landed, or a delete already done). H present and C absent: stream H to C with a create-only put; the lease margin is checked right before the publishing call. C present: byte-compare; a mismatch is counted, logged at error level with the key, hot is kept, and the key is never evicted. Then E6 to SEALED, then E8'. If E6 fails, a delete amended the entry: re-read and handle the new state (a copy still running ends; its late cold publish is hidden by the entry gate and deleted again) |
+| `(PUT, PENDING)` | **Replicate.** First E6a: CAS to `(PUT, HELD, this leader)`. If it fails, a delete amended the entry: re-read and handle the new state, and no copy starts. Then H absent: nothing to copy (a reaped put that never landed, or a delete already done). H present and C absent: stream H to C with a create-only put; the lease margin is checked right before the publishing call. C present: byte-compare; a mismatch is counted, logged at error level with the key, hot is kept, and the key is never evicted. Then E6 from HELD to SEALED, then E8'. If E6 fails, a delete amended the entry while the copy ran: re-read and handle the new state (a copy still running ends; its late cold publish happens before this re-read, and the delete that amended the entry is waiting for the release, which comes only after the roll-forward below has deleted both tiers again) |
 | `(PUT, SEALED)` | E8' (a sealed put was fully replicated) |
+| `(PUT, HELD, leader)`, this leader | its own copy is running; nothing else. A new leader finds it only after the owner has departed (reap) |
 | `(DEL, PENDING)` | E6, then roll forward: `cold.delete`, `hot.delete`, E8' |
 | `(DEL, SEALED)` | roll forward again, then E8' |
 | `(CB, PENDING)` | H absent, C present, level below `Critical`: stream the current cold object into a hot temp, then E6 to SEALED, then land it create-only, then E8'. Any other situation: seal and release. At most 1000 copy-back entries are open (a get above that skips the create), one older than 10 minutes is sealed and released without copying, and the pool runs put and delete work before copy-back |
 | `(CB, SEALED)` | E8' (the landing happened or is abandoned; a later get asks again) |
 | `(EVICT, SEALED)` | E8' (the hot delete is redone only by a fresh eviction) |
-| `(op, HELD)`, owner departed | E7: reap to PENDING; for a put, abort its multipart uploads by listing |
+| `(op, HELD)`, owner departed | E7: reap to PENDING; for a put, abort its multipart uploads by listing. A copy a leader left half done is therefore redone after about D |
 | `(op, HELD)`, owner live | nothing |
 
-Why release is by the leader and by a seal: the leader re-reads the entry (by CAS to SEALED) before releasing it, so a delete that amended the entry while the copy ran is seen, and the delete is rolled forward instead of the entry being released over it. The seal also fixes the copy-back landing after any delete. Copy to cold strictly before any delete of the hot copy is what makes a get after an acknowledged put always find the object.
+Why the leader holds the entry before it copies, and releases by a seal: the CAS to HELD is what a delete meets. A delete that arrives before it amends the entry, the CAS fails, and no copy starts. A delete that arrives after finds the entry HELD by the leader, amends it and waits: the leader re-reads the entry (by CAS to SEALED) before releasing it, so the amend is seen, and the delete is rolled forward instead of the entry being released over it, and the waiting delete is acknowledged only after that release. The seal also fixes the copy-back landing after any delete. Copy to cold strictly before any delete of the hot copy is what makes a get after an acknowledged put always find the object.
 
 ### 6.6 The leader's loop
 
@@ -340,7 +351,7 @@ Why: the listening sockets are passed on, never closed, so the kernel's queue of
 
 **A node dies or freezes** holding a key. Its entry (HELD) and registration just sit there. After D with no change in the registration, on the leader's own clock, the owner is departed and the leader reaps the entry: it moves it to PENDING by CAS (E7), aborts the owner's multipart uploads for the key by listing, and the PENDING step finishes it: replicate if the object landed, release if it did not. The key answered 503 to other puts for about D and then is free. The put was never acknowledged, so nothing is lost. A node that was only frozen and wakes after the reap finds its `live_until` past (it answers 503 and touches nothing), or, if a call was already on the wire, its CAS on the entry fails against the changed tag, so it acknowledges nothing.
 
-**The leader dies.** It stops renewing the lease, which expires about 30 s later. Another process takes it over, scans, and resumes every entry: a copy the old leader left half done is redone, since a create-only copy gets `EXISTS` on a finished one and the byte compare passes. Puts continue meanwhile on every node: each still takes its entry, lands its object and is acknowledged. Replication waits, and entries only accumulate until it resumes. If the hot tier fills in that time, puts answer `Full` and take the cold path (section 5). An old leader that wakes after the takeover makes calls whose conditions fail (a CAS on a changed tag, a create-only write on an existing object), except for its late plain deletes and cold publishes (section 11, R1 and R2).
+**The leader dies.** It stops renewing the lease, which expires about 30 s later. Another process takes it over, scans, and resumes every entry: a copy the old leader left half done is redone, since a create-only copy gets `EXISTS` on a finished one and the byte compare passes. Puts continue meanwhile on every node: each still takes its entry, lands its object and is acknowledged. Replication waits, and entries only accumulate until it resumes. A put entry the old leader held for a copy, `(PUT, HELD, old leader)`, is reaped like any departed owner's, so that key is copied after about D; a delete that had amended it is not held up, because its handed-over `(DEL, PENDING)` entry is at once the new leader's to roll forward and release. If the hot tier fills in that time, puts answer `Full` and take the cold path (section 5). An old leader that wakes after the takeover makes calls whose conditions fail (a CAS on a changed tag, a create-only write on an existing object), except for its late plain deletes and cold publishes (section 11, R1 and R2).
 
 ### 6.9 Usage and back-pressure
 
@@ -368,6 +379,7 @@ Each entry is a mechanism and the reason it works. The races between actors are 
 
 - **A crashed or killed put.** A put that dies after taking its entry leaves a HELD entry, and possibly a hot object or an unfinished multipart upload. After D the leader reaps the entry (E7), aborts the uploads, and either replicates the landed object or releases the entry (section 6.8). The cost of a crash is one key blocked for about D, never a wrong answer. A client that aborts its request releases nothing, since the front finishes a put whose client has left by running it on its own task; the realistic triggers are a process kill, a crash, or a cut at the drain deadline.
 - **A hung but alive client.** A client that is alive but stalled holding a key keeps its node heartbeating, so its key stays 503. There is deliberately no cap, because a long upload is legitimate. The operator verb `tierstore entries release --key K` moves such an entry to PENDING (the owner's later CAS then fails).
+- **A delete that meets a copy.** The leader holds the entry `(PUT, HELD, leader)` for the length of a copy. A delete that amends it deletes both tiers, hands the entry over and waits for its release, so it is acknowledged only after the copy has ended and the leader has deleted both tiers once more. A frozen or stalled leader leaves it waiting until the request deadline, then 503, which the client retries; the retry claims the handed-over entry and waits again. The copy of a large object makes such a delete slow; that is the price of a GET that reads no entry.
 - **A failed landing or CAS.** A put whose landing failed removes its own temp object or aborts its own upload and frees its entry; a put whose acknowledging CAS failed answers 503 and never touches the entry or data again. A delete that returns an error handed the entry over (E5) and is retried safely, because every step of it is idempotent.
 - **An ambiguous answer.** An S3 409 `ConditionalRequestConflict` and a timeout mean "may have landed". The actor re-reads the entry and compares its nonce before it destroys or acknowledges anything.
 - **Two leaders at once.** A leader that is slow (a long copy, a frozen process) can believe it holds a lease that another process has taken over. Every step on an entry is a CAS on its tag and the copy to cold is create-only, so the late leader's calls fail on their conditions; the new leader repeats the work, which is safe because every step is idempotent or conditional. A leader that has less than the margin m left on its lease does not start a destructive call or a cold publish (section 6.4).
@@ -386,12 +398,12 @@ Each race below is a place where several actors touch one key. For each: the mec
 | Race | Mechanism | Test |
 |---|---|---|
 | **Eviction, a delete, and a byte-identical re-put.** The evictor compares and stalls; a delete and a re-put of identical bytes (the same tag) complete; the evictor resumes. | Eviction takes `(EVICT, SEALED)` create-only: it fails if the delete or the re-put holds an entry, and under the entry both tags are re-checked. A delete and a put each take the same entry first. No step relies on a tag differing. | `evict_vs_delete_then_identical_reput_keeps_new_object` (a regression test: the evictor stalls, the delete and re-put complete, the evictor skips, and the new object is acknowledged and readable) |
-| **A delete meets a pending put.** A put is acknowledged and waiting for the leader; a delete arrives. | The delete amends the entry into a delete by CAS (E3) instead of deleting blind or answering 503, then deletes cold and hot and hands the entry over (E5). The leader seals it and rolls the delete forward. | `delete_under_pending_put_amends_not_deletes_blind`, `delete_amends_pending_put_e3_acks_204_and_get_is_404_at_once` |
-| **A cold-served get after an acknowledged delete.** The leader is mid-copy of the put when the delete is acknowledged and publishes the cold copy once more. | The get reads the entry first; a DEL entry in any state is 404, and the entry exists as long as a stale cold copy can. | `cold_served_get_after_acked_delete_is_404`, `get_after_acked_delete_with_replicator_republish_is_404` (the model's counterexample as a schedule), `get_miss_reads_entry_before_cold_and_404s_on_any_delete_state` |
+| **A delete meets a pending put.** A put is acknowledged and waiting for the leader; a delete arrives. | The delete amends the entry into a delete by CAS (E3) instead of deleting blind or answering 503, then deletes cold and hot and hands the entry over (E5). The leader's CAS to HELD fails, so no copy starts, and the delete does not wait; the leader seals the handed-over entry and rolls the delete forward. | `delete_under_pending_put_amends_not_deletes_blind`, `delete_amends_pending_put_e3_acks_204_without_waiting`, `reconciler_cas_to_held_fails_after_amend_and_no_copy_starts` |
+| **A cold-served get after an acknowledged delete.** The leader is mid-copy of the put when the delete runs, and publishes the cold copy once more after the delete's own deletes. | The get reads no entry. The delete amended the leader's HELD entry (or claimed a handed-over delete) and does not answer until the leader has released the entry, which is after its copy ended and its roll-forward deleted both tiers again. Every get that starts after the acknowledgement therefore finds both tiers empty. A get that overlaps the delete before its acknowledgement may return the bytes: the delete has not been acknowledged. | `cold_served_get_after_acked_delete_is_404`, `get_after_acked_delete_with_replicator_republish_is_404` (the model's counterexample as a schedule), `delete_amending_leader_held_entry_acks_only_after_release`, `delete_claiming_handed_over_entry_acks_only_after_release`, `delete_past_deadline_while_leader_frozen_answers_503_and_retry_claims`, `get_miss_never_reads_the_entry` (call counting: one hot read, one cold read) |
 | **A copy-back meets a delete.** A get asks for a copy-back; a delete completes; the copy-back lands. | The copy-back is the leader's and lands only after E6 to SEALED, which a delete cannot amend; it streams the current cold object. A delete that comes first leaves a DEL entry the copy-back finds. | `copy_back_cannot_land_after_delete_ack`, `copy_back_seals_before_landing_and_streams_current_cold` |
 | **Two puts of one key** (hot path against hot path, or hot against cold-direct at `Full`). | The create-only write of the entry has exactly one winner. The loser answers 503 or, once the winner has landed, 412 after the lockless HEADs. | table-driven `race_put_put_*`, `put_take_exists_branches` (one case per row of the take step) |
 | **A put meets a delete in flight, or a delete and a re-put.** | The put is 503 while a DEL entry exists. A fresh delete frees its own entry, so a delete then a re-put never waits. | `race_put_delete_*`, `delete_then_reput_never_waits_and_lands` |
-| **The leader releases an entry a delete amended.** | The leader moves the entry to SEALED by CAS before it releases it; if the CAS fails it re-reads and handles the delete. Release is a plain delete of a SEALED entry the leader holds. | `reconciler_release_requires_seal_with_plain_entry_delete` (on a store that ignores conditional DELETE) |
+| **The leader releases an entry a delete amended.** | The leader moves the entry from HELD to SEALED by CAS before it releases it; if the CAS fails it re-reads and handles the delete. Release is a plain delete of a SEALED entry the leader holds. | `reconciler_release_requires_seal_with_plain_entry_delete` (on a store that ignores conditional DELETE) |
 | **A client crashes holding a key.** | The leader reaps the entry after D, aborts uploads by listing, and finishes it. | `reconciler_reaps_held_entry_only_when_owner_departed_to_pending_and_aborts_uploads_by_listing`, `departed_means_absent_or_unchanged_for_D_on_own_monotonic_clock` |
 | **A client freezes and wakes.** | Its `live_until` has passed, so it answers 503 and touches nothing; a call already on the wire that lands is a create-only write, and its acknowledging CAS fails against the changed tag. | `live_until_stops_ack_and_destroy_after_missed_heartbeat`, `put_that_loses_e2_cas_answers_503_and_never_touches_entry_or_data_again` |
 | **Two leaders: a stalled leader and a takeover.** | CAS on changed tags and create-only on existing objects fail; destructive calls are refused inside the lease margin. | `old_leader_late_calls_fail_their_conditions`, `destructive_step_and_cold_publish_refused_when_lease_margin_below_m` |
@@ -406,7 +418,33 @@ Each race below is a place where several actors touch one key. For each: the mec
 - Every pair of actors `{put, put}`, `{put, delete}`, `{delete, delete}`, `{delete, get}`, `{reconciler, put | delete | get}`, `{evict, put | delete}` is a table-driven race test: a list of `(actor, store-call index)` steps, all calls parked, the driver releasing one at a time.
 - Frozen-actor tests park one call after its guard passed, advance the clock beyond D (the ttl for a leader), reap, re-put or delete, let the key replicate, release the call and assert the exact final state. Residual tests (section 11) pin exactly the outcomes that section states, and no more.
 - Compatibility tests run in both directions (section 13). `dir:` tests cover the subdirectory listing, the fixed-length names, atomicity across two processes, and `If-Match` on a missing entry.
-- **Model.** An explicit-state model of one key, with up to three client operations plus the reconciler, a crash at every step and a "ghost" mode in which a departed actor's in-flight call lands later, was run against the protocol (a script kept outside the repository). Every normal and crash run of the protocol as specified is clean, exhaustively, liveness included. The frozen-actor runs find exactly the residuals of section 11 and are bounded, not exhaustive. The model found the one change to the protocol described in section 5 (the entry-first get). It does not prove the Rust code: a bounded exhaustive explorer written in Rust, running the real proxy and reconciler on in-memory backends under the gate scheduler, replaces it as the conformance check, with a negative case that skips the seal and must report a lost write.
+- **Model.** An explicit-state model of one key, with up to three client operations plus the reconciler, a crash at every step and a "ghost" mode in which a departed actor's in-flight call lands later, was run against the protocol (a script kept outside the repository; results below). Every normal and crash run of the protocol as specified is clean, exhaustively, liveness included. The frozen-actor runs find exactly the residuals of section 11 and are bounded, not exhaustive. It does not prove the Rust code: a bounded exhaustive explorer written in Rust, running the real proxy and reconciler on in-memory backends under the gate scheduler, replaces it as the conformance check, with a negative case that skips the seal and must report a lost write, and one that skips the delete's wait and must report a get of a deleted key's bytes.
+
+### The model check
+
+The model of one key is an explicit-state search of every interleaving of up to three client operations (puts of distinct or identical bytes, deletes, gets) and the leader, one store call per step, with a crash of any client or the leader at every step. In **ghost** mode a departed actor's one in-flight call still lands later. Each scenario runs with the conditional-DELETE fence off (MinIO, RustFS) and on (`dir:`, AWS). It checks that an acknowledged put no delete covers stays readable, that two puts are never both acknowledged, that a GET returns only bytes a not yet acknowledged delete has not covered, and, at rest, that no entry remains.
+
+**Why the entry-first get was dropped.** The first draft read the entry in parallel with cold on a hot miss, and the model found a counterexample with no frozen actor: the leader, mid-copy, republishes the cold copy of a key whose delete was amended and acknowledged, and a get that read cold in that window returns the deleted key's bytes. Revision 2 closed it by reading the entry before cold on every hot miss, at the cost of one hot request in series. On 2026-11-03 that was reversed (section 15, decision 1): a get reads no entry, and the delete is what is made safe. Two changes do it. The leader CASes `(PUT, PENDING)` to `(PUT, HELD, leader)` before it copies, so a delete either amends the entry before the copy starts (the leader's CAS fails and nothing is copied) or meets a copy in flight. And any delete that meets a copy in flight, whether it amended the leader's HELD entry or claimed a handed-over `(DEL, PENDING)` entry, deletes hot and cold, hands over, and waits for the leader to release the entry before it is acknowledged. The leader releases only after its copy has ended and it has deleted both tiers again, so no cold publish can follow an acknowledged delete.
+
+**Why the claim case waits too.** A delete that claims a handed-over entry cannot tell whether the copy is still running, so it must wait as well. The model has a scenario where the claimer does not wait, and it finds this: P1 is acknowledged `(PUT, PENDING)`; R1 CASes it to `(PUT, HELD, R1)`; D1 amends it to `(DEL, HELD, D1)`, its cold delete lands but the call times out, D1 hands over and answers 503; R1 is still copying; D2 claims `(DEL, PENDING)`, deletes cold and hot, and would acknowledge without waiting; R1's create-only cold publish lands; G1 misses hot, reads cold and returns P1's bytes after D2's acknowledgement. With the claimer waiting, D2 is acknowledged only after R1 has released, and the run is clean.
+
+**Results.** Run as `systemd-run --user --scope -p MemoryMax=3G -p MemorySwapMax=0 python3 -I model_f2.py`, three workers at 800 MB each, a bound of 3,000,000 states on the ghost runs: 48 runs, 77,360,956 states in all. Normal runs (exhaustive, liveness included):
+
+| scenario | states, fence off / on | result |
+|---|---|---|
+| distinct | 897,884 / 1,103,654 | clean |
+| identical | 876,676 / 1,059,974 | clean |
+| two-del (the claimer waits) | 1,019,342 / 1,174,006 | clean |
+| cb | 185,694 / 204,517 | clean |
+| cold-direct | 629,869 / 726,606 | clean |
+| leader | 87,626 / 69,458 | clean |
+| leader-ident | 159,524 / 142,666 | clean |
+| two-del-claimnowait (the claimer does not wait) | 1,012,416 / 1,142,602 | violation: a GET returns a deleted key's bytes, no frozen actor |
+| distinct-noentryGET-nowait (no entry read, no wait) | 876,080 / 1,019,822 | violation |
+| distinct-parallelGET (the first draft) | 1,372,800 / 1,639,484 | violation |
+| distinct-entryfirstGET (revision 2) | 1,212,562 / 1,448,840 | clean |
+
+The ghost (frozen-actor) runs of the decided rule find only the shapes of R1 to R4 (fence off: a lost put in R1 and R4, R3, R2; fence on: R3 in cold-direct, R2 in leader). No new residual. The cost the model shows is the one stated in section 5: a delete overlapping a copy returns when the copy finishes, and a frozen leader turns the wait into a 503.
 
 ## 9. What tierstore assumes of a store
 
@@ -442,7 +480,7 @@ All coordination state is small objects in the hot bucket, under reserved prefix
 |---|---|---|---|---|---|
 | client key | hot | a put, under its entry; the leader's copy-back | create-only | the client's bytes | until evicted (under its own entry) or deleted |
 | client key | cold | the leader's copy; a put at hot `Full`; a multipart completion | create-only | the client's bytes | until deleted by the client (and again by the leader when it finishes a delete) |
-| `_entries/<sha256 hex of key>` | hot | a put, delete or copy-back; the leader (eviction, strays, reap) | create-only; changed only by `If-Match` | `{v, key, op, st, owner, nonce, created_ms}` | deleted by its holder: a fresh delete frees its own, the leader releases the rest |
+| `_entries/<sha256 hex of key>` | hot | a put, delete or copy-back; the leader (HELD before a copy, eviction, strays, reap) | create-only; changed only by `If-Match` | `{v, key, op, st, owner, nonce, created_ms}` | deleted by its holder: a fresh delete frees its own, the leader releases the rest |
 | `_tiering/proxies/<id>` | hot | node `<id>`: boot, then every 10 s | create-only, then `If-Match` | `{proto, boot, hb}` | deleted by the leader 10 D after departure, if no entry names it |
 | `_tiering/lease` | hot | the leader | create-only to acquire; `If-Match` to renew and take over | `holder`, `nonce`, `generation` | deleted on release if the tag is still the holder's |
 | `_tiering/usage` | hot | leader, every 10 s | overwrite: only the leader publishes | `{hot_bytes, copy_lag, time}` | replaced by the next publish |
@@ -462,14 +500,14 @@ Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tie
 - **R2: a late cold publish or hot landing by a stalled leader.** A stalled old leader's create-only cold publish, or a client's late landing, executes after a delete was acknowledged and the entry released: the key reappears. A create-only call cannot be made conditional on "my entry still exists". It is not seen until a get or the eviction compare does.
 - **R3: a late landing of an unacknowledged put.** A reaped client's create-only landing that executes later is a valid late put, not a resurrection, since it was never acknowledged. If another write meanwhile took the other tier, hot and cold differ. The compare counts it, logs the key, keeps hot and never evicts it, **and until the keys are reconciled a get can return the unacknowledged put's bytes instead of the acknowledged ones.**
 - **R4: a late entry delete.** A stalled holder's plain entry delete (stores that ignore `If-Match` on DELETE: MinIO, RustFS) executes after the entry was reaped and re-created, or after the leader sealed a DEL entry, and removes it. The new holder's next CAS fails, so it does not acknowledge. **But a holder that already acknowledged loses its put when a live leader, resuming the delete it has in hand, deletes the data.** A conditional entry delete stops this on `dir:` and AWS; on MinIO and RustFS it is a residual. Signal: `tierstore_entry_vanished_total` (the leader's final delete found the entry gone).
-- **R5: read windows.** A LIST may show a key for the length of an in-flight copy after its delete was acknowledged; get and head answer 404. A 503 after a landing is an unknown outcome. The hot-only window is the ack-to-cold lag.
-- **R6: a crash blocks one key** for about D (60 s; up to D more right after a leader change).
+- **R5: read windows.** A LIST may show a key for the length of an in-flight copy after its delete was acknowledged; get and head answer 404. Before a delete is acknowledged, a get or head can still return the key's bytes, and a delete that overlaps a copy is not acknowledged until the copy ends (section 5, Delete). A 503 after a landing is an unknown outcome. The hot-only window is the ack-to-cold lag.
+- **R6: a crash blocks one key** for about D (60 s; up to D more right after a leader change, which also delays the copy of a key whose copy the dead leader held).
 - **R7: a monotonic clock that stops during a VM pause.** The deadline check cannot see the pause. Same class as R1 and R2.
 - **R8: the local cache.** Its keep check compares sizes, not content, so a build node can return the old bytes of a key deleted and re-put with a same-size body. Not touched here, because no write id is added. A separate, documented limit.
 - **R9: an old binary started after activation** writes without entries and its journals are never read. Unsupported; the rollout verb prints the credential rotation that fences it. Hot objects it leaves with no cold copy are adopted by the stray sweep.
 - **R10: conformance is not proven.** The model covers one key at store-call granularity; the Rust explorer makes the same interleavings a test.
 - **R11: copy-back is skipped under load** (the cap, the age limit, the pool priority): a cold-served key may be served cold longer. Not a correctness issue.
-- **R12: cold down stops new-key puts** (section 5): a consequence of the write-once HEAD under the entry.
+- **R12: cold down stops new-key puts** (section 5; decision 2 of section 15): a consequence of the write-once HEAD under the entry.
 
 Other limits: a lost hot tier loses what was not yet copied, and the window is the ack-to-cold lag. An alive but stalled client holds its key and pins its hot object without limit (the operator verb releases it). Eviction is first-in-first-out. Reserved keys can appear in a cold listing (the filter applies to the hot listing). On `dir:` at ENOSPC an entry create or CAS can fail, so a delete, the operation that frees space, can answer 503: set level `Full` well below disk-full. With cold down nothing is evictable, so hot fills and every write is then 503.
 
@@ -497,7 +535,8 @@ The shape is the end of a sequence of designs, each rejected for a concrete brea
 
 **What the entry design keeps and rejects.** From the earlier per-object-entry drafts it keeps only what a concrete break needs: the SEALED state (a release and a copy-back must not race a delete), amend and claim (a delete must not answer 503 under a pending put), hash-named entries, the process deadline `live_until` with a heartbeat, a bridge release for the rollout, and a held operator verb. It rejects several machines that those drafts added (extra entry states, a renewal task per holder, a quarantine, garbage collection of free entries, a 409 for concurrent writers, a `closed` flag, an upload id in the entry, a copy-poll, an entry-etag skip), because the model showed the smaller machine is enough and each cut shrinks the surface to test. There is no wake ping: the reconciler's back-off bounds the latency, and a ping would add a path to test and to secure for a gain the back-off already gives to within a few seconds.
 
-**Why a hot-miss get reads the entry first.** It was first drawn in parallel with the cold read, to save a round trip. The model found a sequence with no frozen actor in which that returns a deleted key's bytes (section 5, Get). The only safe shape found reads the entry first, at the cost of one small hot request on hot-miss gets, which are the slow path anyway.
+**Why a hot-miss get reads no entry, and a delete waits.** A get that read the entry in parallel with cold lost to the model (a deleted key's bytes, no frozen actor); reading the entry first was safe but put one more hot request in front of every hot-miss get. The decided shape puts the cost on the rarer operation: a delete that meets a copy in flight waits for the leader's release, and the leader holds the entry (HELD) before it copies so the delete can tell. The get is then one hot read on a hit and one cold read on a miss. The price is a slow or 503 delete while a large copy runs or the leader is frozen (section 8, The model check; section 15, decision 1).
+
 
 **Why no conditional DELETE is needed.** The release of an entry or of data is by its exclusive holder, so a plain DELETE is safe whenever the exclusivity holds. What is left is the stalled actor, R1 and R4, which no primitive of the target stores can stop. The design says so, pins it with tests, and takes the fence where the store offers one.
 
@@ -530,9 +569,9 @@ The compatibility tests of section 8 run the previous release on directories and
 
 1. Remove the reservation read side that no code path writes any more (the reservation marks in the backends, `get_marked`, the reconciler's reservation steps) and its two test files.
 2. Split the files that are over 1000 lines (`dir.rs`, `tiered.rs`, `cli.rs`, `config.rs`) before they grow; moves only.
-3. A one-call read, `open_read(key, range)` returning the tag and the body together, and a streaming `Proxy::get_stream`; the S3 front uses it. Gives the one-round-trip hot hit and removes the whole-object buffering of the read path.
+3. A one-call read, `open_read(key, range)` returning the tag and the body together, and a streaming `Proxy::get_stream`; the S3 front uses it. Gives the one-round-trip hot hit and removes the whole-object buffering of the read path. Pull request #94.
 4. `get_marked` becomes `get_tagged` (tag with the body, for entry reads).
-5. The `if-match-missing` start-up probe.
+5. The `if-match-missing` start-up probe. Pull request #93.
 6. `dir:`: the `_entries/` subdirectory and a blocking cross-process file lock, with the compatibility test that the previous release lists such a root.
 7. The test harness: gate backend, injected monotonic clock, recording sleeper, call counting, each with its own tests.
 
@@ -549,18 +588,20 @@ The compatibility tests of section 8 run the previous release on directories and
 
 *Stage 3, the protocol behind the epoch gate (nodes are inert until activation).*
 
-13. The reconciler loop: scan, pool, back-off, reap, the entry steps of section 6.5, the stray sweep.
+13. The reconciler loop: scan, pool, back-off, reap, the entry steps of section 6.5 (including the CAS to HELD before a copy), the stray sweep.
 14. Entry-held eviction, with the tag fast path and the compare; usage from the entry listing.
 15. The client put on entries: hot, cold-direct, multipart completion, presigned.
-16. The client delete: create, amend, claim.
-17. The get and head entry gate.
-18. Copy-back as entries, and the in-request copy-back removed (its own late pull request; open question 3).
+16. The client delete: create, amend, claim, and the wait for the leader's release when a copy is in flight (503 at the request deadline).
+17. The get and head: a hot miss goes straight to cold and reads no entry (the delete's wait of item 16 is what keeps this safe).
+18. Copy-back as entries, and the in-request copy-back removed (its own late pull request, decided 2026-11-03; section 15, decision 4).
 19. The Rust conformance explorer.
 
 *Stage 4, cut over.*
 
 20. Delete the per-node journal, its state and checkpoints, and the old flags (`--reconcile-interval`, `--journal-linger`); update the docs and this document.
 21. Activation wiring and the release; clean-up of the old `_journal/*` objects one release later.
+
+*The pull requests around the plan (2026-11-03).* #87 (an eviction without a tag first checks that cold holds a real object) and #67 (a checkpoint is stored only under a valid lease and never behind the stored one) are **kept** as interim fixes until the redesign replaces them: entry-held eviction (item 14) replaces #87, and removing the checkpoints (item 20) removes what #67 guards. #88 (the cold reservation writers) is **closed**, because reservations are dropped. #89 (the `Cargo.lock` release fix) is **merged**. Items 5 and 3 are open as #93 and #94. Separately signed off, and independent of the protocol: #91 (the grant flags are removed, and a presigned PUT is refused with AccessDenied) and #90 (the nft tables are renamed and the host updater name is banned).
 
 The bridge release of step 11 must ship and be rolled to every node before any step of stage 3 activates. Stages 1 and 3 leave two protocol paths in the code for a period. Today's conditional delete in `Backend` (`delete_if_match`) stays as the optional fence of section 11.
 
@@ -584,24 +625,25 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 
 **(e) Format versioning and the compatibility test.** What: a version in each stored format, or the written additive-only rule enforced by a test that reads the previous release's objects, run in both directions. Why: the entry body carries `v` from the start, but the older formats do not, and the rollout depends on the rule. Touches: the stored-format fixtures and a compatibility test per format.
 
-## 15. Open questions
+## 15. Decisions
 
-Decided as written, but flagged because each is a trade a reader may want to revisit:
+The decisions of 2026-11-03, taken by the CEO on the design as drafted. They state what the design is; the sections above describe it accordingly.
 
-1. **Cold down stops new-key puts.** A consequence of dropping the reservation: write-once is a cold HEAD under the entry, and a cold error is a 503. The alternative, re-checking write-once at replication, reopens the decision and can acknowledge two puts of one key.
-2. **The default `--reconcile-idle-max`: 10 s or 60 s.** 10 s costs about $2 to $3 a month more (inferred) and bounds the hot-only window and the 503 after an amended delete at 10 s; 60 s leaves about 30 s median ack-to-cold after a quiet period. The design recommends 10 s.
-3. **Copy-back.** Keep it, as its own late pull request, or cut it. Cutting means the cache never refills from cold, a regression against today's in-request copy-back.
-4. **Rollout.** One planned write pause of minutes, no canary, and the owners of the client fleet told beforehand.
-5. **Residuals R1 to R4** stand as stated in section 11, with R3 and R4 stated at their full strength.
-6. **A hot-miss get reads the entry first**, not in parallel with cold: one extra small hot request on hot-miss gets, required by the model (section 5, Get).
+1. **A GET never reads the journal entry.** A hot hit is one hot GET. A hot miss is one cold GET, plus the best-effort copy-back request. This **reverses** the earlier draft's entry-first GET. In its place the reconciler CASes `(PUT, PENDING)` to `(PUT, HELD, owner)` before it copies, and any DELETE that meets an in-flight copy waits for it: a DELETE that finds the entry HELD by the reconciler, and a DELETE that claims a handed-over `(DEL, PENDING)` entry (a retry finishing a half-done delete) amend or claim by CAS, delete hot and cold, then poll the entry with the per-item back-off until the reconciler releases it, and only then are acknowledged. Past the request deadline (a frozen or stalled reconciler) the answer is a retryable 503. A DELETE that amends a PENDING (not HELD) put makes the reconciler's CAS to HELD fail, so no copy starts and it does not wait. A DELETE with no entry finishes synchronously. Cold is always deleted at once by the DELETE. Sections 5, 6.2, 6.5 and 8 (The model check); cost: a delete overlapping a copy returns when the copy finishes, and 503s on a frozen reconciler.
+2. **New-key puts fail (503) while cold is down.** Accepted. A consequence of dropping the reservation: write-once is a cold HEAD under the entry, and a cold error is a 503. The alternative, re-checking write-once at replication, reopens the decision and can acknowledge two puts of one key.
+3. **`--reconcile-idle-max` defaults to 10 s.** The idle wait is 1 s and backs off to 10 s. It costs about $2 to $3 a month more than 60 s (inferred) and bounds the hot-only window and the 503 after an amended delete at 10 s.
+4. **Copy-back is kept,** as its own late pull request (item 18 of the plan, section 14), before the journal is deleted. Cutting it would mean the cache never refills from cold, a regression against today's in-request copy-back.
+5. **Rollout: one planned write pause of a few minutes, no canary.** Accepted, with the owners of the client fleet told beforehand (section 13).
+6. **Residuals R1 to R4 are accepted as written** in section 11, with R3 and R4 stated at their full strength. The model's frozen-actor runs of decision 1 find only these shapes.
+7. **The pull request plan** (section 14): #87 and #67 are kept as interim fixes until the redesign replaces them; #88 is closed; #89 is merged; #93 (the `if-match-missing` probe, item 5) and #94 (the one-call streaming read, item 3) are the new stage-0 pull requests. #91 and #90 are signed off as well.
 
-Not yet decided:
+Still open, not covered by those decisions:
 
-7. Should start-up measure the store's clock against the machine's and refuse beyond a bound (no decision uses a cross-machine clock, so this matters only for the usage staleness check)?
-8. Should the self-test say plainly that concurrent atomicity is assumed, and should its paging check tolerate a lagging listing, which the trait allows?
-9. Should reserved keys be filtered from cold listings, and from the proxy's get and head, or only at the front?
-10. Should the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
-11. For configuration C, should the local cache sit in front of the proxy (cache hits skip the hot tier) or beside it?
+8. Should start-up measure the store's clock against the machine's and refuse beyond a bound (no decision uses a cross-machine clock, so this matters only for the usage staleness check)?
+9. Should the self-test say plainly that concurrent atomicity is assumed, and should its paging check tolerate a lagging listing, which the trait allows?
+10. Should reserved keys be filtered from cold listings, and from the proxy's get and head, or only at the front?
+11. Should the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
+12. For configuration C, should the local cache sit in front of the proxy (cache hits skip the hot tier) or beside it?
 
 ## 16. Glossary
 
@@ -615,8 +657,8 @@ Not yet decided:
 | Front | The S3 or OCI HTTP surface over a proxy. |
 | Entry | The small object `_entries/<sha256 of the key>` in hot that holds a key while one actor changes it. Created create-only, changed only by `If-Match`, deleted by its exclusive holder. It is both the lock and the journal record. |
 | Op, state | An entry's op is PUT, DEL, CB or EVICT; its state is HELD, PENDING or SEALED (section 6.2). |
-| HELD / PENDING / SEALED | The owner is working / landed, the leader's turn / the leader is finishing and nobody else may act. |
-| Amend, claim | A delete turning a pending put or copy-back entry into its own, or taking over a handed-over delete, by CAS. |
+| HELD / PENDING / SEALED | The owner is working (a client, or the leader copying) / landed, the leader's turn / the leader is finishing and nobody else may act. |
+| Amend, claim | A delete turning a pending put or copy-back entry, or a put entry the leader holds for a copy, into its own, or taking over a handed-over delete, by CAS. A delete that amends the leader's HELD entry, or claims, then waits for the release. |
 | Seal | The leader's CAS of an entry to SEALED before it releases it or lands a copy-back. |
 | Reap | The leader moving a departed owner's HELD entry to PENDING. |
 | Reconciler / leader | The one process, chosen by lease, that lists the entries and copies to cold, finishes deletes, copies back, evicts, reaps and publishes usage. The only actor that releases entries it did not take itself. |
