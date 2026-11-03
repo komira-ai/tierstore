@@ -95,6 +95,14 @@ pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
     Ok(blocks.join("\n\n"))
 }
 
+/// The index of the first empty line after line `from`, or the number of lines: where the
+/// lock entry that holds line `from` ends.
+fn package_end(lines: &[String], from: usize) -> usize {
+    (from + 1..lines.len())
+        .find(|&i| lines[i].is_empty())
+        .unwrap_or(lines.len())
+}
+
 /// Whether `line` is a dependency entry naming a package called `tierstore`.
 fn is_tierstore_ref(line: &str) -> bool {
     line.trim_start().starts_with("\"tierstore ")
