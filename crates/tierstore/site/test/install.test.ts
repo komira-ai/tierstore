@@ -176,6 +176,19 @@ test('every document of the repository that the install pages, the packaging not
   assert.ok(named >= 6, `only ${named} paths were found to check`);
 });
 
+// Catches: a page that cites a file under packaging/ that is not in the repository (the pages once named
+// packaging/tierstore and packaging/tierstore/README.md, which never existed).
+test('every packaging path the install and demo pages name exists in the repository', () => {
+  let named = 0;
+  for (const page of ['install.html', 'demo.html']) {
+    const file = `${SITE_REL}/content/${page}`;
+    const paths = [...read(REPO, file).matchAll(/(?<![\w/.-])packaging(?:\/[A-Za-z0-9@._-]+)*/g)].map((m) => m[0]);
+    for (const p of paths) assert.ok(existsSync(join(REPO, p)), `${file} names ${p}, which does not exist`);
+    named += paths.length;
+  }
+  assert.ok(named >= 3, `only ${named} paths were found to check`);
+});
+
 // The verify block as a whole: each command checked on its own line, and the three checks in their order.
 //
 // Catches: an online gh command that loses --source-digest or --deny-self-hosted-runners while the offline command
