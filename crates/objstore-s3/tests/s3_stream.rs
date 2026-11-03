@@ -514,10 +514,9 @@ async fn an_unsized_streamed_replace_of_at_most_one_part_is_one_put_with_if_matc
         let put = seen[0].to_ascii_lowercase();
         assert!(put.starts_with("put /test-bucket/cas/seg-1 "), "{put}");
         assert!(put.contains("\r\nif-match: \"old\"\r\n"), "{put}");
-        assert!(
-            put.contains(&format!("\r\ncontent-length: {len}\r\n")),
-            "{put}"
-        );
+        // An empty body states no length; any other states its own.
+        let stated = put.contains(&format!("\r\ncontent-length: {len}\r\n"));
+        assert_eq!(stated, len > 0, "{put}");
     }
 }
 
