@@ -290,7 +290,7 @@ impl Backend for FaultyBackend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         let asked = range.map(|range| (range.offset(), range.size()));
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;

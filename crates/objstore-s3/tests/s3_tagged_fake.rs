@@ -356,7 +356,7 @@ async fn the_reservation_mark_is_what_the_last_write_sent() {
     let head = store.head(&k).await.unwrap();
     assert_eq!((head.reservation, head.etag.as_str()), (true, tag.as_str()));
     let read = store.get_all_marked(&k).await.unwrap();
-    assert_eq!(read, (Bytes::from("one"), true));
+    assert_eq!(read, (Bytes::from("one"), true, Some(tag.clone())));
 
     let again = store.put_new_marked(&k, Bytes::from("two")).await;
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
@@ -378,12 +378,12 @@ async fn the_reservation_mark_is_what_the_last_write_sent() {
     assert_eq!(service(&stale).0, 412);
     assert_eq!(store.get_all(&k).await.unwrap(), "three");
 
-    store
+    let five = store
         .put_if_match(&k, Bytes::from("five"), &kept)
         .await
         .unwrap();
     let cleared = store.get_all_marked(&k).await.unwrap();
-    assert_eq!(cleared, (Bytes::from("five"), false));
+    assert_eq!(cleared, (Bytes::from("five"), false, Some(five)));
     assert!(!store.head(&k).await.unwrap().reservation);
 }
 

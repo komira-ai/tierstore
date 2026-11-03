@@ -1,12 +1,14 @@
 //! The calls of [`S3Store`] that never hold an object whole: a read that gives the answer's body
 //! as the pieces it arrives in ([`S3Store::get_stream`]), and a conditional replacement that sends
-//! the new body as it is given ([`S3Store::put_stream_if_match`]).
+//! the new body as it is given ([`S3Store::put_stream_if_match`], and [`S3Store::put_stream_if_match_unsized`]
+//! for a body whose length is not known).
 //!
 //! A read is one GET, whole or ranged. The answer's headers must arrive within `request_timeout`,
 //! and then each piece of the body within `request_timeout` of the one before, so a body of any
 //! size may take as long as it needs while it keeps arriving, as a ranged read does. The request
-//! is sent again after a failure in transport before any of the body was given; a failure after
-//! that is the end of the body, an error, and the caller starts the read again. The reservation
+//! is sent again after a failure in transport before the response headers arrived; once valid
+//! headers have arrived the read is given, and a failure after that, even before the first body
+//! byte, is the end of the body, an error, and the caller starts the read again. The reservation
 //! mark is that of the answer's own headers, so the bytes and the mark belong to one object.
 
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use reqwest::{Response, StatusCode};
 
 use super::tagged::{RESERVATION_HEADER, header, retrying};
 use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, transport};
+use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 
 /// The pieces of the body of a read, in order. A piece that is an error ends the body: the
@@ -29,6 +32,9 @@ pub struct ObjectRead {
     /// Whether the answer carried the reservation mark: the mark of the object the body is read
     /// from.
     pub reservation: bool,
+    /// The entity tag of the answer, as the store sends it (quotes included), if it sends one:
+    /// the tag of the object the body is read from.
+    pub etag: Option<String>,
     /// The bytes, in pieces. It ends without an error only when the whole body came: the HTTP
     /// client fails a body that is shorter than the `Content-Length` of the answer.
     pub body: ObjectBody,
@@ -105,8 +111,13 @@ impl S3Store {
             _ => return Err(self.conn.within(failure(resp)).await?),
         }
         let reservation = header(&resp, RESERVATION_HEADER) == Some("1");
+        let etag = header(&resp, "etag").map(str::to_owned);
         let body = pieces(Arc::clone(&self.conn), resp);
-        Ok(ObjectRead { reservation, body })
+        Ok(ObjectRead {
+            reservation,
+            etag,
+            body,
+        })
     }
 
     /// Replaces the object only if its entity tag is `etag` (`If-Match`, the tag sent as it is),
@@ -134,6 +145,31 @@ impl S3Store {
             return self.put_if_match(key, bytes, etag).await;
         }
         let done = multipart::put(&self.conn, key, len, body, Some(etag)).await?;
+        done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+    }
+
+    /// [`put_stream_if_match`](Self::put_stream_if_match) for a body whose length is not known,
+    /// which is never held whole: the first [`PART_BYTES`](super::PART_BYTES) of it are read, and if the body ends
+    /// there it is one PUT with `If-Match`; if it has more, it is a multipart upload whose parts
+    /// of [`PART_BYTES`](super::PART_BYTES) are each sent as soon as they are full (so the upload moves while the
+    /// body is still being given), completed with `If-Match` after the whole body was read, and
+    /// aborted on any failure. At most one part and one piece of the body are held. The object is
+    /// replaced only by the last request; the write is sent once.
+    ///
+    /// # Errors
+    /// As [`put_stream_if_match`](Self::put_stream_if_match), and the body's error.
+    pub async fn put_stream_if_match_unsized(
+        &self,
+        key: &ObjectKey,
+        body: BodyStream,
+        etag: &str,
+    ) -> Result<String, ObjectStoreError> {
+        let mut rest = Unsized::new(body);
+        let first = rest.next(multipart::PART_LEN).await?;
+        if !rest.more().await? {
+            return self.put_if_match(key, first, etag).await;
+        }
+        let done = multipart::put_unsized(&self.conn, key, first, rest, etag).await?;
         done.ok_or_else(|| bad(key, "the completion carries no ETag"))
     }
 }

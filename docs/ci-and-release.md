@@ -226,7 +226,7 @@ is made from a commit whose `artifacts.yml` run computed that same version.
 
 `crates/compat` holds tests that run two releases of the `tierstore` library side by side: this
 branch's, and the previous release's, which is the dev-dependency `tierstore_prev`, taken from this
-repository's public URL at the commit of the previous tag (`rev` in `crates/compat/Cargo.toml`;
+repository's public URL at the commit of the previous tag (`rev` in the root `Cargo.toml`, in `[workspace.dependencies]`;
 `allow-git` in `deny.toml` names that one URL). Over one directory and one in-process S3 service,
 each release reads and replaces what the other wrote (`tests/dir.rs`, `tests/s3.rs`), which is how
 a change to the formats stays additive. The tests need no network: only the build fetches the

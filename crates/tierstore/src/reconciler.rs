@@ -164,8 +164,9 @@ fn millis(duration: Duration) -> u64 {
 /// `_tiering/proxies/`, one small object for each proxy, and, for each proxy, the journal
 /// objects above the last one it read):
 ///
-/// 1. **Tail the journals.** For each proxy, in the order of the journal objects from its
-///    checkpoint, a journal object is read and applied: its puts are settled with the cold
+/// 1. **Tail the journals.** The journal objects of every proxy that follow its checkpoint are read
+///    first; then, for each proxy, in the order of the journal objects from its checkpoint, a
+///    journal object is applied: its puts are settled with the cold
 ///    tier, up to [`ReconcilerConfig::parallel`] at a time, one look at a time for each key
 ///    (the hot tier's object, then the cold tier's), by the rules below; then its deletes are
 ///    applied to the cold tier, by the last rule below. Then the object counts as applied.
@@ -296,8 +297,15 @@ impl Reconciler {
         report.held = true;
         self.discover(&mut report).await;
         let ids: Vec<String> = self.books.streams.keys().cloned().collect();
+        // Every proxy's journal is read before any is applied, so that a mirror of one proxy
+        // is judged against the later puts and deletes of all of them.
         for id in &ids {
-            self.advance(id, &mut report).await;
+            if let Err(error) = self.read_new(id).await {
+                report.failed.push(error);
+            }
+        }
+        for id in &ids {
+            self.apply_pending(id, &mut report).await;
         }
         self.books.trim_stale();
         let kept = millis(self.config.retention);
@@ -336,13 +344,6 @@ impl Reconciler {
                 Err(error) => report.failed.push(error),
             }
         }
-    }
-
-    async fn advance(&mut self, id: &str, report: &mut PassReport) {
-        if let Err(error) = self.read_new(id).await {
-            report.failed.push(error);
-        }
-        self.apply_pending(id, report).await;
     }
 
     /// Reads the journal objects of a proxy that follow the last one read, as far as their
