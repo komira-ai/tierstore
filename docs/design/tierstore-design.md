@@ -48,10 +48,10 @@ Non-goals:
 One `tierstore` process serves an S3 front (`--listen`) and, if asked, a read-only OCI front (`--oci-listen`, its own address). Both fronts call the same **proxy**, so an image pulled over OCI and an object read over S3 are answered from the same tiers by the same code ([server/cli.rs](../../crates/tierstore/src/server/cli.rs) module docs). The pieces:
 
 - **Tiers.** A **hot tier** (small, fast: `dir:` on local disk or an S3-compatible bucket) and a **cold tier** (large, cheap: `dir:` or an S3-compatible bucket). Both are used through one trait, [`Backend`](../../crates/tierstore/src/backend.rs). `memory` is also accepted as a tier kind; it keeps nothing across a restart and stamps every object with time zero, so it is for tests.
-- **Proxy** ([tiered.rs](../../crates/tierstore/src/tiered.rs), `Proxy`). Answers every request against the two tiers. It keeps no durable state: a cached reading of capacity, a full latch, the open journal batch and its next number. Each process boot gets a fresh id `<node>-<boot id>`, never reused.
+- **Proxy** ([tiered.rs](../../crates/tierstore/src/tiered.rs), `Proxy`). Answers every request against the two tiers. It keeps no durable state: a cached reading of capacity, a full latch, the open journal batch and its next number. Today `Proxy::open` resumes the configured node id and its journal sequence; a fresh id `<node>-<boot id>` on every boot, never reused, is part of the planned protocol (sections 5, 6 and 12).
 - **Fronts** ([server/](../../crates/tierstore/src/server/), `ops.rs` and `oci/`). Check signatures, enforce request limits, and call the proxy as a `Backend`.
-- **Journal** ([journal.rs](../../crates/tierstore/src/journal.rs)). A put is recorded as an entry in a small object `_journal/<proxy id>/<seq>` in the hot tier (a copy-back appends one too, and today's delete appends a delete entry; section 5). A put is acknowledged when the key is reserved in cold and the object and its entry are durable in hot. The leader learns what the hot tier holds from journal objects and never lists the hot tier's data, so a pass costs work in proportion to new writes.
-- **Reconciler** ([reconciler.rs](../../crates/tierstore/src/reconciler.rs)). Runs in the leader only. Copies each journaled put to the cold tier (replacing the reservation), evicts from the hot tier when it fills, writes checkpoints, deletes journal objects at once and retires departed nodes (today's code also applies journaled deletes; section 5, Delete). It works on the raw tiers, not through the proxy.
+- **Journal** ([journal.rs](../../crates/tierstore/src/journal.rs)). A put is recorded as an entry in a small object `_journal/<proxy id>/<seq>` in the hot tier (a copy-back appends one too, and today's delete appends a delete entry; section 5). Today a put is acknowledged after the cold tier is checked with a HEAD and the object and its entry are durable in hot; acknowledging once the key is reserved in cold is the planned protocol (sections 5 and 12). The leader learns what the hot tier holds from journal objects and never lists the hot tier's data, so a pass costs work in proportion to new writes.
+- **Reconciler** ([reconciler.rs](../../crates/tierstore/src/reconciler.rs)). Runs in the leader only. Copies each journaled put to the cold tier, evicts from the hot tier when it fills and writes checkpoints. Today `Reconciler::prune` keeps a journal object until eviction progress and retention allow deleting it; replacing a reservation, deleting journal objects at once and retiring departed nodes are planned (section 12). (Today's code also applies journaled deletes; section 5, Delete). It works on the raw tiers, not through the proxy.
 - **Lease** ([lease.rs](../../crates/tierstore/src/lease.rs)). One object in the hot tier; its holder is the one active reconciler among all processes.
 - **Local cache** ([server/local_cache/](../../crates/tierstore/src/server/local_cache/)). A read-through disk cache on a node's own NVMe, used by the build-node configuration (section 4). It is not part of the storage-node path.
 
@@ -266,7 +266,7 @@ Why: the listening sockets are passed on, never closed, so the kernel's queue of
 
 ### 6.8 Usage and back-pressure
 
-The leader publishes `_tiering/usage` = `{hot_bytes, copy_lag, time}` at the end of each pass in which it holds the lease. The proxy never measures the hot tier. It rereads the usage object at most once per second and maps it to a level: `Open`, `Critical` (at or above 95% of the budget) or `Full` (at or above the budget). A missing, unreadable or 30-second-old usage counts as `Open`. A hot tier that answers `Full` is latched `Full` for one second. `hot_bytes` is a **budget** the deployment sets below the real capacity, not a measurement of the disk. `/usagez` answers 200, or 503 when the usage is older than `--usage-stale-after`.
+The leader publishes `_tiering/usage` = `{hot_bytes, copy_lag, time}` at the end of each pass in which it holds the lease. The proxy never measures the hot tier. It rereads the usage object at most once per second and maps it to a level: `Open`, `Critical` (at or above 95% of the budget) or `Full` (at or above the budget). A missing, unreadable or 30-second-old usage counts as `Open`. A hot tier that answers `Full` is latched `Full` for one second. `hot_bytes` in this object is the journal-derived usage that `Reconciler::publish` takes from `Books::usage()`, not a measurement of the disk. The budget it is compared with is configured separately (`--hot-bytes` or `hot_store.budget`) and reaches the proxy as `ProxyConfig::hot_budget`; the deployment sets it below the real capacity. `/usagez` answers 200, or 503 when the usage is older than `--usage-stale-after`.
 
 There is no back-pressure sleep. A put at `Open` or `Critical` takes the normal path; at `Full` it takes the cold path or, if presigned, is refused with 503 `SlowDown` (section 5). `Critical` stops copy-back, so a read does not fill a hot tier that is nearly full.
 
@@ -474,7 +474,7 @@ Why: the gaps of section 8 (a lost object, a resurrected delete, a double acknow
 ```toml
 [[interface]]
 type = "s3"
-params = { port = 9300 }      # or addresses = ["10.0.0.5:9300"]
+params = { port = 9300 }      # or addresses = ["192.0.2.5:9300"]
 
 [[interface]]
 type = "oci"
