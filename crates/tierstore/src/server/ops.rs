@@ -9,6 +9,7 @@ use hyper::body::Body;
 use hyper::header::HeaderMap;
 use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::task::JoinError;
 
 use crate::{ByteRange, Error, Meta, ReadBody};
 
@@ -198,13 +199,22 @@ fn conditional(parts: &Parts, key: &str, meta: &Meta) -> Result<Option<Answer>, 
 /// object from one tier would leave it in the other. The completion of a multipart upload is
 /// carried to its end too, so that the parts it joins are not left half joined. (A put does
 /// the same on its own, see `put_streamed`.)
-async fn detached<T, F>(call: F) -> Result<T, Error>
+pub(super) async fn detached<T, F>(call: F) -> Result<T, Error>
 where
     T: Send + 'static,
     F: Future<Output = Result<T, Error>> + Send + 'static,
 {
-    let done = tokio::spawn(call).await;
-    done.expect("a call to the backend does not panic")
+    joined(tokio::spawn(call).await)
+}
+
+/// What a call run on a task of its own came to: its result, or, if the task panicked or was
+/// cancelled, a failure of the call.
+fn joined<T>(done: Result<Result<T, Error>, JoinError>) -> Result<T, Error> {
+    done.unwrap_or_else(|lost| {
+        Err(Error::Other(format!(
+            "a call to the backend did not finish: {lost}"
+        )))
+    })
 }
 
 /// Whether a put only creates, which is what it does when it has no `If-Match` and its
@@ -417,7 +427,7 @@ impl Server {
             Some(done) => done,
             None => storing.await,
         };
-        let stored = stored.expect("a call to the backend does not panic");
+        let stored = joined(stored);
         if let Some(error) = refused.take() {
             return Err(error);
         }

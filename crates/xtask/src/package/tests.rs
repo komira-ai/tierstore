@@ -96,6 +96,30 @@ fn the_tarball_holds_the_binary_alone_owned_by_root_mode_0755_at_time_0() {
     );
 }
 
+/// A sink that refuses every write.
+struct Full;
+
+impl Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+}
+
+#[test]
+fn a_tarball_that_cannot_be_written_to_its_sink_is_an_error_that_says_so() {
+    // Asserts the error of a sink that refuses its writes: the message names the tarball and
+    // the sink's own error, instead of a panic.
+    let error = tarball_to(Full, "tierstore", BINARY).err();
+    assert_eq!(
+        error.as_deref(),
+        Some("cannot write the tarball: the sink is full")
+    );
+}
+
 #[test]
 fn the_gzip_stream_names_no_file_and_no_time() {
     // Catches: a gzip header carrying the time it was written (so two runs of one

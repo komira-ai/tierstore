@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 use crate::TestClock;
 
 use super::auth::{
-    MALFORMED, MISMATCH, SKEWED, Signed, UNKNOWN_KEY, UNSIGNED, WEAK, canonical_header, sign,
-    sign_as, verify,
+    MALFORMED, MISMATCH, SKEWED, Signed, UNKNOWN_KEY, UNSIGNED, WEAK, block_key, canonical_header,
+    hmac, sign, sign_as, verify,
 };
 use super::keys::Role;
 use super::testing::{BUCKET, KEY_ID, NOW, SECRET};
@@ -374,4 +374,41 @@ fn a_request_with_no_canonical_form_is_malformed() {
     assert_eq!(verify(&config, &bad_path), Err(MALFORMED));
     let bad_query = changed(|parts| parts.uri = "/b/k?prefix=%FF".parse().unwrap());
     assert_eq!(verify(&config, &bad_query), Err(MALFORMED));
+}
+
+/// Asserts the HMAC-SHA-256 cases of RFC 4231 that bracket the block size: a short key (case 1,
+/// 20 bytes, padded) and a key longer than the 64-byte block (case 6, 131 bytes, hashed first);
+/// and that a key of exactly one block, or none, is padded as it should be.
+#[test]
+fn hmac_keys_shorter_and_longer_than_the_block_give_the_standard_tags() {
+    assert_eq!(
+        hex::encode(hmac(&[0x0b; 20], b"Hi There")),
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    );
+    assert_eq!(
+        hex::encode(hmac(
+            &[0xaa; 131],
+            b"Test Using Larger Than Block-Size Key - Hash Key First"
+        )),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+    assert_eq!(block_key(&[7; 64]), [7; 64]);
+    assert_eq!(block_key(&[]), [0; 64]);
+}
+
+/// Asserts that the key made for the HMAC gives the tags of the `hmac` crate's own length
+/// handling for no key, keys around the 64-byte block (63, 64, 65) and around two blocks.
+#[test]
+fn the_block_key_gives_the_tags_of_the_crates_own_key_handling() {
+    use hmac::{Hmac, KeyInit, Mac};
+    for length in [0, 1, 63, 64, 65, 66, 127, 128, 129, 131] {
+        let key = vec![0x5a_u8; length];
+        let mut own = <Hmac<Sha256> as KeyInit>::new_from_slice(&key).unwrap();
+        own.update(b"data");
+        assert_eq!(
+            hmac(&key, b"data"),
+            own.finalize().into_bytes().to_vec(),
+            "a key of {length} bytes"
+        );
+    }
 }

@@ -36,7 +36,7 @@ pub(super) fn check_policies(policies: &[Policy], caching: bool) -> Result<(), C
             return Err(invalid(&format!("{key}.prefix"), why));
         }
         if policy.cache && !caching {
-            let why = "a storage node keeps no cache: it needs [local_cache] and no [hot_store]";
+            let why = "a node without [local_cache] keeps no cache: give it [local_cache]";
             return Err(invalid(&format!("{key}.cache"), why));
         }
         for (before, other) in policies.iter().enumerate().take(at) {

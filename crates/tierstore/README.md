@@ -81,9 +81,9 @@ exits 2.
 Prometheus text of the counters of the process. All are counters since the process started.
 `/metricz` renders whichever blocks the process has: the proxy's (a storage node, with a hot and
 a cold tier; the block below), the OCI read front's, and the local cache's `tierstore_cache_*`
-block (a build node; see "Local cache" below). A cache node and a storage node are different
-processes: a file with `[local_cache]` is refused together with `[hot_store]`, so one process does
-not have both the proxy's and the cache's block.
+block (a build node, or a storage node with a cache in front of its proxy; see "Local cache"
+below). A file with `[local_cache]`, `[hot_store]` and `[cold_store]` is one process with both the
+proxy's block and the cache's.
 
 The block of the proxy is one labelled family per measure, so one query serves every tier. The
 labels have a few fixed values, never a key or a client: `tier` is `hot` or `cold` here (`local`
@@ -96,9 +96,9 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 | `tierstore_read_errors_total` | `tier`, `op` | reads the tier failed with anything but "not found" (the tier is down, refused, timed out) |
 | `tierstore_reads_total` | `tier`, `op` | reads that reached the tier: hits, misses and errors. For `tier="cold"` these are the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | `tier` | bytes of object data that gets answered, by the tier that gave them (the range, if one was asked) |
-| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, whole objects whatever range was asked (the range alone when the hot tier is critical), so the ratio to `bytes_served` is the read amplification of ranged gets |
+| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, the whole object for a get without a range and the range alone for a ranged get |
 | `tierstore_promotions_total` | none | objects a get copied from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object, whatever range the get asked |
+| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object (only a get without a range copies one) |
 | `tierstore_promotions_skipped_total` | `reason` = `critical`, `full`, `raced`, `failed` | copies not made, by reason |
 
 What the counts mean:
