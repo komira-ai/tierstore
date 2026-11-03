@@ -52,7 +52,8 @@ pub fn set_manifest(text: &str, version: &str) -> Result<String, Error> {
 /// The lock text with the version of the local `tierstore` package (the one without a `source`
 /// line) set to `version`, and every dependency entry naming that package by its old version
 /// (`"tierstore <old>"`, no ` (source)` suffix) changed to match. A second package of the same
-/// name from a remote source, and the entries naming it, stay as they were.
+/// name from a remote source keeps its version; the entries naming it keep theirs, and lose the
+/// ` (source)` suffix when its version is no longer the local one's, as cargo writes them.
 pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
     let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
     let local = (0..lines.len())
@@ -74,6 +75,17 @@ pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
     let to = format!("\"tierstore {version}\",");
     for line in lines.iter_mut().filter(|l| l.trim() == from) {
         *line = format!("{}{to}", &line[..line.len() - line.trim_start().len()]);
+    }
+    // Cargo names the source of a dependency entry only while another package of the same name
+    // has the same version: a remote entry at another version than the local package loses it.
+    let same = format!("\"tierstore {version} (");
+    for line in lines
+        .iter_mut()
+        .filter(|l| is_tierstore_ref(l) && !l.trim_start().starts_with(&same))
+    {
+        if let Some((head, _)) = line.split_once(" (") {
+            *line = format!("{head}\",");
+        }
     }
     // Cargo writes same-named entries ordered by version, then local before remote: a lock
     // in another order is rewritten by the next cargo command, which `--locked` refuses.
