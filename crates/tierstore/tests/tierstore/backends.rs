@@ -200,6 +200,7 @@ fn a_journal_object_is_a_json_list_of_entries() {
         size: 5,
         time: 7,
         cold_tag: None,
+        hot_tag: None,
     };
     let delete = JournalEntry {
         op: JournalOp::Delete,
@@ -207,6 +208,7 @@ fn a_journal_object_is_a_json_list_of_entries() {
         size: 0,
         time: 8,
         cold_tag: None,
+        hot_tag: None,
     };
     let entries = vec![put, delete];
     let encoded = encode_journal(&entries);

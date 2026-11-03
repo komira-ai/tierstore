@@ -97,6 +97,9 @@ struct Wanted<'a> {
     reservations: Vec<&'a str>,
     /// The cold tag of the last mirror entry of the key.
     mirror: Option<&'a str>,
+    /// The hot tag of the last mirror entry of the key: the tag the hot tier gave the copy. It is
+    /// only ever compared with the hot tier's tags, never with a cold tag.
+    mirror_hot: Option<&'a str>,
     /// The index, in the journal object, of the last entry that puts the key.
     index: u64,
     /// Whether that entry is still the latest word on the key in the journals read: no later
@@ -115,6 +118,7 @@ fn wanted(entries: &[JournalEntry]) -> BTreeMap<&str, Wanted<'_>> {
             kind: entry.op,
             reservations: Vec::new(),
             mirror: None,
+            mirror_hot: None,
             index: 0,
             current: true,
         });
@@ -123,7 +127,10 @@ fn wanted(entries: &[JournalEntry]) -> BTreeMap<&str, Wanted<'_>> {
         let tag = entry.cold_tag.as_deref();
         match entry.op {
             JournalOp::PutReserved => slot.reservations.extend(tag),
-            JournalOp::PutMirror => slot.mirror = tag,
+            JournalOp::PutMirror => {
+                slot.mirror = tag;
+                slot.mirror_hot = entry.hot_tag.as_deref();
+            }
             _ => {}
         }
     }
@@ -185,24 +192,29 @@ fn millis(duration: Duration) -> u64 {
 ///      a proxy is never the word on a key that another proxy's put holds. The journals do not
 ///      order the writes of different proxies, so the guarantee is about ownership and not about
 ///      time: a mirror deletes the hot object only if the object has the content tag the
-///      mirror's own entry names (`If-Match`, [`Backend::delete_if_match`]), so a newer
-///      acknowledged object of other bytes is never deleted by a mirror, and a mirror that names
-///      no tag deletes nothing. A put of the same bytes by another proxy whose journal object no
+///      mirror's own entry names as the hot tier's tag of its copy (`JournalEntry::hot_tag`;
+///      `If-Match`, [`Backend::delete_if_match`]), so a newer acknowledged object of other bytes
+///      is never deleted by a mirror, and a mirror that names no hot tag deletes nothing. Tags are
+///      never compared across tiers (a directory tier tags by SHA-256, an S3 tier by ETag): the
+///      cold tag is compared with the cold tier's, the hot tag with the hot tier's. A put of the same bytes by another proxy whose journal object no
 ///      read has shown yet is not told from the mirror's object;
 ///    - the hot tier no longer holds the key: nothing to copy; for a `PutReserved`, the
 ///      reservations its entries name are deleted by their tags (a put and a delete that were
 ///      both acknowledged leave no reservation behind), and no other cold object is touched;
 ///    - the cold tier holds an object (not a reservation): a `PutReserved` or a `Put` counts as
-///      copied; a `PutMirror` counts as copied if the cold object has the tag its entry names,
-///      else the hot copy is a stale mirror and is deleted by the tag of its entry;
+///      copied; a `PutMirror` counts as copied, and so becomes an eviction candidate, only if the
+///      cold object has the cold tag its entry names *and* the hot object has the hot tag its
+///      entry names; if the cold object has another tag the hot copy is a stale mirror and is
+///      deleted by the hot tag of its entry; if the hot object has another tag it is not the
+///      mirror's, and is left and not counted;
 ///    - the cold tier holds a reservation: a `PutReserved` whose entries name its tag replaces it
 ///      with the hot bytes in one conditional write (if the reservation changed meanwhile, the
 ///      key is looked at again, three times at most, then the pass reports it); a reservation
 ///      its entries do not name is another put's, and nothing is touched; a `Put` leaves it
-///      alone; a `PutMirror` is an orphan and the hot copy is deleted by the tag of its entry;
+///      alone; a `PutMirror` is an orphan and the hot copy is deleted by the hot tag of its entry;
 ///    - the cold tier holds nothing: a `PutReserved` keeps the hot object and the pass reports
 ///      the key (a cold bucket that was repointed or restored is what it means, and the
-///      key stays refused until someone looks); a `PutMirror` deletes the hot copy by the tag of its entry;
+///      key stays refused until someone looks); a `PutMirror` deletes the hot copy by the hot tag of its entry;
 ///      a `Put` is copied create-only (an object that appears meanwhile counts as copied);
 ///    - delete entries: one is applied to the cold tier (the cold object goes by its tag, unless
 ///      the hot tier holds the key again and the cold object is of that object) for a key whose
@@ -524,11 +536,20 @@ impl Reconciler {
         hot: &Meta,
         cold: &Meta,
     ) -> Result<Round, Error> {
-        let mirrors_it = want.mirror == Some(cold.tag.as_str());
-        if want.kind != JournalOp::PutMirror || mirrors_it {
+        if want.kind != JournalOp::PutMirror {
             return Ok(Round::Done(Some(hot.tag.clone())));
         }
-        self.drop_mirror(key, want).await
+        if want.mirror != Some(cold.tag.as_str()) {
+            return self.drop_mirror(key, want).await;
+        }
+        // The cold tier holds the mirrored object. The hot object is the mirror's copy of it, and
+        // so an eviction candidate, only if it has the tag the hot tier gave that copy; any other
+        // hot object (a put whose journal was not read yet) is not the mirror's, and is left and
+        // not counted as copied. An entry that names no hot tag owns nothing.
+        if want.mirror_hot == Some(hot.tag.as_str()) {
+            return Ok(Round::Done(Some(hot.tag.clone())));
+        }
+        Ok(Round::Done(None))
     }
 
     /// The cold tier holds a reservation. The put it was made for replaces it with the hot bytes,
@@ -587,11 +608,13 @@ impl Reconciler {
         }
     }
 
-    /// Deletes a mirror from the hot tier, by the tag its own entry names: only an object that has
-    /// that tag is the mirror's. Any other object (a put of another proxy, replaced or removed
-    /// meanwhile) stays, and so does the object of a mirror entry that names no tag.
+    /// Deletes a mirror from the hot tier, by the hot tag its own entry names (the tag the hot tier
+    /// gave the copy, never the cold tag): only an object that has that tag is the mirror's. Any
+    /// other object (a put of another proxy, replaced or removed meanwhile) stays, and so does
+    /// the object of a mirror entry that names no hot tag (one written by a release before the
+    /// field), which is left to the eviction's normal path.
     async fn drop_mirror(&self, key: &str, want: &Wanted<'_>) -> Result<Round, Error> {
-        let Some(tag) = want.mirror else {
+        let Some(tag) = want.mirror_hot else {
             return Ok(Round::Done(None));
         };
         match self.hot.delete_if_match(key, tag).await {

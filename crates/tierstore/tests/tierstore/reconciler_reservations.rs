@@ -26,6 +26,10 @@ fn entry(op: JournalOp, key: &str, tag: Option<&str>) -> JournalEntry {
         size: 5,
         time: 0,
         cold_tag: tag.map(str::to_owned),
+        // The two tiers of these tests tag bytes alike, so a mirror's hot tag is its cold tag.
+        hot_tag: tag
+            .filter(|_| op == JournalOp::PutMirror)
+            .map(str::to_owned),
     }
 }
 
@@ -770,6 +774,7 @@ async fn the_new_ops_count_in_usage_lag_and_eviction() {
         size,
         time,
         cold_tag: Some(tag.to_owned()),
+        hot_tag: (op == JournalOp::PutMirror).then(|| tag.to_owned()),
     };
     let rig = with_journal(&[
         sized(JournalOp::PutReserved, "a", 60, 1, &tag_a),
@@ -802,7 +807,8 @@ async fn the_new_ops_count_in_usage_lag_and_eviction() {
 fn the_new_ops_and_the_tag_round_trip_and_an_entry_without_a_tag_encodes_as_before() {
     let plain = entry(JournalOp::Put, "a", None);
     let reserved = entry(JournalOp::PutReserved, "b", Some("t1"));
-    let mirror = entry(JournalOp::PutMirror, "c", Some("t2"));
+    let mut mirror = entry(JournalOp::PutMirror, "c", Some("t2"));
+    mirror.hot_tag = Some("h2".to_owned());
     let delete = entry(JournalOp::Delete, "d", None);
     let entries = vec![plain.clone(), reserved, mirror, delete];
 
@@ -813,9 +819,16 @@ fn the_new_ops_and_the_tag_round_trip_and_an_entry_without_a_tag_encodes_as_befo
     assert_eq!(std::str::from_utf8(&single).unwrap(), legacy);
     let decoded = decode_journal(legacy.as_bytes()).unwrap();
     assert_eq!(decoded[0].cold_tag, None);
+    assert_eq!(decoded[0].hot_tag, None);
+    let before_hot_tag = r#"[{"op":"PUTMIRROR","key":"c","size":5,"time":0,"cold_tag":"t2"}]"#;
+    let decoded = decode_journal(before_hot_tag.as_bytes()).unwrap();
+    assert_eq!(decoded[0].cold_tag.as_deref(), Some("t2"));
+    assert_eq!(decoded[0].hot_tag, None);
     let json = std::str::from_utf8(&encoded).unwrap();
     assert!(json.contains(r#""op":"PUTRESERVED""#), "{json}");
     assert!(json.contains(r#""cold_tag":"t2""#), "{json}");
+    assert!(json.contains(r#""hot_tag":"h2""#), "{json}");
+    assert_eq!(json.matches("hot_tag").count(), 1, "{json}");
 }
 
 /// Asserts that an object that is deleted and put again with new content while the reconciler

@@ -17,6 +17,7 @@ mod lease;
 mod lease_takeover;
 mod list_uploads;
 mod list_uploads_reserved;
+mod mirror_tags;
 mod multipart;
 mod one_winner;
 mod recheck;

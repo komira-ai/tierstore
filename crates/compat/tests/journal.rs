@@ -14,7 +14,7 @@ use tierstore_testkit::dir::TestDir;
 /// The key of a journal object of a proxy.
 const OBJECT: &str = "journal-object";
 
-/// An entry of this branch, which may name a cold tag.
+/// An entry of this branch, which may name a cold tag (and a hot tag, which a test sets).
 fn now_entry(op: JournalOp, key: &str, size: u64, tag: Option<&str>) -> JournalEntry {
     JournalEntry {
         op,
@@ -22,6 +22,7 @@ fn now_entry(op: JournalOp, key: &str, size: u64, tag: Option<&str>) -> JournalE
         size,
         time: 1_790_000_000_000 + size,
         cold_tag: tag.map(str::to_owned),
+        hot_tag: None,
     }
 }
 
@@ -37,18 +38,20 @@ fn before_entry(op: PrevOp, key: &str, size: u64) -> PrevEntry {
 
 /// Asserts that the previous release reads a journal object that this branch wrote with every
 /// kind of entry: the plain puts and deletes are read as before, with their keys, sizes and times,
-/// and the reserved put and the mirror (ops it does not know, with a field it does not know) are
-/// read as entries it skips, with their keys.
+/// and the reserved put and the mirror (ops it does not know, with the fields `cold_tag` and
+/// `hot_tag`, which it does not know) are read as entries it skips, with their keys.
 #[tokio::test]
 async fn the_previous_release_reads_a_journal_object_this_branch_wrote() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-journal-new");
     let now = DirBackend::open(dir.path()).unwrap();
     let before = PrevDir::open(dir.path()).unwrap();
 
+    let mut mirror = now_entry(JournalOp::PutMirror, "c", 3, Some("object-tag"));
+    mirror.hot_tag = Some("hot-object-tag".to_owned());
     let entries = [
         now_entry(JournalOp::Put, "a", 1, None),
         now_entry(JournalOp::PutReserved, "b", 2, Some("reservation-tag")),
-        now_entry(JournalOp::PutMirror, "c", 3, Some("object-tag")),
+        mirror,
         now_entry(JournalOp::Delete, "d", 0, None),
     ];
     now.put(OBJECT, encode_journal(&entries)).await.unwrap();
@@ -77,8 +80,8 @@ async fn the_previous_release_reads_a_journal_object_this_branch_wrote() {
 }
 
 /// Asserts that this branch reads a journal object that the previous release wrote: the entries
-/// are the ones it wrote, none names a cold tag, and what this branch writes for the same entries
-/// is the same bytes.
+/// are the ones it wrote, none names a cold tag or a hot tag, and what this branch writes for the
+/// same entries is the same bytes.
 #[tokio::test]
 async fn this_branch_reads_a_journal_object_the_previous_release_wrote() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-journal-old");
