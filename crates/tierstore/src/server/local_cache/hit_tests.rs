@@ -107,10 +107,9 @@ async fn keys_outside_a_policy_and_listings_pass_through_and_are_never_kept() {
 }
 
 /// Asserts that the longest prefix decides: under a prefix that says `cache = false` inside one
-/// that says `true` nothing is kept, and the keys of the reserved prefixes are never kept even
-/// under a policy for everything.
+/// that says `true` nothing is kept.
 #[tokio::test]
-async fn the_longest_policy_decides_and_reserved_keys_are_never_kept() {
+async fn the_longest_policy_decides() {
     let rig = Rig::with("tscache-policy", |config| {
         config.policies = vec![
             (String::new(), true),
@@ -118,24 +117,41 @@ async fn the_longest_policy_decides_and_reserved_keys_are_never_kept() {
             ("cas/x/ok/".to_owned(), true),
         ];
     });
-    for key in [
-        "a",
-        "cas/x/no",
-        "cas/x/ok/yes",
-        "_entries/p/1",
-        "_journal/p/1",
-        "_tiering/usage",
-    ] {
+    for key in ["a", "cas/x/no", "cas/x/ok/yes"] {
         rig.put(key, &pattern(10)).await;
         assert_eq!(rig.get(key).await.unwrap().len(), 10, "{key}");
     }
     assert!(rig.has_file("a"));
     assert!(rig.has_file("cas/x/ok/yes"));
     assert!(!rig.has_file("cas/x/no"));
-    assert!(!rig.has_file("_entries/p/1"));
-    assert!(!rig.has_file("_journal/p/1"));
-    assert!(!rig.has_file("_tiering/usage"));
     assert_eq!(rig.cache.held(), (20, 2));
+}
+
+/// Asserts that a get, a ranged get, a streamed get and a head of a key under `_entries/`,
+/// `_journal/` or `_tiering/` are refused with `Reserved` under a policy for everything, that the
+/// upstream is not asked, and that nothing is kept: the upstream may be a plain bucket that holds
+/// them.
+#[tokio::test]
+async fn a_read_of_a_reserved_key_is_refused_before_the_upstream_is_asked() {
+    let rig = Rig::with("tscache-reserved-reads", |config| {
+        config.policies = vec![(String::new(), true)];
+    });
+    for key in ["_entries/p/1", "_journal/p/1", "_tiering/usage"] {
+        rig.put(key, &pattern(10)).await;
+        let reserved = Some(Error::Reserved(key.to_owned()));
+        assert_eq!(rig.get(key).await.err(), reserved, "{key}");
+        let range = Some(ByteRange::new(1, 2));
+        assert_eq!(rig.cache.get(key, range).await.err(), reserved, "{key}");
+        assert_eq!(rig.cache.head(key).await.err(), reserved, "{key}");
+        assert_eq!(
+            rig.cache.get_stream(key, None).await.err(),
+            reserved,
+            "{key}"
+        );
+        assert!(!rig.has_file(key), "{key}");
+    }
+    assert_eq!((rig.calls(Op::Get), rig.calls(Op::Head)), (0, 0));
+    assert_eq!(rig.cache.held(), (0, 0));
 }
 
 /// Asserts that a HEAD of an object that is not kept goes to the upstream and fills nothing, so
