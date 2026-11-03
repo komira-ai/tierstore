@@ -54,6 +54,8 @@ async fn the_keys_of_the_proxy_are_out_of_reach() {
         let done_uri = format!("{key}?uploadId=u");
         let done = rig.call("POST", &done_uri, complete).await;
         assert_eq!(done.status, StatusCode::FORBIDDEN, "{key}");
+        let malformed = rig.call("POST", &done_uri, b"x").await;
+        assert_eq!(malformed.status, StatusCode::FORBIDDEN, "{key}");
         let abort = rig.call("DELETE", &done_uri, b"").await;
         assert_eq!(abort.status, StatusCode::FORBIDDEN, "{key}");
     }

@@ -11,6 +11,7 @@ use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
+use crate::journal::is_reserved;
 use crate::{ByteRange, Error, Meta, ReadBody};
 
 use super::Server;
@@ -118,6 +119,16 @@ fn read_answer(
         return answer(status, headers, Bytes::new());
     }
     streamed_answer(status, headers, len, body)
+}
+
+/// Refuses a key the proxy keeps for itself. Only the completion of an upload asks for it: its
+/// body is read and checked before the backend is called, so without this a malformed body would
+/// be answered 400 for a reserved key; every other call leaves the refusal to the backend.
+fn refuse_reserved(key: &str) -> Result<(), S3Error> {
+    if is_reserved(key) {
+        return Err(S3Error::from(Error::Reserved(key.to_owned())));
+    }
+    Ok(())
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
@@ -560,6 +571,7 @@ impl Server {
         key: &str,
         body: Bytes,
     ) -> Result<Answer, S3Error> {
+        refuse_reserved(key)?;
         let id = query.get("uploadId").unwrap_or_default();
         let wanted = xml::parse_complete(&body).filter(|parts| !parts.is_empty());
         let Some(wanted) = wanted else {
