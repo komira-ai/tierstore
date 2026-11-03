@@ -58,10 +58,10 @@ A put reserves its key first, with one create-only write to the cold tier, then 
 
 What a reader of the cold tier sees of one:
 
-- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD, which is remembered once it found a real object), and a build node's cache treats it as absent.
+- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD at every listing: a listing gives no version of an object, so no answer is kept), and a build node's cache treats it as absent.
 - A put of its key is refused with 412 until it is gone: that is how two puts of a key do not both win.
 - A delete removes it only if the hot tier holds the key; a bare one belongs to a put in flight and is left.
-- The reconciler replaces the reservation that a journal entry names by the hot bytes, in one conditional write, and deletes it by its tag if the hot tier lost the key.
+- The reconciler replaces the reservation that a journal entry names by the hot bytes, in one conditional write (the hot object is streamed to the cold tier, never held whole), and deletes it by its tag if the hot tier lost the key.
 
 A put that fails before it is acknowledged (the hot tier refuses the object, the journal cannot be written, the caller goes away) removes its own object, by its content tag, and its own reservation, by its tag. **A put whose process is killed leaves its reservation, and nothing takes it over yet**: the key is refused (412, and a read of it is not found) until the reservation is removed, and one invisible 56-byte object stays in the cold bucket for each such put. A later change will take over a reservation whose owner proxy has been retired; until then, find one with a raw listing of the cold bucket for 56-byte objects with the `tierstore-reservation` metadata and delete it with the put's proxy stopped.
 

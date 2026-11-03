@@ -28,10 +28,6 @@ const UPLOAD_LISTING_CALLS: u32 = 100;
 /// How many cold objects of a listing that may be reservations are asked about at once.
 const LISTING_HEADS: usize = 16;
 
-/// How many objects the proxy remembers to be real (not reservations) from a listing, so that
-/// the next listing does not ask about them again. The memory is emptied when it is full.
-const KNOWN_REAL: usize = 4096;
-
 /// How many times a delete looks at the cold tier's object again after it changed under the
 /// delete.
 const DELETE_ROUNDS: u32 = 3;
@@ -147,6 +143,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
 ///   (`PutMirror`, with the content tag the cold object has), in the background, so that the
 ///   reconciler can evict it again, and can drop it if the cold tier no longer holds that object.
+///   The tag is the one the cold object had before the read, and the copy is made only if a HEAD
+///   after the read gives the same tag, so the bytes copied are those of the object named.
 ///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
 ///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
 ///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
@@ -194,12 +192,13 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
 ///   `_tiering/`, and without reservations: a cold object of the size of one that the hot
-///   listing does not show is asked about with a HEAD (sixteen at a time; one a HEAD found real
-///   is remembered, by key, size and time of last write, and not asked about again). A HEAD that
-///   fails fails the listing. [`Backend::list_page`] pages through the merged listing: the last
-///   key of a page is the continuation token, and `max_keys` is kept to (a page of the cold
-///   tier that the filter cut short is made up from the next). A put or a delete of a key under
-///   a reserved prefix is refused with [`Error::Reserved`].
+///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
+///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
+///   version of an object to know it by). A HEAD that fails fails the listing.
+///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
+///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
+///   short is made up from the next). A put or a delete of a key under a reserved prefix is
+///   refused with [`Error::Reserved`].
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -264,9 +263,6 @@ struct Inner {
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
     counters: Counters,
-    /// The objects (key, size and time of last write, as a listing gives them) that a HEAD found
-    /// to be real objects and not reservations: a listing does not ask about them again.
-    known_real: Mutex<BTreeSet<(String, u64, u64)>>,
 }
 
 impl Proxy {
@@ -307,7 +303,6 @@ impl Proxy {
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
             counters: Counters::default(),
-            known_real: Mutex::new(BTreeSet::new()),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -509,6 +504,16 @@ impl Inner {
         }
     }
 
+    /// The content tag of the cold tier's object under `key`: nothing for a key that holds none
+    /// or a reservation, an error if the HEAD fails.
+    async fn cold_version(&self, key: &str) -> Result<Option<String>, Error> {
+        match self.cold.head(key).await {
+            Ok(meta) if !meta.reservation => Ok(Some(meta.tag)),
+            Ok(_) | Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn get_object(
         self: &Arc<Self>,
         key: &str,
@@ -537,8 +542,16 @@ impl Inner {
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
+        // The version is asked for before the read, and again before the copy is journaled: the
+        // copy is made only if both give one tag, so the tag it names is the tag of the bytes that
+        // were read, never that of an object that replaced them in between.
+        let seen = if self.level().await >= Level::Critical {
+            None
+        } else {
+            Some(self.cold_version(key).await)
+        };
         let body = self.cold_get(key, None).await?;
-        self.copy_back(key, &body).await;
+        self.copy_back(key, &body, seen).await;
         let served = match range {
             Some(range) => range.slice(&body)?,
             None => body,
@@ -622,41 +635,24 @@ impl Inner {
         }
     }
 
-    /// Whether a listing showed this object and a HEAD then found it real.
-    fn is_known_real(&self, object: &Listed) -> bool {
-        let known = locked(&self.known_real);
-        known.contains(&(object.key.clone(), object.size, object.modified))
-    }
-
-    /// Remembers an object that a HEAD found real, forgetting all of them first if there are too
-    /// many.
-    fn remember_real(&self, object: &Listed) {
-        let mut known = locked(&self.known_real);
-        if known.len() >= KNOWN_REAL {
-            known.clear();
-        }
-        known.insert((object.key.clone(), object.size, object.modified));
-    }
-
     /// The object of a cold listing if it is one: a reservation (a marked object of
     /// [`RESERVATION_LEN`] bytes) and an object that is gone are left out. Only an object of that
-    /// size that the hot listing does not show and that no earlier HEAD found real is asked about:
-    /// a key the hot tier shows is shown whatever the cold tier holds under it.
+    /// size that the hot listing does not show is asked about, at every listing: a listing gives no
+    /// identity of the version (a key, a size and a time of last write do not tell a real object
+    /// from a reservation that replaced it within the same time), so no answer is kept. A key the
+    /// hot tier shows is shown whatever the cold tier holds under it.
     async fn visible(
         &self,
         object: Listed,
         in_hot: &BTreeSet<&str>,
     ) -> Result<Option<Listed>, Error> {
         let may_hold = object.size == RESERVATION_LEN && !in_hot.contains(object.key.as_str());
-        if !may_hold || self.is_known_real(&object) {
+        if !may_hold {
             return Ok(Some(object));
         }
         match self.cold.head(&object.key).await {
             Ok(meta) if meta.reservation => Ok(None),
-            Ok(_) => {
-                self.remember_real(&object);
-                Ok(Some(object))
-            }
+            Ok(_) => Ok(Some(object)),
             Err(Error::NotFound(_)) => Ok(None),
             Err(error) => Err(error),
         }

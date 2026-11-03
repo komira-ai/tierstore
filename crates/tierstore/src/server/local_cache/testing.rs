@@ -168,6 +168,10 @@ pub(in crate::server) struct Tamper {
     pub(in crate::server) fail_once: AtomicBool,
     /// The next read, once the gate lets it go, panics.
     pub(in crate::server) panic_once: AtomicBool,
+    /// Whether a read with the mark is answered (with the mark of the object read), as the
+    /// backends of the crate do; if not, it is `Unsupported`, as a backend that keeps no marks
+    /// says.
+    pub(in crate::server) marks: AtomicBool,
     /// The gate and the one key it holds (every key if none).
     gate: Mutex<Option<Gate>>,
     /// The gate that holds a read after it has read the object, and the one key it holds.
@@ -208,6 +212,7 @@ impl Tamper {
             blank_tags: AtomicBool::new(false),
             fail_once: AtomicBool::new(false),
             panic_once: AtomicBool::new(false),
+            marks: AtomicBool::new(false),
             gate: Mutex::new(None),
             after: Mutex::new(None),
             parked: AtomicU64::new(0),
@@ -355,6 +360,19 @@ impl Backend for Tamper {
             return Ok(Bytes::from(more));
         }
         Ok(body)
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        if !self.marks.load(Ordering::SeqCst) {
+            return Err(Error::Unsupported("get_marked".to_owned()));
+        }
+        let body = self.get(key, range).await?;
+        let marked = self.memory.head(key).await?.reservation;
+        Ok((body, marked))
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {

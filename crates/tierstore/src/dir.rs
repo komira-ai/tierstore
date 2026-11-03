@@ -9,13 +9,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use futures::StreamExt;
+use futures::stream;
 use sha2::{Digest, Sha256};
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use crate::backend::upload_page;
-use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
+use crate::{
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
@@ -35,6 +38,10 @@ const NAME_LIMIT: usize = 255;
 
 /// The size of the pieces in which the parts of an upload are joined.
 const COPY_CHUNK: usize = 1 << 20;
+
+/// The most bytes of an object that a streamed read ([`Backend::get_stream`]) holds at a time:
+/// each chunk it gives is this long, but for the last, which is what is left.
+const READ_CHUNK: u64 = 1 << 16;
 
 /// The directory, inside the one of the backend, that holds the uploads in progress.
 const UPLOADS: &str = ".uploads";
@@ -105,6 +112,14 @@ impl SyncDir for FsyncDir {
 ///   is written over reserved room after the last chunk, the file is synced, and only then is it
 ///   linked to the name, with the directory synced after the link as for any put. A body that
 ///   fails leaves no object and removes the temporary file.
+/// - A streamed read ([`Backend::get_stream`]) opens the file once and reads the range in chunks of
+///   at most 64 KiB as they are asked for, so that a reader holds one chunk and not the object;
+///   a replacement or a delete of the name meanwhile leaves it on the file it opened. A read with
+///   the mark ([`Backend::get_marked`]) takes the bytes and the mark from the same open file.
+/// - A streamed replacement ([`Backend::put_stream_if_match`]) writes the chunks to a temporary
+///   file as they arrive, outside the lock, and then, under the lock and the tag check of
+///   [`Backend::put_if_match`], moves the file over the object and syncs the directory. A body
+///   that fails or a tag that does not match leaves the object as it was and removes the file.
 /// - A multipart upload is a directory `.uploads/<id>` that holds a file with the key and a file
 ///   for each part, written as the chunks of the part arrive, so that a part is never held in
 ///   memory; the completion joins the parts into the new object by streaming them, and removes
@@ -347,6 +362,73 @@ struct Stored {
     marked: bool,
 }
 
+impl Stored {
+    /// Positions the file at `offset` bytes into the body, behind the content tag.
+    async fn seek_body(&mut self, offset: u64) -> Result<(), Error> {
+        let start = SeekFrom::Start(TAG_LEN as u64 + offset);
+        let sought = self.file.seek(start).await;
+        sought.map(drop).map_err(io_error(&self.path))
+    }
+}
+
+/// The offset in the body, and the number of bytes from there, that `range` of a body of `size`
+/// bytes asks for.
+fn window(size: u64, range: Option<ByteRange>) -> Result<(u64, u64), Error> {
+    match range {
+        None => Ok((0, size)),
+        Some(range) if range.offset() > size => {
+            let text = format!(
+                "range starting at {} is past the end of the {size}-byte object",
+                range.offset()
+            );
+            Err(Error::Other(text))
+        }
+        Some(range) => Ok((range.offset(), range.size().min(size - range.offset()))),
+    }
+}
+
+/// The bytes of `range` of the object `stored` was opened from, and its mark. The mark and the
+/// bytes are those of the one open file, so a replacement of the object that comes meanwhile (a
+/// new file under the name, whatever its mark) is not seen by this read.
+async fn read_marked(mut stored: Stored, range: Option<ByteRange>) -> Result<(Bytes, bool), Error> {
+    let (offset, len) = window(stored.size, range)?;
+    stored.seek_body(offset).await?;
+    let mut body = Vec::new();
+    let read = (&mut stored.file).take(len).read_to_end(&mut body).await;
+    read.map_err(io_error(&stored.path))?;
+    Ok((Bytes::from(body), stored.marked))
+}
+
+/// The `left` bytes of the body that `stored` is positioned at, as chunks of at most
+/// [`READ_CHUNK`] bytes, each read when the chunk is asked for. A file that ends before the
+/// bytes do, or a read that fails, is the last chunk, as an error.
+fn chunks(stored: Stored, left: u64) -> ReadBody {
+    let next = |(mut stored, left): (Stored, u64)| async move {
+        if left == 0 {
+            return None;
+        }
+        let want = left.min(READ_CHUNK);
+        let mut chunk = Vec::new();
+        let read = (&mut stored.file).take(want).read_to_end(&mut chunk).await;
+        let read = read.map_err(io_error(&stored.path));
+        let got = read.and_then(|got| {
+            if got as u64 == want {
+                return Ok(Bytes::from(chunk));
+            }
+            let text = format!(
+                "{}: the file ended inside the object",
+                stored.path.display()
+            );
+            Err(Error::Other(text))
+        });
+        match got {
+            Ok(chunk) => Some((Ok(chunk), (stored, left - want))),
+            Err(error) => Some((Err(error), (stored, 0))),
+        }
+    };
+    stream::unfold((stored, left), next).boxed()
+}
+
 /// Opens the file of an object and reads its content tag.
 async fn open_stored(path: &Path) -> std::io::Result<Stored> {
     let mut file = File::open(path).await?;
@@ -453,15 +535,33 @@ impl DirBackend {
         opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
     }
 
+    /// Opens the object `key` if its content tag is `etag`. The caller holds the `replacing` lock,
+    /// so that the check and what follows it are not split by another call of this backend.
+    async fn matching(&self, key: &str, etag: &str) -> Result<Stored, Error> {
+        let current = self.stored(key).await?;
+        if hex::encode(current.tag) == etag {
+            Ok(current)
+        } else {
+            Err(Error::PreconditionFailed(key.to_owned()))
+        }
+    }
+
+    /// Moves the temporary file `temp` over the file of `current`, so that the name holds the
+    /// new body whole or the old one, and syncs the directory. The temporary file is gone either
+    /// way. The caller holds the `replacing` lock.
+    async fn install(&self, temp: &Path, current: &Stored) -> Result<(), Error> {
+        let renamed = fs::rename(temp, &current.path).await;
+        let _ = fs::remove_file(temp).await;
+        renamed.map_err(io_error(&current.path))?;
+        self.sync(&self.root).await
+    }
+
     /// Removes the file of the object `key` if its content tag is `etag`, with the lock that
     /// replacements and deletes take held from the check to the removal, so that no other call
     /// of this backend replaces or deletes the object in between. The directory is not synced.
     async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
         let _replacing = self.replacing.lock().await;
-        let current = self.stored(key).await?;
-        if hex::encode(current.tag) != etag {
-            return Err(Error::PreconditionFailed(key.to_owned()));
-        }
+        let current = self.matching(key, etag).await?;
         let path = current.path.clone();
         drop(current);
         // The lock keeps out every other call of this backend, so a file that is gone now was
@@ -531,15 +631,9 @@ impl DirBackend {
         mode: u32,
     ) -> Result<String, Error> {
         let _replacing = self.replacing.lock().await;
-        let current = self.stored(key).await?;
-        if hex::encode(current.tag) != etag {
-            return Err(Error::PreconditionFailed(key.to_owned()));
-        }
+        let current = self.matching(key, etag).await?;
         let (temp, tag) = self.write_temp(body, mode).await?;
-        let renamed = fs::rename(&temp, &current.path).await;
-        let _ = fs::remove_file(&temp).await;
-        renamed.map_err(io_error(&current.path))?;
-        self.sync(&self.root).await?;
+        self.install(&temp, &current).await?;
         Ok(hex::encode(tag))
     }
 
@@ -605,6 +699,28 @@ impl Backend for DirBackend {
         self.replace(key, body, etag, MARKED_MODE).await
     }
 
+    /// Writes the chunks to a temporary file as they arrive, outside the lock, so that a slow
+    /// body holds up no delete or replacement; then, under the lock and the tag check of
+    /// [`Backend::put_if_match`], moves the file over the object. A body that fails, a tag that
+    /// does not match and a call that is dropped half way remove the temporary file and leave the
+    /// object as it was. The new file has no mark, as after a plain replacement.
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.path(key)?;
+        let temp = self.temp(&self.root);
+        let _scratch = Scratch(temp.clone());
+        let tag = write_object_stream(&temp, &mut body).await?;
+        let _replacing = self.replacing.lock().await;
+        let current = self.matching(key, etag).await?;
+        self.install(&temp, &current).await?;
+        Ok(hex::encode(tag))
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         Ok(self.get_marked(key, range).await?.0)
     }
@@ -614,25 +730,17 @@ impl Backend for DirBackend {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool), Error> {
+        read_marked(self.stored(key).await?, range).await
+    }
+
+    /// Opens the file and gives its bytes in chunks of at most 64 KiB, read as they are asked
+    /// for: the object is never held, and a replacement or a delete of the name while the chunks
+    /// are read leaves this read on the file it opened.
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
         let mut stored = self.stored(key).await?;
-        let size = stored.size;
-        let (offset, len) = match range {
-            None => (0, size),
-            Some(range) if range.offset() > size => {
-                let text = format!(
-                    "range starting at {} is past the end of the {size}-byte object",
-                    range.offset()
-                );
-                return Err(Error::Other(text));
-            }
-            Some(range) => (range.offset(), range.size().min(size - range.offset())),
-        };
-        let mut body = Vec::new();
-        let start = SeekFrom::Start(TAG_LEN as u64 + offset);
-        let sought = stored.file.seek(start).await;
-        let read = (&mut stored.file).take(len).read_to_end(&mut body).await;
-        sought.and(read).map_err(io_error(&stored.path))?;
-        Ok((Bytes::from(body), stored.marked))
+        let (offset, len) = window(stored.size, range)?;
+        stored.seek_body(offset).await?;
+        Ok(chunks(stored, len))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

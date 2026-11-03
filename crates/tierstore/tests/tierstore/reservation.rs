@@ -1,5 +1,5 @@
 //! Reservations as a backend holds them: the memory and the directory backend held to the
-//! checks every backend passes, the calls the trait provides for a backend that does not do them,
+//! checks every backend passes, the calls the trait refuses for a backend that does not do them,
 //! and the wrappers that pass them on (the fault injector, the RAM cache).
 
 use std::sync::Arc;
@@ -11,9 +11,10 @@ use tierstore::{
     Op,
 };
 use tierstore_testkit::dir::TestDir;
+use tokio::sync::Notify;
 
 use crate::conformance::{self, reservation};
-use crate::support::body;
+use crate::support::{body, chunks};
 
 /// Runs a check over a backend of each kind that needs no service, each from empty.
 macro_rules! over_each {
@@ -67,8 +68,7 @@ async fn a_conditional_delete_takes_a_reservation_only_on_its_tag() {
     over_each!(conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag);
 }
 
-/// A backend that does what the trait requires and no more: it holds one object `k`, which it says
-/// is a reservation, and `gone`, which it reads and cannot head.
+/// A backend that does what the trait requires and no more: it holds nothing.
 struct Bare;
 
 #[async_trait]
@@ -82,22 +82,11 @@ impl Backend for Bare {
     }
 
     async fn get(&self, key: &str, _range: Option<ByteRange>) -> Result<Bytes, Error> {
-        match key {
-            "k" | "gone" => Ok(body("held")),
-            _ => Err(Error::NotFound(key.to_owned())),
-        }
+        Err(Error::NotFound(key.to_owned()))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
-        match key {
-            "k" => Ok(Meta {
-                size: 4,
-                tag: "t".to_owned(),
-                modified: 0,
-                reservation: true,
-            }),
-            _ => Err(Error::NotFound(key.to_owned())),
-        }
+        Err(Error::NotFound(key.to_owned()))
     }
 
     async fn delete(&self, _key: &str) -> Result<(), Error> {
@@ -109,28 +98,33 @@ impl Backend for Bare {
     }
 }
 
-/// Asserts that a backend that does not override the reservation calls refuses both with
-/// `Unsupported`, naming the call, and that its read with the mark is the read and then a HEAD:
-/// the mark of the HEAD, and an error from either call.
+/// Asserts that a backend that does not override the calls of reservations, of the read with the
+/// mark and of the streamed replacement refuses each with `Unsupported`, naming the call, and so
+/// never makes up a read with the mark from a HEAD and a read, which could pair the bytes of one
+/// object with the mark of another.
 #[tokio::test]
-async fn a_backend_without_reservations_refuses_them_and_reads_the_mark_by_a_head() {
+async fn a_backend_without_reservations_refuses_the_calls_that_need_them() {
     let created = Bare.put_reservation("k", reservation(1)).await.unwrap_err();
-    assert!(matches!(created, Error::Unsupported(_)), "{created}");
-    assert!(created.to_string().contains("put_reservation"), "{created}");
     let replaced = Bare
         .put_reservation_if_match("k", reservation(1), "t")
         .await
         .unwrap_err();
-    assert!(matches!(replaced, Error::Unsupported(_)), "{replaced}");
-    let call = "put_reservation_if_match";
-    assert!(replaced.to_string().contains(call), "{replaced}");
-
-    let read = Bare.get_marked("k", None).await.unwrap();
-    assert_eq!(read, (body("held"), true));
-    let absent = Bare.get_marked("absent", None).await;
-    assert_eq!(absent, Err(Error::NotFound("absent".to_owned())));
-    let vanished = Bare.get_marked("gone", None).await;
-    assert_eq!(vanished, Err(Error::NotFound("gone".to_owned())));
+    let read = Bare.get_marked("k", None).await.unwrap_err();
+    let ranged = Bare.get_marked("k", Some(ByteRange::new(0, 1)));
+    let ranged = ranged.await.unwrap_err();
+    let streamed = Bare.put_stream_if_match("k", None, chunks(&["x"]), "t");
+    let streamed = streamed.await.unwrap_err();
+    let calls = [
+        (created, "put_reservation"),
+        (replaced, "put_reservation_if_match"),
+        (read, "get_marked"),
+        (ranged, "get_marked"),
+        (streamed, "put_stream_if_match"),
+    ];
+    for (error, call) in calls {
+        assert!(matches!(error, Error::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains(call), "{call}: {error}");
+    }
 }
 
 fn faulty() -> FaultyBackend {
@@ -197,5 +191,99 @@ async fn a_cache_passes_reservations_on_and_forgets_a_replaced_key() {
         .put_reservation_if_match("k", reservation(3), &tag)
         .await;
     assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(cache.head("k").await.unwrap().tag, new);
+}
+
+/// A backend over memory whose marked replacement is paused after it was committed: it tells
+/// `committed` and returns only after `release` is notified, so a test holds the moment in which
+/// the object under the key is new and the caller of the replacement has not heard of it.
+struct Pausing {
+    inner: MemoryBackend,
+    committed: Notify,
+    release: Notify,
+}
+
+#[async_trait]
+impl Backend for Pausing {
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.inner.put(key, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let tag = self.inner.put_reservation_if_match(key, body, etag).await?;
+        self.committed.notify_one();
+        self.release.notified().await;
+        Ok(tag)
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.inner.get(key, range).await
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        self.inner.get_marked(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        self.inner.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.inner.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.inner.list(prefix).await
+    }
+}
+
+/// Asserts that a read with the mark through a RAM cache is the backend's own read and never the
+/// cache's copy: the cache holds the plain bytes A of a key, a marked replacement of the key is
+/// committed in the backend and paused before the cache is told, and the read with the mark, whole
+/// or by range, gives the bytes and the mark of the new object, while a plain read still gives the
+/// copy A; once the replacement returns, plain reads give the new bytes too.
+#[tokio::test]
+async fn a_read_with_the_mark_through_a_cache_is_the_backends_read_and_not_its_copy() {
+    let pausing = Pausing {
+        inner: MemoryBackend::new(),
+        committed: Notify::new(),
+        release: Notify::new(),
+    };
+    let inner = Arc::new(pausing);
+    let cache = Arc::new(CachedStore::new(inner.clone(), 1 << 20));
+    inner.put("k", body("plain a")).await.unwrap();
+    assert_eq!(cache.get("k", None).await.unwrap(), body("plain a"));
+    let tag = cache.head("k").await.unwrap().tag;
+
+    let racing = Arc::clone(&cache);
+    let replacing = tokio::spawn(async move {
+        racing
+            .put_reservation_if_match("k", reservation(2), &tag)
+            .await
+    });
+    inner.committed.notified().await;
+    assert_eq!(cache.get("k", None).await.unwrap(), body("plain a"));
+    let whole = cache.get_marked("k", None).await.unwrap();
+    assert_eq!(whole, (reservation(2), true));
+    let range = Some(ByteRange::new(0, 4));
+    let part = cache.get_marked("k", range).await.unwrap();
+    assert_eq!(part, (reservation(2).slice(0..4), true));
+
+    inner.release.notify_one();
+    let new = replacing.await.unwrap().unwrap();
+    assert_eq!(cache.get("k", None).await.unwrap(), reservation(2));
     assert_eq!(cache.head("k").await.unwrap().tag, new);
 }

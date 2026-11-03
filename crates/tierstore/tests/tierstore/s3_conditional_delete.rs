@@ -2,11 +2,11 @@
 //! a DELETE with `If-Match` where the service enforces it, and a read of the tag before a plain
 //! DELETE where it does not, and the settling that picks between them.
 
-use std::net::TcpListener;
 use std::sync::Mutex;
 
 use objstore_s3::s3::fake::{Failure, FakeS3};
 use tierstore::{Backend, Error, S3Backend, SelfTestOptions, settle_conditional_delete};
+use tokio::net::TcpListener;
 
 use crate::conformance;
 use crate::s3::{backend, config};
@@ -93,16 +93,23 @@ async fn a_store_that_ignores_if_match_is_given_a_read_of_the_tag_before_the_del
 /// refused: the start must go on, and the answer is the one that is right on every store.
 #[tokio::test]
 async fn a_store_that_cannot_be_asked_is_settled_on_the_read_of_the_tag() {
-    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
-    let endpoint = format!("http://{}", closed.local_addr().unwrap());
-    drop(closed);
+    // The listener stays bound for the whole test and closes every connection it accepts, so
+    // the port is never free for another process and the backend meets a transport failure.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let closer = tokio::spawn(async move {
+        while let Ok((connection, _)) = listener.accept().await {
+            drop(connection);
+        }
+    });
     let backend = S3Backend::new(config(&endpoint)).unwrap();
     let way = backend.settle_conditional_delete("probe/conditional").await;
     let way = way.unwrap();
     assert!(
-        way.starts_with("head-then-delete (could not ask: "),
+        way.starts_with("head-then-delete (could not ask: write: "),
         "{way}"
     );
+    closer.abort();
 }
 
 /// Asserts that a request that fails in the middle of the probe (the store answering 500, once)
