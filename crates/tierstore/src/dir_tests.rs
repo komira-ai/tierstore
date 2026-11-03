@@ -87,6 +87,8 @@ fn a_key_is_a_file_name_that_decodes_back() {
     assert_eq!(encode(".x"), "%2Ex");
     assert_eq!(encode("a~ b%"), "a%7E%20b%25");
     assert_eq!(encode("é"), "%C3%A9");
+    assert_eq!(encode("Foo"), "%46oo");
+    assert_eq!(decode("%46oo").as_deref(), Some("Foo"));
 }
 
 /// Asserts that a name that `encode` does not make is not a key: a `%` without two hex digits
@@ -94,7 +96,7 @@ fn a_key_is_a_file_name_that_decodes_back() {
 #[test]
 fn a_file_name_that_is_not_an_encoded_key_does_not_decode() {
     assert_eq!(decode("a~b").as_deref(), Some("a/b"));
-    for name in ["%", "%4", "%zz", "%FF", "a%+f"] {
+    for name in ["%", "%4", "%zz", "%FF", "a%+f", "Foo", "aB"] {
         assert_eq!(decode(name), None, "{name}");
     }
 }
@@ -822,4 +824,34 @@ async fn a_streamed_replace_that_is_dropped_half_way_leaves_the_object() {
     }
     assert_eq!(names(dir.path()), [".uploads", "k"]);
     assert_eq!(backend.get("k", None).await.unwrap(), "old");
+}
+
+/// Asserts that two keys that differ only by case are stored under file names that differ in more
+/// than case, so that on a case-insensitive file system they are still two objects, and that a
+/// file whose name has an upper-case letter is not listed as a key.
+#[tokio::test]
+async fn keys_that_differ_only_by_case_are_two_files() {
+    let (dir, backend) = backend();
+    backend.put("Foo", body("upper")).await.unwrap();
+    backend.put("foo", body("lower")).await.unwrap();
+    assert_eq!(backend.get("Foo", None).await.unwrap(), body("upper"));
+    assert_eq!(backend.get("foo", None).await.unwrap(), body("lower"));
+    let folded: Vec<String> = names(dir.path())
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let mut distinct = folded.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(folded.len(), distinct.len(), "{folded:?}");
+    std::fs::write(dir.path().join("Stray"), "not an object").unwrap();
+    let mut keys: Vec<String> = backend
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|listed| listed.key)
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["Foo", "foo"]);
 }

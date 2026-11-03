@@ -72,10 +72,12 @@ impl SyncDir for FsyncDir {
 
 /// A bucket kept in a directory.
 ///
-/// An object is one file of the directory. Its name is the key with `/` written as `~`; letters,
-/// digits, `_`, `-` and a `.` (but not as the first byte) stay as they are, and every other
-/// byte is written as `%` and two hex digits. So no key can name a file outside the directory
-/// or a file the backend keeps for itself (their names start with `.`). A key whose name is
+/// An object is one file of the directory. Its name is the key with `/` written as `~`; lower-case
+/// letters, digits, `_`, `-` and a `.` (but not as the first byte) stay as they are, and every
+/// other byte, upper-case letters included, is written as `%` and two hex digits, so that two
+/// keys never differ only by case in a file name: on a case-insensitive file system (the
+/// default on macOS) `Foo` and `foo` would otherwise be one file. So no key can name a file
+/// outside the directory or a file the backend keeps for itself (their names start with `.`). A key whose name is
 /// empty or longer than 255 bytes is refused with [`Error::Other`]. The file holds the SHA-256
 /// of the body, which is the content tag, and then the body, so that a head reads 32 bytes and
 /// not the object.
@@ -159,19 +161,21 @@ fn encode(key: &str) -> String {
         match byte {
             b'/' => name.push('~'),
             b'.' if at > 0 => name.push('.'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
+            b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
             _ => name.push_str(&format!("%{byte:02X}")),
         }
     }
     name
 }
 
-/// The key a file name stands for, if the name is one [`encode`] makes.
+/// The key a file name stands for, if the name is one [`encode`] makes: an upper-case letter
+/// is never written as it is, so a name that has one is not a key.
 fn decode(name: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(name.len());
     let mut rest = name.bytes();
     while let Some(byte) = rest.next() {
         match byte {
+            b'A'..=b'Z' => return None,
             b'~' => bytes.push(b'/'),
             b'%' => {
                 let pair = [rest.next()?, rest.next()?];
