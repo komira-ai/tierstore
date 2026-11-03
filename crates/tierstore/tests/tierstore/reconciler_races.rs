@@ -8,12 +8,16 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use tierstore::{
-    Backend, ByteRange, Error, JournalEntry, JournalOp, Listed, MemoryBackend, Meta, PartBody,
+    Backend, ByteRange, Error, JournalEntry, JournalOp, Listed, MemoryBackend, Meta, Op, PartBody,
     ReadBody, encode_journal,
 };
 
 use crate::conformance::reservation;
 use crate::support::{Rig, body, journal_key, read};
+
+fn down() -> Error {
+    Error::Unavailable("down".to_owned())
+}
 
 fn entry(op: JournalOp, key: &str, size: u64, tag: Option<&str>) -> JournalEntry {
     JournalEntry {
@@ -283,5 +287,60 @@ async fn a_mirror_that_another_proxys_delete_and_put_supersede_leaves_the_newer_
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(read(&*rig.hot_mem, "k").await, body("new!!"));
     assert_eq!(read(&*rig.cold_mem, "k").await, body("new!!"));
+    assert_eq!(report.copied, 1);
+}
+
+/// Asserts that a mirror does not take a key from the put of another proxy whatever the order the
+/// proxies' journals are read in, and that a failed copy of that put is made good by the next
+/// pass: proxy `p1` (read first) has a delete of `k` and then a put of `k`, proxy `p2` has the
+/// older mirror of `k`, the cold tier holds no `k`, and the first copy of `p1`'s put fails at the
+/// cold tier's HEAD. The mirror is applied after that failure in the same pass; the newer object
+/// is still in the hot tier after it, and the next pass copies it to the cold tier.
+#[tokio::test(start_paused = true)]
+async fn a_mirror_of_the_later_proxy_leaves_the_newer_put_and_the_put_is_copied_on_retry() {
+    let rig = Rig::new();
+    let _p1 = rig.proxy("p1", 1000).await;
+    let _p2 = rig.proxy("p2", 1000).await;
+    add_journal(&rig, "p1", 1, &[entry(JournalOp::Delete, "k", 0, None)]).await;
+    add_journal(&rig, "p1", 2, &[entry(JournalOp::Put, "k", 5, None)]).await;
+    let mirror = entry(JournalOp::PutMirror, "k", 5, Some("old-tag"));
+    add_journal(&rig, "p2", 1, &[mirror]).await;
+    rig.hot_mem.put("k", body("new!!")).await.unwrap();
+    rig.cold.fail_next_on(Op::Head, "k", down());
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("new!!"));
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("new!!"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new!!"));
+    assert_eq!(report.copied, 1);
+}
+
+/// Asserts that a mirror whose tag is the tag of the newer hot object, put by another proxy, is
+/// still not the word on the key: proxy `p1` has the put, proxy `p2` the mirror naming the same
+/// bytes, the cold tier holds nothing; the put's own copy fills the cold tier and the hot object
+/// is not deleted.
+#[tokio::test(start_paused = true)]
+async fn a_mirror_naming_the_bytes_of_another_proxys_put_does_not_delete_them() {
+    let scratch = MemoryBackend::new();
+    scratch.put("k", body("same!")).await.unwrap();
+    let tag = scratch.head("k").await.unwrap().tag;
+    let rig = Rig::new();
+    let _p1 = rig.proxy("p1", 1000).await;
+    let _p2 = rig.proxy("p2", 1000).await;
+    add_journal(&rig, "p1", 1, &[entry(JournalOp::Put, "k", 5, None)]).await;
+    let mirror = entry(JournalOp::PutMirror, "k", 5, Some(&tag));
+    add_journal(&rig, "p2", 1, &[mirror]).await;
+    rig.hot_mem.put("k", body("same!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("same!"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("same!"));
     assert_eq!(report.copied, 1);
 }
