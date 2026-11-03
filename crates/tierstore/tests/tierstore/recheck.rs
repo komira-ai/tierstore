@@ -103,6 +103,10 @@ impl Backend for Fake {
         self.inner.delete(key).await
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
     }

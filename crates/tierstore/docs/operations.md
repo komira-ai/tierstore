@@ -48,6 +48,22 @@ The hot tier's size is measured against `--hot-bytes` (`hot_store.budget`). Thre
 
 Eviction frees the hot tier only as fast as the cold tier takes copies, which `--copy-parallel` bounds. If the cold tier is slow or down, copies stall, nothing becomes evictable, and the hot tier climbs to the budget.
 
+An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A tag names content: an object put again with the same bytes has the same tag.
+
+## Reservations
+
+A reservation is an object under a key in the cold tier that holds the key without being an object of yours: 56 bytes, marked by the user metadata `tierstore-reservation` (on a `dir` tier, by the owner-execute bit of the file). It exists so that the cold tier, which every proxy shares, decides which of two concurrent puts of a key wins. This release only reads and reconciles around reservations; **nothing in it writes one**, so a cold tier written only by this release holds none.
+
+What this release does with one that is there:
+
+- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD at every listing: a listing gives no version of an object, so no answer is kept), and a build node's cache treats it as absent.
+- A delete removes it only if the hot tier holds the key; a bare one belongs to a put in flight and is left.
+- The reconciler replaces the reservation that a journal entry names by the hot bytes, in one conditional write (the hot object is streamed to the cold tier, never held whole), and deletes it by its tag if the hot tier lost the key.
+
+A raw listing of the cold bucket (`aws s3 ls`) shows reservations as 56-byte objects. Do not delete one by hand while a put runs.
+
+**Upgrade order.** The release that writes reservations must not run beside a release that does not read them: an older reader serves the 56 bytes as the object, an older reconciler skips the journal entries that name them, and an older listing shows them. Upgrade every proxy, reconciler and build node to a release that reads reservations (this one) before any node runs a release that writes them. The auto-release cannot enforce it, and nothing at run time does; going back to a release before this one after a writer has run is not supported.
+
 ## What a full disk does
 
 A `dir` hot tier whose disk is out of space, or an `s3` hot tier that answers 507, is a full hot tier: the put that met it goes to the cold tier where nothing of its body was taken yet, and the tier is taken to be full for a moment. A put that had already streamed some of its body into the hot tier fails, and the client's retry goes to the cold tier. Reads use both tiers throughout. The hot tier is used again once the usage falls. Objects written straight to the cold tier are not journaled and not copied; the reconciler has nothing to do for them.

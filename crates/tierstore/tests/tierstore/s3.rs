@@ -343,6 +343,14 @@ async fn a_second_put_of_a_key_is_refused_and_changes_nothing() {
     conformance::a_second_put_is_refused(&backend).await;
 }
 
+/// Asserts that a tagged put gives the tag of the object it created (the `ETag` of the PUT's
+/// answer) and refuses a second put of the key.
+#[tokio::test]
+async fn a_tagged_put_gives_the_tag_of_the_object_it_created() {
+    let (_s3, backend) = backend().await;
+    conformance::a_tagged_put_gives_the_tag_a_head_gives(&backend).await;
+}
+
 /// Asserts that ranges are byte-exact: the first byte, the last byte, a slice in the middle,
 /// a range running past the end (cut at the end, even when its end overflows a number), empty
 /// ranges inside the object and at its end, and an error for a range starting past the end.

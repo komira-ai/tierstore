@@ -9,7 +9,7 @@ use futures::{StreamExt, stream};
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::{Inner, Level, refuse_reserved};
-use crate::{Error, PartBody};
+use crate::{Error, JournalOp, PartBody};
 
 /// The body of a streamed put, which more than one tier may be offered in turn: a view of it is
 /// a stream of its chunks, and the next view goes on where the last one stopped. The proxy
@@ -108,7 +108,7 @@ impl Inner {
         let size = body.len() as u64;
         let stored = match self.hot.put(key, body.clone()).await {
             Ok(()) => match self.confirm_not_tiered(key).await {
-                Ok(()) => self.journal_put(key, size).await,
+                Ok(()) => self.journal_put(JournalOp::Put, key, size, None).await,
                 refused => refused,
             },
             failed => failed,
@@ -165,7 +165,10 @@ impl Inner {
     ) -> Result<(), Error> {
         let stored = match self.hot.put_stream(key, len, offered.view()).await {
             Ok(()) => match self.confirm_not_tiered(key).await {
-                Ok(()) => self.journal_put(key, offered.taken()).await,
+                Ok(()) => {
+                    let taken = offered.taken();
+                    self.journal_put(JournalOp::Put, key, taken, None).await
+                }
                 refused => refused,
             },
             failed => failed,

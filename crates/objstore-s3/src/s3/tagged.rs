@@ -155,6 +155,27 @@ impl S3Store {
         self.conditional_write(key, body, condition, true).await
     }
 
+    /// Creates the object, unmarked, only if the key has none (`If-None-Match: *`), and gives
+    /// the tag of the new object as the store sends it: the `ETag` of the answer to this write,
+    /// so a caller that must own what it wrote holds the tag of its own object and not of
+    /// whatever a later HEAD would show.
+    ///
+    /// # Errors
+    /// As [`put_new_marked`](Self::put_new_marked).
+    pub async fn put_new_tagged(
+        &self,
+        key: &ObjectKey,
+        body: Bytes,
+    ) -> Result<String, ObjectStoreError> {
+        if !self.conn.capabilities.conditional_put {
+            return Err(ObjectStoreError::Unsupported(
+                "a create-only write on a store without conditional puts",
+            ));
+        }
+        let condition = ("if-none-match", "*".to_owned());
+        self.conditional_write(key, body, condition, false).await
+    }
+
     /// A PUT that carries `condition` (`If-Match` or `If-None-Match`) and, if `marked`, the
     /// reservation mark, sent once (a 409 leaves it unknown whether it was applied, see the module
     /// docs). Gives the `ETag` of the answer.

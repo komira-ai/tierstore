@@ -661,9 +661,15 @@ impl DirBackend {
 #[async_trait]
 impl Backend for DirBackend {
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.put_tagged(key, body).await.map(drop)
+    }
+
+    /// The tag is that of the file this call published: the SHA-256 of the bytes it wrote.
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let path = self.path(key)?;
-        let (temp, _) = self.write_temp(body, PLAIN_MODE).await?;
-        self.publish(&temp, &path, key).await
+        let (temp, tag) = self.write_temp(body, PLAIN_MODE).await?;
+        self.publish(&temp, &path, key).await?;
+        Ok(hex::encode(tag))
     }
 
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {

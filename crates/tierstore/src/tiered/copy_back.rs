@@ -4,20 +4,31 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use super::{Inner, Level};
+use super::Inner;
 use crate::Error;
 use crate::metrics::Skipped;
 
 impl Inner {
     /// Copies an object read from the cold tier into the hot tier, and journals the copy in
-    /// the background.
-    pub(super) async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes) {
-        if self.level().await >= Level::Critical {
-            self.counters.skipped(Skipped::Critical);
-            return;
-        }
-        match self.hot.put(key, body.clone()).await {
-            Ok(()) => {
+    /// the background as a mirror of the cold object: the entry names the content tag the cold
+    /// object has, which the reconciler compares with the cold tier's before it keeps the copy,
+    /// and the tag the hot tier's create-only write gave the copy (the same operation gives the
+    /// bytes their place and the tag, with no HEAD after it), by which the reconciler deletes or
+    /// evicts it. The two tags are never compared with each other.
+    ///
+    /// Every removal of the copy is by the hot tag (`If-Match`), so an object another proxy puts
+    /// under the key after this write is never deleted by this copy, whichever path removes it
+    /// (a failed journal entry here, the reconciler later). A write that gave no tag leaves no
+    /// tag to delete by, and deletes nothing.
+    ///
+    /// `tag` is the tag the cold tier's read gave with the bytes (`Backend::get_marked`), so it
+    /// is the tag of the object the bytes were read from, and not of one that was in the key
+    /// before or after the read, even one that has the same tag again after a change and a change
+    /// back. No HEAD of the cold tier is made. If the key has changed since the read, the mirror names a tag that
+    /// the cold tier no longer has, and the reconciler removes the copy.
+    pub(super) async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes, tag: String) {
+        match self.hot.put_tagged(key, body.clone()).await {
+            Ok(hot_tag) => {
                 // Counted when the hot tier has the object, before the journal entry below,
                 // which can fail.
                 self.counters.promoted(body.len());
@@ -25,7 +36,10 @@ impl Inner {
                 let key = key.to_owned();
                 let size = body.len() as u64;
                 drop(tokio::spawn(async move {
-                    let _ = inner.journal_put(&key, size).await;
+                    // The entry carries the hot tier's own tag of the copy, which the write above
+                    // gave, apart from the cold tag: the two tiers need not tag the same bytes
+                    // alike. A copy whose entry cannot be written is taken out by that tag.
+                    let _ = inner.journal_mirror(&key, size, tag, hot_tag).await;
                 }));
             }
             Err(Error::Full(_)) => {
