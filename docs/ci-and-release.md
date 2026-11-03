@@ -101,12 +101,16 @@ with the plan's tag and commit.
 
 A release binary reports exactly its tag: `tierstore --version` prints `tierstore X.Y.Z+<12 hex>`
 for the release `vX.Y.Z` of the commit whose first 12 digits follow the `+`, and the build gauge
-`tierstore_build_info` carries the same `version` label. The version is not the crate's version
-in `Cargo.toml`. `artifacts.yml` computes it before it builds (`cargo xtask release version`: the
-patch after the highest `vX.Y.Z` tag, or the `VERSION` file when that is higher, the same rule as
-the plan above) and gives it to the build as `TIERSTORE_BUILD_VERSION_OVERRIDE` (strict
-`X.Y.Z`, or the build fails); a build without it, a developer's for one, keeps the crate's
-version. The release plan computes the version again and names the tag with it. The `verify` job
+`tierstore_build_info` carries the same `version` label. The binary reports the version in
+`crates/tierstore/Cargo.toml`, and `build.rs` reads no environment variable for it (nor for the
+commit, which is git's, `unknown` without it). `artifacts.yml` computes the release version before
+it builds (`cargo xtask release version`: the patch after the highest `vX.Y.Z` tag, or the `VERSION`
+file when that is higher, the same rule as the plan above), and each build job writes it into the
+crate with `cargo xtask release set-version --version X.Y.Z` (strict `X.Y.Z`, or the verb fails): it
+rewrites `version` in that manifest and the `tierstore` entry of `Cargo.lock`, so the `--locked`
+build accepts it, and the SBOM step must leave the lock file as the verb wrote it. A build that
+does not run the verb, a developer's for one, reports the version committed in `Cargo.toml`. The
+release plan computes the version again and names the tag with it. The `verify` job
 then unpacks the linux-x86_64 tarball it will publish, runs the binary with `--version`
 (`cargo xtask release check-binary`) and refuses to go on, so that nothing is tagged or published,
 unless the binary says the tag and the commit. The release runner cannot run the linux-arm64 or
