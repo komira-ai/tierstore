@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
+use crate::backend::ByteRange;
 use crate::journal::{
     PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
     load_checkpoint, seq_of, to_body, write_object,
@@ -150,8 +151,10 @@ enum Eviction {
     Removed,
     /// The hot tier no longer had it.
     Gone,
-    /// The hot tier holds another object under the key now, which was left.
-    Replaced,
+    /// The object was left: the hot tier holds another object under the key now, or the cold tier
+    /// does not hold a real object of the hot object's content (nothing, a reservation, or
+    /// another object), so the hot object may be the only copy. It stays a candidate.
+    Kept,
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -234,7 +237,9 @@ fn millis(duration: Duration) -> u64 {
 ///    put again since is skipped. The delete is conditional on the content tag the copy found
 ///    (`If-Match`, [`Backend::delete_if_match`]), so an object that was put again after the
 ///    copy, with other bytes, is kept; for an entry applied by an earlier reconciler the tag is
-///    read from the hot tier just before the delete.
+///    read from the hot tier just before the delete, and only if the cold tier holds a real
+///    object of that content then (not nothing, not a reservation, not another object: the hot
+///    object may be the only copy, and stays, and is asked about again by the next pass).
 /// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
 ///    put, after the first): every journal object up to a number is applied, and every entry
 ///    before a position is done with (the eviction folds its progress into the checkpoint,
@@ -664,6 +669,24 @@ impl Reconciler {
         }
         self.books.trim_stale();
         let low = (budget * self.config.low_water) as u64;
+        let mut kept = Vec::new();
+        self.evict_down(low, report, &mut kept).await;
+        // A candidate that was left stays a candidate (oldest first, as before), so that a later
+        // pass asks again once the cold tier holds the object.
+        for (proxy, candidate) in kept.into_iter().rev() {
+            self.books.requeue(&proxy, candidate);
+        }
+    }
+
+    /// Evicts candidates, oldest first, until the hot tier holds no more than `low` bytes, there
+    /// is no candidate left, or a call failed. The candidates that were left are put in `kept`,
+    /// with the name of their proxy.
+    async fn evict_down(
+        &mut self,
+        low: u64,
+        report: &mut PassReport,
+        kept: &mut Vec<(String, Candidate)>,
+    ) {
         while self.books.usage() > low {
             let Some((proxy, victim)) = self.books.next_victim() else {
                 return;
@@ -675,7 +698,7 @@ impl Reconciler {
                         report.evicted += 1;
                     }
                     Ok(Eviction::Gone) => self.books.forget(&victim.key),
-                    Ok(Eviction::Replaced) => {}
+                    Ok(Eviction::Kept) => kept.push((proxy.clone(), victim)),
                     Err(error) => {
                         report.failed.push(error);
                         return;
@@ -686,23 +709,97 @@ impl Reconciler {
         }
     }
 
-    /// Deletes one candidate from the hot tier, on the content tag the copy found, or on the tag the
-    /// hot tier gives now if the entry was applied by an earlier reconciler.
+    /// Deletes one candidate from the hot tier, on the content tag the copy found. An entry that an
+    /// earlier reconciler applied has none: the tag is read from the hot tier, and the cold tier is
+    /// asked first whether it holds a real object of that content (not nothing, not a reservation,
+    /// not another object), since nothing here has seen the copy.
     async fn evict_one(&self, victim: &Candidate) -> Result<Eviction, Error> {
         let tag = match &victim.tag {
             Some(tag) => tag.clone(),
-            None => match self.hot.head(&victim.key).await {
-                Ok(meta) => meta.tag,
-                Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
-                Err(error) => return Err(error),
-            },
+            None => {
+                let hot = match self.hot.head(&victim.key).await {
+                    Ok(meta) => meta,
+                    Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
+                    Err(error) => return Err(error),
+                };
+                match self.cold_holds_copy(&victim.key, &hot).await? {
+                    Some(true) => hot.tag,
+                    Some(false) => return Ok(Eviction::Kept),
+                    None => return Ok(Eviction::Gone),
+                }
+            }
         };
         match self.hot.delete_if_match(&victim.key, &tag).await {
             Ok(()) => Ok(Eviction::Removed),
             Err(Error::NotFound(_)) => Ok(Eviction::Gone),
-            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Replaced),
+            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Kept),
             Err(error) => Err(error),
         }
+    }
+
+    /// Whether the cold tier holds a real object under `key` of the content of `hot`: not a
+    /// reservation, not nothing, and not another object. The tags are not compared (two tiers of
+    /// different kinds tag the same bytes differently): the sizes are, and if they agree the bytes.
+    /// `None` if the hot object is gone by the time it is read.
+    async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
+        match self.cold.head(key).await {
+            Ok(cold) if !cold.reservation && cold.size == hot.size => {
+                match self.same_bytes(key, hot, &cold).await? {
+                    Some(true) => self.still_the_object(key, &cold).await.map(Some),
+                    other => Ok(other),
+                }
+            }
+            Ok(_) => Ok(Some(false)),
+            Err(Error::NotFound(_)) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier still holds, under `key`, the real object of `seen` (what the HEAD
+    /// before the comparison gave): the same content tag and not a reservation. The comparison
+    /// reads bind each range to that tag, so this look only finds an object that was removed or
+    /// replaced after the last range was read.
+    async fn still_the_object(&self, key: &str, seen: &Meta) -> Result<bool, Error> {
+        match self.cold.head(key).await {
+            Ok(now) => Ok(!now.reservation && now.tag == seen.tag),
+            Err(Error::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave,
+    /// in the object `cold` (what a HEAD of the cold tier gave). Both tiers are read in ranges of
+    /// at most [`COMPARE_RANGE`] bytes, each read with its content tag and mark in one call, so
+    /// that every byte compared is of the object whose tag a HEAD gave: a range of another object
+    /// (a key replaced between the HEAD and the read, and put back before the next look) has
+    /// another tag, a range of a reservation is marked, and either ends the comparison with
+    /// `Some(false)`, as does a range that is not the length asked for; a read ends at the first
+    /// difference. Neither tier is held whole. An object that is not there to be read is not an
+    /// error: the cold one is not held (`Some(false)`), and the hot one is gone (`None`).
+    async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
+        let mut offset = 0u64;
+        while offset < hot.size {
+            let len = (hot.size - offset).min(COMPARE_RANGE);
+            let range = ByteRange::new(offset, len);
+            let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if tag != hot.tag || mine.len() as u64 != len {
+                return Ok(Some(false));
+            }
+            let (theirs, marked, tag) = match self.cold.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(Some(false)),
+                Err(error) => return Err(error),
+            };
+            if marked || tag != cold.tag || theirs != mine {
+                return Ok(Some(false));
+            }
+            offset += len;
+        }
+        Ok(Some(true))
     }
 
     /// Stores the checkpoint of a proxy if it moved.
@@ -755,3 +852,6 @@ impl Reconciler {
         }
     }
 }
+
+/// The most bytes of the hot object that one read of a comparison holds.
+const COMPARE_RANGE: u64 = 1 << 20;

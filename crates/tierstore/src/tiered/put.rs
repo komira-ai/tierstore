@@ -131,11 +131,7 @@ impl Inner {
         }
         match self.level().await {
             Level::Full => self.put_cold(key, body).await,
-            Level::Critical => {
-                tokio::time::sleep(self.config.back_pressure).await;
-                self.put_hot(key, body).await
-            }
-            Level::Open => self.put_hot(key, body).await,
+            Level::Critical | Level::Open => self.put_hot(key, body).await,
         }
     }
 
@@ -209,11 +205,9 @@ impl Inner {
         match self.level().await {
             Level::Full if hot_only => Err(Error::Full(key.to_owned())),
             Level::Full => self.put_cold_stream(key, len, &offered).await,
-            Level::Critical => {
-                tokio::time::sleep(self.config.back_pressure).await;
+            Level::Critical | Level::Open => {
                 self.put_hot_stream(key, len, &offered, hot_only).await
             }
-            Level::Open => self.put_hot_stream(key, len, &offered, hot_only).await,
         }
     }
 }
