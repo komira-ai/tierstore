@@ -173,11 +173,19 @@ fn every_flag_is_given_in_one_of_the_round_trips() {
         .collect();
     let command = Cli::command();
     // `--config` is the file itself, `--check-config` only checks one, and `--capabilities` prints
-    // and exits before any setting is read: a round trip never gives any of them.
+    // and exits before any setting is read: a round trip never gives any of them. The two flags of
+    // the removed read grant are read and never written, so no round trip returns them; their own
+    // test is `the_flags_of_the_removed_read_grant_are_not_printed`.
     for arg in command.get_arguments().filter(|arg| {
         !matches!(
             arg.get_long(),
-            Some("config" | "check-config" | "capabilities")
+            Some(
+                "config"
+                    | "check-config"
+                    | "capabilities"
+                    | "grant-key-file"
+                    | "grant-max-lifetime"
+            )
         )
     }) {
         let long = arg.get_long().unwrap();
