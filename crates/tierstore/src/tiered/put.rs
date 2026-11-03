@@ -103,9 +103,9 @@ impl Inner {
     async fn put_hot(self: &Arc<Self>, key: &str, body: Bytes) -> Result<(), Error> {
         let hold = self.reserve(key).await?;
         let size = body.len() as u64;
-        let failure = match self.hot.put(key, body.clone()).await {
-            Ok(()) => {
-                hold.hot_landed();
+        let failure = match self.hot.put_tagged(key, body.clone()).await {
+            Ok(hot_tag) => {
+                hold.hot_landed(Some(hot_tag));
                 let tag = Some(hold.tag().to_owned());
                 let entry = self.entry(JournalOp::PutReserved, key, size, tag);
                 self.append(entry).await.err()
@@ -166,7 +166,7 @@ impl Inner {
         let hold = self.reserve(key).await?;
         let failure = match self.hot.put_stream(key, len, offered.view()).await {
             Ok(()) => {
-                hold.hot_landed();
+                hold.hot_landed(None);
                 let tag = Some(hold.tag().to_owned());
                 let entry = self.entry(JournalOp::PutReserved, key, offered.taken(), tag);
                 match self.append(entry).await {

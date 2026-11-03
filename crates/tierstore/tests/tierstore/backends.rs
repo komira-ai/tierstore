@@ -23,6 +23,28 @@ async fn a_second_put_of_a_key_is_refused_and_changes_nothing() {
     }
 }
 
+/// Asserts that a tagged put gives the tag of the object it created and refuses a second put of
+/// the key, on the memory backend and on the wrappers that pass the call on (the fault injector
+/// and, with a delete on that tag, the memory backend itself: only the object with the tag goes).
+#[tokio::test]
+async fn a_tagged_put_gives_the_tag_of_the_object_it_created() {
+    let memory = MemoryBackend::new();
+    conformance::a_tagged_put_gives_the_tag_a_head_gives(&memory).await;
+    let faulty = FaultyBackend::new(Arc::new(MemoryBackend::new()));
+    conformance::a_tagged_put_gives_the_tag_a_head_gives(&faulty).await;
+    assert_eq!(faulty.calls(Op::Put), 2);
+    faulty.fail_next(Op::Put, 1);
+    let failed = faulty.put_tagged("other", body("x")).await;
+    assert!(matches!(failed, Err(Error::Unavailable(_))));
+    assert!(faulty.head("other").await.is_err());
+
+    let tag = memory.head("k").await.unwrap().tag;
+    let stale = memory.delete_if_match("k", "not-the-tag").await;
+    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
+    memory.delete_if_match("k", &tag).await.unwrap();
+    assert!(memory.head("k").await.is_err());
+}
+
 /// Asserts that ranges are byte-exact on a backend: the first byte, the last byte, a slice
 /// in the middle, a range running past the end (cut at the end, even when its end overflows
 /// a number), empty ranges inside the object and at its end, and an error for a range

@@ -195,6 +195,12 @@ impl Backend for MemoryBackend {
         self.create(key, body, false)
     }
 
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        let tag = tag_of(&body);
+        self.create(key, body, false)?;
+        Ok(tag)
+    }
+
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let tag = tag_of(&body);
         self.create(key, body, true)?;

@@ -403,6 +403,33 @@ async fn a_marked_create_sends_if_none_match_and_the_mark() {
     assert!(seen.lock().unwrap().is_empty());
 }
 
+/// Asserts that a tagged create is a PUT carrying `If-None-Match: *` and no reservation mark,
+/// and gives the `ETag` of the answer; that a 412 is `AlreadyExists` naming the key; and that a
+/// store that does not claim conditional puts is refused before any request.
+#[tokio::test]
+async fn a_tagged_create_sends_if_none_match_without_the_mark_and_gives_the_etag() {
+    let created = answer("200 OK", &["etag: \"new\""], "");
+    let refused = answer("412 Precondition Failed", &[], FAILED);
+    let (endpoint, seen) = script(vec![created, refused]).await;
+    let s = conditional(endpoint);
+    let tag = s.put_new_tagged(&key(), Bytes::from("abc")).await.unwrap();
+    assert_eq!(tag, "\"new\"");
+    let again = s.put_new_tagged(&key(), Bytes::from("abc")).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(k)) if k == key()));
+    {
+        let heads = seen.lock().unwrap();
+        let put = heads[0].to_ascii_lowercase();
+        assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
+        assert!(!put.contains("x-amz-meta-tierstore-reservation"), "{put}");
+        assert!(!put.contains("if-match: \""), "{put}");
+    }
+
+    let (endpoint, seen) = script(vec![]).await;
+    let refused = store(endpoint).put_new_tagged(&key(), Bytes::new()).await;
+    assert!(matches!(refused, Err(ObjectStoreError::Unsupported(_))));
+    assert!(seen.lock().unwrap().is_empty());
+}
+
 /// Asserts that a marked replace carries `If-Match` and the mark, signed, that a plain replace
 /// carries no mark, and that each gives the `ETag` of the answer.
 #[tokio::test]

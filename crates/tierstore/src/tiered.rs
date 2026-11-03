@@ -146,8 +146,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
 ///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
-///   made for it. The hot tag is read from the hot tier right after the create-only write (a
-///   copy whose tag cannot be read is taken out again). The two tags are never compared with each
+///   made for it. The hot tag is the one the create-only write itself returns
+///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
+///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
 ///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
 ///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
@@ -411,7 +412,9 @@ impl Inner {
     }
 
     /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
-    /// the tag the hot tier gives the copy. Takes the copy out of the hot tier if that fails.
+    /// the tag the hot tier's create-only write gave the copy. If the append fails, takes the copy
+    /// out of the hot tier by `hot_tag` (`If-Match`): an object that another writer put under the
+    /// key since has another tag and is left.
     async fn journal_mirror(
         &self,
         key: &str,
@@ -420,8 +423,12 @@ impl Inner {
         hot_tag: String,
     ) -> Result<(), Error> {
         let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
-        entry.hot_tag = Some(hot_tag);
-        self.journal_entry(entry).await
+        entry.hot_tag = Some(hot_tag.clone());
+        let appended = self.append(entry).await;
+        if appended.is_err() {
+            let _ = self.hot.delete_if_match(key, &hot_tag).await;
+        }
+        appended
     }
 
     fn latch_full(&self) {

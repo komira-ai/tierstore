@@ -35,6 +35,9 @@ pub(super) struct Hold {
     key: String,
     tag: String,
     phase: Mutex<Phase>,
+    /// The hot tier's tag of the object the put created, when the create gave one: the cleanup
+    /// deletes by it, with no HEAD.
+    hot_tag: Mutex<Option<String>>,
 }
 
 impl Hold {
@@ -43,8 +46,10 @@ impl Hold {
         &self.tag
     }
 
-    /// The hot tier took the object.
-    pub(super) fn hot_landed(&self) {
+    /// The hot tier took the object, and gave `hot_tag` as the tag of the object its create-only
+    /// write made (`None` for a write that gives none, which the cleanup then reads with a HEAD).
+    pub(super) fn hot_landed(&self, hot_tag: Option<String>) {
+        *locked(&self.hot_tag) = hot_tag;
         *locked(&self.phase) = Phase::HotLanded;
     }
 
@@ -58,7 +63,10 @@ impl Hold {
     /// if there is one, and releases the reservation. Both are best effort.
     pub(super) async fn abandon(&self) {
         let landed = *locked(&self.phase) == Phase::HotLanded;
-        self.inner.clean_up(&self.key, &self.tag, landed).await;
+        let hot_tag = locked(&self.hot_tag).clone();
+        self.inner
+            .clean_up(&self.key, &self.tag, landed, hot_tag)
+            .await;
         self.settle();
     }
 }
@@ -73,8 +81,9 @@ impl Drop for Hold {
         };
         let inner = Arc::clone(&self.inner);
         let (key, tag) = (self.key.clone(), self.tag.clone());
+        let hot_tag = locked(&self.hot_tag).clone();
         drop(tokio::spawn(async move {
-            inner.clean_up(&key, &tag, landed).await;
+            inner.clean_up(&key, &tag, landed, hot_tag).await;
         }));
     }
 }
@@ -95,6 +104,7 @@ impl Inner {
             key: key.to_owned(),
             tag,
             phase: Mutex::new(Phase::Reserved),
+            hot_tag: Mutex::new(None),
         })
     }
 
@@ -104,16 +114,20 @@ impl Inner {
     /// reservation: that reservation keeps every other put of the key out of the hot tier, so
     /// while it is there the object under the key is the put's, and once it is gone (a delete of
     /// the key took it) the object under the key may be another put's, and is left. The hot
-    /// tier's tag is read with a HEAD: the put does not know it. A delete and a put of the key
+    /// tier's tag is the one its create-only write gave (`hot_tag`), with no HEAD; a create that gave
+    /// none (the streamed put's) has it read with a HEAD at cleanup time. A delete and a put of the key
     /// that both run between the check and the hot delete are the narrow case left. Errors are
     /// ignored: this runs after the put has failed, and a leftover is what the limits of the
     /// type say.
-    async fn clean_up(&self, key: &str, tag: &str, landed: bool) {
-        if landed
-            && self.still_holds(key, tag).await
-            && let Ok(meta) = self.hot.head(key).await
-        {
-            let _ = self.hot.delete_if_match(key, &meta.tag).await;
+    async fn clean_up(&self, key: &str, tag: &str, landed: bool, hot_tag: Option<String>) {
+        if landed && self.still_holds(key, tag).await {
+            let hot_tag = match hot_tag {
+                Some(hot_tag) => Some(hot_tag),
+                None => self.hot.head(key).await.ok().map(|meta| meta.tag),
+            };
+            if let Some(hot_tag) = hot_tag {
+                let _ = self.hot.delete_if_match(key, &hot_tag).await;
+            }
         }
         let _ = self.cold.delete_if_match(key, tag).await;
     }

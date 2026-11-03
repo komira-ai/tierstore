@@ -197,6 +197,25 @@ pub trait Backend: Send + Sync {
     /// [`Error::Full`] if the backend has no room for the object.
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error>;
 
+    /// As [`Backend::put`], and gives the content tag of the object this write created, the tag
+    /// a later [`Backend::delete_if_match`] must name to delete exactly this object.
+    ///
+    /// A backend that can must bind the tag to the write itself (the memory backend and the
+    /// directory backend know it from the bytes they publish, S3 sends it as the `ETag` of the
+    /// answer to the PUT), so that an object another writer puts under the key afterwards is
+    /// never taken for this one. The provided implementation reads the tag with a HEAD after the
+    /// write, which is not bound to it (the object may have been replaced between the two); it
+    /// serves the fakes of tests, and every backend a proxy uses as its hot tier overrides it.
+    ///
+    /// # Errors
+    /// As [`Backend::put`], and the error of the HEAD for the provided implementation. A write
+    /// that succeeded and whose tag was not obtained is an error too: the caller then holds no
+    /// tag, and so must delete nothing.
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.put(key, body).await?;
+        Ok(self.head(key).await?.tag)
+    }
+
     /// As [`Backend::put`], for a body that arrives as chunks: `len` is the number of bytes
     /// `body` is to give, or `None` if the caller does not know.
     ///

@@ -16,6 +16,17 @@ pub async fn a_second_put_is_refused(backend: &dyn Backend) {
     assert_eq!(backend.get("k", None).await.unwrap(), body("one"));
 }
 
+/// A tagged put gives the tag a HEAD of the object gives (the tag of the object it created),
+/// refuses a second put of the key with `AlreadyExists`, and leaves the first object and its tag.
+pub async fn a_tagged_put_gives_the_tag_a_head_gives(backend: &dyn Backend) {
+    let tag = backend.put_tagged("k", body("one")).await.unwrap();
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+    let again = backend.put_tagged("k", body("two")).await;
+    assert_eq!(again, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), body("one"));
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+}
+
 /// Ranges of an object are byte-exact.
 pub async fn ranges_are_byte_exact(backend: &dyn Backend) {
     backend.put("k", body("0123456789")).await.unwrap();
