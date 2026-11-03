@@ -4,8 +4,8 @@
 //! `build.rs` embeds the crate's version and the commit of the checkout; it reads no
 //! environment variable for either. The release build jobs run this verb with the version
 //! `release version` computed: it rewrites `version` in the `[package]` table of
-//! `crates/tierstore/Cargo.toml` and the `tierstore` entry of `Cargo.lock` (so the `--locked`
-//! build accepts it), and touches nothing else.
+//! `crates/tierstore/Cargo.toml` and the `tierstore` entry of `Cargo.lock` (the local package and
+//! the dependency entries that name it, so the `--locked` build accepts it), and touches nothing else.
 
 use std::path::Path;
 
@@ -49,14 +49,94 @@ pub fn set_manifest(text: &str, version: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Failed(format!("{MANIFEST}: [package] has no version line")))
 }
 
-/// The lock text with the version of the `tierstore` package set to `version`.
+/// The lock text with the version of the local `tierstore` package (the one without a `source`
+/// line) set to `version`, and every dependency entry naming that package by its old version
+/// (`"tierstore <old>"`, no ` (source)` suffix) changed to match. A second package of the same
+/// name from a remote source keeps its version; the entries naming it keep theirs, and lose the
+/// ` (source)` suffix when its version is no longer the local one's, as cargo writes them.
 pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
-    let start = text
-        .split('\n')
-        .position(|l| l == "name = \"tierstore\"")
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    let local = (0..lines.len())
+        .filter(|&i| lines[i] == "name = \"tierstore\"")
+        .find(|&i| {
+            let end = package_end(&lines, i);
+            !lines[i..end].iter().any(|l| l.starts_with("source = "))
+        })
         .ok_or_else(|| Error::Failed(format!("{LOCK}: no tierstore package")))?;
-    replace_version(text, start, str::is_empty, version)
-        .ok_or_else(|| Error::Failed(format!("{LOCK}: tierstore has no version line")))
+    let end = package_end(&lines, local);
+    let at = (local + 1..end)
+        .find(|&i| lines[i].starts_with("version = \""))
+        .ok_or_else(|| Error::Failed(format!("{LOCK}: tierstore has no version line")))?;
+    let old = lines[at]["version = \"".len()..]
+        .trim_end_matches('"')
+        .to_owned();
+    lines[at] = format!("version = \"{version}\"");
+    let from = format!("\"tierstore {old}\",");
+    let to = format!("\"tierstore {version}\",");
+    for line in lines.iter_mut().filter(|l| l.trim() == from) {
+        *line = format!("{}{to}", &line[..line.len() - line.trim_start().len()]);
+    }
+    // Cargo names the source of a dependency entry only while another package of the same name
+    // has the same version: a remote entry at another version than the local package loses it.
+    let same = format!("\"tierstore {version} (");
+    for line in lines
+        .iter_mut()
+        .filter(|l| is_tierstore_ref(l) && !l.trim_start().starts_with(&same))
+    {
+        if let Some((head, _)) = line.split_once(" (") {
+            *line = format!("{head}\",");
+        }
+    }
+    // Cargo writes same-named entries ordered by version, then local before remote: a lock
+    // in another order is rewritten by the next cargo command, which `--locked` refuses.
+    for run in lines.chunk_by_mut(|a, b| is_tierstore_ref(a) == is_tierstore_ref(b)) {
+        if is_tierstore_ref(&run[0]) {
+            run.sort_by_cached_key(|l| (version_key(l), l.contains('(')));
+        }
+    }
+    let joined = lines.join("\n");
+    let mut blocks: Vec<String> = joined.split("\n\n").map(str::to_owned).collect();
+    let at: Vec<usize> = (0..blocks.len())
+        .filter(|&i| blocks[i].starts_with("[[package]]\nname = \"tierstore\"\n"))
+        .collect();
+    let mut run: Vec<String> = at.iter().map(|&i| blocks[i].clone()).collect();
+    run.sort_by_cached_key(|b| (block_key(b), b.contains("\nsource = ")));
+    for (&i, block) in at.iter().zip(run) {
+        blocks[i] = block;
+    }
+    Ok(blocks.join("\n\n"))
+}
+
+/// The index of the first empty line after line `from`, or the number of lines: where the
+/// lock entry that holds line `from` ends.
+fn package_end(lines: &[String], from: usize) -> usize {
+    (from + 1..lines.len())
+        .find(|&i| lines[i].is_empty())
+        .unwrap_or(lines.len())
+}
+
+/// Whether `line` is a dependency entry naming a package called `tierstore`.
+fn is_tierstore_ref(line: &str) -> bool {
+    line.trim_start().starts_with("\"tierstore ")
+}
+
+/// The numbers of the version in `line` (a dependency entry or a `version` line), before any
+/// `(source)`, for ordering versions the way cargo does.
+fn version_key(line: &str) -> Vec<u64> {
+    line.split('(')
+        .take(1)
+        .flat_map(|l| l.split(|c: char| !c.is_ascii_digit()))
+        .filter_map(|n| n.parse().ok())
+        .collect()
+}
+
+/// The version key of the package entry `block`.
+fn block_key(block: &str) -> Vec<u64> {
+    block
+        .lines()
+        .filter(|l| l.starts_with("version = \""))
+        .flat_map(version_key)
+        .collect()
 }
 
 /// The `release set-version` verb: sets the version in both files under `root`; the line to
