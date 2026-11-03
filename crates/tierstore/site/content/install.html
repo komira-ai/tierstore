@@ -81,8 +81,9 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
   <li>
     <h3>Start it <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The unit does not start at install or at boot (it has no <code>[Install]</code> section), and it is skipped while <code>/etc/tierstore/access.key</code> does not exist. Start it by hand when the files are in place:</p>
-    <div class="code"><pre><span class="p">$</span> systemctl start tierstore</pre></div>
+    <p>The unit does not start at install or at boot (it has no <code>[Install]</code> section), and it is skipped while <code>/etc/tierstore/access.key</code> does not exist. If you edited the unit after the <code>daemon-reload</code> above, run it again: systemd starts the copy it last loaded, which has the example values. Start it by hand when the files are in place:</p>
+    <div class="code"><pre><span class="p">$</span> systemctl daemon-reload
+<span class="p">$</span> systemctl start tierstore</pre></div>
     <p>To start it at boot, add the section in a drop-in (<code>systemctl edit tierstore</code>, <code>[Install]</code> and <code>WantedBy=multi-user.target</code>) and run <code>systemctl enable tierstore</code>.</p>
   </li>
 </ol>
