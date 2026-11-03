@@ -1,68 +1,65 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" width="960" height="720" role="img" aria-label="Sequence diagram of a delete in the decided design: the proxy HEADs the cold tier, deletes the real object or a reservation whose put already wrote its hot object with If-Match on its tag, leaves a bare reservation of a put in flight, then deletes from the hot tier, appends a DELETE entry to its journal, and replies 204.">
-<title>A delete: cold first, then hot, then the journal, then the reply</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 660" width="960" height="660" role="img" aria-label="Sequence diagram of a delete: Client, Node, Hot tier, Cold tier. The node creates a DEL entry, or amends a pending put or copy-back entry, or claims a pending delete, by compare-and-swap. It then deletes the key in cold and then in hot. A fresh entry is deleted at once; an amended or claimed entry is handed to the leader as DEL PENDING.">
+<title>A delete: take or amend the entry, delete cold then hot, finish or hand over</title>
 <defs><marker id="seq-delete-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-delete-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
 .box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
 .box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
 .box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
-.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
 .ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
 .ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
 .ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
 text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
 .b{font-weight:600}
 .t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="960" height="631" fill="#FFFFFF"/>
-<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
-<rect x="0" y="0" width="960" height="720" fill="#FFFFFF"/>
+<rect x="0" y="0" width="960" height="660" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A delete: take or amend the entry, delete cold then hot, finish or hand over</text>
 <rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
 <text x="110" y="65" class="b" text-anchor="middle">Client</text>
-<line x1="110" y1="76" x2="110" y2="560" class="ln-d"/>
 <rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
-<text x="340" y="65" class="b" text-anchor="middle">Proxy</text>
-<line x1="340" y1="76" x2="340" y2="560" class="ln-d"/>
-<rect x="545" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="340" y="65" class="b" text-anchor="middle">Node</text>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box"/>
 <text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
-<line x1="600" y1="76" x2="600" y2="560" class="ln-d"/>
-<rect x="785" y="44" width="110" height="32" rx="5" class="box-b"/>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
 <text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
-<line x1="840" y1="76" x2="840" y2="560" class="ln-d"/>
-<text x="20" y="28" class="b" font-size="16" text-anchor="start">A delete: cold first, then hot, then the journal, then the reply</text>
-<text x="225" y="110" class="t-m lbl" text-anchor="middle">0  DELETE key</text>
-<line x1="110" y1="119" x2="340" y2="119" class="ln" marker-end="url(#seq-delete-ak)"/>
-<text x="360" y="140" class="t-m lbl" text-anchor="start">Reserved key: refused (403). The call runs on a task of its own,</text>
-<text x="360" y="154" class="t-m lbl" text-anchor="start">so a client that goes away cannot stop it half done.</text>
-<text x="590" y="186" class="t-m lbl" text-anchor="middle">1  head(key)</text>
-<line x1="340" y1="195" x2="840" y2="195" class="ln" marker-end="url(#seq-delete-ak)"/>
-<text x="590" y="222" class="t-m lbl" text-anchor="middle">a real object, a reservation, or nothing (with its tag)</text>
-<line x1="840" y1="231" x2="340" y2="231" class="ln-d" marker-end="url(#seq-delete-ak)"/>
-<text x="590" y="262" class="t-m lbl" text-anchor="middle">2  delete_if_match(key, tag)</text>
-<line x1="340" y1="271" x2="840" y2="271" class="ln" marker-end="url(#seq-delete-ak)"/>
-<text x="590" y="298" class="t-m lbl" text-anchor="middle">ok: the key no longer exists (cold decides)</text>
-<line x1="840" y1="307" x2="340" y2="307" class="ln-d" marker-end="url(#seq-delete-ak)"/>
-<rect x="360" y="318" width="470" height="58" rx="5" class="box"/>
-<text x="372" y="336" class="t-m" text-anchor="start">Step 2 runs for a real object, or for a reservation whose put</text>
-<text x="372" y="351" class="t-m" text-anchor="start">already wrote its hot object. A bare reservation (a put still in</text>
-<text x="372" y="366" class="t-m" text-anchor="start">flight) is left: the delete is ordered before that put. Nothing: skip.</text>
-<text x="470" y="404" class="t-m lbl" text-anchor="middle">3  delete(key)</text>
-<line x1="340" y1="413" x2="600" y2="413" class="ln" marker-end="url(#seq-delete-ak)"/>
-<text x="470" y="438" class="t-m lbl" text-anchor="middle">ok (a key that is not there is ok too)</text>
-<line x1="600" y1="447" x2="340" y2="447" class="ln-d" marker-end="url(#seq-delete-ak)"/>
-<text x="470" y="474" class="t-m lbl" text-anchor="middle">4  put _journal/&lt;node&gt;/&lt;seq&gt; (DELETE entry)</text>
-<line x1="340" y1="483" x2="600" y2="483" class="ln" marker-end="url(#seq-delete-ak)"/>
-<text x="470" y="508" class="t-m lbl" text-anchor="middle">ok: the journal object is durable</text>
-<line x1="600" y1="517" x2="340" y2="517" class="ln-d" marker-end="url(#seq-delete-ak)"/>
-<rect x="30" y="530" width="900" height="52" rx="5" class="box-o"/>
-<text x="225" y="549" class="t-m lbl" text-anchor="middle">5  204 (also for a key that was not there)</text>
-<line x1="340" y1="558" x2="110" y2="558" class="ln-o" marker-end="url(#seq-delete-ao)"/>
-<text x="40" y="575" class="t-m lbl" text-anchor="start">The reply waits for the journal object, not for the leader.</text>
-<rect x="30" y="595" width="900" height="100" rx="5" class="box"/>
-<text x="42" y="615" class="b" text-anchor="start">Why cold first</text>
-<text x="42" y="634" class="t-m" text-anchor="start">The cold tier decides whether a key exists. Once step 2 is done the key is gone: a copy the leader had in flight replaces the reservation</text>
-<text x="42" y="650" class="t-m" text-anchor="start">with If-Match, finds it gone and writes nothing; a copy-back that lands later leaves a hot object whose key is not in cold, which the leader removes.</text>
-<text x="42" y="666" class="t-m" text-anchor="start">The DELETE entry only updates the leader's books; the leader never deletes from the cold tier. Any step can fail: the error is the reply,</text>
-<text x="42" y="682" class="t-m" text-anchor="start">and a retry is safe, since deleting an absent key succeeds.</text>
+<line x1="110" y1="76" x2="110" y2="594" class="ln-d"/>
+<line x1="340" y1="76" x2="340" y2="594" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="594" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="594" class="ln-d"/>
+<text x="225.0" y="112" class="t-m lbl" text-anchor="middle">0  DELETE key</text>
+<text x="225.0" y="128" class="t-m lbl" text-anchor="middle">refuse a reserved key</text>
+<line x1="110" y1="140" x2="340" y2="140" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="166" class="t-m lbl" text-anchor="middle">1  create the entry, create-only: (DEL, HELD, this node)</text>
+<line x1="340" y1="178" x2="600" y2="178" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="204" class="t-m lbl" text-anchor="middle">created: a fresh entry</text>
+<line x1="600" y1="216" x2="340" y2="216" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<rect x="30" y="230" width="900" height="64" rx="5" fill="#FFFFFF"/>
+<rect x="30" y="230" width="900" height="64" rx="5" class="box-p"/>
+<text x="40" y="250" class="t-m">EXISTS: read it. (PUT, PENDING) or (CB, PENDING): CAS to (DEL, HELD, this node), an amend: the delete is taken over the pending put. (DEL,</text>
+<text x="40" y="266" class="t-m">PENDING): CAS to (DEL, HELD), a claim (a retried delete). HELD or SEALED, or lost the CAS three times: 503 SlowDown. After an amend or claim the</text>
+<text x="40" y="282" class="t-m">node remembers it handed over.</text>
+<text x="590.0" y="320" class="t-m lbl" text-anchor="middle">2  cold DELETE key (cold first, so a cold read cannot return what hot lost)</text>
+<line x1="340" y1="332" x2="840" y2="332" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="358" class="t-m lbl" text-anchor="middle">3  hot DELETE key</text>
+<line x1="340" y1="370" x2="600" y2="370" class="ln" marker-end="url(#seq-delete-ak)"/>
+<rect x="30" y="384" width="900" height="48" rx="5" fill="#FFFFFF"/>
+<rect x="30" y="384" width="900" height="48" rx="5" class="box-p"/>
+<text x="40" y="404" class="t-m">Each call is bounded by its own timeout and by the node's live_until, and is never retried. A call that fails or times out: CAS the entry to (DEL,</text>
+<text x="40" y="420" class="t-m">PENDING) and answer 503; the leader finishes the delete.</text>
+<text x="470.0" y="458" class="t-m lbl" text-anchor="middle">4a  fresh entry: delete the entry. Nothing is left for the leader,</text>
+<text x="470.0" y="474" class="t-m lbl" text-anchor="middle">so a delete then a re-put of the key never waits</text>
+<line x1="340" y1="486" x2="600" y2="486" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470.0" y="512" class="t-m lbl" text-anchor="middle">4b  amended or claimed: CAS the entry to (DEL, PENDING), If-Match</text>
+<text x="470.0" y="528" class="t-m lbl" text-anchor="middle">the leader rolls it forward later and releases it</text>
+<line x1="340" y1="540" x2="600" y2="540" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="225.0" y="566" class="t-m lbl" text-anchor="middle">5  204</text>
+<line x1="340" y1="578" x2="110" y2="578" class="ln-o" marker-end="url(#seq-delete-ao)"/>
+<rect x="30" y="592" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="612" class="t-m">From the moment the DEL entry exists in any state, a GET or HEAD of the key that misses hot answers 404 without reading cold, and a PUT is 503. If</text>
+<text x="40" y="628" class="t-m">the 4b CAS fails the delete still happened: 204. A delete of an absent key is a 204.</text>
 </svg>
