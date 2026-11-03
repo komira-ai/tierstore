@@ -257,7 +257,7 @@ async fn a_takeover_keeps_a_hot_object_whose_cold_object_vanished_after_the_comp
 /// both looks find A with one tag, and the objects after it are evicted.
 #[tokio::test(start_paused = true)]
 async fn a_takeover_keeps_a_hot_object_whose_cold_object_was_replaced_and_restored_around_the_read()
- {
+{
     let rig = five_objects().await;
     let b = "x".repeat(21);
     let a = "x".repeat(20) + "y";
