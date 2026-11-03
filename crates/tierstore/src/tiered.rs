@@ -140,11 +140,14 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Get** reads the hot tier, else the cold tier. An object it read from the cold tier is
 ///   copied back into the hot tier, create-only (it is fine if another read got there
 ///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
-///   (`PutMirror`, with the content tag the cold object has), in the background, so that the
-///   reconciler can evict it again, and can drop it if the cold tier no longer holds that object.
-///   The tag is the one the cold tier's read gives with the bytes (`get_marked`: the bytes, the
-///   mark and the tag of one object), so it is the tag of the bytes copied whatever the key held
-///   before or after; no HEAD is made for it.
+///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
+///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
+///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
+///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
+///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
+///   made for it. The hot tag is read from the hot tier right after the create-only write (a
+///   copy whose tag cannot be read is taken out again). The two tags are never compared with each
+///   other: the tiers may tag the same bytes differently.
 ///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
 ///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
 ///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
@@ -329,6 +332,7 @@ impl Inner {
             size,
             time: self.config.clock.now(),
             cold_tag,
+            hot_tag: None,
         }
     }
 
@@ -395,6 +399,24 @@ impl Inner {
         cold_tag: Option<String>,
     ) -> Result<(), Error> {
         let appended = self.append(self.entry(op, key, size, cold_tag)).await;
+        if appended.is_err() {
+            let _ = self.hot.delete(key).await;
+        }
+        appended
+    }
+
+    /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
+    /// the tag the hot tier gives the copy. Takes the copy out of the hot tier if that fails.
+    async fn journal_mirror(
+        &self,
+        key: &str,
+        size: u64,
+        cold_tag: String,
+        hot_tag: String,
+    ) -> Result<(), Error> {
+        let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
+        entry.hot_tag = Some(hot_tag);
+        let appended = self.append(entry).await;
         if appended.is_err() {
             let _ = self.hot.delete(key).await;
         }

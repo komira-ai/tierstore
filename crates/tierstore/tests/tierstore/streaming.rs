@@ -57,6 +57,7 @@ async fn a_streamed_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_ti
         size: 5,
         time: 42,
         cold_tag: None,
+        hot_tag: None,
     };
     assert_eq!(entries, [want]);
 }

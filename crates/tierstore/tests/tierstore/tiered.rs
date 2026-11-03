@@ -15,6 +15,7 @@ fn entry(op: JournalOp, key: &str, size: u64, time: u64) -> JournalEntry {
         size,
         time,
         cold_tag: None,
+        hot_tag: None,
     }
 }
 
@@ -101,6 +102,7 @@ async fn a_get_copies_a_cold_object_back_and_a_head_does_not() {
     let entries = journal(&*rig.hot_mem, "p1", 1).await;
     let mut mirror = entry(JournalOp::PutMirror, "k", 5, 0);
     mirror.cold_tag = Some(rig.cold_mem.head("k").await.unwrap().tag);
+    mirror.hot_tag = Some(rig.hot_mem.head("k").await.unwrap().tag);
     assert_eq!(entries, [mirror]);
 
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
