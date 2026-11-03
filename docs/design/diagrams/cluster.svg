@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 800" width="960" height="800" role="img" aria-label="Three nodes, one of them the leader, above two tier frames. The hot tier holds client objects, journal objects and the _tiering objects; the cold tier holds reservations and real objects. Numbered badges mark node boot, a put and the leader pass.">
+<title>The cluster at a glance: nodes, the hot tier, the cold tier and who writes what</title>
+<defs><marker id="cluster-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="cluster-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="800" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">The cluster at a glance: nodes, the two tiers, and what each writes</text>
+<rect x="20" y="46" width="920" height="130" rx="8" class="box-p"/>
+<text x="34" y="66" class="b">Nodes: any number of processes; every one is a proxy with its own id, and one of them also leads</text>
+<rect x="34" y="80" width="285" height="84" rx="6" class="box-b"/>
+<rect x="34" y="80" width="285" height="84" rx="6" fill="none" stroke="#0B0B0A" stroke-width="3.2"/>
+<text x="46" y="102" class="b">node A, boot id A-4</text>
+<text x="46" y="121">LEADER: holds _tiering/lease</text>
+<text x="46" y="140" class="t-n">also copies to cold, evicts, retires nodes</text>
+<rect x="337" y="80" width="285" height="84" rx="6" class="box-b"/>
+<text x="349" y="102" class="b">node B, boot id B-7</text>
+<text x="349" y="121">serves puts and gets</text>
+<text x="349" y="140" class="t-n">copies and evicts nothing</text>
+<rect x="640" y="80" width="285" height="84" rx="6" class="box-b"/>
+<text x="652" y="102" class="b">node C, boot id C-2</text>
+<text x="652" y="121">serves puts and gets</text>
+<text x="652" y="140" class="t-n">copies and evicts nothing</text>
+<line x1="300" y1="176" x2="300" y2="238" class="ln" marker-end="url(#cluster-ak)"/>
+<text x="310" y="204" class="t-n lbl">every node: register, objects, journal</text>
+<text x="310" y="222" class="t-n lbl">the leader: lease, checkpoints, usage</text>
+<line x1="790" y1="176" x2="790" y2="238" class="ln" marker-end="url(#cluster-ak)"/>
+<text x="780" y="204" class="t-n lbl" text-anchor="end">every node: reserve the key</text>
+<text x="780" y="222" class="t-n lbl" text-anchor="end">the leader: copy to cold</text>
+<rect x="20" y="242" width="590" height="400" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
+<text x="36" y="266" class="b" font-size="15">HOT tier</text>
+<text x="110" y="266" class="t-n">fast; holds the data until it is evicted, and all coordination state</text>
+<rect x="34" y="282" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="303" class="b">&lt;client key&gt;</text>
+<text x="46" y="321" class="t-n">the object, under its own key</text>
+<circle cx="578" cy="298" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="302" class="b" text-anchor="middle" font-size="12">3</text>
+<circle cx="551" cy="298" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="551" y="302" class="b" text-anchor="middle" font-size="12">2</text>
+<rect x="34" y="338" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="359" class="b">_journal/&lt;id&gt;/&lt;seq&gt;</text>
+<text x="46" y="377" class="t-n">one per batch of a node's puts; deleted once checkpointed</text>
+<circle cx="578" cy="354" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="358" class="b" text-anchor="middle" font-size="12">3</text>
+<circle cx="551" cy="354" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="551" y="358" class="b" text-anchor="middle" font-size="12">2</text>
+<rect x="34" y="394" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="415" class="b">_tiering/proxies/&lt;id&gt;</text>
+<text x="46" y="433" class="t-n">the node's registration and heartbeat</text>
+<circle cx="578" cy="410" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="414" class="b" text-anchor="middle" font-size="12">4</text>
+<circle cx="551" cy="410" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="551" y="414" class="b" text-anchor="middle" font-size="12">1</text>
+<rect x="34" y="450" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="471" class="b">_tiering/checkpoint/&lt;id&gt;</text>
+<text x="46" y="489" class="t-n">how far the leader has applied that node's journal</text>
+<circle cx="578" cy="466" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="470" class="b" text-anchor="middle" font-size="12">4</text>
+<circle cx="551" cy="466" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="551" y="470" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="34" y="506" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="527" class="b">_tiering/lease</text>
+<text x="46" y="545" class="t-n">whoever holds it is the leader</text>
+<circle cx="578" cy="522" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="526" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="34" y="562" width="562" height="48" rx="5" class="box"/>
+<text x="46" y="583" class="b">_tiering/usage</text>
+<text x="46" y="601" class="t-n">how full the hot tier is; published by the leader</text>
+<circle cx="578" cy="578" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="578" y="582" class="b" text-anchor="middle" font-size="12">3</text>
+<text x="36" y="632" class="t-n">plus _tiering/selftest/&lt;run&gt;/ probes written at start-up (never client data)</text>
+<rect x="640" y="242" width="300" height="400" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
+<text x="656" y="266" class="b" font-size="15">COLD tier</text>
+<text x="730" y="266" class="t-n">durable</text>
+<rect x="654" y="282" width="272" height="64" rx="5" class="box-o"/>
+<text x="666" y="303" class="b">&lt;client key&gt;: RESERVATION</text>
+<text x="666" y="321" class="t-n">small, marked; made first by a put</text>
+<circle cx="912" cy="298" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="912" y="302" class="b" text-anchor="middle" font-size="12">2</text>
+<line x1="790" y1="346" x2="790" y2="386" class="ln" marker-end="url(#cluster-ak)"/>
+<text x="800" y="362" class="t-m lbl">leader replaces it</text>
+<text x="800" y="378" class="t-m lbl">(If-Match)</text>
+<rect x="654" y="386" width="272" height="64" rx="5" class="box"/>
+<text x="666" y="407" class="b">&lt;client key&gt;: REAL OBJECT</text>
+<text x="666" y="425" class="t-n">the bytes; the key now exists for good</text>
+<circle cx="912" cy="402" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="912" y="406" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="654" y="470" width="272" height="110" rx="5" class="box-p"/>
+<text x="666" y="494" class="t-n">Cold decides whether a key exists.</text>
+<text x="666" y="512" class="t-n">Nothing else lives in cold:</text>
+<text x="666" y="530" class="t-n">no _journal, no _tiering.</text>
+<rect x="20" y="660" width="920" height="124" rx="5" class="box"/>
+<text x="34" y="682" class="b">Reading the numbers</text>
+<text x="34" y="704" class="t-n">1  A node boots: a fresh id, its registration created in hot, rewritten every minute while it lives.</text>
+<text x="34" y="723" class="t-n">2  A put: reserve the key in cold (one create-only write decides the owner), then write the object and the node's journal entry to hot; acknowledge.</text>
+<text x="34" y="742" class="t-n">3  The leader's pass: renew the lease, read each journal, copy objects to cold over the reservations, write checkpoints, delete journals, evict.</text>
+<text x="34" y="761" class="t-n">4  A node that closed or went silent is retired by the leader: its journal, checkpoint and registration are deleted.</text>
+<text x="34" y="780" class="t-m">Zoomed views follow: the put, a node's life, leader election, the leader's pass.</text>
+</svg>
