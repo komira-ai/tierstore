@@ -38,24 +38,24 @@ use tracing::{Event, Level, Metadata, Subscriber};
 
 /// Installs the stderr subscriber for the process, showing `info` and above. A process that
 /// already has a global subscriber keeps it.
-pub fn install() {
+pub(crate) fn install() {
     let _ = try_install();
 }
 
 /// Installs the stderr subscriber as the global default; an error says one is already set.
-pub fn try_install() -> Result<(), SetGlobalDefaultError> {
+pub(super) fn try_install() -> Result<(), SetGlobalDefaultError> {
     tracing::subscriber::set_global_default(LineLog::new(io::stderr(), Level::INFO))
 }
 
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.
-pub struct LineLog<W> {
+pub(super) struct LineLog<W> {
     out: Mutex<W>,
     max: Level,
 }
 
 impl<W: Write> LineLog<W> {
     /// A subscriber over `out` that shows events at `max` and more severe ones.
-    pub fn new(out: W, max: Level) -> Self {
+    pub(super) fn new(out: W, max: Level) -> Self {
         Self {
             out: Mutex::new(out),
             max,

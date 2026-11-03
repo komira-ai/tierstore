@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tracing::Level;
 use tracing::subscriber::with_default;
 
-use super::stderr_log::{LineLog, try_install};
+use super::stderr_log::{LineLog, install, try_install};
 
 /// A writer whose bytes the test reads back.
 #[derive(Clone, Default)]
@@ -133,6 +133,6 @@ fn events_of_other_crates_are_not_written() {
 #[test]
 fn a_second_install_is_refused_because_the_first_subscriber_is_kept() {
     // Another test may have set the global default first, so only the second call is asserted.
-    let _ = try_install();
+    install();
     assert!(try_install().is_err());
 }

@@ -1,7 +1,7 @@
 //! What this build says of itself: its version, the commit it was built from, and the
 //! capabilities a host updater may ask for with `tierstore --capabilities`.
 
-pub mod stderr_log;
+pub(crate) mod stderr_log;
 
 #[cfg(test)]
 mod stderr_log_tests;
