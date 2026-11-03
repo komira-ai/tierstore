@@ -41,8 +41,8 @@ yet: place it from this directory, below):
 
 ```sh
 tar -xzf tierstore-<commit>-linux-x86_64.tar.gz tierstore
-install -d -m 0755 /usr/libexec/kbf
-install -m 0755 -o root -g root tierstore /usr/libexec/kbf/tierstore
+install -d -m 0755 /usr/libexec/tierstore
+install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore
 ```
 
 With `tierstore.service`, nothing updates it afterwards: whoever runs the setup places the next
@@ -911,13 +911,13 @@ path, never what is in them, and the file it prints is loaded back before it is 
 loads. Take the flags out of `ExecStart=`:
 
 ```sh
-/usr/libexec/kbf/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
+/usr/libexec/tierstore/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
 ```
 
 and switch the unit by changing `ExecStart=` to
 
 ```
-ExecStart=/usr/libexec/kbf/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
+ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
 The flags and the file are both accepted in this release, so a unit may stay as it is and move

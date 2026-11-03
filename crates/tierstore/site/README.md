@@ -14,25 +14,24 @@ npm run golden      # after a change meant to alter a hand-made page or asset: r
 
 ## Why it is here
 
-tierstore's own repository is being planned. The site lives with the crate (`crates/tierstore/site`) so that it moves
-with it: in the new repository this directory becomes `site/`. The path is the only thing that changes. The tests find
-the repository root by looking for `.github/workflows` above them, and compute the site's path from it
-(`test/support.ts`); `.github/workflows/tierstore-site.yml` names the directory in three places (the `paths:` filters,
-`working-directory` and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact
-path and in the two files its deploy job checks out, and `test/supply-chain.test.ts` checks that the
-workflows and the site agree. The test `csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy that
-the site's hosting stack serves; a change to it there is made here in the same step.
+The site lives with the crate (`crates/tierstore/site`). The tests find the repository root by looking for
+`.github/workflows` above them, and compute the site's path from it (`test/support.ts`);
+`.github/workflows/tierstore-site.yml` names the directory in three places (the `paths:` filters, `working-directory`
+and `node-version-file`), `.github/workflows/tierstore-site-publish.yml` in those, in the artifact path and in the two
+files its deploy job checks out, and `test/supply-chain.test.ts` checks that the workflows and the site agree. The test
+`csp.test.ts` reads the Content-Security-Policy from `served-policy.ts`, a copy of the policy the site's hosting sets as
+the header; a change to it there is made here in the same step.
 
 | Path | What |
 |---|---|
 | `../docs/*.md` | the operator guide, rendered by `tools/docs.ts` into `/docs/` and `/docs/<name>/` (a page for each file, so a new file is a new page; `Not in a release yet` sections are marked). The crate's test `src/server/docs_tests.rs` holds the guide to the code, so the pages cannot say what the code does not. A minimal renderer for the subset the guide uses, no dependency; it refuses what it does not read |
-| `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/tierstore/README.md` or the code; a page says where |
-| `served-policy.ts` | the Content-Security-Policy the site is served under, copied from the hosting stack that sets the header |
-| `static/theme.css` | the shared theme (tierstore.dev and its sibling sites), copied byte for byte; `test/theme.test.ts` pins its sha256 |
+| `content/*.html` | the page copy: the inside of each page's `<main>`. Each claim comes from the crate's documentation, `packaging/README.md` or the code; a page says where |
+| `served-policy.ts` | the Content-Security-Policy the site is served under, a copy of the policy the site's hosting sets as the header |
+| `static/theme.css` | the theme; `test/theme.test.ts` pins its sha256 |
 | `static/site.css` | this site's own rules, loaded after the theme |
 | `src/copy.ts` | copy buttons on command blocks |
 | `tools/` | `pages.ts` (routes, titles, the white-paper URL), `layout.ts` (the page shell, with the `> tierstore` mark), `build.ts`, `check-dist.ts`, `links.ts`, `csp.ts`, `publish.ts` (uploads a built `dist/`; see Deploying) |
-| `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the white-paper slot, the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
+| `test/` | golden output (`golden.manifest` guards the hand-made pages and assets, the docs index included; the pages rendered from the guide (`docs/<name>/index.html`) are left out of it and held by `docs.test.ts` and the crate's `docs_tests.rs`, so a guide edit needs no new manifest), the docs pages (`docs.test.ts`), links, Content-Security-Policy, theme digest, the optional footer link (`footer-slot.test.ts`), the "not built" statements and demo strings held to the crate source (`claims.test.ts`), public-repo scan, supply-chain policy, the publish program against stand-ins for the token service and the `aws` CLI (`publish.test.ts`) |
 
 ## The demo
 
@@ -43,13 +42,13 @@ read from its source, and each block names the file. Values that differ on every
 
 ## The white paper
 
-`WHITE_PAPER_URL` in `tools/pages.ts` is `null`: until the paper is final the site says nothing about it, and
-`test/whitepaper.test.ts` fails if any built file mentions one. Setting the URL adds a footer link on every page.
+`WHITE_PAPER_URL` in `tools/pages.ts` is `null`: until the paper is final the site says nothing about it.
+Setting the URL adds a footer link on every page. The paper itself is maintained with the website, not in this repository.
 
 ## Deploying
 
 A push to `main` that changes the site is published by `.github/workflows/tierstore-site-publish.yml`, and so is a manual run of
-that workflow on `main`. It is the same flow as mopm.dev's: a GitHub environment holds the settings, the job proves its identity
+that workflow on `main`. A GitHub environment holds the settings, the job proves its identity
 to AWS with an OpenID Connect token (no stored key), and a role that can only write this site's bucket and invalidate its
 distribution does the upload. A pull request never reaches it.
 
@@ -78,9 +77,7 @@ The settings are three variables of the environment `prod-site-tierstore`, set o
 variable is an empty flag, which the program refuses. The environment, the role and its trust, the bucket, the distribution and
 the certificate are created once by an operator with their own AWS credentials (`infra/site`); the workflow only publishes.
 
-The workflow lint holds the workflow's safety properties: main only, one job with the
-token, the environment, the role from a variable and no stored key, the build and the tests before the upload, a deploy that is
-never cancelled. The workflow lint additionally allows `id-token: write` for this job and this environment alone.
+The workflow lint (`cargo test -p xtask --test workflows`) allows `id-token: write` for this job and this environment alone.
 
 The output and its rules are those of `site/README.md`: `dist/` holds the pages and `assets/<id>/`, served under
 `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'`.

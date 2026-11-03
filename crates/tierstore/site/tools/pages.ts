@@ -33,7 +33,7 @@ export const RELEASES_URL = `${REPO_URL}/releases`;
 
 /**
  * The white paper. null while there is no final version: nothing on the site links to it, names it or reserves room
- * for it (test/hygiene.test.ts checks that). Set to the paper's URL, and the footer gains the link.
+ * for it. Set to the paper's URL, and the footer gains the link.
  */
 export const WHITE_PAPER_URL: string | null = null;
 

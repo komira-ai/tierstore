@@ -4,9 +4,7 @@
 //!
 //! The commit is the value of [`OVERRIDE`] when that variable is set, and otherwise
 //! `git rev-parse --short=12 HEAD`, or `unknown` where git gives nothing. The override is for a
-//! build without a `.git` (a source archive, a sandbox) that knows its commit. It is the rule of
-//! `kbf-server`'s `KBF_BUILD_COMMIT_OVERRIDE`, under a tierstore name, because that one is
-//! kbf's and this crate is built to move to a repository of its own.
+//! build without a `.git` (a source archive, a sandbox) that knows its commit.
 
 /// The variable that replaces the commit read from git.
 pub const OVERRIDE: &str = "TIERSTORE_BUILD_COMMIT_OVERRIDE";
