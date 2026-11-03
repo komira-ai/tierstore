@@ -1,7 +1,7 @@
 //! What a reconciler that took over from another does before it evicts an object the other copied
 //! (it holds no tag of it): it compares the bytes of the two tiers, never their tags, since two
-//! tiers of different kinds tag the same bytes differently. The hot object is read in ranges, each
-//! with its content tag, so that the bytes compared are those of the object the eviction deletes.
+//! tiers of different kinds tag the same bytes differently. Both objects are read in ranges, each
+//! with its tag and mark, so that the bytes compared are those of the objects the HEADs saw.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -10,7 +10,7 @@ use tierstore::{Backend, Error, Op, Reconciler};
 
 use crate::churn::{Change, Churn, Flaky};
 
-use crate::chunked::{Chunked, Ending};
+use crate::marked_reads::{Ending, MarkedReads};
 use crate::reconciler_reservations::{after_a_takeover, five_objects};
 use crate::support::{Rig, assert_absent, body, read};
 
@@ -20,7 +20,7 @@ fn down() -> Error {
 
 /// A reconciler over `hot` and `cold` that took over from one that copied the rig's five objects,
 /// with a budget of 100 bytes.
-async fn takeover_over(rig: &Rig, hot: Chunked, cold: Chunked) -> Reconciler {
+async fn takeover_over(rig: &Rig, hot: MarkedReads, cold: MarkedReads) -> Reconciler {
     let mut first = rig.reconciler("r1", 1000);
     first.pass().await;
     first.stop().await;
@@ -28,47 +28,35 @@ async fn takeover_over(rig: &Rig, hot: Chunked, cold: Chunked) -> Reconciler {
     Reconciler::new(Arc::new(hot), Arc::new(cold), config)
 }
 
-/// Asserts that a takeover compares the bytes of the two tiers and not the pieces they come in:
-/// objects with the same bytes, read in chunks of different sizes (with empty chunks between), are
-/// evicted down to the low-water mark.
+/// Asserts that the comparison reads range by range and stops at the first difference: two objects
+/// of 2.5 MiB (three ranges each) whose cold object differs in the first byte (k1) or not at all
+/// (k2) are read from the cold tier for one range and for all three, and the hot object of k1 stays.
 #[tokio::test(start_paused = true)]
-async fn a_takeover_evicts_objects_the_cold_tier_holds_the_same_bytes_of_in_other_chunks() {
-    let rig = five_objects().await;
-    let hot = Chunked::new(rig.hot_mem.clone(), 4, Ending::Whole);
-    let cold = Chunked::new(rig.cold_mem.clone(), 7, Ending::Whole);
-    let mut second = takeover_over(&rig, hot, cold).await;
-
-    let report = second.pass().await;
-    assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(report.evicted, 2);
-    assert_absent(&*rig.hot_mem, "k1").await;
-    assert_absent(&*rig.hot_mem, "k2").await;
-    assert_eq!(read(&*rig.hot_mem, "k3").await, body(&"x".repeat(21)));
-}
-
-/// Asserts that the comparison consumes the reads chunk by chunk and stops at the first
-/// difference: objects of 21 bytes that differ in the first byte, whose cold object is read in
-/// chunks of 3, are pulled from the cold tier for one chunk only (not for the whole object), and
-/// the hot object stays.
-#[tokio::test(start_paused = true)]
-async fn a_takeover_compares_chunk_by_chunk_and_stops_at_the_first_difference() {
-    let rig = five_objects().await;
+async fn a_takeover_compares_range_by_range_and_stops_at_the_first_difference() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 100 << 20).await;
+    let whole = "x".repeat(5 << 19);
+    for key in ["k1", "k2"] {
+        proxy.put(key, body(&whole)).await.unwrap();
+    }
+    let mut first = rig.reconciler("r1", 100 << 20);
+    first.pass().await;
+    first.stop().await;
+    let other = "y".to_owned() + &"x".repeat((5 << 19) - 1);
     rig.cold_mem.delete("k1").await.unwrap();
-    rig.cold_mem
-        .put("k1", body(&("y".to_owned() + &"x".repeat(20))))
-        .await
-        .unwrap();
-    let hot = Chunked::new(rig.hot_mem.clone(), 3, Ending::Whole);
-    let cold = Chunked::new(rig.cold_mem.clone(), 3, Ending::Whole);
-    let cold_pulled = cold.pulled();
-    let mut second = takeover_over(&rig, hot, cold).await;
+    rig.cold_mem.put("k1", body(&other)).await.unwrap();
+    let hot = MarkedReads::new(rig.hot_mem.clone(), Ending::Whole);
+    let cold = MarkedReads::new(rig.cold_mem.clone(), Ending::Whole);
+    let cold_reads = cold.reads();
+    let config = rig.reconciler_config("r2", 1);
+    let mut second = Reconciler::new(Arc::new(hot), Arc::new(cold), config);
 
     let report = second.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
-    // k1 is pulled for one chunk, and each of the objects after it (7 chunks each) for all of them
-    // when it matches: the 2 evicted ones and no more.
-    assert_eq!(cold_pulled.load(Ordering::SeqCst), 1 + 2 * 7);
+    assert_eq!(report.evicted, 1);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&whole));
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_eq!(cold_reads.load(Ordering::SeqCst), 1 + 3);
 }
 
 /// Asserts that a takeover keeps a hot object whose cold object is of the same size and other
@@ -105,8 +93,8 @@ async fn a_takeover_keeps_hot_objects_when_a_read_of_either_tier_ends_early_or_b
     ];
     for (hot_ending, cold_ending, breaks) in reads {
         let rig = five_objects().await;
-        let hot = Chunked::new(rig.hot_mem.clone(), 5, hot_ending);
-        let cold = Chunked::new(rig.cold_mem.clone(), 5, cold_ending);
+        let hot = MarkedReads::new(rig.hot_mem.clone(), hot_ending);
+        let cold = MarkedReads::new(rig.cold_mem.clone(), cold_ending);
         let mut second = takeover_over(&rig, hot, cold).await;
 
         let report = second.pass().await;

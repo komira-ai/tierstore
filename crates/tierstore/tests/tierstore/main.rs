@@ -6,7 +6,6 @@ mod cache;
 mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
-mod chunked;
 mod churn;
 mod conformance;
 mod faults;
@@ -17,6 +16,7 @@ mod lease;
 mod lease_takeover;
 mod list_uploads;
 mod list_uploads_reserved;
+mod marked_reads;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
