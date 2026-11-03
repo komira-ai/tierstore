@@ -66,7 +66,7 @@ impl Registrations {
         let due = self
             .seen
             .iter()
-            .filter(|(_, seen)| since(seen.first) && seen.asked.is_none_or(|asked| since(asked)));
+            .filter(|(_, seen)| since(seen.first) && seen.asked.is_none_or(&since));
         due.map(|(id, _)| id.clone()).collect()
     }
 
