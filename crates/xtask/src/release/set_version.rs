@@ -75,15 +75,48 @@ pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
     for line in lines.iter_mut().filter(|l| l.trim() == from) {
         *line = format!("{}{to}", &line[..line.len() - line.trim_start().len()]);
     }
-    Ok(lines.join("\n"))
+    // Cargo writes same-named entries ordered by version, then local before remote: a lock
+    // in another order is rewritten by the next cargo command, which `--locked` refuses.
+    for run in lines.chunk_by_mut(|a, b| is_tierstore_ref(a) == is_tierstore_ref(b)) {
+        if is_tierstore_ref(&run[0]) {
+            run.sort_by_cached_key(|l| (version_key(l), l.contains('(')));
+        }
+    }
+    let joined = lines.join("\n");
+    let mut blocks: Vec<String> = joined.split("\n\n").map(str::to_owned).collect();
+    let at: Vec<usize> = (0..blocks.len())
+        .filter(|&i| blocks[i].starts_with("[[package]]\nname = \"tierstore\"\n"))
+        .collect();
+    let mut run: Vec<String> = at.iter().map(|&i| blocks[i].clone()).collect();
+    run.sort_by_cached_key(|b| (block_key(b), b.contains("\nsource = ")));
+    for (&i, block) in at.iter().zip(run) {
+        blocks[i] = block;
+    }
+    Ok(blocks.join("\n\n"))
 }
 
-/// The index of the first empty line after line `from`, or the number of lines: where the
-/// lock entry that holds line `from` ends.
-fn package_end(lines: &[String], from: usize) -> usize {
-    (from + 1..lines.len())
-        .find(|&i| lines[i].is_empty())
-        .unwrap_or(lines.len())
+/// Whether `line` is a dependency entry naming a package called `tierstore`.
+fn is_tierstore_ref(line: &str) -> bool {
+    line.trim_start().starts_with("\"tierstore ")
+}
+
+/// The numbers of the version in `line` (a dependency entry or a `version` line), before any
+/// `(source)`, for ordering versions the way cargo does.
+fn version_key(line: &str) -> Vec<u64> {
+    line.split('(')
+        .take(1)
+        .flat_map(|l| l.split(|c: char| !c.is_ascii_digit()))
+        .filter_map(|n| n.parse().ok())
+        .collect()
+}
+
+/// The version key of the package entry `block`.
+fn block_key(block: &str) -> Vec<u64> {
+    block
+        .lines()
+        .filter(|l| l.starts_with("version = \""))
+        .flat_map(version_key)
+        .collect()
 }
 
 /// The `release set-version` verb: sets the version in both files under `root`; the line to

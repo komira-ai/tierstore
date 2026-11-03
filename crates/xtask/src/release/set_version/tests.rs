@@ -52,39 +52,70 @@ fn the_lock_version_is_that_of_the_tierstore_package_alone() {
     assert!(got.contains("name = \"zed\"\nversion = \"2.0.0\""));
 }
 
-const REMOTE_REF: &str = "tierstore 0.3.0 (git+https://example.invalid/tierstore?rev=abc)";
+const REMOTE_REF: &str = " \"tierstore 0.3.0 (git+https://example.invalid/tierstore?rev=abc)\",\n";
 const REMOTE_PKG: &str = "[[package]]\nname = \"tierstore\"\nversion = \"0.3.0\"\nsource = \"git+https://example.invalid/tierstore?rev=abc#abc\"\n\n";
 
-/// A lock with the remote previous release listed before the local package, and the references
-/// to each from another package; `local` is the local package's version and reference.
-fn two_packages(local: &str) -> String {
+/// The local package entry at `version`.
+fn local_pkg(version: &str) -> String {
     format!(
-        "{REMOTE_PKG}[[package]]\nname = \"tierstore\"\nversion = \"{local}\"\ndependencies = [\n \"x\",\n]\n\n[[package]]\nname = \"compat\"\nversion = \"0.1.0\"\ndependencies = [\n \"tierstore {local}\",\n \"{REMOTE_REF}\",\n]\n"
+        "[[package]]\nname = \"tierstore\"\nversion = \"{version}\"\ndependencies = [\n \"x\",\n]\n\n"
     )
 }
 
-/// Asserts that with both packages present, the local one (the one without a `source`, even
-/// listed second) and the exact references to it get the new version, while the remote package
-/// and the references to it stay as they were.
+/// The entry of a package that depends on tierstore, with the dependency lines `refs`.
+fn compat(refs: &str) -> String {
+    format!(
+        "[[package]]\nname = \"tierstore-compat\"\nversion = \"0.1.0\"\ndependencies = [\n \"bytes\",\n{refs} \"tierstore-testkit\",\n]\n"
+    )
+}
+
+fn local_ref(version: &str) -> String {
+    format!(" \"tierstore {version}\",\n")
+}
+
+/// Asserts that with both packages present, the local one (the one without a `source`) and the
+/// exact references to it get the new version, the remote package and the references to it stay
+/// as they were, and the entries and references are in the order cargo writes (by version), so
+/// the `--locked` build accepts the lock.
 #[test]
 fn the_local_package_and_its_references_move_and_the_remote_package_stays() {
-    let got = set_lock(&two_packages("0.3.0"), "1.2.3").expect("set");
-    assert_eq!(got, two_packages("1.2.3"));
+    let text = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{}{REMOTE_REF}", local_ref("0.3.0")))
+    );
+    let expected = format!(
+        "{REMOTE_PKG}{}{}",
+        local_pkg("1.2.3"),
+        compat(&format!("{REMOTE_REF}{}", local_ref("1.2.3")))
+    );
+    assert_eq!(set_lock(&text, "1.2.3").expect("set"), expected);
+}
+
+/// Asserts that a version below the remote package's keeps the local entry and reference first,
+/// so the order follows the versions and is not a fixed swap.
+#[test]
+fn a_local_version_below_the_remote_one_keeps_the_local_entries_first() {
+    let text = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.3.0"),
+        compat(&format!("{REMOTE_REF}{}", local_ref("0.3.0")))
+    );
+    let expected = format!(
+        "{}{REMOTE_PKG}{}",
+        local_pkg("0.2.9"),
+        compat(&format!("{}{REMOTE_REF}", local_ref("0.2.9")))
+    );
+    assert_eq!(set_lock(&text, "0.2.9").expect("set"), expected);
 }
 
 /// Asserts that a lock whose references name only the remote package changes in the local
-/// version line alone.
+/// package alone: its version and its place after the remote entry.
 #[test]
 fn references_to_the_remote_package_alone_leave_the_rest_unchanged() {
-    let text = two_packages("0.3.0").replace(" \"tierstore 0.3.0\",\n", "");
-    let got = set_lock(&text, "1.2.3").expect("set");
-    let expected = text.replacen(
-        "name = \"tierstore\"\nversion = \"0.3.0\"\ndependencies",
-        "name = \"tierstore\"\nversion = \"1.2.3\"\ndependencies",
-        1,
-    );
-    assert_ne!(got, text);
-    assert_eq!(got, expected);
+    let text = format!("{}{REMOTE_PKG}{}", local_pkg("0.3.0"), compat(REMOTE_REF));
+    let expected = format!("{REMOTE_PKG}{}{}", local_pkg("1.2.3"), compat(REMOTE_REF));
+    assert_eq!(set_lock(&text, "1.2.3").expect("set"), expected);
 }
 
 /// Asserts that a lock holding only a remote tierstore is refused as having no local package,
