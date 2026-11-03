@@ -98,8 +98,8 @@ async fn with_journal(entries: &[JournalEntry]) -> Rig {
     let rig = Rig::new();
     let _proxy = rig.proxy("p1", 1000).await;
     let object = encode_journal(entries);
-    let put = rig.hot_mem.put(&journal_key("p1", 1), object);
-    put.await.unwrap();
+    let key = journal_key("p1", 1);
+    rig.hot_mem.put(&key, object).await.unwrap();
     rig
 }
 
