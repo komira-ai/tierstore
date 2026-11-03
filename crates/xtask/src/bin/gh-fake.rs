@@ -195,18 +195,18 @@ fn departure(expect: &str, flags: &BTreeMap<&str, &str>) -> Option<String> {
 }
 
 /// Appends `args` to the file that the `record` line of `expect.txt` names, if there is one:
-/// one argument per line, an empty line after them, in one write.
-fn record(expect: &str, args: &[String]) {
-    let Some(path) = expect.lines().find_map(|l| l.strip_prefix("record=")) else {
-        return;
-    };
+/// one argument per line, an empty line after them, in one write. What went wrong, if the file
+/// could not be written.
+fn record(expect: &str, args: &[String]) -> Option<String> {
+    let path = expect.lines().find_map(|l| l.strip_prefix("record="))?;
     let block: String = args.iter().map(|a| format!("{a}\n")).collect();
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .and_then(|mut f| f.write_all(format!("{block}\n").as_bytes()))
-        .expect("gh-fake: the record file");
+        .err()
+        .map(|e| format!("cannot write the record file {path}: {e}"))
 }
 
 /// `attestation verify <file> ...`: see the header.
@@ -231,8 +231,8 @@ fn attestation(args: &[String]) -> ExitCode {
     let bundle = flags.get("--bundle").and_then(|b| digest(b));
     let ledger = find_beside(&args[2], "ledger.txt");
     let expect = find_beside(&args[2], "expect.txt");
-    record(&expect, args);
-    if let Some(problem) = departure(&expect, &flags) {
+    let unrecorded = record(&expect, args);
+    if let Some(problem) = unrecorded.or_else(|| departure(&expect, &flags)) {
         eprintln!("gh-fake: {problem}: {flags:?}");
         return ExitCode::FAILURE;
     }

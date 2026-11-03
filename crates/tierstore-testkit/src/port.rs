@@ -39,9 +39,10 @@
 //!
 //! The tests below prove the behaviour on the platform they run on, macOS included.
 
+use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::os::fd::OwnedFd;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use rustix::net::{self, AddressFamily, SocketType};
 
@@ -99,19 +100,25 @@ impl Reserved {
             // (SO_REUSEADDR for the closing connection's leftover state).
             let addr = self.addr();
             drop(self.v4);
-            let fd = net::socket(AddressFamily::INET, SocketType::STREAM, None).expect("socket");
-            net::sockopt::set_socket_reuseaddr(&fd, true).expect("reuseaddr");
-            net::bind(&fd, &addr).expect("bind the held port");
+            let fd = must(
+                net::socket(AddressFamily::INET, SocketType::STREAM, None),
+                "socket",
+            );
+            must(net::sockopt::set_socket_reuseaddr(&fd, true), "reuseaddr");
+            must(net::bind(&fd, &addr), "bind the held port");
             fd
         };
-        net::listen(&fd, 128).expect("listen");
+        must(net::listen(&fd, 128), "listen");
         TcpListener::from(fd)
     }
 }
 
 /// The IPv4 half of a new [`Reserved`]: a free number on `127.0.0.1`, held.
 fn new_v4() -> Held {
-    held_socket(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind a loopback socket")
+    must(
+        held_socket(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))),
+        "bind a loopback socket",
+    )
 }
 
 impl Default for Reserved {
@@ -172,9 +179,19 @@ fn held_socket(addr: SocketAddr) -> rustix::io::Result<Held> {
     connected_socket(addr)
 }
 
+/// The value of a socket call that fails only when the host has no socket to give. These
+/// helpers are for tests, which stop with the call and the reason, as a failed assertion
+/// does; the public functions that use it say so under `# Panics`.
+fn must<T, E: Display>(done: Result<T, E>, what: &str) -> T {
+    match done {
+        Ok(value) => value,
+        Err(error) => panic!("{what}: {error}"),
+    }
+}
+
 fn local_port(fd: &OwnedFd) -> u16 {
-    let addr = net::getsockname(fd).expect("getsockname");
-    SocketAddr::try_from(addr).expect("an inet address").port()
+    let addr = must(net::getsockname(fd), "getsockname");
+    must(SocketAddr::try_from(addr), "an inet address").port()
 }
 
 /// Whether another socket cannot bind `addr` because its port is owned: the check the
@@ -212,7 +229,9 @@ pub fn dead_addr() -> SocketAddr {
     static HELD: Mutex<Vec<Reserved>> = Mutex::new(Vec::new());
     let held = Reserved::new();
     let addr = held.addr();
-    HELD.lock().expect("held ports").push(held);
+    HELD.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(held);
     addr
 }
 
@@ -242,8 +261,8 @@ pub fn dead_addr() -> SocketAddr {
 #[must_use]
 pub fn own_loopback_port() -> SocketAddr {
     let ip = own_loopback_ip();
-    let probe = TcpListener::bind(SocketAddr::new(ip, 0)).expect("bind");
-    probe.local_addr().expect("addr")
+    let probe = must(TcpListener::bind(SocketAddr::new(ip, 0)), "bind");
+    must(probe.local_addr(), "addr")
 }
 
 #[cfg(target_os = "linux")]
@@ -293,6 +312,15 @@ mod tests {
         let listener = held.listen();
         assert_eq!(listener.local_addr().expect("addr"), addr);
         TcpStream::connect(addr).expect("accepted");
+    }
+
+    /// Asserts that a socket call that fails stops the test with the call's name and the
+    /// reason, and that one that succeeds gives its value.
+    #[test]
+    #[should_panic(expected = "bind the held port: address in use")]
+    fn a_failed_socket_call_panics_with_its_name_and_reason() {
+        assert_eq!(must(Ok::<u8, String>(3), "fine"), 3);
+        must(Err::<u8, _>("address in use"), "bind the held port");
     }
 
     /// Catches a `Default` that does not hold a port (the same as `new`): the default
