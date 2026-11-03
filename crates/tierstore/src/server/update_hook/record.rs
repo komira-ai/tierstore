@@ -188,21 +188,29 @@ impl Record {
     /// # Errors
     /// [`RecordError`]: too big, not a record, or of another schema.
     pub fn decode(bytes: &[u8]) -> Result<Record, RecordError> {
-        if bytes.len() > RECORD_MAX {
-            return Err(RecordError::TooBig);
-        }
-        let header: Header =
-            serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))?;
-        if header.schema > SCHEMA {
-            return Err(RecordError::Newer {
-                found: header.schema,
-            });
-        }
-        if header.schema < SCHEMA {
-            return Err(RecordError::Older {
-                found: header.schema,
-            });
-        }
-        serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))
+        decode_schema(bytes)
     }
+}
+
+/// Reads stored bytes as a record of schema [`SCHEMA`] of type `T`: the size and the schema
+/// first, the rest only then.
+pub(super) fn decode_schema<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, RecordError> {
+    if bytes.len() > RECORD_MAX {
+        return Err(RecordError::TooBig);
+    }
+    let header: Header =
+        serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))?;
+    if header.schema > SCHEMA {
+        return Err(RecordError::Newer {
+            found: header.schema,
+        });
+    }
+    if header.schema < SCHEMA {
+        return Err(RecordError::Older {
+            found: header.schema,
+        });
+    }
+    serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))
 }

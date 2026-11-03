@@ -33,7 +33,7 @@ The release carries `tierstore-<commit>-linux-x86_64.tar.gz` and
 `tierstore-<commit>-linux-arm64.tar.gz`, each with `<tarball>.sigstore.json` and listed in
 `SHA256SUMS`. Take the tarball of the host's architecture by its digest, and verify it as every
 tarball is verified (`docs/ci-and-release.md`). The release also carries
-`tierstore-<commit>-macos-arm64.tar.gz`; the files here (systemd, sysusers.d) are for Linux hosts,
+`tierstore-<commit>-macos-arm64.tar.gz`; the files here are for Linux hosts (a Mac's: `macos/README.md`),
 and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
 binary.
 The tarball holds one member, the binary under its own name (the declaration is not in it

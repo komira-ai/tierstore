@@ -1,6 +1,7 @@
 //! What the steps do to the machine, as ports: the nftables rules, the units, the slot links,
 //! the instances' HTTP answers, what the host says of itself, the clock and the state
-//! directory.
+//! directory; and, for a host that runs one instance under its service manager (launchd on
+//! macOS), the service and the release links of [`SinglePorts`].
 //!
 //! Each port is a small trait; the steps take a [`Ports`] and never reach for the machine
 //! themselves. Tests keep the machine's world in a fake. Nothing here reads an environment
@@ -232,6 +233,97 @@ pub trait StateDir {
     /// # Errors
     /// The file could not be written; the record is then what it was.
     fn save(&self, bytes: &[u8]) -> Result<(), PortError>;
+}
+
+/// The one service of a host that runs a single instance, under its service manager (launchd on
+/// macOS). Both calls set state: starting a running service and stopping a stopped one are not
+/// errors.
+pub trait Service {
+    /// Starts the service if it is not running, and returns when the manager has started it.
+    ///
+    /// # Errors
+    /// The manager refused or failed. Reported as [`PortKind::Units`].
+    fn start(&self) -> Result<(), PortError>;
+
+    /// Stops the service if it runs, and returns when the manager no longer has it (its process
+    /// has exited, the drain included).
+    ///
+    /// # Errors
+    /// The manager refused or failed, or still has the service when its time is up. Reported as
+    /// [`PortKind::Units`].
+    fn stop(&self) -> Result<(), PortError>;
+}
+
+/// One of the two release links of a single-instance host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    /// `current`: the release the service runs (the service's program is `current/tierstore`).
+    Current,
+    /// `previous`: the release that ran before an update, while the update is in flight.
+    Previous,
+}
+
+impl Link {
+    /// The name of the link in its directory.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Link::Current => "current",
+            Link::Previous => "previous",
+        }
+    }
+}
+
+/// The release links of a single-instance host: each points at a staged release, or is absent.
+pub trait Releases {
+    /// Where `link` points; `None` when there is none.
+    ///
+    /// # Errors
+    /// The path exists and is not a readable link. Reported as [`PortKind::Slots`].
+    fn target(&self, link: Link) -> Result<Option<PathBuf>, PortError>;
+
+    /// Points `link` at `release`, atomically (a new link renamed over the old).
+    ///
+    /// # Errors
+    /// The link could not be made; it is then what it was.
+    fn point(&self, link: Link, release: &Path) -> Result<(), PortError>;
+
+    /// Removes `link`; an absent link is fine.
+    ///
+    /// # Errors
+    /// The link could not be removed.
+    fn remove(&self, link: Link) -> Result<(), PortError>;
+
+    /// Checks that `release` is one the service may be pointed at: reached from the host's root
+    /// through directories only (no symbolic link on the way, so no alias of `current` or
+    /// `previous`, no relative, dangling or cyclic path), each owned by the release owner (root)
+    /// and writable by no group or others, and holding the binary as a regular file of that
+    /// owner that no group or others can write. Nothing is run: the hook never executes a
+    /// release.
+    ///
+    /// # Errors
+    /// The release is not one to trust, or cannot be read. Reported as [`PortKind::Host`].
+    fn check(&self, release: &Path) -> Result<(), PortError>;
+}
+
+/// Everything a step of a single-instance host may touch: no nftables, no slot and no second
+/// unit, since the one instance serves on its own port.
+pub struct SinglePorts<'a> {
+    /// The service.
+    pub service: &'a dyn Service,
+    /// The release links.
+    pub releases: &'a dyn Releases,
+    /// The instance's answers.
+    pub instances: &'a dyn Instances,
+    /// The host (its declaration).
+    pub host: &'a dyn Host,
+    /// Time.
+    pub clock: &'a dyn Clock,
+    /// The state directory.
+    pub state: &'a dyn StateDir,
+    /// The record directory `state` was opened for: the step refuses a declaration, read again
+    /// under the lock, that names another.
+    pub state_dir: &'a Path,
 }
 
 /// Everything a step may touch.

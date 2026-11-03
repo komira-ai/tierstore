@@ -1,12 +1,8 @@
 use std::fs;
-use std::os::fd::AsFd;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
-use rustix::fs::{Mode, OFlags, open};
-
 use super::super::ports::{PortError, PortKind, StateDir};
-use super::state::try_lock;
 use super::testing::{SERVICE, account, files, me, my_group, scratch_state};
 use super::{Account, LOCK_FILE, STATE_FILE, StateFiles};
 
@@ -163,9 +159,17 @@ fn a_lock_file_that_is_a_link_is_refused() {
 }
 
 /// Asserts that a failure of `flock` that is not contention is an error, not `Busy`: a
-/// descriptor that cannot be locked (opened for its path only) is `EBADF`.
+/// descriptor that cannot be locked (opened for its path only) is `EBADF`. `O_PATH` is Linux's,
+/// so the test is too.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_flock_failure_other_than_contention_is_an_error() {
+    use std::os::fd::AsFd;
+
+    use rustix::fs::{Mode, OFlags, open};
+
+    use super::state::try_lock;
+
     let (_guard, dir) = scratch_state("state-ebadf");
     let fd = open(dir.as_path(), OFlags::PATH | OFlags::CLOEXEC, Mode::empty()).unwrap();
     let text = message(try_lock(fd.as_fd()).unwrap_err());
@@ -407,4 +411,60 @@ fn a_service_with_no_passwd_entry_is_refused() {
             "{passwd}: {text}"
         );
     }
+}
+
+/// A private state directory (a launchd host's) of the tests' own user, mode 0700, with no group
+/// file anywhere near it.
+fn private_dir(name: &str) -> (tierstore_testkit::dir::TestDir, std::path::PathBuf) {
+    let (guard, root) = super::testing::scratch(name);
+    let dir = root.join("state");
+    fs::create_dir(&dir).unwrap();
+    mode(&dir, 0o700);
+    (guard, dir)
+}
+
+/// Asserts that a private state directory of the hook's user with mode 0700 takes the lock and
+/// keeps the record, with no group file to read: the service of a launchd host never reads the
+/// directory, so no account must be in its group. It would catch a launchd host refused for a
+/// group file macOS does not keep its accounts in.
+#[test]
+fn a_private_directory_of_the_hook_takes_the_lock_and_keeps_the_record() {
+    let (_guard, dir) = private_dir("state-private-dir");
+    let state = StateFiles::private(dir.clone(), me());
+    let _lock = state.lock().expect("the lock");
+    assert_eq!(state.load().unwrap(), None);
+    state.save(b"{}\n").unwrap();
+    assert_eq!(state.load().unwrap(), Some(b"{}\n".to_vec()));
+    assert!(!dir.parent().unwrap().join("group").exists());
+}
+
+/// Asserts that a private state directory is refused when its mode is not exactly 0700 (0750,
+/// which the two-slot directory has, included) and when another user owns it, and that a record
+/// in it that a group could write is not read. It would catch a private directory that the
+/// service's group could read or that another account could have prepared.
+#[test]
+fn a_private_directory_is_the_hooks_alone() {
+    let (_guard, dir) = private_dir("state-private-refused");
+    let shown = dir.display();
+    mode(&dir, 0o750);
+    assert_eq!(
+        refused(&StateFiles::private(dir.clone(), me())),
+        format!("state directory: {shown} has mode 0750, not 0700")
+    );
+    mode(&dir, 0o700);
+    assert_eq!(
+        refused(&StateFiles::private(dir.clone(), me() + 1)),
+        format!(
+            "state directory: {shown} is owned by user {}, not {}",
+            me(),
+            me() + 1
+        )
+    );
+    fs::write(dir.join(STATE_FILE), b"{}").unwrap();
+    mode(&dir.join(STATE_FILE), 0o620);
+    let text = message(StateFiles::private(dir.clone(), me()).load().unwrap_err());
+    assert!(
+        text.ends_with("can be written by a group or others"),
+        "{text}"
+    );
 }
