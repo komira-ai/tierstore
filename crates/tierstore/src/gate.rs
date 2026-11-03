@@ -139,8 +139,8 @@ impl GateBackend {
     /// the key is the prefix listed) at `phase`, until the returned gate releases it. A gate is
     /// looked at when a call reaches the place it names, so a call that is already under way when
     /// the gate is made, and has not yet reached that place, is held too (a `Post` gate holds a
-    /// call that was started before it and is still with the store). A test that needs a call
-    /// not to be held makes the gate before it starts the call.
+    /// call that was started before it and is still with the store). A call that has already
+    /// passed that place is not held.
     #[must_use]
     pub fn gate(&self, op: Op, key_prefix: &str, phase: Phase) -> Gate {
         let shared = Arc::new(Shared {
