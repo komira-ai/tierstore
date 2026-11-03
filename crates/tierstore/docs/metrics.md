@@ -29,9 +29,10 @@ object only in the cold tier reads the whole object and copies it into the hot t
 when the hot tier has room; a ranged get reads only its range and copies nothing. Its series are one labelled family per measure, with the tier as a
 label, so one query serves every tier.
 
-A process runs one of the two shapes, so the series of one shape are absent from the other's
-`/metricz`. A series that is absent has not been counted at zero: a query over it returns
-nothing, not 0.
+A process runs a storage node, a build-node cache, or both. A combined node (`[hot_store]`,
+`[cold_store]` and `[local_cache]` in one file) exposes both blocks, the proxy's and the cache's, on its
+`/metricz`. A process without one component has none of that component's series. A series that is
+absent has not been counted at zero: a query over it returns nothing, not 0.
 
 ## Reading the series
 
