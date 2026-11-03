@@ -24,7 +24,10 @@
 //!   one yet.
 //! - [`MemoryBackend`] is an in-memory backend whose times come from a [`TestClock`] that a
 //!   test sets by hand, and [`FaultyBackend`] wraps a backend to fail or delay chosen calls
-//!   and to count them: both are for tests. [`DirBackend`] keeps a bucket in a directory of the
+//!   and to count them (per kind of call, and per kind and key): both are for tests, as are
+//!   [`GateBackend`], which parks a chosen call until a test releases it, [`Mono`], a monotonic
+//!   clock a test advances, and [`RecordingSleeper`], which records the waits a loop asks for
+//!   through [`Sleeper`] and returns at once. [`DirBackend`] keeps a bucket in a directory of the
 //!   local file system, parts of uploads included, which are streamed to files.
 //! - `S3Backend` (feature `s3`, in the module `s3`) is a bucket of an S3-compatible store as
 //!   a [`Backend`]: a create-only put is `If-None-Match: *`, a put that replaces is
@@ -90,9 +93,16 @@ mod build_commit;
 mod build_version;
 mod cache;
 mod clock;
+#[cfg(test)]
+mod clock_tests;
 mod dir;
 mod error;
 mod faulty;
+#[cfg(test)]
+mod faulty_tests;
+mod gate;
+#[cfg(test)]
+mod gate_tests;
 mod journal;
 #[cfg(test)]
 mod journal_tests;
@@ -112,15 +122,19 @@ mod selftest;
 mod selftest_tests;
 #[cfg(feature = "server")]
 pub mod server;
+mod sleeper;
+#[cfg(test)]
+mod sleeper_tests;
 mod state;
 mod tiered;
 
 pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter};
 pub use cache::CachedStore;
-pub use clock::{Clock, MonotonicClock, SystemClock};
+pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use dir::DirBackend;
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
+pub use gate::{Gate, GateBackend, Phase};
 pub use journal::{JournalEntry, JournalOp, decode_journal, encode_journal};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
@@ -130,4 +144,5 @@ pub use selftest::{
     Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
     settle_conditional_delete, sweep_probes,
 };
+pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
 pub use tiered::{Proxy, ProxyConfig};
