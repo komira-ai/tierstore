@@ -6,12 +6,14 @@
 //! defaults (the tests check that a file that gives the least a start needs and the flags that
 //! give the least make equal settings).
 //!
-//! There are two shapes, told apart by the tables the file has:
+//! There are three shapes, told apart by the tables the file has:
 //!
 //! - a storage node: `[hot_store]` and `[cold_store]`, as the flags are;
 //! - a build node: `[local_cache]` and `[cold_store]` and no `[hot_store]`, a read cache in
 //!   front of one upstream (see [`config_cache`](super::config_cache) and
-//!   [`local_cache`](super::local_cache)). It has no flag form.
+//!   [`local_cache`](super::local_cache)). It has no flag form;
+//! - a storage node with a cache: all three tables, a disk cache in front of the node's own
+//!   proxy (see [`config_combined`](super::config_combined)). It has no flag form either.
 //!
 //! The tables:
 //!
@@ -20,18 +22,18 @@
 //! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
 //!   the reconciler and its lease.
 //! - `[cold_store]`: the cold tier, and the start-up check it may skip.
-//! - `[local_cache]`: the cache directory, its budget and marks (build node only).
+//! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
+//!   that keeps a cache in front of itself).
 //! - `[oci]`: the read-only OCI front, left out when there is none: `listen` (needed in the
 //!   table), the certificate and key files, the key prefix and the connection limits. They
 //!   follow the rules of the `--oci-*` flags. Both shapes take it: a build node serves the
 //!   registry from its cache.
-//! - `[[policy]]`: the per-prefix settings. On a build node `cache = true` keeps the keys under
-//!   the prefix in the cache; on a storage node a policy is read and checked and has no
-//!   effect, and `cache = true` is refused.
+//! - `[[policy]]`: the per-prefix settings. With `[local_cache]` `cache = true` keeps the keys
+//!   under the prefix in the cache; without it a policy is read and checked and has no effect,
+//!   and `cache = true` is refused.
 //!
-//! The three tables together are refused (the hot store is already local disk). Any other table
-//! or key is refused, and so is a key that holds a secret: keys and credentials are paths of
-//! files (a key ending in `_file` or `_files`).
+//! Any other table or key is refused, and so is a key that holds a secret: keys and credentials
+//! are paths of files (a key ending in `_file` or `_files`).
 //!
 //! Per-run knobs are flags only: `--config` and the two parts of the drain (see [`PER_RUN`]).
 //! [`KEYS`] says which key each other flag has; the tests walk the flags of [`Cli`] against it,
@@ -50,6 +52,7 @@ use super::cli::{
     DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_duration, parse_skip,
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
+use super::config_combined::{CombinedSettings, combined};
 use super::config_oci::{OciTable, oci};
 use super::config_policy::{Policy, check_policies};
 use super::front::{FrontSettings, S3Tls};
@@ -662,13 +665,15 @@ pub(super) fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, Con
     Ok(listen.0)
 }
 
-/// What a file makes: the settings of one of the two shapes.
+/// What a file makes: the settings of one of the three shapes.
 #[derive(Debug)]
 pub(super) enum Settings {
     /// A storage node: the settings the flags make.
     Storage(Box<Cli>),
     /// A build node: a read cache, which has no flags.
     Cache(Box<CacheSettings>),
+    /// A storage node with a local cache in front of its proxy, which has no flags.
+    Combined(Box<CombinedSettings>),
 }
 
 /// Refuses the keys only `[hot_store]` has, in `cold`.
@@ -695,15 +700,23 @@ impl Settings {
     pub(super) fn into_storage(self) -> Option<Cli> {
         match self {
             Settings::Storage(cli) => Some(*cli),
-            Settings::Cache(_) => None,
+            Settings::Cache(_) | Settings::Combined(_) => None,
         }
     }
 
     /// The settings of a build node, if that is what these are.
     pub(super) fn into_cache(self) -> Option<CacheSettings> {
         match self {
-            Settings::Storage(_) => None,
+            Settings::Storage(_) | Settings::Combined(_) => None,
             Settings::Cache(cache) => Some(*cache),
+        }
+    }
+
+    /// The settings of a storage node with a local cache, if that is what these are.
+    pub(super) fn into_combined(self) -> Option<CombinedSettings> {
+        match self {
+            Settings::Combined(combined) => Some(*combined),
+            Settings::Storage(_) | Settings::Cache(_) => None,
         }
     }
 }
@@ -720,16 +733,18 @@ fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     } = file;
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
-            let cli = storage(server, (hot, cold), oci, &policy, per_run)?;
+            check_policies(&policy, false)?;
+            let cli = storage(server, (hot, cold), oci, per_run)?;
             Ok(Settings::Storage(Box::new(cli)))
         }
         (None, Some(cold), Some(cache)) => {
             let cache = CacheSettings::new(server, (cache, cold), oci, &policy, per_run)?;
             Ok(Settings::Cache(Box::new(cache)))
         }
-        (Some(_), Some(_), Some(_)) => {
-            let why = "is refused with [hot_store]: the hot store is already local disk, and a disk cache in front of it would cache a disk with a disk";
-            Err(invalid("local_cache", why))
+        (Some(hot), Some(cold), Some(cache)) => {
+            let tiers = (hot, cold);
+            let node = combined(server, tiers, cache, oci, &policy, per_run)?;
+            Ok(Settings::Combined(Box::new(node)))
         }
         _ => {
             let why = "the file needs both [hot_store] and [cold_store] (the storage-node shape), or [local_cache] and [cold_store] without [hot_store] (the build-node shape)";
@@ -738,16 +753,14 @@ fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     }
 }
 
-/// The settings of a storage-node file.
-fn storage(
+/// The settings of a storage-node file (and of the node of a file that also has `[local_cache]`).
+pub(super) fn storage(
     server: ServerTable,
     tiers: (TierTable, TierTable),
     oci_table: Option<OciTable>,
-    policy: &[Policy],
     per_run: PerRun,
 ) -> Result<Cli, ConfigError> {
     let (hot, cold) = tiers;
-    check_policies(policy, false)?;
     refuse_hot_keys(&cold)?;
     let why = "only the [cold_store] of a build node takes a list; give endpoint";
     refuse("hot_store", why, &[("endpoints", hot.endpoints.is_some())])?;
@@ -946,6 +959,10 @@ pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError>
         Settings::Storage(cli) => Ok(*cli),
         Settings::Cache(_) => {
             let why = "is the file of a build node, which has no flag form";
+            Err(invalid("local_cache", why))
+        }
+        Settings::Combined(_) => {
+            let why = "is in a file with [hot_store] too, which has no flag form";
             Err(invalid("local_cache", why))
         }
     }
