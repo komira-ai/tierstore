@@ -156,7 +156,7 @@ async fn a_tagged_put_gives_the_tag_of_the_file_it_published() {
     backend.delete_if_match("k", &tag).await.unwrap();
     assert!(backend.head("k").await.is_err());
     let refused = backend.put_tagged("", body("v")).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
 }
 
 /// Asserts that a key of 255 bytes is stored; that one of 256, and the empty key, and one whose
@@ -617,7 +617,7 @@ async fn a_streamed_put_that_is_dropped_half_way_leaves_nothing() {
 async fn a_streamed_put_of_a_key_that_is_no_file_name_is_refused() {
     let (_dir, backend) = backend();
     let refused = backend.put_stream("", None, pieces(&["x"])).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
 }
 
 /// Asserts that the mark of a reservation is the owner-execute bit of its file: a reservation
@@ -662,7 +662,7 @@ async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
 async fn a_key_that_cannot_be_a_file_name_is_refused_by_a_reservation() {
     let (dir, backend) = backend();
     let created = backend.put_reservation("", body("r")).await;
-    assert!(matches!(created, Err(Error::Other(_))), "{created:?}");
+    assert!(matches!(created, Err(Error::InvalidKey(_))), "{created:?}");
     assert_eq!(names(dir.path()), [".uploads"]);
 }
 
@@ -816,7 +816,7 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
 
     let refused = backend.put_stream_if_match("", None, pieces(&["x"]), &new);
     let refused = refused.await;
-    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
+    assert!(matches!(refused, Err(Error::InvalidKey(_))), "{refused:?}");
 }
 
 /// Asserts that a streamed replacement that is dropped half way (its caller gave up) removes its
