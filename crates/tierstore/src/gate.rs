@@ -136,8 +136,11 @@ impl GateBackend {
     }
 
     /// Holds the next call of kind `op` on a key that starts with `key_prefix` (for a list call,
-    /// the key is the prefix listed) at `phase`, until the returned gate releases it. Calls that
-    /// came before the gate was made are not held.
+    /// the key is the prefix listed) at `phase`, until the returned gate releases it. A gate is
+    /// looked at when a call reaches the place it names, so a call that is already under way when
+    /// the gate is made, and has not yet reached that place, is held too (a `Post` gate holds a
+    /// call that was started before it and is still with the store). A test that needs a call
+    /// not to be held makes the gate before it starts the call.
     #[must_use]
     pub fn gate(&self, op: Op, key_prefix: &str, phase: Phase) -> Gate {
         let shared = Arc::new(Shared {
