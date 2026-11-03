@@ -409,6 +409,43 @@ async fn a_cleanup_after_a_delete_of_the_key_leaves_a_later_hot_object() {
     assert_eq!(rig.hot.calls(Op::DeleteIfMatch), 0);
 }
 
+/// Asserts that a put dropped after its hot create landed, whose reservation a delete of the key
+/// took and which a plain object has replaced in the cold tier, removes nothing: the object that
+/// appears in the hot tier afterwards stays and the cold tier's object is not changed.
+#[tokio::test(start_paused = true)]
+async fn a_cleanup_after_a_plain_cold_object_replaced_its_reservation_leaves_both_objects() {
+    let rig = Rig::new();
+    let entered = Arc::new(Notify::new());
+    let stuck: Arc<dyn Backend> = Arc::new(Stall::new(
+        rig.hot.clone(),
+        "_journal/",
+        entered.clone(),
+        None,
+    ));
+    let proxy = Arc::new(
+        Proxy::open(stuck, rig.cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap(),
+    );
+    let putting = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.put("k", body("first")).await })
+    };
+    entered.notified().await;
+    rig.cold_mem.delete("k").await.unwrap();
+    rig.hot_mem.delete("k").await.unwrap();
+    rig.cold_mem.put("k", body("plain")).await.unwrap();
+    rig.hot_mem.put("k", body("later")).await.unwrap();
+
+    putting.abort();
+    assert!(putting.await.unwrap_err().is_cancelled());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("later"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("plain"));
+    assert_eq!(rig.hot.calls(Op::DeleteIfMatch), 0);
+}
+
 /// Asserts that a put whose journal fails still removes its own hot object when the cold tier
 /// cannot say whether the reservation is still its own (the HEAD fails): a leftover object that
 /// no entry names is the worse result.

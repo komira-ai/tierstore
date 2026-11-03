@@ -296,3 +296,24 @@ impl Books {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Asserts which residents count as the put of another proxy: a put of another proxy does, a
+    /// put of the same proxy does not, a mirror of either proxy does not, and a key the hot tier
+    /// does not hold does not.
+    #[test]
+    fn only_a_put_of_another_proxy_is_the_put_of_another_proxy() {
+        let mut books = Books::default();
+        books.put("p1", (1, 0), "put", 1, false);
+        books.put("p1", (1, 1), "mirror", 1, true);
+
+        assert!(books.is_put_of_another_proxy("p2", "put"));
+        assert!(!books.is_put_of_another_proxy("p1", "put"));
+        assert!(!books.is_put_of_another_proxy("p2", "mirror"));
+        assert!(!books.is_put_of_another_proxy("p1", "mirror"));
+        assert!(!books.is_put_of_another_proxy("p2", "absent"));
+    }
+}
