@@ -228,6 +228,10 @@ pub const KEEP_DEADLINE: Duration = Duration::from_secs(60);
 /// The text of the refusal of a write at the Backend level (the front refuses it earlier).
 const READ_ONLY: &str = "this tierstore is a read cache";
 
+/// What a cache calls each time a put's copy has been put in the index (see
+/// [`LocalCache::open_observed`]): it is called on the task of the keep, so it must not block.
+pub type KeepObserver = Arc<dyn Fn() + Send + Sync>;
+
 /// The settings of a [`LocalCache`].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -386,6 +390,8 @@ pub(super) struct Inner {
     permits: Arc<Semaphore>,
     /// One permit for each put that may be copied to the stage directory; held until it ends.
     keeps: Arc<Semaphore>,
+    /// Called after a keep has put its object in the index.
+    observer: Option<KeepObserver>,
     /// Run by a test just before a kept object is put in the index (see `keep`).
     #[cfg(test)]
     before_insert: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -440,7 +446,24 @@ impl LocalCache {
         disk: Arc<dyn Disk>,
         clock: Arc<dyn Clock>,
     ) -> io::Result<Self> {
-        Self::start(config, upstream, disk, clock, Standing::Lockless)
+        Self::start(config, upstream, disk, clock, Standing::Lockless, None)
+    }
+
+    /// Opens the cache as [`open`](Self::open) does, and calls `observer` each time the copy of a
+    /// put has been put in the index, which is the end of a keep that kept the object (a keep
+    /// that was skipped, abandoned or marked deleted does not call it). A caller that waits for
+    /// its own put's copy waits for this, not for the put, which may be answered first.
+    ///
+    /// # Errors
+    /// What the system said about the directory.
+    pub fn open_observed(
+        config: CacheConfig,
+        upstream: Arc<dyn Backend>,
+        disk: Arc<dyn Disk>,
+        clock: Arc<dyn Clock>,
+        observer: Option<KeepObserver>,
+    ) -> io::Result<Self> {
+        Self::start(config, upstream, disk, clock, Standing::Lockless, observer)
     }
 
     /// Opens the cache as [`open`](Self::open) does, if the lock of the directory (`.lock`) is
@@ -462,7 +485,7 @@ impl LocalCache {
             Some(file) => Standing::Holding(file),
             None => Standing::Waiting,
         };
-        Self::start(config, upstream, disk, clock, standing)
+        Self::start(config, upstream, disk, clock, standing, None)
     }
 
     /// The cache over `config.path` as `standing` says it may treat it.
@@ -472,6 +495,7 @@ impl LocalCache {
         disk: Arc<dyn Disk>,
         clock: Arc<dyn Clock>,
         standing: Standing,
+        observer: Option<KeepObserver>,
     ) -> io::Result<Self> {
         let counters = Counters::default();
         let scanned = if matches!(standing, Standing::Waiting) {
@@ -498,6 +522,7 @@ impl LocalCache {
             reserved: AtomicU64::new(0),
             permits,
             keeps,
+            observer,
             #[cfg(test)]
             before_insert: Mutex::new(None),
             evicting: AtomicBool::new(false),
