@@ -356,6 +356,14 @@ impl Backend for Retagged {
         self.inner.get(key, range).await
     }
 
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        self.inner.get_marked(key, range).await
+    }
+
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         let mut meta = self.inner.head(key).await?;
         meta.tag = outer_tag(meta.tag);
