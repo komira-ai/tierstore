@@ -522,7 +522,7 @@ impl Backend for S3Backend {
                 let _ = self.store.delete(object).await;
                 asked
             }
-            Err(why) => Err(ProbeError::Key(why)),
+            Err(why) => Err(ProbeError::Key(why.clone())),
         };
         let enforced = matches!(asked, Ok(true));
         self.if_match_delete.store(enforced, Ordering::Release);
