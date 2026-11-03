@@ -163,6 +163,40 @@ async fn a_delete_syncs_the_directory_after_the_name_is_removed() {
     assert_eq!(count(&seen), 2);
 }
 
+/// Asserts that a conditional delete syncs the directory after the name is gone, and that one
+/// refused for its tag, or for an absent key, syncs nothing.
+#[tokio::test]
+async fn a_conditional_delete_syncs_the_directory_after_the_name_is_removed() {
+    let (dir, backend, seen) = recorded(None, false);
+    backend.put("k", body("one")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+    let wrong = backend.delete_if_match("k", "not-the-tag").await;
+    assert!(matches!(wrong, Err(Error::PreconditionFailed(_))));
+    let absent = backend.delete_if_match("other", &tag).await;
+    assert!(matches!(absent, Err(Error::NotFound(_))));
+    assert_eq!(count(&seen), 1);
+    backend.delete_if_match("k", &tag).await.unwrap();
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].dir, dir.path());
+    assert_eq!(seen[1].names, [".uploads".to_owned()]);
+}
+
+/// Asserts that a conditional delete whose directory sync fails is an error, and that the object
+/// is gone all the same (the removal cannot be undone), so a retry reads `NotFound`.
+#[tokio::test]
+async fn a_conditional_delete_whose_sync_fails_is_an_error_and_the_object_is_gone() {
+    let (_dir, backend, _seen, switch) = switched(None, false, false);
+    backend.put("k", body("one")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+    switch.store(true, Ordering::SeqCst);
+    let deleted = backend.delete_if_match("k", &tag).await;
+    assert!(matches!(deleted, Err(Error::Other(_))));
+    assert!(matches!(backend.head("k").await, Err(Error::NotFound(_))));
+    let again = backend.delete_if_match("k", &tag).await;
+    assert!(matches!(again, Err(Error::NotFound(_))));
+}
+
 /// Asserts that placing a part syncs the upload's directory after the part has its name, and that
 /// the completion syncs the bucket's directory after the object is linked. It would catch a part
 /// or a completion that acks with its name unsynced.

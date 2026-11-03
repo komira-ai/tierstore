@@ -247,3 +247,94 @@ async fn len_is_the_size_of_a_head_and_none_for_a_missing_key() {
     store.delete(&key("big")).await.unwrap();
     assert_eq!(store.len(&key("big")).await.unwrap(), None);
 }
+
+/// Asserts that a DELETE with `If-Match` takes the object only if it has that entity tag: a
+/// wrong tag is refused with 412 and the object still reads, the tag as a HEAD gives it
+/// (quotes included) deletes it, and the key can be written again.
+#[tokio::test]
+async fn a_delete_with_if_match_removes_only_the_object_with_that_tag() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    let tag = store.head(&k).await.unwrap().etag;
+
+    let err = store.delete_if_match(&k, "\"wrong\"").await.unwrap_err();
+    assert_eq!(service(&err).0, 412, "{err}");
+    assert_eq!(store.get_all(&k).await.unwrap(), "one");
+
+    store.delete_if_match(&k, &tag).await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+    store.put_new(&k, Bytes::from("two"), None).await.unwrap();
+    assert_eq!(store.get_all(&k).await.unwrap(), "two");
+}
+
+/// Asserts that a DELETE with `If-Match` of a key with no object is `NotFound`, and that a
+/// plain delete of such a key still succeeds.
+#[tokio::test]
+async fn a_delete_with_if_match_of_an_absent_key_is_not_found() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("absent");
+    let err = store.delete_if_match(&k, "\"any\"").await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::NotFound(_)), "{err}");
+    store.delete(&k).await.unwrap();
+}
+
+/// Asserts that a DELETE with `If-Match` is not supported on a store with Object Lock, and that
+/// no request reaches the service.
+#[tokio::test]
+async fn a_delete_with_if_match_is_unsupported_where_object_lock_is_on() {
+    let s3 = FakeS3::start().await;
+    let locked = Capabilities {
+        conditional_put: true,
+        object_lock: true,
+    };
+    let store = s3.store(locked);
+    let err = store.delete_if_match(&key("k"), "\"t\"").await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Unsupported(_)), "{err}");
+    assert_eq!(s3.requests(), Vec::<String>::new());
+}
+
+/// Asserts that a service told to ignore the condition of a DELETE (as some S3-compatible
+/// stores do) removes the object on a wrong tag and answers success, which is what a caller
+/// that needs the refusal has to detect.
+#[tokio::test]
+async fn a_service_that_ignores_the_condition_deletes_on_a_wrong_tag() {
+    let s3 = FakeS3::start().await;
+    s3.ignore_delete_condition();
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    store.delete_if_match(&k, "\"wrong\"").await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+}
+
+/// Asserts that a failure asked for a HEAD or a DELETE of an object hits the request it counts
+/// to and no other: the second HEAD from now answers 500 while the first and third are served,
+/// and the next DELETE answers 500 and leaves the object, after which one is served again.
+#[tokio::test]
+async fn a_failure_of_a_head_or_a_delete_hits_the_request_it_counts_to() {
+    use objstore_s3::s3::fake::Failure;
+
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    store.head(&k).await.unwrap();
+    s3.fail(Failure::Head(2));
+    store.head(&k).await.unwrap();
+    let refused = store.head(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+
+    s3.fail(Failure::Delete(1));
+    let refused = store.delete(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+    store.delete(&k).await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+}

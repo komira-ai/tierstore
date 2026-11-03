@@ -35,6 +35,9 @@
 //!   wrongly (a [`SelfTestError::Violation`]; a store it could not ask is
 //!   [`SelfTestError::Unreachable`], and one that is full is not in doubt). The `tierstore`
 //!   binary runs it on both tiers and refuses to start if one answers wrongly.
+//!   [`settle_conditional_delete`] then asks a tier once how it does [`Backend::delete_if_match`]
+//!   (an S3 tier: `If-Match` on the DELETE where the store enforces it, else a read of the tag
+//!   and a delete) and never fails the start.
 //! - [`Proxy`] is a store over a hot and a cold backend that is itself a [`Backend`]. Any
 //!   number of proxies (one per node, each with its own id) work over the same two backends,
 //!   and none needs state for correctness. A get reads the hot tier, else the cold tier, and
@@ -118,6 +121,6 @@ pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
 pub use s3::S3Backend;
 pub use selftest::{
     Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
-    sweep_probes,
+    settle_conditional_delete, sweep_probes,
 };
 pub use tiered::{Proxy, ProxyConfig};

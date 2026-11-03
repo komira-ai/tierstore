@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use tierstore::{
     Backend, ByteRange, Clock, Error, FaultyBackend, JournalEntry, JournalOp, MemoryBackend, Op,
-    SystemClock, TestClock, decode_journal, encode_journal,
+    SelfTestOptions, SystemClock, TestClock, decode_journal, encode_journal,
+    settle_conditional_delete,
 };
 
 use crate::conformance;
@@ -116,6 +117,57 @@ async fn a_page_of_a_listing_starts_after_a_key_and_is_cut_at_max_keys() {
 async fn a_put_if_match_replaces_only_the_object_with_that_tag() {
     let backend = MemoryBackend::new();
     conformance::a_put_if_match_replaces_only_the_object_with_that_tag(&backend).await;
+}
+
+/// Asserts that a delete with the content tag of the object removes it, that one with another
+/// tag, or with the tag of an earlier object of the key, is refused and changes nothing, and
+/// that an absent key is `NotFound`.
+#[tokio::test]
+async fn a_conditional_delete_removes_only_the_object_with_that_tag() {
+    let backend = MemoryBackend::new();
+    conformance::a_conditional_delete_removes_only_the_object_with_that_tag(&backend).await;
+}
+
+/// Asserts that a backend that has one way to delete conditionally has nothing to settle: the
+/// settling gives no line and no call reaches the backend.
+#[tokio::test]
+async fn a_backend_with_one_way_to_delete_conditionally_gives_no_line() {
+    let faulty = FaultyBackend::new(Arc::new(MemoryBackend::new()));
+    let options = SelfTestOptions {
+        name: "memory",
+        run_id: "run-1",
+        multipart: false,
+        skip: &[],
+        wait: Duration::ZERO,
+        pause: Duration::from_secs(1),
+        max_pause: Duration::from_secs(1),
+    };
+    settle_conditional_delete(&faulty, &options, &|line: String| panic!("{line}")).await;
+    assert_eq!(faulty.calls(Op::DeleteIfMatch), 0);
+    assert_eq!(faulty.calls(Op::Put), 0);
+}
+
+/// Asserts that a conditional delete through the fault injector is a call of its own kind: it
+/// is counted, reaches the backend and deletes only on the right tag, and a failure planned for
+/// that kind fails it without touching the object.
+#[tokio::test]
+async fn a_conditional_delete_through_the_fault_injector_is_counted_and_can_fail() {
+    let memory = Arc::new(MemoryBackend::new());
+    let faulty = FaultyBackend::new(memory.clone());
+    faulty.put("k", body("one")).await.unwrap();
+    let tag = faulty.head("k").await.unwrap().tag;
+
+    faulty.fail_next(Op::DeleteIfMatch, 1);
+    let failed = faulty.delete_if_match("k", &tag).await.unwrap_err();
+    assert!(failed.is_unavailable(), "{failed}");
+    assert_eq!(memory.get("k", None).await.unwrap(), body("one"));
+
+    let wrong = faulty.delete_if_match("k", "not-the-tag").await;
+    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
+    faulty.delete_if_match("k", &tag).await.unwrap();
+    assert_eq!(faulty.calls(Op::DeleteIfMatch), 3);
+    assert_eq!(faulty.calls(Op::Delete), 0);
+    assert!(matches!(memory.head("k").await, Err(Error::NotFound(_))));
 }
 
 /// Asserts that a put that replaces moves the time of last write on, and that a put that is

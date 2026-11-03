@@ -1,13 +1,13 @@
 //! The calls beyond [`ObjectStore`](crate::ObjectStore) that a store used for coordination
-//! needs: the entity tag and time of last write of an object (HEAD), a replace that only an
-//! object with a given tag takes (`If-Match`), a read of the whole object, and a listing
+//! needs: the entity tag and time of last write of an object (HEAD), a replace and a delete
+//! that only an object with a given tag takes (`If-Match`), a read of the whole object, and a listing
 //! that gives the time each object was last written.
 //!
 //! They are inherent methods of [`S3Store`], so the trait and the other stores are as they
 //! were. A read is sent again after a failure in transport, as a ranged read is (see
-//! [`READ_RETRIES`]); the replace is sent once, since a connection that fails before the
-//! answer leaves it unknown whether the object was replaced, and only the caller can read it
-//! back.
+//! [`READ_RETRIES`]); the replace and the delete are sent once, since a connection that fails
+//! before the answer leaves it unknown whether the object was replaced or deleted, and only the
+//! caller can read it back.
 //!
 //! A create-only write (`If-None-Match: *`) is
 //! [`put_new`](crate::ObjectStore::put_new) on a store that claims
@@ -109,6 +109,41 @@ impl S3Store {
             }
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
             _ => Err(failure(resp).await),
+        }
+    }
+
+    /// Deletes the object only if its entity tag is `etag` (`If-Match` on the DELETE, the tag
+    /// sent as it is). Sent once, as [`put_if_match`](Self::put_if_match) is: after a failure in
+    /// transport the caller reads the object to see whether it is gone.
+    ///
+    /// Only a store that enforces the header refuses a wrong tag. Amazon S3 does; some
+    /// S3-compatible stores take the header and delete anyway, so the caller that needs the
+    /// refusal asks the store once (a wrong tag, then a read) before it relies on this call.
+    /// On a store with Object Lock the call is not supported: a delete there names the version.
+    ///
+    /// # Errors
+    /// [`ObjectStoreError::NotFound`] if the store answers 404, as it does where there is no
+    /// object. [`ObjectStoreError::Service`] with status 412 if the object has another tag; it
+    /// is left as it was. [`ObjectStoreError::Unsupported`] with Object Lock on.
+    pub async fn delete_if_match(
+        &self,
+        key: &ObjectKey,
+        etag: &str,
+    ) -> Result<(), ObjectStoreError> {
+        if self.conn.capabilities.object_lock {
+            return Err(ObjectStoreError::Unsupported(
+                "delete_if_match with Object Lock",
+            ));
+        }
+        let headers = vec![("if-match", etag.to_owned())];
+        let sent = self
+            .conn
+            .send(Method::DELETE, Some(key), &[], headers, Bytes::new())
+            .await?;
+        match sent.status() {
+            StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+            StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
+            _ => Err(failure(sent).await),
         }
     }
 

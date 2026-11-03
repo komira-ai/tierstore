@@ -76,6 +76,11 @@ impl SyncDir for FsyncDir {
 ///   cannot be undone, the old body being gone: the call fails and the change may be visible; a
 ///   retry of a delete is fine, and the caller of a replacement reads the object to see which
 ///   body it holds.
+/// - A conditional delete ([`Backend::delete_if_match`]) checks the content tag and removes the
+///   file with the lock a replacement holds, and a plain delete takes that lock for the removal
+///   too, so that a delete and a put of new content that come between the check and the removal
+///   of a conditional delete cannot be undone by it. The directory is synced after the lock is
+///   released.
 /// - A streamed put ([`Backend::put_stream`]) writes the chunks to the temporary file as they
 ///   arrive, so that the body is never held in memory; the content tag, which starts the file,
 ///   is written over reserved room after the last chunk, the file is synced, and only then is it
@@ -91,9 +96,9 @@ impl SyncDir for FsyncDir {
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
 /// create-only, and the temporary files of two backends never have one name, since a name holds
 /// the process id, the time the backend was opened and its number in the process);
-/// [`Backend::put_if_match`] is atomic among the calls of one backend only, and so is the
-/// replacement of a part by another of its number: the parts of one upload should be taken by one
-/// backend.
+/// [`Backend::put_if_match`] and [`Backend::delete_if_match`] are atomic among the calls of one
+/// backend only, and so is the replacement of a part by another of its number: the parts of one
+/// upload should be taken by one backend.
 pub struct DirBackend {
     root: PathBuf,
     /// Tells the temporary files of this backend from those of any other backend over the same
@@ -101,8 +106,10 @@ pub struct DirBackend {
     nonce: String,
     /// Numbers the temporary files and the uploads.
     counter: AtomicU64,
-    /// Held while an object is replaced, so that two replacements of one backend do not
-    /// interleave their check and their write.
+    /// Held while an object is replaced, or removed, so that two replacements of one backend do
+    /// not interleave their check and their write, and a conditional delete's check and removal
+    /// are not split by another delete or replacement. A plain delete therefore waits for a
+    /// replacement in progress, through its temporary write and its sync.
     replacing: Mutex<()>,
     /// Held while a part is moved to its name and the other files of its number are removed, so
     /// that two overlapping uploads of one part number do not remove each other's file.
@@ -418,6 +425,24 @@ impl DirBackend {
         opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
     }
 
+    /// Removes the file of the object `key` if its content tag is `etag`, with the lock that
+    /// replacements and deletes take held from the check to the removal, so that no other call
+    /// of this backend replaces or deletes the object in between. The directory is not synced.
+    async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        let _replacing = self.replacing.lock().await;
+        let current = self.stored(key).await?;
+        if hex::encode(current.tag) != etag {
+            return Err(Error::PreconditionFailed(key.to_owned()));
+        }
+        let path = current.path.clone();
+        drop(current);
+        // The lock keeps out every other call of this backend, so a file that is gone now was
+        // taken by another process: the key has no object, as the trait says.
+        let removed = fs::remove_file(&path).await;
+        let absent = ErrorKind::NotFound;
+        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
+    }
+
     /// Writes the file of an object with this body to a new temporary file.
     async fn write_temp(&self, body: Bytes) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
         let tag = sha256(&body);
@@ -446,7 +471,13 @@ impl DirBackend {
         let Err(synced) = self.sync(&self.root).await else {
             return Ok(());
         };
-        match fs::remove_file(path).await {
+        // Under the lock of the replacements, so that the rollback is no exception to a check
+        // and a removal that no delete or replacement of this backend can split.
+        let rolled_back = {
+            let _replacing = self.replacing.lock().await;
+            fs::remove_file(path).await
+        };
+        match rolled_back {
             Ok(()) => {
                 let _ = self.sync(&self.root).await;
                 Err(synced)
@@ -550,11 +581,22 @@ impl Backend for DirBackend {
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
         let path = self.path(key)?;
-        match fs::remove_file(&path).await {
+        // Not held across the sync: the name is gone, and a replacement or a delete that
+        // follows needs nothing the sync would protect.
+        let removed = {
+            let _replacing = self.replacing.lock().await;
+            fs::remove_file(&path).await
+        };
+        match removed {
             Ok(()) => self.sync(&self.root).await,
             Err(why) if why.kind() != ErrorKind::NotFound => Err(failed(&path, &why)),
             Err(_) => Ok(()),
         }
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.unlink_if_match(key, etag).await?;
+        self.sync(&self.root).await
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {

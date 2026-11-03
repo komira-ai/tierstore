@@ -22,6 +22,8 @@ mod reconciler;
 mod reconciler_faults;
 #[cfg(feature = "s3")]
 mod s3;
+#[cfg(feature = "s3")]
+mod s3_conditional_delete;
 mod streaming;
 mod support;
 mod tiered;

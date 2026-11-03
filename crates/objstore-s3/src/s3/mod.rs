@@ -15,7 +15,7 @@
 //!
 //! Beyond the trait, [`S3Store`] has the calls an object used for coordination needs
 //! (`tagged.rs`): [`S3Store::head`] (size, entity tag, time of last write),
-//! [`S3Store::get_all`], [`S3Store::put_if_match`] (`If-Match`) and
+//! [`S3Store::get_all`], [`S3Store::put_if_match`] and [`S3Store::delete_if_match`] (`If-Match`),
 //! [`S3Store::list_stamped`] (a listing with the time of last write).
 //!
 //! A caller that drives a multipart upload itself has the four calls one at a time

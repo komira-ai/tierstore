@@ -245,6 +245,63 @@ async fn a_put_if_match_replaces_only_the_object_with_that_tag() {
     assert_eq!(names(dir.path()), [".uploads".to_owned(), "k".to_owned()]);
 }
 
+/// Asserts that a conditional delete removes the object only if it has the content tag: another
+/// tag is refused and changes nothing, the right tag removes it (and the key can be put again),
+/// a tag the object had before a replacement is refused, an absent key is `NotFound`, and
+/// no temporary file is left behind.
+#[tokio::test]
+async fn a_conditional_delete_removes_only_the_object_with_that_tag() {
+    let (dir, backend) = backend();
+    backend.put("k", body("one")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+    let wrong = backend.delete_if_match("k", "not-the-tag").await;
+    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), "one");
+
+    backend.delete_if_match("k", &tag).await.unwrap();
+    assert!(matches!(backend.head("k").await, Err(Error::NotFound(_))));
+    backend.put("k", body("two")).await.unwrap();
+    let stale = backend.delete_if_match("k", &tag).await;
+    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), "two");
+
+    let absent = backend.delete_if_match("other", &tag).await;
+    assert_eq!(absent, Err(Error::NotFound("other".to_owned())));
+    assert_eq!(names(dir.path()), [".uploads".to_owned(), "k".to_owned()]);
+}
+
+/// Asserts that a conditional delete does not start while a replacement or a delete holds the
+/// lock of the backend, and goes on once it is released: its check and its removal are not
+/// split by them. Polled once while the lock is held, with no clock and no wait.
+#[tokio::test]
+async fn a_conditional_delete_waits_for_the_lock_of_a_replacement_or_a_delete() {
+    let (_dir, backend) = backend();
+    backend.put("k", body("one")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+    let held = backend.replacing.lock().await;
+    let mut call = Box::pin(backend.delete_if_match("k", &tag));
+    assert!(futures::poll!(&mut call).is_pending());
+    drop(held);
+    call.await.unwrap();
+    assert!(matches!(backend.head("k").await, Err(Error::NotFound(_))));
+}
+
+/// Asserts that a plain delete does not remove the name while a replacement or a conditional
+/// delete holds the lock of the backend, so that a conditional delete that has checked its tag
+/// cannot have the object deleted and put again before it removes the file.
+#[tokio::test]
+async fn a_delete_waits_for_the_lock_of_a_replacement_or_a_conditional_delete() {
+    let (_dir, backend) = backend();
+    backend.put("k", body("one")).await.unwrap();
+    let held = backend.replacing.lock().await;
+    let mut call = Box::pin(backend.delete("k"));
+    assert!(futures::poll!(&mut call).is_pending());
+    assert_eq!(backend.get("k", None).await.unwrap(), "one");
+    drop(held);
+    call.await.unwrap();
+    assert!(matches!(backend.head("k").await, Err(Error::NotFound(_))));
+}
+
 /// Asserts that a file too short to hold the content tag is an error, not an object.
 #[tokio::test]
 async fn a_file_too_short_for_its_content_tag_is_an_error() {
