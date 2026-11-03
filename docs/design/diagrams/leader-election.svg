@@ -58,7 +58,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="208" y="190" class="t-m lbl">1  acquire:</text>
 <text x="208" y="206" class="t-m lbl">create-only</text>
 <line x1="350" y1="280" x2="350" y2="169" class="ln" marker-end="url(#leader-election-ak)"/>
-<text x="358" y="190" class="t-m lbl">2  renew each pass:</text>
+<text x="358" y="190" class="t-m lbl">2  renew on its own timer:</text>
 <text x="358" y="206" class="t-m lbl">If-Match on its tag</text>
 <line x1="510" y1="280" x2="510" y2="169" class="ln-o" marker-end="url(#leader-election-ao)"/>
 <text x="502" y="236" class="t-m lbl" text-anchor="end">3  release: delete</text>
@@ -71,7 +71,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="604" y="190" class="t-m lbl">4  acquire within one</text>
 <text x="604" y="206" class="t-m lbl">pass: create-only</text>
 <text x="140" y="402" class="t-m">follows: serves puts and gets; copies and evicts nothing</text>
-<text x="596" y="402" class="t-m">leads: renews each pass (the ticks)</text>
+<text x="596" y="402" class="t-m">leads: renews on its own timer (the ticks)</text>
 <line x1="713" y1="373" x2="727" y2="387" class="ln-o"/>
 <line x1="727" y1="373" x2="713" y2="387" class="ln-o"/>
 <text x="738" y="360" class="t-m lbl">5  B crashes:</text>
@@ -85,9 +85,9 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="30" y="540" width="900" height="70" rx="5" class="box-o"/>
 <text x="42" y="562" class="b">Puts never stop.</text>
 <text x="42" y="582" class="t-m">Every node keeps accepting puts and gets through a hand-over or a crash. While there is no leader (the gap between 3 and 4, or about 30 s after</text>
-<text x="42" y="598" class="t-m">a crash: the ttl, counted from when a taker first sees the unchanged tag, plus up to one pass) only the leader's work waits: copying, checkpoints, evicting.</text>
+<text x="42" y="598" class="t-m">a crash: the ttl, counted from when a taker first sees the unchanged tag, plus up to one pass) only the leader's work waits: copying, evicting.</text>
 <rect x="30" y="624" width="900" height="60" rx="5" class="box"/>
 <text x="42" y="646" class="b">Safety does not depend on a single leader.</text>
-<text x="42" y="664" class="t-m">Every destructive step is conditional: the copy replaces the reservation with If-Match, a hot delete names the hot tag just read, a checkpoint is If-Match.</text>
-<text x="42" y="678" class="t-m">A leader that lost the lease without noticing makes a step that fails instead of one that destroys.</text>
+<text x="42" y="664" class="t-m">Every step on an entry is a compare-and-swap on its tag, and the copy to cold is create-only.</text>
+<text x="42" y="678" class="t-m">A leader that lost the lease without noticing makes a call that fails (a late plain delete is the one stated residual).</text>
 </svg>
