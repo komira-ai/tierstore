@@ -6,8 +6,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta};
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
+use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta, PartBody};
+
+/// The chunks of `body` joined, or the error that ends it.
+async fn collect(mut body: PartBody<'_>) -> Result<Bytes, Error> {
+    let mut whole = BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk?);
+    }
+    Ok(whole.freeze())
+}
 
 /// What [`Churn`] does to the object under the key of a conditional call, just before the call.
 #[derive(Clone, Debug)]
@@ -115,6 +125,19 @@ impl Backend for Churn {
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         self.interfere(key).await;
         self.mem.put_if_match(key, body, etag).await
+    }
+
+    /// A streamed replacement, as the replacement of its bytes whole: the change comes just before
+    /// the conditional call.
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let whole = collect(body).await?;
+        self.put_if_match(key, whole, etag).await
     }
 
     async fn put_reservation_if_match(
@@ -268,8 +291,27 @@ impl Backend for Flaky {
         self.mem.put_if_match(key, body, etag).await
     }
 
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let whole = collect(body).await?;
+        self.mem.put_if_match(key, whole, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.mem.get(key, range).await
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        self.mem.get_marked(key, range).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

@@ -246,6 +246,19 @@ impl Backend for FaultyBackend {
         self.inner.put_if_match(key, body, etag).await
     }
 
+    /// A streamed replacement is a call of kind [`Op::PutIfMatch`], as a replacement of the bytes
+    /// whole is.
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.enter(Op::PutIfMatch, key).await?;
+        self.inner.put_stream_if_match(key, len, body, etag).await
+    }
+
     /// A reservation is a call of kind [`Op::PutReservation`], not of kind [`Op::Put`].
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
         self.enter(Op::PutReservation, key).await?;

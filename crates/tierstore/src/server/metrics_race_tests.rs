@@ -59,6 +59,19 @@ impl Backend for Held {
         self.inner.get(key, range).await
     }
 
+    /// A read with the mark waits at the barrier as a read does, and is answered by the wrapped
+    /// backend's own call.
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool), Error> {
+        if let Some(gate) = &self.gets {
+            let _ = gate.wait().await;
+        }
+        self.inner.get_marked(key, range).await
+    }
+
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         self.inner.head(key).await
     }

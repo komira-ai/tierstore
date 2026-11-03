@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use serde::Deserialize;
 use tierstore::{
     Backend, Error, JournalEntry, JournalOp, MemoryBackend, Op, Reconciler, decode_journal,
     encode_journal,
@@ -781,30 +780,12 @@ async fn the_new_ops_count_in_usage_lag_and_eviction() {
     assert_eq!((reconciler.hot_bytes(), reconciler.copy_lag()), (50, 0));
 }
 
-/// The journal entry as the previous release reads it: it knows `Put` and `Delete`, skips any other
-/// op, and ignores a field it does not know. This is a test-local copy of that shape, which is
-/// weaker than running the previous release.
-#[derive(Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-enum PreviousOp {
-    Put,
-    Delete,
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Deserialize)]
-struct PreviousEntry {
-    op: PreviousOp,
-    key: String,
-}
-
 /// Asserts that the new ops and the tag round-trip through the journal's encoding, that an entry
-/// without a tag encodes as before (no new field), that an entry written before the field existed
-/// decodes with none, and that the previous release's shape reads the new ops as unknown and the
-/// others as it did.
+/// without a tag encodes as before (no new field), and that an entry written before the field
+/// existed decodes with none. The previous release reading the new ops, and this branch reading the
+/// previous release's, run in `crates/compat/tests/journal.rs`.
 #[test]
-fn a_journal_with_the_new_ops_decodes_as_unknown_for_the_previous_shape() {
+fn the_new_ops_and_the_tag_round_trip_and_an_entry_without_a_tag_encodes_as_before() {
     let plain = entry(JournalOp::Put, "a", None);
     let reserved = entry(JournalOp::PutReserved, "b", Some("t1"));
     let mirror = entry(JournalOp::PutMirror, "c", Some("t2"));
@@ -821,19 +802,6 @@ fn a_journal_with_the_new_ops_decodes_as_unknown_for_the_previous_shape() {
     let json = std::str::from_utf8(&encoded).unwrap();
     assert!(json.contains(r#""op":"PUTRESERVED""#), "{json}");
     assert!(json.contains(r#""cold_tag":"t2""#), "{json}");
-
-    let previous: Vec<PreviousEntry> = serde_json::from_slice(&encoded).unwrap();
-    let ops: Vec<u8> = previous
-        .iter()
-        .map(|e| match e.op {
-            PreviousOp::Put => 1,
-            PreviousOp::Delete => 2,
-            PreviousOp::Unknown => 0,
-        })
-        .collect();
-    assert_eq!(ops, [1, 0, 0, 2]);
-    let keys: Vec<&str> = previous.iter().map(|e| e.key.as_str()).collect();
-    assert_eq!(keys, ["a", "b", "c", "d"]);
 }
 
 /// Asserts that an object that is deleted and put again with new content while the reconciler

@@ -56,9 +56,9 @@ A reservation is an object under a key in the cold tier that holds the key witho
 
 What this release does with one that is there:
 
-- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD, which is remembered once it found a real object), and a build node's cache treats it as absent.
+- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD at every listing: a listing gives no version of an object, so no answer is kept), and a build node's cache treats it as absent.
 - A delete removes it only if the hot tier holds the key; a bare one belongs to a put in flight and is left.
-- The reconciler replaces the reservation that a journal entry names by the hot bytes, in one conditional write, and deletes it by its tag if the hot tier lost the key.
+- The reconciler replaces the reservation that a journal entry names by the hot bytes, in one conditional write (the hot object is streamed to the cold tier, never held whole), and deletes it by its tag if the hot tier lost the key.
 
 A raw listing of the cold bucket (`aws s3 ls`) shows reservations as 56-byte objects. Do not delete one by hand while a put runs.
 
