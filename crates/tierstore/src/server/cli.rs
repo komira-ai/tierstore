@@ -538,12 +538,12 @@ pub(super) struct Built {
 /// The OCI front, as far as the flags and files go: the proxy it reads is not open yet.
 pub(super) struct OciSetup {
     /// The addresses, which are at least one.
-    listen: Vec<SocketAddr>,
+    pub(super) listen: Vec<SocketAddr>,
     /// `None` serves plain HTTP.
-    acceptor: Option<tokio_rustls::TlsAcceptor>,
-    prefix: OciPrefix,
+    pub(super) acceptor: Option<tokio_rustls::TlsAcceptor>,
+    pub(super) prefix: OciPrefix,
     pub(super) metrics: Arc<OciMetrics>,
-    limits: OciLimits,
+    pub(super) limits: OciLimits,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
