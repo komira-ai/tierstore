@@ -124,7 +124,6 @@ const LAUNCHD_RESERVED_TREES: [&str; 30] = [
     "/usr/share",
     "/usr/local/bin",
     "/usr/local/etc",
-    "/usr/local/kbf",
     "/usr/local/lib",
     "/usr/local/libexec",
     "/usr/local/tierstore",

@@ -288,7 +288,7 @@ mod tests {
     /// would catch a cleanup whose failures a passing run could hide.
     #[test]
     fn every_failure_of_the_cleanup_is_reported() {
-        let tables = "table inet kbf_forward_tierstore\ntable inet kbf_guard_tierstore\n";
+        let tables = "table inet tierstore_forward\ntable inet tierstore_guard\n";
         let (problems, calls) = with(tables, "");
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(
@@ -302,7 +302,7 @@ mod tests {
         );
         for fail in [
             "list tables",
-            "delete table inet kbf_guard",
+            "delete table inet tierstore_guard",
             "netns del t1-r",
             "netns list",
         ] {

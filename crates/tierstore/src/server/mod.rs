@@ -119,7 +119,7 @@
 //!   base64 of a hash of the right length;
 //! - `x-amz-checksum-crc64nvme` is answered `NotImplemented` (the crate depends on no CRC-64
 //!   implementation), and so is a trailing checksum or a signed stream (`STREAMING-` payloads,
-//!   `aws-chunked`), which the clients of kbf do not use.
+//!   `aws-chunked`), which common S3 clients do not use.
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
