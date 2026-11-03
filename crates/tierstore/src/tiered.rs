@@ -398,7 +398,8 @@ impl Inner {
         size: u64,
         cold_tag: Option<String>,
     ) -> Result<(), Error> {
-        self.journal_entry(self.entry(op, key, size, cold_tag)).await
+        self.journal_entry(self.entry(op, key, size, cold_tag))
+            .await
     }
 
     /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
