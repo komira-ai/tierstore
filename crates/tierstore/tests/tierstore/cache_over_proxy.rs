@@ -10,11 +10,13 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use futures::{StreamExt as _, stream};
 use tierstore::server::local_cache::{CacheConfig, KeepObserver, LocalCache, SystemDisk};
 use tierstore::{
-    Backend, ByteRange, Clock, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig,
-    TestClock,
+    Backend, ByteRange, Clock, Error, FaultyBackend, Listed, MemoryBackend, Meta, Op, Proxy,
+    ProxyConfig, ReadBody, TestClock,
 };
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
@@ -134,6 +136,56 @@ async fn without_the_tiered_option_a_cold_only_object_is_not_kept() {
     assert!(tiers.reads() > before);
 }
 
+/// A proxy as the upstream of a cache, whose streamed reads after the first wait until the hot
+/// tier holds the key: the copy of a cold read is a task beside the response, and the windows of
+/// a read are made one after the other, so this makes the second window start after the copy of
+/// the first, as the test needs. It waits on that progress (a yield loop), on no clock.
+struct AfterTheCopy {
+    proxy: Arc<Proxy>,
+    hot: Arc<MemoryBackend>,
+    streams: AtomicUsize,
+}
+
+#[async_trait]
+impl Backend for AfterTheCopy {
+    fn needs_length(&self) -> bool {
+        self.proxy.needs_length()
+    }
+
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.proxy.put(key, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.proxy.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.proxy.get(key, range).await
+    }
+
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        if self.streams.fetch_add(1, Ordering::SeqCst) > 0 {
+            while self.hot.head(key).await.is_err() {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.proxy.get_stream(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        self.proxy.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.proxy.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.proxy.list(prefix).await
+    }
+}
+
 /// Asserts the same for an object larger than the whole-fill limit, which is read in windows and
 /// checked against the version the read began with: served with the option, refused without it.
 #[tokio::test]
@@ -142,7 +194,11 @@ async fn a_windowed_read_of_a_cold_only_object_succeeds_only_with_the_tiered_opt
     let asked = Some(ByteRange::new(0, 24));
     for (tiered, served) in [(true, true), (false, false)] {
         let tiers = Tiers::new();
-        let proxy = tiers.proxy().await;
+        let proxy = Arc::new(AfterTheCopy {
+            proxy: tiers.proxy().await,
+            hot: tiers.hot_mem.clone(),
+            streams: AtomicUsize::new(0),
+        });
         tiers.cold_mem.put("img/big", body(data)).await.unwrap();
         let (_dir, cache) = cache_over(proxy, tiered, |config| {
             config.whole_limit = 4;
