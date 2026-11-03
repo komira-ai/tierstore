@@ -62,7 +62,6 @@ kind             = "s3"
 bucket           = "tierstore-cold"
 endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
-skip_checks      = []
 ```
 
 Start it with the file and nothing else but the per-run flags:
@@ -170,7 +169,6 @@ The keys of each table are those of the storage node and of the build node. What
 | `server.put_rate_grace` | `--put-rate-grace` | duration, `30s` | the time spent waiting for the client before that rate is held |
 | `server.body_idle_timeout` | `--body-idle-timeout` | duration, `30s` | how long a body or an answer may go without a byte; more than zero |
 | `server.s3_request_timeout` | `--s3-request-timeout` | duration, `60s` | the limit on a request to an `s3` tier (both tiers); more than zero. Set it longer than the longest multipart completion your store takes |
-| `server.backend_check_wait` | `--backend-check-wait` | duration, `5m` | how long the start-up self-test asks again of a tier that does not answer; `0s` asks once |
 
 ## `[hot_store]` and `[cold_store]`
 
@@ -186,7 +184,8 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | `cold_store.endpoint` | `--cold-endpoint` | `http://host[:port]`, required for `s3` | the cold tier's store |
 | `cold_store.region` | `--cold-region` | string, `us-east-1` | the signing region of the cold tier's store |
 | `cold_store.credentials_file` | `--cold-credentials-file` | path, required for `s3` | the key file of the cold tier's store |
-| `cold_store.skip_checks` | `--skip-backend-check` | list of `CHECK=REASON`, none | the start-up check that is left out, with its reason. Only `multipart-conditional` can be skipped, and it needs a reason; it runs on the cold tier |
+| `hot_store.conditional_delete` | `--hot-conditional-delete` | boolean; `false` for `s3`, `true` for `memory` and `dir` | whether a conditional delete of the hot tier is sent as a DELETE with `If-Match` (`true`) or as a read of the tag before a plain DELETE (`false`). Set it `true` for a store that enforces `If-Match` on a DELETE, such as Amazon S3. `false` is refused for `memory` and `dir`, which delete conditionally in one atomic step. tierstore does not ask the store; see [operations](operations.md#conditional-delete) |
+| `cold_store.conditional_delete` | `--cold-conditional-delete` | boolean; as for the hot tier | the same, for the cold tier |
 
 Only `[hot_store]` has these, since only a process with a hot tier has them:
 
@@ -223,7 +222,7 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 | `local_cache.max_concurrent_keeps` | count, 8 (1 to 64) | on main, not in v0.0.41. The most create-only puts copied into the cache at once, apart from the fills; a put that finds them all running succeeds and is not kept. A process that does not hold the lock of the cache directory (see [operations](operations.md#the-cache-lock-and-read-only-mode)) keeps no put at all |
 | `local_cache.keep_wait` | duration, `5s` (above 0) | on main, not in v0.0.41. The longest a put waits, once the upstream has the object, for its copy to land in the cache; past it the put is answered and the copy finishes in the background |
 | `local_cache.keep_deadline` | duration, `60s` (above 0, not below `keep_wait`) | on main, not in v0.0.41. The longest a copy takes in all, from the upstream's acknowledgement; a copy not done by then is abandoned and its stage file removed |
-| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the start runs the self-test of a storage node against the upstream and exits 3 if it answers one wrongly. In a file with `[hot_store]` too it is `true` whether left out or given, `false` is refused, and no self-test of the upstream is run (the upstream is the node's own proxy, whose tiers are tested) |
+| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the upstream is not tested at start. In a file with `[hot_store]` too it is `true` whether left out or given, and `false` is refused |
 | `local_cache.whole_fill_limit` | size, 64 MiB (1 byte to `budget`) | on main, not in v0.0.41. the most an object may be for a ranged read of it to fill the whole of it; a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | boolean, `true` | `false` is refused: leave `[local_cache]` out to run without a cache |
 | `local_cache.scrub_rate` | rate, `"16MiB/s"` | a size and `/s`, such as `"50MiB/s"`: the rate at which the scrub re-reads cached objects and hashes them again; `"off"` or `"0B/s"` turns the scrub off (not in a release yet, see [limits](limits.md)) |
@@ -280,7 +279,7 @@ These describe one run, not the data path, and have no key:
 | `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
 | `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (on main, not in v0.0.41: a lingering close, see [operations](operations.md#drain-and-restart)) |
 
-`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down or answers the self-test wrongly; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
+`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down (nothing asks a tier at start) or does not do what tierstore requires of a store (nothing checks); the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
 
 `--help` and `--version` are the usual; on main `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp. A start that gives `--config` and any other flag but `--drain-lb-wait`, `--drain-deadline` and `--check-config` is refused with exit status 2.
 
@@ -312,3 +311,12 @@ Then change `ExecStart=` to the `--config` line above, keeping `--drain-lb-wait`
 ## Not in a release yet
 
 - **Several upstream endpoints.** A cache node listing more than one upstream, with failover between them.
+
+## Deprecated settings
+
+Two settings belonged to the start-up self-test that earlier releases ran. tierstore no longer tests its stores (see [what tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)), so they do nothing. They are still accepted, so that a unit or a file written for an earlier release starts, and each one given is one line on stderr at the start: `tierstore: --skip-backend-check (cold_store.skip_checks) is deprecated and ignored: tierstore no longer tests its stores at start-up; remove it`, and the same for `--backend-check-wait (server.backend_check_wait)`. Their values are not read, and `--print-config` does not write them.
+
+| Key | Flag | What |
+|---|---|---|
+| `server.backend_check_wait` | `--backend-check-wait` | a duration; ignored |
+| `cold_store.skip_checks` | `--skip-backend-check` | a list of texts (`--skip-backend-check` once for each); ignored. A build-node file still refuses both keys |

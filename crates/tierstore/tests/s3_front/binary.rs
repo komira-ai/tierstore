@@ -513,16 +513,18 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that a start whose cold tier is an S3 store that cannot be reached exits with status
-/// 1 (not 3, which is a store that answered wrongly: the unit restarts a status 1) before it
-/// serves anything: nothing on stdout (no start line), and a last line that says the tier is
-/// unreachable, names the cold tier as the flag gave it and says which check could not be run;
-/// the hot tier, a memory tier, was tested before it and said so.
+/// Asserts that a start does not ask its tiers anything: the cold tier is an S3 store that cannot
+/// be reached (nothing listens at its endpoint), the address is taken so that the start ends
+/// after the settings are built, and the start fails at the address (status 1, nothing on stdout)
+/// and not at the tier: no line says a tier was tested or is unreachable. The two flags of the
+/// removed start-up self-test are accepted and each is one warning, word for word.
 #[test]
-fn a_tier_that_cannot_be_reached_by_the_self_test_is_a_start_that_exits_1() {
-    let files = Files::new("bin-selftest-refused");
+fn a_start_does_not_ask_its_tiers_and_the_flags_of_the_removed_self_test_warn() {
+    let files = Files::new("bin-no-self-test");
     let secret = files.secret("cold-key", "ID\nsecret\n");
     let key = secret.display().to_string();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = taken.local_addr().unwrap().to_string();
     let described = files.flags(&[
         "--cold-credentials-file",
         key.as_str(),
@@ -530,21 +532,29 @@ fn a_tier_that_cannot_be_reached_by_the_self_test_is_a_start_that_exits_1() {
         "http://127.0.0.1:1",
         "--backend-check-wait",
         "2s",
+        "--skip-backend-check",
+        "multipart-conditional=because",
     ]);
     let flags = with(&described, "--cold", "s3:cold-bucket");
+    let flags = with(&flags, "--listen", &address);
     let (code, out, err) = run(&flags);
     assert_eq!((code, out.as_str()), (1, ""));
-    // The flag is read: a wait of 2 s allows the first pause (1 s) and not the second (2 s).
-    assert_eq!(err.matches("trying again in 1s").count(), 1, "{err}");
-    assert!(!err.contains("trying again in 2s"), "{err}");
+    let ignored =
+        " is deprecated and ignored: tierstore no longer tests its stores at start-up; remove it";
+    let warned: Vec<&str> = err
+        .lines()
+        .filter(|line| line.contains("deprecated"))
+        .collect();
+    let skip = format!("tierstore: --skip-backend-check (cold_store.skip_checks){ignored}");
+    let wait = format!("tierstore: --backend-check-wait (server.backend_check_wait){ignored}");
+    assert_eq!(warned, [skip, wait], "{err}");
+    let last = err.lines().last().unwrap();
     assert!(
-        err.contains("tierstore: tested the hot tier memory in "),
+        last.starts_with(&format!("tierstore: binding {address}")),
         "{err}"
     );
-    let last = err.lines().last().unwrap();
-    let want = "tierstore: tier unreachable: cold tier s3:cold-bucket: ";
-    assert!(last.starts_with(want), "{err}");
-    assert!(last.contains("create-only"), "{err}");
+    assert!(!err.contains("unreachable"), "{err}");
+    assert!(!err.contains("tested the"), "{err}");
 }
 
 /// Asserts that a start with a tier that its flags do not describe exits with status 1 and a

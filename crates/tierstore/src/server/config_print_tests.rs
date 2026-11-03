@@ -173,11 +173,19 @@ fn every_flag_is_given_in_one_of_the_round_trips() {
         .collect();
     let command = Cli::command();
     // `--config` is the file itself, `--check-config` only checks one, and `--capabilities` prints
-    // and exits before any setting is read: a round trip never gives any of them.
+    // and exits before any setting is read: a round trip never gives any of them. The two flags of
+    // the removed start-up self-test are read and never written, so no round trip returns them;
+    // their own test is `the_flags_of_the_removed_self_test_are_not_printed`.
     for arg in command.get_arguments().filter(|arg| {
         !matches!(
             arg.get_long(),
-            Some("config" | "check-config" | "capabilities")
+            Some(
+                "config"
+                    | "check-config"
+                    | "capabilities"
+                    | "skip-backend-check"
+                    | "backend-check-wait"
+            )
         )
     }) {
         let long = arg.get_long().unwrap();
@@ -205,11 +213,30 @@ fn the_printed_keys_are_the_keys_of_the_table() {
         let (cli, _) = parse(flags);
         printed.extend(keys_of(&render(&cli).unwrap()));
     }
+    // The two keys of the removed start-up self-test are read and never written.
     let documented: BTreeSet<String> = KEYS
         .iter()
+        .filter(|(flag, _)| !matches!(*flag, "skip-backend-check" | "backend-check-wait"))
         .flat_map(|(_, keys)| keys.iter().map(|key| (*key).to_owned()))
         .collect();
     assert_eq!(printed, documented);
+}
+
+/// Asserts that the flags of the removed start-up self-test are accepted by `--print-config` and
+/// left out of the file it writes, which is the file of the same flags without them.
+#[test]
+fn the_flags_of_the_removed_self_test_are_not_printed() {
+    let mut old = s3_flags();
+    old.extend([
+        "--skip-backend-check=multipart-conditional=store-ignores-if-none-match-on-completion",
+        "--backend-check-wait=90s",
+    ]);
+    let (old, _) = parse(old);
+    let (new, _) = parse(s3_flags());
+    let text = render(&old).unwrap();
+    assert_eq!(text, render(&new).unwrap());
+    assert!(!text.contains("skip_checks"), "{text}");
+    assert!(!text.contains("backend_check_wait"), "{text}");
 }
 
 /// Asserts that the file names the key files by path and holds no key: the files are not read,

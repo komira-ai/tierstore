@@ -165,11 +165,6 @@ pub enum Failure {
     CompleteLate,
     /// AbortMultipartUpload answers 500; the upload stays open.
     Abort,
-    /// The `n`th HEAD from now on answers 500 (`Head(1)` is the next one).
-    Head(u32),
-    /// The `n`th DELETE of a whole object from now on answers 500 (`Delete(1)` is the next
-    /// one); the object stays.
-    Delete(u32),
 }
 
 impl State {
@@ -296,9 +291,6 @@ struct State {
     min_part: Option<u64>,
     /// A DELETE takes the object whatever its `If-Match` says ([`FakeS3::ignore_delete_condition`]).
     ignore_delete_condition: bool,
-    /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
-    heads: u32,
-    deletes: u32,
     /// The next AbortMultipartUpload is to be held ([`FakeS3::hold_next_abort`]).
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
@@ -394,13 +386,7 @@ impl FakeS3 {
 
     /// Fails the next request `failure` names, once.
     pub fn fail(&self, failure: Failure) {
-        let mut state = self.lock();
-        let due = match failure {
-            Failure::Head(n) => Failure::Head(state.heads + n),
-            Failure::Delete(n) => Failure::Delete(state.deletes + n),
-            other => other,
-        };
-        state.failures.push(due);
+        self.lock().failures.push(failure);
     }
 
     /// From now on takes a part of at least `bytes` bytes where S3 takes one of 5 MiB or
@@ -684,22 +670,10 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         }
         ("GET", Some(_), None, None) if key.is_empty() => list_uploads(state, request),
         ("PUT", None, None, None) => put_object(state, key, conditional, request),
-        ("DELETE", None, None, None) => {
-            state.deletes += 1;
-            if state.take(Failure::Delete(state.deletes)) {
-                return error("500 Internal Server Error", "InternalError");
-            }
-            delete_object(state, &key, request)
-        }
+        ("DELETE", None, None, None) => delete_object(state, &key, request),
         ("GET", None, None, None) if key.is_empty() => list(state, request),
         ("GET", None, None, None) => get(state, &key, request.headers.get("range")),
-        ("HEAD", None, None, None) => {
-            state.heads += 1;
-            if state.take(Failure::Head(state.heads)) {
-                return error("500 Internal Server Error", "InternalError");
-            }
-            head(state, &key)
-        }
+        ("HEAD", None, None, None) => head(state, &key),
         _ => error("501 Not Implemented", "NotImplemented"),
     }
 }

@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use tierstore::{
     Backend, ByteRange, Clock, Error, FaultyBackend, JournalEntry, JournalOp, MemoryBackend, Op,
-    SelfTestOptions, SystemClock, TestClock, decode_journal, encode_journal,
-    settle_conditional_delete,
+    SystemClock, TestClock, decode_journal, encode_journal,
 };
 
 use crate::conformance;
@@ -148,25 +147,6 @@ async fn a_put_if_match_replaces_only_the_object_with_that_tag() {
 async fn a_conditional_delete_removes_only_the_object_with_that_tag() {
     let backend = MemoryBackend::new();
     conformance::a_conditional_delete_removes_only_the_object_with_that_tag(&backend).await;
-}
-
-/// Asserts that a backend that has one way to delete conditionally has nothing to settle: the
-/// settling gives no line and no call reaches the backend.
-#[tokio::test]
-async fn a_backend_with_one_way_to_delete_conditionally_gives_no_line() {
-    let faulty = FaultyBackend::new(Arc::new(MemoryBackend::new()));
-    let options = SelfTestOptions {
-        name: "memory",
-        run_id: "run-1",
-        multipart: false,
-        skip: &[],
-        wait: Duration::ZERO,
-        pause: Duration::from_secs(1),
-        max_pause: Duration::from_secs(1),
-    };
-    settle_conditional_delete(&faulty, &options, &|line: String| panic!("{line}")).await;
-    assert_eq!(faulty.calls(Op::DeleteIfMatch), 0);
-    assert_eq!(faulty.calls(Op::Put), 0);
 }
 
 /// Asserts that a conditional delete through the fault injector is a call of its own kind: it

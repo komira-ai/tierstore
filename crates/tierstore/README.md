@@ -69,9 +69,10 @@ With `write_through = true` in `[local_cache]` (version 0.2.0 on; `tierstore --v
 the node also takes create-only puts, presigned PUTs, multipart uploads and deletes, and sends
 each to the upstream (`src/server/local_cache/write.rs`) before it answers; a create-only put
 under a `cache = true` policy is also kept on the node (`src/server/local_cache/keep.rs`), a
-multipart upload is not. The roles of the keys apply as on a storage node. The start tests the upstream's
-create-only and multipart-conditional answers with the self-test, so the upstream key must be one
-that writes (exit status 3 if not). `tierstore --config <path> --check-config` checks a file as a
+multipart upload is not. The roles of the keys apply as on a storage node. The start does not test the
+upstream (tierstore verifies nothing of the stores it is given; see "What tierstore requires of a
+store" in `docs/operations.md`), so the upstream key must be one that writes, or the first write fails.
+`tierstore --config <path> --check-config` checks a file as a
 start does, without touching the network, and exits 0 and prints nothing, or prints the refusal and
 exits 2.
 

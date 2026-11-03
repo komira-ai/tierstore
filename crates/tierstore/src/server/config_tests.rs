@@ -41,7 +41,8 @@ fn a_storage_node_file_makes_the_settings_its_flags_make() {
     assert_eq!(from_file, from_flags);
     assert_eq!(from_file.hot_bytes, 500 << 30);
     assert_eq!(from_file.hot, "s3:tierstore-hot");
-    assert_eq!(from_file.skip_backend_check.len(), 1);
+    assert_eq!(from_file.hot_conditional_delete, Some(true));
+    assert_eq!(from_file.cold_conditional_delete, Some(true));
     assert_eq!(from_file.read_only_key_file.len(), 2);
     assert_eq!(from_file.config, None);
     assert!(!from_file.print_config);
@@ -254,13 +255,6 @@ fn a_fault_in_the_file_is_reported_without_the_value() {
             golden_with("kind               = \"s3\"", "kind = \"SENTINEL\""),
             "kind",
         ),
-        (
-            golden_with(
-                "skip_checks      = [\"multipart-conditional=store-ignores-if-none-match-on-completion\"]",
-                "skip_checks = [\"SENTINEL\"]",
-            ),
-            "skip_checks",
-        ),
     ];
     for (text, want) in cases {
         let why = refusal(&text);
@@ -399,14 +393,6 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
     }
     let hot = minimal_with("budget = 1000", "budget = 1000\nskip_checks = []");
     assert!(refusal(&hot).contains("hot_store.skip_checks"));
-    for bad in ["nonsense", "multipart-conditional=", "create-only=because"] {
-        let text = minimal_with(
-            "[cold_store]\nkind = \"memory\"",
-            &format!("[cold_store]\nkind = \"memory\"\nskip_checks = [\"{bad}\"]"),
-        );
-        let why = refusal(&text);
-        assert!(why.contains("cold_store.skip_checks"), "{bad}: {why}");
-    }
 }
 
 /// Asserts that the values the flags bound are bound in the file too: a water mark outside 1 to

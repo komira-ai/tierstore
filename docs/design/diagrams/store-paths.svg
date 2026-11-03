@@ -86,12 +86,6 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="44" y="754" class="t-n">Deleted: never; replaced by the next publish</text>
 <circle cx="552" cy="691" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
 <text x="552" y="695" class="b" text-anchor="middle" font-size="12">3</text>
-<text x="36" y="779" class="b">Start-up</text>
-<rect x="32" y="789" width="536" height="85" rx="5" class="box"/>
-<text x="44" y="810" class="b">_tiering/selftest/&lt;run&gt;/</text>
-<text x="44" y="831" class="t-n">Writer: start-up probes; never client data</text>
-<text x="44" y="850" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">probes of the store's write modes</tspan></text>
-<text x="44" y="869" class="t-n">Deleted: by the probe after each check; swept after an hour</text>
 <rect x="600" y="86" width="500" height="440" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
 <text x="616" y="110" class="b" font-size="15">COLD tier</text>
 <text x="696" y="110" class="t-n">durable; decides whether a key exists</text>

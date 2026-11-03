@@ -18,10 +18,10 @@
 //! The tables:
 //!
 //! - `[server]`: the address, the id, the bucket and region, the key files, the limits on
-//!   requests and bodies, and the start-up self-test's wait.
+//!   requests and bodies.
 //! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
 //!   the reconciler and its lease.
-//! - `[cold_store]`: the cold tier, and the start-up check it may skip.
+//! - `[cold_store]`: the cold tier.
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
 //! - `[oci]`: the read-only OCI front, left out when there is none: `listen` (needed in the
@@ -49,7 +49,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_duration, parse_skip,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, parse_duration,
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
@@ -117,6 +117,11 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("put-min-bytes-per-sec", &["server.put_min_bytes_per_sec"]),
     ("put-rate-grace", &["server.put_rate_grace"]),
     ("body-idle-timeout", &["server.body_idle_timeout"]),
+    ("hot-conditional-delete", &["hot_store.conditional_delete"]),
+    (
+        "cold-conditional-delete",
+        &["cold_store.conditional_delete"],
+    ),
     ("skip-backend-check", &["cold_store.skip_checks"]),
     ("backend-check-wait", &["server.backend_check_wait"]),
     ("oci-listen", &["oci.listen"]),
@@ -381,6 +386,9 @@ pub(super) struct ServerTable {
     pub put_rate_grace: Option<Dur>,
     pub body_idle_timeout: Option<Dur>,
     pub s3_request_timeout: Option<Dur>,
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_check_wait: Option<Dur>,
 }
 
@@ -400,6 +408,11 @@ pub(super) struct TierTable {
     pub region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_file: Option<PathBuf>,
+    /// Whether a conditional delete is sent as a DELETE with `If-Match`; the default is the one
+    /// of the kind (`true` for `memory` and `dir`, `false` for `s3`), and `false` is refused for
+    /// the two that delete in one atomic step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditional_delete: Option<bool>,
     // Only `[hot_store]` has these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<Size>,
@@ -424,6 +437,8 @@ pub(super) struct TierTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_retention: Option<Dur>,
     // Only `[cold_store]` has these.
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_checks: Option<Vec<String>>,
     /// Only the `[cold_store]` of a build node: the upstream, as a list of one in place of
@@ -503,6 +518,8 @@ pub(super) struct TierParts {
     pub endpoint: Option<String>,
     pub region: Option<String>,
     pub credentials_file: Option<PathBuf>,
+    /// The `conditional_delete` key; `None` is the default of the kind.
+    pub conditional_delete: Option<bool>,
 }
 
 /// The tier `table` names, if its keys fit its kind.
@@ -514,15 +531,21 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
     ];
     let bucket = ("bucket", table.bucket.is_some());
     let path = ("path", table.path.is_some());
+    let delete_off = (
+        "conditional_delete",
+        table.conditional_delete == Some(false),
+    );
     let spec = match (table.kind, &table.path, &table.bucket) {
         (Kind::Memory, ..) => {
             let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2]];
             refuse(name, "not for kind \"memory\"", &keys)?;
+            refuse(name, DELETE_OFF, &[delete_off])?;
             "memory".to_owned()
         }
         (Kind::Dir, path_value, _) => {
             let keys = [bucket, s3_only[0], s3_only[1], s3_only[2]];
             refuse(name, "not for kind \"dir\"", &keys)?;
+            refuse(name, DELETE_OFF, &[delete_off])?;
             format!(
                 "dir:{}",
                 require(name, "path", path_value.as_ref())?.display()
@@ -541,8 +564,13 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         endpoint: table.endpoint.clone(),
         region: table.region.clone(),
         credentials_file: table.credentials_file.clone(),
+        conditional_delete: table.conditional_delete,
     })
 }
+
+/// Why `conditional_delete = false` is refused for a `memory` or `dir` tier.
+const DELETE_OFF: &str =
+    "false is only for kind \"s3\": a memory or dir tier deletes conditionally in one atomic step";
 
 /// Whether a key's name says it holds a secret: it has a word of one, or is a key itself and
 /// not the path of a file. A hint for a message that says what to do, not a gate: what keeps a
@@ -846,22 +874,7 @@ pub(super) fn storage(
         &[("endpoints", cold.endpoints.is_some())],
     )?;
     let skipping = [("skip_checks", hot.skip_checks.is_some())];
-    refuse(
-        "hot_store",
-        "only [cold_store] has it: the check it skips runs there",
-        &skipping,
-    )?;
-    let mut skip_backend_check: Vec<SkippedCheck> = Vec::new();
-    for text in cold.skip_checks.iter().flatten() {
-        match parse_skip(text) {
-            Ok(skipped) => skip_backend_check.push(skipped),
-            // Not the reason of the flag: it holds the text, free text that is never repeated.
-            Err(_) => {
-                let why = "each is CHECK=REASON; only multipart-conditional can be skipped, and it needs a reason";
-                return Err(invalid("cold_store.skip_checks", why));
-            }
-        }
-    }
+    refuse("hot_store", "only [cold_store] has it", &skipping)?;
     let hot_parts = tier("hot_store", &hot)?;
     let cold_parts = tier("cold_store", &cold)?;
     let budget = require("hot_store", "budget", hot.budget)?.0;
@@ -898,6 +911,8 @@ pub(super) fn storage(
         cold_endpoint: cold_parts.endpoint,
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
+        hot_conditional_delete: hot_parts.conditional_delete,
+        cold_conditional_delete: cold_parts.conditional_delete,
         s3_request_timeout: shared.s3_request_timeout,
         hot_bytes: hot_budget,
         high_water,
@@ -928,7 +943,7 @@ pub(super) fn storage(
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
-        skip_backend_check,
+        skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
         oci_tls_cert: oci.tls_cert,
@@ -944,7 +959,7 @@ pub(super) fn storage(
 pub(super) struct Shared {
     pub front: FrontSettings,
     pub s3_request_timeout: Duration,
-    pub backend_check_wait: Duration,
+    pub backend_check_wait: Option<Duration>,
 }
 
 /// The `server.slot` key: a port, so not zero (a number past 65535 does not parse as one).
@@ -1005,7 +1020,7 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
     Ok(Shared {
         front,
         s3_request_timeout: duration(server.s3_request_timeout, Duration::from_secs(60)),
-        backend_check_wait: duration(server.backend_check_wait, Duration::from_secs(300)),
+        backend_check_wait: server.backend_check_wait.map(|wait| wait.0),
     })
 }
 

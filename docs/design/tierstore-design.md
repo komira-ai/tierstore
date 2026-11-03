@@ -30,7 +30,7 @@ Goals:
 - Reads from the fastest tier that holds the object, with a fill of the faster tier on a miss.
 - Back-pressure instead of failure when the hot tier fills.
 - Recovery from a restart or a lost lease using only what is stored in the tiers.
-- A small contract for what a tier must do (section 9), checked when the process starts.
+- A small contract for what a tier must do (section 9), stated and not verified: tierstore is a proxy over a hot and a cold store and does not test them.
 
 Non-goals:
 
@@ -159,7 +159,7 @@ The figure is the whole story in one picture: any number of nodes, one of them t
 
 The hot tier holds the data until it is evicted, and all coordination state, under reserved prefixes. The cold tier decides whether a key exists, and holds client keys only.
 
-- **Hot tier.** Client objects under their own keys. `_journal/<id>/<seq>`: one create-only object per batch of a node's puts, deleted by the leader as soon as it is checkpointed. `_tiering/proxies/<id>`: the node's registration and heartbeat. `_tiering/checkpoint/<id>`: how far the leader has applied that node's journal. `_tiering/lease`: the leader's lease. `_tiering/usage`: published by the leader. `_tiering/selftest/<run>/`: start-up probes.
+- **Hot tier.** Client objects under their own keys. `_journal/<id>/<seq>`: one create-only object per batch of a node's puts, deleted by the leader as soon as it is checkpointed. `_tiering/proxies/<id>`: the node's registration and heartbeat. `_tiering/checkpoint/<id>`: how far the leader has applied that node's journal. `_tiering/lease`: the leader's lease. `_tiering/usage`: published by the leader.
 - **Cold tier.** Client objects, in one of two states under the same key: a marked **reservation** (a small object that says a put owns the key) and then the **real object**. Nothing else lives there: no `_journal`, no `_tiering`.
 
 Why: the coordination state is in the hot tier because it is small, changes often and must be fast, and the hot tier is the store every node already writes to. The key's existence is decided in the cold tier because that is the one place that outlives eviction: a key is taken when cold holds a reservation or a real object for it, and a second create-only put of the key fails there. Section 10 lists each path with its writer and write mode.
@@ -197,7 +197,7 @@ The lease body is `holder`, `nonce`, `generation`; it is never read, only its ta
 
 Why a lease object and not a coordination service: requirement 5 says there is none, and a conditional write on one small object in a store the deployment already has gives exactly one winner. Why a single leader at all: copying, checkpoints and eviction then have one writer in the normal case, so they never contend, and a journal is read by one process. Puts never stop: every process keeps accepting puts and gets through a hand-over or a crash. While there is no leader, only the leader's work waits: copying to cold, checkpoints, deleting journal objects, evicting.
 
-**What the hot tier must provide.** The lease, checkpoint and registration writes need a hot tier whose create-only and `If-Match` writes are atomic across processes, because during a live update two processes run at once over one hot tier. An S3-compatible hot bucket provides this. A `dir:` hot tier provides it by doing its create-only and `If-Match` writes under a file lock inside its own directory (decided, section 12; today it is atomic only inside one process, which is why the code still has `--lock-file`). The start-up self-test (section 9) checks the sequential behaviour of both writes and refuses a tier that gets it wrong; its probes are sequential, so it cannot detect a lack of atomicity across processes, and the choice of tier is the deployment's.
+**What the hot tier must provide.** The lease, checkpoint and registration writes need a hot tier whose create-only and `If-Match` writes are atomic across processes, because during a live update two processes run at once over one hot tier. An S3-compatible hot bucket provides this. A `dir:` hot tier provides it by doing its create-only and `If-Match` writes under a file lock inside its own directory (decided, section 12; today it is atomic only inside one process, which is why the code still has `--lock-file`). Nothing at start-up checks this (section 9): tierstore does not test its stores, so the choice of a tier that meets it is the deployment's.
 
 ### 6.4 The life of a write: journal to cold to prune to eviction
 
@@ -295,7 +295,7 @@ Each entry is a mechanism and the reason it works.
 - **Restart rebuild.** The leader's in-memory books are rebuilt from checkpoints and journals: it reloads each checkpoint and re-reads the journal objects after it, which are exactly the writes not yet applied. Work done since the last stored checkpoint is done again, which is safe because the copy is conditional on the reservation's tag and deletes of missing keys succeed.
 - **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.3).
 - **Reserved prefixes.** `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses put, delete and multipart under them, and the S3 front refuses every call on them (403). The proxy filters them from the hot listing.
-- **The start-up self-test.** Before any address is bound, each tier is probed (section 9). A store whose create-only put or `If-Match` does not hold is refused with exit status 3, so the lease and the one-winner promise are never built on a store that cannot keep them.
+- **No start-up test of the stores.** tierstore does not probe its tiers (decision of 2026-11-03: "tierstore is simply a proxy on top of hot and cold stores"). The lease and the one-winner promise rest on what section 9 says a store must do, and a store that does not do it is not detected. An earlier design ran a start-up self-test of each tier and refused a wrong answer with exit status 3; it was removed, and the flags that tuned it (`--skip-backend-check`, `--backend-check-wait`) are accepted and ignored with a warning.
 - **Fail closed.** A put whose reservation cannot be made fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read.
 
 ## 8. Races the current code loses (the test list for the build)
@@ -392,23 +392,25 @@ Intended: a checkpoint never moves backwards. Today: the stored checkpoint has `
 
 Both tiers are used through the `Backend` trait. The contract: `put` and `put_stream` are create-only (`AlreadyExists`, `Full`); `put_if_match(key, body, tag)` replaces only if the tag matches; `head` returns size, tag and modified time; `delete` of a missing key succeeds; `list_page` is ordered and honours `start_after`; multipart calls are optional, and `complete_upload` is create-only. A network backend bounds each call with its own timeout.
 
-Before binding any address the server runs a self-test against each tier, hot first. Probe keys live under `_tiering/selftest/<run id>/` and are deleted after each check. A wrong answer is a violation: the process exits with status 3 and does not retry. An `Unavailable` answer is retried (1 s doubling to 30 s) until `--backend-check-wait` (5 minutes). A tier that is still unreachable when the wait ends fails the start with exit status 1 (a restart may mend it); a violation exits with status 3, which a restart cannot mend. A `Full` answer skips the write checks with a note. Only the multipart check can be skipped, and only with a stated reason. After a tier passes, a sweep removes probe keys left by a killed start that are older than one hour.
+tierstore does not verify any of this. It writes no probe key, at start-up or later, and asks a store nothing beyond the requests of clients and of its own work. A store that cannot be reached at start does not fail the start: the first request that needs it fails as an ordinary request does. The hot tier must provide atomic create-only and `If-Match` PUTs and strong read-after-write for GET, HEAD and LIST; the cold tier the same create-only PUT, on a single PUT and on the completion of a multipart upload. Known to meet them: Amazon S3, MinIO (conditional PUT) and tierstore's own `dir` store.
 
-| Assumption | Why | Checked at start-up |
+How a conditional delete (`delete_if_match`) is sent to an S3 tier is configuration and not a probe: the tier's `conditional_delete` setting, which is `false` for an `s3` tier unless set (a read of the tag before a plain DELETE, right on every store) and `true` for `memory` and `dir`, which delete conditionally in one atomic step. An operator of a store that enforces `If-Match` on a DELETE, such as Amazon S3, sets it `true`.
+
+| Assumption | Why | Verified |
 |---|---|---|
-| Create-only put refuses a second put | One winner per key; the lease is taken create-only | yes (`create-only`; does not read the object back) |
-| HEAD gives size and a non-empty tag, and the tag `put_if_match` returns equals the next HEAD tag | Lease and checkpoint use the tag from HEAD | yes (`head`) |
-| `If-Match` refuses a wrong tag and accepts the right one | Lease take-over, renewal, checkpoint | yes (`if-match`) |
-| Ranged read returns the exact bytes | Ranged gets | yes (`range`, one in-range read) |
-| Listing is ordered, paged, honours `start_after` | Reading the journal | yes (`paging`) |
+| Create-only put refuses a second put | One winner per key; the lease is taken create-only | no |
+| HEAD gives size and a non-empty tag, and the tag `put_if_match` returns equals the next HEAD tag | Lease and checkpoint use the tag from HEAD | no |
+| `If-Match` refuses a wrong tag and accepts the right one | Lease take-over, renewal, checkpoint | no |
+| Ranged read returns the exact bytes | Ranged gets | no |
+| Listing is ordered, paged, honours `start_after` | Reading the journal | no |
 | Delete of a missing key succeeds | Repeated and re-applied deletes, eviction, prune, restart rebuild | no |
-| Multipart completion is create-only (cold tier) | The proxy does not HEAD cold at completion | yes (`multipart-conditional`, skippable) |
-| Create-only and `If-Match` are atomic under concurrent writers, across processes | One winner; one lease holder, also while two processes run during a live update | no: the probes are sequential; a `dir:` hot tier fails this across processes (section 6.3) |
+| Multipart completion is create-only (cold tier) | The proxy does not HEAD cold at completion | no |
+| Create-only and `If-Match` are atomic under concurrent writers, across processes | One winner; one lease holder, also while two processes run during a live update | no |
 | The tag is the same function of content on both tiers | `delete_cold` compares a hot tag with a cold tag | no |
-| Strong read-after-write for get, head and list | Journal reading, probes | implicitly, by reading right after writing |
-| Store clock and this machine's clock agree to well under the lease ttl | Lease expiry, journal retention | no (the flag relations are checked, not the clocks) |
+| Strong read-after-write for get, head and list | Journal reading | no |
+| Store clock and this machine's clock agree to well under the lease ttl | Lease expiry, journal retention | no |
 | Durability and replication of an acknowledged write | An acknowledgement means durable | no |
-| Streaming put and read paths | Client writes | no (the probes use `put`) |
+| Streaming put and read paths | Client writes | no |
 
 How `S3Backend` maps answers: 507 is `Full`; 408, 429, other 5xx (not 501), transport failures and a 409 conflict are `Unavailable`; 412 on a create-only put is `AlreadyExists`, on `put_if_match` `PreconditionFailed`. `DirBackend` and `MemoryBackend` tag an object with the SHA-256 of its body; `S3Backend` uses the store's ETag, which is an MD5 for a single PUT and something else for a multipart object.
 
@@ -416,7 +418,7 @@ How `S3Backend` maps answers: 507 is `Full`; 408, 429, other 5xx (not 501), tran
 
 ![Where each key lives: every path, who writes it, how, and when it goes](diagrams/store-paths.svg)
 
-All coordination state is small objects in the hot bucket, under reserved prefixes, beside client objects under their own names. The cold bucket holds client keys only: real objects and reservations (the same key, marked). The self-test's probes live in the hot tier under `_tiering/selftest/`.
+All coordination state is small objects in the hot bucket, under reserved prefixes, beside client objects under their own names. The cold bucket holds client keys only: real objects and reservations (the same key, marked).
 
 | Key | Tier | Writer | Write mode | Content | Lifetime |
 |---|---|---|---|---|---|
@@ -428,7 +430,6 @@ All coordination state is small objects in the hot bucket, under reserved prefix
 | `_tiering/checkpoint/<id>` | hot | leader | `If-Match`; never moves backwards | `{seq, evict_seq, evict_idx}` | deleted at retirement |
 | `_tiering/lease` | hot | the leader | create-only to acquire; `If-Match` to renew and take over | `holder`, `nonce`, `generation` | deleted on release if the tag is still the holder's |
 | `_tiering/usage` | hot | leader, each pass | unconditional overwrite: only the leader publishes, and a stale leader's write is replaced on the next pass | `{hot_bytes, copy_lag, time}` | replaced by the next publish |
-| `_tiering/selftest/<run>/...` | hot | start-up | per check | short literals | deleted after each check; swept after an hour |
 
 A `DELETE` entry has size 0. A journal object holds up to 64 entries. An unknown `op` decodes as `Unknown` and is skipped. The leader's own memory (`Books`: an index of the latest put per key, usage, lag, and per node a stream of pending and candidate objects) is rebuilt from the above and is never a record.
 
@@ -451,17 +452,17 @@ Operator-facing limits are in [crates/tierstore/docs/limits.md](../../crates/tie
 
 ## 12. Future work
 
-**(a) Other object-store APIs and other backends.** What: further fronts over the same proxy, for example the Google Cloud Storage JSON or XML API and Azure Blob, beside the S3 and OCI fronts. Other stores as tiers would be further implementations of `Backend`. Why: clients that do not speak S3 could use the same tiers; the proxy already has one call per operation and does not know the front. Touches: a new module under `server/` per front (request parsing, auth, errors, listing and range semantics of that API); for a new tier, a `Backend` implementation that passes the conformance tests in `tests/tierstore/conformance.rs` and the self-test. Create-only needs a conditional create on the store; an API without one cannot be a tier.
+**(a) Other object-store APIs and other backends.** What: further fronts over the same proxy, for example the Google Cloud Storage JSON or XML API and Azure Blob, beside the S3 and OCI fronts. Other stores as tiers would be further implementations of `Backend`. Why: clients that do not speak S3 could use the same tiers; the proxy already has one call per operation and does not know the front. Touches: a new module under `server/` per front (request parsing, auth, errors, listing and range semantics of that API); for a new tier, a `Backend` implementation that passes the conformance tests in `tests/tierstore/conformance.rs`, and meets what section 9 requires of a store. Create-only needs a conditional create on the store; an API without one cannot be a tier.
 
 **(b) Tierstore as a file system.** What: a FUSE mount or an NFS gateway over the proxy, read-mostly first. Why: tools that want paths can use immutable objects without an S3 client, and immutability avoids most of what makes a distributed file system hard (no overwrite, no rename). Touches: a front that maps paths to keys and directories to prefixes (listing is by prefix; `delimiter` is not supported); a read path with ranged gets and local caching, for which the build-node `local_cache` is the starting point; writes later, as create-only files closed whole.
 
-**(c) The single-process local_cache + hot_store + cold_store configuration.** What: configuration C of section 4. Why: a node that also owns the data should serve its own reads from local NVMe without a second process and a hop between them. Touches: `config.rs` (accept the three tables), `config_cache.rs` and `cli.rs` (construct the `LocalCache` with the proxy as its `Arc<dyn Backend>` upstream, which it takes as any `Backend`, rather than over an S3 upstream), the start-up checks (the tiers are already self-tested before the proxy opens, so the cache must not run its write-through self-test against the proxy, which refuses the `_tiering/` probe keys; only the cache directory's own file-system check applies), the drain and hand-over (a local cache holds a directory lock), and `docs/configuration.md`.
+**(c) The single-process local_cache + hot_store + cold_store configuration.** What: configuration C of section 4. Why: a node that also owns the data should serve its own reads from local NVMe without a second process and a hop between them. Touches: `config.rs` (accept the three tables), `config_cache.rs` and `cli.rs` (construct the `LocalCache` with the proxy as its `Arc<dyn Backend>` upstream, which it takes as any `Backend`, rather than over an S3 upstream), the start-up checks (only the cache directory's own file-system check applies), the drain and hand-over (a local cache holds a directory lock), and `docs/configuration.md`.
 
 **(d) Replication: one leader and a cold reservation (decided, not built yet).** What: the design of sections 5 and 6, which closes the known gaps of section 8. In order, each step a pull request that can land alone:
 
 1. A conditional delete in `Backend` (delete only if the tag is unchanged) and a streamed `If-Match` put, in every backend. No behaviour change.
 2. A reconciler that reads around a reservation: the leader's copy replaces the reservation with `If-Match` (streamed, read once), and eviction checks that cold holds the real object and then deletes from hot on the tag just read. Proxy get, head and list hide reservations. Journal entries gain an optional field for the reservation's tag (additive). Lands before anything writes a reservation.
-3. The reservation put: one create-only write in cold, then the object and the journal entry in hot concurrently, acknowledged when both are durable; the two cold HEADs and `confirm_not_tiered` go, and so does the fixed sleep in the put path; the cold path at `Full` stays; the start-up self-test learns the reservation checks. An abandoned reservation is taken over with one compare-and-swap once the leader has retired the node that made it (section 7).
+3. The reservation put: one create-only write in cold, then the object and the journal entry in hot concurrently, acknowledged when both are durable; the two cold HEADs and `confirm_not_tiered` go, and so does the fixed sleep in the put path; the cold path at `Full` stays. An abandoned reservation is taken over with one compare-and-swap once the leader has retired the node that made it (section 7).
 4. One leader: other nodes never copy or evict; renewal each pass, release on drain; checkpoints never move backwards; the journal object is deleted at once when checkpointed.
 5. Node lifecycle: a fresh id per boot, the registration and its one-minute heartbeat, `closed` on stop, departure after ten minutes on the leader's clock, the sentinel, and retirement of the node's journal, checkpoint and registration.
 6. Live update by socket hand-off (section 6.6): the new instance receives the listening sockets over a Unix control socket, the old one drains. The update hook stays POSIX, so one hook serves Linux and macOS; only the runner that starts and stops an instance differs (systemd, launchd). It replaces the current update hook. The properties: a fresh id per boot, socket hand-off over a Unix control socket, a POSIX hook, no fixed ports, no firewall rules.
@@ -497,7 +498,7 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 6. The binary cuts an in-flight pass on halt while a comment in the reconciler says not to cancel one. Which is intended?
 7. Should the reconciler's copy and the proxy's read path stay whole-object, given that puts are streamed?
 8. Should start-up measure the store's clock against the machine's and refuse beyond a bound?
-9. Should the self-test say plainly that concurrent atomicity is assumed, and should its paging check tolerate a lagging listing, which the trait allows?
+9. (Resolved: there is no self-test; section 9 says plainly what is assumed and that nothing verifies it.)
 10. Should reserved keys be filtered from cold listings, and from the proxy's get and head, or only at the front?
 11. Should the 64-entry batch, the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
 12. Should the one-minute heartbeat and the ten-minute departure time have flags, or stay fixed?
@@ -533,4 +534,3 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
 | Reserved prefix | `_journal/` and `_tiering/`; refused to clients. |
-| Self-test | The start-up check of each tier's contract. |

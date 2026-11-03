@@ -200,6 +200,7 @@ mod config_cache;
 mod config_combined;
 mod config_policy;
 mod config_print;
+mod deprecated;
 mod door;
 mod drain;
 mod front;
@@ -237,6 +238,8 @@ mod cache_lock_tests;
 mod combined_cli_tests;
 #[cfg(test)]
 mod completion_tests;
+#[cfg(test)]
+mod conditional_delete_tests;
 #[cfg(test)]
 mod config_cache_tests;
 #[cfg(test)]

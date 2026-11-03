@@ -26,6 +26,7 @@ struct S3Flags<'a> {
     endpoint: Option<&'a str>,
     region: Option<&'a str>,
     credentials_file: Option<&'a Path>,
+    conditional_delete: Option<bool>,
 }
 
 /// The table of the tier that `spec` names (`memory`, `dir:<path>` or `s3:<bucket>`), with the
@@ -35,6 +36,7 @@ fn tier_table(flag: &str, spec: &str, s3: S3Flags<'_>) -> Result<TierTable, Conf
         endpoint: s3.endpoint.map(str::to_owned),
         region: s3.region.map(str::to_owned),
         credentials_file: s3.credentials_file.map(Path::to_path_buf),
+        conditional_delete: s3.conditional_delete,
         ..TierTable::default()
     };
     match (spec, spec.strip_prefix("dir:"), spec.strip_prefix("s3:")) {
@@ -69,6 +71,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         endpoint: cli.hot_endpoint.as_deref(),
         region: cli.hot_region.as_deref(),
         credentials_file: cli.hot_credentials_file.as_deref(),
+        conditional_delete: cli.hot_conditional_delete,
     };
     let mut hot = tier_table("--hot", &cli.hot, hot_s3)?;
     hot.budget = Some(Size(cli.hot_bytes));
@@ -86,14 +89,9 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         endpoint: cli.cold_endpoint.as_deref(),
         region: cli.cold_region.as_deref(),
         credentials_file: cli.cold_credentials_file.as_deref(),
+        conditional_delete: cli.cold_conditional_delete,
     };
-    let mut cold = tier_table("--cold", &cli.cold, cold_s3)?;
-    let skipped = cli
-        .skip_backend_check
-        .iter()
-        .map(|skipped| format!("{}={}", skipped.check, skipped.reason))
-        .collect();
-    cold.skip_checks = Some(skipped);
+    let cold = tier_table("--cold", &cli.cold, cold_s3)?;
     let server = ServerTable {
         listen: Addrs(cli.listen.clone()),
         proxy_id: cli.proxy_id.clone(),
@@ -115,7 +113,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         put_rate_grace: Some(Dur(cli.put_rate_grace)),
         body_idle_timeout: Some(Dur(cli.body_idle_timeout)),
         s3_request_timeout: Some(Dur(cli.s3_request_timeout)),
-        backend_check_wait: Some(Dur(cli.backend_check_wait)),
+        backend_check_wait: None,
     };
     // The flags that need `--oci-listen` cannot be given without it, so the table is the front.
     let oci = (!cli.oci_listen.is_empty()).then(|| OciTable {

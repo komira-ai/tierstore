@@ -63,24 +63,18 @@
 //! with status 2: those the parser refuses, two keys that have one id, and a config file that is
 //! refused or given with flags that describe the data path.
 //!
-//! Before it opens the proxy or binds the address, the process asks each tier the questions its
-//! guarantees rest on (see [`self_test`]) under a probe key in `_tiering/selftest/` that is
-//! new for each start and deleted afterwards. A tier that answers one wrongly (a create-only put
-//! that overwrites, an `If-Match` that is ignored, a range answered with the whole object, a
-//! head with no `Last-Modified`, a listing that ignores `start-after`, and on the cold tier a
-//! multipart completion that overwrites) is not served over: the process says which tier, which
-//! check and what the tier answered, and exits with status 3. A tier that cannot be reached (an
-//! error that says it is down, 503, a timeout) is asked again, after pauses from one second doubling
-//! to thirty, for `--backend-check-wait` (five minutes by default; each tier has all of it), and
-//! then the start exits with status 1 and `tier unreachable: <tier>: <error>`. A tier that is full starts: the checks that
-//! need a write are skipped, with a line that says so. `--skip-backend-check` leaves the
-//! multipart-completion check out, for a reason that is logged at the start; no other check can
-//! be left out.
+//! tierstore does not test the tiers it is given: it opens the proxy and binds the address, and a
+//! tier that cannot be reached or that answers wrongly shows as the ordinary error of the first
+//! request that meets it. What a store must do is stated in the operations guide ("What tierstore
+//! requires of a store"), and is not verified. `--skip-backend-check` and `--backend-check-wait`,
+//! which belonged to the start-up self-test the earlier releases ran, are still accepted and
+//! ignored, with one warning each on stderr (see `deprecated.rs`), so that a unit or a file
+//! that sets them starts.
 //!
 //! A file of the build-node shape (`[local_cache]` and `[cold_store]` and no `[hot_store]`) is a
 //! different start: a read cache in front of one upstream, with none of the above (no proxy, no
-//! tiers to test, no reconciler). `cache_cli.rs` has its start and its checks; the exit statuses
-//! are the same, and a file system under the cache that fails its check is status 3.
+//! reconciler). `cache_cli.rs` has its start and its check of the cache directory; the exit
+//! statuses are the same, and a file system under the cache that fails its check is status 3.
 
 use std::ffi::OsString;
 use std::future::Future;
@@ -90,7 +84,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -98,9 +92,8 @@ use tokio::sync::Notify;
 
 use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
-    Backend, Check, Clock, DirBackend, MemoryBackend, MonotonicClock, Proxy, ProxyConfig,
-    Reconciler, ReconcilerConfig, S3Backend, SelfTestError, SelfTestOptions, SweepBudget,
-    SystemClock, self_test, settle_conditional_delete, sweep_probes,
+    Backend, Clock, DirBackend, MemoryBackend, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,
+    S3Backend, SystemClock,
 };
 
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
@@ -108,6 +101,7 @@ use super::cache_cli::serve_cache_until_signalled;
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_print::render;
+use super::deprecated;
 use super::drain::late_of;
 #[cfg(test)]
 use super::front::read_key;
@@ -239,6 +233,17 @@ pub struct Cli {
     /// form of `--hot-credentials-file`. Only its owner may read it (mode 0600).
     #[arg(long)]
     pub cold_credentials_file: Option<PathBuf>,
+    /// Whether the hot tier's conditional delete (a delete only if the content tag is the one
+    /// read) is sent as a DELETE with `If-Match`: `true` or `false`. For an `s3:<bucket>` tier the
+    /// default is `false` (a read of the tag, then a plain DELETE: right on every store, with a
+    /// window for a replacement between the two); give `true` for a store that enforces
+    /// `If-Match` on a DELETE, as Amazon S3 does. `memory` and `dir:<path>` tiers delete
+    /// conditionally as one atomic step: their default is `true`, and `false` is refused.
+    #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
+    pub hot_conditional_delete: Option<bool>,
+    /// As `--hot-conditional-delete`, for the cold tier.
+    #[arg(long, value_name = "BOOL", action = clap::ArgAction::Set, value_parser = clap::value_parser!(bool))]
+    pub cold_conditional_delete: Option<bool>,
     /// The limit on a request to an `s3:<bucket>` tier: a number and `ms`, `s`, `m` or `h`. A
     /// request with a small body, or none, may take this long in all; a ranged read may take
     /// longer while bytes keep arriving; a write may take this long plus the time its body
@@ -412,23 +417,13 @@ pub struct Cli {
     /// logged on stderr, and a drain waits no longer than this for a stalled client.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub body_idle_timeout: Duration,
-    /// Leaves the multipart-completion check of the start-up self-test out, for a reason:
-    /// `multipart-conditional=REASON`, where REASON says why the store cannot pass it (for
-    /// example `multipart-conditional=store-ignores-if-none-match-on-completion`). It is the
-    /// only check that can be left out: the others test the guarantees the proxy, the lease and
-    /// the journal stand on, and any other name is refused as a usage error. The reason is
-    /// written to stderr at every start. Without the check, a multipart upload may replace an
-    /// object that exists: leave it out only for a store you have shown to be safe another way.
-    /// None is skipped by default.
-    #[arg(long, value_name = "CHECK=REASON", value_parser = parse_skip)]
-    pub skip_backend_check: Vec<SkippedCheck>,
-    /// How long the start-up self-test asks again of a tier that does not answer (down, a
-    /// timeout, a 503 or another 5xx but 501 and 507), with pauses that double from one second
-    /// to thirty, before the start fails with status 1 (and the unit starts it again): a number
-    /// and `ms`, `s`, `m` or `h`. Each tier has the whole of it. `0s` asks once. A tier that
-    /// answers wrongly is not asked again.
-    #[arg(long, default_value = "5m", value_parser = parse_duration)]
-    pub backend_check_wait: Duration,
+    /// Deprecated and ignored: tierstore no longer tests its tiers at start-up. Accepted, and its
+    /// value is not read, so that a unit that sets it still starts; stderr says it is ignored.
+    #[arg(long, value_name = "CHECK=REASON")]
+    pub skip_backend_check: Vec<String>,
+    /// Deprecated and ignored, like `--skip-backend-check`: a number and `ms`, `s`, `m` or `h`.
+    #[arg(long, value_parser = parse_duration)]
+    pub backend_check_wait: Option<Duration>,
     /// Serves a read-only OCI distribution front at this address, from the same tiers (see the
     /// [`oci`](super::oci) docs): `GET` and `HEAD` of `/v2/`, of `/v2/<name>/manifests/<digest>`
     /// and of `/v2/<name>/blobs/<digest>`, so that podman and other registry clients pull an
@@ -469,42 +464,6 @@ pub struct Cli {
     /// timeouts (a minute, and `--body-idle-timeout`).
     #[arg(long, requires = "oci_listen", value_parser = parse_duration)]
     pub oci_connection_lifetime: Option<Duration>,
-}
-
-/// A check of the self-test that the operator leaves out, and why.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkippedCheck {
-    /// The check left out.
-    pub check: Check,
-    /// The reason given, never empty.
-    pub reason: String,
-}
-
-/// A skipped check: `multipart-conditional`, `=`, and a reason that is not empty. Any other
-/// check is refused.
-pub(super) fn parse_skip(text: &str) -> Result<SkippedCheck, String> {
-    let names: Vec<&str> = Check::ALL.iter().map(|check| check.name()).collect();
-    let usage = format!(
-        "{text:?} is not CHECK=REASON; the checks are {}",
-        names.join(", ")
-    );
-    let (name, reason) = text.split_once('=').ok_or_else(|| usage.clone())?;
-    let check = Check::parse(name).ok_or(usage)?;
-    if check != Check::MultipartConditional {
-        return Err(format!(
-            "the {name} check cannot be skipped: only multipart-conditional can"
-        ));
-    }
-    let reason = reason.trim();
-    if reason.is_empty() {
-        return Err(format!(
-            "the skipped check {name} needs a reason after the ="
-        ));
-    }
-    Ok(SkippedCheck {
-        check,
-        reason: reason.to_owned(),
-    })
 }
 
 /// A duration: a whole number of `ms`, `s`, `m` or `h`, such as `250ms` or `15m`.
@@ -557,6 +516,8 @@ pub(super) struct S3Flags<'a> {
     pub(super) endpoint: Option<&'a str>,
     pub(super) region: Option<&'a str>,
     pub(super) credentials: Option<&'a Path>,
+    /// The tier's `conditional_delete` setting; `None` is the default of its kind.
+    pub(super) conditional_delete: Option<bool>,
 }
 
 impl S3Flags<'_> {
@@ -578,6 +539,7 @@ impl Cli {
             endpoint: self.hot_endpoint.as_deref(),
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            conditional_delete: self.hot_conditional_delete,
         }
     }
 
@@ -587,6 +549,7 @@ impl Cli {
             endpoint: self.cold_endpoint.as_deref(),
             region: self.cold_region.as_deref(),
             credentials: self.cold_credentials_file.as_deref(),
+            conditional_delete: self.cold_conditional_delete,
         }
     }
 }
@@ -604,6 +567,11 @@ pub(super) fn open_tier(
         None if s3.given() => {
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
+        }
+        None if s3.conditional_delete == Some(false) => {
+            let why = "conditional-delete false is only for an `s3:<bucket>` tier: a \
+                       `memory` or `dir:<path>` tier deletes conditionally in one atomic step";
+            Err(format!("{flag} {spec:?}: {flag}-{why}"))
         }
         None => tier(flag, spec),
     }
@@ -639,6 +607,9 @@ fn s3_tier(
     };
     let built = S3Backend::new(config);
     let backend = built.map_err(|why| fail(why.to_string()))?;
+    // Off unless set: a read of the tag before the DELETE is right on every store. The store is
+    // not asked whether it enforces `If-Match` on a DELETE; the setting says.
+    let backend = backend.with_conditional_delete(s3.conditional_delete.unwrap_or(false));
     Ok(Arc::new(backend))
 }
 
@@ -677,6 +648,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if let Some(path) = &cli.lock_file {
         check_lock_path(path).map_err(|why| format!("--lock-file {path:?} {why}"))?;
     }
+    deprecated::warn(&cli.skip_backend_check, cli.backend_check_wait);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let mut server = server_config(&cli.front(), Arc::clone(&clock))?;
     server.usage_stale_after = cli.usage_stale_after;
@@ -938,9 +910,9 @@ pub(crate) async fn reconcile_gated(
     }
 }
 
-/// The id of a start for the probe keys of its self-test: the proxy id (with any character a
+/// The id of a start for the probe of the cache directory's file system: the proxy id (with any character a
 /// key cannot carry replaced by `_`), the time of the start and the process id, so that two
-/// starts never share a probe key.
+/// starts never share a probe object.
 pub(super) fn probe_run_id(proxy_id: &str, now: u64, process: u32) -> String {
     let safe = |c: char| {
         if c.is_ascii_alphanumeric() || c == '-' {
@@ -951,66 +923,6 @@ pub(super) fn probe_run_id(proxy_id: &str, now: u64, process: u32) -> String {
     };
     let proxy: String = proxy_id.chars().map(safe).collect();
     format!("{proxy}-{now}-{process}")
-}
-
-/// The pause before the first repeat of a check of the self-test that could not reach its tier;
-/// each repeat waits twice as long as the one before.
-const SELF_TEST_FIRST_PAUSE: Duration = Duration::from_secs(1);
-
-/// The longest pause between two attempts at a tier the self-test could not reach.
-const SELF_TEST_MAX_PAUSE: Duration = Duration::from_secs(30);
-
-/// Asks each tier the questions of the self-test, the hot tier first, and says on stderr which
-/// checks the flags leave out, a line before and after each tier with how long it took, and
-/// what the test notes (a check skipped because the tier is full, an attempt repeated, a probe key
-/// not deleted). The cold tier is also asked about multipart uploads, an S3 tier how its conditional
-/// deletes go (never a failure). A tier that did not answer is asked again, after pauses from one
-/// second doubling to thirty, for `wait` (each tier has the whole of it).
-///
-/// # Errors
-/// The [`SelfTestError`] of the first tier to answer a check wrongly (a violation: exit status 3)
-/// or not to answer within `wait` (unreachable: exit status 1).
-pub(super) async fn probe_tiers(
-    cli: &Cli,
-    hot: &dyn Backend,
-    cold: &dyn Backend,
-    wait: Duration,
-) -> Result<(), Error> {
-    let mut skip = Vec::new();
-    for skipped in &cli.skip_backend_check {
-        eprintln!(
-            "tierstore: skipping the {} check of the tiers: {}",
-            skipped.check, skipped.reason
-        );
-        skip.push(skipped.check);
-    }
-    let run_id = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
-    let hot_name = format!("hot tier {}", cli.hot);
-    let cold_name = format!("cold tier {}", cli.cold);
-    let tiers = [(&hot_name, hot, false), (&cold_name, cold, true)];
-    for (name, backend, multipart) in tiers {
-        let options = SelfTestOptions {
-            name,
-            run_id: &run_id,
-            multipart,
-            skip: &skip,
-            wait,
-            pause: SELF_TEST_FIRST_PAUSE,
-            max_pause: SELF_TEST_MAX_PAUSE,
-        };
-        let note = |line: String| eprintln!("tierstore: {line}");
-        eprintln!("tierstore: testing the {name}");
-        let started = Instant::now();
-        let outcome = self_test(backend, &options, &note).await;
-        let took = started.elapsed().as_millis();
-        eprintln!("tierstore: tested the {name} in {took} ms");
-        outcome?;
-        settle_conditional_delete(backend, &options, &note).await;
-        // Bounded in keys and in time (no delete starts after it), on a clock the machine's clock does not move.
-        let budget = SweepBudget::default();
-        sweep_probes(backend, &options, budget, &MonotonicClock::new(), &note).await;
-    }
-    Ok(())
 }
 
 /// The addresses [`run_serving`] is bound to.
@@ -1060,14 +972,13 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
 ///
-/// The tiers are tested first (see [`self_test`]): a tier that fails is an error before the
-/// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over.
+/// The tiers are not tested: the proxy is opened over them, and a tier that cannot be reached
+/// shows as the error of the first request that meets it. `ready` is called with the address the
+/// server is bound to, before the first request is taken. Returns when the drain is over.
 ///
 /// # Errors
-/// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
-/// that fails the self-test (a [`SelfTestError`]), a proxy that cannot be opened, or an address
-/// that cannot be bound.
+/// A flag that is not valid with the others, a key file or a tier that cannot be used, a proxy
+/// that cannot be opened, or an address that cannot be bound.
 pub async fn run(
     cli: &Cli,
     stop: impl Future<Output = ()> + Send + 'static,
@@ -1092,8 +1003,6 @@ pub async fn run_serving(
 ) -> Result<Drained, Error> {
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
-    let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
-    probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
@@ -1295,8 +1204,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 /// checks first. Status 0 and no output if there is nothing to refuse; else the start's message
 /// on stderr and status 2. It binds nothing and asks nothing of a tier. It does not make the
 /// checks that a start makes of the disk and the stores: the budget of a cache against the size
-/// of its file system (`free_floor`), the cache directory, the credentials of a tier, the
-/// self-test.
+/// of its file system (`free_floor`), the cache directory, the credentials of a tier.
 fn check_config(settings: &Settings) -> ExitCode {
     match checked(settings) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1352,9 +1260,9 @@ fn print_config(cli: &Cli) -> ExitCode {
     }
 }
 
-/// The exit status of a start that failed: 2 for flags that cannot go together, 3 for a tier
-/// or a cache directory that answered the self-test wrongly, 1 for anything else (a tier that could not be reached
-/// among it: a restart may mend that).
+/// The exit status of a start that failed: 2 for flags that cannot go together, 3 for a cache
+/// directory whose file system answered the check of the cache wrongly, 1 for anything else (a
+/// tier that could not be reached among it: a restart may mend that).
 pub(super) fn exit_status(why: &Error) -> u8 {
     if why.downcast_ref::<InvalidFlags>().is_some() {
         return 2;
@@ -1362,10 +1270,7 @@ pub(super) fn exit_status(why: &Error) -> u8 {
     if why.downcast_ref::<LocalTierFailure>().is_some() {
         return 3;
     }
-    match why.downcast_ref::<SelfTestError>() {
-        Some(SelfTestError::Violation(_)) => 3,
-        Some(SelfTestError::Unreachable { .. }) | None => 1,
-    }
+    1
 }
 
 #[cfg(test)]

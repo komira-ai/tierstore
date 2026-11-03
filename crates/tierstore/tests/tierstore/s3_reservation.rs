@@ -50,15 +50,14 @@ async fn a_marked_replace_keeps_the_mark_and_takes_only_the_tag() {
 }
 
 /// Asserts that a conditional delete takes a reservation only on its tag, over the S3 service,
-/// before the store is asked how it does a conditional delete and after it found the store to
-/// enforce `If-Match`.
+/// with the read of the tag before the DELETE (the default) and with `If-Match` on the DELETE
+/// (`conditional_delete` on).
 #[tokio::test]
 async fn a_conditional_delete_takes_a_reservation_only_on_its_tag() {
     let (_s3, backend) = backend().await;
     conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag(&backend).await;
     backend.delete("k").await.unwrap();
-    let way = backend.settle_conditional_delete("probe/conditional").await;
-    assert_eq!(way.as_deref(), Some("if-match"));
+    let backend = backend.with_conditional_delete(true);
     conformance::a_conditional_delete_takes_a_reservation_only_on_its_tag(&backend).await;
 }
 

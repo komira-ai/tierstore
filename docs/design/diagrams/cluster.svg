@@ -81,7 +81,6 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="46" y="601" class="t-n">how full the hot tier is; published by the leader</text>
 <circle cx="578" cy="578" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
 <text x="578" y="582" class="b" text-anchor="middle" font-size="12">3</text>
-<text x="36" y="632" class="t-n">plus _tiering/selftest/&lt;run&gt;/ probes written at start-up (never client data)</text>
 <rect x="640" y="242" width="300" height="400" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
 <text x="656" y="266" class="b" font-size="15">COLD tier</text>
 <text x="730" y="266" class="t-n">durable</text>
