@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 720" width="960" height="720" role="img" aria-label="Sequence diagram of a delete in the decided design: the proxy HEADs the cold tier, deletes the real object or a reservation whose put already wrote its hot object with If-Match on its tag, leaves a bare reservation of a put in flight, then deletes from the hot tier, appends a DELETE entry to its journal, and replies 204.">
+<title>A delete: cold first, then hot, then the journal, then the reply</title>
+<defs><marker id="seq-delete-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-delete-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="631" fill="#FFFFFF"/>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
+<rect x="0" y="0" width="960" height="720" fill="#FFFFFF"/>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="110" y="65" class="b" text-anchor="middle">Client</text>
+<line x1="110" y1="76" x2="110" y2="560" class="ln-d"/>
+<rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="340" y="65" class="b" text-anchor="middle">Proxy</text>
+<line x1="340" y1="76" x2="340" y2="560" class="ln-d"/>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
+<line x1="600" y1="76" x2="600" y2="560" class="ln-d"/>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="840" y1="76" x2="840" y2="560" class="ln-d"/>
+<text x="20" y="28" class="b" font-size="16" text-anchor="start">A delete: cold first, then hot, then the journal, then the reply</text>
+<text x="225" y="110" class="t-m lbl" text-anchor="middle">0  DELETE key</text>
+<line x1="110" y1="119" x2="340" y2="119" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="360" y="140" class="t-m lbl" text-anchor="start">Reserved key: refused (403). The call runs on a task of its own,</text>
+<text x="360" y="154" class="t-m lbl" text-anchor="start">so a client that goes away cannot stop it half done.</text>
+<text x="590" y="186" class="t-m lbl" text-anchor="middle">1  head(key)</text>
+<line x1="340" y1="195" x2="840" y2="195" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="590" y="222" class="t-m lbl" text-anchor="middle">a real object, a reservation, or nothing (with its tag)</text>
+<line x1="840" y1="231" x2="340" y2="231" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<text x="590" y="262" class="t-m lbl" text-anchor="middle">2  delete_if_match(key, tag)</text>
+<line x1="340" y1="271" x2="840" y2="271" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="590" y="298" class="t-m lbl" text-anchor="middle">ok: the key no longer exists (cold decides)</text>
+<line x1="840" y1="307" x2="340" y2="307" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<rect x="360" y="318" width="470" height="58" rx="5" class="box"/>
+<text x="372" y="336" class="t-m" text-anchor="start">Step 2 runs for a real object, or for a reservation whose put</text>
+<text x="372" y="351" class="t-m" text-anchor="start">already wrote its hot object. A bare reservation (a put still in</text>
+<text x="372" y="366" class="t-m" text-anchor="start">flight) is left: the delete is ordered before that put. Nothing: skip.</text>
+<text x="470" y="404" class="t-m lbl" text-anchor="middle">3  delete(key)</text>
+<line x1="340" y1="413" x2="600" y2="413" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470" y="438" class="t-m lbl" text-anchor="middle">ok (a key that is not there is ok too)</text>
+<line x1="600" y1="447" x2="340" y2="447" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<text x="470" y="474" class="t-m lbl" text-anchor="middle">4  put _journal/&lt;node&gt;/&lt;seq&gt; (DELETE entry)</text>
+<line x1="340" y1="483" x2="600" y2="483" class="ln" marker-end="url(#seq-delete-ak)"/>
+<text x="470" y="508" class="t-m lbl" text-anchor="middle">ok: the journal object is durable</text>
+<line x1="600" y1="517" x2="340" y2="517" class="ln-d" marker-end="url(#seq-delete-ak)"/>
+<rect x="30" y="530" width="900" height="52" rx="5" class="box-o"/>
+<text x="225" y="549" class="t-m lbl" text-anchor="middle">5  204 (also for a key that was not there)</text>
+<line x1="340" y1="558" x2="110" y2="558" class="ln-o" marker-end="url(#seq-delete-ao)"/>
+<text x="40" y="575" class="t-m lbl" text-anchor="start">The reply waits for the journal object, not for the leader.</text>
+<rect x="30" y="595" width="900" height="100" rx="5" class="box"/>
+<text x="42" y="615" class="b" text-anchor="start">Why cold first</text>
+<text x="42" y="634" class="t-m" text-anchor="start">The cold tier decides whether a key exists. Once step 2 is done the key is gone: a copy the leader had in flight replaces the reservation</text>
+<text x="42" y="650" class="t-m" text-anchor="start">with If-Match, finds it gone and writes nothing; a copy-back that lands later leaves a hot object whose key is not in cold, which the leader removes.</text>
+<text x="42" y="666" class="t-m" text-anchor="start">The DELETE entry only updates the leader's books; the leader never deletes from the cold tier. Any step can fail: the error is the reply,</text>
+<text x="42" y="682" class="t-m" text-anchor="start">and a retry is safe, since deleting an absent key succeeds.</text>
+</svg>

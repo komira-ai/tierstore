@@ -1,4 +1,4 @@
-//! Read-only access keys against the S3 front over loopback: the client of kbf reads, heads and
+//! Read-only access keys against the S3 front over loopback: the `S3Store` client reads, heads and
 //! lists with one and is refused every write, requests signed by hand are refused every call
 //! that writes with the S3 error document, and the full key does everything beside them.
 
@@ -110,11 +110,11 @@ async fn denied(
     assert!(body.contains("<Code>AccessDenied</Code>"), "{what}: {body}");
 }
 
-/// Asserts that each of two read-only keys, with the client of kbf, reads an object whole and by
+/// Asserts that each of two read-only keys, with the `S3Store` client, reads an object whole and by
 /// range, heads it, lists the bucket under a prefix, and gets `NotFound` for a key that is not
 /// there, as the full key does.
 #[tokio::test]
-async fn read_only_keys_read_head_and_list_with_the_client_of_kbf() {
+async fn read_only_keys_read_head_and_list_with_the_s3store_client() {
     let h = with_readers().await;
     let full = h.store(CONDITIONAL);
     put(&full, "cas/a", b"hello world").await;
@@ -134,13 +134,13 @@ async fn read_only_keys_read_head_and_list_with_the_client_of_kbf() {
     }
 }
 
-/// Asserts that a read-only key, with the client of kbf, is refused with 403 `AccessDenied`
+/// Asserts that a read-only key, with the `S3Store` client, is refused with 403 `AccessDenied`
 /// a create-only put of a new key, a put of a key that exists (which the full key is told
 /// `AlreadyExists`), a delete, and a put that goes up in parts (nothing of the upload is
 /// created), and that the objects are as they were; and that the full key puts in parts on the
 /// same server.
 #[tokio::test]
-async fn the_client_of_kbf_is_refused_writes_with_a_read_only_key() {
+async fn the_s3store_client_is_refused_writes_with_a_read_only_key() {
     let h = with_readers().await;
     let full = h.store(CONDITIONAL);
     put(&full, "cas/kept", b"original").await;

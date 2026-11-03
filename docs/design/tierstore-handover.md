@@ -1,9 +1,12 @@
 # tierstore update hook: port-forward hand-over
 
-Moved from komira-ai/kbf's `docs/design` when tierstore moved to this repository. The generic host updater it plugs into stays in kbf; it is linked below as [host-updates.md][hu].
+The host updater this hook plugs into is hostkeeper's, which is being designed and built as a project of its own. The
+updater's protocol is linked below as [host-updates.md][hu]; the document moves to hostkeeper with its section numbers kept,
+so the citations below stay valid. The protocol is a process protocol (steps as arguments, a params file, an exit status
+and one JSON line), so a hook in any language can speak it; this one is written in Rust because tierstore is.
 
-Status: DESIGN, for the maintainers. Nothing here is built. Its claims about today's code were checked against the
-code this repository was imported from (komira-ai/kbf at 8cd3077aa); each names the file and function.
+Status: built. The hook is `crates/tierstore/src/server/update_hook/`, and this page is its design of record. Its claims
+about the code name the file and function; they were first checked against the code this repository was imported from.
 
 tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by the generic host
 updater under [`host-updates.md`][hu] 3.2: steps `prepare`, `cutover`, `verify`, `rollback`, `cleanup`; exit `0`, `1`, `75`

@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 980" width="1120" height="980" role="img" aria-label="Every key path in the hot tier and the cold tier grouped by client data, per-node state, leader state and start-up probes, with who writes it, the write mode and when it is deleted. The cold tier holds reservations and real objects beside each other under the client key.">
+<title>Where each key lives: hot tier and cold tier</title>
+<defs><marker id="store-paths-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="store-paths-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1120" height="980" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Where each key lives: every path, who writes it, how, and when it goes</text>
+<text x="20" y="60" class="b">Bucket namespace</text>
+<rect x="160" y="42" width="300" height="28" rx="5" class="box"/>
+<text x="172" y="61">client keys: every other key</text>
+<rect x="470" y="42" width="250" height="28" rx="5" class="box-b"/>
+<text x="482" y="61">_journal/  reserved, hot tier only</text>
+<rect x="730" y="42" width="260" height="28" rx="5" class="box-b"/>
+<text x="742" y="61">_tiering/  reserved, hot tier only</text>
+<text x="1000" y="61" class="t-m">(S3 front: 403)</text>
+<rect x="20" y="86" width="560" height="860" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
+<text x="36" y="110" class="b" font-size="15">HOT tier</text>
+<text x="116" y="110" class="t-n">fast; holds the data until evicted, and all coordination state</text>
+<text x="36" y="136" class="b">Client data</text>
+<rect x="32" y="146" width="536" height="104" rx="5" class="box"/>
+<text x="44" y="167" class="b">&lt;client key&gt;</text>
+<text x="44" y="188" class="t-n">Writer: node, put (after it won the cold reservation);</text>
+<text x="44" y="207" class="t-n">copy-back from cold</text>
+<text x="44" y="226" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">create-only</tspan></text>
+<text x="44" y="245" class="t-n">Deleted: client delete; eviction (If-Match on the hot tag just read)</text>
+<circle cx="552" cy="163" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="167" class="b" text-anchor="middle" font-size="12">3</text>
+<circle cx="525" cy="163" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="525" y="167" class="b" text-anchor="middle" font-size="12">2</text>
+<text x="36" y="270" class="b">Per node (written by the node)</text>
+<rect x="32" y="280" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="301" class="b">_journal/&lt;id&gt;/&lt;seq&gt;</text>
+<text x="44" y="322" class="t-n">Writer: node &lt;id&gt;, one per batch; the leader, a sentinel</text>
+<text x="44" y="341" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">create-only (a taken number fails the put)</tspan></text>
+<text x="44" y="360" class="t-n">Deleted: leader, at once when checkpointed; rest at retirement</text>
+<circle cx="552" cy="297" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="301" class="b" text-anchor="middle" font-size="12">4</text>
+<circle cx="525" cy="297" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="525" y="301" class="b" text-anchor="middle" font-size="12">3</text>
+<circle cx="498" cy="297" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="498" y="301" class="b" text-anchor="middle" font-size="12">2</text>
+<rect x="32" y="373" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="394" class="b">_tiering/proxies/&lt;id&gt;</text>
+<text x="44" y="415" class="t-n">Writer: node &lt;id&gt;; at boot, every 1 min, "closed" on stop</text>
+<text x="44" y="434" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">create-only at boot, then If-Match rewrite (heartbeat and closed)</tspan></text>
+<text x="44" y="453" class="t-n">Deleted: leader, at retirement</text>
+<circle cx="552" cy="390" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="394" class="b" text-anchor="middle" font-size="12">4</text>
+<circle cx="525" cy="390" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="525" y="394" class="b" text-anchor="middle" font-size="12">1</text>
+<text x="36" y="478" class="b">Leader state</text>
+<rect x="32" y="488" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="509" class="b">_tiering/checkpoint/&lt;id&gt;</text>
+<text x="44" y="530" class="t-n">Writer: leader</text>
+<text x="44" y="549" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">If-Match; never moves backwards</tspan></text>
+<text x="44" y="568" class="t-n">Deleted: leader, at retirement</text>
+<circle cx="552" cy="505" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="509" class="b" text-anchor="middle" font-size="12">4</text>
+<circle cx="525" cy="505" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="525" y="509" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="32" y="581" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="602" class="b">_tiering/lease</text>
+<text x="44" y="623" class="t-n">Writer: the leader; another node after the 30 s ttl</text>
+<text x="44" y="642" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">acquire create-only; renew and take over If-Match</tspan></text>
+<text x="44" y="661" class="t-n">Deleted: released by its holder at drain (If-Match on its tag)</text>
+<circle cx="552" cy="598" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="602" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="32" y="674" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="695" class="b">_tiering/usage</text>
+<text x="44" y="716" class="t-n">Writer: leader, published each pass</text>
+<text x="44" y="735" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">unconditional overwrite</tspan></text>
+<text x="44" y="754" class="t-n">Deleted: never; replaced by the next publish</text>
+<circle cx="552" cy="691" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="552" y="695" class="b" text-anchor="middle" font-size="12">3</text>
+<text x="36" y="779" class="b">Start-up</text>
+<rect x="32" y="789" width="536" height="85" rx="5" class="box"/>
+<text x="44" y="810" class="b">_tiering/selftest/&lt;run&gt;/</text>
+<text x="44" y="831" class="t-n">Writer: start-up probes; never client data</text>
+<text x="44" y="850" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">probes of the store's write modes</tspan></text>
+<text x="44" y="869" class="t-n">Deleted: by the probe after each check; swept after an hour</text>
+<rect x="600" y="86" width="500" height="440" rx="8" fill="none" stroke="#5A5A57" stroke-width="2"/>
+<text x="616" y="110" class="b" font-size="15">COLD tier</text>
+<text x="696" y="110" class="t-n">durable; decides whether a key exists</text>
+<text x="616" y="136" class="b">Client data only: two states under the same key</text>
+<rect x="612" y="146" width="476" height="104" rx="5" class="box-o"/>
+<text x="624" y="167" class="b">&lt;client key&gt;  RESERVATION (marked)</text>
+<text x="624" y="188" class="t-n">Writer: node, first step of a put; a HEAD sees the mark</text>
+<text x="624" y="207" class="t-n">Mode: <tspan class="b" style="fill:#1E1E1D">create-only (If-None-Match: *); one winner owns the key</tspan></text>
+<text x="624" y="226" class="t-n">Deleted: by its own put if the put fails (If-Match on its tag);</text>
+<text x="624" y="245" class="t-n">otherwise replaced by the real object</text>
+<circle cx="1072" cy="163" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="1072" y="167" class="b" text-anchor="middle" font-size="12">2</text>
+<line x1="850" y1="250" x2="850" y2="294" class="ln" marker-end="url(#store-paths-ak)"/>
+<text x="862" y="274" class="t-m lbl">replaced by the real object</text>
+<rect x="612" y="294" width="476" height="104" rx="5" class="box"/>
+<text x="624" y="315" class="b">&lt;client key&gt;  REAL OBJECT</text>
+<text x="624" y="336" class="t-n">Writer: leader (If-Match on the reservation's tag, streamed);</text>
+<text x="624" y="355" class="t-n">the node at level Full (create-only, no reservation);</text>
+<text x="624" y="374" class="t-n">multipart completion (create-only)</text>
+<text x="624" y="393" class="t-n">Deleted: client delete; eviction never touches cold</text>
+<circle cx="1072" cy="311" r="11" fill="#FFFFFF" stroke="#0B0B0A" stroke-width="1.4"/>
+<text x="1072" y="315" class="b" text-anchor="middle" font-size="12">3</text>
+<rect x="612" y="414" width="476" height="92" rx="5" class="box-p"/>
+<text x="624" y="438" class="t-n">No _journal and no _tiering here: cold holds client keys only.</text>
+<text x="624" y="458" class="t-n">A key exists when cold holds a reservation or a real object;</text>
+<text x="624" y="478" class="t-n">a second create-only put for the key fails.</text>
+<rect x="600" y="550" width="500" height="166" rx="5" class="box"/>
+<text x="612" y="572" class="b">Rules that read these tiers</text>
+<text x="612" y="596" class="t-n">Eviction (above high water, down to low water), per object:</text>
+<text x="612" y="616" class="t-n">cold must hold the REAL object, not a reservation;</text>
+<text x="612" y="636" class="t-n">then hot delete, If-Match on the hot tag just read.</text>
+<text x="612" y="656" class="t-n">Tags are never compared across tiers.</text>
+<text x="612" y="676" class="t-n">Other nodes never copy or evict: only the leader does.</text>
+<rect x="600" y="734" width="500" height="124" rx="5" class="box"/>
+<text x="612" y="756" class="b">Numbered badges: which story writes the path</text>
+<text x="612" y="780" class="t-n">1  node boot: registration (see "One node")</text>
+<text x="612" y="800" class="t-n">2  a put (see "A put" and "The life of one write")</text>
+<text x="612" y="820" class="t-n">3  the leader's pass (see "One pass of the leader")</text>
+<text x="612" y="840" class="t-n">4  retirement of a departed node (see "One node")</text>
+</svg>

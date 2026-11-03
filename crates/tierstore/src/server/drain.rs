@@ -68,7 +68,7 @@ impl Drain {
     /// `late`.
     pub(super) fn new(linger_bound: Duration, late: Arc<AtomicU64>) -> Self {
         #[cfg(feature = "test-drain-off")]
-        eprintln!(
+        tracing::info!(
             "tierstore: a test build (test-drain-off): no Connection: close and no lingering close in the drain"
         );
         Self {

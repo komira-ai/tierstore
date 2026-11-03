@@ -65,7 +65,7 @@ fn parse(unit: &str) -> Cli {
 #[test]
 fn the_command_line_is_the_binarys_flags_for_two_s3_tiers() {
     let unit = read("tierstore.service");
-    assert_eq!(exec_start(&unit)[0], "/usr/libexec/kbf/tierstore");
+    assert_eq!(exec_start(&unit)[0], "/usr/libexec/tierstore/tierstore");
     let cli = parse(&unit);
     assert!(cli.hot.starts_with("s3:"), "{}", cli.hot);
     assert!(cli.cold.starts_with("s3:"), "{}", cli.cold);
