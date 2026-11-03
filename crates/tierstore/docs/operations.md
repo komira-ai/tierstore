@@ -2,7 +2,7 @@
 
 ## Starting
 
-Start the unit by hand (see [install](install.md)). The process does not test or probe its tiers (see [What tierstore requires of a store](#what-tierstore-requires-of-a-store)): it opens the proxy and binds the address, and a store that cannot be reached shows as the error of the first request that meets it. When it is ready it prints one line on stdout:
+Start the unit by hand (see [install](install.md)). The process does not test or probe its tiers (see [What tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)): it opens the proxy and binds the address, and a store that cannot be reached shows as the error of the first request that meets it. When it is ready it prints one line on stdout:
 
 ```text
 tierstore <version> listen=192.0.2.10:9000
