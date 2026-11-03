@@ -549,6 +549,14 @@ impl Backend for S3Backend {
         put.await.map_err(|e| map_error(e, key))
     }
 
+    /// The tag is the `ETag` of the answer to this PUT.
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let put = self.store.put_new_tagged(&object, body);
+        let tag = put.await.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
     async fn put_stream(
         &self,
         key: &str,

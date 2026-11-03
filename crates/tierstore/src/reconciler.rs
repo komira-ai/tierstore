@@ -193,11 +193,16 @@ fn millis(duration: Duration) -> u64 {
 ///      order the writes of different proxies, so the guarantee is about ownership and not about
 ///      time: a mirror deletes the hot object only if the object has the content tag the
 ///      mirror's own entry names as the hot tier's tag of its copy (`JournalEntry::hot_tag`;
-///      `If-Match`, [`Backend::delete_if_match`]), so a newer acknowledged object of other bytes
-///      is never deleted by a mirror, and a mirror that names no hot tag deletes nothing. Tags are
-///      never compared across tiers (a directory tier tags by SHA-256, an S3 tier by ETag): the
-///      cold tag is compared with the cold tier's, the hot tag with the hot tier's. A put of the same bytes by another proxy whose journal object no
-///      read has shown yet is not told from the mirror's object;
+///      `If-Match`, [`Backend::delete_if_match`]). The proxy took that tag from the hot tier's
+///      create-only write that made the copy ([`Backend::put_tagged`]: one operation, no HEAD
+///      after it), so it is the tag of the copy itself, and an object of other bytes that
+///      another proxy put under the key since (before or after the entry was written) is never
+///      deleted by a mirror. A mirror that names no hot tag owns nothing: it deletes nothing, is
+///      never an eviction candidate, and stays so when the books are rebuilt from a checkpoint.
+///      Tags are never compared across tiers (a directory tier tags by SHA-256, an S3 tier by
+///      ETag): the cold tag is compared with the cold tier's, the hot tag with the hot tier's. A
+///      tag names content, so a put of the *same bytes* by another proxy has the copy's tag and
+///      is not told from it, whether or not its journal object has been read;
 ///    - the hot tier no longer holds the key: nothing to copy; for a `PutReserved`, the
 ///      reservations its entries name are deleted by their tags (a put and a delete that were
 ///      both acknowledged leave no reservation behind), and no other cold object is touched;

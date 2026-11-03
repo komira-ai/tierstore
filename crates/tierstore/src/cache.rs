@@ -171,6 +171,10 @@ impl Backend for CachedStore {
         self.inner.put(key, body).await
     }
 
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.inner.put_tagged(key, body).await
+    }
+
     /// A put does not touch the cache (objects are immutable, and a key that was absent has
     /// nothing cached), so the stream goes on to the inner store as it is, not held.
     async fn put_stream(
