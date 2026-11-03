@@ -245,11 +245,10 @@ impl Relay {
                         let part = chunk.slice((low - start) as usize..(high - start) as usize);
                         // The client has every byte it asked for, and may stop reading here: the
                         // rest of the cold read, up to its end, goes on for the copy alone.
-                        if end >= self.to
-                            && let Some(tee) = self.tee.take()
-                        {
+                        if end >= self.to {
                             let rest = std::mem::replace(&mut self.body, stream::empty().boxed());
-                            drop(tokio::spawn(copy_rest(rest, tee)));
+                            let copy = self.tee.take();
+                            drop(copy.map(|tee| tokio::spawn(copy_rest(rest, tee))));
                             self.ended = true;
                         }
                         return Some((Ok(part), self));
@@ -257,9 +256,7 @@ impl Relay {
                 }
                 Some(Err(error)) => {
                     self.inner.counters.error(Tier::Cold, Read::Get);
-                    if let Some(tee) = &mut self.tee {
-                        tee.abandon();
-                    }
+                    self.tee.iter_mut().for_each(Tee::abandon);
                     self.ended = true;
                     return Some((Err(error), self));
                 }
