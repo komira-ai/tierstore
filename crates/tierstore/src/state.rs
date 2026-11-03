@@ -19,6 +19,9 @@ struct Resident {
     size: u64,
     /// Whether the cold tier holds it: the journal object of the entry is applied.
     copied: bool,
+    /// Whether the entry is a mirror (a copy-back), which owns the hot object only while no put
+    /// of another proxy is the word on the key.
+    mirror: bool,
 }
 
 impl Resident {
@@ -34,6 +37,9 @@ pub(crate) struct Candidate {
     pub(crate) at: Position,
     pub(crate) key: String,
     pub(crate) time: u64,
+    /// The content tag of the hot tier's object when it was found to be in the cold tier, which
+    /// the eviction deletes on; none for an entry applied by a reconciler before this one.
+    pub(crate) tag: Option<String>,
 }
 
 /// Where the reconciler is in the journal of one proxy.
@@ -89,6 +95,11 @@ pub(crate) struct Books {
     usage: u64,
     lag: u64,
     pub(crate) streams: BTreeMap<String, Stream>,
+    /// The keys whose latest put entry that was read is a reserved put or a mirror, with the time
+    /// of that entry: a delete entry of such a key was written by a proxy that removes the cold
+    /// tier's object itself, so the reconciler does not apply it to the cold tier. A key whose
+    /// latest put entry is a plain put (an entry of a release without reservations) is not here.
+    reserved: BTreeMap<String, u64>,
 }
 
 impl Books {
@@ -102,6 +113,18 @@ impl Books {
         self.lag
     }
 
+    /// Whether the latest put entry read for `key` is a reserved put or a mirror.
+    pub(crate) fn is_reserved(&self, key: &str) -> bool {
+        self.reserved.contains_key(key)
+    }
+
+    /// Forgets the keys whose latest reserved put or mirror was written before `time`: a delete
+    /// of such a key that has not been applied by then is applied by the rule for a key of a
+    /// release without reservations.
+    pub(crate) fn forget_reserved_before(&mut self, time: u64) {
+        self.reserved.retain(|_, written| *written >= time);
+    }
+
     pub(crate) fn stream(&mut self, proxy: &str) -> &mut Stream {
         self.streams.entry(proxy.to_owned()).or_default()
     }
@@ -110,6 +133,13 @@ impl Books {
     pub(crate) fn is_current(&self, proxy: &str, at: Position, key: &str) -> bool {
         let found = self.index.get(key);
         found.is_some_and(|resident| resident.is_entry(proxy, at))
+    }
+
+    /// Whether what the hot tier holds under `key` is, by the journals, the object of a put (not
+    /// a mirror) that a proxy other than `proxy` wrote.
+    fn is_put_of_another_proxy(&self, proxy: &str, key: &str) -> bool {
+        let found = self.index.get(key);
+        found.is_some_and(|resident| !resident.mirror && resident.proxy != proxy)
     }
 
     /// Takes a key out of what the hot tier holds. A key that is not there is ignored.
@@ -123,7 +153,7 @@ impl Books {
     }
 
     /// Records a put entry: the hot tier holds the object, and the cold tier does not yet.
-    pub(crate) fn put(&mut self, proxy: &str, at: Position, key: &str, size: u64) {
+    pub(crate) fn put(&mut self, proxy: &str, at: Position, key: &str, size: u64, mirror: bool) {
         self.forget(key);
         self.usage += size;
         self.lag += size;
@@ -132,13 +162,22 @@ impl Books {
             at,
             size,
             copied: false,
+            mirror,
         };
         self.index.insert(key.to_owned(), resident);
     }
 
     /// Records that the cold tier holds the object of a put entry, which makes it a
-    /// candidate for eviction. An entry that a later one replaced is ignored.
-    pub(crate) fn copied(&mut self, proxy: &str, at: Position, key: &str, time: u64) {
+    /// candidate for eviction, with the content tag the hot tier's object had. An entry that a
+    /// later one replaced is ignored.
+    pub(crate) fn copied(
+        &mut self,
+        proxy: &str,
+        at: Position,
+        key: &str,
+        time: u64,
+        tag: Option<String>,
+    ) {
         let found = self.index.get_mut(key);
         let Some(resident) = found.filter(|r| r.is_entry(proxy, at)) else {
             return;
@@ -149,8 +188,23 @@ impl Books {
             at,
             key: key.to_owned(),
             time,
+            tag,
         };
         self.stream(proxy).candidates.push_back(candidate);
+    }
+
+    /// Puts a candidate that an eviction left back at the front of its stream, with the cursor on
+    /// it. Candidates put back newest first end up in their old order. The cursor goes back to
+    /// the kept candidate on purpose: `pop` moved it past the candidate, and a restart must read
+    /// the candidate again to ask again. It never goes below the cursor the pass began with (a
+    /// candidate lies at or after it), so the stored checkpoint does not regress, and the replay
+    /// from it is safe (a put entry is applied again as a no-op, an eviction is conditional on the
+    /// tag or on the bytes). A candidate that can never be evicted holds the cursor, and the
+    /// journal objects after it are retained, until it is deleted or replaced.
+    pub(crate) fn requeue(&mut self, proxy: &str, candidate: Candidate) {
+        let stream = self.stream(proxy);
+        stream.cursor = candidate.at;
+        stream.candidates.push_front(candidate);
     }
 
     /// Records that the hot tier does not hold the object of a put entry after all (it was
@@ -177,18 +231,43 @@ impl Books {
         stream.retained.push_back((seq, modified));
         for (index, entry) in entries.iter().enumerate() {
             let at = (seq, index as u64);
+            match entry.op {
+                JournalOp::PutReserved | JournalOp::PutMirror => {
+                    self.reserved.insert(entry.key.clone(), entry.time);
+                }
+                JournalOp::Put => {
+                    self.reserved.remove(&entry.key);
+                }
+                _ => {}
+            }
             if at < cursor {
                 continue;
             }
             match entry.op {
-                JournalOp::Put => {
-                    self.put(proxy, at, &entry.key, entry.size);
-                    if applied {
-                        self.copied(proxy, at, &entry.key, entry.time);
+                op if op.is_put() => {
+                    let mirror = op == JournalOp::PutMirror;
+                    if mirror && self.is_put_of_another_proxy(proxy, &entry.key) {
+                        // A copy-back, read after a put of another proxy that the hot tier holds
+                        // (the proxies' journals are read in no order that is the order of the
+                        // writes): the mirror cannot be told to be the later, so it owns nothing
+                        // and is never the resident, whichever journal was read first.
+                        continue;
+                    }
+                    self.put(proxy, at, &entry.key, entry.size, mirror);
+                    if applied && mirror && entry.hot_tag.is_none() {
+                        // A mirror that names no hot tag owns nothing, as when its journal object
+                        // was applied (the pass forgot it): rebuilt from a checkpoint it is not
+                        // an eviction candidate, and no current tag of the hot tier stands in
+                        // for the one it lacks.
+                        self.forget(&entry.key);
+                    } else if applied {
+                        // A mirror's hot tag is the tag its copy has; a plain put names none.
+                        let hot_tag = entry.hot_tag.clone();
+                        self.copied(proxy, at, &entry.key, entry.time, hot_tag);
                     }
                 }
                 JournalOp::Delete => self.forget(&entry.key),
-                JournalOp::Unknown => {}
+                _ => {}
             }
         }
         if !applied {

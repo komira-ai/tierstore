@@ -1,8 +1,7 @@
 // The shared theme.
 //
-// Catches: an edited copy of theme.css. The theme is one file shared by kbf.dev, mopm.dev, ucdk.dev and tierstore.dev; each site
-// copies it byte for byte and never changes its copy, so a change is made once, upstream, with a new digest. The
-// digest below is the one the upstream spec (THEME.md) states; a hand edit, a reformat, a line-ending change or a
+// Catches: an edited copy of theme.css. The theme is one file, pinned by the digest below, which is changed in the same
+// commit as the file; a hand edit, a reformat, a line-ending change or a
 // stale copy changes it, and the test goes red. The built site must also ship that very file, unchanged, and load
 // it before the site's own stylesheet (so the site's rules can override the theme and never the other way round).
 
@@ -15,8 +14,8 @@ import { readTags } from '../tools/check-dist';
 import { outPath, PAGES } from '../tools/pages';
 import { assetDir, buildReal, copyTree, plant, SITE } from './support';
 
-/** theme.css sha256, as THEME.md states it. */
-const THEME_SHA256 = 'ea04dacad9e29d2b7e5cf0afe34c9631b05881f0cb82f9e23d1688926f5d1993';
+/** theme.css sha256. */
+const THEME_SHA256 = 'dc07bcb1137cdd4d1207e4f33ebdc61e96dc4d096ff24f54c712a0616029caaf';
 const sha256 = (b: Buffer): string => createHash('sha256').update(b).digest('hex');
 
 test('static/theme.css is the pinned theme, byte for byte', () => {

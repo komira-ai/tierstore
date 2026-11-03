@@ -46,6 +46,16 @@ pub(super) fn written_over() -> Error {
     Error::Unavailable(text.to_owned())
 }
 
+/// The HEAD of an object of the upstream as the cache sees it: a reservation (a marked object that
+/// an upstream which is the cold bucket of a two-tier store may hold under a key that has no
+/// object yet) is not an object, so it is not found, and is neither served nor kept.
+pub(super) fn as_object(key: &str, meta: Meta) -> Result<Meta, Error> {
+    if meta.reservation {
+        return Err(Error::NotFound(key.to_owned()));
+    }
+    Ok(meta)
+}
+
 /// Refuses an upstream that gives no content tag for `key`: the tag is what tells one version of an
 /// object from another of the same size, so a read of it could not be held to one version.
 pub(super) fn tagged(key: &str, meta: &Meta) -> Result<(), Error> {
@@ -468,7 +478,7 @@ impl Inner {
         live: &watch::Sender<Live>,
     ) -> Result<Filled, Stop> {
         let generation = self.generation();
-        let meta = self.upstream.head(key).await?;
+        let meta = as_object(key, self.upstream.head(key).await?)?;
         tagged(key, &meta)?;
         let Some(reservation) = self.reserve(meta.size) else {
             bump(&self.counters.fills_skipped);

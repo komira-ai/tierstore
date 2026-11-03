@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{FutureExt, StreamExt, stream};
+use futures::{StreamExt, stream};
 use tierstore::{
     Backend, ByteRange, Error, JournalEntry, JournalOp, Listed, MemoryBackend, Meta, Op, PartBody,
 };
@@ -56,6 +56,8 @@ async fn a_streamed_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_ti
         key: "k".to_owned(),
         size: 5,
         time: 42,
+        cold_tag: None,
+        hot_tag: None,
     };
     assert_eq!(entries, [want]);
 }
@@ -162,23 +164,25 @@ async fn a_streamed_put_goes_straight_to_the_cold_tier_when_the_hot_tier_is_full
     assert_absent(&*rig.cold_mem, "h").await;
 }
 
-/// Asserts that a streamed put made while the usage is above the critical share is still
-/// waiting for the back-pressure when it is polled (nothing is written to the hot tier), and
-/// goes to the hot tier once the paused clock is moved past the back-pressure.
+/// Asserts that a streamed put made while the usage is above the critical share takes exactly as
+/// much of the paused clock as one made under the share (the journal's linger and nothing more),
+/// and the object is in the hot tier. (Before, it slept a fixed back-pressure on top.)
 #[tokio::test(start_paused = true)]
-async fn a_streamed_put_above_the_critical_mark_is_delayed_and_goes_to_the_hot_tier() {
+async fn a_streamed_put_above_the_critical_mark_goes_to_the_hot_tier_without_waiting() {
     let rig = Rig::new();
     let mut config = rig.config("p1", 1000);
     config.critical = 0.5;
-    config.back_pressure = Duration::from_millis(200);
     let proxy = rig.open(config).await.unwrap();
-    set_usage(&rig, 600, 0).await;
 
-    let mut putting = Box::pin(proxy.put_stream("b", None, chunks(&["2"])));
-    assert!((&mut putting).now_or_never().is_none());
-    assert_absent(&*rig.hot_mem, "b").await;
-    tokio::time::advance(Duration::from_millis(200)).await;
-    putting.await.unwrap();
+    set_usage(&rig, 100, 0).await;
+    let start = tokio::time::Instant::now();
+    proxy.put_stream("a", None, chunks(&["1"])).await.unwrap();
+    let under = start.elapsed();
+
+    set_usage(&rig, 600, 0).await;
+    let start = tokio::time::Instant::now();
+    proxy.put_stream("b", None, chunks(&["2"])).await.unwrap();
+    assert_eq!(start.elapsed(), under);
 
     assert_eq!(read(&*rig.hot_mem, "b").await, body("2"));
 }
