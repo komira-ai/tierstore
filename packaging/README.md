@@ -836,7 +836,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
 | `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
-| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less `--deadline-margin`; today it only sets `Proxy::is_live`, no request path reads it yet, and registration removal uses `--registration-retention` (`60s`; at least six times `--heartbeat`) |
+| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; today it only sets `Proxy::is_live`, no request path reads it yet, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
 | `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; no request path uses either yet (`10s`; at most a quarter of `--departure`) |
 | `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`10m`; at least `--departure`) |
 | `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
