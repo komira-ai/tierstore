@@ -39,7 +39,7 @@ http.workspace = true
 # Loopback ports nothing can take (tierstore_testkit::port).
 tierstore-testkit.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }
-tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "test-util", "sync"] }
 
 [lints]
 workspace = true

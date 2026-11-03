@@ -343,9 +343,9 @@ where
     cut
 }
 
-/// Says on stderr that an accept failed, and waits a moment before the next.
+/// Says that an accept failed, and waits a moment before the next.
 async fn accept_failed(error: &io::Error) {
-    eprintln!("tierstore: oci: accept: {error}");
+    tracing::warn!("tierstore: oci: accept: {error}");
     tokio::time::sleep(ACCEPT_PAUSE).await;
 }
 
@@ -397,11 +397,11 @@ impl Serving {
         match handshake.await {
             Ok(Ok(tls)) => Some(Box::new(tls)),
             Ok(Err(error)) => {
-                eprintln!("tierstore: oci: {peer}: TLS handshake: {error}");
+                tracing::warn!("tierstore: oci: {peer}: TLS handshake: {error}");
                 None
             }
             Err(_) => {
-                eprintln!("tierstore: oci: {peer}: TLS handshake took too long");
+                tracing::warn!("tierstore: oci: {peer}: TLS handshake took too long");
                 None
             }
         }

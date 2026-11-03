@@ -38,18 +38,18 @@ test('the install page and the install guide give the verify command with this r
   }
 });
 
-test('downloads point to this repository\'s releases and no page sends the reader to kbf for a release or a verification', () => {
+test('downloads point to this repository\'s releases and no page sends the reader to another repository for a release or a verification', () => {
   assert.match(pages[0][1], /github\.com\/komira-ai\/tierstore\/releases/);
   assert.match(pages[2][1], /github\.com\/komira-ai\/tierstore\/releases/);
   for (const [name, text] of pages) {
-    assert.doesNotMatch(text, /komira-ai\/kbf\/(releases|blob)/, `${name} links to a kbf release or document`);
-    assert.doesNotMatch(text, /kbf (release|repository)/i, `${name} says tierstore comes with a kbf release`);
-    assert.doesNotMatch(text, /(releases|code|docs) (are|is) in kbf/i, `${name} says the releases are in kbf`);
+    assert.doesNotMatch(text, /komira-ai\/(?!tierstore\/)[\w.-]+\/(releases|blob)/, `${name} links to a release or document of another repository`);
+    const outsideTheHistoryNote = text.split(/(?<=\.)\s+/).filter((sentence) => !sentence.includes('0.2.0')).join(' ');
+    assert.doesNotMatch(outsideTheHistoryNote, /(another|other|separate) repository/i, `${name} sends the reader to another repository outside the 0.2.0 note`);
   }
 });
 
-test('the install guide says versions up to 0.2.0 were built in kbf', () => {
-  assert.match(pages[2][1], /up to (and including )?0\.2\.0[^.]*built in kbf|built in kbf[^.]*0\.2\.0/i);
+test('the install guide says versions up to 0.2.0 were built in another repository', () => {
+  assert.match(pages[2][1], /up to (and including )?0\.2\.0[^.]*built in another repository|built in another repository[^.]*0\.2\.0/i);
   assert.match(pages[0][1], /0\.2\.0/);
 });
 

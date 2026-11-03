@@ -25,6 +25,7 @@ impl Entry {
             size: self.size,
             tag: self.tag.clone(),
             modified: self.modified,
+            reservation: false,
         }
     }
 }

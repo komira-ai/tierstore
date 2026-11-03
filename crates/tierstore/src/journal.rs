@@ -62,13 +62,31 @@ pub(crate) fn checkpoint_key(proxy_id: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum JournalOp {
-    /// An object was written to the hot tier, and is to be copied to the cold tier.
+    /// An object was written to the hot tier, and is to be copied to the cold tier. Written by a
+    /// release that holds no reservation; the cold tier is not known to decide the key.
     Put,
     /// An object was deleted from both tiers; the cold tier is to be told again.
     Delete,
+    /// An object was written to the hot tier by a put that holds a reservation of the key in the
+    /// cold tier ([`JournalEntry::cold_tag`] names it), and is to replace that reservation.
+    PutReserved,
+    /// An object was copied from the cold tier into the hot tier by a read
+    /// ([`JournalEntry::cold_tag`] is the tag the cold object had), so that the reconciler can
+    /// evict it again ([`JournalEntry::hot_tag`] is the tag the hot tier gave the copy). It is
+    /// never copied to the cold tier: it stays in the hot tier only while the cold tier still
+    /// holds that object.
+    PutMirror,
     /// Anything a newer writer adds: a reader skips the entry.
     #[serde(other)]
     Unknown,
+}
+
+impl JournalOp {
+    /// Whether the entry puts an object into the hot tier (a put, a reserved put or a mirror).
+    #[must_use]
+    pub(crate) fn is_put(self) -> bool {
+        matches!(self, Self::Put | Self::PutReserved | Self::PutMirror)
+    }
 }
 
 /// One entry of a proxy's journal.
@@ -82,6 +100,19 @@ pub struct JournalEntry {
     pub size: u64,
     /// When it happened, in milliseconds, by the clock of the proxy.
     pub time: u64,
+    /// The content tag of the cold tier's object that the entry is about, for a
+    /// [`JournalOp::PutReserved`] (the reservation of the put) and a [`JournalOp::PutMirror`]
+    /// (the object read); absent in every other entry, and in the entries of releases before
+    /// these ops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold_tag: Option<String>,
+    /// The content tag the hot tier gave the object of a [`JournalOp::PutMirror`] when the copy
+    /// was written there: the hot tier's own tag, which need not equal [`JournalEntry::cold_tag`]
+    /// (a directory tier tags by SHA-256, an S3 tier by ETag). Tags are never compared across
+    /// tiers: this one is only ever compared with the hot tier's tags. Absent in every other
+    /// entry, and in the mirrors of releases before this field, which own no hot object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_tag: Option<String>,
 }
 
 fn corrupt(what: &str, error: &serde_json::Error) -> Error {

@@ -118,14 +118,14 @@ impl<I: Incoming> Closing<I> {
     }
 
     /// Whether a handshake is in flight. One that cannot be counted is taken to be, so that the
-    /// door waits out [`GRACE`]; the failure is said on stderr once.
+    /// door waits out [`GRACE`]; the failure is said once.
     fn in_flight(&mut self) -> bool {
         match self.incoming.handshakes() {
             Ok(count) => count > 0,
             Err(error) => {
                 if !self.told {
                     self.told = true;
-                    eprintln!(
+                    tracing::warn!(
                         "tierstore: the end of the settle: cannot count the handshakes in flight, so the listener waits {GRACE:?}: {error}"
                     );
                 }
