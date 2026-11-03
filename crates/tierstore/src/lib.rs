@@ -67,8 +67,10 @@
 //!
 //! The keys under `_entries/`, `_journal/` and `_tiering/` belong to the proxy and the
 //! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
-//! a listing of either tier leaves them out. The S3 and OCI fronts have no check of their own;
-//! the local cache keeps its own, since its upstream may be a plain bucket.
+//! a listing of either tier leaves them out. The OCI front and the S3 front have no check of their
+//! own, except that the S3 front refuses the completion of an upload before it reads the body
+//! (so that a malformed body is `AccessDenied` too); the local cache keeps its own, since its
+//! upstream may be a plain bucket.
 //!
 //! Every proxy, reconciler and cache takes its settings as constructor parameters.
 //!
