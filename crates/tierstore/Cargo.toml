@@ -2,7 +2,7 @@
 name = "tierstore"
 # Its own version, not the workspace's: 0.2.0 is the first release whose cache node can write
 # through (`[local_cache] write_through`), which `tierstore --version` shows. 0.3.0 is the first
-# release built in this repository, so a host can tell it from the last one built in kbf.
+# release built in this repository, so a host can tell it from the releases before it.
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -43,6 +43,7 @@ server = [
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
+    "dep:tracing",
     "s3",
     "tokio/macros",
     "tokio/net",
@@ -147,6 +148,9 @@ tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-rustls = { workspace = true, optional = true }
 # The IP subjectAltNames of the OCI front's certificate, which the start checks (`server`).
 x509-parser = { workspace = true, optional = true }
+# The operator messages of the server go through its facade; `server::build_info::stderr_log`
+# is the subscriber the binary installs (`server`).
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 # A stock S3 SDK (aws-sdk-rust) and its plain-HTTP client, which tests/s3_front/sdk.rs drives

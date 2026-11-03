@@ -47,8 +47,8 @@ install -m 0755 -o root -g root tierstore /usr/libexec/kbf/tierstore
 
 With `tierstore.service`, nothing updates it afterwards: whoever runs the setup places the next
 binary the same way and restarts the unit. A host that runs the two slot units instead is
-updated by the host updater through `tierstore update-hook` ([Moving to the update
-hook](#moving-to-the-update-hook)).
+updated by the host updater (hostkeeper's, in development) through `tierstore update-hook`
+([Moving to the update hook](#moving-to-the-update-hook)).
 
 ## Placing the unit
 

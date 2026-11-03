@@ -431,9 +431,9 @@ impl LocalCache {
                 let outcome = inner.tick();
                 inner.describe(&outcome)
             });
-            // A tick that panicked or was cancelled is said on stderr; the loop goes on to the next.
+            // A tick that panicked or was cancelled is logged; the loop goes on to the next.
             if let Some(line) = joined(ticking.await, "a hold tick").flatten() {
-                eprintln!("tierstore: {line}");
+                tracing::info!("tierstore: {line}");
             }
             #[cfg(test)]
             self.inner.trace_after_tick();
