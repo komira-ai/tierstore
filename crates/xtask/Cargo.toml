@@ -38,6 +38,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-pro
 [dev-dependencies]
 # The YAML parser the workflow lint (tests/workflows.rs) reads each workflow with.
 saphyr-parser = "0.1.0"
+# The scratch directories of the tests that read files (tests/banned_names.rs).
+tierstore-testkit.workspace = true
 
 [lints]
 workspace = true

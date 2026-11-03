@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
+use tierstore_testkit::dir::TestDir;
 
 /// Lowercase hex SHA-256 of each banned word, lowercased. The longest banned word has 10
 /// letters; `MAX_WORD` is above it.
@@ -243,14 +244,16 @@ fn a_banned_word_in_a_path_is_redacted_in_the_finding() {
 fn an_unreadable_tracked_file_is_an_error() {
     let deny = test_deny();
     let none = HashSet::new();
-    let cause = std::fs::read(root().join("crates")).unwrap_err();
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "banned-names-unreadable");
+    std::fs::create_dir(dir.path().join("sub")).expect("make sub");
+    let cause = std::fs::read(dir.path().join("sub")).unwrap_err();
     assert_eq!(
-        read_tracked(&root(), "crates", &none, &deny),
-        Err(format!("cannot read crates: {cause}"))
+        read_tracked(dir.path(), "sub", &none, &deny),
+        Err(format!("cannot read sub: {cause}"))
     );
-    let cause = std::fs::read(root().join("zebra/missing.md")).unwrap_err();
+    let cause = std::fs::read(dir.path().join("zebra/missing.md")).unwrap_err();
     assert_eq!(
-        read_tracked(&root(), "zebra/missing.md", &none, &deny),
+        read_tracked(dir.path(), "zebra/missing.md", &none, &deny),
         Err(format!("cannot read <banned>/missing.md: {cause}"))
     );
 }
@@ -261,13 +264,14 @@ fn an_unreadable_tracked_file_is_an_error() {
 fn a_file_deleted_in_the_work_tree_is_skipped_explicitly() {
     let deny = test_deny();
     let gone: HashSet<String> = ["gone/file.md".to_owned()].into();
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "banned-names-deleted");
+    std::fs::write(dir.path().join("here.md"), b"text").expect("write here.md");
     assert_eq!(
-        read_tracked(&root(), "gone/file.md", &gone, &deny),
+        read_tracked(dir.path(), "gone/file.md", &gone, &deny),
         Ok(None)
     );
-    let bytes = std::fs::read(root().join("Cargo.toml")).unwrap_or_default();
     assert_eq!(
-        read_tracked(&root(), "Cargo.toml", &gone, &deny),
-        Ok(Some(bytes))
+        read_tracked(dir.path(), "here.md", &gone, &deny),
+        Ok(Some(b"text".to_vec()))
     );
 }
