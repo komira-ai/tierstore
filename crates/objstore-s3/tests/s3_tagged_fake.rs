@@ -387,6 +387,25 @@ async fn the_reservation_mark_is_what_the_last_write_sent() {
     assert!(!store.head(&k).await.unwrap().reservation);
 }
 
+/// Asserts that a tagged create against the service gives the tag a HEAD of the new object
+/// gives, leaves the object unmarked, and is refused (`AlreadyExists`) where the key has an
+/// object, which stays as it was.
+#[tokio::test]
+async fn a_tagged_create_gives_the_tag_of_the_object_it_wrote() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    let tag = store.put_new_tagged(&k, Bytes::from("one")).await.unwrap();
+    let head = store.head(&k).await.unwrap();
+    assert_eq!(
+        (head.reservation, head.etag.as_str()),
+        (false, tag.as_str())
+    );
+    let again = store.put_new_tagged(&k, Bytes::from("two")).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
+    assert_eq!(store.get_all(&k).await.unwrap(), "one");
+}
+
 /// Asserts that a create-only marked write is refused without a request where the store does
 /// not claim conditional puts, since without the header it would replace the object.
 #[tokio::test]

@@ -240,8 +240,14 @@ impl Books {
                         continue;
                     }
                     self.put(proxy, at, &entry.key, entry.size, mirror);
-                    if applied {
-                        // A mirror's hot tag is the tag its copy has; any other entry names none.
+                    if applied && mirror && entry.hot_tag.is_none() {
+                        // A mirror that names no hot tag owns nothing, as when its journal object
+                        // was applied (the pass forgot it): rebuilt from a checkpoint it is not
+                        // an eviction candidate, and no current tag of the hot tier stands in
+                        // for the one it lacks.
+                        self.forget(&entry.key);
+                    } else if applied {
+                        // A mirror's hot tag is the tag its copy has; a plain put names none.
                         let hot_tag = entry.hot_tag.clone();
                         self.copied(proxy, at, &entry.key, entry.time, hot_tag);
                     }
