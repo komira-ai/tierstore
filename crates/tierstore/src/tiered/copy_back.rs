@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use super::{Inner, Level};
+use super::Inner;
 use crate::metrics::Skipped;
 use crate::{Error, JournalOp};
 
@@ -13,15 +13,33 @@ impl Inner {
     /// the background as a mirror of the cold object: the entry names the content tag the cold
     /// object has, which the reconciler compares with the cold tier's before it keeps the copy.
     ///
-    /// The tag is read with a HEAD before the copy is made. A key the cold tier no longer holds
-    /// as an object (a reservation, or nothing: it was deleted since the read) is not copied.
-    pub(super) async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes) {
-        if self.level().await >= Level::Critical {
+    /// `seen` is what a HEAD found before the read (`None` if the hot tier is too full to take a
+    /// copy, so no HEAD was made). The tag is read with a second HEAD before the copy is made,
+    /// and the copy is made only if both HEADs gave the same tag: then the object the bytes were
+    /// read from is the object with that tag, and not one that replaced it between the read and
+    /// the HEAD. A key the cold tier no longer holds as an object (a reservation, or nothing: it
+    /// was deleted since the read) is not copied either.
+    pub(super) async fn copy_back(
+        self: &Arc<Self>,
+        key: &str,
+        body: &Bytes,
+        seen: Option<Result<Option<String>, Error>>,
+    ) {
+        let Some(seen) = seen else {
             self.counters.skipped(Skipped::Critical);
             return;
-        }
+        };
+        let before = match seen {
+            Ok(before) => before,
+            Err(_) => {
+                self.counters.skipped(Skipped::Failed);
+                return;
+            }
+        };
         let tag = match self.cold.head(key).await {
-            Ok(meta) if !meta.reservation => meta.tag,
+            Ok(meta) if !meta.reservation && before.as_deref() == Some(meta.tag.as_str()) => {
+                meta.tag
+            }
             Ok(_) | Err(Error::NotFound(_)) => {
                 self.counters.skipped(Skipped::Raced);
                 return;

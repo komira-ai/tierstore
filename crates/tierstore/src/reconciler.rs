@@ -95,18 +95,29 @@ struct Wanted<'a> {
     reservations: Vec<&'a str>,
     /// The cold tag of the last mirror entry of the key.
     mirror: Option<&'a str>,
+    /// The index, in the journal object, of the last entry that puts the key.
+    index: u64,
+    /// Whether that entry is still the latest word on the key in the journals read: no later
+    /// put or delete of the key was read, from this proxy or another.
+    current: bool,
 }
 
 /// What each key put by the entries is wanted as.
 fn wanted(entries: &[JournalEntry]) -> BTreeMap<&str, Wanted<'_>> {
     let mut wanted: BTreeMap<&str, Wanted<'_>> = BTreeMap::new();
-    for entry in entries.iter().filter(|entry| entry.op.is_put()) {
+    for (index, entry) in entries.iter().enumerate() {
+        if !entry.op.is_put() {
+            continue;
+        }
         let slot = wanted.entry(entry.key.as_str()).or_insert(Wanted {
             kind: entry.op,
             reservations: Vec::new(),
             mirror: None,
+            index: 0,
+            current: true,
         });
         slot.kind = entry.op;
+        slot.index = index as u64;
         let tag = entry.cold_tag.as_deref();
         match entry.op {
             JournalOp::PutReserved => slot.reservations.extend(tag),
@@ -162,6 +173,9 @@ fn millis(duration: Duration) -> u64 {
 ///    A cold object that a *reservation* is (a marked 56-byte object; see
 ///    [`Backend::put_reservation`]) holds a key for a put that the proxy acknowledged. The rules
 ///    for a key, by the last put entry of the key in the journal object:
+///    - a `PutMirror` that a later put or delete of the key (read from any proxy's journal)
+///      supersedes is skipped: the hot object is not the one it mirrors, so it is neither dropped
+///      nor counted as copied;
 ///    - the hot tier no longer holds the key: nothing to copy; for a `PutReserved`, the
 ///      reservations its entries name are deleted by their tags (a put and a delete that were
 ///      both acknowledged leave no reservation behind), and no other cold object is touched;
@@ -362,7 +376,7 @@ impl Reconciler {
             let Some((seq, entries)) = self.books.stream(id).pending.front().cloned() else {
                 return;
             };
-            let copied = match self.apply_object(&entries).await {
+            let copied = match self.apply_object(id, seq, &entries).await {
                 Ok(copied) => copied,
                 Err(error) => {
                     report.failed.push(error);
@@ -394,9 +408,14 @@ impl Reconciler {
     /// tier's object for each.
     async fn apply_object(
         &self,
+        proxy: &str,
+        seq: u64,
         entries: &[JournalEntry],
     ) -> Result<BTreeMap<String, String>, Error> {
-        let wanted = wanted(entries);
+        let mut wanted = wanted(entries);
+        for (key, want) in &mut wanted {
+            want.current = self.books.is_current(proxy, (seq, want.index), key);
+        }
         let copies = stream::iter(&wanted).map(|(key, want)| self.copy_key(key, want));
         let parallel = self.config.parallel.max(1);
         let outcomes: Copies = copies.buffer_unordered(parallel).collect().await;
@@ -444,6 +463,11 @@ impl Reconciler {
 
     /// One look at a key: the hot tier's object, then the cold tier's.
     async fn copy_round(&self, key: &str, want: &Wanted<'_>) -> Result<Round, Error> {
+        if want.kind == JournalOp::PutMirror && !want.current {
+            // A put or a delete of the key was journaled after the mirror: the hot tier's object
+            // is that put's, not the one the mirror was made of, and the mirror owns nothing.
+            return Ok(Round::Done(None));
+        }
         let hot = match self.hot.head(key).await {
             Ok(hot) => hot,
             Err(Error::NotFound(_)) => {
@@ -505,12 +529,17 @@ impl Reconciler {
         match want.kind {
             JournalOp::PutMirror => self.drop_mirror(key, hot).await,
             JournalOp::PutReserved if want.reservations.contains(&cold.tag.as_str()) => {
-                let body = match self.hot.get(key, None).await {
+                let body = match self.hot.get_stream(key, None).await {
                     Ok(body) => body,
                     Err(Error::NotFound(_)) => return Ok(Round::Again),
                     Err(error) => return Err(error),
                 };
-                match self.cold.put_if_match(key, body, &cold.tag).await {
+                // The hot object goes to the cold tier as it is read, never held whole.
+                let sent = self
+                    .cold
+                    .put_stream_if_match(key, Some(hot.size), body, &cold.tag)
+                    .await;
+                match sent {
                     Ok(_) => Ok(Round::Done(Some(hot.tag.clone()))),
                     Err(Error::PreconditionFailed(_) | Error::NotFound(_)) => Ok(Round::Again),
                     Err(error) => Err(error),
@@ -530,12 +559,12 @@ impl Reconciler {
             }
             JournalOp::PutMirror => self.drop_mirror(key, hot).await,
             _ => {
-                let body = match self.hot.get(key, None).await {
+                let body = match self.hot.get_stream(key, None).await {
                     Ok(body) => body,
                     Err(Error::NotFound(_)) => return Ok(Round::Done(None)),
                     Err(error) => return Err(error),
                 };
-                match self.cold.put(key, body).await {
+                match self.cold.put_stream(key, Some(hot.size), body).await {
                     Ok(()) | Err(Error::AlreadyExists(_)) => Ok(Round::Done(Some(hot.tag.clone()))),
                     Err(error) => Err(error),
                 }

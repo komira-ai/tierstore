@@ -9,7 +9,7 @@ use std::time::Duration;
 use tierstore::{Backend, ByteRange, Error, JournalOp, Op, Proxy};
 use tokio::sync::Notify;
 
-use crate::churn::{Change, Churn, Ghost};
+use crate::churn::{Change, Churn, Flaky, Ghost};
 use crate::conformance::reservation;
 use crate::hold::Stall;
 use crate::support::{
@@ -223,6 +223,61 @@ async fn a_copy_back_is_not_made_of_a_key_that_stopped_being_an_object() {
     }
 }
 
+/// Asserts that a copy-back is not made when the object that was read is replaced by another real
+/// object before the question for its tag: the read answers with the bytes it read, and the old
+/// bytes are not put in the hot tier or journaled under the new object's tag (the reconciler would
+/// take them for a copy of it). Also when the second question for the tag fails: counted as failed.
+#[tokio::test(start_paused = true)]
+async fn a_copy_back_is_not_made_of_an_object_replaced_between_the_read_and_the_tag() {
+    let rig = Rig::new();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+    let swap = Churn::after_a_read(rig.cold_mem.clone(), Change::Object(body("other")));
+    let proxy = Proxy::open(rig.hot.clone(), Arc::new(swap), rig.config("p1", 1000))
+        .await
+        .unwrap();
+
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("other"));
+    assert_absent(&*rig.hot_mem, "k").await;
+    assert_eq!(
+        journal_keys(&*rig.hot_mem, "p1").await,
+        Vec::<String>::new()
+    );
+    let raced = "tierstore_promotions_skipped_total{reason=\"raced\"}";
+    assert_eq!(metric(&proxy, raced), format!("{raced} 1"));
+
+    let rig = Rig::new();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+    let flaky = Arc::new(Flaky::head_fails_at(rig.cold_mem.clone(), "k", 2));
+    let proxy = Proxy::open(rig.hot.clone(), flaky, rig.config("p1", 1000))
+        .await
+        .unwrap();
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    assert_absent(&*rig.hot_mem, "k").await;
+    let failed = "tierstore_promotions_skipped_total{reason=\"failed\"}";
+    assert_eq!(metric(&proxy, failed), format!("{failed} 1"));
+}
+
+/// Asserts that a listing does not show a reservation that replaced a real object of the same
+/// size within the same time of last write (the clock of the rig does not move): the listing
+/// before showed the real object, and the listing after asks the cold tier again.
+#[tokio::test(start_paused = true)]
+async fn a_reservation_that_replaces_a_real_object_at_the_same_time_is_not_listed() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    rig.cold_mem.put("k", reservation(1)).await.unwrap();
+    assert_eq!(keys(&proxy).await, ["k"]);
+
+    rig.cold_mem.delete("k").await.unwrap();
+    let held = rig.cold_mem.put_reservation("k", reservation(2));
+    held.await.unwrap();
+    assert_eq!(keys(&proxy).await, Vec::<String>::new());
+    let page = proxy.list_page("", None, 10).await.unwrap();
+    assert_eq!(page.len(), 0, "by page too");
+}
+
 /// Asserts that a listing leaves out reservations of the cold tier, whole and by page, shows the
 /// objects around them, and shows a key the hot tier holds though the cold tier holds a
 /// reservation of it.
@@ -298,10 +353,11 @@ async fn a_listing_fails_if_the_head_of_a_candidate_fails_and_leaves_out_a_gone_
     assert_eq!(keys(&over_ghost).await, ["a"]);
 }
 
-/// Asserts that a listing does not ask again about an object a HEAD found real: the second
-/// listing makes no HEAD.
+/// Asserts that a listing asks about an object of the size of a reservation at every listing, and
+/// remembers no answer: a listing gives no version of the object, so the second listing makes its
+/// HEAD again (the memory this test replaces was by key, size and time of last write).
 #[tokio::test(start_paused = true)]
-async fn a_listing_does_not_ask_again_about_an_object_a_head_found_real() {
+async fn a_listing_asks_again_about_an_object_of_the_size_of_a_reservation() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     rig.cold_mem.put("a", reservation(1)).await.unwrap();
@@ -313,14 +369,13 @@ async fn a_listing_does_not_ask_again_about_an_object_a_head_found_real() {
     assert_eq!(keys(&proxy).await, ["a"]);
     assert_eq!(rig.cold.calls(Op::Head), 2);
     assert_eq!(keys(&proxy).await, ["a"]);
-    assert_eq!(rig.cold.calls(Op::Head), 3);
+    assert_eq!(rig.cold.calls(Op::Head), 4);
 }
 
-/// Asserts that the proxy's memory of objects found real is emptied when it is full, and that
-/// listings stay right across that: more real objects of the size of a reservation than it holds
-/// are all listed, twice.
+/// Asserts that listings of more real objects of the size of a reservation than the proxy once
+/// remembered list them all, every time, with one HEAD for each at each listing.
 #[tokio::test(start_paused = true)]
-async fn the_memory_of_real_objects_is_emptied_when_it_is_full() {
+async fn a_listing_of_many_real_objects_the_size_of_a_reservation_asks_about_each_every_time() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     let count = 4100;
@@ -331,10 +386,9 @@ async fn the_memory_of_real_objects_is_emptied_when_it_is_full() {
             .unwrap();
     }
     assert_eq!(keys(&proxy).await.len(), count);
-    let heads = rig.cold.calls(Op::Head);
-    assert_eq!(heads, count as u64);
+    assert_eq!(rig.cold.calls(Op::Head), count as u64);
     assert_eq!(keys(&proxy).await.len(), count);
-    assert!(rig.cold.calls(Op::Head) > heads);
+    assert_eq!(rig.cold.calls(Op::Head), 2 * count as u64);
 }
 
 /// Asserts that a delete takes a real cold object by its tag, then the hot object, and journals
