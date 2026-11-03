@@ -2,6 +2,7 @@
 //! that hold the same bytes can be read in different pieces, and a read can end short or fail.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -25,11 +26,23 @@ pub struct Chunked {
     mem: Arc<MemoryBackend>,
     size: usize,
     ending: Ending,
+    pulled: Arc<AtomicUsize>,
 }
 
 impl Chunked {
     pub fn new(mem: Arc<MemoryBackend>, size: usize, ending: Ending) -> Self {
-        Self { mem, size, ending }
+        Self {
+            mem,
+            size,
+            ending,
+            pulled: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// How many non-empty chunks the streamed reads of this backend have given out so far (a
+    /// chunk is counted when a reader pulls it, not when the stream is made).
+    pub fn pulled(&self) -> Arc<AtomicUsize> {
+        self.pulled.clone()
     }
 }
 
@@ -62,7 +75,13 @@ impl Backend for Chunked {
             items.truncate(2);
             items.push(Err(Error::Unavailable("read broke".to_owned())));
         }
-        Ok(futures::stream::iter(items).boxed())
+        let pulled = self.pulled.clone();
+        let counted = futures::stream::iter(items).inspect(move |item| {
+            if matches!(item, Ok(chunk) if !chunk.is_empty()) {
+                pulled.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        Ok(counted.boxed())
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

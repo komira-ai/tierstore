@@ -3,6 +3,7 @@
 //! tiers of different kinds tag the same bytes differently.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use tierstore::{Backend, Error, Op, Reconciler};
 
@@ -42,6 +43,31 @@ async fn a_takeover_evicts_objects_the_cold_tier_holds_the_same_bytes_of_in_othe
     assert_eq!(read(&*rig.hot_mem, "k3").await, body(&"x".repeat(21)));
 }
 
+/// Asserts that the comparison consumes the reads chunk by chunk and stops at the first
+/// difference: objects of 21 bytes that differ in the first byte, read in chunks of 3, are each
+/// pulled for one chunk only (not for the whole object), and the hot object stays.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_compares_chunk_by_chunk_and_stops_at_the_first_difference() {
+    let rig = five_objects().await;
+    rig.cold_mem.delete("k1").await.unwrap();
+    rig.cold_mem
+        .put("k1", body(&("y".to_owned() + &"x".repeat(20))))
+        .await
+        .unwrap();
+    let hot = Chunked::new(rig.hot_mem.clone(), 3, Ending::Whole);
+    let cold = Chunked::new(rig.cold_mem.clone(), 3, Ending::Whole);
+    let (hot_pulled, cold_pulled) = (hot.pulled(), cold.pulled());
+    let mut second = takeover_over(&rig, hot, cold).await;
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    // k1 is pulled for one chunk, and each of the objects after it (7 chunks each) for all of them
+    // when it matches: the 2 evicted ones and no more.
+    assert_eq!(hot_pulled.load(Ordering::SeqCst), 1 + 2 * 7);
+    assert_eq!(cold_pulled.load(Ordering::SeqCst), 1 + 2 * 7);
+}
+
 /// Asserts that a takeover keeps a hot object whose cold object is of the same size and other
 /// bytes, and evicts the objects after it.
 #[tokio::test(start_paused = true)]
@@ -60,14 +86,16 @@ async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_other_bytes_of_the_sa
     assert_absent(&*rig.hot_mem, "k3").await;
 }
 
-/// Asserts that a takeover keeps every hot object when a read of either tier ends before the other
-/// (an object replaced between the HEAD and the read), and that a read that breaks is reported
+/// Asserts that a takeover keeps every hot object when a read of either tier ends before the other,
+/// or both end together before the size the HEAD gave (an object replaced between the HEAD and the
+/// read), and that a read that breaks is reported
 /// with nothing evicted.
 #[tokio::test(start_paused = true)]
 async fn a_takeover_keeps_hot_objects_when_a_read_of_either_tier_ends_early_or_breaks() {
     let reads = [
         (Ending::Short, Ending::Whole, false),
         (Ending::Whole, Ending::Short, false),
+        (Ending::Short, Ending::Short, false),
         (Ending::Broken, Ending::Whole, true),
         (Ending::Whole, Ending::Broken, true),
     ];

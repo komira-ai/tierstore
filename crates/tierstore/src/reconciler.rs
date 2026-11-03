@@ -703,18 +703,22 @@ impl Reconciler {
     /// `None` if the hot object is gone by the time it is read.
     async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         match self.cold.head(key).await {
-            Ok(cold) if !cold.reservation && cold.size == hot.size => self.same_bytes(key).await,
+            Ok(cold) if !cold.reservation && cold.size == hot.size => {
+                self.same_bytes(key, hot.size).await
+            }
             Ok(_) => Ok(Some(false)),
             Err(Error::NotFound(_)) => Ok(Some(false)),
             Err(error) => Err(error),
         }
     }
 
-    /// Whether both tiers hold the same bytes under `key`, read as the chunks they come in (one
-    /// chunk of each at a time, and a read stops at the first difference). An object that is not
+    /// Whether both tiers hold the same `size` bytes under `key`, read as the chunks they come in
+    /// (one chunk of each at a time, and a read stops at the first difference). The bytes compared
+    /// are counted: two reads that end together before `size` bytes (objects replaced by shorter
+    /// ones between the HEAD and the read) are not a match. An object that is not
     /// there to be read is not an error: the cold one is not held (`Some(false)`), and the hot
     /// one is gone (`None`).
-    async fn same_bytes(&self, key: &str) -> Result<Option<bool>, Error> {
+    async fn same_bytes(&self, key: &str, size: u64) -> Result<Option<bool>, Error> {
         let mut hot = match self.hot.get_stream(key, None).await {
             Ok(stream) => stream,
             Err(Error::NotFound(_)) => return Ok(None),
@@ -726,6 +730,7 @@ impl Reconciler {
             Err(error) => return Err(error),
         };
         let (mut mine, mut theirs) = (Bytes::new(), Bytes::new());
+        let mut compared = 0u64;
         loop {
             if mine.is_empty() {
                 mine = next_chunk(&mut hot).await?;
@@ -734,12 +739,14 @@ impl Reconciler {
                 theirs = next_chunk(&mut cold).await?;
             }
             if mine.is_empty() || theirs.is_empty() {
-                return Ok(Some(mine.is_empty() && theirs.is_empty()));
+                let ended_together = mine.is_empty() && theirs.is_empty();
+                return Ok(Some(ended_together && compared == size));
             }
             let len = mine.len().min(theirs.len());
             if mine.split_to(len) != theirs.split_to(len) {
                 return Ok(Some(false));
             }
+            compared += len as u64;
         }
     }
 
