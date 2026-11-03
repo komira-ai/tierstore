@@ -19,6 +19,9 @@ struct Resident {
     size: u64,
     /// Whether the cold tier holds it: the journal object of the entry is applied.
     copied: bool,
+    /// Whether the entry is a mirror (a copy-back), which owns the hot object only while no put
+    /// of another proxy is the word on the key.
+    mirror: bool,
 }
 
 impl Resident {
@@ -132,6 +135,13 @@ impl Books {
         found.is_some_and(|resident| resident.is_entry(proxy, at))
     }
 
+    /// Whether what the hot tier holds under `key` is, by the journals, the object of a put (not
+    /// a mirror) that a proxy other than `proxy` wrote.
+    fn is_put_of_another_proxy(&self, proxy: &str, key: &str) -> bool {
+        let found = self.index.get(key);
+        found.is_some_and(|resident| !resident.mirror && resident.proxy != proxy)
+    }
+
     /// Takes a key out of what the hot tier holds. A key that is not there is ignored.
     pub(crate) fn forget(&mut self, key: &str) {
         if let Some(old) = self.index.remove(key) {
@@ -143,7 +153,7 @@ impl Books {
     }
 
     /// Records a put entry: the hot tier holds the object, and the cold tier does not yet.
-    pub(crate) fn put(&mut self, proxy: &str, at: Position, key: &str, size: u64) {
+    pub(crate) fn put(&mut self, proxy: &str, at: Position, key: &str, size: u64, mirror: bool) {
         self.forget(key);
         self.usage += size;
         self.lag += size;
@@ -152,6 +162,7 @@ impl Books {
             at,
             size,
             copied: false,
+            mirror,
         };
         self.index.insert(key.to_owned(), resident);
     }
@@ -220,7 +231,15 @@ impl Books {
             }
             match entry.op {
                 op if op.is_put() => {
-                    self.put(proxy, at, &entry.key, entry.size);
+                    let mirror = op == JournalOp::PutMirror;
+                    if mirror && self.is_put_of_another_proxy(proxy, &entry.key) {
+                        // A copy-back, read after a put of another proxy that the hot tier holds
+                        // (the proxies' journals are read in no order that is the order of the
+                        // writes): the mirror cannot be told to be the later, so it owns nothing
+                        // and is never the resident, whichever journal was read first.
+                        continue;
+                    }
+                    self.put(proxy, at, &entry.key, entry.size, mirror);
                     if applied {
                         self.copied(proxy, at, &entry.key, entry.time, None);
                     }
