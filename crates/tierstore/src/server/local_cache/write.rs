@@ -23,7 +23,7 @@
 //!   [`forget`](Inner::forget)).
 //! - **A put that replaces on a tag** (`put_if_match`) is not done, as on every front.
 //!
-//! The keys under `_entries/`, `_journal/` and `_tiering/` belong to a storage node and are refused with
+//! The keys under `_journal/` and `_tiering/` belong to a storage node and are refused with
 //! [`Error::Reserved`], as a storage node does.
 
 use std::sync::Arc;

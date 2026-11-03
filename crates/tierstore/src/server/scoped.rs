@@ -12,7 +12,7 @@
 //! ```
 //!
 //! All five fields are required and no other is allowed. Each prefix ends in `/` and is not
-//! `_entries/`, `_journal/` or `_tiering/`, under them, a prefix of them, or a path with one of those names as
+//! `_journal/` or `_tiering/`, under them, a prefix of them, or a path with one of those names as
 //! a segment. The three lists may overlap, a list may be empty, and a key whose three lists are
 //! all empty is refused (it could do nothing). A request signed by the key is allowed for the
 //! calls below, and only for a key (or a list prefix) that starts with a prefix of the list the
@@ -30,7 +30,7 @@
 //! Everything else is `403 AccessDenied`, answered before the body is read: a replacing put
 //! (`If-Match`), a copy (`x-amz-copy-source`, on a put or on a part), a call on the bucket itself
 //! other than a listing, any method but `GET`, `HEAD`, `PUT`, `POST` and `DELETE`, a key or a
-//! listing under `_entries/`, `_journal/` or `_tiering/` (no prefix of a key can cover them), and a call on a
+//! listing under `_journal/` or `_tiering/` (no prefix of a key can cover them), and a call on a
 //! key outside the list its kind needs: a read prefix does not let the key write, and a write
 //! prefix does not let it read. A put over a key that exists is `412` as for every create-only
 //! put. The key is refused on a presigned URL (the URL's key must be a presigning key).
@@ -94,7 +94,7 @@ impl Scopes {
 /// Whether `name` starts with a prefix of `list` (and, for a key, is longer than it) and is a
 /// plain name. A name under a prefix of a list is never one of the proxy's: `Scopes` are made
 /// only of prefixes that [`valid_prefix`] accepted, none of which is, covers or is under
-/// `_entries/`, `_journal/` or `_tiering/`.
+/// `_journal/` or `_tiering/`.
 fn covers(list: &[String], name: &str, key: bool) -> Result<(), Refusal> {
     let under =
         |prefix: &String| name.starts_with(prefix.as_str()) && (!key || name.len() > prefix.len());
@@ -116,7 +116,7 @@ fn valid_prefix(prefix: &str) -> Result<(), PresignError> {
     let reserved = RESERVED_PREFIXES.map(|name| name.trim_end_matches('/'));
     if prefix.split('/').any(|segment| reserved.contains(&segment)) {
         return Err(PresignError::Key(
-            "a prefix is, or contains, _entries/, _journal/ or _tiering/",
+            "a prefix is, or contains, _journal/ or _tiering/",
         ));
     }
     Ok(())
@@ -157,7 +157,7 @@ impl ScopedKey {
     /// # Errors
     /// [`PresignError::Key`] for an empty id or secret, an id with a `/`, `,`, `=` or a
     /// character that is not printable ASCII, a prefix that is not valid, does not end in `/`, or
-    /// is or contains `_entries/`, `_journal/` or `_tiering/`, and three lists that are all empty.
+    /// is or contains `_journal/` or `_tiering/`, and three lists that are all empty.
     pub fn new(id: &str, secret: &str, prefixes: &Prefixes<'_>) -> Result<Self, PresignError> {
         check_credentials(id, secret)?;
         let Prefixes {

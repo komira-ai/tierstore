@@ -266,14 +266,7 @@ fn an_undeclared_manifest_is_served_by_its_shape_or_refused() {
 /// proxy keeps for itself.
 #[test]
 fn a_prefix_is_plain_segments_outside_the_reserved_ones() {
-    for good in [
-        "oci/",
-        "a/b-c.d_e/",
-        "_journal2/",
-        "_entries2/",
-        "x/_journal/",
-        "Z9/",
-    ] {
+    for good in ["oci/", "a/b-c.d_e/", "_journal2/", "x/_journal/", "Z9/"] {
         assert_eq!(OciPrefix::new(good).expect(good).as_str(), good);
     }
     let cases = [
@@ -286,8 +279,6 @@ fn a_prefix_is_plain_segments_outside_the_reserved_ones() {
         ("./", "segments"),
         ("a b/", "segments"),
         ("a%2f/", "segments"),
-        ("_entries/", "overlaps"),
-        ("_entries/x/", "overlaps"),
         ("_journal/", "overlaps"),
         ("_tiering/", "overlaps"),
         ("_journal/x/", "overlaps"),

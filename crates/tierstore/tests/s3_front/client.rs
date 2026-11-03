@@ -226,11 +226,7 @@ async fn a_full_store_answers_slow_down() {
 async fn the_keys_of_the_proxy_are_out_of_reach() {
     let h = Harness::start(|_| {}).await;
     let store = h.store(CONDITIONAL);
-    for name in [
-        "_entries/x",
-        "_journal/p1/00000000000000000001",
-        "_tiering/lease",
-    ] {
+    for name in ["_journal/p1/00000000000000000001", "_tiering/lease"] {
         let k = key(name);
         let body = Bytes::from_static(b"x");
         let put = store.put_new(&k, body, None).await;

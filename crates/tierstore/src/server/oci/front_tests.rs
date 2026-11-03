@@ -618,7 +618,7 @@ async fn a_store_that_fails_is_503_or_500_without_its_message() {
 }
 
 /// Asserts that a front over a proxy serves the blobs of its prefix from either tier, and that a
-/// path that tries to name a key under `_entries/`, `_journal/` or `_tiering/` is `UNSUPPORTED`
+/// path that tries to name a key under `_journal/` or `_tiering/` is `UNSUPPORTED`
 /// (404) and reads none: the routes name only `<prefix>blobs/sha256/<hex>`, and the prefix is
 /// never one the proxy keeps for itself (see `OciPrefix`), so the front has no reserved-key check
 /// of its own and the proxy behind it is the one place that refuses those keys.
@@ -632,7 +632,7 @@ async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
         .await
         .unwrap();
     rig.memory
-        .put("_entries/x", Bytes::from_static(b"secret"))
+        .put("_journal/x", Bytes::from_static(b"secret"))
         .await
         .unwrap();
     let hot = rig.get(&format!("/v2/a/blobs/{hot_digest}")).await;
@@ -646,7 +646,7 @@ async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
     assert_eq!(from_cold.body, b"cold blob");
     let head = rig.ask(Method::HEAD, &cold_path, &[]).await;
     assert_eq!(head.status, StatusCode::OK);
-    for reserved in ["_entries/x", "_journal/p1/1", "_tiering/lease"] {
+    for reserved in ["_journal/x", "_journal/p1/1", "_tiering/lease"] {
         let answer = rig.get(&format!("/v2/a/blobs/../../{reserved}")).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "{reserved}");
         let expected = (

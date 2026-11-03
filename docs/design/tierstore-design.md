@@ -294,7 +294,7 @@ Each entry is a mechanism and the reason it works.
 - **Journal numbering.** A journal object is written create-only. If its number is taken by a sentinel, the node stops and registers again (above); a node never skips to the next number, because a taken number means the leader has stopped reading its journal. A node that boots takes a fresh id and starts at the first number, so a number is not reused after a prune.
 - **Restart rebuild.** The leader's in-memory books are rebuilt from checkpoints and journals: it reloads each checkpoint and re-reads the journal objects after it, which are exactly the writes not yet applied. Work done since the last stored checkpoint is done again, which is safe because the copy is conditional on the reservation's tag and deletes of missing keys succeed.
 - **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.3).
-- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket (`_entries/` is set aside for the per-key entries of a later release and is not written yet). The proxy refuses get, head, put, delete and multipart under them and leaves them out of the listings of both tiers; the S3 front refuses every call on them (403) before it looks at the rest of the request, and the local cache refuses reads and writes of them as well, since its upstream may be a plain bucket.
+- **Reserved prefixes.** `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses get, head, put, delete and multipart under them and leaves them out of the listings of both tiers; the S3 front refuses every call on them (403) before it looks at the rest of the request, and the local cache refuses reads and writes of them as well, since its upstream may be a plain bucket.
 - **The start-up self-test.** Before any address is bound, each tier is probed (section 9). A store whose create-only put or `If-Match` does not hold is refused with exit status 3, so the lease and the one-winner promise are never built on a store that cannot keep them.
 - **Fail closed.** A put whose reservation cannot be made fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read.
 
@@ -531,5 +531,5 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 | Copy-back | Writing an object read from cold into hot, journaled so it can be evicted again; its entry carries no reservation tag, so the leader only counts and evicts it. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
-| Reserved prefix | `_entries/`, `_journal/` and `_tiering/`; refused to clients. |
+| Reserved prefix | `_journal/` and `_tiering/`; refused to clients. |
 | Self-test | The start-up check of each tier's contract. |

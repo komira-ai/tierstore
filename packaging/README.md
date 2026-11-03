@@ -250,7 +250,7 @@ start):
 ```
 
 A URL is good for one `PUT` of a key that starts with the prefix (after the path is decoded: no
-`..`, no `.` segment, no control character, never `_entries/`, `_journal/` or `_tiering/`), with an
+`..`, no `.` segment, no control character, never `_journal/` or `_tiering/`), with an
 `X-Amz-Expires` of at most the smaller of `max_expires_secs` and `--presign-max-expires` (default
 15m), and a body of at most `max_object_bytes` (5 GiB at most, the S3 single-PUT limit; each key file chooses its own), checked on
 `Content-Length` and on the bytes received (and held to `--max-request-bytes`, 256 MiB by default, too: a key with a larger
@@ -303,7 +303,7 @@ signed with it is refused). The file is JSON of exactly these five fields, all r
  "delete_prefixes": []}
 ```
 
-Every prefix ends in `/` and is not empty. None may be `_entries/`, `_journal/` or `_tiering/`, be under one, be
+Every prefix ends in `/` and is not empty. None may be `_journal/` or `_tiering/`, be under one, be
 a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one is refused at
 start. A list may be empty, but a key whose three lists are all empty is refused, since it could do
 nothing. The lists may overlap: a prefix in `read_prefixes` and in `write_prefixes` is one the key
@@ -416,7 +416,7 @@ body   = "tierstore-grant-v1" LF key-id LF bucket LF expires LF name { LF name }
   ahead of that clock.
 - Each `name` is the exact key of an object, as it appears in the path of the request after
   percent-decoding: UTF-8, at most 1024 bytes, not empty, no control character, no `..`, no `.`
-  segment, not under `_entries/`, `_journal/` or `_tiering/`. There is at least one name and at most 4096, but
+  segment, not under `_journal/` or `_tiering/`. There is at least one name and at most 4096, but
   the header limit below is reached first, at about 700 ordinary names (the token is about 4/3 of
   the body). The names are in strictly ascending byte order, so none is listed twice.
 - The header value is at most 65536 bytes. The server compares the tag in constant time over the
@@ -534,7 +534,7 @@ read, and answers 412 at once if the object is there; the upstream's conditional
 arbiter of two writers. A full upstream (507) is 503 `SlowDown` with `Retry-After`; an upstream that
 does not answer is 503. A delete drops the cache's copy and then deletes at the upstream, and a fill
 that was reading the object does not keep it; the completion of an upload drops the cache's copy of
-the key. Listings leave out the keys under `_entries/`, `_journal/` and `_tiering/`, always. The upstream key
+the key. Listings leave out the keys under `_journal/` and `_tiering/`, always. The upstream key
 must now be one that writes: with `write_through` the start runs the self-test of the storage node
 against the upstream, under `_tiering/selftest/` (a create-only put that refuses a key that exists,
 a replace on a tag, ranged reads, paging, and a multipart completion that refuses a key that
@@ -610,7 +610,7 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_entries/`, `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
+(and it is not under `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
 key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing
 leaves them out). Every other key that is not kept, and every other listing, goes to the
 upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
@@ -905,7 +905,7 @@ Each of these exits with status 2 and names the file and the key:
 - an `[oci]` table without `listen`, with a key but no `listen` (the message names that key), with
   only one of `tls_cert_file` and `tls_key_file`, or with `max_connections = 0`;
 - a `[[policy]]` prefix that is listed twice, that lies inside another listed prefix (or holds
-  one), that does not end in `/`, or that is under `_entries/`, `_journal/` or `_tiering/`, which tierstore
+  one), that does not end in `/`, or that is under `_journal/` or `_tiering/`, which tierstore
   keeps for itself.
 
 `[[policy]]` has a `prefix` (empty for all the rest) and `cache`. With `[local_cache]` `cache = true`
@@ -1067,7 +1067,7 @@ the front then reads through the node's local cache, not a proxy (see The regist
 |---|---|
 | `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. On main, not in v0.0.41: give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
 | `--oci-tls-cert PATH`, `--oci-tls-key PATH` | both or neither (one without the other is refused at start, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for `--oci-listen` (for each of them, when it is given more than once; any IP subjectAltName, if the address is `0.0.0.0` or `::`); a certificate without one, one that is expired or not yet valid, a key file any user can read (the "other" mode bits; a group may), or an unreadable file, is refused at start. The files are read once: a new certificate takes a restart, so renew it before it expires |
-| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_entries/`, `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
+| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
 

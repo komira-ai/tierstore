@@ -204,7 +204,7 @@ async fn the_upstream_conditional_put_decides_a_race_and_a_failed_head_fails_the
 #[tokio::test]
 async fn reserved_keys_are_refused_by_every_write() {
     let rig = Rig::writing("tscache-write-reserved");
-    for key in ["_entries/p1/0001", "_journal/p1/0001", "_tiering/lease"] {
+    for key in ["_journal/p1/0001", "_tiering/lease"] {
         let cache = &rig.cache;
         let results = [
             cache.put(key, Bytes::from_static(b"x")).await,

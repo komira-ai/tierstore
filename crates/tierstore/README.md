@@ -188,7 +188,7 @@ by default).
 
 A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `read_prefixes`,
 `write_prefixes` and `delete_prefixes`; the lists may be empty, but not all three, and every prefix
-ends in `/`, is not, or under, or over `_entries/`, `_journal/` or `_tiering/`, and has neither as a segment.
+ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
 A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
 The server library does not itself force the access key ids of its keys to differ (`ServerConfig`

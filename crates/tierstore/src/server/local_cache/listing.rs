@@ -1,6 +1,6 @@
 //! The listings of a cache: the upstream's, without the names a storage node keeps for itself.
 //!
-//! The keys under `_entries/`, `_journal/` and `_tiering/` (a storage node's journal and its bookkeeping) are
+//! The keys under `_journal/` and `_tiering/` (a storage node's journal and its bookkeeping) are
 //! left out of every listing, as a storage node leaves them out of its own. When the upstream is
 //! a bucket that holds them, a client of the cache never sees them. A page that the filter cuts
 //! short is made up from the next page of the upstream, because a caller takes a short page for

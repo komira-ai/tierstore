@@ -9,7 +9,7 @@
 //! ```
 //!
 //! All three fields are required and no other is allowed. The prefix ends in `/` and is not
-//! `_entries/`, `_journal/` or `_tiering/` or under them or a prefix of them. A request signed by the key is
+//! `_journal/` or `_tiering/` or under them or a prefix of them. A request signed by the key is
 //! allowed, and only for a key (or a list prefix) that starts with the prefix of the key and is
 //! longer than it, after the path is percent-decoded and with no `..`, no `.` segment and no
 //! control character in it:
@@ -22,7 +22,7 @@
 //!
 //! Everything else is `403 AccessDenied`, answered before the body is read: GetObject (a GC key never reads
 //! a body), every `PUT` and `POST` (put, part, start and completion of an upload, copy), the calls
-//! on the bucket itself, and every key under `_entries/`, `_journal/` or `_tiering/`. The key is refused
+//! on the bucket itself, and every key under `_journal/` or `_tiering/`. The key is refused
 //! on a presigned URL (the URL's key must be a presigning key), as a presigning key is refused in
 //! the header.
 //!
@@ -181,7 +181,7 @@ pub(super) fn permit(
     target: &Target,
     query: &Query,
 ) -> Result<(), Refusal> {
-    // `GcKey::new` also refuses a prefix that is, or covers, `_entries/`, `_journal/` or `_tiering/`, so a name
+    // `GcKey::new` also refuses a prefix that is, or covers, `_journal/` or `_tiering/`, so a name
     // under the prefix of a key is never one of the proxy's; the check of reserved names here is the
     // second guard, for a caller that builds its prefix another way.
     let inside = |name: &str| {

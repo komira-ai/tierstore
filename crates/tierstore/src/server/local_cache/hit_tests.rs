@@ -127,8 +127,8 @@ async fn the_longest_policy_decides() {
     assert_eq!(rig.cache.held(), (20, 2));
 }
 
-/// Asserts that a get, a ranged get, a streamed get and a head of a key under `_entries/`,
-/// `_journal/` or `_tiering/` are refused with `Reserved` under a policy for everything, that the
+/// Asserts that a get, a ranged get, a streamed get and a head of a key under `_journal/` or
+/// `_tiering/` are refused with `Reserved` under a policy for everything, that the
 /// upstream is not asked, and that nothing is kept: the upstream may be a plain bucket that holds
 /// them.
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn a_read_of_a_reserved_key_is_refused_before_the_upstream_is_asked() {
     let rig = Rig::with("tscache-reserved-reads", |config| {
         config.policies = vec![(String::new(), true)];
     });
-    for key in ["_entries/p/1", "_journal/p/1", "_tiering/usage"] {
+    for key in ["_journal/p/1", "_tiering/usage"] {
         rig.put(key, &pattern(10)).await;
         let reserved = Some(Error::Reserved(key.to_owned()));
         assert_eq!(rig.get(key).await.err(), reserved, "{key}");

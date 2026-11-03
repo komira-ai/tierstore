@@ -166,18 +166,13 @@ async fn a_delete_removes_both_copies_and_is_journaled() {
     assert_eq!(again, [entry(JournalOp::Delete, "k", 0, 0)]);
 }
 
-/// Asserts that a client put or delete of a key under `_entries/`, `_journal/` or `_tiering/` is
+/// Asserts that a client put or delete of a key under `_journal/` or `_tiering/` is
 /// refused with `Reserved` and changes nothing, and that the proxy does not replace objects.
 #[tokio::test(start_paused = true)]
 async fn a_client_write_under_a_reserved_prefix_is_refused() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
-    for key in [
-        "_entries/x",
-        "_journal/p1/x",
-        "_tiering/lease",
-        "_tiering/usage",
-    ] {
+    for key in ["_journal/p1/x", "_tiering/lease", "_tiering/usage"] {
         let put = proxy.put(key, body("v")).await;
         assert_eq!(put, Err(Error::Reserved(key.to_owned())));
         let delete = proxy.delete(key).await;
@@ -192,20 +187,18 @@ async fn a_client_write_under_a_reserved_prefix_is_refused() {
 }
 
 /// Asserts that a get (whole and of a range), a head and the four multipart calls of a key under
-/// `_entries/`, `_journal/` or `_tiering/` are refused with `Reserved`, whichever tier holds the
+/// `_journal/` or `_tiering/` are refused with `Reserved`, whichever tier holds the
 /// key, and that the object the tier holds is left as it is.
 #[tokio::test(start_paused = true)]
 async fn a_client_read_or_upload_of_a_reserved_key_is_refused_whichever_tier_holds_it() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
-    rig.hot_mem.put("_entries/h", body("hot")).await.unwrap();
-    rig.cold_mem.put("_entries/c", body("cold")).await.unwrap();
+    rig.hot_mem.put("_journal/h", body("hot")).await.unwrap();
     rig.cold_mem.put("_tiering/c", body("cold")).await.unwrap();
     rig.cold_mem.put("_journal/c", body("cold")).await.unwrap();
     let parts = [(1, "t".to_owned())];
     for key in [
-        "_entries/h",
-        "_entries/c",
+        "_journal/h",
         "_tiering/c",
         "_tiering/proxies/p1",
         "_journal/c",
@@ -224,8 +217,8 @@ async fn a_client_read_or_upload_of_a_reserved_key_is_refused_whichever_tier_hol
         let aborted = proxy.abort_upload(key, "u").await;
         assert_eq!(aborted.err(), refused, "abort {key}");
     }
-    assert_eq!(read(&*rig.hot_mem, "_entries/h").await, body("hot"));
-    assert_eq!(read(&*rig.cold_mem, "_entries/c").await, body("cold"));
+    assert_eq!(read(&*rig.hot_mem, "_journal/h").await, body("hot"));
+    assert_eq!(read(&*rig.cold_mem, "_journal/c").await, body("cold"));
 }
 
 /// Asserts that a reserved key that only the cold tier holds is left out of a listing, of a page
@@ -236,13 +229,13 @@ async fn a_listing_leaves_out_the_reserved_keys_that_only_the_cold_tier_holds() 
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("a", body("v")).await.unwrap();
-    for key in ["_entries/c", "_journal/c", "_tiering/c", "b", "c"] {
+    for key in ["_journal/c", "_tiering/c", "b", "c"] {
         rig.cold_mem.put(key, body("v")).await.unwrap();
     }
     assert_eq!(keys(&proxy).await, ["a", "b", "c"]);
     assert_eq!(page(&proxy, None, 2).await, ["a", "b"]);
     assert_eq!(page(&proxy, Some("a"), 2).await, ["b", "c"]);
-    for prefix in ["_entries/", "_journal/", "_tiering/", "_"] {
+    for prefix in ["_journal/", "_tiering/", "_"] {
         let listed = proxy.list(prefix).await.unwrap();
         assert!(listed.is_empty(), "{prefix}");
         let paged = proxy.list_page(prefix, None, 10).await.unwrap();

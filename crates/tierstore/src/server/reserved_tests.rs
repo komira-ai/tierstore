@@ -11,7 +11,7 @@ use super::testing::{Rig, texts};
 
 const MEBIBYTE: u64 = 1 << 20;
 
-/// Asserts that no call can name a key under `_entries/`, `_journal/` or `_tiering/`: get, head,
+/// Asserts that no call can name a key under `_journal/` or `_tiering/`: get, head,
 /// a create-only put, delete and the multipart calls are `AccessDenied` (the front
 /// refuses them before it looks at the rest of the request, so also a completion with a
 /// malformed body), and a listing leaves those keys out
@@ -21,11 +21,7 @@ async fn the_keys_of_the_proxy_are_out_of_reach() {
     let rig = Rig::new(MEBIBYTE).await;
     rig.put("k", b"v").await;
     rig.hot_mem
-        .put("_entries/h", Bytes::from("e"))
-        .await
-        .unwrap();
-    rig.cold_mem
-        .put("_entries/c", Bytes::from("e"))
+        .put("_journal/h", Bytes::from("e"))
         .await
         .unwrap();
     rig.cold_mem
@@ -39,8 +35,7 @@ async fn the_keys_of_the_proxy_are_out_of_reach() {
         "_journal/p1/00000000000000000001",
         "_tiering/lease",
         "_tiering/c",
-        "_entries/h",
-        "_entries/c",
+        "_journal/h",
     ] {
         for method in ["GET", "HEAD", "DELETE"] {
             let reply = rig.call(method, key, b"x").await;
@@ -65,7 +60,7 @@ async fn the_keys_of_the_proxy_are_out_of_reach() {
     assert_eq!(reply.code(), "AccessDenied");
     assert_eq!(texts(&rig.list("").await.body, "Key"), ["k"]);
     assert_eq!(
-        texts(&rig.list("prefix=_entries/").await.body, "Key"),
+        texts(&rig.list("prefix=_journal/").await.body, "Key"),
         Vec::<String>::new()
     );
 }

@@ -19,8 +19,6 @@ use crate::{Backend, Error};
 
 /// The prefix of the journals.
 pub(crate) const JOURNAL_PREFIX: &str = "_journal/";
-/// The prefix reserved for the per-key entries of a later release; no client may name it.
-pub(crate) const ENTRIES_PREFIX: &str = "_entries/";
 /// The prefix of everything else the proxy and the reconciler keep.
 pub(crate) const TIERING_PREFIX: &str = "_tiering/";
 /// The prefix of the objects that say which proxies have journals.
@@ -31,7 +29,7 @@ pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
 /// Every prefix that the proxy keeps for itself: no client names a key under one.
-pub(crate) const RESERVED_PREFIXES: [&str; 3] = [ENTRIES_PREFIX, JOURNAL_PREFIX, TIERING_PREFIX];
+pub(crate) const RESERVED_PREFIXES: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
