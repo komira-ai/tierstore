@@ -20,7 +20,7 @@ const DEPARTURE: Duration = Duration::from_secs(60);
 /// The default of `--deadline-margin`.
 const MARGIN: Duration = Duration::from_secs(10);
 /// The default of `--registration-retention`.
-const RETENTION: Duration = Duration::from_secs(600);
+const RETENTION: Duration = Duration::ZERO;
 
 /// How the proxy heartbeats and how long the reconciler waits.
 #[derive(Clone, Debug, PartialEq, Eq, Args)]
@@ -42,9 +42,10 @@ pub struct HeartbeatFlags {
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
     /// reconciler sees it, before the reconciler removes it, if the proxy left no journal object.
-    /// At least `--departure`, or zero, which removes no registration: set it before going back
-    /// to a release without the heartbeat, whose proxies never rewrite a registration.
-    #[arg(long, default_value = "10m", value_parser = parse_duration)]
+    /// At least `--departure`, or zero, which is the default and removes no registration: a proxy
+    /// of a release without the heartbeat that reopens a registration written by this release
+    /// never rewrites it, so set a time only once no such proxy runs.
+    #[arg(long, default_value = "0s", value_parser = parse_duration)]
     pub registration_retention: Duration,
 }
 

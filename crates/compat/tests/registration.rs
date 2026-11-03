@@ -86,7 +86,8 @@ async fn this_branch_reads_the_registration_of_the_previous_release_and_never_re
     let cold = Arc::new(MemoryBackend::new());
     let mut settings = ReconcilerConfig::new("new", 1 << 20, Arc::new(SystemClock));
     settings.mono = mono.clone();
-    let retention = settings.registration_retention;
+    let retention = Duration::from_secs(600);
+    settings.registration_retention = retention;
     let mut reconciler = Reconciler::new(hot.clone(), cold.clone(), settings);
     let report = reconciler.pass().await;
     assert_eq!((report.copied, report.failed.len()), (1, 0), "{report:?}");
@@ -96,4 +97,40 @@ async fn this_branch_reads_the_registration_of_the_previous_release_and_never_re
     let report = reconciler.pass().await;
     assert_eq!(report.failed.len(), 0, "{report:?}");
     assert!(hot.head(REGISTRATION).await.is_ok());
+}
+
+/// Asserts that a proxy of the previous release that reopens a registration this branch wrote
+/// (a count above zero) leaves it as it was, and that under the default settings of this branch's
+/// reconciler, which removes no registration, the registration is still there after a very long
+/// time with no journal object, so that what the older proxy writes later is found and copied.
+#[tokio::test]
+async fn a_previous_release_proxy_over_a_beating_registration_is_found_under_the_default_settings()
+{
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-registration-reopen");
+    let hot = Arc::new(DirBackend::open(dir.path()).unwrap());
+    let beating = body(r#"{"proto":1,"boot":"b","hb":4}"#);
+    hot.put(REGISTRATION, beating.clone()).await.unwrap();
+
+    let before_hot = Arc::new(PrevDir::open(dir.path()).unwrap());
+    let mut old = PrevProxyConfig::new("p1", 1 << 20, Arc::new(PrevClock));
+    old.linger = Duration::from_millis(1);
+    let old_proxy = PrevProxy::open(before_hot, Arc::new(PrevMemory::new()), old)
+        .await
+        .unwrap();
+    assert_eq!(hot.get(REGISTRATION, None).await.unwrap(), beating);
+
+    let mono = Arc::new(Mono::new());
+    let cold = Arc::new(MemoryBackend::new());
+    let mut settings = ReconcilerConfig::new("new", 1 << 20, Arc::new(SystemClock));
+    settings.mono = mono.clone();
+    let mut reconciler = Reconciler::new(hot.clone(), cold.clone(), settings);
+    assert_eq!(reconciler.pass().await.failed.len(), 0);
+    mono.advance(Duration::from_secs(100_000));
+    assert_eq!(reconciler.pass().await.failed.len(), 0);
+    assert_eq!(hot.get(REGISTRATION, None).await.unwrap(), beating);
+
+    old_proxy.put("k1", body("one")).await.unwrap();
+    let report = reconciler.pass().await;
+    assert_eq!((report.copied, report.failed.len()), (1, 0), "{report:?}");
+    assert_eq!(cold.get("k1", None).await.unwrap(), body("one"));
 }

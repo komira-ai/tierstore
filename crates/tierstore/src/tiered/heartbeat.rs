@@ -11,8 +11,8 @@
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just
 //! stops changing, and the reconciler removes it once it has stayed unchanged for
-//! `ReconcilerConfig::registration_retention` (which is at least `departure`) and the proxy left
-//! no journal object.
+//! `ReconcilerConfig::registration_retention` (if that is set, which it is not by default, and
+//! then it is at least `departure`) and the proxy left no journal object.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -193,7 +193,8 @@ impl Proxy {
     /// Stops the heartbeat and waits until the task has ended, so that no beat follows; a second
     /// caller, at the same time or later, waits for the same end. The
     /// registration is left as it is: it stops changing, and the reconciler removes it after
-    /// `ReconcilerConfig::registration_retention` if no journal object is left. Afterwards the heartbeat cannot be started
+    /// `ReconcilerConfig::registration_retention` if that is set and no journal object is left.
+    /// Afterwards the heartbeat cannot be started
     /// again, whether it was running or not.
     pub async fn stop_heartbeat(&self) {
         let mut ended = {

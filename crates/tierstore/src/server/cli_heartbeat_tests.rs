@@ -34,7 +34,7 @@ fn refused(more: &[&str]) -> Option<String> {
 }
 
 /// Asserts the defaults (a beat every 10 seconds, departure after 60, a margin of 10 seconds and a
-/// registration retention of 10 minutes), and that the keys of `[hot_store]` left out have the same
+/// registration retention of zero, which removes none), and that the keys of `[hot_store]` left out have the same
 /// defaults as the flags left out.
 #[test]
 fn the_flags_have_their_defaults_and_the_keys_have_the_same() {
@@ -42,7 +42,7 @@ fn the_flags_have_their_defaults_and_the_keys_have_the_same() {
     assert_eq!(flags.heartbeat, 10 * SECOND);
     assert_eq!(flags.departure, 60 * SECOND);
     assert_eq!(flags.deadline_margin, 10 * SECOND);
-    assert_eq!(flags.registration_retention, 600 * SECOND);
+    assert_eq!(flags.registration_retention, Duration::ZERO);
     assert_eq!(HeartbeatFlags::from_table(&TierTable::default()), flags);
 }
 

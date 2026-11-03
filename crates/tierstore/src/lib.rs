@@ -73,7 +73,8 @@
 //!   the data prefixes of either tier: it lists `_tiering/proxies/` and the journal prefix of
 //!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage. It also
 //!   removes the registration of a proxy that heartbeated, left no journal object and has not
-//!   changed for [`ReconcilerConfig::registration_retention`] by its own monotonic clock.
+//!   changed for [`ReconcilerConfig::registration_retention`] by its own monotonic clock; by
+//!   default that is zero and nothing is removed.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

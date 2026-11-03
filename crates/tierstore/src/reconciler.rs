@@ -61,7 +61,7 @@ impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
     /// retention of an hour, listings of 100 journal objects, a [`MonotonicClock`] that reads zero
-    /// now, and a registration retention of 10 minutes.
+    /// now, and no removal of registrations (a registration retention of zero).
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -75,7 +75,7 @@ impl ReconcilerConfig {
             page_size: 100,
             clock,
             mono: Arc::new(MonotonicClock::new()),
-            registration_retention: Duration::from_secs(600),
+            registration_retention: Duration::ZERO,
         }
     }
 }
