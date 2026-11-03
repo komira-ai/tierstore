@@ -240,20 +240,25 @@ impl Backend for MemoryBackend {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        Ok(self.get_marked(key, range).await?.0)
+        let (body, _, _) = self.object(key)?;
+        match range {
+            Some(range) => range.slice(&body),
+            None => Ok(body),
+        }
     }
 
     async fn get_marked(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         let (body, _, marked) = self.object(key)?;
+        let tag = tag_of(&body);
         let read = match range {
             Some(range) => range.slice(&body)?,
             None => body,
         };
-        Ok((read, marked))
+        Ok((read, marked, tag))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

@@ -37,6 +37,6 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Every crate comes from crates.io or this workspace, but one: the release before this one, the
-# `tierstore_prev` dev-dependency of crates/compat, taken from this repository's own public URL at
+# `tierstore_prev` workspace dependency (a dev-dependency of crates/compat), taken from this repository's own public URL at
 # a pinned commit, which is what lets the compatibility tests run the previous release's code.
 allow-git = ["https://github.com/komira-ai/tierstore"]

@@ -21,7 +21,7 @@ use bytes::Bytes;
 use reqwest::{Method, Response, StatusCode};
 
 use super::{Conn, failure, transport, xml};
-use crate::body::Parts;
+use crate::body::{Parts, Unsized};
 use crate::{BodyStream, ObjectKey, ObjectStoreError};
 
 /// The smallest part S3 takes, except the last: 5 MiB.
@@ -43,7 +43,12 @@ pub const PART_BYTES: u64 = 16 << 20;
 /// one PUT.
 pub const MULTIPART_THRESHOLD: u64 = PART_BYTES;
 
+/// [`PART_BYTES`] as a length in memory.
+pub(super) const PART_LEN: usize = 16 << 20;
+
 const MIB: u64 = 1 << 20;
+
+const _: () = assert!(PART_LEN as u64 == PART_BYTES);
 
 // One PUT carries at most what S3 takes in one.
 const _: () = assert!(MULTIPART_THRESHOLD <= MAX_PART_BYTES);
@@ -73,7 +78,35 @@ pub(super) async fn put(
         "an object larger than 10,000 parts of 5 GiB",
     ))?;
     let upload = create(conn, key).await?;
-    match send(&upload, len, size, body, matching).await {
+    let sent = send(&upload, len, size, body, matching).await;
+    settle(upload, sent).await
+}
+
+/// Writes `first` and `rest`, a body of a length not known, as a multipart upload that replaces
+/// the object that has the entity tag `etag` (`If-Match` on the completion). Each part (of
+/// [`PART_LEN`] bytes, the last shorter) is sent as soon as it is full and the body has more, so
+/// at most one part and one piece of the body are held, and the object is replaced only by the
+/// completion, after the whole body was read. `first` is the first part, which the caller read
+/// to find that the body is longer than one part.
+/// Gives the `ETag` of the object, quotes included, if the completion carries one.
+pub(super) async fn put_unsized(
+    conn: &Arc<Conn>,
+    key: &ObjectKey,
+    first: Bytes,
+    rest: Unsized,
+    etag: &str,
+) -> Result<Option<String>, ObjectStoreError> {
+    let upload = create(conn, key).await?;
+    let sent = send_unsized(&upload, first, rest, etag).await;
+    settle(upload, sent).await
+}
+
+/// Ends `upload` as `sent` says: nothing more to do if it completed, an abort if it failed.
+async fn settle(
+    upload: Upload,
+    sent: Result<Option<String>, ObjectStoreError>,
+) -> Result<Option<String>, ObjectStoreError> {
+    match sent {
         Ok(etag) => {
             upload.finished();
             Ok(etag)
@@ -83,6 +116,22 @@ pub(super) async fn put(
             Err(e)
         }
     }
+}
+
+/// `first`, then every part of `rest` while it has bytes, then the completion. A part number
+/// past [`MAX_PARTS`] is the store's to refuse, which aborts the upload.
+async fn send_unsized(
+    upload: &Upload,
+    first: Bytes,
+    mut rest: Unsized,
+    etag: &str,
+) -> Result<Option<String>, ObjectStoreError> {
+    let mut etags = vec![upload_part(upload, 1, first).await?];
+    while rest.more().await? {
+        let part = rest.next(PART_LEN).await?;
+        etags.push(upload_part(upload, etags.len() + 1, part).await?);
+    }
+    complete(upload, &etags, Some(etag)).await
 }
 
 /// An upload in progress. Dropped while open, it is aborted from a task of its own.

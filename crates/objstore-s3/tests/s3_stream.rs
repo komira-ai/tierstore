@@ -14,6 +14,15 @@ use tokio::net::TcpListener;
 
 /// Serves `responses` in order, one per connection, and records each request head.
 async fn script(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let (told, _) = tokio::sync::mpsc::unbounded_channel();
+    script_heads(responses, told).await
+}
+
+/// As [`script`], and also gives each request head on `told` as soon as the request is complete.
+async fn script_heads(
+    responses: Vec<String>,
+    told: tokio::sync::mpsc::UnboundedSender<String>,
+) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -44,7 +53,8 @@ async fn script(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
                 let n = sock.read(&mut chunk).await.unwrap();
                 buf.extend_from_slice(&chunk[..n]);
             }
-            log.lock().unwrap().push(head);
+            log.lock().unwrap().push(head.clone());
+            let _ = told.send(head);
             sock.write_all(resp.as_bytes()).await.unwrap();
             sock.shutdown().await.unwrap();
         }
@@ -119,15 +129,17 @@ async fn whole(body: objstore_s3::s3::ObjectBody) -> Vec<u8> {
 /// answer, absent on the next.
 #[tokio::test]
 async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answer() {
-    let marked = answer("200 OK", &[MARK], "abcdefg");
+    let marked = answer("200 OK", &[MARK, "etag: \"one\""], "abcdefg");
     let plain = answer("200 OK", &[], "xyz");
     let (endpoint, seen) = script(vec![marked, plain]).await;
     let s = store(endpoint);
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(read.reservation);
+    assert_eq!(read.etag.as_deref(), Some("\"one\""));
     assert_eq!(whole(read.body).await, b"abcdefg");
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(!read.reservation);
+    assert_eq!(read.etag, None);
     assert_eq!(whole(read.body).await, b"xyz");
 
     let heads = seen.lock().unwrap();
@@ -145,7 +157,7 @@ async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answ
 async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer() {
     let part = answer(
         "206 Partial Content",
-        &["content-range: bytes 2-4/10", MARK],
+        &["content-range: bytes 2-4/10", MARK, "etag: \"two\""],
         "cde",
     );
     let (endpoint, seen) = script(vec![part]).await;
@@ -154,6 +166,7 @@ async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer
         .await
         .unwrap();
     assert!(read.reservation);
+    assert_eq!(read.etag.as_deref(), Some("\"two\""));
     assert_eq!(whole(read.body).await, b"cde");
     let get = seen.lock().unwrap()[0].to_ascii_lowercase();
     assert!(get.contains("\r\nrange: bytes=2-4\r\n"), "{get}");
@@ -226,8 +239,8 @@ async fn a_streamed_read_that_is_not_answered_with_what_was_asked_is_typed() {
     }
 }
 
-/// Asserts that a streamed read is sent again after a failure in transport before any of the body
-/// was given, as a read is.
+/// Asserts that a streamed read is sent again after a failure in transport before the response
+/// headers arrived, as a read is.
 #[tokio::test]
 async fn a_streamed_read_is_sent_again_after_a_transport_failure_before_its_body() {
     let hello = answer("200 OK", &[], "hello");
@@ -412,5 +425,159 @@ async fn a_large_streamed_replace_is_completed_with_if_match_and_aborted_on_fail
     let unnamed = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
     let (outcome, _) = big_replace(answer("200 OK", &[], unnamed), false).await;
     let err = outcome.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");
+}
+
+/// Asserts that a read whose answer has valid headers and then fails before its first body byte is
+/// not sent again: the retry boundary is the response headers. The read is given, its body ends
+/// with a transport error as the first piece, and the store saw one request.
+#[tokio::test]
+async fn a_failure_after_valid_headers_and_before_the_first_body_byte_is_not_retried() {
+    let headers_only = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 10\r\n\r\n";
+    let hello = answer("200 OK", &[], "hello");
+    let (endpoint, seen) = script(vec![headers_only.to_owned(), hello]).await;
+    let read = store(endpoint).get_stream(key(), None).await.unwrap();
+    let (bytes, error) = drained(read.body).await;
+    assert!(bytes.is_empty(), "{bytes:?}");
+    let error = error.unwrap();
+    assert!(matches!(error, ObjectStoreError::Transport(_)), "{error}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// The completion of a two-part upload that names `joined-2`.
+fn two_part_completion() -> String {
+    let ok =
+        "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
+    answer("200 OK", &[], ok)
+}
+
+/// Asserts that a streamed replacement of a body of unknown length that is longer than one part
+/// sends the first part while the producer still withholds the rest: the part's request arrives
+/// before the producer is released, nothing else has been sent and the call has not returned, and
+/// after the release the second part and the completion (which alone carries `If-Match`) follow
+/// and the call gives the completion's tag. The producer is gated on an event, never on time.
+#[tokio::test]
+async fn an_unsized_streamed_replace_sends_a_part_while_the_producer_withholds_the_rest() {
+    let (told, mut heads) = tokio::sync::mpsc::unbounded_channel();
+    let (endpoint, _) = script_heads(upload_answers(two_part_completion(), false), told).await;
+    let s = store(endpoint);
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let first = Bytes::from(vec![0_u8; (16 << 20) + 1]);
+    let rest = stream::once(async move {
+        released.await.unwrap();
+        Ok(Bytes::from_static(b"tail"))
+    });
+    let body: BodyStream = stream::iter([Ok(first)]).chain(rest).boxed();
+    let put =
+        tokio::spawn(async move { s.put_stream_if_match_unsized(key(), body, "\"old\"").await });
+
+    let create = heads.recv().await.unwrap();
+    assert!(
+        create.starts_with("POST /test-bucket/cas/seg-1?uploads= "),
+        "{create}"
+    );
+    let part = heads.recv().await.unwrap().to_ascii_lowercase();
+    let first_part = "put /test-bucket/cas/seg-1?partnumber=1&uploadid=u1 ";
+    assert!(part.starts_with(first_part), "{part}");
+    assert!(part.contains("\r\ncontent-length: 16777216\r\n"), "{part}");
+    assert!(
+        !put.is_finished(),
+        "the call returned before the producer was released"
+    );
+
+    release.send(()).unwrap();
+    let part = heads.recv().await.unwrap().to_ascii_lowercase();
+    let second_part = "put /test-bucket/cas/seg-1?partnumber=2&uploadid=u1 ";
+    assert!(part.starts_with(second_part), "{part}");
+    assert!(part.contains("\r\ncontent-length: 5\r\n"), "{part}");
+    let complete = heads.recv().await.unwrap().to_ascii_lowercase();
+    assert!(
+        complete.starts_with("post /test-bucket/cas/seg-1?uploadid=u1 "),
+        "{complete}"
+    );
+    assert!(complete.contains("\r\nif-match: \"old\"\r\n"), "{complete}");
+    assert_eq!(put.await.unwrap().unwrap(), "\"joined-2\"");
+}
+
+/// Asserts that an unsized body of at most one part is one PUT with `If-Match` and no multipart
+/// request, whether it is empty, short, or exactly one part, and that it gives the answer's tag.
+#[tokio::test]
+async fn an_unsized_streamed_replace_of_at_most_one_part_is_one_put_with_if_match() {
+    for len in [0_u64, 3, 16 << 20] {
+        let done = answer("200 OK", &["etag: \"new\""], "");
+        let (endpoint, seen) = script(vec![done]).await;
+        let s = store(endpoint);
+        let put = s.put_stream_if_match_unsized(key(), zeros(len, None), "\"old\"");
+        assert_eq!(put.await.unwrap(), "\"new\"", "{len}");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{len}");
+        let put = seen[0].to_ascii_lowercase();
+        assert!(put.starts_with("put /test-bucket/cas/seg-1 "), "{put}");
+        assert!(put.contains("\r\nif-match: \"old\"\r\n"), "{put}");
+        assert!(
+            put.contains(&format!("\r\ncontent-length: {len}\r\n")),
+            "{put}"
+        );
+    }
+}
+
+/// Asserts that an unsized body that fails before its first part is full sends no request, and
+/// one that fails after the first part was sent aborts the upload and gives the body's error.
+#[tokio::test]
+async fn an_unsized_streamed_replace_whose_body_fails_replaces_nothing() {
+    let cut = ObjectStoreError::Body("cut".to_owned());
+    let (endpoint, seen) = script(Vec::new()).await;
+    let s = store(endpoint);
+    let failing = zeros(2 << 20, Some(cut.clone()));
+    let failed = s.put_stream_if_match_unsized(key(), failing, "\"old\"");
+    assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    assert_eq!(seen.lock().unwrap().len(), 0);
+
+    let id =
+        "<InitiateMultipartUploadResult><UploadId>u1</UploadId></InitiateMultipartUploadResult>";
+    let answers = vec![
+        answer("200 OK", &[], id),
+        answer("200 OK", &["etag: \"p1\""], ""),
+        answer("204 No Content", &[], ""),
+    ];
+    let (endpoint, seen) = script(answers).await;
+    let s = store(endpoint);
+    let first = Bytes::from(vec![0_u8; (16 << 20) + 1]);
+    let failing: BodyStream = stream::iter(vec![Ok(first), Err(cut.clone())]).boxed();
+    let failed = s.put_stream_if_match_unsized(key(), failing, "\"old\"");
+    assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert!(seen[2].starts_with("DELETE "), "{seen:?}");
+}
+
+/// Asserts that a completion the store refuses (412, or a 200 that names no tag) is typed and the
+/// upload is aborted after a refusal.
+#[tokio::test]
+async fn an_unsized_streamed_replace_refused_at_completion_is_typed_and_aborted() {
+    let refused = answer(
+        "412 Precondition Failed",
+        &[],
+        "<Error><Code>PreconditionFailed</Code></Error>",
+    );
+    let (endpoint, seen) = script(upload_answers(refused, true)).await;
+    let s = store(endpoint);
+    let body = zeros(OVER_ONE_PUT, None);
+    let put = s.put_stream_if_match_unsized(key(), body, "\"old\"");
+    let err = put.await.unwrap_err();
+    assert!(
+        matches!(err, ObjectStoreError::Service { status: 412, .. }),
+        "{err}"
+    );
+    assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
+
+    let unnamed = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
+    let (endpoint, _) = script(upload_answers(answer("200 OK", &[], unnamed), false)).await;
+    let s = store(endpoint);
+    let body = zeros(OVER_ONE_PUT, None);
+    let err = s
+        .put_stream_if_match_unsized(key(), body, "\"old\"")
+        .await
+        .unwrap_err();
     assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");
 }
