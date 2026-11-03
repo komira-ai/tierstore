@@ -67,9 +67,9 @@ opening the proxy: <why>
 binding <address>: <why>
 ```
 
-`tier unreachable` is a store that did not answer for `--backend-check-wait`: check the endpoint, the network and the store. The process asks again with growing pauses before it gives up, so a store that is slow to come up after a reboot does not fail a start. `binding` is an address in use, or one that is not on this host. On main, not in v0.0.41, a server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
+`tier unreachable` is a store that did not answer for `--backend-check-wait`: check the endpoint, the network and the store. The process asks again with growing pauses before it gives up, so a store that is slow to come up after a reboot does not fail a start. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
 
-An address given twice (on main, not in v0.0.41) exits 2 before anything is bound; the message names the flag or the key and never the address:
+An address given twice exits 2 before anything is bound; the message names the flag or the key and never the address:
 
 ```message
 <flag> is given the same address twice
@@ -91,7 +91,7 @@ A tier that answers a self-test question wrongly exits 3 and names the tier, the
 | 413 `EntityTooLarge` | a body longer than `--max-request-bytes` (or the presigning key's ceiling) |
 | 400 `RequestTimeout` | a body that stalled for `--body-idle-timeout` or came slower than `--put-min-bytes-per-sec`; nothing is stored |
 | 503 `SlowDown` | more than `--max-concurrent-puts` bodies at once for longer than `--put-permit-wait`, or a put that met a full tier; retry |
-| 503 `ServiceUnavailable` | a tier could not be reached; in v0.0.41 and before also a request on a connection that was open when the drain's settle ended. On main a drain answers no request 503 (see "A connection ends during a restart") |
+| 503 `ServiceUnavailable` | a tier could not be reached; a drain answers no request 503 (see "A connection ends during a restart") |
 | 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or `encoding-type=url` on a listing; set the SDK's checksum calculation to "when required" |
 
 ## The hot tier keeps filling
@@ -100,7 +100,7 @@ Check `/usagez` first. A 503 there means the reconciler is not publishing: look 
 
 ## A connection ends during a restart
 
-On main, not in v0.0.41. From the moment a stop begins every answer carries `Connection: close`, and at the end of the settle (`--drain-lb-wait`) the server closes each idle connection by shutting its end for writing: a client reads the end of the stream, not a reset, and opens a new connection. A client that sent a request in the one round trip before it read that end gets no answer: the server read the request, dropped it and counted it in `tierstore_drain_late_requests_total`. Do not retry such a request unless it is safe to repeat: a retried create-only put answers 412 whether its first try was stored or another writer stored the key. Only a connection that was idle for the whole settle can meet this, and the server cannot remove it; a count that is large after every restart means clients that send on a connection without looking at `Connection: close`. The OCI read front drains the same way, and counts its own connections in `tierstore_oci_drain_late_requests_total`. The counts reach their last value after the settle, when `/metricz` has closed with the S3 listener, so the process says them on stderr as it exits, a line for each front that counted one: `tierstore: <N> connections sent a request too late in the drain of the S3 front` (or `of the OCI front`). Each counts connections, once each, not requests.
+From the moment a stop begins every answer carries `Connection: close`, and at the end of the settle (`--drain-lb-wait`) the server closes each idle connection by shutting its end for writing: a client reads the end of the stream, not a reset, and opens a new connection. A client that sent a request in the one round trip before it read that end gets no answer: the server read the request, dropped it and counted it in `tierstore_drain_late_requests_total`. Do not retry such a request unless it is safe to repeat: a retried create-only put answers 412 whether its first try was stored or another writer stored the key. Only a connection that was idle for the whole settle can meet this, and the server cannot remove it; a count that is large after every restart means clients that send on a connection without looking at `Connection: close`. The OCI read front drains the same way, and counts its own connections in `tierstore_oci_drain_late_requests_total`. The counts reach their last value after the settle, when `/metricz` has closed with the S3 listener, so the process says them on stderr as it exits, a line for each front that counted one: `tierstore: <N> connections sent a request too late in the drain of the S3 front` (or `of the OCI front`). Each counts connections, once each, not requests.
 
 ## At drain deadline
 
