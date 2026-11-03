@@ -819,6 +819,9 @@ impl Server {
             if error.is_timeout() {
                 self.log_stalled(&parts, &id, error.message());
             }
+            if let Some(detail) = error.detail() {
+                self.log_failed(&parts, &id, detail);
+            }
             error.into_answer(path, &id)
         });
         let name = HeaderName::from_static("x-amz-request-id");
@@ -833,6 +836,12 @@ impl Server {
             response.body_mut().hold_wire(wire);
         }
         response
+    }
+
+    /// Logs what the store said about a request it failed: the client got a fixed text.
+    fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
+        let (method, path) = (&parts.method, parts.uri.path());
+        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
