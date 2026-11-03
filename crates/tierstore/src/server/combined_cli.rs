@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, Proxy, Reconciler, SystemClock};
+use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
@@ -73,6 +73,8 @@ pub(super) async fn serve_combined(
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    proxy.start_heartbeat(Arc::new(TokioSleeper));
+    let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;
     let run = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
@@ -95,6 +97,8 @@ pub(super) async fn serve_combined(
     let [halt, maintain_halt, lock_halt, scrub_halt] = halts.clone();
     let serving = async move {
         let drained = server.serve_all(listeners).await;
+        // The proxy beats until its drain is over: its in-flight requests are finished or cut.
+        beating.stop_heartbeat().await;
         for halting in &halts {
             halting.notify_one();
         }

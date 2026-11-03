@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-use crate::{Backend, Proxy, Reconciler};
+use crate::{Backend, Proxy, Reconciler, TokioSleeper};
 
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_probe::probe_tiers;
@@ -108,6 +108,8 @@ pub async fn run_serving(
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    proxy.start_heartbeat(Arc::new(TokioSleeper));
+    let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
     let server = Server::new(proxy, built.server);
@@ -122,6 +124,8 @@ pub async fn run_serving(
     let halting = Arc::clone(&halt);
     let serving = async move {
         let drained = server.serve_all(listeners).await;
+        // The proxy beats until its drain is over: its in-flight requests are finished or cut.
+        beating.stop_heartbeat().await;
         halting.notify_one();
         drained
     };

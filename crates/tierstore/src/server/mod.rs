@@ -194,6 +194,7 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod cli_heartbeat;
 mod cli_probe;
 mod cli_reconcile;
 mod cli_serve;
@@ -238,6 +239,8 @@ mod body_stall_tests;
 mod cache_cli_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+#[cfg(test)]
+mod cli_heartbeat_tests;
 #[cfg(test)]
 mod combined_cli_tests;
 #[cfg(test)]
