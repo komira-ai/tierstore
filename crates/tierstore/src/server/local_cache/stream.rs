@@ -426,8 +426,8 @@ impl Chunks {
     async fn unpinned(&self, range: ByteRange) -> Result<ReadBody, Error> {
         let upstream = &self.inner.upstream;
         match upstream.get_marked(&self.key, Some(range)).await {
-            Ok((_, true)) => Err(Error::NotFound(self.key.clone())),
-            Ok((bytes, false)) => Ok(stream::once(std::future::ready(Ok(bytes))).boxed()),
+            Ok((_, true, _)) => Err(Error::NotFound(self.key.clone())),
+            Ok((bytes, false, _)) => Ok(stream::once(std::future::ready(Ok(bytes))).boxed()),
             Err(Error::Unsupported(_)) => upstream.get_stream(&self.key, Some(range)).await,
             Err(error) => Err(error),
         }

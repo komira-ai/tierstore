@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, ByteRange, Error, JournalOp, Op, Proxy};
+use tierstore::{Backend, ByteRange, Error, JournalOp, MemoryBackend, Op, Proxy};
 use tokio::sync::Notify;
 
-use crate::churn::{Change, Churn, Flaky, Ghost};
+use crate::churn::{Change, Churn, Ghost};
 use crate::conformance::reservation;
 use crate::hold::Stall;
 use crate::support::{
@@ -174,8 +174,7 @@ async fn a_failed_read_of_the_cold_tier_is_an_error_and_an_absent_key_is_a_miss(
 }
 
 /// Asserts that a copy-back is journaled as a mirror that names the content tag of the cold
-/// object, and that no copy is made when the cold tier cannot be asked for the tag, or when the
-/// key turned into a reservation between the read and the question.
+/// object, which the read of the cold tier gives (no HEAD is made for it).
 #[tokio::test(start_paused = true)]
 async fn a_copy_back_is_journaled_as_a_mirror_of_the_cold_object() {
     let rig = Rig::new();
@@ -188,26 +187,19 @@ async fn a_copy_back_is_journaled_as_a_mirror_of_the_cold_object() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].op, JournalOp::PutMirror);
     assert_eq!(entries[0].cold_tag.as_deref(), Some(tag.as_str()));
-
-    rig.cold_mem.put("j", body("value")).await.unwrap();
-    rig.cold
-        .fail_next_on(Op::Head, "j", Error::Unavailable("cold".to_owned()));
-    assert_eq!(proxy.get("j", None).await.unwrap(), body("value"));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_absent(&*rig.hot_mem, "j").await;
-    let failed = "tierstore_promotions_skipped_total{reason=\"failed\"}";
-    assert_eq!(metric(&proxy, failed), format!("{failed} 1"));
 }
 
-/// Asserts that a copy-back is not made of a key whose cold object was replaced by a
-/// reservation, or removed, between the read and the question for its tag: the read is answered,
-/// nothing is put in the hot tier or journaled, and the copy is counted as raced.
+/// Asserts that a copy-back names the tag of the bytes that were read, when the cold object is
+/// removed or replaced by a reservation right after the read: the read is answered, the bytes are
+/// put in the hot tier, and the mirror carries the tag of the object read (which the cold tier no
+/// longer has, so the reconciler drops the copy).
 #[tokio::test(start_paused = true)]
-async fn a_copy_back_is_not_made_of_a_key_that_stopped_being_an_object() {
+async fn a_copy_back_names_the_tag_of_the_bytes_read_when_the_key_changes_after_the_read() {
     let changes = [Change::Remove, Change::Reservation(reservation(1))];
     for (n, change) in changes.into_iter().enumerate() {
         let rig = Rig::new();
         rig.cold_mem.put("k", body("value")).await.unwrap();
+        let read_tag = rig.cold_mem.head("k").await.unwrap().tag;
         let cold = Churn::after_a_read(rig.cold_mem.clone(), change);
         let id = format!("p{n}");
         let proxy = Proxy::open(rig.hot.clone(), Arc::new(cold), rig.config(&id, 1000))
@@ -216,48 +208,44 @@ async fn a_copy_back_is_not_made_of_a_key_that_stopped_being_an_object() {
 
         assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert_absent(&*rig.hot_mem, "k").await;
-        assert_eq!(journal_keys(&*rig.hot_mem, &id).await, Vec::<String>::new());
-        let raced = "tierstore_promotions_skipped_total{reason=\"raced\"}";
-        assert_eq!(metric(&proxy, raced), format!("{raced} 1"));
+        assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
+        let entries = journal(&*rig.hot_mem, &id, 1).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].op, JournalOp::PutMirror);
+        assert_eq!(entries[0].cold_tag.as_deref(), Some(read_tag.as_str()));
     }
 }
 
-/// Asserts that a copy-back is not made when the object that was read is replaced by another real
-/// object before the question for its tag: the read answers with the bytes it read, and the old
-/// bytes are not put in the hot tier or journaled under the new object's tag (the reconciler would
-/// take them for a copy of it). Also when the second question for the tag fails: counted as failed.
+/// Asserts that a copy-back names the tag of the object it read when the key holds A, then B (the
+/// object read), then A again: the cold tier's one read gives B's bytes with B's tag, so the
+/// mirror names B's tag and not A's, and no HEAD before or after the read can be taken for it.
+/// With A's tag the reconciler would keep B's bytes in the hot tier as the copy of A.
 #[tokio::test(start_paused = true)]
-async fn a_copy_back_is_not_made_of_an_object_replaced_between_the_read_and_the_tag() {
+async fn a_copy_back_names_the_tag_of_the_object_read_when_the_key_goes_from_a_to_b_and_back() {
     let rig = Rig::new();
-    rig.cold_mem.put("k", body("value")).await.unwrap();
-    let swap = Churn::after_a_read(rig.cold_mem.clone(), Change::Object(body("other")));
-    let proxy = Proxy::open(rig.hot.clone(), Arc::new(swap), rig.config("p1", 1000))
-        .await
-        .unwrap();
-
-    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("other"));
-    assert_absent(&*rig.hot_mem, "k").await;
-    assert_eq!(
-        journal_keys(&*rig.hot_mem, "p1").await,
-        Vec::<String>::new()
+    rig.cold_mem.put("k", body("a-bytes")).await.unwrap();
+    let tag_a = rig.cold_mem.head("k").await.unwrap().tag;
+    let scratch = MemoryBackend::new();
+    scratch.put("k", body("b-bytes")).await.unwrap();
+    let tag_b = scratch.head("k").await.unwrap().tag;
+    assert_ne!(tag_a, tag_b);
+    let cold = Churn::around_a_marked_read(
+        rig.cold_mem.clone(),
+        Change::Object(body("b-bytes")),
+        Change::Object(body("a-bytes")),
     );
-    let raced = "tierstore_promotions_skipped_total{reason=\"raced\"}";
-    assert_eq!(metric(&proxy, raced), format!("{raced} 1"));
-
-    let rig = Rig::new();
-    rig.cold_mem.put("k", body("value")).await.unwrap();
-    let flaky = Arc::new(Flaky::head_fails_at(rig.cold_mem.clone(), "k", 2));
-    let proxy = Proxy::open(rig.hot.clone(), flaky, rig.config("p1", 1000))
+    let proxy = Proxy::open(rig.hot.clone(), Arc::new(cold), rig.config("p1", 1000))
         .await
         .unwrap();
-    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
+
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("b-bytes"));
     tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_absent(&*rig.hot_mem, "k").await;
-    let failed = "tierstore_promotions_skipped_total{reason=\"failed\"}";
-    assert_eq!(metric(&proxy, failed), format!("{failed} 1"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("a-bytes"));
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("b-bytes"));
+    let entries = journal(&*rig.hot_mem, "p1", 1).await;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].op, JournalOp::PutMirror);
+    assert_eq!(entries[0].cold_tag.as_deref(), Some(tag_b.as_str()));
 }
 
 /// Asserts that a listing does not show a reservation that replaced a real object of the same

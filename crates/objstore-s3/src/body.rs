@@ -111,6 +111,50 @@ impl Parts {
     }
 }
 
+/// Pieces of a body of unknown length taken in parts of a given size, whatever sizes its pieces
+/// came in. Holds at most one part and one piece of the body.
+pub(crate) struct Unsized {
+    body: futures::stream::Fuse<BodyStream>,
+    /// What the last piece has not given yet.
+    carry: Bytes,
+}
+
+impl Unsized {
+    pub(crate) fn new(body: BodyStream) -> Self {
+        Self {
+            body: body.fuse(),
+            carry: Bytes::new(),
+        }
+    }
+
+    /// Whether any byte of the body is left, which may take reading the next piece.
+    ///
+    /// # Errors
+    /// A piece's error.
+    pub(crate) async fn more(&mut self) -> Result<bool, ObjectStoreError> {
+        while self.carry.is_empty() {
+            match self.body.next().await {
+                Some(piece) => self.carry = piece?,
+                None => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// The next `size` bytes of the body, fewer when the body ends first (none when it had ended).
+    ///
+    /// # Errors
+    /// A piece's error.
+    pub(crate) async fn next(&mut self, size: usize) -> Result<Bytes, ObjectStoreError> {
+        let mut part = BytesMut::new();
+        while part.len() < size && self.more().await? {
+            let take = (size - part.len()).min(self.carry.len());
+            part.extend_from_slice(&self.carry.split_to(take));
+        }
+        Ok(part.freeze())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use futures::stream;
@@ -188,5 +232,64 @@ mod tests {
             why.as_deref(),
             Some("the body of a streamed write failed: the source broke")
         );
+    }
+
+    fn unsized_parts(pieces: &[&'static [u8]], size: usize) -> Result<Vec<Bytes>, String> {
+        futures::executor::block_on(async {
+            let mut taken = Unsized::new(body(pieces));
+            let mut out = Vec::new();
+            loop {
+                let part = taken.next(size).await.map_err(|e| e.to_string())?;
+                if part.is_empty() {
+                    return Ok(out);
+                }
+                out.push(part);
+            }
+        })
+    }
+
+    /// Asserts that a body of unknown length is cut at the part size whatever its pieces, that
+    /// the last part is the short one, that empty pieces are no bytes, and that a body that has
+    /// ended gives nothing, however often it is asked.
+    #[test]
+    fn a_body_of_unknown_length_is_cut_at_the_part_size_whatever_the_pieces() {
+        let got = unsized_parts(&[b"abc", b"", b"defgh", b"ij"], 4).unwrap();
+        assert_eq!(got, [&b"abcd"[..], b"efgh", b"ij"]);
+        let exact = unsized_parts(&[b"ab", b"cd", b"", b""], 4).unwrap();
+        assert_eq!(exact, [&b"abcd"[..]]);
+        assert!(unsized_parts(&[], 4).unwrap().is_empty());
+        let more = futures::executor::block_on(async {
+            let mut taken = Unsized::new(body(&[b"ab"]));
+            let first = taken.more().await.unwrap();
+            let part = taken.next(4).await.unwrap();
+            let ended = (taken.more().await.unwrap(), taken.next(4).await.unwrap());
+            (first, part, ended)
+        });
+        assert_eq!(
+            more,
+            (true, Bytes::from_static(b"ab"), (false, Bytes::new()))
+        );
+    }
+
+    /// Asserts that a piece's error ends a body of unknown length with that error, whether it is
+    /// met while a part fills or while asking whether bytes are left.
+    #[test]
+    fn a_failed_piece_fails_a_body_of_unknown_length() {
+        let failing = || -> BodyStream {
+            stream::iter(vec![
+                Ok(Bytes::from_static(b"ab")),
+                Err(ObjectStoreError::Body("the source broke".into())),
+            ])
+            .boxed()
+        };
+        let want = "the body of a streamed write failed: the source broke";
+        let filling = futures::executor::block_on(Unsized::new(failing()).next(4));
+        assert_eq!(filling.unwrap_err().to_string(), want);
+        let asking = futures::executor::block_on(async {
+            let mut taken = Unsized::new(failing());
+            let part = taken.next(2).await.unwrap();
+            (part, taken.more().await.unwrap_err().to_string())
+        });
+        assert_eq!(asking, (Bytes::from_static(b"ab"), want.to_owned()));
     }
 }

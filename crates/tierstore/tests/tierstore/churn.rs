@@ -33,15 +33,16 @@ pub enum Change {
 /// A memory backend whose `put_if_match` and `delete_if_match` each first apply the next of the
 /// changes it was given (if any are left) to the object under the key, so that the call finds
 /// what a racing writer left, as it would between the look that gave the caller the tag and the
-/// call; and, if asked to, whose first read with the mark is followed by a change, so that a
-/// HEAD after the read finds what a racing writer left, or whose first plain read is preceded by
-/// one, so that the read finds what a racing writer left. Everything else is the memory backend's
+/// call; and, if asked to, whose first read with the mark is preceded and followed by a change,
+/// so that the read finds, and a look after it finds, what a racing writer left, or whose first
+/// plain read is preceded by one, so that the read finds what a racing writer left. Everything else is the memory backend's
 /// own.
 pub struct Churn {
     mem: Arc<MemoryBackend>,
     left: Mutex<VecDeque<Change>>,
     after_read: Mutex<Option<Change>>,
     before_read: Mutex<Option<Change>>,
+    before_marked_read: Mutex<Option<Change>>,
     /// The only key whose conditional calls apply the changes, if one was named.
     only: Option<String>,
 }
@@ -54,6 +55,7 @@ impl Churn {
             left,
             after_read: Mutex::new(None),
             before_read: Mutex::new(None),
+            before_marked_read: Mutex::new(None),
             only: None,
         }
     }
@@ -76,6 +78,15 @@ impl Churn {
     pub fn after_a_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
         let churn = Self::new(mem, Vec::new());
         *churn.after_read.lock().unwrap() = Some(change);
+        churn
+    }
+
+    /// A backend whose first read with the mark is preceded by `before` and followed by `after`:
+    /// the object read is the one `before` left, and `after` can put back the one that was there
+    /// first (a key that holds A, then B, then A again).
+    pub fn around_a_marked_read(mem: Arc<MemoryBackend>, before: Change, after: Change) -> Self {
+        let churn = Self::after_a_read(mem, after);
+        *churn.before_marked_read.lock().unwrap() = Some(before);
         churn
     }
 
@@ -163,7 +174,11 @@ impl Backend for Churn {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
+        let before = self.before_marked_read.lock().unwrap().take();
+        if let Some(change) = before {
+            self.apply(key, change).await;
+        }
         let read = self.mem.get_marked(key, range).await;
         let change = self.after_read.lock().unwrap().take();
         if let Some(change) = change {
@@ -310,7 +325,7 @@ impl Backend for Flaky {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool), Error> {
+    ) -> Result<(Bytes, bool, String), Error> {
         self.mem.get_marked(key, range).await
     }
 

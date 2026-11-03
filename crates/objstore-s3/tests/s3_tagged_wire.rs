@@ -486,21 +486,21 @@ async fn a_head_reads_the_reservation_mark_from_its_header() {
     assert_eq!(marks, [true, false, false]);
 }
 
-/// Asserts that a read of the whole object gives its bytes and the mark of the same answer, and
-/// that a missing object is `NotFound`.
+/// Asserts that a read of the whole object gives its bytes, the mark and the entity tag of the
+/// same answer (no tag when the answer has none), and that a missing object is `NotFound`.
 #[tokio::test]
-async fn a_whole_object_read_gives_the_mark_of_its_own_answer() {
+async fn a_whole_object_read_gives_the_mark_and_tag_of_its_own_answer() {
     let (endpoint, _) = script(vec![
-        answer("200 OK", &[MARK], "hello"),
+        answer("200 OK", &[MARK, ETAG], "hello"),
         answer("200 OK", &[], "world"),
         answer("404 Not Found", &[], NO_SUCH_KEY),
     ])
     .await;
     let s = store(endpoint);
     let first = s.get_all_marked(&key()).await.unwrap();
-    assert_eq!(first, (Bytes::from("hello"), true));
+    assert_eq!(first, (Bytes::from("hello"), true, Some("\"abc\"".into())));
     let second = s.get_all_marked(&key()).await.unwrap();
-    assert_eq!(second, (Bytes::from("world"), false));
+    assert_eq!(second, (Bytes::from("world"), false, None));
     let missing = s.get_all_marked(&key()).await.unwrap_err();
     assert!(matches!(&missing, ObjectStoreError::NotFound(k) if *k == key()));
 }

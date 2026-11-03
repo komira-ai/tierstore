@@ -142,8 +142,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
 ///   (`PutMirror`, with the content tag the cold object has), in the background, so that the
 ///   reconciler can evict it again, and can drop it if the cold tier no longer holds that object.
-///   The tag is the one the cold object had before the read, and the copy is made only if a HEAD
-///   after the read gives the same tag, so the bytes copied are those of the object named.
+///   The tag is the one the cold tier's read gives with the bytes (`get_marked`: the bytes, the
+///   mark and the tag of one object), so it is the tag of the bytes copied whatever the key held
+///   before or after; no HEAD is made for it.
 ///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
 ///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
 ///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
@@ -458,19 +459,23 @@ impl Inner {
     }
 
     /// A get of the cold tier, counted as a hit, a miss or an error of it. A reservation is not an
-    /// object: the read of one is a miss. The read gives the mark with the bytes; an error that
-    /// is neither "not found" nor "unavailable" (a range past the end of the 56 bytes of a
-    /// reservation is one) is told from a failure by one HEAD.
-    async fn cold_get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+    /// object: the read of one is a miss. The read gives the mark and the content tag with the
+    /// bytes, all of one object; an error that is neither "not found" nor "unavailable" (a range
+    /// past the end of the 56 bytes of a reservation is one) is told from a failure by one HEAD.
+    async fn cold_get(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, String), Error> {
         match self.cold.get_marked(key, range).await {
-            Ok((_, true)) => {
+            Ok((_, true, _)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(Error::NotFound(key.to_owned()))
             }
-            Ok((body, false)) => {
+            Ok((body, false, tag)) => {
                 self.counters.hit(Tier::Cold, Read::Get);
                 self.counters.bytes_read(Tier::Cold, body.len());
-                Ok(body)
+                Ok((body, tag))
             }
             Err(error @ Error::NotFound(_)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
@@ -490,16 +495,6 @@ impl Inner {
                     Err(error)
                 }
             },
-        }
-    }
-
-    /// The content tag of the cold tier's object under `key`: nothing for a key that holds none
-    /// or a reservation, an error if the HEAD fails.
-    async fn cold_version(&self, key: &str) -> Result<Option<String>, Error> {
-        match self.cold.head(key).await {
-            Ok(meta) if !meta.reservation => Ok(Some(meta.tag)),
-            Ok(_) | Err(Error::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
         }
     }
 
@@ -527,20 +522,19 @@ impl Inner {
             // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
             // that part alone: a whole read per chunk of a long blob would be quadratic.
             self.counters.skipped(Skipped::Critical);
-            let body = self.cold_get(key, Some(part)).await?;
+            let (body, _) = self.cold_get(key, Some(part)).await?;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
-        // The version is asked for before the read, and again before the copy is journaled: the
-        // copy is made only if both give one tag, so the tag it names is the tag of the bytes that
-        // were read, never that of an object that replaced them in between.
-        let seen = if self.level().await >= Level::Critical {
-            None
+        // The tag the cold tier's read gives is the tag of the very bytes read, so the copy is
+        // journaled under it whatever the key holds by then.
+        let critical = self.level().await >= Level::Critical;
+        let (body, tag) = self.cold_get(key, None).await?;
+        if critical {
+            self.counters.skipped(Skipped::Critical);
         } else {
-            Some(self.cold_version(key).await)
-        };
-        let body = self.cold_get(key, None).await?;
-        self.copy_back(key, &body, seen).await;
+            self.copy_back(key, &body, tag).await;
+        }
         let served = match range {
             Some(range) => range.slice(&body)?,
             None => body,
