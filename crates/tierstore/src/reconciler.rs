@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 
-use crate::backend::{ByteRange, ReadBody};
+use crate::backend::ByteRange;
 use crate::journal::{
     PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
     load_checkpoint, seq_of, to_body, write_object,
@@ -745,7 +744,7 @@ impl Reconciler {
     async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         match self.cold.head(key).await {
             Ok(cold) if !cold.reservation && cold.size == hot.size => {
-                match self.same_bytes(key, hot).await? {
+                match self.same_bytes(key, hot, &cold).await? {
                     Some(true) => self.still_the_object(key, &cold).await.map(Some),
                     other => Ok(other),
                 }
@@ -758,9 +757,8 @@ impl Reconciler {
 
     /// Whether the cold tier still holds, under `key`, the real object of `seen` (what the HEAD
     /// before the comparison gave): the same content tag and not a reservation. The comparison
-    /// read is of a stream that carries no mark, so an object that a reservation replaced between
-    /// the HEAD and the read (of the same bytes, a reservation's status being independent of its
-    /// content) is caught here: its tag is not `seen`'s, or it is marked.
+    /// reads bind each range to that tag, so this look only finds an object that was removed or
+    /// replaced after the last range was read.
     async fn still_the_object(&self, key: &str, seen: &Meta) -> Result<bool, Error> {
         match self.cold.head(key).await {
             Ok(now) => Ok(!now.reservation && now.tag == seen.tag),
@@ -769,27 +767,21 @@ impl Reconciler {
         }
     }
 
-    /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave.
-    /// The cold object is read as the chunks it comes in; the hot object in ranges of at most
-    /// [`COMPARE_RANGE`] bytes, each read with its content tag in one call, so that every byte
-    /// compared is of the object whose tag the eviction deletes on: a range of another object (the
-    /// key replaced between the HEAD and the read, and put back before the delete) has another tag
-    /// and ends the comparison with `Some(false)`, as does a range that is not the length asked
-    /// for, and a read ends at the first difference. Neither tier is held whole. An object that
-    /// is not there to be read is not an error: the cold one is not held (`Some(false)`), and the
-    /// hot one is gone (`None`).
-    async fn same_bytes(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
-        let mut cold = match self.cold.get_stream(key, None).await {
-            Ok(stream) => stream,
-            Err(Error::NotFound(_)) => return Ok(Some(false)),
-            Err(error) => return Err(error),
-        };
-        let mut theirs = Bytes::new();
+    /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave,
+    /// in the object `cold` (what a HEAD of the cold tier gave). Both tiers are read in ranges of
+    /// at most [`COMPARE_RANGE`] bytes, each read with its content tag and mark in one call, so
+    /// that every byte compared is of the object whose tag a HEAD gave: a range of another object
+    /// (a key replaced between the HEAD and the read, and put back before the next look) has
+    /// another tag, a range of a reservation is marked, and either ends the comparison with
+    /// `Some(false)`, as does a range that is not the length asked for; a read ends at the first
+    /// difference. Neither tier is held whole. An object that is not there to be read is not an
+    /// error: the cold one is not held (`Some(false)`), and the hot one is gone (`None`).
+    async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
         let mut offset = 0u64;
         while offset < hot.size {
             let len = (hot.size - offset).min(COMPARE_RANGE);
             let range = ByteRange::new(offset, len);
-            let (mut mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+            let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
                 Ok(read) => read,
                 Err(Error::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(error),
@@ -797,22 +789,17 @@ impl Reconciler {
             if tag != hot.tag || mine.len() as u64 != len {
                 return Ok(Some(false));
             }
-            while !mine.is_empty() {
-                if theirs.is_empty() {
-                    theirs = next_chunk(&mut cold).await?;
-                }
-                if theirs.is_empty() {
-                    return Ok(Some(false));
-                }
-                let take = mine.len().min(theirs.len());
-                if mine.split_to(take) != theirs.split_to(take) {
-                    return Ok(Some(false));
-                }
+            let (theirs, marked, tag) = match self.cold.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(Some(false)),
+                Err(error) => return Err(error),
+            };
+            if marked || tag != cold.tag || theirs != mine {
+                return Ok(Some(false));
             }
             offset += len;
         }
-        let ended = theirs.is_empty() && next_chunk(&mut cold).await?.is_empty();
-        Ok(Some(ended))
+        Ok(Some(true))
     }
 
     /// Stores the checkpoint of a proxy if it moved.
@@ -868,14 +855,3 @@ impl Reconciler {
 
 /// The most bytes of the hot object that one read of a comparison holds.
 const COMPARE_RANGE: u64 = 1 << 20;
-
-/// The next chunk of a read that has bytes, or none (an empty `Bytes`) at the end of the body.
-async fn next_chunk(body: &mut ReadBody) -> Result<Bytes, Error> {
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
-        if !chunk.is_empty() {
-            return Ok(chunk);
-        }
-    }
-    Ok(Bytes::new())
-}

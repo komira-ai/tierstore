@@ -215,9 +215,9 @@ async fn a_takeover_keeps_a_hot_object_replaced_and_put_back_around_the_read_of_
 }
 
 /// Asserts that a takeover keeps a hot object whose cold object is replaced, between the HEAD and
-/// the read of its bytes, by a reservation of the same bytes: the read passes the comparison, but
-/// the look after it finds a reservation, so the hot object (maybe the only real copy) survives
-/// and the objects after it are evicted.
+/// the read of its bytes, by a reservation of the same bytes: the read is marked, so the
+/// comparison does not match, the hot object (maybe the only real copy) survives and the objects
+/// after it are evicted.
 #[tokio::test(start_paused = true)]
 async fn a_takeover_keeps_a_hot_object_whose_cold_object_became_an_equal_reservation_before_the_read()
  {
@@ -227,7 +227,7 @@ async fn a_takeover_keeps_a_hot_object_whose_cold_object_became_an_equal_reserva
     first.pass().await;
     first.stop().await;
     let swap = Change::Reservation(body(&same));
-    let cold = Churn::before_a_read(rig.cold_mem.clone(), swap).on_key("k1");
+    let cold = Churn::before_a_marked_read(rig.cold_mem.clone(), swap).on_key("k1");
     let config = rig.reconciler_config("r2", 100);
     let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
 
@@ -249,7 +249,7 @@ async fn a_takeover_keeps_a_hot_object_whose_cold_object_vanished_after_the_comp
     let mut first = rig.reconciler("r1", 1000);
     first.pass().await;
     first.stop().await;
-    let cold = Churn::after_a_plain_read(rig.cold_mem.clone(), Change::Remove).on_key("k1");
+    let cold = Churn::after_a_read(rig.cold_mem.clone(), Change::Remove).on_key("k1");
     let config = rig.reconciler_config("r2", 100);
     let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
 
@@ -258,6 +258,40 @@ async fn a_takeover_keeps_a_hot_object_whose_cold_object_vanished_after_the_comp
     assert_eq!(report.evicted, 2);
     assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
     assert_absent(&*rig.cold_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
+}
+
+/// Asserts that a takeover keeps a hot object whose cold object is replaced by the hot object's
+/// own bytes before the comparison read and restored to what it was before the look after it
+/// (cold A, then B, then A again, with hot B and A of the same size): the cold read is of B, whose
+/// tag is not the tag of the HEAD (A's), so the comparison does not match, B is kept even though
+/// both looks find A with one tag, and the objects after it are evicted.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_whose_cold_object_was_replaced_and_restored_around_the_read()
+ {
+    let rig = five_objects().await;
+    let b = "x".repeat(21);
+    let a = "x".repeat(20) + "y";
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    rig.cold_mem.delete("k1").await.unwrap();
+    rig.cold_mem.put("k1", body(&a)).await.unwrap();
+    let cold = Churn::around_a_marked_read(
+        rig.cold_mem.clone(),
+        Change::Object(body(&b)),
+        Change::Object(body(&a)),
+    )
+    .on_key("k1");
+    let config = rig.reconciler_config("r2", 100);
+    let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&b));
+    assert_eq!(read(&*rig.cold_mem, "k1").await, body(&a));
     assert_absent(&*rig.hot_mem, "k2").await;
     assert_absent(&*rig.hot_mem, "k3").await;
 }

@@ -35,7 +35,7 @@ pub enum Change {
 /// what a racing writer left, as it would between the look that gave the caller the tag and the
 /// call; and, if asked to, whose first read with the mark is preceded and followed by a change,
 /// so that the read finds, and a look after it finds, what a racing writer left, or whose first
-/// plain read is preceded by one, so that the read finds what a racing writer left. Everything else is the memory backend's
+/// plain read is preceded by one. Everything else is the memory backend's
 /// own.
 pub struct Churn {
     mem: Arc<MemoryBackend>,
@@ -43,7 +43,6 @@ pub struct Churn {
     after_read: Mutex<Option<Change>>,
     before_read: Mutex<Option<Change>>,
     before_marked_read: Mutex<Option<Change>>,
-    after_plain_read: Mutex<Option<Change>>,
     /// The only key whose conditional calls apply the changes, if one was named.
     only: Option<String>,
 }
@@ -57,7 +56,6 @@ impl Churn {
             after_read: Mutex::new(None),
             before_read: Mutex::new(None),
             before_marked_read: Mutex::new(None),
-            after_plain_read: Mutex::new(None),
             only: None,
         }
     }
@@ -69,11 +67,10 @@ impl Churn {
         churn
     }
 
-    /// A backend whose first plain read (`get`) is followed by `change`: the read gives the
-    /// bytes that were there, and a look after it finds what a racing writer left.
-    pub fn after_a_plain_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
+    /// A backend whose first read with the mark is preceded by `change`.
+    pub fn before_a_marked_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
         let churn = Self::new(mem, Vec::new());
-        *churn.after_plain_read.lock().unwrap() = Some(change);
+        *churn.before_marked_read.lock().unwrap() = Some(change);
         churn
     }
 
@@ -177,14 +174,7 @@ impl Backend for Churn {
                 self.apply(key, change).await;
             }
         }
-        let read = self.mem.get(key, range).await;
-        if self.only.as_deref().is_none_or(|only| only == key) {
-            let change = self.after_plain_read.lock().unwrap().take();
-            if let Some(change) = change {
-                self.apply(key, change).await;
-            }
-        }
-        read
+        self.mem.get(key, range).await
     }
 
     async fn get_marked(
@@ -192,6 +182,9 @@ impl Backend for Churn {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
+        if self.only.as_deref().is_some_and(|only| only != key) {
+            return self.mem.get_marked(key, range).await;
+        }
         let before = self.before_marked_read.lock().unwrap().take();
         if let Some(change) = before {
             self.apply(key, change).await;
