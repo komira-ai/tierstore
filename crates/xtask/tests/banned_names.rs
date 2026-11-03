@@ -43,7 +43,7 @@ fn digest(word: &str) -> String {
 fn redact(text: &str, deny: &HashSet<String>) -> String {
     let mut out = String::new();
     let mut word = String::new();
-    let mut flush = |word: &mut String, out: &mut String| {
+    let flush = |word: &mut String, out: &mut String| {
         if word.len() <= MAX_WORD && deny.contains(&digest(word)) {
             out.push_str("<banned>");
         } else {
