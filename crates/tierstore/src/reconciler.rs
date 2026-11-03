@@ -66,9 +66,11 @@ impl ReconcilerConfig {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
     /// Whether this reconciler held the lease at the start of the pass. If not, nothing else was
-    /// done. If it lost the lease during the pass, nothing was stored after that (no checkpoint,
-    /// no pruning, no usage), and that is not in `failed`: an operator sees `held` with no
-    /// progress, and the next pass finds the lease lost.
+    /// done. If the check made after the copies and evictions finds the lease gone, nothing is
+    /// stored after that check (no checkpoint, no pruning, no usage), and that is not in
+    /// `failed`; `copied` and `evicted` still count the work done before the check. A takeover
+    /// after the check is not seen. The next pass tries to take or renew the lease again, and
+    /// takes it at once if it was deleted.
     pub held: bool,
     /// The objects copied to the cold tier, or found there already.
     pub copied: usize,
