@@ -633,3 +633,150 @@ async fn a_key_that_cannot_be_a_file_name_is_refused_by_a_reservation() {
     assert!(matches!(created, Err(Error::Other(_))), "{created:?}");
     assert_eq!(names(dir.path()), [".uploads"]);
 }
+
+/// A body of `len` bytes that differ from place to place, so that a chunk read from the wrong
+/// place is not equal to the right one.
+fn patterned(len: u64) -> Bytes {
+    Bytes::from((0..len).map(|at| (at % 251) as u8).collect::<Vec<u8>>())
+}
+
+/// The sizes of the chunks `read` gives, and the bytes they make.
+async fn drained(mut read: crate::ReadBody) -> (Vec<usize>, Vec<u8>) {
+    let (mut sizes, mut bytes) = (Vec::new(), Vec::new());
+    while let Some(chunk) = read.next().await {
+        let chunk = chunk.unwrap();
+        sizes.push(chunk.len());
+        bytes.extend_from_slice(&chunk);
+    }
+    (sizes, bytes)
+}
+
+/// Asserts that a streamed read gives an object larger than one chunk as chunks of the bounded
+/// size and a last one that is what is left, whole and by range, and that the chunks join to the
+/// bytes a get gives.
+#[tokio::test]
+async fn a_streamed_read_gives_chunks_of_the_bounded_size() {
+    let (_dir, backend) = backend();
+    let chunk = super::READ_CHUNK;
+    let held = patterned(2 * chunk + 5);
+    backend.put("k", held.clone()).await.unwrap();
+
+    let whole = backend.get_stream("k", None).await.unwrap();
+    let (sizes, bytes) = drained(whole).await;
+    assert_eq!(sizes, [chunk as usize, chunk as usize, 5]);
+    assert_eq!(bytes, held);
+
+    let range = ByteRange::new(100, chunk + 7);
+    let part = backend.get_stream("k", Some(range)).await.unwrap();
+    let (sizes, bytes) = drained(part).await;
+    assert_eq!(sizes, [chunk as usize, 7]);
+    assert_eq!(bytes, held.slice(100..100 + chunk as usize + 7));
+
+    let none = backend.get_stream("k", Some(ByteRange::new(3, 0))).await;
+    assert_eq!(drained(none.unwrap()).await, (Vec::new(), Vec::new()));
+    let beyond = ByteRange::new(2 * chunk + 6, 1);
+    let past = backend.get_stream("k", Some(beyond)).await;
+    assert!(matches!(past, Err(Error::Other(_))), "{:?}", past.err());
+    let absent = backend.get_stream("absent", None).await;
+    assert_eq!(absent.err(), Some(Error::NotFound("absent".to_owned())));
+}
+
+/// Asserts that a streamed read takes a chunk from the file only when the chunk is asked for: the
+/// file is cut after the first chunk was given, and the second chunk, which is where the file
+/// ends, is an error that ends the body, with no chunk after it.
+#[tokio::test]
+async fn a_streamed_read_takes_each_chunk_from_the_file_when_it_is_asked_for() {
+    let (dir, backend) = backend();
+    let chunk = super::READ_CHUNK;
+    backend.put("k", patterned(3 * chunk)).await.unwrap();
+    let mut read = backend.get_stream("k", None).await.unwrap();
+    let first = read.next().await.unwrap().unwrap();
+    assert_eq!(first.len() as u64, chunk);
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.path().join(encode("k")))
+        .unwrap();
+    file.set_len(super::TAG_LEN as u64 + chunk + 3).unwrap();
+    let second = read.next().await.unwrap();
+    assert!(matches!(second, Err(Error::Other(_))), "{second:?}");
+    assert!(read.next().await.is_none());
+}
+
+/// Asserts that a read stays on the file it opened: the object is replaced, with a mark and then
+/// without, and deleted after the read opened it, and the read still gives the bytes and the mark
+/// of the object it opened, whole and by chunks.
+#[tokio::test]
+async fn a_read_stays_on_the_file_it_opened_when_the_key_is_replaced() {
+    let (_dir, backend) = backend();
+    let chunk = super::READ_CHUNK;
+    let held = patterned(chunk + 9);
+    let tag = backend.put_reservation("k", held.clone()).await.unwrap();
+    let opened = backend.stored("k").await.unwrap();
+    let mut streaming = backend.get_stream("k", None).await.unwrap();
+    let first = streaming.next().await.unwrap().unwrap();
+    assert_eq!(first, held.slice(..chunk as usize));
+
+    let plain = backend.put_if_match("k", body("plain"), &tag);
+    let plain = plain.await.unwrap();
+    let restored = backend.put_reservation_if_match("k", body("again"), &plain);
+    restored.await.unwrap();
+    backend.delete("k").await.unwrap();
+
+    let read = super::read_marked(opened, Some(ByteRange::new(2, 5))).await;
+    assert_eq!(read.unwrap(), (held.slice(2..7), true));
+    let rest = streaming.next().await.unwrap().unwrap();
+    assert_eq!(rest, held.slice(chunk as usize..));
+    assert!(streaming.next().await.is_none());
+}
+
+/// Asserts that a streamed replacement writes the chunks to a temporary file and replaces only
+/// the object with the tag: a tag that does not match, a body that fails and an absent key leave
+/// the object as it was and no temporary file; the right tag gives an unmarked object and its tag.
+#[tokio::test]
+async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
+    let (dir, backend) = backend();
+    let old = backend.put_reservation("k", body("old")).await.unwrap();
+    let wrong = backend.put_stream_if_match("k", None, pieces(&["a", "b"]), "no");
+    assert_eq!(wrong.await, Err(Error::PreconditionFailed("k".to_owned())));
+    let cut = Error::Other("cut".to_owned());
+    let items: Vec<Result<Bytes, Error>> = vec![Ok(body("a")), Err(cut.clone())];
+    let failing: PartBody<'static> = stream::iter(items).boxed();
+    let failed = backend.put_stream_if_match("k", None, failing, &old).await;
+    assert_eq!(failed, Err(cut));
+    let absent = backend.put_stream_if_match("none", None, pieces(&["a"]), &old);
+    assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
+    assert_eq!(names(dir.path()), [".uploads", "k"]);
+    let kept = backend.get_marked("k", None).await.unwrap();
+    assert_eq!(kept, (body("old"), true));
+
+    let new = backend.put_stream_if_match("k", None, pieces(&["n", "ew"]), &old);
+    let new = new.await.unwrap();
+    assert_eq!(backend.head("k").await.unwrap().tag, new);
+    let read = backend.get_marked("k", None).await.unwrap();
+    assert_eq!(read, (body("new"), false));
+    assert_eq!(names(dir.path()), [".uploads", "k"]);
+
+    let refused = backend.put_stream_if_match("", None, pieces(&["x"]), &new);
+    let refused = refused.await;
+    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
+}
+
+/// Asserts that a streamed replacement that is dropped half way (its caller gave up) removes its
+/// temporary file and leaves the object as it was.
+#[tokio::test]
+async fn a_streamed_replace_that_is_dropped_half_way_leaves_the_object() {
+    let (dir, backend) = backend();
+    backend.put("k", body("old")).await.unwrap();
+    let tag = backend.head("k").await.unwrap().tag;
+    let (started, midway) = oneshot::channel();
+    let (_release, resume) = oneshot::channel::<()>();
+    let gated = gated("ab", "cd", started, resume);
+    let replacing = backend.put_stream_if_match("k", None, gated, &tag);
+    tokio::select! {
+        _ = replacing => panic!("the body was not given its second chunk"),
+        _ = midway => {}
+    }
+    assert_eq!(names(dir.path()), [".uploads", "k"]);
+    assert_eq!(backend.get("k", None).await.unwrap(), "old");
+}

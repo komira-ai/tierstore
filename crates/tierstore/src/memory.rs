@@ -61,6 +61,15 @@ fn tag_of(body: &Bytes) -> String {
     hex::encode(Sha256::digest(body))
 }
 
+/// The chunks of `body`, joined.
+async fn collect(body: &mut PartBody<'_>) -> Result<Bytes, Error> {
+    let mut whole = BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk?);
+    }
+    Ok(whole.freeze())
+}
+
 /// A multipart upload in progress: the key it is for, when it was started, and the parts stored
 /// so far by number, each with its content tag.
 struct Upload {
@@ -205,6 +214,19 @@ impl Backend for MemoryBackend {
         self.replace(key, body, etag, true)
     }
 
+    /// Collects the chunks, then replaces as [`Backend::put_if_match`] does: a body that fails
+    /// replaces nothing.
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let whole = collect(&mut body).await?;
+        self.replace(key, whole, etag, false)
+    }
+
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
         let mut objects = self.objects();
         let current = objects
@@ -284,11 +306,7 @@ impl Backend for MemoryBackend {
         mut body: PartBody<'_>,
     ) -> Result<String, Error> {
         self.check_upload(key, id)?;
-        let mut whole = BytesMut::new();
-        while let Some(chunk) = body.next().await {
-            whole.extend_from_slice(&chunk?);
-        }
-        let part = whole.freeze();
+        let part = collect(&mut body).await?;
         let tag = tag_of(&part);
         let mut uploads = self.uploads();
         let upload = uploads.open.get_mut(id).filter(|up| up.key == key);
