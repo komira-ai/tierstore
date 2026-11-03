@@ -262,7 +262,9 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        refuse_unsupported(parts, query, presign.is_some())?;
+        // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
+        // not parameters of the call.
+        refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         let method = parts.method.as_str();
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
