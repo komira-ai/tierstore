@@ -50,10 +50,10 @@ use super::cli::{
     DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_duration, parse_skip,
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
+use super::config_policy::{Policy, check_policies};
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
 
 /// The flags that stay flags: the file is for the data path, and these are per run.
 pub(super) const PER_RUN: &[&str] = &[
@@ -131,9 +131,6 @@ pub(super) const DEFAULT_DRAIN_LB_WAIT: Duration = Duration::from_secs(10);
 
 /// The default of `--drain-deadline`.
 pub(super) const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(15 * 60);
-
-/// The prefixes of keys that tierstore keeps for itself: no policy may name them.
-const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// Why a start from the file `--config` names, or `--print-config`, is refused. Every one of
 /// them but an unreadable file is a start that a restart cannot mend; all exit with status 2.
@@ -457,17 +454,6 @@ pub(super) struct OciTable {
     pub connection_lifetime: Option<Dur>,
 }
 
-/// `[[policy]]`: what is done with the keys under a prefix.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct Policy {
-    /// The keys it is about: empty for all the rest, or ending in `/`.
-    pub prefix: String,
-    /// Whether to keep the keys under the prefix in the local cache. Only a build node has one.
-    #[serde(default)]
-    pub cache: bool,
-}
-
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {
         key: key.to_owned(),
@@ -677,42 +663,6 @@ fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
                 }
             }
             _ => {}
-        }
-    }
-    Ok(())
-}
-
-/// Refuses the policies that are duplicates, overlap or name a reserved prefix, and those that
-/// ask for a cache when the shape has none (`caching` says whether it has).
-pub(super) fn check_policies(policies: &[Policy], caching: bool) -> Result<(), ConfigError> {
-    for (at, policy) in policies.iter().enumerate() {
-        let key = format!("policy[{at}]");
-        let prefix = policy.prefix.as_str();
-        if !prefix.is_empty() && !prefix.ends_with('/') {
-            return Err(invalid(
-                &format!("{key}.prefix"),
-                format!("{prefix:?} does not end in /"),
-            ));
-        }
-        if let Some(reserved) = RESERVED.iter().find(|name| prefix.starts_with(**name)) {
-            let why = format!("{prefix:?} is under {reserved:?}, which tierstore keeps for itself");
-            return Err(invalid(&format!("{key}.prefix"), why));
-        }
-        if policy.cache && !caching {
-            let why = "a storage node keeps no cache: it needs [local_cache] and no [hot_store]";
-            return Err(invalid(&format!("{key}.cache"), why));
-        }
-        for (before, other) in policies.iter().enumerate().take(at) {
-            let (theirs, ours) = (other.prefix.as_str(), prefix);
-            if theirs == ours {
-                let why = format!("{ours:?} is also the prefix of policy[{before}]");
-                return Err(invalid(&format!("{key}.prefix"), why));
-            }
-            let nested = !theirs.is_empty() && !ours.is_empty();
-            if nested && (theirs.starts_with(ours) || ours.starts_with(theirs)) {
-                let why = format!("{ours:?} overlaps {theirs:?} of policy[{before}]");
-                return Err(invalid(&format!("{key}.prefix"), why));
-            }
         }
     }
     Ok(())

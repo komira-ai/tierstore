@@ -94,7 +94,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 
 use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
@@ -117,8 +117,9 @@ use super::listen::{bind_all, has_duplicate, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
 use super::lock::{self, LockFile, check_lock_path};
 use super::oci::{
-    self, OciDrain, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
+    self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
 };
+use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
 use super::{Drained, Server, ServerConfig};
@@ -1086,15 +1087,7 @@ pub async fn run_serving(
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
     let mut built = build(cli)?;
-    // One try now, so that a lock file that cannot be used stops the start; the reconciler's
-    // loop takes it later if another process holds it now.
-    let gate = match &cli.lock_file {
-        Some(path) => {
-            let opened = Gate::open(path, LOCK_RETRY);
-            Some(opened.map_err(|why| format!("--lock-file {}: {why}", path.display()))?)
-        }
-        None => None,
-    };
+    let gate = open_gate(cli)?;
     let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
     probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
@@ -1106,19 +1099,10 @@ pub async fn run_serving(
     let listeners = bind_s3(&cli.listen)?;
     let oci = bind_oci(built.oci, oci_backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
-    let stopping = Arc::clone(&server);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
-    let (oci_stop, oci_stopped) = watch::channel(false);
-    let lb_wait = cli.drain_lb_wait;
-    let watcher = tokio::spawn(async move {
-        stop.await;
-        // Both fronts drain alike: `Connection: close` from now on, and at the end of the settle
-        // a lingering close for each idle connection.
-        begin_drains(&stopping, oci_drain.as_ref());
-        tokio::time::sleep(lb_wait).await;
-        let _ = oci_stop.send(true);
-    });
+    let (watcher, oci_stopped) =
+        stop_watcher(stop, Arc::clone(&server), oci_drain, cli.drain_lb_wait);
     let halt = Arc::new(Notify::new());
     let halting = Arc::clone(&halt);
     let serving = async move {
@@ -1141,6 +1125,33 @@ pub async fn run_serving(
     eprint!("{}", oci_cut_note(oci_cut));
     eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
+}
+
+/// Takes the lock file of the hot tier, if the flags name one: one try now, so that a lock file
+/// that cannot be used stops the start; the reconciler's loop takes it later if another process
+/// holds it now.
+///
+/// # Errors
+/// A lock file that cannot be opened.
+pub(super) fn open_gate(cli: &Cli) -> Result<Option<Gate>, LockFileError> {
+    match &cli.lock_file {
+        Some(path) => match Gate::open(path, LOCK_RETRY) {
+            Ok(gate) => Ok(Some(gate)),
+            Err(source) => Err(LockFileError {
+                path: path.clone(),
+                source,
+            }),
+        },
+        None => Ok(None),
+    }
+}
+
+/// A lock file that cannot be opened: the file and what the system said.
+#[derive(Debug, thiserror::Error)]
+#[error("--lock-file {}: {source}", path.display())]
+pub(super) struct LockFileError {
+    path: PathBuf,
+    source: std::io::Error,
 }
 
 /// What [`run`] reports on stderr of a drain: a line when the drain deadline cut requests, and
@@ -1167,36 +1178,6 @@ pub(super) async fn bind_oci(
     let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
-}
-
-/// Begins the drain of the S3 front `server` and of the OCI front, if there is one. The OCI front's
-/// first, so that an answer of either front that comes after `/readyz` said 503 says
-/// `Connection: close`.
-pub(super) fn begin_drains(server: &Server, oci: Option<&OciDrain>) {
-    if let Some(oci) = oci {
-        oci.begin();
-    }
-    server.begin_drain();
-}
-
-/// Serves the OCI front until `stopped` says so, the end of the settle; the connections it cut. 0
-/// when there is none.
-pub(super) async fn serve_oci(
-    listener: Option<OciListener>,
-    stopped: watch::Receiver<bool>,
-) -> usize {
-    match listener {
-        Some(listener) => listener.serve(stopped).await,
-        None => 0,
-    }
-}
-
-/// The same for the connections of the OCI front.
-pub(super) fn oci_cut_note(cut: usize) -> String {
-    match cut {
-        0 => String::new(),
-        cut => format!("tierstore: {cut} OCI connections were cut at the drain deadline\n"),
-    }
 }
 
 /// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns.

@@ -278,6 +278,39 @@ async fn a_checkpoint_that_cannot_be_stored_is_stored_by_a_later_pass() {
     assert_eq!(stored, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
 }
 
+/// Asserts that a pass that cannot check its lease before it stores (the HEAD of the lease
+/// fails; a renewal is a write, so that is the only HEAD of the lease in the pass) reports the
+/// failure, stores no checkpoint and prunes nothing, and keeps what it read: the next pass copies
+/// nothing again and stores the checkpoint.
+/// Catches a pass that stores without having checked the lease, and one that drops its books on
+/// an error that says nothing of the lease.
+#[tokio::test(start_paused = true)]
+async fn a_lease_that_cannot_be_checked_leaves_the_stores_to_the_next_pass() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("k1", body("1")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+    assert!(reconciler.pass().await.held);
+    let first = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(first, r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#);
+    proxy.put("k2", body("2")).await.unwrap();
+    rig.hot.fail_next_on(Op::Head, "_tiering/lease", down());
+
+    let report = reconciler.pass().await;
+    assert!(report.held, "{report:?}");
+    assert_eq!(
+        (report.copied, report.pruned, report.failed),
+        (1, 0, vec![down()])
+    );
+    assert_eq!(text(&*rig.hot_mem, "_tiering/checkpoint/p1").await, first);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 0);
+    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(stored, r#"{"seq":2,"evict_seq":0,"evict_idx":0}"#);
+}
+
 /// Asserts that a usage that cannot be published is reported without stopping the rest of the
 /// pass, and is published by the next pass.
 #[tokio::test(start_paused = true)]
