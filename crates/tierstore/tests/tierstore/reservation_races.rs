@@ -321,6 +321,20 @@ impl Backend for Retagged {
         tag.map(outer_tag)
     }
 
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let tag = self
+            .inner
+            .put_stream_if_match(key, len, body, inner_tag(etag))
+            .await;
+        tag.map(outer_tag)
+    }
+
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let tag = self.inner.put_reservation(key, body).await;
         tag.map(outer_tag)

@@ -97,6 +97,17 @@ impl Backend for Gate {
         self.inner.put_if_match(key, body, etag).await
     }
 
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.arrive(key).await;
+        self.inner.put_stream_if_match(key, len, body, etag).await
+    }
+
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
         self.wait(key).await;
         self.inner.put_reservation(key, body).await
@@ -207,6 +218,17 @@ impl Backend for Stall {
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         self.stop(key).await;
         self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.stop(key).await;
+        self.inner.put_stream_if_match(key, len, body, etag).await
     }
 
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
