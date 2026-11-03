@@ -56,6 +56,27 @@ impl Tiers {
     }
 }
 
+/// The turns of the scheduler [`until_held`] gives the keep of a put before it fails the test: no
+/// real time is read, so the wait ends when the publication has happened, however slow the disk.
+const TURNS: u32 = 10_000_000;
+
+/// Waits until the cache holds `want` (bytes, objects), which is what a keep's publication changes
+/// (the object is put in the index last), by giving up the thread to the keep task and the
+/// blocking file work it waits for. A put may be answered before its keep ends (past
+/// `keep_wait`), so a test that reads what it wrote waits for this event, not for the put.
+async fn until_held(cache: &LocalCache, want: (u64, usize)) {
+    for _ in 0..TURNS {
+        if cache.held() == want {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!(
+        "after {TURNS} turns, the cache holds {:?}, not {want:?}",
+        cache.held()
+    );
+}
+
 /// A cache over `upstream` that keeps what is under `img/` and takes writes, in a scratch
 /// directory kept as long as the returned guard.
 fn cache_over(
@@ -68,10 +89,6 @@ fn cache_over(
     let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
     config.write_through = true;
     config.tiered_upstream = tiered;
-    // The put waits for the keep to end, as the real clock cannot be moved here: an hour is
-    // never reached, so a slow disk cannot turn a kept object into a miss.
-    config.keep_wait = std::time::Duration::from_secs(3600);
-    config.keep_deadline = std::time::Duration::from_secs(3600);
     change(&mut config);
     let clock: Arc<dyn Clock> = Arc::new(tierstore::SystemClock);
     let cache = LocalCache::open(config, upstream, Arc::new(SystemDisk), clock).unwrap();
@@ -148,8 +165,9 @@ async fn a_windowed_read_of_a_cold_only_object_succeeds_only_with_the_tiered_opt
     }
 }
 
-/// Asserts that a put through the cache goes to the proxy, is kept, and is read back without a
-/// read of either tier.
+/// Asserts that a put through the cache goes to the proxy, is kept (the test waits for the keep's
+/// publication, not for the put to answer after it), and is read back without a read of either
+/// tier.
 #[tokio::test]
 async fn a_put_through_the_cache_is_kept_and_read_without_a_tier_read() {
     let tiers = Tiers::new();
@@ -160,6 +178,7 @@ async fn a_put_through_the_cache_is_kept_and_read_without_a_tier_read() {
         .put_stream("img/p", Some(3), chunks(&["abc"]))
         .await
         .unwrap();
+    until_held(&cache, (3, 1)).await;
     assert_eq!(read(&*tiers.hot_mem, "img/p").await, body("abc"));
     let again = cache.put_stream("img/p", Some(3), chunks(&["xyz"])).await;
     assert_eq!(again, Err(Error::AlreadyExists("img/p".to_owned())));
