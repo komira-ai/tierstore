@@ -399,20 +399,6 @@ impl Inner {
         outcome.await.clone()
     }
 
-    /// Journals a put of an object that the hot tier holds (`op` says of what kind, and
-    /// `cold_tag` names the cold object the entry is about, if one is), and takes the object out
-    /// of the hot tier if that fails.
-    async fn journal_put(
-        &self,
-        op: JournalOp,
-        key: &str,
-        size: u64,
-        cold_tag: Option<String>,
-    ) -> Result<(), Error> {
-        self.journal_entry(self.entry(op, key, size, cold_tag))
-            .await
-    }
-
     /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
     /// of the hot tier if that fails.
     async fn journal_entry(&self, entry: JournalEntry) -> Result<(), Error> {
