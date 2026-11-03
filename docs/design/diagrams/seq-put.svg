@@ -64,7 +64,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="225.0" y="650" class="t-m lbl" text-anchor="middle">6  200: ACK POINT</text>
 <line x1="340" y1="662" x2="110" y2="662" class="ln-o" marker-end="url(#seq-put-ao)"/>
 <rect x="30" y="676" width="900" height="80" rx="5" class="box-o"/>
-<text x="40" y="696" class="t-m">After the ack: hot holds the object and a PENDING entry; cold holds nothing for the key yet. The leader finds the entry by LIST, copies hot to</text>
+<text x="40" y="696" class="t-m">After the ack of a hot landing: hot holds the object and a PENDING entry; cold holds nothing yet. The leader finds the entry by LIST, copies hot to</text>
 <text x="40" y="712" class="t-m">cold create-only and deletes the entry (entry lifecycle). A put never waits for the leader or for eviction. If the CAS fails (the entry was reaped</text>
 <text x="40" y="728" class="t-m">or amended by a DELETE): 503, and the node never touches the entry or the data again. An ambiguous CAS is read back by its nonce, never treated as</text>
 <text x="40" y="744" class="t-m">failed. A 503 after landing is an unknown outcome: the key may exist.</text>
