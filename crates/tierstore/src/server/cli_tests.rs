@@ -824,7 +824,6 @@ async fn the_reconciler_works_every_interval_until_halted() {
     let working = reconcile(reconciler, Duration::from_secs(5), Arc::clone(&halt));
     let watching = async {
         tokio::time::sleep(Duration::from_secs(2)).await;
-        // Not copied: the cold tier still holds the reservation of the put.
         assert!(cold_mem.head("k").await.unwrap().reservation);
         tokio::time::sleep(Duration::from_secs(5)).await;
         let copied = cold_mem.get("k", None).await.unwrap();
