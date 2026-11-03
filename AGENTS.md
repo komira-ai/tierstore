@@ -7,8 +7,8 @@ The file has three parts: the shared core, the same text word for word in every 
 repository's code is Rust; and this repository's own rules. Rules are cited by id.
 
 The shared core is the text between the two marker lines below. `cargo test -p xtask --test agents_md` (in `crates/xtask/tests/agents_md.rs`)
-fails when it differs from the checked-in copy `docs/agents/shared_core.md`, when that copy differs from its hash in
-`docs/agents/shared_core.sha256`, or when `CLAUDE.md` no longer imports this file; a change to the core changes all three in one pull
+fails when it differs from the checked-in copy `crates/xtask/tests/agents_md/shared_core.md` (test data of that test, next to it), when that copy
+differs from its hash in `crates/xtask/tests/agents_md/shared_core.sha256`, or when `CLAUDE.md` no longer imports this file; a change to the core changes all three in one pull
 request.
 
 <!-- shared-core:begin -->

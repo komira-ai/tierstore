@@ -97,7 +97,7 @@ fn the_macos_system_trees_are_refused() {
         "/usr/local/etc/updater.d",
         "/usr/local/kbf/state",
         "/usr/local/lib/x",
-        "/usr/local/libexec/kbf",
+        "/usr/local/libexec/x",
         "/usr/local/tierstore",
         "/usr/local/tierstore/state",
         "/var/folders/x",
@@ -162,7 +162,7 @@ fn a_macos_declaration_that_breaks_a_rule_is_refused() {
         ),
         (
             format!(
-                "{state}uid = \"_tierstore\"\nhealth_ports = [9300]\n[hook]\nservice = \"com.komira.kbf-daemon\"\n"
+                "{state}uid = \"_tierstore\"\nhealth_ports = [9300]\n[hook]\nservice = \"com.example.other\"\n"
             ),
             |e| matches!(e, DeclarationError::Label),
         ),

@@ -606,3 +606,43 @@ fn build_commit_with_a_version_refuses_a_binary_that_says_another() {
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert!(stderr(&o).contains("9.9.9"), "{}", stderr(&o));
 }
+
+#[test]
+fn release_set_version_writes_the_version_into_the_manifest_and_the_lock_of_the_root() {
+    // Catches: `--version` and `--root` not reaching the verb (another directory edited, or a
+    // version not written), the line printed not naming both files, and a version of another
+    // shape being written (exit status 1, nothing changed).
+    let d = dir("set-version");
+    let manifest = "[package]\nname = \"tierstore\"\nversion = \"0.3.0\"\n";
+    let lock = "[[package]]\nname = \"tierstore\"\nversion = \"0.3.0\"\n";
+    put(&d, "crates/tierstore/Cargo.toml", manifest);
+    put(&d, "Cargo.lock", lock);
+    let root = d.to_str().expect("path");
+    let set = |version: &str| {
+        run(
+            &d,
+            &[
+                "--root",
+                root,
+                "release",
+                "set-version",
+                "--version",
+                version,
+            ],
+        )
+    };
+    let o = set("0.3.4");
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(
+        stdout(&o),
+        "crates/tierstore/Cargo.toml and Cargo.lock: tierstore is 0.3.4\n"
+    );
+    let read = |name: &str| std::fs::read_to_string(d.join(name)).expect("read");
+    let manifest = manifest.replace("0.3.0", "0.3.4");
+    let lock = lock.replace("0.3.0", "0.3.4");
+    assert_eq!(read("crates/tierstore/Cargo.toml"), manifest);
+    assert_eq!(read("Cargo.lock"), lock);
+    let o = set("v1.0.0");
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(read("Cargo.lock"), lock);
+}

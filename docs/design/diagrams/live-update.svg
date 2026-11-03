@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 960" width="960" height="960" role="img" aria-label="Sequence diagram of a live update: the new process registers, receives the listening sockets from the old process, starts accepting; the old process drains, writes closed, releases the lease if it held it, and exits; the leader later retires the old id.">
+<title>A live update: the listening sockets are handed over, no connection is refused</title>
+<defs><marker id="live-update-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="live-update-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="960" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A live update: the new process takes over the sockets, then the old one leaves</text>
+<rect x="35" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="90.0" y="65" class="b" text-anchor="middle">Clients</text>
+<rect x="225" y="44" width="110" height="44" rx="5" class="box-b"/>
+<text x="280.0" y="63" class="b" text-anchor="middle">Old process</text>
+<text x="280.0" y="80" class="t-m" text-anchor="middle">node A-1</text>
+<rect x="415" y="44" width="110" height="44" rx="5" class="box-b"/>
+<text x="470.0" y="63" class="b" text-anchor="middle">New process</text>
+<text x="470.0" y="80" class="t-m" text-anchor="middle">node A-2</text>
+<rect x="605" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="660.0" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="795" y="44" width="130" height="32" rx="5" class="box"/>
+<text x="860.0" y="65" class="b" text-anchor="middle">_tiering/lease</text>
+<line x1="90" y1="76" x2="90" y2="740" class="ln-d"/>
+<line x1="470" y1="88" x2="470" y2="740" class="ln-d"/>
+<line x1="660" y1="76" x2="660" y2="740" class="ln-d"/>
+<line x1="860" y1="76" x2="860" y2="740" class="ln-d"/>
+<line x1="280" y1="88" x2="280" y2="706" class="ln-d"/>
+<line x1="90" y1="126" x2="280" y2="126" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="185.0" y="102" class="t-m lbl" text-anchor="middle">0  requests keep arriving</text>
+<text x="185.0" y="118" class="t-m lbl" text-anchor="middle">at the old process</text>
+<rect x="462" y="146" width="16" height="30" rx="5" class="box"/>
+<text x="490" y="158" class="t-m">1  boots with a fresh id</text>
+<text x="490" y="174" class="t-m">A-2 = &lt;node&gt;-&lt;boot id&gt;</text>
+<line x1="470" y1="244" x2="660" y2="244" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="565.0" y="204" class="t-m lbl" text-anchor="middle">2  register: create</text>
+<text x="565.0" y="220" class="t-m lbl" text-anchor="middle">_tiering/proxies/&lt;new id&gt;</text>
+<text x="565.0" y="236" class="t-m lbl" text-anchor="middle">(rewritten every minute)</text>
+<line x1="470" y1="304" x2="280" y2="304" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="375.0" y="280" class="t-m lbl" text-anchor="middle">3  connect to the old</text>
+<text x="375.0" y="296" class="t-m lbl" text-anchor="middle">process's control socket</text>
+<line x1="280" y1="352" x2="470" y2="352" class="ln-o" marker-end="url(#live-update-ao)"/>
+<text x="375.0" y="328" class="t-m lbl" text-anchor="middle">4  hand over the listening</text>
+<text x="375.0" y="344" class="t-m lbl" text-anchor="middle">sockets (POSIX, Unix socket)</text>
+<line x1="90" y1="408" x2="470" y2="408" class="ln-o" marker-end="url(#live-update-ao)"/>
+<text x="190" y="384" class="t-m lbl" text-anchor="middle">5  new process accepts:</text>
+<text x="190" y="400" class="t-m lbl" text-anchor="middle">new connections arrive</text>
+<rect x="272" y="432" width="16" height="48" rx="5" class="box"/>
+<text x="300" y="448" class="t-m">6  stops accepting;</text>
+<text x="300" y="464" class="t-m">drains in-flight requests</text>
+<line x1="280" y1="530" x2="660" y2="530" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="470.0" y="506" class="t-m lbl" text-anchor="middle">7  write "closed" in</text>
+<text x="470.0" y="522" class="t-m lbl" text-anchor="middle">_tiering/proxies/&lt;old id&gt;</text>
+<line x1="280" y1="590" x2="860" y2="590" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="830" y="556" class="t-m lbl" text-anchor="end">8  if it was the leader: release</text>
+<text x="830" y="572" class="t-m lbl" text-anchor="end">(If-Match on its tag)</text>
+<line x1="470" y1="664" x2="860" y2="664" class="ln" marker-end="url(#live-update-ak)"/>
+<text x="830" y="614" class="t-m lbl" text-anchor="end">9  another process acquires</text>
+<text x="830" y="630" class="t-m lbl" text-anchor="end">within one pass</text>
+<text x="830" y="646" class="t-m lbl" text-anchor="end">(create-only)</text>
+<line x1="268" y1="684" x2="292" y2="708" class="ln-o"/>
+<line x1="292" y1="684" x2="268" y2="708" class="ln-o"/>
+<text x="304" y="692" class="t-m">10  old process exits</text>
+<text x="304" y="708" class="t-m">(it does not wait for 9)</text>
+<rect x="30" y="752" width="900" height="64" rx="5" class="box"/>
+<text x="42" y="774" class="b">11  Later, the old id is retired by the leader (whoever holds the lease)</text>
+<text x="42" y="792" class="t-m">After the old journal is applied: sentinel at its next journal number, apply everything below it,</text>
+<text x="42" y="808" class="t-m">then delete its journal, checkpoint and registration. Until then its journal keeps being copied to cold.</text>
+<rect x="30" y="836" width="900" height="100" rx="5" class="box-o"/>
+<text x="42" y="858" class="b">What this buys</text>
+<text x="42" y="878" class="t-m">No connection is refused: the listening sockets are passed on, never closed, so clients keep connecting throughout.</text>
+<text x="42" y="895" class="t-m">No fixed ports and no slots; no firewall rules: the new process takes the same sockets and has its own fresh id.</text>
+<text x="42" y="912" class="t-m">Same on Linux and macOS: POSIX socket hand-off over a Unix control socket.</text>
+<text x="42" y="929" class="t-m">Puts continue throughout; if the lease changes hands, only copying to cold waits, for at most one pass.</text>
+</svg>
