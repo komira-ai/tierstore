@@ -151,7 +151,10 @@ fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
         // A relative path would be read from the working directory of the process, which the
         // file does not say: it could lead into the cache directory, which the start empties.
         let Some(file) = normalised(file) else {
-            return Err(invalid(name, "must be an absolute path in a file with a local cache"));
+            return Err(invalid(
+                name,
+                "must be an absolute path in a file with a local cache",
+            ));
         };
         if file.starts_with(&cache) {
             let why = format!("must not hold {name}: it is not a place for the cache's files");

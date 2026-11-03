@@ -157,7 +157,7 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         ),
         (
             in_cache("lock_file = \"instance.lock\""),
-            "hot_store.lock_file: must be an absolute path in a file with a local cache",
+            "hot_store.lock_file: \"instance.lock\" must be an absolute path",
         ),
         (
             oci("tls_cert_file = \".stage/oci.crt\"\ntls_key_file = \"/etc/oci.key\""),
