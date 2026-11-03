@@ -346,7 +346,7 @@ impl Inner {
         body: PartBody<'_>,
         hot_only: bool,
     ) -> Result<(), Error> {
-        self.writable()?;
+        self.writable(key)?;
         // One HEAD before the body is read, for an upstream of two tiers as for any other: a key
         // that only the first tier holds is refused by the proxy's own put only after the whole
         // body has been written to that tier, so the HEAD is what spares the bandwidth and room.

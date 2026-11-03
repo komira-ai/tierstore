@@ -649,10 +649,12 @@ async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
     for reserved in ["_entries/x", "_journal/p1/1", "_tiering/lease"] {
         let answer = rig.get(&format!("/v2/a/blobs/../../{reserved}")).await;
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "{reserved}");
-        assert_eq!(answer.error().0, "UNSUPPORTED", "{reserved}");
-        assert!(
-            !answer.body.windows(6).any(|w| w == b"secret"),
-            "{reserved}"
+        let expected = (
+            "UNSUPPORTED".to_owned(),
+            "only /v2/, /v2/<name>/manifests/<digest> and /v2/<name>/blobs/<digest> are served"
+                .to_owned(),
+            Value::Null,
         );
+        assert_eq!(answer.error(), expected, "{reserved}");
     }
 }

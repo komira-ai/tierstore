@@ -199,6 +199,35 @@ async fn the_upstream_conditional_put_decides_a_race_and_a_failed_head_fails_the
     );
 }
 
+/// Asserts that the keys a storage node keeps for itself are refused with `Reserved` by every
+/// write call that names a key, and that the upstream is not called.
+#[tokio::test]
+async fn reserved_keys_are_refused_by_every_write() {
+    let rig = Rig::writing("tscache-write-reserved");
+    for key in ["_entries/p1/0001", "_journal/p1/0001", "_tiering/lease"] {
+        let cache = &rig.cache;
+        let results = [
+            cache.put(key, Bytes::from_static(b"x")).await,
+            cache.put_stream(key, Some(1), body(b"x")).await,
+            cache.delete(key).await,
+            cache.create_upload(key).await.map(|_| ()),
+            cache
+                .upload_part(key, "id", 1, body(b"x"))
+                .await
+                .map(|_| ()),
+            cache
+                .complete_upload(key, "id", &[(1, "t".to_owned())])
+                .await
+                .map(|_| ()),
+            cache.abort_upload(key, "id").await,
+        ];
+        for result in results {
+            assert_eq!(result, Err(Error::Reserved(key.to_owned())), "{key}");
+        }
+    }
+    assert_eq!(writes_seen(&rig), 0);
+}
+
 /// Asserts a multipart upload through the cache: the object is made at the upstream from the
 /// parts in the order named, the completion is create-only, and an aborted upload makes nothing.
 #[tokio::test]

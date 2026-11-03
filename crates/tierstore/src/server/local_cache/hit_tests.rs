@@ -107,9 +107,10 @@ async fn keys_outside_a_policy_and_listings_pass_through_and_are_never_kept() {
 }
 
 /// Asserts that the longest prefix decides: under a prefix that says `cache = false` inside one
-/// that says `true` nothing is kept.
+/// that says `true` nothing is kept, and the keys of the reserved prefixes are never kept even
+/// under a policy for everything.
 #[tokio::test]
-async fn the_longest_policy_decides() {
+async fn the_longest_policy_decides_and_reserved_keys_are_never_kept() {
     let rig = Rig::with("tscache-policy", |config| {
         config.policies = vec![
             (String::new(), true),
@@ -117,13 +118,23 @@ async fn the_longest_policy_decides() {
             ("cas/x/ok/".to_owned(), true),
         ];
     });
-    for key in ["a", "cas/x/no", "cas/x/ok/yes"] {
+    for key in [
+        "a",
+        "cas/x/no",
+        "cas/x/ok/yes",
+        "_entries/p/1",
+        "_journal/p/1",
+        "_tiering/usage",
+    ] {
         rig.put(key, &pattern(10)).await;
         assert_eq!(rig.get(key).await.unwrap().len(), 10, "{key}");
     }
     assert!(rig.has_file("a"));
     assert!(rig.has_file("cas/x/ok/yes"));
     assert!(!rig.has_file("cas/x/no"));
+    assert!(!rig.has_file("_entries/p/1"));
+    assert!(!rig.has_file("_journal/p/1"));
+    assert!(!rig.has_file("_tiering/usage"));
     assert_eq!(rig.cache.held(), (20, 2));
 }
 

@@ -35,7 +35,7 @@
 //! The `<name>` in a URL is checked against the grammar of the distribution specification (a bad
 //! one is 400 `NAME_INVALID`) and then ignored: there is one content-addressed namespace, so any
 //! name reads any digest. A key is built only from a validated digest, so nothing outside the
-//! prefix is reachable, and a prefix that overlaps `_journal/` or `_tiering/` is refused at start.
+//! prefix is reachable, and a prefix that overlaps `_entries/`, `_journal/` or `_tiering/` is refused at start.
 //!
 //! # Integrity
 //!

@@ -454,7 +454,7 @@ pub struct Cli {
     pub oci_tls_key: Option<PathBuf>,
     /// The prefix of the keys the OCI front reads, ending in `/` (`oci/` if not given): an
     /// object is at `<prefix>blobs/sha256/<64 lowercase hex digits>`. A prefix inside
-    /// `_journal/` or `_tiering/` is refused at start (exit 2).
+    /// `_entries/`, `_journal/` or `_tiering/` is refused at start (exit 2).
     #[arg(long, value_name = "PREFIX", requires = "oci_listen")]
     pub oci_prefix: Option<String>,
     /// The most connections the OCI front has open at once (64 if not given); the others wait

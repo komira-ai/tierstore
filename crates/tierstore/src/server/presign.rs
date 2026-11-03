@@ -26,7 +26,7 @@
 //! - a `PUT` of one object whose key, after the path is percent-decoded, starts with the
 //!   prefix of the ceiling (a byte prefix, no normalization; the prefix ends in `/` and the key is
 //!   longer than it) and is a valid name: at most 1024 bytes, no control character (NUL included), no `..` anywhere and no `.` segment; never a
-//!   key under `_journal/` or `_tiering/`;
+//!   key under `_entries/`, `_journal/` or `_tiering/`;
 //! - no multipart call, no `If-Match` (nothing is replaced), and no other method;
 //! - an `X-Amz-Expires` of at most the smaller of the ceiling's `max_expires_secs` and the
 //!   server's `--presign-max-expires`, and the URL is refused from the second
@@ -168,7 +168,7 @@ pub fn check_name(text: &str) -> Result<(), PresignError> {
 }
 
 /// Whether `prefix` is one a presigning key may have: a name, not empty, and neither under
-/// `_journal/` or `_tiering/` nor a prefix of either.
+/// `_entries/`, `_journal/` or `_tiering/` nor a prefix of either.
 ///
 /// # Errors
 /// [`PresignError::Name`] with the reason.

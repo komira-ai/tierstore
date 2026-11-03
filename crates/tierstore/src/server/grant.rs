@@ -34,7 +34,7 @@
 //! bucket the server serves. `expires` is the unix time in seconds at which the grant ends, in
 //! decimal digits without a sign or a leading zero: the grant is good while the server's clock
 //! reads less than that. Each `name` is the exact key of an object (at most 1024 bytes, UTF-8, no
-//! control character, no `..`, no `.` segment, not under `_journal/` or `_tiering/`, not empty);
+//! control character, no `..`, no `.` segment, not under `_entries/`, `_journal/` or `_tiering/`, not empty);
 //! there is at least one and at most [`MAX_GRANT_KEYS`], in strictly ascending order of their
 //! bytes (so none twice). The header value is at most [`MAX_TOKEN_BYTES`] bytes.
 //!

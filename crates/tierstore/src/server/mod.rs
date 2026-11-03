@@ -32,13 +32,13 @@
 //!   and `upload-id-marker`, without `delimiter`: the open uploads of the backend (for the
 //!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
-//!   a key under `_journal/` or `_tiering/` are not listed. ListParts (`GET /<key>?uploadId=`) is
+//!   a key under `_entries/`, `_journal/` or `_tiering/` are not listed. ListParts (`GET /<key>?uploadId=`) is
 //!   `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
-//! `_journal/` or `_tiering/` is refused with `AccessDenied`.
+//! `_entries/`, `_journal/` or `_tiering/` is refused with `AccessDenied`.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
 //! when the client goes away before the answer, so that no object is left without the journal

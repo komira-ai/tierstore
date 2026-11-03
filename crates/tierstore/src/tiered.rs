@@ -185,7 +185,7 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   comes before that put).
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_entries/`,
-///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
+///   `_entries/`, `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
 ///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
 ///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
 ///   version of an object to know it by). A HEAD that fails fails the listing.
