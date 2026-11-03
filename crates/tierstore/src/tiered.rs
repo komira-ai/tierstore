@@ -400,17 +400,6 @@ impl Inner {
         outcome.await.clone()
     }
 
-    /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
-    /// of the hot tier if that fails.
-    async fn journal_entry(&self, entry: JournalEntry) -> Result<(), Error> {
-        let key = entry.key.clone();
-        let appended = self.append(entry).await;
-        if appended.is_err() {
-            let _ = self.hot.delete(&key).await;
-        }
-        appended
-    }
-
     /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
     /// the tag the hot tier's create-only write gave the copy. If the append fails, takes the copy
     /// out of the hot tier by `hot_tag` (`If-Match`): an object that another writer put under the
