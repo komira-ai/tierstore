@@ -71,16 +71,22 @@ impl Registrations {
     }
 
     /// Notes that the store was asked about `id` at `now`, so that it is not asked again before
-    /// the wait has passed, or the registration has changed.
-    pub(crate) fn ask(&mut self, id: &str, now: u64) {
-        if let Some(seen) = self.seen.get_mut(id) {
-            seen.asked = Some(now);
-        }
+    /// the wait has passed, or the registration has changed. Gives the version (size and time of
+    /// the last write) the leader has been counting from, or none for an id it does not know.
+    pub(crate) fn ask(&mut self, id: &str, now: u64) -> Option<(u64, u64)> {
+        let seen = self.seen.get_mut(id)?;
+        seen.asked = Some(now);
+        Some(seen.version)
     }
 }
 
-/// Removes the registration of `id` if its owner beat (so it is gone, having not changed for as
-/// long as the caller waited) and left no journal object. Gives whether it was removed.
+/// Removes the registration of `id` if it is still the `version` (size and time of the last
+/// write) that the caller saw unchanged for its whole wait, its owner beat (so it is gone) and it
+/// left no journal object. Gives whether it was removed.
+///
+/// A registration that is not that version any more was written since the caller last looked: its
+/// owner is alive, or a new process opened over it, and the caller's count starts again at its
+/// next look.
 ///
 /// A registration of a process that never beats (an empty one of an older release, or the body of
 /// a proxy that did not start the heartbeat) is never removed: it never changes while its owner
@@ -91,11 +97,15 @@ impl Registrations {
 ///
 /// # Errors
 /// What the reads and the delete give, a registration that is gone or replaced excepted.
-pub(crate) async fn remove_if_departed(hot: &dyn Backend, id: &str) -> Result<bool, Error> {
+pub(crate) async fn remove_if_departed(
+    hot: &dyn Backend,
+    id: &str,
+    version: (u64, u64),
+) -> Result<bool, Error> {
     let key = proxy_key(id);
     let tag = match hot.head(&key).await {
-        Ok(meta) => meta.tag,
-        Err(Error::NotFound(_)) => return Ok(false),
+        Ok(meta) if (meta.size, meta.modified) == version => meta.tag,
+        Ok(_) | Err(Error::NotFound(_)) => return Ok(false),
         Err(error) => return Err(error),
     };
     let body = match hot.get(&key, None).await {

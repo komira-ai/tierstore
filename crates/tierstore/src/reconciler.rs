@@ -51,8 +51,8 @@ pub struct ReconcilerConfig {
     pub mono: Arc<dyn Clock>,
     /// How long a registration of a proxy that heartbeats must have gone unchanged before the
     /// reconciler removes it, if the proxy left no journal object. It is at least the departure
-    /// time of the proxies (see `ProxyConfig::departure`), or a registration could go before its
-    /// owner is counted as departed.
+    /// time of the proxies (see `ProxyConfig::departure`), so a registration does not go while
+    /// the proxy's `live_until` may still be ahead.
     pub registration_retention: Duration,
 }
 
@@ -425,8 +425,8 @@ impl Reconciler {
         let now = self.config.mono.now();
         let wait = self.config.registration_retention;
         for id in self.books.registrations.due(now, wait) {
-            self.books.registrations.ask(&id, now);
-            if let Err(error) = remove_if_departed(self.hot.as_ref(), &id).await {
+            let version = self.books.registrations.ask(&id, now).unwrap_or_default();
+            if let Err(error) = remove_if_departed(self.hot.as_ref(), &id, version).await {
                 report.failed.push(error);
             }
         }

@@ -91,6 +91,12 @@ fn beating() -> Bytes {
     .encode()
 }
 
+/// The version of the registration `p` as a leader that listed it would have noted it.
+async fn seen_as(hot: &MemoryBackend) -> (u64, u64) {
+    let meta = hot.head(&proxy_key("p")).await.unwrap();
+    (meta.size, meta.modified)
+}
+
 async fn is_there(hot: &MemoryBackend, id: &str) -> bool {
     hot.head(&proxy_key(id)).await.is_ok()
 }
@@ -99,7 +105,10 @@ async fn is_there(hot: &MemoryBackend, id: &str) -> bool {
 #[tokio::test]
 async fn the_registration_of_a_process_that_beat_and_left_no_journal_is_removed() {
     let hot = hot_with("p", beating()).await;
-    assert_eq!(remove_if_departed(hot.as_ref(), "p").await, Ok(true));
+    assert_eq!(
+        remove_if_departed(hot.as_ref(), "p", seen_as(&hot).await).await,
+        Ok(true)
+    );
     assert!(!is_there(&hot, "p").await);
 }
 
@@ -115,7 +124,10 @@ async fn a_registration_of_a_process_that_never_beat_or_that_has_a_journal_is_ke
     };
     for body in [Bytes::new(), never.encode(), Bytes::from_static(b"junk")] {
         let hot = hot_with("p", body).await;
-        assert_eq!(remove_if_departed(hot.as_ref(), "p").await, Ok(false));
+        assert_eq!(
+            remove_if_departed(hot.as_ref(), "p", seen_as(&hot).await).await,
+            Ok(false)
+        );
         assert!(is_there(&hot, "p").await);
     }
 
@@ -123,7 +135,10 @@ async fn a_registration_of_a_process_that_never_beat_or_that_has_a_journal_is_ke
     hot.put(&journal_key("p", 1), Bytes::from_static(b"[]"))
         .await
         .unwrap();
-    assert_eq!(remove_if_departed(hot.as_ref(), "p").await, Ok(false));
+    assert_eq!(
+        remove_if_departed(hot.as_ref(), "p", seen_as(&hot).await).await,
+        Ok(false)
+    );
     assert!(is_there(&hot, "p").await);
 }
 
@@ -132,7 +147,7 @@ async fn a_registration_of_a_process_that_never_beat_or_that_has_a_journal_is_ke
 #[tokio::test]
 async fn a_registration_that_is_already_gone_is_not_removed_again() {
     let hot = MemoryBackend::new();
-    assert_eq!(remove_if_departed(&hot, "p").await, Ok(false));
+    assert_eq!(remove_if_departed(&hot, "p", (0, 0)).await, Ok(false));
 }
 
 /// Asserts that the errors of the heads, the read, the listing of the journal and of the delete are given
@@ -141,9 +156,10 @@ async fn a_registration_that_is_already_gone_is_not_removed_again() {
 async fn the_errors_of_the_store_are_given_and_the_registration_stays() {
     for op in [Op::Head, Op::Get, Op::List, Op::DeleteIfMatch] {
         let memory = hot_with("p", beating()).await;
+        let seen = seen_as(&memory).await;
         let hot = FaultyBackend::new(memory.clone());
         hot.fail_next(op, 1);
-        let answer = remove_if_departed(&hot, "p").await;
+        let answer = remove_if_departed(&hot, "p", seen).await;
         assert!(
             matches!(answer, Err(Error::Unavailable(_))),
             "{op:?}: {answer:?}"
@@ -159,6 +175,7 @@ async fn the_errors_of_the_store_are_given_and_the_registration_stays() {
 #[tokio::test]
 async fn a_registration_replaced_or_removed_after_it_was_read_is_kept_or_not_an_error() {
     let memory = hot_with("p", beating()).await;
+    let seen = seen_as(&memory).await;
     let gated = GateBackend::new(memory.clone());
     let held = gated.gate(Op::List, &journal_prefix("p"), Phase::Pre);
     let reopened = Registration {
@@ -167,7 +184,7 @@ async fn a_registration_replaced_or_removed_after_it_was_read_is_kept_or_not_an_
         hb: 0,
     };
     let tag = memory.head(&proxy_key("p")).await.unwrap().tag;
-    let cleanup = remove_if_departed(&gated, "p");
+    let cleanup = remove_if_departed(&gated, "p", seen);
     let reopen = async {
         held.parked().await;
         memory
@@ -182,9 +199,57 @@ async fn a_registration_replaced_or_removed_after_it_was_read_is_kept_or_not_an_
     assert_eq!(Registration::decode(&kept), Some(reopened));
 
     let memory = hot_with("p", beating()).await;
+    let seen = seen_as(&memory).await;
     let gated = GateBackend::new(memory.clone());
     let held = gated.gate(Op::List, &journal_prefix("p"), Phase::Pre);
-    let cleanup = remove_if_departed(&gated, "p");
+    let cleanup = remove_if_departed(&gated, "p", seen);
+    let remove = async {
+        held.parked().await;
+        memory.delete(&proxy_key("p")).await.unwrap();
+        assert!(held.release());
+    };
+    let (answer, ()) = tokio::join!(cleanup, remove);
+    assert_eq!(answer, Ok(false));
+}
+
+/// Asserts that a registration written after the leader last saw it, and before the cleanup looks
+/// at it, is kept: a beat that rewrites it with the same size at a later store time, and one that
+/// changes its size, each make the version the leader counted from not the registration's any
+/// more, so the cleanup deletes nothing and the next look of the leader starts the count again.
+#[tokio::test]
+async fn a_registration_written_after_the_leader_saw_it_is_not_removed() {
+    let clock = Arc::new(crate::TestClock::new());
+    let memory = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    for later in [
+        beating(),
+        Bytes::from(format!("{} ", String::from_utf8_lossy(&beating()))),
+    ] {
+        memory.put(&proxy_key("p"), beating()).await.unwrap();
+        let seen = seen_as(&memory).await;
+        clock.advance(1_000);
+        let tag = memory.head(&proxy_key("p")).await.unwrap().tag;
+        memory
+            .put_if_match(&proxy_key("p"), later, &tag)
+            .await
+            .unwrap();
+        assert_eq!(
+            remove_if_departed(memory.as_ref(), "p", seen).await,
+            Ok(false)
+        );
+        assert!(is_there(&memory, "p").await);
+        memory.delete(&proxy_key("p")).await.unwrap();
+    }
+}
+
+/// Asserts that a registration that is deleted between the head and the read is not an error and
+/// not a removal.
+#[tokio::test]
+async fn a_registration_deleted_between_the_head_and_the_read_is_not_removed() {
+    let memory = hot_with("p", beating()).await;
+    let seen = seen_as(&memory).await;
+    let gated = GateBackend::new(memory.clone());
+    let held = gated.gate(Op::Get, &proxy_key("p"), Phase::Pre);
+    let cleanup = remove_if_departed(&gated, "p", seen);
     let remove = async {
         held.parked().await;
         memory.delete(&proxy_key("p")).await.unwrap();

@@ -29,15 +29,15 @@ pub struct HeartbeatFlags {
     /// call may take. Longer than zero, and at most a sixth of `--departure`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub heartbeat: Duration,
-    /// How long a registration may stay unchanged, as the reconciler sees it on its own clock,
-    /// before its proxy counts as departed; also how long a proxy that is not heard of keeps its
-    /// right to destroy and acknowledge, less `--deadline-margin`. At least six times
+    /// How long a proxy that is not heard of stays live, less `--deadline-margin`: the value of
+    /// `Proxy::is_live`. Today it only sets that value; no request path reads it yet, and the
+    /// removal of registrations uses `--registration-retention`. At least six times
     /// `--heartbeat`.
     #[arg(long, default_value = "60s", value_parser = parse_duration)]
     pub departure: Duration,
-    /// The time that must be left of a proxy's right to destroy before it starts a call that
-    /// destroys, and the longest such a call may take. Longer than zero, and at most a quarter of
-    /// `--departure`.
+    /// The time taken off `--departure` for `Proxy::is_live`, and the time that must be left
+    /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. No
+    /// request path uses either yet. Longer than zero, and at most a quarter of `--departure`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the

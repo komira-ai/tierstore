@@ -70,9 +70,10 @@ pub struct ProxyConfig {
     /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
     /// called, and the longest a call of the heartbeat may take.
     pub heartbeat: Duration,
-    /// How long the reconciler waits, seeing a registration unchanged, before it counts the
-    /// proxy as departed. A proxy whose beat is not acknowledged for this long less
-    /// `deadline_margin` is no longer live.
+    /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
+    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
+    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
+    /// removal of registrations uses its own `registration_retention`.
     pub departure: Duration,
     /// The time that must be left before `live_until` for a call that destroys to start; the
     /// longest such a call may take.

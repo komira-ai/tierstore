@@ -4,11 +4,15 @@
 //! `live_until` is the send time of the last acknowledged beat on the proxy's own monotonic
 //! clock, plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]: past it the
 //! proxy must not destroy or acknowledge anything that another process could take as done by a
-//! live owner. Nothing in the request paths asks yet; [`Proxy::is_live`] is how a caller sees it.
+//! live owner. This is the only use of `departure` and the margin today: no request path reads
+//! `live_until` or refuses anything by it yet (enforcing it on destroying calls is future work),
+//! and [`Proxy::is_live`] is how a caller sees it.
 //!
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just
-//! stops changing, and the reconciler counts it as departed after [`ProxyConfig::departure`].
+//! stops changing, and the reconciler removes it once it has stayed unchanged for
+//! `ReconcilerConfig::registration_retention` (which is at least `departure`) and the proxy left
+//! no journal object.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -188,8 +192,8 @@ impl Proxy {
 
     /// Stops the heartbeat and waits until the task has ended, so that no beat follows; a second
     /// caller, at the same time or later, waits for the same end. The
-    /// registration is left as it is: it stops changing, and the reconciler counts the process as
-    /// departed after [`ProxyConfig::departure`]. Afterwards the heartbeat cannot be started
+    /// registration is left as it is: it stops changing, and the reconciler removes it after
+    /// `ReconcilerConfig::registration_retention` if no journal object is left. Afterwards the heartbeat cannot be started
     /// again, whether it was running or not.
     pub async fn stop_heartbeat(&self) {
         let mut ended = {
