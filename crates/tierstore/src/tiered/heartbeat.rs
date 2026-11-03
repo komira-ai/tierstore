@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::future::select;
+use futures::future::{Either, select};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -124,7 +124,7 @@ async fn run(
         let _ = beater.beat().await;
         let stopped = Box::pin(stop.changed());
         let waited = Box::pin(sleeper.sleep(period));
-        if select(stopped, waited).await.is_left() {
+        if matches!(select(stopped, waited).await, Either::Left(_)) {
             return;
         }
     }
