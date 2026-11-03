@@ -33,6 +33,7 @@ mod parts;
 #[cfg(test)]
 mod read_limit_tests;
 mod sigv4;
+mod streamed;
 mod tagged;
 mod times;
 mod xml;
@@ -41,6 +42,7 @@ pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, MULTIPART_THRESHOLD, PART_BYTES, part_size,
 };
 pub use parts::{OpenUpload, UploadsPage};
+pub use streamed::{ObjectBody, ObjectRead};
 pub use tagged::{ObjectHead, StampedObject, StampedPage};
 
 use std::fmt;
@@ -63,6 +65,7 @@ use crate::{
     ObjectStoreError, PageSize,
 };
 use sigv4::{EMPTY_SHA256, Request, Signer, Utc};
+use streamed::{check_partial, too_long};
 
 /// How long [`S3Store::wait_answering`] waits between attempts.
 pub const WAIT_RETRY: Duration = Duration::from_millis(250);
@@ -612,7 +615,9 @@ impl ObjectStore for S3Store {
             let bytes = crate::gather(body, len).await?;
             return self.put_new(key, bytes, None).await;
         }
-        multipart::put(&self.conn, key, len, body).await
+        multipart::put(&self.conn, key, len, body, None)
+            .await
+            .map(drop)
     }
 
     async fn get_range(
@@ -736,49 +741,6 @@ async fn failure(resp: Response) -> ObjectStoreError {
         code,
         message,
     }
-}
-
-/// The protocol error of a body that is longer than the `limit` bytes asked for.
-fn too_long(limit: u64) -> ObjectStoreError {
-    ObjectStoreError::Protocol(format!(
-        "the body is longer than the {limit} bytes asked for"
-    ))
-}
-
-/// Checks a 206 answer: `Content-Range` must name exactly the bytes asked for (cut at
-/// the end of the object) and the body must be that long.
-fn check_partial(
-    content_range: Option<&str>,
-    range: ByteRange,
-    body_len: usize,
-) -> Result<(), String> {
-    let cr = content_range.ok_or("206 without Content-Range")?;
-    let parsed = cr.strip_prefix("bytes ").and_then(|rest| {
-        let (span, total) = rest.split_once('/')?;
-        let (first, last) = span.split_once('-')?;
-        Some((
-            first.parse::<u64>().ok()?,
-            last.parse::<u64>().ok()?,
-            total.parse::<u64>().ok()?,
-        ))
-    });
-    let Some((first, last, total)) = parsed else {
-        return Err(format!("Content-Range {cr:?} does not parse"));
-    };
-    let want_last = range.last().min(total.saturating_sub(1));
-    if first != range.offset() || last != want_last || last < first {
-        return Err(format!(
-            "asked for bytes {}-{} and got Content-Range {cr:?}",
-            range.offset(),
-            range.last()
-        ));
-    }
-    if body_len as u64 != last - first + 1 {
-        return Err(format!(
-            "Content-Range {cr:?} but the body has {body_len} bytes"
-        ));
-    }
-    Ok(())
 }
 
 fn valid_bucket(b: &str) -> bool {

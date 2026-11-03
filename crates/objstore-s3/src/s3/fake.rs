@@ -4,7 +4,7 @@
 //! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id), with S3's rules on
 //! part sizes enforced at completion and conditional writes (`If-None-Match: *`) on a
 //! PUT and a completion, a PUT that replaces an object only if it has the entity tag in
-//! `If-Match` (412 for another tag, 404 if there is no object), and DELETE, which with `If-Match`
+//! `If-Match`, as does a completion (412 for another tag, 404 if there is no object), and DELETE, which with `If-Match`
 //! takes the object only if it has that entity tag (412 for another, 404 if there is none) unless a
 //! test asks the service to ignore the header ([`FakeS3::ignore_delete_condition`]).
 //!
@@ -30,6 +30,11 @@
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
 //! or the nth HEAD or DELETE of an object, once ([`FakeS3::fail`]).
 //!
+//! It keeps one piece of user metadata, the reservation mark (`x-amz-meta-tierstore-reservation`),
+//! as S3 keeps metadata: an object has it if the request that wrote it sent it, a HEAD and a
+//! read of the whole object or of a range give it back, and a PUT that does not send it, an `If-Match` replace
+//! included, leaves the object without it.
+//!
 //! Bytes are kept compactly: a run of zeros is counted, not stored, so an object of
 //! many GiB of zeros costs the test nothing to hold. It checks no signature unless a test
 //! asks ([`FakeS3::require_credentials`]): then a request not signed with that key pair
@@ -47,6 +52,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod meta;
 mod uploads;
 
 use self::uploads::list_uploads;
@@ -175,12 +181,13 @@ impl State {
 
     /// Keeps `kept` under `key`, stamped with the time of the service, with the entity tag
     /// `joined` if it is made of parts and the tag of its bytes if not.
-    fn store(&mut self, key: String, kept: Kept, joined: Option<String>) {
+    fn store(&mut self, key: String, kept: Kept, joined: Option<String>, marked: bool) {
         let modified = self.time.unwrap_or_else(system_seconds);
         let stored = Stored {
             kept,
             modified,
             joined,
+            marked,
         };
         self.objects.insert(key, stored);
     }
@@ -258,6 +265,8 @@ struct Stored {
     modified: u64,
     /// The entity tag of an object made of parts; none for an object of one PUT.
     joined: Option<String>,
+    /// Whether the request that wrote the object carried the reservation mark ([`meta`]).
+    marked: bool,
 }
 
 impl Stored {
@@ -660,7 +669,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             };
             answer("200 OK", &headers, b"")
         }
-        ("POST", None, Some(id), None) => complete(state, &id, &key, conditional, &request.body),
+        ("POST", None, Some(id), None) => complete(state, &id, &key, conditional, request),
         ("DELETE", None, Some(id), None) => {
             if state.take(Failure::Abort) {
                 return error("500 Internal Server Error", "InternalError");
@@ -695,28 +704,32 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
     }
 }
 
+/// The answer to a write that carries `If-Match` and is refused: 404 if there is no object, 412 if
+/// it has another entity tag; `None` for a write without the header or one the object matches.
+fn if_match_refusal(state: &State, key: &str, request: &Request) -> Option<Vec<u8>> {
+    let expected = request.headers.get("if-match")?;
+    match state.objects.get(key) {
+        None => Some(error("404 Not Found", "NoSuchKey")),
+        Some(stored) if stored.etag() != *expected => {
+            Some(error("412 Precondition Failed", "PreconditionFailed"))
+        }
+        Some(_) => None,
+    }
+}
+
 /// A PUT of a whole object: refused 412 if `conditional` (`If-None-Match: *`) and the key
 /// exists, or if it carries `If-Match` and the object has another entity tag (404 if there is
-/// no object). The answer to a PUT with `If-Match` carries the new object's entity tag.
+/// no object). The answer to a PUT carries the new object's entity tag, as S3's does.
 fn put_object(state: &mut State, key: String, conditional: bool, request: &Request) -> Vec<u8> {
-    let expected = request.headers.get("if-match");
-    if let Some(expected) = expected {
-        let Some(stored) = state.objects.get(&key) else {
-            return error("404 Not Found", "NoSuchKey");
-        };
-        if stored.etag() != *expected {
-            return error("412 Precondition Failed", "PreconditionFailed");
-        }
+    if let Some(refused) = if_match_refusal(state, &key, request) {
+        return refused;
     }
     if conditional && state.objects.contains_key(&key) {
         return error("412 Precondition Failed", "PreconditionFailed");
     }
     let kept = Kept::of(&request.body);
-    let headers = match expected {
-        Some(_) => vec![("etag", etag_of(&kept))],
-        None => vec![],
-    };
-    state.store(key, kept, None);
+    let headers = vec![("etag", etag_of(&kept))];
+    state.store(key, kept, None, meta::sent(&request.headers));
     state.stats.single_puts += 1;
     answer("200 OK", &headers, b"")
 }
@@ -859,8 +872,16 @@ fn assemble(upload: &Upload, body: &[u8], min_part: u64) -> Result<(Kept, String
     Ok((object, joined))
 }
 
-/// CompleteMultipartUpload ([`assemble`]); conditional on `If-None-Match: *`.
-fn complete(state: &mut State, id: &str, key: &str, conditional: bool, body: &[u8]) -> Vec<u8> {
+/// CompleteMultipartUpload ([`assemble`]); conditional on `If-None-Match: *`, or, with `If-Match`,
+/// on the object having that entity tag (412 for another, 404 `NoSuchKey` for no object).
+fn complete(
+    state: &mut State,
+    id: &str,
+    key: &str,
+    conditional: bool,
+    request: &Request,
+) -> Vec<u8> {
+    let body = request.body.as_slice();
     let min_part = state.min_part.unwrap_or(super::MIN_PART_BYTES);
     let upload = state.uploads.get(id).filter(|u| u.key == key);
     let assembled = upload
@@ -880,8 +901,11 @@ fn complete(state: &mut State, id: &str, key: &str, conditional: bool, body: &[u
     if conditional && state.objects.contains_key(key) {
         return error("412 Precondition Failed", "PreconditionFailed");
     }
+    if let Some(refused) = if_match_refusal(state, key, request) {
+        return refused;
+    }
     state.uploads.remove(id);
-    state.store(key.to_owned(), object, Some(joined.clone()));
+    state.store(key.to_owned(), object, Some(joined.clone()), false);
     state.stats.completed += 1;
     let done = format!(
         "<CompleteMultipartUploadResult><ETag>{joined}</ETag>\
@@ -895,10 +919,11 @@ fn head(state: &State, key: &str) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return answer("404 Not Found", &[], b"");
     };
-    let headers = [
+    let mut headers = vec![
         ("etag", stored.etag()),
         ("last-modified", http_date(stored.modified)),
     ];
+    headers.extend(meta::echoed(stored.marked));
     answer_sized("200 OK", stored.kept.len, &headers, b"")
 }
 
@@ -943,14 +968,16 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     answer("200 OK", &[], body.as_bytes())
 }
 
-/// A GET of the whole object, or of one `bytes=first-last` range.
+/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the mark.
 fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return error("404 Not Found", "NoSuchKey");
     };
     let object = &stored.kept;
     let Some(range) = range else {
-        return answer("200 OK", &[], &object.read(0, object.len));
+        let mut headers = meta::echoed(stored.marked);
+        headers.push(("etag", stored.etag()));
+        return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
         .strip_prefix("bytes=")
@@ -962,11 +989,9 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let end = (last + 1).min(object.len);
     let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
     let bytes = object.read(first, end);
-    answer(
-        "206 Partial Content",
-        &[("content-range", content_range)],
-        &bytes,
-    )
+    let mut headers = meta::echoed(stored.marked);
+    headers.extend([("etag", stored.etag()), ("content-range", content_range)]);
+    answer("206 Partial Content", &headers, &bytes)
 }
 
 #[cfg(test)]

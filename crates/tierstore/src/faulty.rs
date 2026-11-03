@@ -19,7 +19,9 @@ pub enum Op {
     Put,
     /// [`Backend::put_if_match`].
     PutIfMatch,
-    /// [`Backend::get`].
+    /// [`Backend::put_reservation`] and [`Backend::put_reservation_if_match`].
+    PutReservation,
+    /// [`Backend::get`] and [`Backend::get_marked`].
     Get,
     /// [`Backend::head`].
     Head,
@@ -244,11 +246,55 @@ impl Backend for FaultyBackend {
         self.inner.put_if_match(key, body, etag).await
     }
 
+    /// A streamed replacement is a call of kind [`Op::PutIfMatch`], as a replacement of the bytes
+    /// whole is.
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.enter(Op::PutIfMatch, key).await?;
+        self.inner.put_stream_if_match(key, len, body, etag).await
+    }
+
+    /// A reservation is a call of kind [`Op::PutReservation`], not of kind [`Op::Put`].
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.enter(Op::PutReservation, key).await?;
+        self.inner.put_reservation(key, body).await
+    }
+
+    /// As `put_reservation`, a call of kind [`Op::PutReservation`].
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        self.enter(Op::PutReservation, key).await?;
+        let inner = &self.inner;
+        inner.put_reservation_if_match(key, body, etag).await
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let asked = range.map(|range| (range.offset(), range.size()));
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;
         self.inner.get(key, range).await
+    }
+
+    /// A read with the mark is a call of kind [`Op::Get`], as a read without it is, and is given
+    /// by the wrapped backend's own call.
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool, String), Error> {
+        let asked = range.map(|range| (range.offset(), range.size()));
+        self.plan().ranges.push(asked);
+        self.enter(Op::Get, key).await?;
+        self.inner.get_marked(key, range).await
     }
 
     /// A streamed read is a call of kind [`Op::Get`], as a read of the bytes whole is, and is

@@ -136,6 +136,17 @@ A tag or release that exists is refused, and so is a commit that the highest rel
 covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
 
+## The compatibility check against the release before
+
+`crates/compat` holds tests that run two releases of the `tierstore` library side by side: this
+branch's, and the previous release's, which is the dev-dependency `tierstore_prev`, taken from this
+repository's public URL at the commit of the previous tag (`rev` in the root `Cargo.toml`, in `[workspace.dependencies]`;
+`allow-git` in `deny.toml` names that one URL). Over one directory and one in-process S3 service,
+each release reads and replaces what the other wrote (`tests/dir.rs`, `tests/s3.rs`), which is how
+a change to the formats stays additive. The tests need no network: only the build fetches the
+previous release's source. When a release is made, move `rev` to its commit, so that the next
+change is held to it; a tag can be moved and a commit cannot, which is why `rev` is the pin.
+
 ## One-time setup for the site (a maintainer)
 
 The site publish job is off until these exist:

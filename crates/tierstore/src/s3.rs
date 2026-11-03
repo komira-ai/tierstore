@@ -23,8 +23,34 @@
 //!   twice); the 412 is [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. It
 //!   gives the `ETag` of the answer, without its quotes.
 //! - `get` is a GET, with `Range: bytes=<first>-<last>` for a range.
+//! - `get_stream` is the same GET, ranged or not, whose answer body is given chunk by chunk as it
+//!   arrives and never collected (the client reads it a piece at a time, each piece within
+//!   `request_timeout` of the one before); a body that fails or ends short is an error as the
+//!   last chunk. The request is sent again after a failure in transport before the response
+//!   headers arrived, and not after: valid headers followed by a failure before the first body
+//!   byte give the read, whose body then ends with the error.
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
-//!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
+//!   other backends give it and the S3 front, which quotes it, expects), `Last-Modified` and
+//!   whether the object carries the reservation mark.
+//! - `put_reservation` is a PUT with `If-None-Match: *` and the user metadata
+//!   `x-amz-meta-tierstore-reservation: 1`, and gives the `ETag` of the answer without its quotes;
+//!   a store that does not claim conditional puts is refused (the backend always claims them, see
+//!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
+//!   metadata. A write is sent once: one the store answers with 409 (see below) is
+//!   [`Error::Unavailable`], and the caller reads the key to see whether its write landed. A
+//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_marked` is
+//!   one GET, whole or ranged, and the mark and the content tag are the metadata header and the
+//!   `ETag` (without its quotes) of that answer, so the bytes, the mark and the tag are those of
+//!   one object whatever is written to the key meanwhile; an answer without an `ETag` is an
+//!   [`Error::Other`].
+//! - `put_stream_if_match` is `put_if_match` for a body that arrives as chunks: a body of at most
+//!   16 MiB is gathered and sent as one PUT with `If-Match`, a longer one is a multipart upload
+//!   whose completion carries `If-Match`, aborted on any failure, so the object is replaced only
+//!   after the whole body was read and only if it still has the tag. A body of unknown length is
+//!   not collected either: its first 16 MiB are read, and a body that ends there is one PUT, while
+//!   a longer one is a multipart upload whose 16 MiB parts are each sent as soon as they are full,
+//!   so at most one part and one chunk are held. It is sent once. The tag
+//!   that does not match is [`Error::PreconditionFailed`] and no object is [`Error::NotFound`].
 //! - `delete` is a DELETE; a 404 is a success.
 //! - `delete_if_match` is best effort, in one of two ways, which
 //!   [`Backend::settle_conditional_delete`] picks once at start-up by asking the store. Where the store enforces `If-Match` on a DELETE
@@ -94,8 +120,10 @@
 //!   (Insufficient Storage, which is how MinIO reports a full drive) is [`Error::Full`]. 501 (Not
 //!   Implemented: the store does not do what was asked) and anything else that is not a success
 //!   is [`Error::Other`]. A 409 `ConditionalRequestConflict` (two writers racing a conditional
-//!   write of one key; the store does not say which won) is [`Error::Unavailable`]: a retry is
-//!   answered 412 if the other writer won.
+//!   write of one key; the store does not say which won) is [`Error::Unavailable`]: the write may
+//!   have landed, so the caller reads the key to see whether the tag is the one it wrote, and does
+//!   not send the write again as if it had not been applied (a retry is answered 412 if the other
+//!   writer won, and also if this one did).
 //!
 //! Each request is bounded by the `request_timeout` of the [`S3Config`], and a read is sent
 //! again after a failure in transport; a write never is. A part is the exception to the bound:
@@ -116,7 +144,9 @@ use objstore_s3::{
 };
 use tokio::sync::mpsc;
 
-use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
+use crate::{
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+};
 
 pub use objstore_s3::Capabilities;
 pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError};
@@ -160,24 +190,57 @@ impl S3Backend {
         })
     }
 
-    /// The bytes of `range` of the object, for a range that is empty or that S3 answers 416
-    /// to: a HEAD says how long the object is, and so whether the 416 was right.
+    /// The bytes of `range` of the object, from the client's ranged read.
     async fn read_range(
         &self,
         object: &ObjectKey,
         key: &str,
         range: ByteRange,
     ) -> Result<Bytes, Error> {
-        let room = LAST_POSITION.saturating_sub(range.offset());
-        let len = range.size().min(room);
-        if let Some(asked) = objstore_s3::ByteRange::new(range.offset(), len) {
+        if let Some(asked) = client_range(range) {
             match self.store.get_range(object, asked).await {
                 Err(ObjectStoreError::InvalidRange { .. }) => {}
                 answer => return answer.map_err(|e| map_error(e, key)),
             }
         }
+        let nothing = self.nothing(object, key, range).await;
+        nothing.map(|_| Bytes::new())
+    }
+
+    /// The read of `key`, or of `range` of it, as the chunks of the body of one GET and the mark
+    /// of that answer.
+    async fn open(&self, key: &str, range: Option<ByteRange>) -> Result<Opened, Error> {
+        let object = object_key(key)?;
+        let answer = match range {
+            None => self.store.get_stream(&object, None).await,
+            Some(range) => match client_range(range) {
+                Some(asked) => self.store.get_stream(&object, Some(asked)).await,
+                None => return self.nothing(&object, key, range).await,
+            },
+        };
+        if let (Err(ObjectStoreError::InvalidRange { .. }), Some(range)) = (&answer, range) {
+            return self.nothing(&object, key, range).await;
+        }
+        let read = answer.map_err(|e| map_error(e, key))?;
+        let name = key.to_owned();
+        let body = read
+            .body
+            .map(move |piece| piece.map_err(|e| map_error(e, &name)));
+        Ok((body.boxed(), read.reservation, read.etag))
+    }
+
+    /// The read of `range`, which is empty or which S3 answered 416 to: a HEAD says how long the
+    /// object is, and so whether the 416 was right. No bytes, and the mark of the HEAD, if the
+    /// range holds none of the object; an error if it holds some, or starts past the end.
+    async fn nothing(
+        &self,
+        object: &ObjectKey,
+        key: &str,
+        range: ByteRange,
+    ) -> Result<Opened, Error> {
         let head = self.store.head(object).await;
-        let size = head.map_err(|e| map_error(e, key))?.size;
+        let head = head.map_err(|e| map_error(e, key))?;
+        let size = head.size;
         if range.offset() > size {
             return Err(Error::Other(format!(
                 "range starting at {} is past the end of the {size}-byte object",
@@ -191,7 +254,7 @@ impl S3Backend {
                 range.offset()
             )));
         }
-        Ok(Bytes::new())
+        Ok((stream::empty().boxed(), head.reservation, Some(head.etag)))
     }
 
     /// What the store does with a DELETE of `object` that carries `If-Match`, asked of the
@@ -266,6 +329,14 @@ impl S3Backend {
     }
 }
 
+/// The range as the client names it, cut where a store reads positions as signed 64-bit numbers,
+/// or `None` for a range that holds no byte.
+fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
+    let room = LAST_POSITION.saturating_sub(range.offset());
+    let len = range.size().min(room);
+    objstore_s3::ByteRange::new(range.offset(), len)
+}
+
 /// Why the probe of the conditional delete could not ask the store.
 #[derive(Debug, thiserror::Error)]
 enum ProbeError {
@@ -320,8 +391,9 @@ fn map_error(error: ObjectStoreError, key: &str) -> Error {
         // 409 `ConditionalRequestConflict`: another write of the key was in flight when this
         // conditional write arrived (S3 and MinIO both answer it for two writers racing a
         // create-only put). Neither the store's documentation nor its answer says which writer
-        // won, so the outcome is unknown, and the answer is the one the documentation gives for
-        // it: try again. A retry gets a plain 412 if the other writer won.
+        // won, so the outcome is unknown (this write may have landed), and the answer is the one
+        // the documentation gives for it: try again. A retry gets a 412 if the other writer won,
+        // and also if this one did, so a caller reads the key before it believes a 412.
         ObjectStoreError::Service { ref code, .. } if code == "ConditionalRequestConflict" => {
             Error::Unavailable(message)
         }
@@ -367,6 +439,17 @@ fn service_code(error: &ObjectStoreError) -> &str {
 /// the `ETag` without its quotes.
 fn unquoted(etag: &str) -> String {
     etag.trim_matches('"').to_owned()
+}
+
+/// What a read opens: the chunks of its body, the mark and the entity tag (as the store sends it,
+/// if it sends one) of the answer they come from.
+type Opened = (ReadBody, bool, Option<String>);
+
+/// The content tag of a read from the `ETag` of its answer, without its quotes. An answer that
+/// has none cannot tell which object was read, so a read that must say is an error.
+fn answered_tag(etag: Option<String>, key: &str) -> Result<String, Error> {
+    let said = etag.ok_or_else(|| Error::Other(format!("{key}: the read's answer has no ETag")))?;
+    Ok(unquoted(&said))
 }
 
 /// A content tag as an entity tag is sent to the store in `If-Match`: in quotes, once.
@@ -429,9 +512,24 @@ where
         Some(len) => (len, body),
         None => held(collect(body).await?),
     };
+    flowing(body, |source| send(len, source)).await
+}
+
+/// Sends `body` to the store as the body of the request that `send` makes, which is given the
+/// chunks as they arrive and never holds more than a few of them (the channel between them is
+/// bounded, so a slow store slows `body`). Gives the error of `body`, if it ended with one, else
+/// the answer of the store.
+async fn flowing<T, F, Fut>(
+    body: PartBody<'_>,
+    send: F,
+) -> Result<Result<T, ObjectStoreError>, Error>
+where
+    F: FnOnce(BodyStream) -> Fut,
+    Fut: Future<Output = Result<T, ObjectStoreError>>,
+{
     let (sink, mut chunks) = mpsc::channel(CHUNKS_WAITING);
     let source: BodyStream = stream::poll_fn(move |cx| chunks.poll_recv(cx)).boxed();
-    let (ended, sent) = futures::join!(feed(body, sink), send(len, source));
+    let (ended, sent) = futures::join!(feed(body, sink), send(source));
     match ended {
         Some(error) => Err(error),
         None => Ok(sent),
@@ -472,6 +570,52 @@ impl Backend for S3Backend {
         Ok(unquoted(&tag))
     }
 
+    async fn put_stream_if_match(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let etag = quoted(etag);
+        let store = &self.store;
+        let (object, etag) = (&object, &etag);
+        let sending = |source| async move {
+            match len {
+                Some(len) => store.put_stream_if_match(object, len, source, etag).await,
+                None => {
+                    store
+                        .put_stream_if_match_unsized(object, source, etag)
+                        .await
+                }
+            }
+        };
+        let sent = flowing(body, sending).await?;
+        let tag = sent.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
+    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let put = self.store.put_new_marked(&object, body);
+        let tag = put.await.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
+    async fn put_reservation_if_match(
+        &self,
+        key: &str,
+        body: Bytes,
+        etag: &str,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let etag = quoted(etag);
+        let put = self.store.put_if_match_marked(&object, body, &etag);
+        let tag = put.await.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let object = object_key(key)?;
         let Some(range) = range else {
@@ -479,6 +623,25 @@ impl Backend for S3Backend {
             return all.await.map_err(|e| map_error(e, key));
         };
         self.read_range(&object, key, range).await
+    }
+
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool, String), Error> {
+        if range.is_some() {
+            let (body, reservation, etag) = self.open(key, range).await?;
+            return Ok((collect(body).await?, reservation, answered_tag(etag, key)?));
+        }
+        let object = object_key(key)?;
+        let all = self.store.get_all_marked(&object);
+        let (bytes, reservation, etag) = all.await.map_err(|e| map_error(e, key))?;
+        Ok((bytes, reservation, answered_tag(etag, key)?))
+    }
+
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        Ok(self.open(key, range).await?.0)
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
@@ -489,6 +652,7 @@ impl Backend for S3Backend {
             size: head.size,
             tag: unquoted(&head.etag),
             modified: head.modified_millis,
+            reservation: head.reservation,
         })
     }
 
