@@ -921,9 +921,8 @@ and switch the unit by changing `ExecStart=` to
 ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
-The flags and the file are both accepted in this release, so a unit may stay as it is and move
-when it is convenient; the flags are to go in the release after, and `--config` is then the way to
-configure the data path. The shipped `tierstore.service` keeps its flags, and
+The flags and the file are both supported, and no release is planned to remove the flags, so a
+unit may stay as it is and move when it is convenient. The shipped `tierstore.service` keeps its flags, and
 `crates/tierstore/tests/packaging.rs` parses them as the binary parses them. `--print-config` does
 not convert anything else in a unit (a drop-in, the firewall rules).
 

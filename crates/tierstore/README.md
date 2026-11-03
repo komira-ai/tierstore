@@ -25,8 +25,8 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
-release along with the file.
+in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
+file.
 
 ## When the puts are at their limit
 
