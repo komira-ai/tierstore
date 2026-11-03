@@ -1,4 +1,10 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
+//!
+//! A key is the name of one file, percent-encoded: every byte but an ASCII letter or digit
+//! (and a few marks) costs three bytes, so a key whose encoded name is empty or over 255 bytes
+//! (about 85 bytes of non-ASCII text) cannot be stored. A write of it is [`Error::InvalidKey`]
+//! (S3 answer 400 `KeyTooLongError`); a read, a head or a delete of it is [`Error::NotFound`],
+//! since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
 use std::os::unix::fs::PermissionsExt;
@@ -519,10 +525,15 @@ impl DirBackend {
     fn path(&self, key: &str) -> Result<PathBuf, Error> {
         let name = encode(key);
         if !(1..=NAME_LIMIT).contains(&name.len()) {
-            let text = format!("key {key:?} is empty or too long to be a file name");
-            return Err(Error::Other(text));
+            return Err(Error::InvalidKey(key.to_owned()));
         }
         Ok(self.root.join(name))
+    }
+
+    /// The path of the file the object `key` would have, for a call that reads or removes it:
+    /// a key that cannot be a file name has no object, so it is [`Error::NotFound`].
+    fn existing(&self, key: &str) -> Result<PathBuf, Error> {
+        self.path(key).map_err(|_| Error::NotFound(key.to_owned()))
     }
 
     /// A name for a temporary file in `dir`, which is not listed.
@@ -533,7 +544,7 @@ impl DirBackend {
 
     /// Opens the object `key`.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        let path = self.path(key)?;
+        let path = self.existing(key)?;
         let opened = open_stored(&path).await;
         let absent = ErrorKind::NotFound;
         opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
@@ -763,7 +774,7 @@ impl Backend for DirBackend {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let path = self.path(key)?;
+        let path = self.existing(key)?;
         // Not held across the sync: the name is gone, and a replacement or a delete that
         // follows needs nothing the sync would protect.
         let removed = {

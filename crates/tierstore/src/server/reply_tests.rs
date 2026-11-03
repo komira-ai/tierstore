@@ -55,6 +55,7 @@ fn each_failure_of_the_store_has_its_status_and_code() {
     check(Error::PreconditionFailed(k()), 412, "PreconditionFailed");
     check(Error::Full(k()), 503, "SlowDown");
     check(Error::Reserved(k()), 403, "AccessDenied");
+    check(Error::InvalidKey(k()), 400, "KeyTooLongError");
     check(Error::InvalidPart(k()), 400, "InvalidPart");
     check(Error::Unsupported(k()), 501, "NotImplemented");
     check(Error::Unavailable(k()), 503, "ServiceUnavailable");
