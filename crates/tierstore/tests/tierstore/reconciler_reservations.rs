@@ -42,6 +42,20 @@ async fn with_journal(entries: &[JournalEntry]) -> Rig {
     rig
 }
 
+/// The tag that an object of `text` has in any backend: a tag names content.
+async fn tag_of(text: &str) -> String {
+    let scratch = MemoryBackend::new();
+    scratch.put("k", body(text)).await.unwrap();
+    scratch.head("k").await.unwrap().tag
+}
+
+/// A rig as `with_journal` makes it, whose journal object holds one mirror of `k`: it names the
+/// tag of the bytes `hot!!`, which the tests put in the hot tier, so the mirror owns that object.
+async fn with_mirror_of_hot() -> Rig {
+    let tag = tag_of("hot!!").await;
+    with_journal(&[entry(JournalOp::PutMirror, "k", Some(&tag))]).await
+}
+
 const STORED: &str = r#"{"seq":1,"evict_seq":0,"evict_idx":0}"#;
 
 /// The tags that reservations of `bodies` under one key have, each replacing the one before it:
@@ -294,7 +308,7 @@ async fn a_copy_whose_replacement_or_read_fails_is_retried_by_the_next_pass() {
 /// one, the hot copy is an orphan and is deleted by its tag, and the reservation stays.
 #[tokio::test(start_paused = true)]
 async fn a_putmirror_entry_never_replaces_a_reservation() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
+    let rig = with_mirror_of_hot().await;
     rig.hot_mem.put("k", body("hot!!")).await.unwrap();
     let tag = rig
         .cold_mem
@@ -344,7 +358,7 @@ async fn a_late_copy_back_does_not_shadow_a_newer_cold_object() {
 /// Asserts that a mirror of an object the cold tier no longer holds is deleted from the hot tier.
 #[tokio::test(start_paused = true)]
 async fn a_putmirror_entry_without_a_cold_object_removes_the_hot_copy() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
+    let rig = with_mirror_of_hot().await;
     rig.hot_mem.put("k", body("hot!!")).await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
 
@@ -359,7 +373,7 @@ async fn a_putmirror_entry_without_a_cold_object_removes_the_hot_copy() {
 /// not deleted: the delete is on the tag the copy had.
 #[tokio::test(start_paused = true)]
 async fn an_orphan_whose_hot_object_was_replaced_is_not_removed() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
+    let rig = with_mirror_of_hot().await;
     rig.hot_mem.put("k", body("hot!!")).await.unwrap();
     let swap = vec![Change::Object(body("other"))];
     let hot = Churn::new(rig.hot_mem.clone(), swap).on_key("k");
@@ -375,7 +389,7 @@ async fn an_orphan_whose_hot_object_was_replaced_is_not_removed() {
 /// pass.
 #[tokio::test(start_paused = true)]
 async fn a_mirror_whose_removal_fails_is_removed_by_the_next_pass() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
+    let rig = with_mirror_of_hot().await;
     rig.hot_mem.put("k", body("hot!!")).await.unwrap();
     rig.hot.fail_next_on(Op::DeleteIfMatch, "k", down());
     let mut reconciler = rig.reconciler("r1", 1000);
@@ -901,4 +915,32 @@ async fn a_reserved_key_is_forgotten_after_the_retention() {
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_absent(&*rig.cold_mem, "k").await;
+}
+
+/// Asserts that a mirror entry that names no tag deletes nothing: it owns no object, so the hot
+/// copy stays, and nothing is copied.
+#[tokio::test(start_paused = true)]
+async fn a_putmirror_entry_without_a_tag_leaves_the_hot_copy() {
+    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", None)]).await;
+    rig.hot_mem.put("k", body("hot!!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 0);
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("hot!!"));
+    assert_absent(&*rig.cold_mem, "k").await;
+}
+
+/// Asserts that a mirror entry whose tag is not the hot object's leaves the hot object when the
+/// cold tier holds nothing: the object is not the mirror's.
+#[tokio::test(start_paused = true)]
+async fn a_putmirror_entry_does_not_delete_a_hot_object_of_another_tag() {
+    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
+    rig.hot_mem.put("k", body("hot!!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("hot!!"));
 }
