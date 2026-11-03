@@ -35,10 +35,10 @@ use crate::{Backend, Clock, Proxy, Reconciler, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
-use super::cli::{
-    Addresses, Error, bind_oci, build, cut_note, open_gate, probe_run_id, probe_tiers, reconcile,
-    reconcile_gated, signals,
-};
+use super::cli::{Addresses, Error, build, signals};
+use super::cli_probe::{probe_run_id, probe_tiers};
+use super::cli_reconcile::{reconcile, reconcile_gated};
+use super::cli_serve::{bind_oci, cut_note, open_gate};
 use super::config_combined::CombinedSettings;
 use super::drain::late_of;
 use super::listen::{joined, local_addrs};
