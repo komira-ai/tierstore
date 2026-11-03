@@ -1241,7 +1241,8 @@ later, and writes no probe key: it does not verify what is said here.
   `If-Match`, and strong read-after-write consistency for GET, HEAD and LIST. The lease, the
   checkpoint and the registration of the proxies are written with those conditional puts.
 - The cold store must provide the same create-only PUT, on a single PUT and on the completion of a
-  multipart upload.
+  multipart upload, and an atomic `If-Match` PUT (the completion of a multipart upload included),
+  which the reconciler uses to replace a reservation with its object.
 - Known to meet them: Amazon S3, MinIO (for the conditional PUT) and tierstore's `dir` store,
   among the calls of one process only (two processes over one `dir` hot tier are held apart by
   `--lock-file`, not by the store).

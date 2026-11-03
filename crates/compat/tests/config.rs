@@ -43,7 +43,7 @@ impl Node {
         let text = format!(
             "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"p1\"\nbucket = \"tier-bucket\"\n\
              access_key_file = \"{key}\"\n{server_extra}\n\n\
-             [hot_store]\nkind = \"s3\"\nbucket = \"hot\"\nendpoint = \"http://127.0.0.1:1\"\n\
+             [hot_store]\nkind = \"s3\"\nbucket = \"hot\"\nendpoint = \"http://hot.invalid\"\n\
              credentials_file = \"{credentials}\"\nbudget = 1000\n{hot_extra}\n\n\
              [cold_store]\nkind = \"memory\"\n{cold_extra}\n",
             key = self.key,

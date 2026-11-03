@@ -4,6 +4,8 @@
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -513,11 +515,65 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that a start does not ask its tiers anything: the cold tier is an S3 store that cannot
-/// be reached (nothing listens at its endpoint), the address is taken so that the start ends
-/// after the settings are built, and the start fails at the address (status 1, nothing on stdout)
-/// and not at the tier: no line says a tier was tested or is unreachable. The two flags of the
-/// removed start-up self-test are accepted and each is one warning, word for word.
+/// A loopback listener that takes every connection and closes it at once, so that a client of it
+/// meets a transport failure and not a refusal, and that counts the connections it took. It stays
+/// bound until it is dropped, so its port is never another process's meanwhile.
+struct Closer {
+    endpoint: String,
+    accepted: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Closer {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (count, ended) = (Arc::clone(&accepted), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                if ended.load(Ordering::SeqCst) {
+                    return;
+                }
+                if connection.is_ok() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            endpoint: format!("http://{addr}"),
+            accepted,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// The connections taken so far.
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // A connection wakes the thread that waits in `accept`, which then sees the flag.
+        let at = self.endpoint.trim_start_matches("http://").to_owned();
+        let _ = std::net::TcpStream::connect(at);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Asserts that a start does not ask its cold tier anything: the cold tier is an S3 store at a
+/// loopback listener that counts the connections it takes, the address is taken so that the start
+/// ends after the settings are built, and the start fails at the address (status 1, nothing on
+/// stdout) and not at the tier: no line says a tier was tested or is unreachable, and the cold
+/// store was never connected to. The two flags of the removed start-up self-test are accepted and
+/// each is one warning, word for word.
 #[test]
 fn a_start_does_not_ask_its_tiers_and_the_flags_of_the_removed_self_test_warn() {
     let files = Files::new("bin-no-self-test");
@@ -525,11 +581,12 @@ fn a_start_does_not_ask_its_tiers_and_the_flags_of_the_removed_self_test_warn() 
     let key = secret.display().to_string();
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let address = taken.local_addr().unwrap().to_string();
+    let cold = Closer::start();
     let described = files.flags(&[
         "--cold-credentials-file",
         key.as_str(),
         "--cold-endpoint",
-        "http://127.0.0.1:1",
+        cold.endpoint.as_str(),
         "--backend-check-wait",
         "2s",
         "--skip-backend-check",
@@ -555,22 +612,25 @@ fn a_start_does_not_ask_its_tiers_and_the_flags_of_the_removed_self_test_warn() 
     );
     assert!(!err.contains("unreachable"), "{err}");
     assert!(!err.contains("tested the"), "{err}");
+    assert_eq!(cold.accepted(), 0);
 }
 
 /// Asserts what a start still asks of the hot tier: opening the proxy reads and writes the hot
 /// tier's own state (the node's registration and its journal), so a hot tier that cannot be
-/// reached fails the start with status 1 (the unit tries again), nothing on stdout, and a last
-/// line that begins `tierstore: opening the proxy: `. No line says a tier was tested.
+/// reached (a loopback listener that closes every connection) fails the start with status 1 (the
+/// unit tries again), nothing on stdout, and a last line that begins
+/// `tierstore: opening the proxy: `. No line says a tier was tested.
 #[test]
 fn a_hot_tier_that_cannot_be_reached_fails_the_start_at_the_proxy_with_status_1() {
     let files = Files::new("bin-hot-unreachable");
     let secret = files.secret("hot-key", "ID\nsecret\n");
     let key = secret.display().to_string();
+    let hot = Closer::start();
     let described = files.flags(&[
         "--hot-credentials-file",
         key.as_str(),
         "--hot-endpoint",
-        "http://127.0.0.1:1",
+        hot.endpoint.as_str(),
     ]);
     let flags = with(&described, "--hot", "s3:hot-bucket");
     let (code, out, err) = run(&flags);
@@ -578,6 +638,7 @@ fn a_hot_tier_that_cannot_be_reached_fails_the_start_at_the_proxy_with_status_1(
     let last = err.lines().last().unwrap();
     assert!(last.starts_with("tierstore: opening the proxy: "), "{err}");
     assert!(!err.contains("tested the"), "{err}");
+    assert!(hot.accepted() >= 1);
 }
 
 /// Asserts that `conditional_delete = false` for a `memory` or a `dir` tier is a refusal that a

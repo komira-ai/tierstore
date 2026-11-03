@@ -31,7 +31,7 @@
 
 <h2 id="guards">What keeps it honest</h2>
 <ul>
-  <li><strong>A stated contract with the stores</strong>: tierstore is a proxy over a hot and a cold store and does not test them. The hot store must give atomic conditional PUTs (create-only and <code>If-Match</code>) and strong read-after-write for GET, HEAD and LIST, and the cold store the same create-only PUT; Amazon S3, MinIO (conditional PUT) and tierstore's own directory store (within one process) are known to meet this. Nothing verifies it. See <a href="/docs/operations/#what-tierstore-requires-of-a-store">operations</a>.</li>
+  <li><strong>A stated contract with the stores</strong>: tierstore is a proxy over a hot and a cold store and does not test them. The hot store must give atomic conditional PUTs (create-only and <code>If-Match</code>) and strong read-after-write for GET, HEAD and LIST, and the cold store the same create-only PUT and an atomic <code>If-Match</code> PUT; Amazon S3, MinIO (conditional PUT) and tierstore's own directory store (within one process) are known to meet this. Nothing verifies it. See <a href="/docs/operations/#what-tierstore-requires-of-a-store">operations</a>.</li>
   <li><strong>Key roles</strong> limit what a client may do: full, read-only, presigning (one object under a prefix), garbage collection and scoped keys. See <a href="/docs/keys/">configuration</a>.</li>
   <li><strong>Objects are immutable</strong> as the crate treats them: byte strings under string keys, written once.</li>
 </ul>

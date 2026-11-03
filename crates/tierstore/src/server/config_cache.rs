@@ -39,9 +39,9 @@
 //! `write_through = true` makes the node take the writes its keys may do (create-only puts,
 //! multipart uploads, presigned puts, deletes) and send each to the upstream, which must then be
 //! written with a key that may write, and keeps under a `cache = true` policy the objects it
-//! puts (`max_concurrent_keeps` of them copied at once): the start tests the upstream's create-only and
-//! multipart-conditional answers (see [`cache_cli`](super::cache_cli)). Left out or `false`, the
-//! node refuses every write with 403 and its upstream key may be a read-only one.
+//! puts (`max_concurrent_keeps` of them copied at once): the start does not test the upstream, so a
+//! key that may not write fails the first write (see [`cache_cli`](super::cache_cli)). Left out or
+//! `false`, the node refuses every write with 403 and its upstream key may be a read-only one.
 //!
 //! The file is read into a [`CacheSettings`]. It has no flag form. The `[oci]` table is the
 //! storage node's, with its rules (see [`config`](super::config)). What it refuses, besides what
