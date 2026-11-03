@@ -294,6 +294,23 @@ impl Backend for GateBackend {
             .await
     }
 
+    /// A page is a call of kind [`Op::List`], and is the wrapped backend's own page, not a cut of
+    /// its whole listing.
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        let call = self.inner.list_page(prefix, start_after, max_keys);
+        self.through(Op::List, prefix, call).await
+    }
+
+    /// Asked of the wrapped backend as it is: it makes no call a gate holds.
+    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
+        self.inner.settle_conditional_delete(key).await
+    }
+
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         let call = self.inner.create_upload(key);
         self.through(Op::CreateUpload, key, call).await

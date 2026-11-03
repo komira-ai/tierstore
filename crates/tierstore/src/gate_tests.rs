@@ -369,35 +369,78 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     );
 }
 
+/// A backend whose answers to the calls the wrapper does not hold apart from the rest are
+/// distinguishable from the provided ones.
+struct Overrides;
+
+#[async_trait::async_trait]
+impl Backend for Overrides {
+    fn needs_length(&self) -> bool {
+        true
+    }
+    async fn put(&self, _: &str, _: Bytes) -> Result<(), Error> {
+        Ok(())
+    }
+    async fn put_if_match(&self, _: &str, _: Bytes, _: &str) -> Result<String, Error> {
+        Ok(String::new())
+    }
+    async fn get(&self, key: &str, _: Option<crate::ByteRange>) -> Result<Bytes, Error> {
+        Err(Error::NotFound(key.to_owned()))
+    }
+    async fn head(&self, key: &str) -> Result<crate::Meta, Error> {
+        Err(Error::NotFound(key.to_owned()))
+    }
+    async fn delete(&self, _: &str) -> Result<(), Error> {
+        Ok(())
+    }
+    async fn list(&self, _: &str) -> Result<Vec<crate::Listed>, Error> {
+        Ok(Vec::new())
+    }
+    async fn list_page(
+        &self,
+        _: &str,
+        _: Option<&str>,
+        _: usize,
+    ) -> Result<Vec<crate::Listed>, Error> {
+        let page = crate::Listed {
+            key: "from-list-page".to_owned(),
+            size: 0,
+            modified: 0,
+        };
+        Ok(vec![page])
+    }
+    async fn settle_conditional_delete(&self, _: &str) -> Option<String> {
+        Some("settled".to_owned())
+    }
+}
+
 /// The wrapper says what the wrapped backend says about the length of a streamed body.
 #[tokio::test]
 async fn needs_length_is_the_wrapped_backends() {
-    struct NeedsLength;
-    #[async_trait::async_trait]
-    impl Backend for NeedsLength {
-        fn needs_length(&self) -> bool {
-            true
-        }
-        async fn put(&self, _: &str, _: Bytes) -> Result<(), Error> {
-            Ok(())
-        }
-        async fn put_if_match(&self, _: &str, _: Bytes, _: &str) -> Result<String, Error> {
-            Ok(String::new())
-        }
-        async fn get(&self, key: &str, _: Option<crate::ByteRange>) -> Result<Bytes, Error> {
-            Err(Error::NotFound(key.to_owned()))
-        }
-        async fn head(&self, key: &str) -> Result<crate::Meta, Error> {
-            Err(Error::NotFound(key.to_owned()))
-        }
-        async fn delete(&self, _: &str) -> Result<(), Error> {
-            Ok(())
-        }
-        async fn list(&self, _: &str) -> Result<Vec<crate::Listed>, Error> {
-            Ok(Vec::new())
-        }
-    }
-
-    assert!(GateBackend::new(Arc::new(NeedsLength)).needs_length());
+    assert!(GateBackend::new(Arc::new(Overrides)).needs_length());
     assert!(!rig().gated.needs_length());
+}
+
+/// A page is the wrapped backend's own page (the provided one would cut the whole listing, which
+/// is empty here), and the settling of the conditional delete is the wrapped backend's answer
+/// (the provided one is `None`).
+#[tokio::test]
+async fn list_page_and_settle_are_the_wrapped_backends_own_answers() {
+    let gated = GateBackend::new(Arc::new(Overrides));
+    let page = gated.list_page("p/", None, 10).await.unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].key, "from-list-page");
+    assert_eq!(
+        gated.settle_conditional_delete("probe").await.as_deref(),
+        Some("settled")
+    );
+}
+
+/// A page is held at a gate of the list kind, ahead of the wrapped backend, and is then the
+/// wrapped backend's own page.
+#[tokio::test]
+async fn list_page_is_held_under_the_list_kind() {
+    let gated = GateBackend::new(Arc::new(Overrides));
+    let page = held(&gated, Op::List, gated.list_page("p/", Some("a"), 5)).await;
+    assert_eq!(page[0].key, "from-list-page");
 }
