@@ -432,7 +432,8 @@ async fn a_presigned_put_goes_through_the_cache_front() {
 /// Asserts the roles over the cache front, one refusal after another, each leaving the upstream
 /// with no write and no HEAD: a read-only key may not put, start an upload or delete; a scoped
 /// key may not write or delete outside its prefixes; a GC key may not put or start an upload and
-/// may not delete outside its prefix; the full key may not name a reserved key. The calls that
+/// may not delete outside its prefix. (A reserved key is refused by the proxy behind the cache; see
+/// `reserved_tests`.) The calls that
 /// each key may do are then done: a put and a delete under the scoped key's prefixes, and a
 /// delete under the GC key's prefix.
 #[tokio::test]
@@ -463,10 +464,6 @@ async fn the_roles_of_the_keys_apply_over_the_cache_front() {
             who.0
         );
     }
-    let reserved = front
-        .full("PUT", "_journal/p1/1", &[("if-none-match", "*")], b"x")
-        .await;
-    assert_eq!(denied(&reserved), access_denied());
     assert_eq!(front.writes_seen(), before);
 
     let create = [("if-none-match", "*")];
