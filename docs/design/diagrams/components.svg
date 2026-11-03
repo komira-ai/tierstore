@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 650" width="960" height="650" role="img" aria-label="Components and deployment of a tierstore process: S3 and OCI fronts over one proxy, a reconciler, and the hot and cold tiers outside the process.">
+<title>tierstore components and deployment</title>
+<defs><marker id="components-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="components-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="650" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16" text-anchor="start">One tierstore process: two fronts, one proxy, a reconciler; the tiers are outside</text>
+<rect x="250" y="68" width="480" height="500" rx="5" class="box-t"/>
+<text x="266" y="92" class="b" text-anchor="start">tierstore process</text>
+<rect x="20" y="130" width="170" height="64" rx="5" class="box-b"/>
+<text x="105.0" y="152" class="b" text-anchor="middle">S3 clients</text>
+<text x="105.0" y="170" class="t-m" text-anchor="middle">any S3 client or SDK</text>
+<rect x="20" y="340" width="170" height="64" rx="5" class="box-b"/>
+<text x="105.0" y="362" class="b" text-anchor="middle">Image clients</text>
+<text x="105.0" y="380" class="t-m" text-anchor="middle">podman, other OCI pulls</text>
+<rect x="270" y="130" width="140" height="64" rx="5" class="box-o"/>
+<text x="340.0" y="152" class="b" text-anchor="middle">S3 front</text>
+<text x="340.0" y="170" class="t-m" text-anchor="middle">--listen</text>
+<rect x="270" y="340" width="140" height="76" rx="5" class="box-o"/>
+<text x="340" y="362" class="b" text-anchor="middle">OCI front</text>
+<text x="340" y="380" class="t-m" text-anchor="middle">read-only</text>
+<text x="340" y="398" class="t-m" text-anchor="middle">--oci-listen</text>
+<rect x="470" y="190" width="240" height="140" rx="5" class="box-o"/>
+<text x="590" y="214" class="b" text-anchor="middle">Proxy</text>
+<text x="590" y="236" class="t-m" text-anchor="middle">one proxy behind both fronts</text>
+<text x="590" y="254" class="t-m" text-anchor="middle">put, get, head, delete</text>
+<text x="590" y="272" class="t-m" text-anchor="middle">hot first, cold on a miss</text>
+<text x="590" y="290" class="t-m" text-anchor="middle">writes the journal to hot</text>
+<rect x="470" y="400" width="240" height="128" rx="5" class="box-o"/>
+<text x="590" y="424" class="b" text-anchor="middle">Reconciler</text>
+<text x="590" y="446" class="t-m" text-anchor="middle">holds the lease</text>
+<text x="590" y="464" class="t-m" text-anchor="middle">reads the journal in hot</text>
+<text x="590" y="482" class="t-m" text-anchor="middle">copies hot to cold, create-only</text>
+<text x="590" y="500" class="t-m" text-anchor="middle">evicts from hot when it fills</text>
+<rect x="800" y="120" width="140" height="92" rx="5" class="box-b"/>
+<text x="870.0" y="142" class="b" text-anchor="middle">Hot tier</text>
+<text x="870.0" y="160" class="t-m" text-anchor="middle">dir: on local disk</text>
+<text x="870.0" y="178" class="t-m" text-anchor="middle">or S3-compatible</text>
+<text x="870.0" y="196" class="t-m" text-anchor="middle">bucket</text>
+<rect x="800" y="390" width="140" height="92" rx="5" class="box-b"/>
+<text x="870.0" y="412" class="b" text-anchor="middle">Cold tier</text>
+<text x="870.0" y="430" class="t-m" text-anchor="middle">dir: on local disk</text>
+<text x="870.0" y="448" class="t-m" text-anchor="middle">or S3-compatible</text>
+<text x="870.0" y="466" class="t-m" text-anchor="middle">bucket</text>
+<line x1="190" y1="162" x2="270" y2="162" class="ln" marker-end="url(#components-ak)"/>
+<line x1="190" y1="372" x2="270" y2="372" class="ln" marker-end="url(#components-ak)"/>
+<line x1="410" y1="162" x2="470" y2="240" class="ln" marker-end="url(#components-ak)"/>
+<line x1="410" y1="378" x2="470" y2="290" class="ln" marker-end="url(#components-ak)"/>
+<line x1="710" y1="240" x2="800" y2="170" class="ln" marker-end="url(#components-ak)"/>
+<line x1="710" y1="300" x2="800" y2="420" class="ln" marker-end="url(#components-ak)"/>
+<line x1="710" y1="470" x2="800" y2="452" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="710" y1="470" x2="800" y2="452" class="ln-d" marker-end="url(#components-ak)"/>
+<line x1="710" y1="430" x2="800" y2="200" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="710" y1="430" x2="800" y2="200" class="ln-d" marker-end="url(#components-ak)"/>
+<line x1="30" y1="610" x2="80" y2="610" class="ln" marker-end="url(#components-ak)"/>
+<text x="90" y="614" class="t-m" text-anchor="start">client request path</text>
+<line x1="250" y1="610" x2="300" y2="610" class="ln-d" marker-end="url(#components-ak)"/>
+<text x="310" y="614" class="t-m" text-anchor="start">background work of the reconciler</text>
+<text x="30" y="636" class="t-m" text-anchor="start">Several processes like this one can share the same two tiers; one reconciler holds the lease at a time.</text>
+</svg>

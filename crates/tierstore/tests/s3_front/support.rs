@@ -35,7 +35,7 @@ pub struct Harness {
 }
 
 impl Harness {
-    /// A server that tells the time by the clock of the machine, as a client of kbf does.
+    /// A server that tells the time by the clock of the machine, as an `S3Store` client does.
     pub async fn start(change: impl FnOnce(&mut ServerConfig)) -> Self {
         Self::start_with(Arc::new(SystemClock), change).await
     }
@@ -77,12 +77,12 @@ impl Harness {
         }
     }
 
-    /// The S3 client of kbf, with the key of the server.
+    /// The `S3Store` client, with the key of the server.
     pub fn store(&self, capabilities: Capabilities) -> S3Store {
         self.store_with(KEY_ID, SECRET, capabilities)
     }
 
-    /// The S3 client of kbf, with this key.
+    /// The `S3Store` client, with this key.
     pub fn store_with(&self, key_id: &str, secret: &str, capabilities: Capabilities) -> S3Store {
         let config = S3Config {
             endpoint: format!("http://{}", self.addr),

@@ -1,6 +1,6 @@
 # Build and tests of the tierstore.dev website (crates/tierstore/site): TypeScript compiled by
 # tsc, a build program that prerenders the pages, and node:test tests over the built tree (golden
-# output, links, the Content-Security-Policy rules, the pinned theme, the white-paper slot, a
+# output, links, the Content-Security-Policy rules, the pinned theme, the optional footer link, a
 # public-repo scan). Runs only when the site (or the guide it is made from, or the crate's source
 # that test/claims.test.ts holds its statements to, or this file) changes. The Node version is
 # exactly the one in the site's .node-version. The network is touched by `npm ci` alone, with

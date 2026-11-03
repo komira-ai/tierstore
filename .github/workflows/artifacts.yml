@@ -31,9 +31,10 @@
 #
 # The version the binary reports. The `version` job computes the version the next release has
 # (`cargo xtask release version`: the patch after the highest vX.Y.Z tag, or the VERSION file at
-# the root when that is higher), before anything is built, and every build job gives it to the
-# build (TIERSTORE_BUILD_VERSION_OVERRIDE), so `tierstore --version` prints `X.Y.Z+<12 hex>`. The
-# release plan (release.yml) names its tag with the same computation, and the release is refused
+# the root when that is higher), before anything is built, and every build job writes it into the
+# crate (`cargo xtask release set-version`, from RELEASE_VERSION) before building, so
+# `tierstore --version` prints `X.Y.Z+<12 hex>`. The release plan (release.yml) names its tag
+# with the same computation, and the release is refused
 # unless the downloaded binary says that tag. File names carry the commit, not the version, and
 # are unchanged. A pull request builds under the version its base would release next.
 #
@@ -108,7 +109,7 @@ jobs:
       contents: read
     env:
       TARGET: x86_64-unknown-linux-gnu
-      TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -130,17 +131,24 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_X86_64_LINUX" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
+      # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
+      # `Cargo.lock` gets the same version, so the `--locked` build below accepts it; the SBOM
+      # step must leave it exactly as this step wrote it.
+      - name: The crate takes the version of the release
+        run: cargo xtask release set-version --version "$RELEASE_VERSION"
+      - name: Keep the lock file as written
+        run: cp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
       - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
       # The binary runs here (a runner of its own architecture built it) and says the commit.
       - name: tierstore names the commit and the version
-        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - name: SBOM
         run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
       - name: The SBOM step left Cargo.lock unchanged
-        run: git diff --exit-code -- Cargo.lock
+        run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-x86_64 --commit "$GITHUB_SHA" --out dist
       # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
@@ -148,7 +156,7 @@ jobs:
       - run: mkdir "$RUNNER_TEMP/unpacked"
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
-        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-x86_64
@@ -172,7 +180,7 @@ jobs:
       contents: read
     env:
       TARGET: aarch64-unknown-linux-gnu
-      TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -194,17 +202,24 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_LINUX" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
+      # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
+      # `Cargo.lock` gets the same version, so the `--locked` build below accepts it; the SBOM
+      # step must leave it exactly as this step wrote it.
+      - name: The crate takes the version of the release
+        run: cargo xtask release set-version --version "$RELEASE_VERSION"
+      - name: Keep the lock file as written
+        run: cp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
       - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
       # The binary runs here (a runner of its own architecture built it) and says the commit.
       - name: tierstore names the commit and the version
-        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - name: SBOM
         run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
       - name: The SBOM step left Cargo.lock unchanged
-        run: git diff --exit-code -- Cargo.lock
+        run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform linux-arm64 --commit "$GITHUB_SHA" --out dist
       # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
@@ -212,7 +227,7 @@ jobs:
       - run: mkdir "$RUNNER_TEMP/unpacked"
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
-        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-arm64
@@ -242,7 +257,7 @@ jobs:
       contents: read
     env:
       TARGET: aarch64-apple-darwin
-      TIERSTORE_BUILD_VERSION_OVERRIDE: ${{ needs.version.outputs.version }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -270,17 +285,24 @@ jobs:
       # out here.
       - name: The tests, on macOS
         run: cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast
+      # The crate's version is the release's: the binary reports the version of `Cargo.toml`.
+      # `Cargo.lock` gets the same version, so the `--locked` build below accepts it; the SBOM
+      # step must leave it exactly as this step wrote it.
+      - name: The crate takes the version of the release
+        run: cargo xtask release set-version --version "$RELEASE_VERSION"
+      - name: Keep the lock file as written
+        run: cp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # `tierstore` is built by itself: its binary needs the crate's `server` feature
       # (`required-features`), and `-p tierstore --bins` without it builds no binary and says
       # nothing.
       - run: cargo build --locked --release --target "$TARGET" -p tierstore --features server --bin tierstore
       # The binary runs here (a runner of its own architecture built it) and says the commit.
       - name: tierstore names the commit and the version
-        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "target/$TARGET/release/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - name: SBOM
         run: cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target "$TARGET"
       - name: The SBOM step left Cargo.lock unchanged
-        run: git diff --exit-code -- Cargo.lock
+        run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       - name: Package tierstore
         run: cargo xtask package --binary "target/$TARGET/release/tierstore" --sbom crates/tierstore/tierstore_bin.cdx.json --platform macos-arm64 --commit "$GITHUB_SHA" --out dist
       # The tarball as a host takes it: unpacked with this runner's own tar, the binary in it runs
@@ -288,7 +310,7 @@ jobs:
       - run: mkdir "$RUNNER_TEMP/unpacked"
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-macos-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
-        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$TIERSTORE_BUILD_VERSION_OVERRIDE"
+        run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-macos-arm64

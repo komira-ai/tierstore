@@ -11,8 +11,8 @@
 //!
 //! A credentials file (the file of `--access-key-file`, `--read-only-key-file`,
 //! `--hot-credentials-file` or `--cold-credentials-file`) holds one key either as JSON,
-//! `{"access_key_id": "...", "secret_access_key": "..."}`, which is what the pack flags of kbf
-//! read (`access_key_id` and `secret_access_key`; tierstore also refuses any other field and an
+//! `{"access_key_id": "...", "secret_access_key": "..."}`, which is what a pack flag that takes a key
+//! reads (`access_key_id` and `secret_access_key`; tierstore also refuses any other field and an
 //! empty value, and takes the values as they are, without trimming), or as two lines: the id on
 //! the first line and the secret on the second. It is JSON when its first byte that is not white
 //! space is `{`. Only its owner may be able to read it (no group or other permission bit), and no

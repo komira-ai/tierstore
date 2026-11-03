@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 600" width="960" height="600" role="img" aria-label="Timeline in three lanes (node B, leader A, hot tier) and four steps: B freezes, ten minutes pass, the leader writes a sentinel and retires B, B wakes and its journal write collides with the sentinel and B re-registers under a new id.">
+<title>A node freezes: the leader retires it, and what the node meets when it wakes</title>
+<defs><marker id="node-death-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="node-death-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="600" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A node freezes: how the leader retires it, and what the node meets on waking</text>
+<rect x="150" y="44" width="185" height="30" rx="5" class="box"/>
+<text x="242.5" y="64" class="b" text-anchor="middle">1  B freezes or crashes</text>
+<rect x="345" y="44" width="185" height="30" rx="5" class="box"/>
+<text x="437.5" y="64" class="b" text-anchor="middle">2  Ten minutes pass</text>
+<rect x="540" y="44" width="185" height="30" rx="5" class="box"/>
+<text x="632.5" y="64" class="b" text-anchor="middle">3  Leader retires B</text>
+<rect x="735" y="44" width="185" height="30" rx="5" class="box"/>
+<text x="827.5" y="64" class="b" text-anchor="middle">4  B wakes up</text>
+<line x1="150" y1="88" x2="935" y2="88" class="ln" marker-end="url(#node-death-ak)"/>
+<text x="150" y="106" class="t-m">time (see "One node" for the full lifecycle)</text>
+<text x="20" y="156" class="b">Node B</text>
+<text x="20" y="174" class="t-m">the one that freezes</text>
+<text x="20" y="256" class="b">Leader A</text>
+<text x="20" y="274" class="t-m">holds the lease</text>
+<text x="20" y="356" class="b">Hot tier</text>
+<text x="20" y="374" class="t-m">the objects</text>
+<rect x="150" y="122" width="185" height="84" rx="5" class="box"/>
+<text x="160" y="144" class="b">Node B</text>
+<text x="160" y="161">no more heartbeats,</text>
+<text x="160" y="178">no more journal writes</text>
+<rect x="345" y="122" width="185" height="84" rx="5" class="box-p"/>
+<text x="355" y="144" class="b">Node B</text>
+<text x="355" y="161">still frozen</text>
+<rect x="540" y="122" width="185" height="84" rx="5" class="box-p"/>
+<text x="550" y="144" class="b">Node B</text>
+<text x="550" y="161">still frozen</text>
+<rect x="735" y="122" width="185" height="84" rx="5" class="box"/>
+<text x="745" y="144" class="b">Node B</text>
+<text x="745" y="161">wakes: writes its next</text>
+<text x="745" y="178">journal object, create-only</text>
+<rect x="150" y="222" width="185" height="84" rx="5" class="box-b"/>
+<text x="160" y="244" class="b">Leader A</text>
+<text x="160" y="261">keeps copying B's journal</text>
+<text x="160" y="278">like every node's</text>
+<rect x="345" y="222" width="185" height="84" rx="5" class="box-b"/>
+<text x="355" y="244" class="b">Leader A</text>
+<text x="355" y="261">registration unchanged for</text>
+<text x="355" y="278">10 min on A's own clock:</text>
+<text x="355" y="295">B has departed</text>
+<rect x="540" y="222" width="185" height="84" rx="5" class="box-b"/>
+<text x="550" y="244" class="b">Leader A</text>
+<text x="550" y="261">sentinel, then apply below</text>
+<text x="550" y="278">it, then delete B's journal,</text>
+<text x="550" y="295">checkpoint, registration</text>
+<rect x="735" y="222" width="185" height="84" rx="5" class="box-p"/>
+<text x="745" y="244" class="b">Leader A</text>
+<text x="745" y="261">nothing to do: B is</text>
+<text x="745" y="278">already retired</text>
+<rect x="150" y="322" width="185" height="84" rx="5" class="box-p"/>
+<text x="160" y="344" class="b">Hot tier</text>
+<text x="160" y="361">registration _tiering/</text>
+<text x="160" y="378">proxies/B-7 unchanged</text>
+<rect x="540" y="322" width="185" height="84" rx="5" class="box"/>
+<text x="550" y="344" class="b">Hot tier</text>
+<text x="550" y="361">sentinel at _journal/B-7/</text>
+<text x="550" y="378">&lt;next seq&gt; (create-only)</text>
+<rect x="735" y="322" width="185" height="84" rx="5" class="box-o"/>
+<text x="745" y="344" class="b">Hot tier</text>
+<text x="745" y="361">write refused: the number</text>
+<text x="745" y="378">exists, create-only fails</text>
+<path d="M920,164 L940,164 L940,364 L920,364" class="ln-o" marker-end="url(#node-death-ao)"/>
+<line x1="632.5" y1="306" x2="632.5" y2="322" class="ln" marker-end="url(#node-death-ak)"/>
+<line x1="827.5" y1="406" x2="827.5" y2="446" class="ln-o" marker-end="url(#node-death-ao)"/>
+<rect x="150" y="446" width="770" height="70" rx="5" class="box-o"/>
+<text x="160" y="470" class="b">Node B: the put is NOT acknowledged. The client sees an error and may retry.</text>
+<text x="160" y="490">B stops, then registers again under a new id (B-8): fresh journal numbers, a fresh checkpoint. The old id is never reused.</text>
+<rect x="30" y="534" width="900" height="52" rx="8" class="box-t"/>
+<text x="44" y="556" class="b">Puts continue on every node throughout.</text>
+<text x="44" y="574" class="t-m">If the leader itself dies instead, see leader election (steps 5 and 6): the lease expires and another node takes it over; only copying waits.</text>
+</svg>

@@ -47,7 +47,7 @@ use tokio::sync::Notify;
 
 use crate::{
     Backend, Clock, Error as BackendError, MonotonicClock, SelfTestOptions, SweepBudget,
-    SystemClock, self_test, sweep_probes,
+    SystemClock, self_test, settle_conditional_delete, sweep_probes,
 };
 
 use super::build_info::{COMMIT, VERSION};
@@ -116,6 +116,7 @@ async fn test_upstream(upstream: &dyn Backend, run: &str, spec: &str) -> Result<
     let note = |line: String| eprintln!("tierstore: {line}");
     eprintln!("tierstore: testing the {name} for writes");
     self_test(upstream, &options, &note).await?;
+    settle_conditional_delete(upstream, &options, &note).await;
     eprintln!("tierstore: tested the {name}");
     Ok(())
 }

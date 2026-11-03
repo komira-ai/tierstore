@@ -17,7 +17,11 @@
 //!   not override: the provided ones answer [`Error::Unsupported`]. A backend whose store
 //!   must know the length of a part before it is sent overrides
 //!   [`Backend::upload_part_with_len`] too, which the S3 front calls with the `Content-Length`
-//!   of the request.
+//!   of the request. A backend can also write a reservation, an object that is marked as one
+//!   ([`Meta::reservation`]): create-only like a put ([`Backend::put_reservation`]), or in place
+//!   of an object with a given content tag ([`Backend::put_reservation_if_match`]); a plain
+//!   [`Backend::put_if_match`] of it makes a real object. Nothing in the crate writes or reads
+//!   one yet.
 //! - [`MemoryBackend`] is an in-memory backend whose times come from a [`TestClock`] that a
 //!   test sets by hand, and [`FaultyBackend`] wraps a backend to fail or delay chosen calls
 //!   and to count them: both are for tests. [`DirBackend`] keeps a bucket in a directory of the
@@ -35,6 +39,9 @@
 //!   wrongly (a [`SelfTestError::Violation`]; a store it could not ask is
 //!   [`SelfTestError::Unreachable`], and one that is full is not in doubt). The `tierstore`
 //!   binary runs it on both tiers and refuses to start if one answers wrongly.
+//!   [`settle_conditional_delete`] then asks a tier once how it does [`Backend::delete_if_match`]
+//!   (an S3 tier: `If-Match` on the DELETE where the store enforces it, else a read of the tag
+//!   and a delete) and never fails the start.
 //! - [`Proxy`] is a store over a hot and a cold backend that is itself a [`Backend`]. Any
 //!   number of proxies (one per node, each with its own id) work over the same two backends,
 //!   and none needs state for correctness. A get reads the hot tier, else the cold tier, and
@@ -95,6 +102,7 @@ mod metrics;
 #[cfg(test)]
 mod metrics_names_tests;
 mod reconciler;
+mod reservation;
 #[cfg(feature = "s3")]
 pub mod s3;
 mod selftest;
@@ -118,6 +126,6 @@ pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
 pub use s3::S3Backend;
 pub use selftest::{
     Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
-    sweep_probes,
+    settle_conditional_delete, sweep_probes,
 };
 pub use tiered::{Proxy, ProxyConfig};

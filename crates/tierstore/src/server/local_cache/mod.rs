@@ -724,7 +724,7 @@ impl Backend for LocalCache {
             return passed(range).await;
         }
         if let Some(wanted) = range {
-            let meta = inner.upstream.head(key).await?;
+            let meta = fill::as_object(key, inner.upstream.head(key).await?)?;
             if meta.size > inner.config.whole_limit {
                 bump(&inner.counters.misses);
                 return passed(Some(wanted)).await;
@@ -746,7 +746,7 @@ impl Backend for LocalCache {
         let kept = inner.cacheable(key).and_then(|name| inner.kept(&name));
         match kept {
             Some(meta) => Ok(meta),
-            None => inner.upstream.head(key).await,
+            None => fill::as_object(key, inner.upstream.head(key).await?),
         }
     }
 

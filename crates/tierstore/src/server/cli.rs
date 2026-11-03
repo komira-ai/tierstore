@@ -100,7 +100,7 @@ use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
     Backend, Check, Clock, DirBackend, MemoryBackend, MonotonicClock, Proxy, ProxyConfig,
     Reconciler, ReconcilerConfig, S3Backend, SelfTestError, SelfTestOptions, SweepBudget,
-    SystemClock, self_test, sweep_probes,
+    SystemClock, self_test, settle_conditional_delete, sweep_probes,
 };
 
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
@@ -962,9 +962,9 @@ const SELF_TEST_MAX_PAUSE: Duration = Duration::from_secs(30);
 /// Asks each tier the questions of the self-test, the hot tier first, and says on stderr which
 /// checks the flags leave out, a line before and after each tier with how long it took, and
 /// what the test notes (a check skipped because the tier is full, an attempt repeated, a probe key
-/// not deleted). The cold tier is also asked about multipart uploads. A tier that did not answer
-/// is asked again, after pauses from one second doubling to thirty, for `wait` (each tier has the
-/// whole of it).
+/// not deleted). The cold tier is also asked about multipart uploads, an S3 tier how its conditional
+/// deletes go (never a failure). A tier that did not answer is asked again, after pauses from one
+/// second doubling to thirty, for `wait` (each tier has the whole of it).
 ///
 /// # Errors
 /// The [`SelfTestError`] of the first tier to answer a check wrongly (a violation: exit status 3)
@@ -1004,8 +1004,8 @@ async fn probe_tiers(
         let took = started.elapsed().as_millis();
         eprintln!("tierstore: tested the {name} in {took} ms");
         outcome?;
-        // Bounded in the keys and in the time after which no delete starts, on a clock that
-        // setting the machine's clock does not move.
+        settle_conditional_delete(backend, &options, &note).await;
+        // Bounded in keys and in time (no delete starts after it), on a clock the machine's clock does not move.
         let budget = SweepBudget::default();
         sweep_probes(backend, &options, budget, &MonotonicClock::new(), &note).await;
     }

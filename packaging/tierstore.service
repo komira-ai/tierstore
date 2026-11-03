@@ -43,7 +43,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=tierstore
-ExecStart=/usr/libexec/kbf/tierstore \
+ExecStart=/usr/libexec/tierstore/tierstore \
   --listen 192.0.2.10:9000 \
   --proxy-id tierstore-1 \
   --bucket tierstore \

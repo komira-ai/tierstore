@@ -78,15 +78,14 @@ fn the_build_embeds_a_commit_and_the_version_names_it() {
     assert_eq!(RELEASE_VERSION, format!("{VERSION}+{COMMIT}"));
 }
 
-/// Asserts that the version the build embeds is `<major>.<minor>.<patch>`, that it is the
-/// override the build was given when there was one (`TIERSTORE_BUILD_VERSION_OVERRIDE`, which the
-/// release workflow sets to the version of the tag) and the crate's version otherwise, and that
-/// the build gauge and `--version` carry exactly it. Catches: an override that does not reach
-/// the constant, `--version` or the gauge label, and one that reaches only some of them.
+/// Asserts that the version the build embeds is the crate's own, from `Cargo.toml` (the release
+/// workflow writes the version of the tag there before it builds), that it is
+/// `<major>.<minor>.<patch>`, and that the build gauge and `--version` carry exactly it. Catches: a
+/// version taken from anywhere but the manifest, and one that reaches only some of the constant,
+/// `--version` and the gauge label.
 #[test]
-fn the_version_override_reaches_the_version_and_the_gauge() {
-    let given = option_env!("TIERSTORE_BUILD_VERSION_OVERRIDE");
-    assert_eq!(VERSION, given.unwrap_or(env!("CARGO_PKG_VERSION")));
+fn the_crate_version_reaches_the_version_and_the_gauge() {
+    assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     let parts: Vec<&str> = VERSION.split('.').collect();
     assert_eq!(parts.len(), 3, "{VERSION}");
     assert!(parts.iter().all(|p| p.parse::<u64>().is_ok()), "{VERSION}");
