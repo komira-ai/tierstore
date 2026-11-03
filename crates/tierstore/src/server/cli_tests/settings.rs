@@ -219,10 +219,8 @@ fn scoped_key_files_are_built_into_the_server_and_their_ids_must_differ() {
         let why = build(&cli).err().expect("refused");
         assert!(why.downcast_ref::<InvalidFlags>().is_some(), "{why}");
         let text = why.to_string();
-        assert!(
-            text.contains("used twice") && !text.contains("s3cret"),
-            "{text}"
-        );
+        assert!(text.contains("used twice"), "{text}");
+        assert!(!text.contains("s3cret"), "{text}");
     }
 }
 
