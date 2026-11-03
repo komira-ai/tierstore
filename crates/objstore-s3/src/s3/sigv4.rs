@@ -230,6 +230,22 @@ mod tests {
         assert_eq!(block_key(&[]), [0; BLOCK]);
     }
 
+    /// Asserts that the key made for the HMAC gives the tags of the `hmac` crate's own length
+    /// handling for no key, keys around the 64-byte block (63, 64, 65) and around two blocks.
+    #[test]
+    fn the_block_key_gives_the_tags_of_the_crates_own_key_handling() {
+        for length in [0, 1, 63, 64, 65, 66, 127, 128, 129, 131] {
+            let key = vec![0x5a_u8; length];
+            let mut own = <Hmac<Sha256> as KeyInit>::new_from_slice(&key).unwrap();
+            own.update(b"data");
+            assert_eq!(
+                hmac(&key, b"data"),
+                own.finalize().into_bytes().to_vec(),
+                "a key of {length} bytes"
+            );
+        }
+    }
+
     fn signature(auth: &str) -> &str {
         auth.rsplit_once("Signature=").unwrap().1
     }
