@@ -134,6 +134,7 @@ fn meta(size: u64, tag: &str) -> Meta {
         size,
         tag: tag.to_owned(),
         modified: 0,
+        reservation: false,
     }
 }
 
