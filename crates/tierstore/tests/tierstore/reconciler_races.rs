@@ -25,11 +25,11 @@ fn entry(op: JournalOp, key: &str, size: u64, tag: Option<&str>) -> JournalEntry
     }
 }
 
-/// Writes `entries` as journal object `seq` of proxy `p1`.
-async fn add_journal(rig: &Rig, seq: u64, entries: &[JournalEntry]) {
+/// Writes `entries` as journal object `seq` of proxy `id`.
+async fn add_journal(rig: &Rig, id: &str, seq: u64, entries: &[JournalEntry]) {
     let object = encode_journal(entries);
     rig.hot_mem
-        .put(&journal_key("p1", seq), object)
+        .put(&journal_key(id, seq), object)
         .await
         .unwrap();
 }
@@ -243,12 +243,38 @@ async fn a_mirror_that_a_delete_and_a_later_put_supersede_leaves_the_newer_objec
     let _proxy = rig.proxy("p1", 1000).await;
     add_journal(
         &rig,
+        "p1",
         1,
         &[entry(JournalOp::PutMirror, "k", 5, Some("old-tag"))],
     )
     .await;
-    add_journal(&rig, 2, &[entry(JournalOp::Delete, "k", 0, None)]).await;
-    add_journal(&rig, 3, &[entry(JournalOp::Put, "k", 5, None)]).await;
+    add_journal(&rig, "p1", 2, &[entry(JournalOp::Delete, "k", 0, None)]).await;
+    add_journal(&rig, "p1", 3, &[entry(JournalOp::Put, "k", 5, None)]).await;
+    rig.hot_mem.put("k", body("new!!")).await.unwrap();
+    let mut reconciler = rig.reconciler("r1", 1000);
+
+    let report = reconciler.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(read(&*rig.hot_mem, "k").await, body("new!!"));
+    assert_eq!(read(&*rig.cold_mem, "k").await, body("new!!"));
+    assert_eq!(report.copied, 1);
+}
+
+/// Asserts that a mirror of one proxy that a delete and a later put of the key by another proxy
+/// supersede does not remove the newer object, although the mirror's proxy comes first in the
+/// pass: proxy `p1` has a mirror of `k`, proxy `p2` has a delete of `k` and then a put of `k`, a
+/// fresh reconciler reads both journals before it applies either, finds the mirror superseded and
+/// skips it; the cold tier holds no `k`, the hot tier keeps the newer object and the put is
+/// copied to the cold tier.
+#[tokio::test(start_paused = true)]
+async fn a_mirror_that_another_proxys_delete_and_put_supersede_leaves_the_newer_object() {
+    let rig = Rig::new();
+    let _p1 = rig.proxy("p1", 1000).await;
+    let _p2 = rig.proxy("p2", 1000).await;
+    let mirror = entry(JournalOp::PutMirror, "k", 5, Some("old-tag"));
+    add_journal(&rig, "p1", 1, &[mirror]).await;
+    add_journal(&rig, "p2", 1, &[entry(JournalOp::Delete, "k", 0, None)]).await;
+    add_journal(&rig, "p2", 2, &[entry(JournalOp::Put, "k", 5, None)]).await;
     rig.hot_mem.put("k", body("new!!")).await.unwrap();
     let mut reconciler = rig.reconciler("r1", 1000);
 
