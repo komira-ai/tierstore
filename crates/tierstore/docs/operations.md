@@ -43,12 +43,12 @@ The first two are 200 and the last two 503. The limit is `--usage-stale-after` (
 The hot tier's size is measured against `--hot-bytes` (`hot_store.budget`). Three shares of it matter:
 
 - Above `--high-water` (80% by default) the reconciler evicts the oldest objects that the cold tier already holds, until the hot tier is down to `--low-water` (70%). It never evicts an object it has not copied.
-- Above `--critical` (95%) a put waits a short time before it is written, and a read of an object that is only in the cold tier is served but not copied back into the hot tier.
+- Above `--critical` (95%) a read of an object that is only in the cold tier is served but not copied back into the hot tier.
 - At the budget, or when the hot tier says it is full, new objects are written straight to the cold tier.
 
 Eviction frees the hot tier only as fast as the cold tier takes copies, which `--copy-parallel` bounds. If the cold tier is slow or down, copies stall, nothing becomes evictable, and the hot tier climbs to the budget.
 
-An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A tag names content: an object put again with the same bytes has the same tag.
+An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A reconciler that took over from another has no tag for the objects the other copied: it reads the hot object's tag just before the delete, and first checks that the cold tier holds a real object of the key with the same size and the same bytes as the hot object (not nothing, not a reservation, not another object). The bytes are compared (both objects read in ranges of at most 1 MiB, each read with its content tag, which must be the one the delete uses, so a key replaced and put back around the read is not deleted), and not the tags across tiers, since tiers of different kinds tag the same bytes differently. If it does not, the hot object stays, since it may be the only copy, and it remains a candidate that the next pass asks about again. A tag names content: an object put again with the same bytes has the same tag.
 
 ## Reservations
 

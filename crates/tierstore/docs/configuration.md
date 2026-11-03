@@ -160,7 +160,7 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.budget` | `--hot-bytes` | size, required | the bytes the hot tier is meant to hold. The water marks are shares of it |
 | `hot_store.high_water` | `--high-water` | percent, 80 | above this share of the budget, eviction begins |
 | `hot_store.low_water` | `--low-water` | percent, 70 | eviction goes on down to this share |
-| `hot_store.critical` | `--critical` | percent, 95 | above this share a put waits a little first and a read of a cold object is not copied back |
+| `hot_store.critical` | `--critical` | percent, 95 | above this share a read of a cold object is not copied back (a put is not slowed; it goes to the cold tier only when the hot tier is full) |
 | `hot_store.journal_linger` | `--journal-linger` | duration, `20ms` | how long a batch of journal entries waits for more |
 | `hot_store.journal_retention` | `--journal-retention` | duration, `24h` | how long an applied journal object is kept |
 | `hot_store.copy_parallel` | `--copy-parallel` | count, 16 | the most objects the reconciler copies at once |
