@@ -3,7 +3,7 @@
 //! tag before a plain DELETE where it is off (the default). The backend does not ask the store
 //! which it enforces.
 
-use objstore_s3::s3::fake::FakeS3;
+use objstore_s3::s3::fake::{Failure, FakeS3};
 use tierstore::{Backend, Error};
 
 use crate::conformance;
@@ -96,4 +96,23 @@ async fn a_key_the_client_cannot_name_sends_no_request() {
     let refused = backend.delete_if_match("a b", "tag").await.unwrap_err();
     assert!(matches!(refused, Error::Other(_)), "{refused}");
     assert_eq!(s3.requests(), Vec::<String>::new());
+}
+
+/// Asserts that a DELETE the store fails (a 500, once) is the error of the conditional delete, in
+/// both ways, and leaves the object where it was: the call is not repeated, and the next one takes
+/// the object on its tag.
+#[tokio::test]
+async fn a_delete_the_store_fails_is_the_error_of_the_conditional_delete() {
+    for enabled in [false, true] {
+        let (s3, backend) = backend().await;
+        let backend = backend.with_conditional_delete(enabled);
+        backend.put("j", body("v")).await.unwrap();
+        let tag = backend.head("j").await.unwrap().tag;
+        s3.fail(Failure::Delete(1));
+        let failed = backend.delete_if_match("j", &tag).await.unwrap_err();
+        assert!(failed.is_unavailable(), "{enabled}: {failed}");
+        assert_eq!(backend.head("j").await.unwrap().tag, tag, "{enabled}");
+        backend.delete_if_match("j", &tag).await.unwrap();
+        assert!(s3.keys().is_empty(), "{enabled}");
+    }
 }

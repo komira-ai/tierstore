@@ -11,7 +11,7 @@ use clap::Parser;
 use objstore_s3::s3::fake::FakeS3;
 use tierstore_testkit::dir::TestDir;
 
-use super::cli::{Cli, S3Flags, build, exit_status, open_tier};
+use super::cli::{Cli, S3Flags, build, check_conditional_delete, exit_status, open_tier};
 use super::config::from_text;
 use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
 use crate::Error;
@@ -137,6 +137,19 @@ fn the_flag_false_is_refused_for_memory_and_dir_with_status_2_and_true_is_not() 
             assert!(build(&cli).is_ok(), "{flag} {spec} true");
             let cli = Cli::try_parse_from(flags(key, hot, cold, &[])).unwrap();
             assert!(build(&cli).is_ok(), "{flag} {spec}");
+        }
+    }
+}
+
+/// Asserts that the refusal is for `false` and only for a memory tier or a dir tier: every other
+/// pair of a tier and a setting, an S3 tier with `false` included, is accepted.
+#[test]
+fn only_false_for_memory_or_dir_is_refused() {
+    for spec in ["s3:bucket", "memory", "dir:/tiers/x"] {
+        for setting in [None, Some(true), Some(false)] {
+            let refused = check_conditional_delete("--hot", spec, setting).is_err();
+            let wanted = setting == Some(false) && spec != "s3:bucket";
+            assert_eq!(refused, wanted, "{spec} {setting:?}");
         }
     }
 }
