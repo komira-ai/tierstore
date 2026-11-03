@@ -52,6 +52,49 @@ fn the_lock_version_is_that_of_the_tierstore_package_alone() {
     assert!(got.contains("name = \"zed\"\nversion = \"2.0.0\""));
 }
 
+const REMOTE_REF: &str = "tierstore 0.3.0 (git+https://example.invalid/tierstore?rev=abc)";
+const REMOTE_PKG: &str = "[[package]]\nname = \"tierstore\"\nversion = \"0.3.0\"\nsource = \"git+https://example.invalid/tierstore?rev=abc#abc\"\n\n";
+
+/// A lock with the remote previous release listed before the local package, and the references
+/// to each from another package; `local` is the local package's version and reference.
+fn two_packages(local: &str) -> String {
+    format!(
+        "{REMOTE_PKG}[[package]]\nname = \"tierstore\"\nversion = \"{local}\"\ndependencies = [\n \"x\",\n]\n\n[[package]]\nname = \"compat\"\nversion = \"0.1.0\"\ndependencies = [\n \"tierstore {local}\",\n \"{REMOTE_REF}\",\n]\n"
+    )
+}
+
+/// Asserts that with both packages present, the local one (the one without a `source`, even
+/// listed second) and the exact references to it get the new version, while the remote package
+/// and the references to it stay as they were.
+#[test]
+fn the_local_package_and_its_references_move_and_the_remote_package_stays() {
+    let got = set_lock(&two_packages("0.3.0"), "1.2.3").expect("set");
+    assert_eq!(got, two_packages("1.2.3"));
+}
+
+/// Asserts that a lock whose references name only the remote package changes in the local
+/// version line alone.
+#[test]
+fn references_to_the_remote_package_alone_leave_the_rest_unchanged() {
+    let text = two_packages("0.3.0").replace(" \"tierstore 0.3.0\",\n", "");
+    let got = set_lock(&text, "1.2.3").expect("set");
+    let expected = text.replacen(
+        "name = \"tierstore\"\nversion = \"0.3.0\"\ndependencies",
+        "name = \"tierstore\"\nversion = \"1.2.3\"\ndependencies",
+        1,
+    );
+    assert_ne!(got, text);
+    assert_eq!(got, expected);
+}
+
+/// Asserts that a lock holding only a remote tierstore is refused as having no local package,
+/// rather than rewriting the remote one.
+#[test]
+fn a_lock_with_only_a_remote_tierstore_is_refused() {
+    let err = set_lock(REMOTE_PKG, "1.2.3").expect_err("no local");
+    assert!(err.to_string().contains("no tierstore package"), "{err}");
+}
+
 /// Asserts that a lock without the package, or whose entry has no version line, is refused
 /// with words naming what is missing.
 #[test]

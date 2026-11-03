@@ -4,8 +4,8 @@
 //! `build.rs` embeds the crate's version and the commit of the checkout; it reads no
 //! environment variable for either. The release build jobs run this verb with the version
 //! `release version` computed: it rewrites `version` in the `[package]` table of
-//! `crates/tierstore/Cargo.toml` and the `tierstore` entry of `Cargo.lock` (so the `--locked`
-//! build accepts it), and touches nothing else.
+//! `crates/tierstore/Cargo.toml` and the `tierstore` entry of `Cargo.lock` (the local package and
+//! the dependency entries that name it, so the `--locked` build accepts it), and touches nothing else.
 
 use std::path::Path;
 
@@ -49,14 +49,41 @@ pub fn set_manifest(text: &str, version: &str) -> Result<String, Error> {
         .ok_or_else(|| Error::Failed(format!("{MANIFEST}: [package] has no version line")))
 }
 
-/// The lock text with the version of the `tierstore` package set to `version`.
+/// The lock text with the version of the local `tierstore` package (the one without a `source`
+/// line) set to `version`, and every dependency entry naming that package by its old version
+/// (`"tierstore <old>"`, no ` (source)` suffix) changed to match. A second package of the same
+/// name from a remote source, and the entries naming it, stay as they were.
 pub fn set_lock(text: &str, version: &str) -> Result<String, Error> {
-    let start = text
-        .split('\n')
-        .position(|l| l == "name = \"tierstore\"")
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    let local = (0..lines.len())
+        .filter(|&i| lines[i] == "name = \"tierstore\"")
+        .find(|&i| {
+            let end = package_end(&lines, i);
+            !lines[i..end].iter().any(|l| l.starts_with("source = "))
+        })
         .ok_or_else(|| Error::Failed(format!("{LOCK}: no tierstore package")))?;
-    replace_version(text, start, str::is_empty, version)
-        .ok_or_else(|| Error::Failed(format!("{LOCK}: tierstore has no version line")))
+    let end = package_end(&lines, local);
+    let at = (local + 1..end)
+        .find(|&i| lines[i].starts_with("version = \""))
+        .ok_or_else(|| Error::Failed(format!("{LOCK}: tierstore has no version line")))?;
+    let old = lines[at]["version = \"".len()..]
+        .trim_end_matches('"')
+        .to_owned();
+    lines[at] = format!("version = \"{version}\"");
+    let from = format!("\"tierstore {old}\",");
+    let to = format!("\"tierstore {version}\",");
+    for line in lines.iter_mut().filter(|l| l.trim() == from) {
+        *line = format!("{}{to}", &line[..line.len() - line.trim_start().len()]);
+    }
+    Ok(lines.join("\n"))
+}
+
+/// The index of the first empty line after line `from`, or the number of lines: where the
+/// lock entry that holds line `from` ends.
+fn package_end(lines: &[String], from: usize) -> usize {
+    (from + 1..lines.len())
+        .find(|&i| lines[i].is_empty())
+        .unwrap_or(lines.len())
 }
 
 /// The `release set-version` verb: sets the version in both files under `root`; the line to
