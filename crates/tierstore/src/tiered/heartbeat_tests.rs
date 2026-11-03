@@ -5,6 +5,7 @@
 //! has reached its wait) and goes on only when told. The monotonic clock is a [`Mono`] the test
 //! advances, so no test waits and no assertion is about elapsed time.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,7 +15,9 @@ use tokio::sync::Semaphore;
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::proxy_key;
 use crate::registration::Registration;
-use crate::{Backend, MemoryBackend, Mono, Proxy, ProxyConfig, Sleeper, TestClock};
+use crate::{
+    Backend, Error, GateBackend, MemoryBackend, Mono, Phase, Proxy, ProxyConfig, Sleeper, TestClock,
+};
 
 const PERIOD: Duration = Duration::from_secs(10);
 
@@ -270,4 +273,105 @@ async fn dropping_the_proxy_ends_its_heartbeat() {
         tokio::task::yield_now().await;
     }
     assert_eq!(hot.calls(Op::PutIfMatch), 1);
+}
+
+fn config(mono: &Arc<Mono>) -> ProxyConfig {
+    let mut config = ProxyConfig::new("p1", 1 << 20, Arc::new(TestClock::new()));
+    config.mono = mono.clone();
+    config
+}
+
+/// Asserts that a process that opens over the registration of an earlier process that beat
+/// replaces it with its own count of zero (so the leader, seeing it never change, still never
+/// removes it), and that the first beat of this process then takes it on from there.
+#[tokio::test]
+async fn open_over_the_registration_of_an_earlier_process_that_beat_writes_the_zero_count() {
+    let first = rig().await;
+    let sleeper = Stepped::new();
+    assert!(first.proxy.start_heartbeat(sleeper.clone()));
+    sleeper.beat_done().await;
+    first.proxy.stop_heartbeat().await;
+    let before = registration(&first.memory).await.unwrap();
+    assert_eq!(before.hb, 1);
+
+    let second = rig_over(first.memory.clone()).await;
+    let after = registration(&second.memory).await.unwrap();
+    assert_eq!(after.hb, 0);
+    assert_ne!(after.boot, before.boot);
+    assert!(!second.proxy.is_live());
+
+    let sleeper = Stepped::new();
+    assert!(second.proxy.start_heartbeat(sleeper.clone()));
+    sleeper.beat_done().await;
+    assert_eq!(registration(&second.memory).await.unwrap().hb, 1);
+    second.proxy.stop_heartbeat().await;
+}
+
+/// Asserts that an open that cannot read or replace the registration it finds fails with that
+/// error and does not go on: a failed head, a failed read and a refused replacement are each returned, and the registration is left as it was.
+#[tokio::test]
+async fn open_fails_with_the_error_of_a_registration_it_cannot_read_or_replace() {
+    let memory = Arc::new(MemoryBackend::new());
+    let body = Registration {
+        proto: 1,
+        boot: "b".into(),
+        hb: 4,
+    }
+    .encode();
+    memory.put(&proxy_key("p1"), body.clone()).await.unwrap();
+    let mono = Arc::new(Mono::new());
+    for op in [Op::Head, Op::Get, Op::PutIfMatch] {
+        let hot = Arc::new(FaultyBackend::new(memory.clone()));
+        hot.fail_next(op, 1);
+        let cold = Arc::new(MemoryBackend::new());
+        let opened = Proxy::open(hot, cold, config(&mono)).await;
+        assert!(matches!(opened, Err(Error::Unavailable(_))), "{op:?}");
+        assert_eq!(memory.get(&proxy_key("p1"), None).await.unwrap(), body);
+    }
+}
+
+/// Asserts that a failure to create the registration, other than "already there", is returned by
+/// `open`.
+#[tokio::test]
+async fn open_fails_when_the_registration_cannot_be_created() {
+    let hot = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::new())));
+    hot.fail_next(Op::Put, 1);
+    let cold = Arc::new(MemoryBackend::new());
+    let opened = Proxy::open(hot, cold, config(&Arc::new(Mono::new()))).await;
+    assert!(matches!(opened, Err(Error::Unavailable(_))));
+}
+
+/// Asserts that two stop calls that overlap a beat in progress both wait for it: the beat is held
+/// at the store, neither call returns while it is held, and both have returned, with the beat
+/// written, once it is released.
+#[tokio::test]
+async fn overlapping_stop_calls_both_wait_for_the_beat_in_progress() {
+    let memory = Arc::new(MemoryBackend::new());
+    let gated = Arc::new(GateBackend::new(memory.clone()));
+    let cold = Arc::new(MemoryBackend::new());
+    let proxy = Proxy::open(gated.clone(), cold, config(&Arc::new(Mono::new())))
+        .await
+        .unwrap();
+    let held = gated.gate(Op::PutIfMatch, &proxy_key("p1"), Phase::Pre);
+    assert!(proxy.start_heartbeat(Stepped::new()));
+
+    let returned = AtomicUsize::new(0);
+    let (proxy_ref, returned_ref) = (&proxy, &returned);
+    let stop = || async move {
+        proxy_ref.stop_heartbeat().await;
+        returned_ref.fetch_add(1, Ordering::SeqCst);
+    };
+    let release = async {
+        held.parked().await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(returned.load(Ordering::SeqCst), 0);
+        assert!(held.release());
+    };
+    tokio::join!(stop(), stop(), release);
+
+    assert_eq!(returned.load(Ordering::SeqCst), 2);
+    assert_eq!(registration(&memory).await.unwrap().hb, 1);
+    proxy.stop_heartbeat().await;
 }

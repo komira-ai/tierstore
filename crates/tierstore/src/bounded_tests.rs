@@ -173,3 +173,18 @@ async fn a_delete_that_does_not_answer_is_cut_at_the_margin_and_never_retried() 
     assert_eq!(rig.store.calls(Op::Delete), 1);
     assert!(rig.memory.head("k").await.is_err());
 }
+
+/// Asserts that with a margin of zero a delete on a deadline with nothing left is refused unsent,
+/// with the exact text, and the object is kept.
+#[tokio::test(start_paused = true)]
+async fn a_delete_with_a_zero_margin_is_refused_when_nothing_of_the_deadline_is_left() {
+    let rig = rig();
+    rig.memory.put("k", body("v")).await.unwrap();
+    let deadline = Deadline::new(Arc::new(Mono::new()), Duration::ZERO);
+
+    let refused = rig.bounded.delete("k", &deadline).await;
+    let text = "delete of k not sent: 0ns of the deadline is left, and 0ns is needed";
+    assert_eq!(refused, Err(Error::Unavailable(text.into())));
+    assert_eq!(rig.store.calls(Op::Delete), 0);
+    assert!(rig.memory.head("k").await.is_ok());
+}

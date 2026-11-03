@@ -309,10 +309,7 @@ impl Proxy {
             .max();
         let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
         let heartbeat = Heartbeat::new(&config);
-        match hot.put(&proxy_key(id), heartbeat.first_body()).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => {}
-            Err(error) => return Err(error),
-        }
+        heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
         let inner = Inner {
             hot,

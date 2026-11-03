@@ -68,9 +68,11 @@ impl Deadline {
         !self.remaining().is_zero()
     }
 
-    /// Whether at least the margin is left, so that a call that destroys may start.
+    /// Whether at least the margin is left, and something is, so that a call that destroys may
+    /// start. A margin of zero therefore still refuses a deadline that was never renewed or has
+    /// passed.
     #[must_use]
     pub fn allows_start(&self) -> bool {
-        self.remaining() >= self.margin
+        self.is_live() && self.remaining() >= self.margin
     }
 }

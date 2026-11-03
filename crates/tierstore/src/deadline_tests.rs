@@ -77,3 +77,19 @@ fn millis_counts_whole_milliseconds_and_stops_at_the_largest() {
     assert_eq!(millis(Duration::from_secs(60)), 60_000);
     assert_eq!(millis(Duration::MAX), u64::MAX);
 }
+
+/// Asserts that a margin of zero does not let a call start on a deadline with nothing left: an
+/// unrenewed deadline and one the clock has run past both refuse, and a live one allows.
+#[test]
+fn a_zero_margin_still_refuses_a_deadline_that_is_unrenewed_or_past() {
+    let mono = Arc::new(Mono::new());
+    let deadline = Deadline::new(mono.clone(), Duration::ZERO);
+    assert!(!deadline.allows_start(), "never renewed");
+
+    deadline.extend_to(5_000);
+    assert!(deadline.allows_start(), "live");
+
+    mono.advance(Duration::from_secs(5));
+    assert_eq!(deadline.remaining(), Duration::ZERO);
+    assert!(!deadline.allows_start(), "run out");
+}

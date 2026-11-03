@@ -150,3 +150,25 @@ async fn a_failed_removal_is_reported_and_tried_again_only_after_the_retention()
     assert_eq!(rig.hot.calls_on(Op::Get, GONE), 2);
     assert!(!there(&rig, GONE).await);
 }
+
+/// Asserts the restart boundary: a process that opens over the registration of an earlier process
+/// that beat, and never starts its own heartbeat, keeps a registration the leader does not remove
+/// after the retention, so a write it makes later is found and copied by a fresh reconciler.
+#[tokio::test(start_paused = true)]
+async fn a_process_that_opens_over_a_beating_registration_and_never_beats_is_not_removed() {
+    let rig = Rig::new();
+    let mono = Arc::new(Mono::new());
+    put(&rig, "_tiering/proxies/p1", beating(7)).await;
+    let proxy = rig.proxy("p1", 1000).await;
+
+    let mut leader = leader(&rig, "r1", &mono);
+    assert_eq!(leader.pass().await.failed, Vec::<Error>::new());
+    mono.advance(RETENTION);
+    assert_eq!(leader.pass().await.failed, Vec::<Error>::new());
+    assert!(there(&rig, "_tiering/proxies/p1").await);
+
+    proxy.put("a", Bytes::from_static(b"1")).await.unwrap();
+    let report = rig.reconciler("r2", 1000).pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.copied, 1);
+}

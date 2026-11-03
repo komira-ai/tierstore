@@ -16,21 +16,23 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::future::{Either, select};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use super::{Inner, Proxy, locked};
 use crate::deadline::millis;
 use crate::lease::new_nonce;
 use crate::registration::{PROTO, Registration};
-use crate::{Bounded, Clock, Deadline, Error, ProxyConfig, Sleeper};
+use crate::{Backend, Bounded, Clock, Deadline, Error, ProxyConfig, Sleeper};
 
 /// Where the heartbeat of a proxy is.
 enum State {
     /// Not started.
     Idle,
-    /// Running: the way to stop it and to wait for it.
-    Running(watch::Sender<bool>, JoinHandle<()>),
-    /// Stopped for good: a proxy that has said it is leaving does not come back.
+    /// Running: the way to stop it, and the end of the task, which closes when the task is over.
+    Running(watch::Sender<bool>, watch::Receiver<()>),
+    /// Stop called, the task may still be ending: every caller of stop waits for the same end.
+    Stopping(watch::Receiver<()>),
+    /// Stopped for good (or never started and then stopped): a proxy that has said it is leaving
+    /// does not come back.
     Stopped,
 }
 
@@ -58,6 +60,25 @@ impl Heartbeat {
     pub(super) fn first_body(&self) -> Bytes {
         let (proto, boot, hb) = (PROTO, self.boot.clone(), 0);
         Registration { proto, boot, hb }.encode()
+    }
+
+    /// Writes this process's registration at open: create-only. One that exists is left as it is,
+    /// except that of an earlier process that beat: this process does not beat until it starts
+    /// its heartbeat, perhaps never, so that registration is replaced by this process's own count
+    /// of zero, which the leader never removes. Left, it would stop changing, be taken for the
+    /// registration of a departed owner and be removed while this process, which may write a
+    /// journal, is alive.
+    pub(super) async fn register(&self, hot: &dyn Backend, key: &str) -> Result<(), Error> {
+        match hot.put(key, self.first_body()).await {
+            Err(Error::AlreadyExists(_)) => {}
+            other => return other,
+        }
+        let meta = hot.head(key).await?;
+        let body = hot.get(key, None).await?;
+        if Registration::decode(&body).is_some_and(|found| found.beats()) {
+            hot.put_if_match(key, self.first_body(), &meta.tag).await?;
+        }
+        Ok(())
     }
 }
 
@@ -155,21 +176,39 @@ impl Proxy {
             etag: None,
         };
         let (stop, stopped) = watch::channel(false);
-        let task = tokio::spawn(run(beater, sleeper, config.heartbeat, stopped));
-        *state = State::Running(stop, task);
+        let (over, ended) = watch::channel(());
+        let period = config.heartbeat;
+        tokio::spawn(async move {
+            run(beater, sleeper, period, stopped).await;
+            drop(over);
+        });
+        *state = State::Running(stop, ended);
         true
     }
 
-    /// Stops the heartbeat and waits until the task has ended, so that no beat follows. The
+    /// Stops the heartbeat and waits until the task has ended, so that no beat follows; a second
+    /// caller, at the same time or later, waits for the same end. The
     /// registration is left as it is: it stops changing, and the reconciler counts the process as
     /// departed after [`ProxyConfig::departure`]. Afterwards the heartbeat cannot be started
     /// again, whether it was running or not.
     pub async fn stop_heartbeat(&self) {
-        let running = std::mem::replace(&mut *locked(&self.inner.heartbeat.state), State::Stopped);
-        if let State::Running(stop, task) = running {
-            stop.send_replace(true);
-            let _ = task.await;
-        }
+        let mut ended = {
+            let mut state = locked(&self.inner.heartbeat.state);
+            match std::mem::replace(&mut *state, State::Stopped) {
+                State::Idle | State::Stopped => return,
+                State::Running(stop, ended) => {
+                    stop.send_replace(true);
+                    *state = State::Stopping(ended.clone());
+                    ended
+                }
+                State::Stopping(ended) => {
+                    *state = State::Stopping(ended.clone());
+                    ended
+                }
+            }
+        };
+        // Nothing is ever sent on it: this returns when the task has dropped its end.
+        while ended.changed().await.is_ok() {}
     }
 
     /// Whether the proxy may still destroy and acknowledge: the time on its own monotonic clock
