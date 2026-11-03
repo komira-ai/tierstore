@@ -200,6 +200,7 @@ mod config_cache;
 mod config_combined;
 mod config_policy;
 mod config_print;
+mod config_tier;
 mod deprecated;
 mod door;
 mod drain;

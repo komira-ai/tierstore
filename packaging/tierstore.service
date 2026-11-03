@@ -30,11 +30,12 @@ After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/tierstore/access.key
 # Restart=on-failure below tries a start that failed again after RestartSec=30. tierstore does not
-# test its stores when it starts, so a store that is down or slow to come up after a reboot does not
-# fail a start: it is the error of the first request that meets it. A start that fails for ever (an
-# address in use, a key file that cannot be read) fails every start with exit 1: after 5 starts in
-# an hour systemd stops trying (`systemctl reset-failed tierstore` and a start try again), so that
-# it does not loop for ever on a start that needs fixing.
+# test its stores when it starts, and a cold store that is down does not fail a start: it is the
+# error of the first request that meets it. A hot store that is down fails the start (opening the
+# proxy reads and writes the hot tier's own state), as does an address in use or a key file that
+# cannot be read: each exits 1. After 5 starts in an hour systemd stops trying
+# (`systemctl reset-failed tierstore` and a start try again), so that it does not loop for ever on
+# a start that needs fixing.
 StartLimitIntervalSec=1h
 StartLimitBurst=5
 

@@ -536,8 +536,8 @@ that was reading the object does not keep it; the completion of an upload drops 
 the key. Listings leave out the keys under `_journal/` and `_tiering/`, always. The upstream key
 must now be one that writes: with `write_through` the start does not test the upstream (tierstore
 verifies nothing of the stores it is given; see "What tierstore requires of a store" below), so a
-key that may not write shows as the failure of the first write, and a store that cannot be reached
-as the error of the first request. The upstream's key is also the cache's: only the front's roles keep one client from another's objects.
+key that may not write shows as the failure of the first write, and an upstream that cannot be
+reached as the error of the first request. The upstream's key is also the cache's: only the front's roles keep one client from another's objects.
 The start line then says `mode=write-through-cache`.
 
 What a put keeps. The body of a create-only put under a `cache = true` policy is copied into
@@ -869,8 +869,9 @@ same refusals, the build-node checks and `write_through` included) and reads the
 names; it binds nothing, makes no directory and calls no store or network. It prints nothing and
 exits 0 if the file would start; if the file is refused it prints the message a start prints and
 exits 2. `--check-config` without `--config` is a usage error (status 2). It does not reach the
-tiers, so a tier that is down, or a key that the store would refuse, is found by the first
-request that needs it and not by the check or by a start. It does not look at the disk either: the start's refusal of a
+tiers, so a tier that is down, or a key that the store would refuse, is not found by it; a hot tier
+that is down is found by a start (the proxy's open fails), a cold tier or a key the store refuses by
+the first request that needs it. It does not look at the disk either: the start's refusal of a
 `budget` over the size of the file system less `free_floor` (exit status 2), the cache directory
 and the credentials file of a tier are checked by a start only. For a storage node with an `[oci]`
 table the check does validate the OCI front as a start does (the prefix, the connection lifetime,
@@ -1241,10 +1242,14 @@ later, and writes no probe key: it does not verify what is said here.
   checkpoint and the registration of the proxies are written with those conditional puts.
 - The cold store must provide the same create-only PUT, on a single PUT and on the completion of a
   multipart upload.
-- Known to meet them: Amazon S3, MinIO (for the conditional PUT) and tierstore's `dir` store.
-- A store that cannot be reached at start does not fail the start; the first request that needs it
-  fails as an ordinary request does. An address in use or a key file refused exits 1 and is tried
-  again after 30 seconds, up to the start limit (5 starts in an hour, then systemd gives up until
+- Known to meet them: Amazon S3, MinIO (for the conditional PUT) and tierstore's `dir` store,
+  among the calls of one process only (two processes over one `dir` hot tier are held apart by
+  `--lock-file`, not by the store).
+- A cold store that cannot be reached at start does not fail the start; the first request that
+  needs it fails as an ordinary request does. Opening the proxy reads and writes the hot tier's own
+  state, so a hot tier that cannot be reached fails the start (exit 1, `opening the proxy: ...`).
+  That, an address in use or a key file refused exits 1 and is tried again after 30 seconds, up to
+  the start limit (5 starts in an hour, then systemd gives up until
   `systemctl reset-failed tierstore`). Exit 3 (`RestartPreventExitStatus=2 3`) is now only the file
   system of a cache directory answering the cache's start-up check wrongly.
 - `conditional_delete` (`--hot-conditional-delete`, `--cold-conditional-delete`) says whether a

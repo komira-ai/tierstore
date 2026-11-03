@@ -63,13 +63,15 @@
 //! with status 2: those the parser refuses, two keys that have one id, and a config file that is
 //! refused or given with flags that describe the data path.
 //!
-//! tierstore does not test the tiers it is given: it opens the proxy and binds the address, and a
-//! tier that cannot be reached or that answers wrongly shows as the ordinary error of the first
-//! request that meets it. What a store must do is stated in the operations guide ("What tierstore
-//! requires of a store"), and is not verified. `--skip-backend-check` and `--backend-check-wait`,
-//! which belonged to the start-up self-test the earlier releases ran, are still accepted and
-//! ignored, with one warning each on stderr (see `deprecated.rs`), so that a unit or a file
-//! that sets them starts.
+//! tierstore does not test or probe the tiers it is given: no probe key is written and no check of
+//! what a store answers is made. It opens the proxy and binds the address. Opening the proxy reads
+//! and writes the hot tier's own state (the node's registration and its journal), so a hot tier
+//! that cannot be reached fails the start with status 1 (`opening the proxy: ...`); the cold tier
+//! is first asked by the first request that needs it. What a store must do is stated in the
+//! operations guide ("What tierstore requires of a store"), and is not verified.
+//! `--skip-backend-check` and `--backend-check-wait`, which belonged to the start-up self-test the
+//! earlier releases ran, are still accepted and ignored, with one warning each on stderr (see
+//! `deprecated.rs`), so that a unit or a file that sets them starts.
 //!
 //! A file of the build-node shape (`[local_cache]` and `[cold_store]` and no `[hot_store]`) is a
 //! different start: a read cache in front of one upstream, with none of the above (no proxy, no
@@ -417,11 +419,13 @@ pub struct Cli {
     /// logged on stderr, and a drain waits no longer than this for a stalled client.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub body_idle_timeout: Duration,
-    /// Deprecated and ignored: tierstore no longer tests its tiers at start-up. Accepted, and its
-    /// value is not read, so that a unit that sets it still starts; stderr says it is ignored.
+    /// Deprecated and ignored: tierstore no longer tests its tiers at start-up. Accepted with any
+    /// text, which is not used, so that a unit that sets it still starts; stderr says it is
+    /// ignored.
     #[arg(long, value_name = "CHECK=REASON")]
     pub skip_backend_check: Vec<String>,
-    /// Deprecated and ignored, like `--skip-backend-check`: a number and `ms`, `s`, `m` or `h`.
+    /// Deprecated and ignored, like `--skip-backend-check`: a number and `ms`, `s`, `m` or `h`, as
+    /// it always was (a value that is not a duration is still refused); the value is not used.
     #[arg(long, value_parser = parse_duration)]
     pub backend_check_wait: Option<Duration>,
     /// Serves a read-only OCI distribution front at this address, from the same tiers (see the
@@ -568,13 +572,27 @@ pub(super) fn open_tier(
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
         }
-        None if s3.conditional_delete == Some(false) => {
-            let why = "conditional-delete false is only for an `s3:<bucket>` tier: a \
-                       `memory` or `dir:<path>` tier deletes conditionally in one atomic step";
-            Err(format!("{flag} {spec:?}: {flag}-{why}"))
-        }
         None => tier(flag, spec),
     }
+}
+
+/// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
+/// delete conditionally in one atomic step: flags that cannot go together (exit status 2).
+///
+/// # Errors
+/// [`InvalidFlags`] naming the flag, when `setting` is `Some(false)` for such a tier.
+pub(super) fn check_conditional_delete(
+    flag: &str,
+    spec: &str,
+    setting: Option<bool>,
+) -> Result<(), InvalidFlags> {
+    let atomic = spec == "memory" || spec.starts_with("dir:");
+    if setting == Some(false) && atomic {
+        let why = "conditional-delete false is only for an `s3:<bucket>` tier: a `memory` or \
+                   `dir:<path>` tier deletes conditionally in one atomic step";
+        return Err(InvalidFlags(format!("{flag} {spec:?}: {flag}-{why}")));
+    }
+    Ok(())
 }
 
 /// The bucket `bucket` of the S3-compatible store that `s3` says how to reach, as the tier
@@ -653,6 +671,8 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let mut server = server_config(&cli.front(), Arc::clone(&clock))?;
     server.usage_stale_after = cli.usage_stale_after;
     let timeout = cli.s3_request_timeout;
+    check_conditional_delete("--hot", &cli.hot, cli.hot_conditional_delete)?;
+    check_conditional_delete("--cold", &cli.cold, cli.cold_conditional_delete)?;
     let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout)?;
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
@@ -972,9 +992,10 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
 ///
-/// The tiers are not tested: the proxy is opened over them, and a tier that cannot be reached
-/// shows as the error of the first request that meets it. `ready` is called with the address the
-/// server is bound to, before the first request is taken. Returns when the drain is over.
+/// The tiers are not tested or probed. The proxy is opened over them, which reads and writes the
+/// hot tier's own state, so a hot tier that cannot be reached is an error here; the cold tier is
+/// first asked by the first request that needs it. `ready` is called with the address the server
+/// is bound to, before the first request is taken. Returns when the drain is over.
 ///
 /// # Errors
 /// A flag that is not valid with the others, a key file or a tier that cannot be used, a proxy
@@ -1262,7 +1283,7 @@ fn print_config(cli: &Cli) -> ExitCode {
 
 /// The exit status of a start that failed: 2 for flags that cannot go together, 3 for a cache
 /// directory whose file system answered the check of the cache wrongly, 1 for anything else (a
-/// tier that could not be reached among it: a restart may mend that).
+/// hot tier that could not be reached when the proxy was opened among it: a restart may mend that).
 pub(super) fn exit_status(why: &Error) -> u8 {
     if why.downcast_ref::<InvalidFlags>().is_some() {
         return 2;

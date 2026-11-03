@@ -136,8 +136,7 @@ fn the_stop_timeout_covers_the_drain_and_a_refused_command_line_is_not_restarted
     assert_eq!(value(&unit, "Restart"), "on-failure");
     assert_eq!(value(&unit, "RestartPreventExitStatus"), "2 3");
     // A start that fails with exit 1 for ever (an address in use, say) is given up on after 5
-    // starts in an hour, not retried for ever, with a restart gap of 30 s. The start does not ask
-    // the stores anything, so a store that is down does not fail one.
+    // starts in an hour, not retried for ever, with a restart gap of 30 s.
     assert_eq!(value(&unit, "RestartSec"), "30");
     assert_eq!(value(&unit, "StartLimitIntervalSec"), "1h");
     let burst: u32 = value(&unit, "StartLimitBurst").parse().expect("a count");

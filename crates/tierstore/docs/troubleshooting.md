@@ -5,8 +5,8 @@
 | Status | Meaning | The unit |
 |---|---|---|
 | 0 | a clean drain, or `--print-config` or `--help` done | stays stopped |
-| 1 | a start that failed: an address in use, a key file refused after parsing, and the flags that depend on each other (see "Messages at start"). A store that cannot be reached is not one: tierstore does not ask its stores anything at start | restarts after 30 seconds |
-| 2 | a flag the parser refused, a file that does not load, a limit of the OCI front, or two keys with one id | does not restart: a restart cannot mend it |
+| 1 | a start that failed: an address in use, a key file refused after parsing, the flags that depend on each other (see "Messages at start"), and a hot tier that cannot be reached when the proxy is opened (`opening the proxy: ...`). A cold store that cannot be reached is not one: tierstore does not test its stores | restarts after 30 seconds |
+| 2 | a flag the parser refused, a file that does not load, a limit of the OCI front, two keys with one id, or `conditional_delete = false` (`--hot-conditional-delete false`) for a `memory` or `dir` tier | does not restart: a restart cannot mend it |
 | 3 | the file system of a cache directory answered the start-up check of the cache wrongly (a build node, or a node with `[local_cache]`) | does not restart: the same file system would answer the same way |
 
 Messages go to stderr, prefixed `tierstore: `, and so to the journal: `journalctl -u tierstore`. None carries a secret.
@@ -66,7 +66,7 @@ opening the proxy: <why>
 binding <address>: <why>
 ```
 
-tierstore does not test its stores at start, so a store that is down does not fail a start; the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. On main, not in v0.0.41, a server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
+tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration and its journal), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again every 30 seconds. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. On main, not in v0.0.41, a server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
 
 An address given twice (on main, not in v0.0.41) exits 2 before anything is bound; the message names the flag or the key and never the address:
 

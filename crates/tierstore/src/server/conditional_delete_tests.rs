@@ -7,10 +7,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 use bytes::Bytes;
+use clap::Parser;
 use objstore_s3::s3::fake::FakeS3;
 use tierstore_testkit::dir::TestDir;
 
-use super::cli::{S3Flags, open_tier};
+use super::cli::{Cli, S3Flags, build, exit_status, open_tier};
 use super::config::from_text;
 use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
 use crate::Error;
@@ -85,28 +86,58 @@ fn true_is_the_default_of_memory_and_dir_and_false_is_refused_for_them() {
     }
 }
 
-/// Asserts the same refusal for the flags, in full: `false` for a memory tier or a dir tier is
-/// refused naming the flag, `true` and no value are accepted for them, and an S3 tier is not
-/// refused for either value.
+/// The flags of a start with the key file `key` and these two tiers, then `more`.
+fn flags(key: &str, hot: &str, cold: &str, more: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "tierstore",
+        "--listen=127.0.0.1:0",
+        "--proxy-id=p1",
+        "--hot-bytes=1000",
+        "--bucket=tier-bucket",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    args.extend([
+        format!("--hot={hot}"),
+        format!("--cold={cold}"),
+        format!("--access-key-file={key}"),
+    ]);
+    args.extend(more.iter().cloned());
+    args
+}
+
+/// Asserts the same refusal for the flags, in full and as flags that cannot go together (exit
+/// status 2, which a restart cannot mend): `false` for a memory tier or a dir tier, either tier,
+/// is refused naming the flag; `true` and no value start them.
 #[test]
-fn the_flag_false_is_refused_for_memory_and_dir_and_true_is_not() {
-    let timeout = Duration::from_secs(5);
+fn the_flag_false_is_refused_for_memory_and_dir_with_status_2_and_true_is_not() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-delete-flag");
-    let spec = format!("dir:{}", dir.path().join("tier").display());
-    let flags = |conditional_delete| S3Flags {
-        endpoint: None,
-        region: None,
-        credentials: None,
-        conditional_delete,
-    };
-    for spec in ["memory", spec.as_str()] {
-        let refused = open_tier("--hot", spec, &flags(Some(false)), timeout);
-        let want = format!(
-            "--hot {spec:?}: --hot-conditional-delete false is only for an `s3:<bucket>` tier: a `memory` or `dir:<path>` tier deletes conditionally in one atomic step"
-        );
-        assert_eq!(refused.err(), Some(want));
-        assert!(open_tier("--hot", spec, &flags(Some(true)), timeout).is_ok());
-        assert!(open_tier("--hot", spec, &flags(None), timeout).is_ok());
+    let key = dir.path().join("key");
+    std::fs::write(&key, "AKID\nsecret\n").unwrap();
+    std::fs::set_permissions(&key, Permissions::from_mode(0o600)).unwrap();
+    let key = key.to_str().unwrap();
+    let on_disk = format!("dir:{}", dir.path().join("tier").display());
+    for spec in ["memory", on_disk.as_str()] {
+        for flag in ["--hot", "--cold"] {
+            let (hot, cold) = if flag == "--hot" {
+                (spec, "memory")
+            } else {
+                ("memory", spec)
+            };
+            let off = vec![format!("{flag}-conditional-delete=false")];
+            let cli = Cli::try_parse_from(flags(key, hot, cold, &off)).unwrap();
+            let why = build(&cli).err().expect("false is refused");
+            let want = format!(
+                "{flag} {spec:?}: {flag}-conditional-delete false is only for an `s3:<bucket>` tier: a `memory` or `dir:<path>` tier deletes conditionally in one atomic step"
+            );
+            assert_eq!(why.to_string(), want);
+            assert_eq!(exit_status(&why), 2);
+            let on = vec![format!("{flag}-conditional-delete=true")];
+            let cli = Cli::try_parse_from(flags(key, hot, cold, &on)).unwrap();
+            assert!(build(&cli).is_ok(), "{flag} {spec} true");
+            let cli = Cli::try_parse_from(flags(key, hot, cold, &[])).unwrap();
+            assert!(build(&cli).is_ok(), "{flag} {spec}");
+        }
     }
 }
 

@@ -557,6 +557,66 @@ fn a_start_does_not_ask_its_tiers_and_the_flags_of_the_removed_self_test_warn() 
     assert!(!err.contains("tested the"), "{err}");
 }
 
+/// Asserts what a start still asks of the hot tier: opening the proxy reads and writes the hot
+/// tier's own state (the node's registration and its journal), so a hot tier that cannot be
+/// reached fails the start with status 1 (the unit tries again), nothing on stdout, and a last
+/// line that begins `tierstore: opening the proxy: `. No line says a tier was tested.
+#[test]
+fn a_hot_tier_that_cannot_be_reached_fails_the_start_at_the_proxy_with_status_1() {
+    let files = Files::new("bin-hot-unreachable");
+    let secret = files.secret("hot-key", "ID\nsecret\n");
+    let key = secret.display().to_string();
+    let described = files.flags(&[
+        "--hot-credentials-file",
+        key.as_str(),
+        "--hot-endpoint",
+        "http://127.0.0.1:1",
+    ]);
+    let flags = with(&described, "--hot", "s3:hot-bucket");
+    let (code, out, err) = run(&flags);
+    assert_eq!((code, out.as_str()), (1, ""));
+    let last = err.lines().last().unwrap();
+    assert!(last.starts_with("tierstore: opening the proxy: "), "{err}");
+    assert!(!err.contains("tested the"), "{err}");
+}
+
+/// Asserts that `conditional_delete = false` for a `memory` or a `dir` tier is a refusal that a
+/// restart cannot mend, status 2, with nothing on stdout: as flags (the message names the flag,
+/// in full, for either tier) and in a file (the message names the key).
+#[test]
+fn conditional_delete_false_for_a_memory_or_dir_tier_is_status_2() {
+    let files = Files::new("bin-delete-off");
+    let off = "a `memory` or `dir:<path>` tier deletes conditionally in one atomic step";
+    let (code, out, err) = run(&files.flags(&["--hot-conditional-delete", "false"]));
+    let want = format!(
+        "tierstore: --hot \"memory\": --hot-conditional-delete false is only for an `s3:<bucket>` tier: {off}\n"
+    );
+    assert_eq!((code, out.as_str(), err), (2, "", want));
+
+    let tier = files.key.with_file_name("cold");
+    let spec = format!("dir:{}", tier.display());
+    let flags = with(
+        &files.flags(&["--cold-conditional-delete", "false"]),
+        "--cold",
+        &spec,
+    );
+    let (code, out, err) = run(&flags);
+    let want = format!(
+        "tierstore: --cold {spec:?}: --cold-conditional-delete false is only for an `s3:<bucket>` tier: {off}\n"
+    );
+    assert_eq!((code, out.as_str(), err), (2, "", want));
+
+    let text = format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"bin\"\nbucket = \"tier-bucket\"\naccess_key_file = \"{}\"\n\n[hot_store]\nkind = \"memory\"\nbudget = 1000\nconditional_delete = false\n\n[cold_store]\nkind = \"memory\"\n",
+        files.key.display()
+    );
+    let file = files.secret("off.toml", &text).display().to_string();
+    let (code, out, err) = run(&["--config".to_owned(), file]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    let key = "hot_store.conditional_delete: false is only for kind \"s3\"";
+    assert!(err.contains(key), "{err}");
+}
+
 /// Asserts that a start with a tier that its flags do not describe exits with status 1 and a
 /// reason that names the flag: an S3 tier with no endpoint, one whose credentials file is not
 /// there, one whose bucket name is not a bucket name, and the flags of an S3 tier given for a

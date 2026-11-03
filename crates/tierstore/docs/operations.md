@@ -2,7 +2,7 @@
 
 ## Starting
 
-Start the unit by hand (see [install](install.md)). The process does not test or probe its tiers (see [What tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)): it opens the proxy and binds the address, and a store that cannot be reached shows as the error of the first request that meets it. When it is ready it prints one line on stdout:
+Start the unit by hand (see [install](install.md)). The process does not test or probe its tiers (see [What tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)): it opens the proxy and binds the address. Opening the proxy reads and writes the hot tier's own state, so a hot tier that cannot be reached fails the start (exit 1, `opening the proxy: ...`); the cold tier is first asked by the first request that needs it. When it is ready it prints one line on stdout:
 
 ```text
 tierstore <version> listen=192.0.2.10:9000
@@ -103,7 +103,7 @@ On main, not in v0.0.41, `--lock-file` (`hot_store.lock_file`) says which of the
 
 ## What tierstore requires of a store
 
-tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently.
+tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration and its journal, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
 
 The hot store must provide:
 
@@ -112,9 +112,9 @@ The hot store must provide:
 
 The cold store must provide the same create-only PUT (`If-None-Match: *`), on a single PUT and on the completion of a multipart upload. A store that overwrites on a create-only write loses the one-winner rule of a put.
 
-Known to meet these requirements: Amazon S3, MinIO (for the conditional PUT; use a release that has it) and tierstore's own `dir` store. The `memory` store of a process meets them too, but its objects are lost when the process stops.
+Known to meet these requirements: Amazon S3, MinIO (for the conditional PUT; use a release that has it) and tierstore's own `dir` store, which meets them among the calls of one process only: its conditional writes are atomic inside one process, so a `dir` hot tier that two processes use at once (a live update, a second process over the same node) is not covered by the store: `--lock-file` (see above) is what keeps two such processes from reconciling and holding the lease together, and an S3 hot tier does not need it. The `memory` store of a process meets them too, but its objects are lost when the process stops.
 
-tierstore does not verify any of this. Run a store you have not seen meet them through your own tests before it holds data. A store that cannot be reached at start is not an error of the start: the first request that needs it fails as an ordinary request does (503 `ServiceUnavailable` for the client, and a retry by the reconciler), and the process goes on.
+tierstore does not verify any of this. Run a store you have not seen meet them through your own tests before it holds data. A cold store that cannot be reached is not an error of the start: the first request that needs it fails as an ordinary request does (503 `ServiceUnavailable` for the client, and a retry by the reconciler), and the process goes on.
 
 ### Conditional delete
 
@@ -123,7 +123,7 @@ The proxy and the reconciler delete an object only if it still has the content t
 - `true`: a DELETE with `If-Match: "<tag>"`. A store that enforces the header refuses a wrong tag with 412 and removes the object only on the right one. Set it for a store that enforces `If-Match` on a DELETE, such as Amazon S3. A store that takes the header and deletes anyway (some S3-compatible stores do) must not have it set: the fence is then no fence.
 - `false`: a HEAD, a comparison of the content tags and a plain DELETE. It is right on every store and leaves a window in which another writer's replacement of the key between the two requests is deleted.
 
-The default for an S3 tier is `false`: tierstore does not detect Amazon S3 from its endpoint (an S3-compatible store is reached at any address), so the default is the one that is right on every store, and `conditional_delete = true` is for the operator to set. A `memory` tier and a `dir` tier compare the tag and remove the object in one atomic step: their setting is `true`, and `false` is refused when the file is loaded or the flags are read. A guarantee that rests on conditional deletes holds only once every process over the tiers runs a version that makes them; during a rolling upgrade a process of an older version deletes without a tag.
+The default for an S3 tier is `false`: tierstore does not detect Amazon S3 from its endpoint (an S3-compatible store is reached at any address), so the default is the one that is right on every store, and `conditional_delete = true` is for the operator to set. A `memory` tier and a `dir` tier compare the tag and remove the object in one atomic step: their setting is `true`, and `false` is refused when the file is loaded or the flags are read. A guarantee that rests on conditional deletes holds only once every process over the tiers runs a version that makes them; during a rolling upgrade a process of an older version deletes without a tag. The key is new in this release, and the release before refuses a file that has it (it refuses every key it does not know, status 2): leave `conditional_delete` out of a file until no process that may be started from it runs the release before. A file without the key loads in both releases (`crates/compat/tests/config.rs`).
 
 ### What earlier releases did at start
 
