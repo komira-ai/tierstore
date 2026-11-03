@@ -1,5 +1,6 @@
 //! A memory backend whose streamed reads come in chunks of a size a test names, so that two tiers
-//! that hold the same bytes can be read in different pieces, and a read can end short or fail.
+//! that hold the same bytes can be read in different pieces, and a read can end short, end late or
+//! fail. A read of a range with the mark (the hot tier's, in a comparison) ends short or fails too.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,6 +17,8 @@ pub enum Ending {
     Whole,
     /// One byte early, as a read of an object that was replaced by a shorter one.
     Short,
+    /// One byte late, as a read of an object that was replaced by a longer one.
+    Long,
     /// With an error after the first chunk.
     Broken,
 }
@@ -60,10 +63,27 @@ impl Backend for Chunked {
         self.mem.get(key, range).await
     }
 
+    async fn get_marked(
+        &self,
+        key: &str,
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, bool, String), Error> {
+        let (mut bytes, reservation, tag) = self.mem.get_marked(key, range).await?;
+        match self.ending {
+            Ending::Short => bytes.truncate(bytes.len().saturating_sub(1)),
+            Ending::Broken => return Err(Error::Unavailable("read broke".to_owned())),
+            Ending::Whole | Ending::Long => {}
+        }
+        Ok((bytes, reservation, tag))
+    }
+
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
         let mut whole = self.mem.get(key, range).await?;
         if self.ending == Ending::Short {
             whole.truncate(whole.len().saturating_sub(1));
+        }
+        if self.ending == Ending::Long {
+            whole = Bytes::from([whole.as_ref(), b"z"].concat());
         }
         let mut items: Vec<Result<Bytes, Error>> = Vec::new();
         while !whole.is_empty() {

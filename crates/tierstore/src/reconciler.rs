@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 
-use crate::backend::ReadBody;
+use crate::backend::{ByteRange, ReadBody};
 use crate::journal::{
     PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
     load_checkpoint, seq_of, to_body, write_object,
@@ -705,7 +705,7 @@ impl Reconciler {
     async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         match self.cold.head(key).await {
             Ok(cold) if !cold.reservation && cold.size == hot.size => {
-                self.same_bytes(key, hot.size).await
+                self.same_bytes(key, hot).await
             }
             Ok(_) => Ok(Some(false)),
             Err(Error::NotFound(_)) => Ok(Some(false)),
@@ -713,42 +713,50 @@ impl Reconciler {
         }
     }
 
-    /// Whether both tiers hold the same `size` bytes under `key`, read as the chunks they come in
-    /// (one chunk of each at a time, and a read stops at the first difference). The bytes compared
-    /// are counted: two reads that end together before `size` bytes (objects replaced by shorter
-    /// ones between the HEAD and the read) are not a match. An object that is not
-    /// there to be read is not an error: the cold one is not held (`Some(false)`), and the hot
-    /// one is gone (`None`).
-    async fn same_bytes(&self, key: &str, size: u64) -> Result<Option<bool>, Error> {
-        let mut hot = match self.hot.get_stream(key, None).await {
-            Ok(stream) => stream,
-            Err(Error::NotFound(_)) => return Ok(None),
-            Err(error) => return Err(error),
-        };
+    /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave.
+    /// The cold object is read as the chunks it comes in; the hot object in ranges of at most
+    /// [`COMPARE_RANGE`] bytes, each read with its content tag in one call, so that every byte
+    /// compared is of the object whose tag the eviction deletes on: a range of another object (the
+    /// key replaced between the HEAD and the read, and put back before the delete) has another tag
+    /// and ends the comparison with `Some(false)`, as does a range that is not the length asked
+    /// for, and a read ends at the first difference. Neither tier is held whole. An object that
+    /// is not there to be read is not an error: the cold one is not held (`Some(false)`), and the
+    /// hot one is gone (`None`).
+    async fn same_bytes(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
         let mut cold = match self.cold.get_stream(key, None).await {
             Ok(stream) => stream,
             Err(Error::NotFound(_)) => return Ok(Some(false)),
             Err(error) => return Err(error),
         };
-        let (mut mine, mut theirs) = (Bytes::new(), Bytes::new());
-        let mut compared = 0u64;
-        loop {
-            if mine.is_empty() {
-                mine = next_chunk(&mut hot).await?;
-            }
-            if theirs.is_empty() {
-                theirs = next_chunk(&mut cold).await?;
-            }
-            if mine.is_empty() || theirs.is_empty() {
-                let ended_together = mine.is_empty() && theirs.is_empty();
-                return Ok(Some(ended_together && compared == size));
-            }
-            let len = mine.len().min(theirs.len());
-            if mine.split_to(len) != theirs.split_to(len) {
+        let mut theirs = Bytes::new();
+        let mut offset = 0u64;
+        while offset < hot.size {
+            let len = (hot.size - offset).min(COMPARE_RANGE);
+            let range = ByteRange::new(offset, len);
+            let (mut mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if tag != hot.tag || mine.len() as u64 != len {
                 return Ok(Some(false));
             }
-            compared += len as u64;
+            while !mine.is_empty() {
+                if theirs.is_empty() {
+                    theirs = next_chunk(&mut cold).await?;
+                }
+                if theirs.is_empty() {
+                    return Ok(Some(false));
+                }
+                let take = mine.len().min(theirs.len());
+                if mine.split_to(take) != theirs.split_to(take) {
+                    return Ok(Some(false));
+                }
+            }
+            offset += len;
         }
+        let ended = theirs.is_empty() && next_chunk(&mut cold).await?.is_empty();
+        Ok(Some(ended))
     }
 
     /// Stores the checkpoint of a proxy if it moved.
@@ -801,6 +809,9 @@ impl Reconciler {
         }
     }
 }
+
+/// The most bytes of the hot object that one read of a comparison holds.
+const COMPARE_RANGE: u64 = 1 << 20;
 
 /// The next chunk of a read that has bytes, or none (an empty `Bytes`) at the end of the body.
 async fn next_chunk(body: &mut ReadBody) -> Result<Bytes, Error> {
