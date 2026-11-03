@@ -72,8 +72,9 @@ pub enum JournalOp {
     PutReserved,
     /// An object was copied from the cold tier into the hot tier by a read
     /// ([`JournalEntry::cold_tag`] is the tag the cold object had), so that the reconciler can
-    /// evict it again. It is never copied to the cold tier: it stays in the hot tier only while
-    /// the cold tier still holds that object.
+    /// evict it again ([`JournalEntry::hot_tag`] is the tag the hot tier gave the copy). It is
+    /// never copied to the cold tier: it stays in the hot tier only while the cold tier still
+    /// holds that object.
     PutMirror,
     /// Anything a newer writer adds: a reader skips the entry.
     #[serde(other)]
@@ -105,6 +106,13 @@ pub struct JournalEntry {
     /// these ops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cold_tag: Option<String>,
+    /// The content tag the hot tier gave the object of a [`JournalOp::PutMirror`] when the copy
+    /// was written there: the hot tier's own tag, which need not equal [`JournalEntry::cold_tag`]
+    /// (a directory tier tags by SHA-256, an S3 tier by ETag). Tags are never compared across
+    /// tiers: this one is only ever compared with the hot tier's tags. Absent in every other
+    /// entry, and in the mirrors of releases before this field, which own no hot object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hot_tag: Option<String>,
 }
 
 fn corrupt(what: &str, error: &serde_json::Error) -> Error {

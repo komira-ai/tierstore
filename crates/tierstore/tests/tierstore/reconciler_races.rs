@@ -26,6 +26,10 @@ fn entry(op: JournalOp, key: &str, size: u64, tag: Option<&str>) -> JournalEntry
         size,
         time: 0,
         cold_tag: tag.map(str::to_owned),
+        // The two tiers of these tests tag bytes alike, so a mirror's hot tag is its cold tag.
+        hot_tag: tag
+            .filter(|_| op == JournalOp::PutMirror)
+            .map(str::to_owned),
     }
 }
 

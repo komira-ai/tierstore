@@ -114,6 +114,7 @@ async fn a_gap_in_the_journal_stops_the_reading_until_it_is_filled() {
         size: 1,
         time: 0,
         cold_tag: None,
+        hot_tag: None,
     };
     let third = encode_journal(&[put_x]);
     rig.hot_mem.put(&journal_key("p1", 3), third).await.unwrap();
