@@ -1237,6 +1237,8 @@ fn capabilities(args: &[OsString]) -> ExitCode {
 /// The binary: flags in, exit status out.
 #[must_use]
 pub fn main(args: Vec<OsString>) -> ExitCode {
+    // Before anything can say something: the operator messages go through `tracing`.
+    super::build_info::stderr_log::install();
     // The host updater's hook: a verb of its own, answered before any flag is parsed.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if args.get(1).is_some_and(|verb| verb == update_hook::VERB) {

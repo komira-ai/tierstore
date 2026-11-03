@@ -431,7 +431,7 @@ impl LocalCache {
                 inner.describe(&outcome)
             });
             if let Some(line) = ticking.await.expect("a tick does not panic") {
-                eprintln!("tierstore: {line}");
+                tracing::info!("tierstore: {line}");
             }
             #[cfg(test)]
             self.inner.trace_after_tick();
