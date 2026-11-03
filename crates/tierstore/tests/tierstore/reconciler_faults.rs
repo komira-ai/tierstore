@@ -338,6 +338,7 @@ fn legacy_put(key: &str, size: u64) -> JournalEntry {
         size,
         time: 0,
         cold_tag: None,
+        hot_tag: None,
     }
 }
 
