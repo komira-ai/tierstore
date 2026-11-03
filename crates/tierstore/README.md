@@ -13,7 +13,7 @@ other crate of this workspace unless the `s3` feature is on.
   `packaging/README.md` has the flags, the keys and the unit.
 
 An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
-`Authorization` header (and presigned PUT URLs). The packaging notes, the flags and the key files
+`Authorization` header (and presigned GET and PUT URLs). The packaging notes, the flags and the key files
 are in `packaging/README.md`; the roles of a key are in `src/server/keys.rs`.
 
 The operator guide (install, keys and roles, configuration, operations, troubleshooting, limits) is in `docs/`; a test of the crate (`src/server/docs_tests.rs`) holds every page of it to the code, and the site's docs pages are made from it.
@@ -176,13 +176,12 @@ counterpart here.
 | presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
 | GC | `--gc-key-file` | list, head, delete and abort uploads under one prefix |
 | scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
-| grant | `--grant-key-file` | signs no request; its signature on a read grant (`x-tierstore-grant`) lets the bearer GET and HEAD the objects the grant lists, and nothing else |
 
-A read grant is a token the process that starts a job makes with `server::mint_grant`; the byte
-format is in "Read grants" in `packaging/README.md`. It works on the storage front and on
-the front of a build node alike. A grant is a bearer token (replayable until it expires; use TLS
-where that matters), and the server refuses one that ends beyond `--grant-max-lifetime` (15 minutes
-by default).
+The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
+that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
+key that signed it, until it expires (at most `--presign-max-expires`, 15 minutes by default). A URL
+is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
+`packaging/README.md`.
 
 ### Scoped keys
 

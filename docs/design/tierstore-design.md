@@ -24,7 +24,7 @@ From this follow the requirements:
 
 Goals:
 
-- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned put) and, beside it, a read-only OCI distribution front, both over one proxy.
+- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned get and put) and, beside it, a read-only OCI distribution front, both over one proxy.
 - Create-only puts across two tiers: a key that exists in either tier is refused. One write in the cold tier decides every race, except between a presigned (hot-only) put and a put that goes through cold (section 11).
 - A put is acknowledged only when it can be found again: the key is reserved in the cold tier and the object and its journal entry are durable in the hot tier, or (hot tier full) the cold tier holds the object.
 - Reads from the fastest tier that holds the object, with a fill of the faster tier on a miss.
@@ -532,5 +532,6 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 | Copy-back | Writing an object read from cold into hot, journaled so it can be evicted again; its entry carries no reservation tag, so the leader only counts and evicts it. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
+| Presigned get | A get or head of one object signed in the URL by a key that reads (full, read-only or scoped), with the rights of that key; any `Range` is allowed, so one URL serves a parallel download. |
 | Reserved prefix | `_journal/` and `_tiering/`; refused to clients. |
 | Self-test | The start-up check of each tier's contract. |

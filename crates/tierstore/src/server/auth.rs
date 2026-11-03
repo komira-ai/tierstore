@@ -14,7 +14,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 use sha2::{Digest, Sha256};
 
 use super::ServerConfig;
-use super::grant::{self, GRANT_HEADER};
 use super::keys::Role;
 use super::presign::{self, Grant, PRESIGN_ONLY};
 use super::reply::S3Error;
@@ -224,15 +223,11 @@ pub(super) fn string_to_sign_for(stamp: &str, scope: (&str, &str), request: &str
 ///
 /// Gives the value of its `x-amz-content-sha256` header, the hash of the body that the
 /// signature covers, which the caller checks the body against, and the role of the key it is
-/// signed with. The key is the one whose id the credential names, in the server's region. A
-/// request with the header of a read grant is not checked as SigV4 at all (see `grant`).
+/// signed with. The key is the one whose id the credential names, in the server's region.
 ///
 /// # Errors
 /// The [`Refusal`] that says what is wrong with the request.
 pub(crate) fn verify(config: &ServerConfig, parts: &Parts) -> Result<Signed, Refusal> {
-    if parts.headers.contains_key(GRANT_HEADER) {
-        return grant::verify(config, parts);
-    }
     let Some(text) = header(&parts.headers, "authorization") else {
         return presign::verify_query(config, parts);
     };

@@ -6,16 +6,15 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 
 | Key | Flag | Key of the file | May do |
 |---|---|---|---|
-| full | `--access-key-file` | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads |
-| read-only | `--read-only-key-file` | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
+| full | `--access-key-file` | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads; also signs presigned GET URLs |
+| read-only | `--read-only-key-file` | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket; also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
 | presigning | `--presign-key-file` | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
 | GC | `--gc-key-file` | `server.gc_key_files` | list, head, delete and abort uploads under one prefix, and nothing else; it never reads a body |
-| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else |
-| grant | `--grant-key-file` | `server.grant_key_files` | signs no request: its signature on a read grant (the `x-tierstore-grant` header) lets the bearer get and head the objects the grant lists, until the grant expires, and nothing else |
+| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
 | hot tier credential | `--hot-credentials-file` | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
 | cold tier credential | `--cold-credentials-file` | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
 
-Only the full key is required. The read-only, presigning, GC, scoped and grant flags may each be given once for each key. A tier that is a directory needs no credential file.
+Only the full key is required. The read-only, presigning, GC and scoped flags may each be given once for each key. A tier that is a directory needs no credential file.
 
 A role is not a prefix: a read-only key may read every object of the bucket. To limit a client to prefixes, use a scoped key (or a GC key, or a presigned URL). The key prefixes `_journal/` and `_tiering/` belong to tierstore: a client put or delete there is refused, and a listing leaves them out.
 
@@ -76,6 +75,8 @@ The server reads its key files once, at start. To rotate a key, write the new fi
 
 A change to the tier credentials takes the same restart.
 
-## Read grants
+## Presigned GET URLs
 
-A client that holds no key and must read a fixed set of objects for a short time presents a read grant: a token signed with a grant key, sent as one `x-tierstore-grant` header on `GET` and `HEAD`. It names one bucket, an expiry and the exact objects it lists, and allows nothing else. The server refuses a grant that ends more than `--grant-max-lifetime` (15 minutes by default) after its own clock. A grant is a bearer token: whoever holds it can use it until it expires, so use TLS where that matters. A grant key's secret is at least 32 bytes (the server refuses a shorter one at start); the length is counted in the characters as written, so generate it as 32 random bytes in hex (64 characters), for example with `openssl rand -hex 32`. The cap is measured on the server's clock, so a minting service whose clock runs ahead of the server's should mint grants shorter than the cap by at least that skew. The token format is in the README, under Read grants.
+A client that holds no key and must read an object for a short time presents a presigned GET URL: the URL of the object with the SigV4 query-string parameters, signed with the full key, a read-only key or a scoped key. Any SDK presigner makes one (the library has `presign_get`). No flag and no key file is added for it: the key that signs is one of those above, and the URL has that key's rights and no more. A scoped key's URL reads an object under one of its read prefixes and nothing outside them; a GC key and a presigning key sign no read URL.
+
+The URL is good for a `GET` or `HEAD` (the method it was signed for) of one object, with or without a `Range` header, and for nothing else: another method, a call on the bucket, a multipart call or a parameter beyond the SigV4 ones and `x-id` is 403 `AccessDenied`. The `Range` header is not part of the signature, so one URL serves every part of a parallel download of a large object. The URL is refused from the second `X-Amz-Date + X-Amz-Expires` on, and its `X-Amz-Expires` may not be over `--presign-max-expires` (15 minutes by default). The cap is measured on the server's clock, so a service whose clock runs ahead of the server's should sign URLs shorter than the cap by at least that skew. A URL is a bearer credential: whoever holds it can use it until it expires, so use TLS where that matters. The calls and the answers are in `packaging/README.md`, under Presigned GET URLs.

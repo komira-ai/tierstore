@@ -129,6 +129,10 @@ The process tries the lock every second. When it takes it, it empties the stagin
 
 `GET /metricz` on the S3 listener (unsigned) answers 200 in the Prometheus text format. On main it has the hit, miss, byte and cold-read counters of the hot and cold tiers, the counters of the OCI read front, such as `tierstore_oci_requests_total`, and the counters of the cache of a build node, all named `tierstore_` and a word; without `--oci-listen` it says the front is not enabled, and a node with no cache says so on a line of its own. The tier counters are on main and not in v0.0.40. The full list of metric names, their labels and queries to alert on is in [metrics](metrics.md).
 
+## Handing out read URLs
+
+A job that holds no key reads its objects with presigned GET URLs. The service that starts the job signs one URL for each object with a key that may read (a scoped key limited to the job's prefix is the usual choice; see [keys](keys.md)) and gives the job the URLs. Each URL is good for at most `--presign-max-expires` (15 minutes by default), so sign it when the job starts, and again for a job that runs longer. To fetch a large object in parallel, the job sends several `GET`s of the one URL, each with its own `Range` header, and puts the parts together: the range is not signed, so every part passes. A URL is a bearer credential; do not log it, and use TLS where the path is not trusted. A URL the server refuses is a 403 `AccessDenied` or `SignatureDoesNotMatch` answer; the first thing to check is the clock of the signing service against the server's.
+
 ## Not in a release yet
 
 - **Waiting for a put slot** (on main, not in v0.0.41). A put over `--max-concurrent-puts` waits up to `--put-permit-wait` (15 s) for a slot before it is answered 503 `SlowDown`, and the kbf task client retries a 503 with jittered waits. In v0.0.41 it is answered 503 at once.
