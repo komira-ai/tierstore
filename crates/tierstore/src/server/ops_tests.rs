@@ -182,8 +182,8 @@ async fn a_ranged_get_answers_the_bytes_and_the_range() {
 }
 
 /// Asserts that an object only the cold tier holds is described by a head without being copied,
-/// and read, whole or by range, with the same answers as one in the hot tier; the read copies
-/// it into the hot tier.
+/// and read, whole or by range, with the same answers as one in the hot tier; a read of a range
+/// copies nothing into the hot tier, and a read of the whole object copies it.
 #[tokio::test(start_paused = true)]
 async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -196,6 +196,9 @@ async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.body, "234");
     assert_eq!(part.header("content-range"), "bytes 2-4/10");
+    assert!(rig.hot_mem.get("cold", None).await.is_err());
+    let whole = rig.get("cold", None).await;
+    assert_eq!(whole.body, "0123456789");
     let copy = rig.hot_mem.get("cold", None).await.unwrap();
     assert_eq!(copy, body);
 }

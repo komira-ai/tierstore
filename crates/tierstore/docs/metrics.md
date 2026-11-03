@@ -24,14 +24,15 @@ the only tierstore hop in v1, and its series describe the cache's own work and i
 upstream.
 
 **v2: storage nodes with hot and cold tiers.** A storage node runs a proxy over a hot store and a
-cold store. A read asks the hot tier first, and on a miss the cold tier. A get that finds the
+cold store. A read asks the hot tier first, and on a miss the cold tier. A get without a range that finds the
 object only in the cold tier reads the whole object and copies it into the hot tier (a promotion)
-when the hot tier has room. Its series are one labelled family per measure, with the tier as a
+when the hot tier has room; a ranged get reads only its range and copies nothing. Its series are one labelled family per measure, with the tier as a
 label, so one query serves every tier.
 
-A process runs one of the two shapes, so the series of one shape are absent from the other's
-`/metricz`. A series that is absent has not been counted at zero: a query over it returns
-nothing, not 0.
+A process runs a storage node, a build-node cache, or both. A combined node (`[hot_store]`,
+`[cold_store]` and `[local_cache]` in one file) exposes both blocks, the proxy's and the cache's, on its
+`/metricz`. A process without one component has none of that component's series. A series that is
+absent has not been counted at zero: a query over it returns nothing, not 0.
 
 ## Reading the series
 
@@ -123,9 +124,9 @@ value `local` of `tier` is reserved for the build node's cache.
 | `tierstore_read_errors_total` | counter | `tier`, `op` | the tier failed with anything but "not found": it is down, refused, or timed out |
 | `tierstore_reads_total` | counter | `tier`, `op` | a read reached the tier: its hits, misses and errors added up. For `tier="cold"`, the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | counter | `tier` | bytes of object data that gets answered, by the tier that gave them, after a range is applied |
-| `tierstore_bytes_read_total` | counter | `tier` | bytes of object data that gets read from the tier. For `cold`, the whole object, whatever range was asked, except a ranged read made while the hot tier is at its critical mark, which reads only the range |
+| `tierstore_bytes_read_total` | counter | `tier` | bytes of object data that gets read from the tier. For `cold`, the whole object for a get without a range, and the range alone for a ranged get |
 | `tierstore_promotions_total` | counter | none | a get copied an object from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | counter | none | bytes of those objects: the whole object, whatever range the get asked |
+| `tierstore_promoted_bytes_total` | counter | none | bytes of those objects: the whole object (only a get without a range copies one) |
 | `tierstore_promotions_skipped_total` | counter | `reason`: `critical`, `full`, `raced`, `failed` | a get found the object in the cold tier and did not copy it into the hot tier |
 
 What they do not count, and how to read them:
@@ -133,8 +134,7 @@ What they do not count, and how to read them:
 - An S3 GET reaches the proxy as a HEAD and then a GET. A GET that is answered at the HEAD shows only under `op="head"`: a key that exists in neither tier, a conditional request that is answered 304 or 412, and a range that cannot be satisfied. So `op="head"` is a lookup rate: it mixes the clients' HEADs with the HEAD that starts every GET. `op="get"` counts only the reads that went on to fetch data.
 - An error is neither a hit nor a miss. A tier that is down does not lower its hit rate; it shows in `read_errors_total`. A hot-tier error ends the read: the cold tier is not asked, so a hot outage does not show as cold reads.
 - Bytes are counted when the proxy hands them to the front, so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied after a cold read has counted the cold hit and the cold bytes read, and no bytes served.
-- A ranged GET that misses the hot tier, while the hot tier is at its critical mark, asks the cold tier for the range alone and copies nothing: it counts a `critical` skip, and its `bytes_read` and `bytes_served` are both the range.
-- Otherwise a ranged GET that misses the hot tier reads the whole object from the cold tier, promotes the whole object, and serves the range. Its `bytes_read` and `promoted_bytes` are the object's size, and its `bytes_served` is the range.
+- A ranged GET that misses the hot tier asks the cold tier for the range alone and copies nothing, so its `bytes_read` and `bytes_served` are both the range and it promotes nothing. While the hot tier is at its critical mark it also counts a `critical` skip.
 - A HEAD promotes nothing.
 - `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier answering this copy with "full". `raced` is another read having copied the object first: two concurrent cold GETs of one object read it twice and promote it once, and the second counts `raced`. `failed` is any other error of the copy.
 - `promotions_total` counts a copy when the hot tier has taken it, before the entry for it is appended to the journal. That append can fail, and then the object can later leave the hot tier with no trace in these counters.

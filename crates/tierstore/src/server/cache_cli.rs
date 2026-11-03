@@ -37,6 +37,11 @@
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass and the
 //! lock task are the only things running beside the server, and they stop with it. Nothing is
 //! owed to the upstream: no journal, no lease, no copy in flight.
+//!
+//! A storage node with a cache in front of its own proxy (see
+//! [`combined_cli`](super::combined_cli)) uses the same cache directory start (`open`), the same
+//! sockets (`bind_cache_s3`) and the same two loops; its upstream is the proxy, so the HEAD and the
+//! write self-test of the upstream are left out there.
 
 use std::future::Future;
 use std::path::Path;
@@ -66,18 +71,18 @@ use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
 /// How often the eviction pass runs beside the server.
-const PASS_INTERVAL: Duration = Duration::from_secs(10);
+pub(super) const PASS_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How often a cache that does not hold the lock of its directory tries it again, and one that
 /// holds it checks that the lock file is still the file at the path.
-const LOCK_INTERVAL: Duration = Duration::from_secs(1);
+pub(super) const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Binds the S3 front of a build node: every configured address, then the loopback sockets that
+/// Binds the S3 front of a node with a local cache: every configured address, then the loopback sockets that
 /// [`bind_set`] adds because a local cache is defined.
 ///
 /// # Errors
 /// A configured address that cannot be bound (named), or a loopback socket that cannot ([`LoopbackBind`]).
-fn bind_cache_s3(
+pub(super) fn bind_cache_s3(
     configured: &[std::net::SocketAddr],
 ) -> Result<Vec<tokio::net::TcpListener>, Error> {
     let mut listeners = bind_s3(configured)?;
@@ -166,7 +171,7 @@ pub(super) fn unjudged_warning(why: &str, path: &Path) -> String {
 
 /// Opens the cache in `config`, checks its file system and the upstream, and says on stderr what
 /// the start found.
-async fn open(
+pub(super) async fn open(
     config: &CacheConfig,
     upstream: &Arc<dyn Backend>,
     disk: &Arc<dyn Disk>,

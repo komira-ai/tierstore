@@ -149,7 +149,7 @@ fn print_config_of_flags_that_no_file_can_say_is_a_refusal() {
 /// Asserts the refusals of a start with a file, each with status 2, nothing on stdout and a
 /// message that names what is wrong: a data path flag given with the file (all such flags named,
 /// and `--drain-lb-wait` not), `--print-config` with the file, a file that is not there, an
-/// unknown key, an inline secret, and `[local_cache]` along with `[hot_store]`.
+/// unknown key, an inline secret, and `[local_cache]` along with `[hot_store]` and nothing a cache keeps.
 #[test]
 fn a_start_with_a_file_that_must_be_refused_says_why() {
     let files = Files::new("cfg-refused");
@@ -186,7 +186,7 @@ fn a_start_with_a_file_that_must_be_refused_says_why() {
         (
             "[cold_store]\n",
             "[local_cache]\npath = \"/c\"\n\n[cold_store]\n",
-            "is refused with [hot_store]",
+            "no policy has cache = true",
         ),
     ];
     for (from, to, want) in refused {
