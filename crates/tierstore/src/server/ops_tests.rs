@@ -476,6 +476,7 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     let head = rig.call("HEAD", "big", b"").await;
     assert_eq!(head.header("etag"), tag);
     assert_eq!(rig.get("big", None).await.body, "hello world");
+    rig.copied("big").await;
     assert!(rig.hot_mem.get("big", None).await.is_ok());
     assert_eq!(rig.cold.calls(Op::UploadPart), 2);
 }
