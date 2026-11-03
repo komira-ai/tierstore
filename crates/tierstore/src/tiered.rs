@@ -414,7 +414,9 @@ impl Inner {
     }
 
     /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
-    /// the tag the hot tier gives the copy. Takes the copy out of the hot tier if that fails.
+    /// the tag the hot tier's create-only write gave the copy. If the append fails, takes the copy
+    /// out of the hot tier by `hot_tag` (`If-Match`): an object that another writer put under the
+    /// key since has another tag and is left.
     async fn journal_mirror(
         &self,
         key: &str,
@@ -423,8 +425,12 @@ impl Inner {
         hot_tag: String,
     ) -> Result<(), Error> {
         let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
-        entry.hot_tag = Some(hot_tag);
-        self.journal_entry(entry).await
+        entry.hot_tag = Some(hot_tag.clone());
+        let appended = self.append(entry).await;
+        if appended.is_err() {
+            let _ = self.hot.delete_if_match(key, &hot_tag).await;
+        }
+        appended
     }
 
     fn latch_full(&self) {

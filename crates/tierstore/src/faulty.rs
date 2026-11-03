@@ -215,6 +215,12 @@ impl Backend for FaultyBackend {
         self.inner.put(key, body).await
     }
 
+    /// A tagged put is a call of kind [`Op::Put`], so what is planned for puts applies to it.
+    async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
+        self.enter(Op::Put, key).await?;
+        self.inner.put_tagged(key, body).await
+    }
+
     fn needs_length(&self) -> bool {
         self.inner.needs_length()
     }

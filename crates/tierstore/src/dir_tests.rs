@@ -141,6 +141,24 @@ fn a_directory_is_made_and_a_name_that_cannot_be_one_is_refused() {
     assert!(blocked.to_string().contains("inside"), "{blocked}");
 }
 
+/// Asserts that a tagged put gives the tag a HEAD of the file it published gives, refuses a second
+/// put of the key and leaves the first file and its tag, and refuses a key that cannot be a file
+/// name without giving a tag.
+#[tokio::test]
+async fn a_tagged_put_gives_the_tag_of_the_file_it_published() {
+    let (_dir, backend) = backend();
+    let tag = backend.put_tagged("k", body("one")).await.unwrap();
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+    let again = backend.put_tagged("k", body("two")).await;
+    assert_eq!(again, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(backend.get("k", None).await.unwrap(), body("one"));
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+    backend.delete_if_match("k", &tag).await.unwrap();
+    assert!(backend.head("k").await.is_err());
+    let refused = backend.put_tagged("", body("v")).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+}
+
 /// Asserts that a key of 255 bytes is stored and one of 256, and the empty key, are refused with
 /// an error for every call that names the key, and that nothing is made for them.
 #[tokio::test]
