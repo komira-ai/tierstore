@@ -1,6 +1,6 @@
 # site: the tierstore.dev website
 
-Plain TypeScript compiled by `tsc`, a build program (`tools/`) that prerenders the pages, no framework, no bundler, no
+The stack is plain TypeScript compiled by `tsc`, a build program (`tools/`) that prerenders the pages, no framework, no bundler, no
 runtime dependencies. `package.json` lists two development packages, pinned exactly; Node is the exact version in
 `.node-version`.
 
@@ -62,7 +62,7 @@ distribution does the upload. A pull request never reaches it.
 
 The publish program asks the runner for the job's token, exchanges it with `aws sts assume-role-with-web-identity` for credentials
 that last an hour, uploads the assets (immutable) then the pages (short cache) then `version.txt`, sweeps what the build no
-longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 8 pages or 10 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
+longer has, and invalidates the distribution. It refuses a `dist/` with fewer than 9 pages or 11 files (`MIN_HTML_PAGES` and `MIN_FILES`; a test keeps them under the real site and above half of it), so
 an empty build can never make the sweep empty the bucket, and a file type other than `.html`, `.js` and `.css` (the sync
 gives only those a content type and a cache rule; `check-dist` already refuses others). `releases/` is never touched. Because the repository and its Actions logs are
 public, the role, the bucket (its name ends in the account id) and the distribution are masked before the first command.

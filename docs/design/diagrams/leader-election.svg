@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 700" width="960" height="700" role="img" aria-label="Lease timeline: node A creates the lease on an empty store, renews it, and releases it at drain; node B acquires it, then crashes; after the ttl node C takes it over with If-Match.">
+<title>How the leader is chosen: one lease object in the hot tier</title>
+<defs><marker id="leader-election-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="leader-election-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="700" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Leader election: whoever holds the lease object leads</text>
+<text x="20" y="48" class="t-m">Every node runs the same code. The lease object _tiering/lease in the hot tier is the only thing that decides who copies to cold. Not to scale.</text>
+<line x1="130" y1="76" x2="940" y2="76" class="ln" marker-end="url(#leader-election-ak)"/>
+<text x="130" y="70" class="t-m">time</text>
+<text x="130" y="112" class="t-m">0  empty store: the first node to create the lease (create-only) wins</text>
+<text x="20" y="144" class="b">Lease object</text>
+<text x="20" y="161" class="t-m">_tiering/lease</text>
+<rect x="130" y="124" width="60" height="44" rx="5" class="box-p"/>
+<text x="160.0" y="150" class="t-m" text-anchor="middle">empty</text>
+<rect x="190" y="124" width="330" height="44" rx="5" class="box"/>
+<text x="355.0" y="143" class="b" text-anchor="middle">held by node A</text>
+<text x="355.0" y="159" class="t-m" text-anchor="middle">tag changes at every renewal</text>
+<rect x="520" y="124" width="64" height="44" rx="5" class="box-p"/>
+<text x="552.0" y="150" class="t-m" text-anchor="middle">no leader</text>
+<rect x="584" y="124" width="130" height="44" rx="5" class="box"/>
+<text x="649.0" y="150" class="b" text-anchor="middle">held by node B</text>
+<rect x="714" y="124" width="110" height="44" rx="5" class="box-p"/>
+<text x="769.0" y="143" class="t-m" text-anchor="middle">no leader</text>
+<text x="769.0" y="159" class="t-m" text-anchor="middle">ttl runs out</text>
+<rect x="824" y="124" width="116" height="44" rx="5" class="box"/>
+<text x="882.0" y="150" class="b" text-anchor="middle">held by node C</text>
+<line x1="280" y1="168" x2="280" y2="180" class="ln"/>
+<line x1="430" y1="168" x2="430" y2="180" class="ln"/>
+<line x1="470" y1="168" x2="470" y2="180" class="ln"/>
+<line x1="630" y1="168" x2="630" y2="180" class="ln"/>
+<line x1="665" y1="168" x2="665" y2="180" class="ln"/>
+<line x1="700" y1="168" x2="700" y2="180" class="ln"/>
+<rect x="20" y="265" width="90" height="30" rx="5" class="box-b"/>
+<text x="65" y="285" class="b" text-anchor="middle">node A</text>
+<rect x="20" y="365" width="90" height="30" rx="5" class="box-b"/>
+<text x="65" y="385" class="b" text-anchor="middle">node B</text>
+<rect x="20" y="465" width="90" height="30" rx="5" class="box-b"/>
+<text x="65" y="485" class="b" text-anchor="middle">node C</text>
+<line x1="130" y1="280" x2="510" y2="280" class="ln-d"/>
+<line x1="130" y1="380" x2="720" y2="380" class="ln-d"/>
+<line x1="130" y1="480" x2="940" y2="480" class="ln-d"/>
+<line x1="200" y1="280" x2="200" y2="169" class="ln" marker-end="url(#leader-election-ak)"/>
+<text x="208" y="190" class="t-m lbl">1  acquire:</text>
+<text x="208" y="206" class="t-m lbl">create-only</text>
+<line x1="350" y1="280" x2="350" y2="169" class="ln" marker-end="url(#leader-election-ak)"/>
+<text x="358" y="190" class="t-m lbl">2  renew each pass:</text>
+<text x="358" y="206" class="t-m lbl">If-Match on its tag</text>
+<line x1="510" y1="280" x2="510" y2="169" class="ln-o" marker-end="url(#leader-election-ao)"/>
+<text x="502" y="236" class="t-m lbl" text-anchor="end">3  release: delete</text>
+<text x="502" y="252" class="t-m lbl" text-anchor="end">(If-Match on its tag)</text>
+<line x1="503" y1="273" x2="517" y2="287" class="ln-o"/>
+<line x1="517" y1="273" x2="503" y2="287" class="ln-o"/>
+<text x="140" y="302" class="t-m">leader: serves puts and gets, and copies, evicts and retires</text>
+<text x="502" y="320" class="t-m" text-anchor="end">A has stopped accepting and drained; it exits</text>
+<line x1="596" y1="380" x2="596" y2="169" class="ln-o" marker-end="url(#leader-election-ao)"/>
+<text x="604" y="190" class="t-m lbl">4  acquire within one</text>
+<text x="604" y="206" class="t-m lbl">pass: create-only</text>
+<text x="140" y="402" class="t-m">follows: serves puts and gets; copies and evicts nothing</text>
+<text x="596" y="402" class="t-m">leads: renews each pass (the ticks)</text>
+<line x1="713" y1="373" x2="727" y2="387" class="ln-o"/>
+<line x1="727" y1="373" x2="713" y2="387" class="ln-o"/>
+<text x="738" y="360" class="t-m lbl">5  B crashes:</text>
+<text x="738" y="376" class="t-m lbl">nobody renews</text>
+<line x1="834" y1="480" x2="834" y2="169" class="ln-o" marker-end="url(#leader-election-ao)"/>
+<text x="842" y="190" class="t-m lbl">6  after the ttl:</text>
+<text x="842" y="206" class="t-m lbl">If-Match on the</text>
+<text x="842" y="222" class="t-m lbl">tag it saw</text>
+<text x="140" y="502" class="t-m">follows: serves puts and gets; copies and evicts nothing</text>
+<text x="730" y="502" class="t-m">sees the tag unchanged</text>
+<rect x="30" y="540" width="900" height="70" rx="5" class="box-o"/>
+<text x="42" y="562" class="b">Puts never stop.</text>
+<text x="42" y="582" class="t-m">Every node keeps accepting puts and gets through a hand-over or a crash. While there is no leader (the gap between 3 and 4, or about 30 s after</text>
+<text x="42" y="598" class="t-m">a crash: the ttl, counted from when a taker first sees the unchanged tag, plus up to one pass) only the leader's work waits: copying, checkpoints, evicting.</text>
+<rect x="30" y="624" width="900" height="60" rx="5" class="box"/>
+<text x="42" y="646" class="b">Safety does not depend on a single leader.</text>
+<text x="42" y="664" class="t-m">Every destructive step is conditional: the copy replaces the reservation with If-Match, a hot delete names the hot tag just read, a checkpoint is If-Match.</text>
+<text x="42" y="678" class="t-m">A leader that lost the lease without noticing makes a step that fails instead of one that destroys.</text>
+</svg>
