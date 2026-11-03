@@ -4,9 +4,9 @@
 //!
 //! Catches:
 //! - a shared core that drifted: the text between the two marker lines of `AGENTS.md` is,
-//!   byte for byte, `docs/agents/shared_core.md` (the first line that differs is named, in
+//!   byte for byte, `agents_md/shared_core.md` next to this file (the first line that differs is named, in
 //!   both files);
-//! - a copy edited along with it: `docs/agents/shared_core.sha256` is
+//! - a copy edited along with it: `agents_md/shared_core.sha256` is
 //!   `<sha256 of the copy, lowercase hex>  shared_core.md` and one newline, the form
 //!   `sha256sum` writes, and the digest is the copy's;
 //! - markers that cannot delimit the core: each of the two is a line of its own, exactly
@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 const BEGIN: &str = "<!-- shared-core:begin -->";
 const END: &str = "<!-- shared-core:end -->";
 const IMPORT: &str = "@AGENTS.md";
-const COPY: &str = "docs/agents/shared_core.md";
-const HASH: &str = "docs/agents/shared_core.sha256";
+const COPY: &str = "crates/xtask/tests/agents_md/shared_core.md";
+const HASH: &str = "crates/xtask/tests/agents_md/shared_core.sha256";
 
 /// One line of a text split at `\n` only: its 1-based number, its text without the `\n`,
 /// the byte offset where it starts, and the offset just after its `\n`.
@@ -122,7 +122,7 @@ fn hash_matches(copy: &[u8], hash_file: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{HASH} is {hash_file:?}, not {want:?} (run `sha256sum shared_core.md` in docs/agents)"
+            "{HASH} is {hash_file:?}, not {want:?} (run `sha256sum shared_core.md` in crates/xtask/tests/agents_md)"
         ))
     }
 }
@@ -458,14 +458,14 @@ fn the_hash_file_is_the_copys_sha256sum_line() {
         format!("{hex}  shared_core.md\n\n"),
         format!("{hex}  shared_core.md\r\n"),
         format!("{hex} shared_core.md\n"),
-        format!("{hex}  docs/agents/shared_core.md\n"),
+        format!("{hex}  crates/xtask/tests/agents_md/shared_core.md\n"),
         format!("{hex}\n"),
         String::new(),
     ] {
         assert_eq!(
             hash_matches(copy, &bad),
             Err(format!(
-                "{HASH} is {bad:?}, not {good:?} (run `sha256sum shared_core.md` in docs/agents)"
+                "{HASH} is {bad:?}, not {good:?} (run `sha256sum shared_core.md` in crates/xtask/tests/agents_md)"
             )),
             "{bad:?}"
         );

@@ -109,6 +109,10 @@ impl Backend for Gate {
         self.inner.delete(key).await
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
     }
@@ -200,6 +204,10 @@ impl Backend for Stall {
         self.inner.delete(key).await
     }
 
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
     }
@@ -277,5 +285,90 @@ impl Backend for Interpose {
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        self.inner.list_page(prefix, start_after, max_keys).await
+    }
+}
+
+/// A backend that holds the first conditional delete (`delete_if_match`) of one key: the call says
+/// it has arrived (`entered`) and goes on when `release` is notified. Every other call goes
+/// straight through to the backend it wraps.
+pub struct HoldDelete {
+    inner: Arc<dyn Backend>,
+    key: &'static str,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    spent: AtomicBool,
+}
+
+impl HoldDelete {
+    pub fn new(
+        inner: Arc<dyn Backend>,
+        key: &'static str,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    ) -> Self {
+        Self {
+            inner,
+            key,
+            entered,
+            release,
+            spent: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for HoldDelete {
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.inner.put(key, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.inner.get(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        self.inner.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.inner.delete(key).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        if key == self.key && !self.spent.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.delete_if_match(key, etag).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.inner.list(prefix).await
+    }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        self.inner.list_page(prefix, start_after, max_keys).await
     }
 }

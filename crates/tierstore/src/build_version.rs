@@ -1,11 +1,7 @@
-//! Which version `build.rs` embeds as `TIERSTORE_BUILD_VERSION`. The build script includes this
-//! file by path, and the library compiles it only for its unit tests, so the rule the build
-//! applies is the rule the tests check.
-//!
-//! The version is the value of [`OVERRIDE`] when that variable is set, and otherwise the
-//! crate's own version. The release workflow sets it to the version it is about to publish, so
-//! the binary reports the tag it ships under; a build without it (a developer's, a test's)
-//! keeps the crate's version.
+//! The former rule for a version override of the build. `build.rs` no longer reads any override
+//! (the version is the crate's, from `Cargo.toml`), so nothing uses this module but its own
+//! unit tests; it and its `mod` line in `lib.rs` are removed in the follow-up that may edit
+//! `lib.rs`.
 
 /// The variable that replaces the crate's version.
 pub const OVERRIDE: &str = "TIERSTORE_BUILD_VERSION_OVERRIDE";

@@ -130,6 +130,7 @@ async fn a_head_gives_the_size_the_tag_of_the_bytes_and_the_time_of_last_write()
         size: 3,
         etag: tag.to_owned(),
         modified_millis: 1_255_369_830_000,
+        reservation: false,
     };
     assert_eq!(a, want);
     assert_eq!(store.head(&key("b")).await.unwrap(), a);
@@ -246,4 +247,194 @@ async fn len_is_the_size_of_a_head_and_none_for_a_missing_key() {
     assert_eq!(store.len(&key("never")).await.unwrap(), None);
     store.delete(&key("big")).await.unwrap();
     assert_eq!(store.len(&key("big")).await.unwrap(), None);
+}
+
+/// Asserts that a DELETE with `If-Match` takes the object only if it has that entity tag: a
+/// wrong tag is refused with 412 and the object still reads, the tag as a HEAD gives it
+/// (quotes included) deletes it, and the key can be written again.
+#[tokio::test]
+async fn a_delete_with_if_match_removes_only_the_object_with_that_tag() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    let tag = store.head(&k).await.unwrap().etag;
+
+    let err = store.delete_if_match(&k, "\"wrong\"").await.unwrap_err();
+    assert_eq!(service(&err).0, 412, "{err}");
+    assert_eq!(store.get_all(&k).await.unwrap(), "one");
+
+    store.delete_if_match(&k, &tag).await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+    store.put_new(&k, Bytes::from("two"), None).await.unwrap();
+    assert_eq!(store.get_all(&k).await.unwrap(), "two");
+}
+
+/// Asserts that a DELETE with `If-Match` of a key with no object is `NotFound`, and that a
+/// plain delete of such a key still succeeds.
+#[tokio::test]
+async fn a_delete_with_if_match_of_an_absent_key_is_not_found() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("absent");
+    let err = store.delete_if_match(&k, "\"any\"").await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::NotFound(_)), "{err}");
+    store.delete(&k).await.unwrap();
+}
+
+/// Asserts that a DELETE with `If-Match` is not supported on a store with Object Lock, and that
+/// no request reaches the service.
+#[tokio::test]
+async fn a_delete_with_if_match_is_unsupported_where_object_lock_is_on() {
+    let s3 = FakeS3::start().await;
+    let locked = Capabilities {
+        conditional_put: true,
+        object_lock: true,
+    };
+    let store = s3.store(locked);
+    let err = store.delete_if_match(&key("k"), "\"t\"").await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Unsupported(_)), "{err}");
+    assert_eq!(s3.requests(), Vec::<String>::new());
+}
+
+/// Asserts that a service told to ignore the condition of a DELETE (as some S3-compatible
+/// stores do) removes the object on a wrong tag and answers success, which is what a caller
+/// that needs the refusal has to detect.
+#[tokio::test]
+async fn a_service_that_ignores_the_condition_deletes_on_a_wrong_tag() {
+    let s3 = FakeS3::start().await;
+    s3.ignore_delete_condition();
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    store.delete_if_match(&k, "\"wrong\"").await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+}
+
+/// Asserts that a failure asked for a HEAD or a DELETE of an object hits the request it counts
+/// to and no other: the second HEAD from now answers 500 while the first and third are served,
+/// and the next DELETE answers 500 and leaves the object, after which one is served again.
+#[tokio::test]
+async fn a_failure_of_a_head_or_a_delete_hits_the_request_it_counts_to() {
+    use objstore_s3::s3::fake::Failure;
+
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    store.put_new(&k, Bytes::from("one"), None).await.unwrap();
+    store.head(&k).await.unwrap();
+    s3.fail(Failure::Head(2));
+    store.head(&k).await.unwrap();
+    let refused = store.head(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+
+    s3.fail(Failure::Delete(1));
+    let refused = store.delete(&k).await.unwrap_err();
+    assert_eq!(service(&refused).0, 500, "{refused}");
+    store.head(&k).await.unwrap();
+    store.delete(&k).await.unwrap();
+    let gone = store.head(&k).await;
+    assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
+}
+
+/// Asserts that the service keeps the reservation mark as S3 keeps metadata: a create-only
+/// marked write sets it, a HEAD and a whole read give it back, a second one is refused and leaves
+/// the object, a marked replace keeps it and a plain replace clears it, and a plain object never
+/// has it.
+#[tokio::test]
+async fn the_reservation_mark_is_what_the_last_write_sent() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let (k, plain) = (key("k"), key("plain"));
+    store.put_new(&plain, Bytes::new(), None).await.unwrap();
+    assert!(!store.head(&plain).await.unwrap().reservation);
+
+    let tag = store.put_new_marked(&k, Bytes::from("one")).await.unwrap();
+    let head = store.head(&k).await.unwrap();
+    assert_eq!((head.reservation, head.etag.as_str()), (true, tag.as_str()));
+    let read = store.get_all_marked(&k).await.unwrap();
+    assert_eq!(read, (Bytes::from("one"), true, Some(tag.clone())));
+
+    let again = store.put_new_marked(&k, Bytes::from("two")).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
+    assert_eq!(store.get_all(&k).await.unwrap(), "one");
+    let over = store.put_new_marked(&plain, Bytes::from("two")).await;
+    assert!(matches!(over, Err(ObjectStoreError::AlreadyExists(_))));
+    assert!(!store.head(&plain).await.unwrap().reservation);
+
+    let kept = store
+        .put_if_match_marked(&k, Bytes::from("three"), &tag)
+        .await
+        .unwrap();
+    assert_ne!(kept, tag);
+    assert!(store.head(&k).await.unwrap().reservation);
+    let stale = store
+        .put_if_match_marked(&k, Bytes::from("four"), &tag)
+        .await
+        .unwrap_err();
+    assert_eq!(service(&stale).0, 412);
+    assert_eq!(store.get_all(&k).await.unwrap(), "three");
+
+    let five = store
+        .put_if_match(&k, Bytes::from("five"), &kept)
+        .await
+        .unwrap();
+    let cleared = store.get_all_marked(&k).await.unwrap();
+    assert_eq!(cleared, (Bytes::from("five"), false, Some(five)));
+    assert!(!store.head(&k).await.unwrap().reservation);
+}
+
+/// Asserts that a tagged create against the service gives the tag a HEAD of the new object
+/// gives, leaves the object unmarked, and is refused (`AlreadyExists`) where the key has an
+/// object, which stays as it was.
+#[tokio::test]
+async fn a_tagged_create_gives_the_tag_of_the_object_it_wrote() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    let tag = store.put_new_tagged(&k, Bytes::from("one")).await.unwrap();
+    let head = store.head(&k).await.unwrap();
+    assert_eq!(
+        (head.reservation, head.etag.as_str()),
+        (false, tag.as_str())
+    );
+    let again = store.put_new_tagged(&k, Bytes::from("two")).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
+    assert_eq!(store.get_all(&k).await.unwrap(), "one");
+}
+
+/// Asserts that a create-only marked write is refused without a request where the store does
+/// not claim conditional puts, since without the header it would replace the object.
+#[tokio::test]
+async fn a_marked_create_is_refused_where_conditional_puts_are_not_claimed() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(Capabilities::default());
+    let err = store
+        .put_new_marked(&key("k"), Bytes::from("one"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Unsupported(_)), "{err}");
+    assert_eq!(s3.requests(), Vec::<String>::new());
+}
+
+/// Asserts that a marked replace of a key with no object is `NotFound`, and that a whole read
+/// of such a key is too.
+#[tokio::test]
+async fn a_marked_replace_and_a_marked_read_of_an_absent_key_are_not_found() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("absent");
+    let replace = store
+        .put_if_match_marked(&k, Bytes::from("x"), "\"t\"")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(replace, ObjectStoreError::NotFound(_)),
+        "{replace}"
+    );
+    let read = store.get_all_marked(&k).await.unwrap_err();
+    assert!(matches!(read, ObjectStoreError::NotFound(_)), "{read}");
 }

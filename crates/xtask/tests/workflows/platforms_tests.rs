@@ -328,14 +328,14 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
     (
         MAC,
         "      - name: The packaged tierstore names the commit and the version\n",
-        "      - name: The packaged tierstore names the commit and the version\n        env:\n          TIERSTORE_BUILD_VERSION_OVERRIDE: 9.9.9\n",
+        "      - name: The packaged tierstore names the commit and the version\n        env:\n          RELEASE_VERSION: 9.9.9\n",
         "macos-arm64: the step `The packaged tierstore names the commit and the version` sets its own env",
     ),
     (
         MAC,
         "      TARGET: aarch64-apple-darwin\n",
         "      TARGET: aarch64-apple-darwin\n      CARGO_BUILD_TARGET: x86_64-apple-darwin\n",
-        "macos-arm64: its env sets [\"CARGO_BUILD_TARGET\", \"TARGET\", \"TIERSTORE_BUILD_VERSION_OVERRIDE\"]",
+        "macos-arm64: its env sets [\"CARGO_BUILD_TARGET\", \"RELEASE_VERSION\", \"TARGET\"]",
     ),
     (
         MAC,
@@ -634,6 +634,59 @@ fn commands_out_of_order_are_named() {
         problems.contains(&"macos-arm64: runs its commands out of order".to_owned()),
         "{problems:?}"
     );
+}
+
+const SET_VERSION: &str = "cargo xtask release set-version --version \"$RELEASE_VERSION\"";
+const KEEP_LOCK: &str = "cp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"";
+const CHECK_LOCK: &str = "cmp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"";
+const BUILD: &str = "cargo build --locked --release --target \"$TARGET\" -p tierstore --features server --bin tierstore";
+
+#[test]
+fn a_build_job_without_its_set_version_or_lock_commands_is_named() {
+    // Catches: a build job that drops or changes the command that writes the release version
+    // into the crate, the copy of the lock file as written, or the comparison that proves the
+    // SBOM step left it alone (a plain `git diff` would then pass or always fail).
+    let text = text_of("artifacts.yml");
+    for b in BUILDS {
+        for (command, with) in [
+            (
+                SET_VERSION,
+                "cargo xtask release set-version --version 0.0.0",
+            ),
+            (SET_VERSION, "true"),
+            (KEEP_LOCK, "true"),
+            (CHECK_LOCK, "git diff --exit-code -- Cargo.lock"),
+            (CHECK_LOCK, "true"),
+        ] {
+            let problems = artifacts_problems_of(&in_job(&text, b.platform, command, with));
+            let says = format!("{}: does not run `{command}`", b.platform);
+            assert!(
+                problems.iter().any(|p| p.contains(&says)),
+                "{}: {command} -> {with}: {problems:?}",
+                b.platform
+            );
+        }
+    }
+}
+
+#[test]
+fn a_build_job_that_runs_set_version_or_the_lock_copy_after_the_build_is_named() {
+    // Catches: the release version written after the build (the binary would still say the
+    // version of the checkout), and the lock comparison made before the lock file is copied.
+    let text = text_of("artifacts.yml");
+    for b in BUILDS {
+        for (early, late) in [(SET_VERSION, BUILD), (KEEP_LOCK, CHECK_LOCK)] {
+            let swapped = in_job(&text, b.platform, early, "SWAP-PLACEHOLDER");
+            let swapped = in_job(&swapped, b.platform, late, early);
+            let swapped = in_job(&swapped, b.platform, "SWAP-PLACEHOLDER", late);
+            let problems = artifacts_problems_of(&swapped);
+            assert!(
+                problems.contains(&format!("{}: runs its commands out of order", b.platform)),
+                "{}: {early} after {late}: {problems:?}",
+                b.platform
+            );
+        }
+    }
 }
 
 #[test]

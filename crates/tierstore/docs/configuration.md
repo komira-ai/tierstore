@@ -68,7 +68,7 @@ skip_checks      = []
 Start it with the file and nothing else but the per-run flags:
 
 ```sh
-/usr/libexec/kbf/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
+/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
 ## A file for a build node
@@ -162,7 +162,7 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.budget` | `--hot-bytes` | size, required | the bytes the hot tier is meant to hold. The water marks are shares of it |
 | `hot_store.high_water` | `--high-water` | percent, 80 | above this share of the budget, eviction begins |
 | `hot_store.low_water` | `--low-water` | percent, 70 | eviction goes on down to this share |
-| `hot_store.critical` | `--critical` | percent, 95 | above this share a put waits a little first and a read of a cold object is not copied back |
+| `hot_store.critical` | `--critical` | percent, 95 | above this share a read of a cold object is not copied back (a put is not slowed; it goes to the cold tier only when the hot tier is full) |
 | `hot_store.journal_linger` | `--journal-linger` | duration, `20ms` | how long a batch of journal entries waits for more |
 | `hot_store.journal_retention` | `--journal-retention` | duration, `24h` | how long an applied journal object is kept |
 | `hot_store.copy_parallel` | `--copy-parallel` | count, 16 | the most objects the reconciler copies at once |
@@ -270,7 +270,7 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 `tierstore --print-config`, given the flags of a unit and not `--config`, prints on stdout the file that is equivalent to them and exits 0 without starting anything. It names key files by path and never prints what is in them, and the file it prints is loaded back before it is printed, so it loads. Take the flags out of `ExecStart=`:
 
 ```sh
-/usr/libexec/kbf/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
+/usr/libexec/tierstore/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
 ```
 
 Then change `ExecStart=` to the `--config` line above, keeping `--drain-lb-wait` and `--drain-deadline`. It does not convert anything else in a unit. If `--print-config` cannot write its output (a closed pipe, a full disk) it exits 1; a refusal of the flags exits 2.

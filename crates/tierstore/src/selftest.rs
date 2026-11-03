@@ -18,6 +18,12 @@
 //! need a write are skipped, with a note, and the test passes. Any other error is an answer the
 //! contract does not allow, and a violation.
 //!
+//! A question that is not a check is [`settle_conditional_delete`]: whether the store enforces
+//! `If-Match` on a DELETE, which only some S3-compatible stores do. It never fails the start. A
+//! backend that has one way to delete conditionally ([`Backend::settle_conditional_delete`]
+//! is the provided answer) is not asked; the S3 backend probes once, takes the way the store
+//! allows and says which in a note, with the name of the backend.
+//!
 //! The probe keys are under `_tiering/selftest/<run id>/`, a prefix a client never sees (the
 //! `_tiering/` prefix is reserved), and the caller gives a run id that is new for each start.
 //! The keys of a check are deleted after it, whether it passed or not (a delete that fails is
@@ -74,6 +80,7 @@ const MATCH_KEY: &str = "match";
 const RANGE_KEY: &str = "range";
 const PAGE_KEYS: [&str; 3] = ["page/a", "page/b", "page/c"];
 const MULTIPART_KEY: &str = "multipart";
+const CONDITIONAL_DELETE_KEY: &str = "conditional-delete";
 
 /// What the object of the range check holds.
 const DIGITS: &[u8] = b"0123456789";
@@ -277,6 +284,25 @@ pub async fn sweep_probes(
         started: Instant::now(),
     };
     probe.sweep(budget, clock).await
+}
+
+/// Asks `backend` once how it does [`Backend::delete_if_match`] where that depends on the store,
+/// and passes a line naming the way to `note` (`conditional delete: if-match`, or
+/// `conditional delete: head-then-delete` for a store that does not enforce `If-Match` on a
+/// DELETE, or `conditional delete: head-then-delete (could not ask: <error>)` when a request of
+/// the probe failed), with the name of the backend. A backend that has one way is not asked and gives no
+/// line. This is not a check: whatever the store answers, the test does not fail and the start
+/// goes on, since the call is best effort in either way. It is for the caller to run after
+/// [`self_test`] has passed; the probe key is under the run's prefix and is deleted again.
+pub async fn settle_conditional_delete(
+    backend: &dyn Backend,
+    options: &SelfTestOptions<'_>,
+    note: Note<'_>,
+) {
+    let key = format!("{PROBE_PREFIX}{}/{CONDITIONAL_DELETE_KEY}", options.run_id);
+    if let Some(way) = backend.settle_conditional_delete(&key).await {
+        note(format!("{}: conditional delete: {way}", options.name));
+    }
 }
 
 /// Runs the checks on `backend`. The first check that fails ends the test.

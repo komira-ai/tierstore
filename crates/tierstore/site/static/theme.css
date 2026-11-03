@@ -1,8 +1,7 @@
-/* theme.css: the shared look of the komira open-source sites (mopm.dev, kbf.dev, ucdk.dev).
-   THIS FILE IS CANONICAL AND COPIED BYTE FOR BYTE: a site never edits its copy, it adds its own rules in its own
-   stylesheet loaded after this one. Changing it changes THEME.md's recorded sha256 in the same commit (kbf's
-   `cargo xtask site check` refuses a mismatch), and the other sites then take the new file.
-   Tokens and type follow mopm.dev's site.css: warm neutrals, an orange accent, system fonts, light and dark by
+/* theme.css: the look of tierstore.dev.
+   THIS FILE IS PINNED: a page never edits it, it adds its own rules in its own
+   stylesheet loaded after this one. Changing it changes the sha256 recorded in test/theme.test.ts in the same commit.
+   Tokens and type: warm neutrals, an orange accent, system fonts, light and dark by
    prefers-color-scheme. The mark is the prompt: `> name` (a `.brand` holding a `.gt`).
    No external resources, no inline style is needed: the policy is style-src 'self'; script-src 'self'. */
 

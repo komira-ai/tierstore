@@ -1,13 +1,12 @@
 //! The proxy: a store over a hot and a cold backend.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::{StreamExt, TryStreamExt, stream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell};
 use tokio::time::Instant;
 
@@ -16,6 +15,7 @@ use crate::journal::{
     proxy_key, seq_of,
 };
 use crate::metrics::{Counters, Read, Skipped, Tier};
+use crate::reservation::RESERVATION_LEN;
 use crate::{
     Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, PartBody,
     UploadsAfter,
@@ -24,6 +24,16 @@ use crate::{
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
 /// filter of reserved keys cut short.
 const UPLOAD_LISTING_CALLS: u32 = 100;
+
+/// How many cold objects of a listing that may be reservations are asked about at once.
+const LISTING_HEADS: usize = 16;
+
+/// How many times a delete looks at the cold tier's object again after it changed under the
+/// delete.
+const DELETE_ROUNDS: u32 = 3;
+
+mod copy_back;
+mod put;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -34,12 +44,10 @@ pub struct ProxyConfig {
     /// The bytes the hot tier is meant to hold, which the usage the reconciler publishes is
     /// compared with.
     pub hot_budget: u64,
-    /// The share of the budget (0.95, say) above which a put is delayed by `back_pressure`
-    /// and a read does not copy the object it found in the cold tier into the hot tier.
+    /// The share of the budget (0.95, say) above which a read does not copy the object it
+    /// found in the cold tier into the hot tier. A put is not changed by it: it still goes to
+    /// the hot tier, at once, until the usage reaches the budget.
     pub critical: f64,
-    /// How long a put waits before it is written to the hot tier while the usage is above the
-    /// critical share.
-    pub back_pressure: Duration,
     /// The most entries one journal object holds. A batch that reaches it is written at once.
     pub batch_entries: usize,
     /// How long a batch waits for more entries before it is written.
@@ -55,7 +63,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
-    /// critical share of 0.95, a back-pressure of 20 ms, batches of at most 64 entries that
+    /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
@@ -63,7 +71,6 @@ impl ProxyConfig {
             proxy_id: proxy_id.to_owned(),
             hot_budget,
             critical: 0.95,
-            back_pressure: Duration::from_millis(20),
             batch_entries: 64,
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
@@ -129,11 +136,23 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///
 /// - **Get** reads the hot tier, else the cold tier. An object it read from the cold tier is
 ///   copied back into the hot tier, create-only (it is fine if another read got there
-///   first), unless the hot tier is above the critical mark; the copy is journaled, in the
-///   background, so that the reconciler can evict it again. A failed copy-back does not
-///   fail the read. A ranged read that misses the hot tier reads the whole object from the
-///   cold tier, since the hot tier takes the whole of it, and cuts the range from that.
-/// - **Head** reads the hot tier, else the cold tier, and copies nothing back.
+///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
+///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
+///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
+///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
+///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
+///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
+///   made for it. The hot tag is the one the create-only write itself returns
+///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
+///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
+///   other: the tiers may tag the same bytes differently.
+///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
+///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
+///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
+///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
+///   copied back.
+/// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
+///   not found.
 /// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
 ///   may have been evicted from the hot tier) or in the hot tier. The cold tier is asked
 ///   first (a HEAD); then the object is written to the hot tier, create-only; then the cold
@@ -159,13 +178,21 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   after it took some of the body, the bytes cannot be offered to the cold tier, so the put
 ///   fails with [`Error::Full`] (the tier is latched full, and the client's retry goes to the
 ///   cold tier); if it took none, the cold tier gets the whole body as for a held put.
-/// - **Delete** removes the object from the hot tier and from the cold tier, then appends a
-///   delete entry, which lets the reconciler undo a copy to the cold tier that was under way.
+/// - **Delete** removes the object from the cold tier first, by its content tag (looking again if
+///   it changed, three times at most), then from the hot tier, then appends a delete entry. A
+///   reservation in the cold tier is removed only if the hot tier holds the key; a bare one is a
+///   put that has not written its object yet, and is left (the delete finds no object, so it
+///   comes before that put).
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
-///   `_tiering/`. [`Backend::list_page`] pages through the merged listing: the last key of a
-///   page is the continuation token, and `max_keys` is kept to. A put or a delete of a key
-///   under a reserved prefix is refused with [`Error::Reserved`].
+///   `_tiering/`, and without reservations: a cold object of the size of one that the hot
+///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
+///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
+///   version of an object to know it by). A HEAD that fails fails the listing.
+///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
+///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
+///   short is made up from the next). A put or a delete of a key under a reserved prefix is
+///   refused with [`Error::Reserved`].
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -189,7 +216,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// older than [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
 /// leaves puts unrestrained: [`Proxy::usage_age`] is how a caller sees it, and the server's
 /// `/usagez` reports it). Above
-/// [`ProxyConfig::critical`] of the budget a put waits [`ProxyConfig::back_pressure`] first.
+/// [`ProxyConfig::critical`] of the budget a put is written to the hot tier as it is under it
+/// (it does not wait), and a read of a cold object is not copied back.
 /// At the budget, or when the hot tier answers a put (of the object, or of the journal object
 /// that holds its entry) with [`Error::Full`], puts go straight to the cold tier, create-only
 /// and unjournaled, and never fail for lack of room in the hot tier; reads still use both
@@ -210,53 +238,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   reconciler then counts the cold tier's object as the copy of the hot tier's, and the object
 ///   of the cold tier is the one that stays.
 /// - A get that copies an object back into the hot tier while it is deleted may put it back
-///   there, with a put entry after the delete entry.
+///   there, with a put entry after the delete entry; reads are served that copy until the
+///   reconciler's next pass, which finds the cold tier without the object and drops the mirror.
 pub struct Proxy {
     inner: Arc<Inner>,
-}
-
-/// The body of a streamed put, which more than one tier may be offered in turn: a view of it is
-/// a stream of its chunks, and the next view goes on where the last one stopped. The proxy
-/// counts the bytes that were taken (the size of the object, for the journal), and a tier that
-/// refuses the put before it took a byte is followed by the other tier, which gets the whole
-/// body.
-struct Offered<'a> {
-    /// The rest of the body; `None` once it has ended or failed.
-    rest: AsyncMutex<Option<PartBody<'a>>>,
-    taken: AtomicU64,
-}
-
-impl<'a> Offered<'a> {
-    fn new(body: PartBody<'a>) -> Self {
-        Self {
-            rest: AsyncMutex::new(Some(body)),
-            taken: AtomicU64::new(0),
-        }
-    }
-
-    /// The number of bytes of the body taken so far.
-    fn taken(&self) -> u64 {
-        self.taken.load(Ordering::SeqCst)
-    }
-
-    /// The rest of the body as a stream. It ends after the end of the body or an error of it.
-    fn view(&self) -> PartBody<'_> {
-        stream::unfold(self, |offered| async move {
-            let mut rest = offered.rest.lock().await;
-            let next = rest.as_mut()?.next().await;
-            match &next {
-                Some(Ok(chunk)) => {
-                    offered
-                        .taken
-                        .fetch_add(chunk.len() as u64, Ordering::SeqCst);
-                }
-                Some(Err(_)) | None => *rest = None,
-            }
-            drop(rest);
-            Some((next?, offered))
-        })
-        .boxed()
-    }
 }
 
 struct Inner {
@@ -339,12 +324,14 @@ impl Proxy {
 }
 
 impl Inner {
-    fn entry(&self, op: JournalOp, key: &str, size: u64) -> JournalEntry {
+    fn entry(&self, op: JournalOp, key: &str, size: u64, cold_tag: Option<String>) -> JournalEntry {
         JournalEntry {
             op,
             key: key.to_owned(),
             size,
             time: self.config.clock.now(),
+            cold_tag,
+            hot_tag: None,
         }
     }
 
@@ -400,12 +387,47 @@ impl Inner {
         outcome.await.clone()
     }
 
-    /// Journals a put of an object that the hot tier holds, and takes the object out of the
-    /// hot tier if that fails.
-    async fn journal_put(&self, key: &str, size: u64) -> Result<(), Error> {
-        let appended = self.append(self.entry(JournalOp::Put, key, size)).await;
+    /// Journals a put of an object that the hot tier holds (`op` says of what kind, and
+    /// `cold_tag` names the cold object the entry is about, if one is), and takes the object out
+    /// of the hot tier if that fails.
+    async fn journal_put(
+        &self,
+        op: JournalOp,
+        key: &str,
+        size: u64,
+        cold_tag: Option<String>,
+    ) -> Result<(), Error> {
+        self.journal_entry(self.entry(op, key, size, cold_tag))
+            .await
+    }
+
+    /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
+    /// of the hot tier if that fails.
+    async fn journal_entry(&self, entry: JournalEntry) -> Result<(), Error> {
+        let key = entry.key.clone();
+        let appended = self.append(entry).await;
         if appended.is_err() {
-            let _ = self.hot.delete(key).await;
+            let _ = self.hot.delete(&key).await;
+        }
+        appended
+    }
+
+    /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
+    /// the tag the hot tier's create-only write gave the copy. If the append fails, takes the copy
+    /// out of the hot tier by `hot_tag` (`If-Match`): an object that another writer put under the
+    /// key since has another tag and is left.
+    async fn journal_mirror(
+        &self,
+        key: &str,
+        size: u64,
+        cold_tag: String,
+        hot_tag: String,
+    ) -> Result<(), Error> {
+        let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
+        entry.hot_tag = Some(hot_tag.clone());
+        let appended = self.append(entry).await;
+        if appended.is_err() {
+            let _ = self.hot.delete_if_match(key, &hot_tag).await;
         }
         appended
     }
@@ -467,208 +489,43 @@ impl Inner {
         self.classify(hot_bytes)
     }
 
-    /// Checks that the hot tier has no object `key`: the hot tier is asked before the cold tier
-    /// is written, since a put is refused where either tier holds the key.
-    async fn check_not_in_hot(&self, key: &str) -> Result<(), Error> {
-        match self.hot.head(key).await {
-            Ok(_) => Err(Error::AlreadyExists(key.to_owned())),
-            Err(Error::NotFound(_)) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// Writes the object to the cold tier, create-only, when the hot tier is full.
-    async fn put_cold(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.check_not_in_hot(key).await?;
-        self.cold.put(key, body).await
-    }
-
-    /// Creates the object of a multipart upload in the cold tier, create-only, as `put_cold`
-    /// does. The cold tier's own completion refuses a key it holds. The object is not
-    /// journaled, as a put to the cold tier is not: it is in the cold tier, which is where the
-    /// reconciler would copy it to.
-    async fn complete_cold(
+    /// A get of the cold tier, counted as a hit, a miss or an error of it. A reservation is not an
+    /// object: the read of one is a miss. The read gives the mark and the content tag with the
+    /// bytes, all of one object; an error that is neither "not found" nor "unavailable" (a range
+    /// past the end of the 56 bytes of a reservation is one) is told from a failure by one HEAD.
+    async fn cold_get(
         &self,
         key: &str,
-        id: &str,
-        parts: &[(u32, String)],
-    ) -> Result<String, Error> {
-        refuse_reserved(key)?;
-        self.check_not_in_hot(key).await?;
-        self.cold.complete_upload(key, id, parts).await
-    }
-
-    /// Asks the cold tier again, after this call created `key` in the hot tier. The first ask
-    /// (before the create) can be stale: the reconciler copies an object to the cold tier before it
-    /// deletes it from the hot tier, so a create that wins the hot tier after that delete finds the
-    /// cold copy here. If the cold tier holds the key, the object this call created is removed from
-    /// the hot tier (best effort) and the put is [`Error::AlreadyExists`]; if the cold tier cannot
-    /// be asked, the object is removed and the put fails with that error, since it cannot be told
-    /// to be the only one.
-    async fn confirm_not_tiered(&self, key: &str) -> Result<(), Error> {
-        let refused = match self.cold.head(key).await {
-            Ok(_) => Error::AlreadyExists(key.to_owned()),
-            Err(Error::NotFound(_)) => return Ok(()),
-            Err(error) => error,
-        };
-        let _ = self.hot.delete(key).await;
-        Err(refused)
-    }
-
-    async fn put_hot(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        let size = body.len() as u64;
-        let stored = match self.hot.put(key, body.clone()).await {
-            Ok(()) => match self.confirm_not_tiered(key).await {
-                Ok(()) => self.journal_put(key, size).await,
-                refused => refused,
-            },
-            failed => failed,
-        };
-        match stored {
-            Err(Error::Full(_)) => {
-                self.latch_full();
-                self.put_cold(key, body).await
+        range: Option<ByteRange>,
+    ) -> Result<(Bytes, String), Error> {
+        match self.cold.get_marked(key, range).await {
+            Ok((_, true, _)) => {
+                self.counters.miss(Tier::Cold, Read::Get);
+                Err(Error::NotFound(key.to_owned()))
             }
-            other => other,
-        }
-    }
-
-    async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        refuse_reserved(key)?;
-        match self.cold.head(key).await {
-            Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
-            Err(Error::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-        match self.level().await {
-            Level::Full => self.put_cold(key, body).await,
-            Level::Critical => {
-                tokio::time::sleep(self.config.back_pressure).await;
-                self.put_hot(key, body).await
-            }
-            Level::Open => self.put_hot(key, body).await,
-        }
-    }
-
-    /// Writes the object to the cold tier from the body, create-only, when the hot tier is full.
-    async fn put_cold_stream(
-        &self,
-        key: &str,
-        len: Option<u64>,
-        offered: &Offered<'_>,
-    ) -> Result<(), Error> {
-        self.check_not_in_hot(key).await?;
-        self.cold.put_stream(key, len, offered.view()).await
-    }
-
-    /// Writes the object to the hot tier from the body, then journals it. The object is in the
-    /// hot tier only when the body has ended whole (the backend sees to it), and the journal
-    /// entry comes after that, so a body that fails leaves neither. A hot tier with no room is
-    /// latched full; the body goes to the cold tier instead if the hot tier took none of it,
-    /// and else the put fails with [`Error::Full`], since the bytes taken cannot be offered
-    /// again (the client's retry goes to the cold tier).
-    async fn put_hot_stream(
-        &self,
-        key: &str,
-        len: Option<u64>,
-        offered: &Offered<'_>,
-        hot_only: bool,
-    ) -> Result<(), Error> {
-        let stored = match self.hot.put_stream(key, len, offered.view()).await {
-            Ok(()) => match self.confirm_not_tiered(key).await {
-                Ok(()) => self.journal_put(key, offered.taken()).await,
-                refused => refused,
-            },
-            failed => failed,
-        };
-        match stored {
-            Err(Error::Full(_)) if hot_only => {
-                self.latch_full();
-                Err(Error::Full(key.to_owned()))
-            }
-            Err(Error::Full(_)) if offered.taken() == 0 => {
-                self.latch_full();
-                self.put_cold_stream(key, len, offered).await
-            }
-            Err(error @ Error::Full(_)) => {
-                self.latch_full();
-                Err(error)
-            }
-            other => other,
-        }
-    }
-
-    /// As `put_object`, for a body that arrives as chunks: it goes to the hot tier, or to the
-    /// cold tier where the hot tier is full, without being held.
-    async fn put_object_stream(
-        &self,
-        key: &str,
-        len: Option<u64>,
-        body: PartBody<'_>,
-        hot_only: bool,
-    ) -> Result<(), Error> {
-        refuse_reserved(key)?;
-        match self.cold.head(key).await {
-            Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
-            Err(Error::NotFound(_)) => {}
-            Err(error) => return Err(error),
-        }
-        let offered = Offered::new(body);
-        match self.level().await {
-            Level::Full if hot_only => Err(Error::Full(key.to_owned())),
-            Level::Full => self.put_cold_stream(key, len, &offered).await,
-            Level::Critical => {
-                tokio::time::sleep(self.config.back_pressure).await;
-                self.put_hot_stream(key, len, &offered, hot_only).await
-            }
-            Level::Open => self.put_hot_stream(key, len, &offered, hot_only).await,
-        }
-    }
-
-    /// Copies an object read from the cold tier into the hot tier, and journals the copy in
-    /// the background.
-    async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes) {
-        if self.level().await >= Level::Critical {
-            self.counters.skipped(Skipped::Critical);
-            return;
-        }
-        match self.hot.put(key, body.clone()).await {
-            Ok(()) => {
-                // Counted when the hot tier has the object, before the journal entry below,
-                // which can fail.
-                self.counters.promoted(body.len());
-                let inner = Arc::clone(self);
-                let key = key.to_owned();
-                let size = body.len() as u64;
-                drop(tokio::spawn(async move {
-                    let _ = inner.journal_put(&key, size).await;
-                }));
-            }
-            Err(Error::Full(_)) => {
-                self.latch_full();
-                self.counters.skipped(Skipped::Full);
-            }
-            Err(Error::AlreadyExists(_)) => self.counters.skipped(Skipped::Raced),
-            Err(_) => self.counters.skipped(Skipped::Failed),
-        }
-    }
-
-    /// A get of the cold tier, counted as a hit, a miss or an error of it.
-    async fn cold_get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        match self.cold.get(key, range).await {
-            Ok(body) => {
+            Ok((body, false, tag)) => {
                 self.counters.hit(Tier::Cold, Read::Get);
                 self.counters.bytes_read(Tier::Cold, body.len());
-                Ok(body)
+                Ok((body, tag))
             }
             Err(error @ Error::NotFound(_)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(error)
             }
-            Err(error) => {
+            Err(error @ Error::Unavailable(_)) => {
                 self.counters.error(Tier::Cold, Read::Get);
                 Err(error)
             }
+            Err(error) => match self.cold.head(key).await {
+                Ok(meta) if meta.reservation => {
+                    self.counters.miss(Tier::Cold, Read::Get);
+                    Err(Error::NotFound(key.to_owned()))
+                }
+                _ => {
+                    self.counters.error(Tier::Cold, Read::Get);
+                    Err(error)
+                }
+            },
         }
     }
 
@@ -696,12 +553,19 @@ impl Inner {
             // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
             // that part alone: a whole read per chunk of a long blob would be quadratic.
             self.counters.skipped(Skipped::Critical);
-            let body = self.cold_get(key, Some(part)).await?;
+            let (body, _) = self.cold_get(key, Some(part)).await?;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
-        let body = self.cold_get(key, None).await?;
-        self.copy_back(key, &body).await;
+        // The tag the cold tier's read gives is the tag of the very bytes read, so the copy is
+        // journaled under it whatever the key holds by then.
+        let critical = self.level().await >= Level::Critical;
+        let (body, tag) = self.cold_get(key, None).await?;
+        if critical {
+            self.counters.skipped(Skipped::Critical);
+        } else {
+            self.copy_back(key, &body, tag).await;
+        }
         let served = match range {
             Some(range) => range.slice(&body)?,
             None => body,
@@ -723,6 +587,10 @@ impl Inner {
             }
         }
         match self.cold.head(key).await {
+            Ok(meta) if meta.reservation => {
+                self.counters.miss(Tier::Cold, Read::Head);
+                Err(Error::NotFound(key.to_owned()))
+            }
             Ok(meta) => {
                 self.counters.hit(Tier::Cold, Read::Head);
                 Ok(meta)
@@ -738,17 +606,116 @@ impl Inner {
         }
     }
 
+    /// Deletes the object: the cold tier's object first, by its content tag, then the hot tier's,
+    /// then a delete entry is appended (the books forget the key). A reservation is removed only
+    /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
+    /// a put in flight, and the delete, which finds no object, is one that comes before it.
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
+        self.remove_from_cold(key).await?;
         self.hot.delete(key).await?;
-        self.cold.delete(key).await?;
-        self.append(self.entry(JournalOp::Delete, key, 0)).await
+        self.append(self.entry(JournalOp::Delete, key, 0, None))
+            .await
+    }
+
+    /// Removes the cold tier's object under `key` as `delete_object` says, looking again if the
+    /// object changes between the look and the delete, [`DELETE_ROUNDS`] looks at most.
+    async fn remove_from_cold(&self, key: &str) -> Result<(), Error> {
+        for _ in 0..DELETE_ROUNDS {
+            let found = match self.cold.head(key).await {
+                Ok(found) => found,
+                Err(Error::NotFound(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            if found.reservation && !self.hot_holds(key).await? {
+                return Ok(());
+            }
+            match self.cold.delete_if_match(key, &found.tag).await {
+                Ok(()) | Err(Error::NotFound(_)) => return Ok(()),
+                Err(Error::PreconditionFailed(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        let text = format!("the cold copy of {key} kept changing under its delete");
+        Err(Error::Unavailable(text))
+    }
+
+    /// Whether the hot tier holds an object under `key`.
+    async fn hot_holds(&self, key: &str) -> Result<bool, Error> {
+        match self.hot.head(key).await {
+            Ok(_) => Ok(true),
+            Err(Error::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The object of a cold listing if it is one: a reservation (a marked object of
+    /// [`RESERVATION_LEN`] bytes) and an object that is gone are left out. Only an object of that
+    /// size that the hot listing does not show is asked about, at every listing: a listing gives no
+    /// identity of the version (a key, a size and a time of last write do not tell a real object
+    /// from a reservation that replaced it within the same time), so no answer is kept. A key the
+    /// hot tier shows is shown whatever the cold tier holds under it.
+    async fn visible(
+        &self,
+        object: Listed,
+        in_hot: &BTreeSet<&str>,
+    ) -> Result<Option<Listed>, Error> {
+        let may_hold = object.size == RESERVATION_LEN && !in_hot.contains(object.key.as_str());
+        if !may_hold {
+            return Ok(Some(object));
+        }
+        match self.cold.head(&object.key).await {
+            Ok(meta) if meta.reservation => Ok(None),
+            Ok(_) => Ok(Some(object)),
+            Err(Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The objects of a cold listing that are objects (see `visible`), in the order given, asking
+    /// about [`LISTING_HEADS`] of them at a time.
+    async fn visible_all(
+        &self,
+        listed: Vec<Listed>,
+        in_hot: &[Listed],
+    ) -> Result<Vec<Listed>, Error> {
+        let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
+        let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
+        let checked: Vec<Option<Listed>> = checks.buffered(LISTING_HEADS).try_collect().await?;
+        Ok(checked.into_iter().flatten().collect())
+    }
+
+    /// The first `max_keys` objects of the listing of the cold tier after `start_after` that are
+    /// objects: pages of the cold tier are read until enough are left or the listing ends, so
+    /// that a page the filter cut short is made up, and a short page is the last.
+    async fn cold_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+        in_hot: &[Listed],
+    ) -> Result<Vec<Listed>, Error> {
+        let mut found: Vec<Listed> = Vec::new();
+        let mut after = start_after.map(str::to_owned);
+        loop {
+            let page = self.cold.list_page(prefix, after.as_deref(), max_keys);
+            let page = page.await?;
+            let full_page = page.len() >= max_keys;
+            after = page.last().map(|object| object.key.clone());
+            found.extend(self.visible_all(page, in_hot).await?);
+            if !full_page || found.len() >= max_keys {
+                break;
+            }
+        }
+        found.truncate(max_keys);
+        Ok(found)
     }
 
     async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
         let in_cold = self.cold.list(prefix).await?;
+        let in_cold = self.visible_all(in_cold, &in_hot).await?;
         Ok(merge(in_hot, in_cold, usize::MAX))
     }
 
@@ -759,7 +726,9 @@ impl Inner {
         max_keys: usize,
     ) -> Result<Vec<Listed>, Error> {
         let in_hot = data_page(self.hot.as_ref(), prefix, start_after, max_keys).await?;
-        let in_cold = self.cold.list_page(prefix, start_after, max_keys).await?;
+        let in_cold = self
+            .cold_page(prefix, start_after, max_keys, &in_hot)
+            .await?;
         Ok(merge(in_hot, in_cold, max_keys))
     }
 }
