@@ -202,12 +202,12 @@ async fn an_open_read_whose_answer_lacks_part_of_the_meta_is_an_error() {
             "Last-Modified",
         ),
         (
-            "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nlast-modified: Sun, 06 Nov 1994 08:49:37 GMT",
+            "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nlast-modified: Tue, 03 Nov 2026 08:49:37 GMT",
             "ab",
             "ETag",
         ),
         (
-            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\netag: \"t\"\r\nlast-modified: Sun, 06 Nov 1994 08:49:37 GMT",
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\netag: \"t\"\r\nlast-modified: Tue, 03 Nov 2026 08:49:37 GMT",
             "2\r\nab\r\n0\r\n\r\n",
             "Content-Length",
         ),

@@ -52,17 +52,15 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod dates;
 mod meta;
 mod uploads;
 
+use self::dates::{http_date, iso_date};
 use self::uploads::list_uploads;
-use super::sigv4::{Request as Signed, Signer, Utc};
-use super::times::MONTHS;
+use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store};
 use crate::{Capabilities, ObjectKey};
-
-/// The weekday names of an HTTP date, from Thursday: the day of the epoch.
-const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
 
 /// The runs bytes are cut into when kept: a run of all zeros is only counted.
 const RUN: usize = 64 << 10;
@@ -230,23 +228,6 @@ fn part_tag(kept: &Kept) -> String {
 #[must_use]
 pub fn part_etag(bytes: &[u8]) -> String {
     part_tag(&Kept::of(bytes))
-}
-
-/// `Sun, 06 Nov 1994 08:49:37 GMT`, the form of a `Last-Modified` header.
-fn http_date(seconds: u64) -> String {
-    let utc = Utc::of(UNIX_EPOCH + Duration::from_secs(seconds), false);
-    let weekday = WEEKDAYS[((seconds / 86_400) % 7) as usize];
-    let month = MONTHS[utc.month as usize - 1];
-    format!(
-        "{weekday}, {:02} {month} {:04} {:02}:{:02}:{:02} GMT",
-        utc.day, utc.year, utc.hour, utc.minute, utc.second
-    )
-}
-
-/// `2009-10-12T17:50:30.000Z`, the form of a `<LastModified>` of a listing.
-fn iso_date(seconds: u64) -> String {
-    let utc = Utc::of(UNIX_EPOCH + Duration::from_secs(seconds), false);
-    utc.iso8601().replace('Z', ".000Z")
 }
 
 /// One multipart upload in progress.

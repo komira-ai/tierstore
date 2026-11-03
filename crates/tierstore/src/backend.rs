@@ -74,18 +74,28 @@ impl ByteRange {
         self.len
     }
 
-    /// The bytes of `body` this range covers.
+    /// Whether the range starts within an object of `size` bytes (at its end is within, and gives
+    /// no bytes).
     ///
     /// # Errors
-    /// [`Error::Other`] if `offset` is beyond the end of `body`.
-    pub fn slice(self, body: &Bytes) -> Result<Bytes, Error> {
-        let size = body.len() as u64;
+    /// [`Error::Other`] if `offset` is beyond the end of the object.
+    pub(crate) fn within(self, size: u64) -> Result<(), Error> {
         if self.offset > size {
             return Err(Error::Other(format!(
                 "range starting at {} is past the end of the {size}-byte object",
                 self.offset
             )));
         }
+        Ok(())
+    }
+
+    /// The bytes of `body` this range covers.
+    ///
+    /// # Errors
+    /// [`Error::Other`] if `offset` is beyond the end of `body`.
+    pub fn slice(self, body: &Bytes) -> Result<Bytes, Error> {
+        let size = body.len() as u64;
+        self.within(size)?;
         let end = size.min(self.offset.saturating_add(self.len));
         // Both bounds are at most `size`, which came from a `usize`.
         Ok(body.slice(self.offset as usize..end as usize))

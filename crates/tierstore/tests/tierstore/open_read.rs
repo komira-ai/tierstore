@@ -469,3 +469,73 @@ async fn a_large_hot_object_arrives_as_bounded_chunks() {
     assert!(chunks >= 3, "{chunks}");
     assert_eq!(got, large[100..200_000]);
 }
+
+/// The line of a metric of the proxy, as `Proxy::metrics` renders it, with its value.
+fn metric(proxy: &Proxy, line: &str) -> String {
+    let rendered = proxy.metrics();
+    let found = rendered.lines().find(|l| l.starts_with(line));
+    found.unwrap_or("").to_owned()
+}
+
+/// Asserts that a streamed read of a range of no bytes, or of one that starts at or past the end,
+/// of an object that only the cold tier holds is answered from the size the open read gives: an
+/// empty body, or an error if the range starts past the end, with a cold tier that refuses every
+/// read but the open read (nothing is collected), below the critical mark and at it.
+#[tokio::test(start_paused = true)]
+async fn an_empty_streamed_range_of_a_cold_object_collects_nothing() {
+    for usage in [0, 960] {
+        let rig = Rig::new();
+        let mem = Arc::new(MemoryBackend::with_clock(rig.clock.clone()));
+        mem.put("k", body(TEN)).await.unwrap();
+        let cold = Counted::new(&mem, false);
+        let proxy = Proxy::open(rig.hot.clone(), cold.clone(), rig.config("p1", 1000))
+            .await
+            .unwrap();
+        set_usage(&rig, usage, 0).await;
+        let cases = [
+            (4, 0, true),
+            (10, 0, true),
+            (11, 0, false),
+            (10, 5, true),
+            (12, 5, false),
+        ];
+        for (offset, len, within) in cases {
+            let read = proxy
+                .get_stream("k", Some(ByteRange::new(offset, len)))
+                .await;
+            let case = format!("{usage} {offset}+{len}");
+            assert_eq!(read.is_ok(), within, "{case}");
+            if let Ok(mut read) = read {
+                assert!(read.next().await.is_none(), "{case}");
+            }
+        }
+        assert_eq!((cold.opens(), cold.others()), (cases.len(), 0), "{usage}");
+        assert_absent(&*rig.hot_mem, "k").await;
+    }
+}
+
+/// Asserts that a cold body that fails under a ranged streamed read made with the hot tier at its
+/// critical mark (the cold tier's own stream of the range, which copies nothing) counts a cold
+/// error, as a body that fails under a whole read does.
+#[tokio::test(start_paused = true)]
+async fn a_critical_ranged_cold_stream_that_fails_counts_a_cold_error() {
+    let rig = Rig::new();
+    let mem = Arc::new(MemoryBackend::with_clock(rig.clock.clone()));
+    mem.put("k", body(TEN)).await.unwrap();
+    let cold = Counted::new(&mem, true);
+    let proxy = Proxy::open(rig.hot.clone(), cold.clone(), rig.config("p1", 1000))
+        .await
+        .unwrap();
+    set_usage(&rig, 960, 0).await;
+
+    let mut stream = proxy
+        .get_stream("k", Some(ByteRange::new(0, 10)))
+        .await
+        .unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap(), body("01"));
+    assert_eq!(stream.next().await.unwrap().unwrap(), body("23"));
+    let failed = stream.next().await.unwrap().unwrap_err();
+    assert!(failed.is_unavailable(), "{failed}");
+    let errors = "tierstore_read_errors_total{tier=\"cold\",op=\"get\"}";
+    assert_eq!(metric(&proxy, errors), format!("{errors} 1"));
+}

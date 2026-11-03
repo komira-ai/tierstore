@@ -824,21 +824,24 @@ impl Backend for Proxy {
     }
 
     /// A streamed read: the hot tier's own stream on a hit, and not the object collected as
-    /// [`Backend::get`] gives it. A range of no bytes, or one that starts at or past the end,
-    /// is answered as `get` answers it.
+    /// [`Backend::get`] gives it. A range of no bytes, or one that starts at or past the end, is
+    /// answered as `get` answers it (an empty body, or an error if it starts past the end), from
+    /// the size the open read gave and with no read of the object collected.
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
-        let span = match range {
-            None => None,
-            Some(range) if range.size() == 0 => return self.inner.held_stream(key, range).await,
-            Some(range) => Some(Span::From {
-                first: range.offset(),
-                last: Some(range.offset().saturating_add(range.size() - 1)),
-            }),
-        };
+        // A range of no bytes is opened as one of the byte at its start: no body of it is read.
+        let span = range.map(|range| Span::From {
+            first: range.offset(),
+            last: Some(
+                range
+                    .offset()
+                    .saturating_add(range.size().saturating_sub(1)),
+            ),
+        });
         let opened = self.inner.open_object(key, span).await?;
         match range {
-            Some(range) if opened.window == Window::Unsatisfiable => {
-                self.inner.held_stream(key, range).await
+            Some(range) if range.size() == 0 || opened.window == Window::Unsatisfiable => {
+                range.within(opened.meta.size)?;
+                Ok(futures::stream::empty().boxed())
             }
             _ => Ok(opened.body),
         }

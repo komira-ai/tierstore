@@ -8,7 +8,7 @@ use futures::StreamExt;
 use super::relay::{Tee, relay};
 use super::{Inner, Level};
 use crate::metrics::{Read, Skipped, Tier};
-use crate::{ByteRange, Error, Opened, ReadBody, Span, Window};
+use crate::{Error, Opened, Span, Window};
 
 impl Inner {
     /// Opens the read of `span` of the object `key` (all of it without one).
@@ -53,12 +53,21 @@ impl Inner {
         if critical && span.is_some() {
             // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
             // that part alone: a whole read per chunk of a long blob would be quadratic.
-            let opened = self.cold_open(key, span).await?;
-            let served = opened.served() as usize;
+            let Opened { meta, window, body } = self.cold_open(key, span).await?;
+            let served = window.bytes(meta.size) as usize;
             self.counters.hit(Tier::Cold, Read::Get);
             self.counters.bytes_read(Tier::Cold, served);
             self.counters.served(Tier::Cold, served);
-            return Ok(opened);
+            // A body that fails is counted, as the relayed body of a whole read is.
+            let inner = Arc::clone(self);
+            let body = body
+                .inspect(move |piece| {
+                    if piece.is_err() {
+                        inner.counters.error(Tier::Cold, Read::Get);
+                    }
+                })
+                .boxed();
+            return Ok(Opened { meta, window, body });
         }
         let Opened { meta, body, .. } = self.cold_open(key, None).await?;
         let window = Window::of(span, meta.size);
@@ -71,17 +80,6 @@ impl Inner {
         let tee = (!critical).then(|| Tee::new(self, key, meta.size, meta.tag.clone()));
         let body = relay(self, body, window, tee);
         Ok(Opened { meta, window, body })
-    }
-
-    /// The bytes of `range` as [`Backend::get`](crate::Backend::get) gives them, as a body of one
-    /// chunk: what a range of no bytes, or one that starts at or past the end, is answered with.
-    pub(super) async fn held_stream(
-        self: &Arc<Self>,
-        key: &str,
-        range: ByteRange,
-    ) -> Result<ReadBody, Error> {
-        let held = self.get_object(key, Some(range)).await?;
-        Ok(futures::stream::once(std::future::ready(Ok(held))).boxed())
     }
 
     /// The cold tier's open read of `span`, with the counting of a miss or an error that an

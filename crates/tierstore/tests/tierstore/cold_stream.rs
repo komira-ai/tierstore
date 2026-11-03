@@ -539,3 +539,96 @@ async fn a_streamed_range_of_a_cold_object_is_one_cold_read() {
     assert_eq!(run.cold.opens.load(Ordering::SeqCst), 1);
     assert_eq!(run.cold.others.load(Ordering::SeqCst), 0);
 }
+
+/// The line of a metric of the proxy, as `Proxy::metrics` renders it, with its value.
+fn metric(proxy: &Proxy, line: &str) -> String {
+    let rendered = proxy.metrics();
+    let found = rendered.lines().find(|l| l.starts_with(line));
+    found.unwrap_or("").to_owned()
+}
+
+/// Asserts that a cold body that has the bytes the meta says in a chunk, and then more bytes or a
+/// failure, is never made an object in the hot tier, whether the client reads the whole body or
+/// has every byte of its range already: the write is not ended by the chunk that makes up the
+/// size, but by the clean end of the body. Each is checked by what the hot write ends with and by
+/// the hot tier holding nothing.
+#[tokio::test(start_paused = true)]
+async fn a_cold_body_that_goes_on_after_the_size_or_fails_there_is_not_copied() {
+    let first_five = Some(Span::From {
+        first: 0,
+        last: Some(4),
+    });
+    for (cut, span) in [
+        (None, None),
+        (None, first_five),
+        (Some(1), None),
+        (Some(1), first_five),
+    ] {
+        let object = patterned(20);
+        let mut run = start(&[("k", object.clone())], 10, |cold, _| {
+            cold.claims = Some(10);
+            cold.cut_after = cut;
+        })
+        .await;
+        let opened = run.proxy.open_read("k", span).await.unwrap();
+        let (got, _) = drained(opened.body).await;
+        let want = if span.is_some() { 5 } else { 10 };
+        assert_eq!(got[..want], object[..want], "{cut:?} {span:?}");
+        let ended = run.ended.recv().await.unwrap();
+        assert!(
+            matches!(ended, Err(Error::Other(_))),
+            "{cut:?} {span:?}: {ended:?}"
+        );
+        assert_absent(&*run.hot.mem, "k").await;
+    }
+}
+
+/// Asserts that the chunk that brings a cold body to the size its meta gave is not given to the
+/// hot write before the body has ended: with the cold body held back at its end, the hot write
+/// has taken nothing though the client has every byte, and once the end is let through the write
+/// takes the chunk and ends the object whole.
+#[tokio::test(start_paused = true)]
+async fn the_last_chunk_is_given_to_the_hot_write_only_at_the_end_of_the_cold_body() {
+    let object = patterned(10);
+    let release = Arc::new(Notify::new());
+    let mut run = start(&[("k", object.clone())], 10, |cold, _| {
+        cold.gate = Some((1, release.clone()));
+    })
+    .await;
+    let opened = run.proxy.open_read("k", None).await.unwrap();
+    let mut client = opened.body;
+    assert_eq!(client.next().await.unwrap().unwrap(), object);
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(run.taken.try_recv().is_err());
+    assert!(run.ended.try_recv().is_err());
+    release.notify_one();
+    assert!(client.next().await.is_none());
+    assert!(run.ended.recv().await.unwrap().is_ok());
+    assert!(run.taken.try_recv().is_ok());
+    assert_eq!(run.hot.mem.get("k", None).await.unwrap(), object);
+}
+
+/// Asserts that a cold body that fails after the client has been given every byte of its range,
+/// which the copy alone reads on, counts a cold error, and that the same body failing under the
+/// client counts one.
+#[tokio::test(start_paused = true)]
+async fn a_cold_body_that_fails_after_the_range_counts_a_cold_error() {
+    let errors = "tierstore_read_errors_total{tier=\"cold\",op=\"get\"}";
+    let first_five = Some(Span::From {
+        first: 0,
+        last: Some(4),
+    });
+    for (span, drained_by_client) in [(first_five, false), (None, true)] {
+        let mut run = start(&[("k", patterned(30))], 10, |cold, _| {
+            cold.cut_after = Some(2);
+        })
+        .await;
+        let opened = run.proxy.open_read("k", span).await.unwrap();
+        let (_, error) = drained(opened.body).await;
+        assert_eq!(error.is_some(), drained_by_client);
+        assert!(run.ended.recv().await.unwrap().is_err());
+        assert_eq!(metric(&run.proxy, errors), format!("{errors} 1"));
+    }
+}

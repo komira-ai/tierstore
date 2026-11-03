@@ -130,7 +130,7 @@ async fn whole(body: objstore_s3::s3::ObjectBody) -> Vec<u8> {
 /// `Last-Modified`), absent on the next (no time).
 #[tokio::test]
 async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answer() {
-    let stamp = "last-modified: Sun, 06 Nov 1994 08:49:37 GMT";
+    let stamp = "last-modified: Tue, 03 Nov 2026 08:49:37 GMT";
     let marked = answer("200 OK", &[MARK, "etag: \"one\"", stamp], "abcdefg");
     let plain = answer("200 OK", &[], "xyz");
     let (endpoint, seen) = script(vec![marked, plain]).await;
@@ -139,7 +139,7 @@ async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answ
     assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"one\""));
     assert_eq!(read.size, Some(7));
-    assert_eq!(read.modified_millis, Some(784_111_777_000));
+    assert_eq!(read.modified_millis, Some(1_793_695_777_000));
     assert_eq!(whole(read.body).await, b"abcdefg");
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(!read.reservation);

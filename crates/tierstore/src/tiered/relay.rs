@@ -8,7 +8,9 @@
 //! is dropped, the write fails and leaves nothing, and the client's body goes on. A body that is
 //! dropped before the last byte of the object was given (a client that went away), that fails, or
 //! that has more or fewer bytes than the cold tier's meta said, is abandoned in the same way, so
-//! that no partial object is ever written under the key. A read of a range is the same read of the
+//! that no partial object is ever written under the key. The chunk that brings the bytes given to
+//! the size of the meta is queued only when the body has ended cleanly there, so the object is
+//! made whole by the end of the body and not by its size being reached. A read of a range is the same read of the
 //! whole object: once the client has the last byte of its range, the rest of the object is read
 //! for the copy alone, in a task of its own.
 
@@ -60,6 +62,10 @@ pub(super) struct Tee {
     tag: String,
     /// The bytes given so far.
     seen: u64,
+    /// The chunk that brought `seen` to `size`: it is queued only once the body has ended cleanly
+    /// (see [`Tee::finish`]), so that the write cannot end the object before the end of the body
+    /// is known to be where the meta said.
+    held: Option<Bytes>,
     feed: Feed,
     outcome: Arc<AtomicU8>,
 }
@@ -72,6 +78,7 @@ impl Tee {
             size,
             tag,
             seen: 0,
+            held: None,
             feed: Feed::Idle,
             outcome: Arc::new(AtomicU8::new(OPEN)),
         }
@@ -106,40 +113,47 @@ impl Tee {
         Live { chunks, queued }
     }
 
-    /// Queues a chunk the client is given.
+    /// Queues a chunk the client is given. The chunk that makes up the size of the object is held
+    /// back until the body ends; a chunk that goes past the size abandons the write.
     fn offer(&mut self, chunk: &Bytes) {
         let len = chunk.len() as u64;
         self.seen += len;
         let (size, seen) = (self.size, self.seen);
         let Some(live) = self.live() else { return };
-        let waiting = live.queued.fetch_add(len, Ordering::SeqCst) + len;
-        let queued =
-            waiting <= BACKLOG_BYTES && seen <= size && live.chunks.send(chunk.clone()).is_ok();
-        match (queued, seen == size) {
-            (false, _) => self.abandon(),
-            (true, true) => self.complete(),
-            (true, false) => {}
+        if seen > size {
+            self.abandon();
+        } else if seen == size {
+            self.held = Some(chunk.clone());
+        } else {
+            let waiting = live.queued.fetch_add(len, Ordering::SeqCst) + len;
+            if waiting > BACKLOG_BYTES || live.chunks.send(chunk.clone()).is_err() {
+                self.abandon();
+            }
         }
     }
 
-    /// Whether the object has bytes the copy has not been given.
-    fn pending(&self) -> bool {
-        self.seen < self.size
-    }
-
-    /// The cold body ended: the write is whole if the body gave the bytes the meta said.
+    /// The cold body ended cleanly: the write is whole if the body gave the bytes the meta said,
+    /// and abandoned if it gave fewer.
     fn finish(&mut self) {
-        if self.seen == self.size {
-            self.complete();
+        if self.seen != self.size {
+            self.abandon();
+            return;
         }
-    }
-
-    /// Ends the object: the write has every byte.
-    fn complete(&mut self) {
-        if self.live().is_some() {
+        let held = self.held.take();
+        if let Some(live) = self.live() {
+            if let Some(chunk) = held {
+                live.queued.fetch_add(chunk.len() as u64, Ordering::SeqCst);
+                let _ = live.chunks.send(chunk);
+            }
             self.outcome.store(WHOLE, Ordering::SeqCst);
             self.feed = Feed::Done;
         }
+    }
+
+    /// The cold body failed: the write is abandoned, and a cold error is counted.
+    fn failed(&mut self) {
+        self.inner.counters.error(Tier::Cold, Read::Get);
+        self.abandon();
     }
 
     /// Fails the write, which leaves nothing, unless it was ended whole.
@@ -147,6 +161,7 @@ impl Tee {
         let _ = self
             .outcome
             .compare_exchange(OPEN, ABANDONED, Ordering::SeqCst, Ordering::SeqCst);
+        self.held = None;
         self.feed = Feed::Done;
     }
 }
@@ -190,12 +205,16 @@ fn queue(
 }
 
 /// Reads the rest of a cold body for the copy alone, once the client has been given what it asked
-/// for. A body that fails, or ends short, leaves the copy abandoned (see [`Tee::finish`]).
+/// for, up to the end of the body: only a body that ends cleanly, at the size the meta said, makes
+/// the copy whole. A body that fails counts a cold error and leaves the copy abandoned.
 async fn copy_rest(mut body: ReadBody, mut tee: Tee) {
-    while let Some(Ok(chunk)) = body.next().await {
-        tee.offer(&chunk);
+    loop {
+        match body.next().await {
+            Some(Ok(chunk)) => tee.offer(&chunk),
+            Some(Err(_)) => return tee.failed(),
+            None => return tee.finish(),
+        }
     }
-    tee.finish();
 }
 
 /// The cold body being given to the client.
@@ -225,9 +244,9 @@ impl Relay {
                     if low < high {
                         let part = chunk.slice((low - start) as usize..(high - start) as usize);
                         // The client has every byte it asked for, and may stop reading here: the
-                        // rest of the cold read goes on for the copy alone.
+                        // rest of the cold read, up to its end, goes on for the copy alone.
                         if end >= self.to
-                            && let Some(tee) = self.tee.take_if(|tee| tee.pending())
+                            && let Some(tee) = self.tee.take()
                         {
                             let rest = std::mem::replace(&mut self.body, stream::empty().boxed());
                             drop(tokio::spawn(copy_rest(rest, tee)));
@@ -238,6 +257,9 @@ impl Relay {
                 }
                 Some(Err(error)) => {
                     self.inner.counters.error(Tier::Cold, Read::Get);
+                    if let Some(tee) = &mut self.tee {
+                        tee.abandon();
+                    }
                     self.ended = true;
                     return Some((Err(error), self));
                 }
