@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::*;
 use crate::testdir::TestDir;
@@ -138,10 +138,10 @@ fn one_binary_packages_to_the_same_bytes_whenever_and_wherever_it_is_built() {
     // both, and must give byte-identical tarballs and identical SHA256SUMS lines.
     let mut sums = Vec::new();
     let mut tgzs = Vec::new();
-    for (n, age) in [("early", 86_400 * 365), ("late", 5)] {
+    for (n, at) in [("early", 1_800_000_000), ("late", 1_900_000_000)] {
         let dir = scratch(&format!("same-bytes-{n}"));
         let (binary, sbom) = inputs(&dir);
-        let when = SystemTime::now() - Duration::from_secs(age);
+        let when = UNIX_EPOCH + Duration::from_secs(at);
         std::fs::File::options()
             .write(true)
             .open(&binary)
