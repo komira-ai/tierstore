@@ -43,6 +43,7 @@ pub struct Churn {
     after_read: Mutex<Option<Change>>,
     before_read: Mutex<Option<Change>>,
     before_marked_read: Mutex<Option<Change>>,
+    after_plain_read: Mutex<Option<Change>>,
     /// The only key whose conditional calls apply the changes, if one was named.
     only: Option<String>,
 }
@@ -56,6 +57,7 @@ impl Churn {
             after_read: Mutex::new(None),
             before_read: Mutex::new(None),
             before_marked_read: Mutex::new(None),
+            after_plain_read: Mutex::new(None),
             only: None,
         }
     }
@@ -64,6 +66,14 @@ impl Churn {
     pub fn before_a_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
         let churn = Self::new(mem, Vec::new());
         *churn.before_read.lock().unwrap() = Some(change);
+        churn
+    }
+
+    /// A backend whose first plain read (`get`) is followed by `change`: the read gives the
+    /// bytes that were there, and a look after it finds what a racing writer left.
+    pub fn after_a_plain_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
+        let churn = Self::new(mem, Vec::new());
+        *churn.after_plain_read.lock().unwrap() = Some(change);
         churn
     }
 
@@ -167,7 +177,14 @@ impl Backend for Churn {
                 self.apply(key, change).await;
             }
         }
-        self.mem.get(key, range).await
+        let read = self.mem.get(key, range).await;
+        if self.only.as_deref().is_none_or(|only| only == key) {
+            let change = self.after_plain_read.lock().unwrap().take();
+            if let Some(change) = change {
+                self.apply(key, change).await;
+            }
+        }
+        read
     }
 
     async fn get_marked(

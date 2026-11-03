@@ -240,6 +240,28 @@ async fn a_takeover_keeps_a_hot_object_whose_cold_object_became_an_equal_reserva
     assert_absent(&*rig.hot_mem, "k3").await;
 }
 
+/// Asserts that a takeover keeps a hot object whose cold object is removed after the comparison
+/// read has passed and before the look after it: the look finds nothing, so the hot object (the
+/// only copy now) survives and the objects after it are evicted.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_whose_cold_object_vanished_after_the_comparison() {
+    let rig = five_objects().await;
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    let cold = Churn::after_a_plain_read(rig.cold_mem.clone(), Change::Remove).on_key("k1");
+    let config = rig.reconciler_config("r2", 100);
+    let mut second = Reconciler::new(rig.hot.clone(), Arc::new(cold), config);
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_absent(&*rig.cold_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
+}
+
 /// Asserts that a takeover whose second look at the cold object (after the comparison) fails
 /// reports that error and keeps the hot object, which it has no proof the cold tier still holds.
 #[tokio::test(start_paused = true)]
