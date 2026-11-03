@@ -98,11 +98,12 @@ fn a_start_refuses_values_under_which_a_departed_owner_could_be_taken_for_alive(
     for (flags, text) in cases {
         assert_eq!(refused(flags).as_deref(), Some(text), "{flags:?}");
     }
-    let boundaries: [&[&str]; 4] = [
+    let boundaries: [&[&str]; 5] = [
         &[],
         &["--departure=60s", "--heartbeat=10s"],
         &["--deadline-margin=15s"],
         &["--registration-retention=60s"],
+        &["--registration-retention=0s"],
     ];
     let rules = [
         "must be longer than zero",

@@ -174,3 +174,23 @@ async fn a_process_that_opens_over_a_beating_registration_and_never_beats_is_not
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(report.copied, 1);
 }
+
+/// Asserts that a registration retention of zero removes no registration, however long it has
+/// been unchanged (the switch to set before going back to a release whose proxies never rewrite
+/// a registration), and that the leader asks the store about none of them.
+#[tokio::test]
+async fn a_retention_of_zero_removes_no_registration() {
+    let rig = Rig::new();
+    let mono = Arc::new(Mono::new());
+    put(&rig, GONE, beating(3)).await;
+    let mut config = rig.reconciler_config("r1", 1 << 20);
+    config.mono = mono.clone();
+    config.registration_retention = Duration::ZERO;
+    let mut leader = rig.reconciler_with(config);
+
+    assert_eq!(leader.pass().await.failed, Vec::<Error>::new());
+    mono.advance(Duration::from_secs(100_000));
+    assert_eq!(leader.pass().await.failed, Vec::<Error>::new());
+    assert!(there(&rig, GONE).await);
+    assert_eq!(rig.hot.calls_on(Op::Get, GONE), 0);
+}

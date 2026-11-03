@@ -42,7 +42,8 @@ pub struct HeartbeatFlags {
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
     /// reconciler sees it, before the reconciler removes it, if the proxy left no journal object.
-    /// At least `--departure`.
+    /// At least `--departure`, or zero, which removes no registration: set it before going back
+    /// to a release without the heartbeat, whose proxies never rewrite a registration.
     #[arg(long, default_value = "10m", value_parser = parse_duration)]
     pub registration_retention: Duration,
 }
@@ -97,7 +98,7 @@ impl HeartbeatFlags {
                  ({departure:?})"
             ));
         }
-        if retention < departure {
+        if !retention.is_zero() && retention < departure {
             return Err(format!(
                 "--registration-retention ({retention:?}) must be at least --departure \
                  ({departure:?})"

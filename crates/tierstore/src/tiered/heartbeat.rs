@@ -212,7 +212,7 @@ impl Proxy {
             }
         };
         // Nothing is ever sent on it: this returns when the task has dropped its end.
-        while ended.changed().await.is_ok() {}
+        let _ = ended.changed().await;
     }
 
     /// Whether the proxy may still destroy and acknowledge: the time on its own monotonic clock

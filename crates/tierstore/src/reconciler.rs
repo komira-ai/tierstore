@@ -52,7 +52,8 @@ pub struct ReconcilerConfig {
     /// How long a registration of a proxy that heartbeats must have gone unchanged before the
     /// reconciler removes it, if the proxy left no journal object. It is at least the departure
     /// time of the proxies (see `ProxyConfig::departure`), so a registration does not go while
-    /// the proxy's `live_until` may still be ahead.
+    /// the proxy's `live_until` may still be ahead. Zero removes none: a proxy of a release
+    /// without the heartbeat that reopens such a registration never rewrites it.
     pub registration_retention: Duration,
 }
 
@@ -419,11 +420,15 @@ impl Reconciler {
     }
 
     /// Removes the registrations of proxies that heartbeat and have left: unchanged for
-    /// [`ReconcilerConfig::registration_retention`] by the monotonic clock, with no journal object.
+    /// [`ReconcilerConfig::registration_retention`] by the monotonic clock, with no journal object;
+    /// none if that is zero.
     /// Each is asked about once in that time, not at every pass.
     async fn remove_departed_registrations(&mut self, report: &mut PassReport) {
         let now = self.config.mono.now();
         let wait = self.config.registration_retention;
+        if wait.is_zero() {
+            return;
+        }
         for id in self.books.registrations.due(now, wait) {
             let version = self.books.registrations.ask(&id, now).unwrap_or_default();
             if let Err(error) = remove_if_departed(self.hot.as_ref(), &id, version).await {
