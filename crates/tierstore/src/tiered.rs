@@ -398,9 +398,16 @@ impl Inner {
         size: u64,
         cold_tag: Option<String>,
     ) -> Result<(), Error> {
-        let appended = self.append(self.entry(op, key, size, cold_tag)).await;
+        self.journal_entry(self.entry(op, key, size, cold_tag)).await
+    }
+
+    /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
+    /// of the hot tier if that fails.
+    async fn journal_entry(&self, entry: JournalEntry) -> Result<(), Error> {
+        let key = entry.key.clone();
+        let appended = self.append(entry).await;
         if appended.is_err() {
-            let _ = self.hot.delete(key).await;
+            let _ = self.hot.delete(&key).await;
         }
         appended
     }
@@ -416,11 +423,7 @@ impl Inner {
     ) -> Result<(), Error> {
         let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
         entry.hot_tag = Some(hot_tag);
-        let appended = self.append(entry).await;
-        if appended.is_err() {
-            let _ = self.hot.delete(key).await;
-        }
-        appended
+        self.journal_entry(entry).await
     }
 
     fn latch_full(&self) {
