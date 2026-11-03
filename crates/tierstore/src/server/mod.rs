@@ -825,9 +825,10 @@ impl Server {
             if error.is_timeout() {
                 self.log_stalled(&parts, &id, error.message());
             }
-            if let Some(detail) = error.detail() {
-                self.log_failed(&parts, &id, detail);
-            }
+            let detail = error.detail();
+            detail
+                .into_iter()
+                .for_each(|why| self.log_failed(&parts, &id, why));
             error.into_answer(path, &id)
         });
         let name = HeaderName::from_static("x-amz-request-id");
