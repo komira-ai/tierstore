@@ -107,7 +107,7 @@ impl Reading {
                 Err(why) => {
                     self.done = true;
                     let why = format!("{}: {why}", self.read.key);
-                    eprintln!("tierstore: oci: {why}");
+                    tracing::warn!("tierstore: oci: {why}");
                     return Some((Err(why.into()), self));
                 }
             }
@@ -136,7 +136,7 @@ impl Reading {
         self.read.metrics.mismatch();
         let key = &self.read.key;
         let why = format!("{key} does not hold the bytes of its digest (they hash to {found})");
-        eprintln!("tierstore: oci: {why}");
+        tracing::warn!("tierstore: oci: {why}");
         Err(why.into())
     }
 }

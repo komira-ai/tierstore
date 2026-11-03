@@ -2,8 +2,8 @@
 //! it is released at all. `release.yml` runs one of them first and feeds its outputs
 //! (`release`, `tag`, `commit`, `note`, or `release=false` and a `reason`) to the jobs that
 //! check and publish. `release version` ([`version`]) prints the version part of the same
-//! computation (`X.Y.Z`), which `artifacts.yml` gives the build before it builds, so the binary
-//! reports the tag it is released under.
+//! computation (`X.Y.Z`), which `artifacts.yml` writes into the crate (`release set-version`)
+//! before it builds, so the binary reports the tag it is released under.
 //!
 //! - `release plan --repo <owner/repo> --commit <sha> [--version-file <path>] [--freeze <value>]
 //!   [--output <file>] [--gh <program>]` ([`plan`]): no release when `--freeze`

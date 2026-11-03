@@ -20,6 +20,7 @@
 
 use super::tests::{config, r};
 use super::*;
+use futures::StreamExt;
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -496,6 +497,48 @@ fn an_error_body_that_stops_fails_as_a_timeout() {
         assert!(is_stall(&err), "{err:?}");
         assert!(err.to_string().contains("timed out"), "{err}");
         assert_eq!(taken(), Taken { heads: 1, body: 0 });
+        assert_eq!(store.requests(), 1);
+    });
+}
+
+/// Reads `len` bytes from offset 0 as a streamed read, on a task of its own, collecting the pieces
+/// of the body, through an `S3Store` whose limit is [`LIMIT`].
+fn read_streamed(endpoint: &str, len: usize) -> JoinHandle<Answer> {
+    let mut c = config(endpoint, "test-bucket");
+    c.request_timeout = LIMIT;
+    let store = S3Store::new(c).unwrap();
+    let key = ObjectKey::new("obj").unwrap();
+    tokio::spawn(async move {
+        let read = store.get_stream(&key, Some(r(0, len as u64))).await?;
+        let mut body = read.body;
+        let mut all = BytesMut::new();
+        while let Some(piece) = body.next().await {
+            all.extend_from_slice(&piece?);
+        }
+        Ok(all.freeze())
+    })
+}
+
+/// Catches: a streamed body that stops and is never cut, holding the reader forever: it fails as
+/// the client's stall, after one request, once the half of the body the store sent was taken (the
+/// pieces before the stall were given, and the stall is the last piece).
+#[test]
+fn a_streamed_read_whose_body_stops_fails_as_a_timeout() {
+    Harness::run(None, |mut h| async move {
+        let store = Store::new(1000, Script::StallsInBody).await;
+        let mut reading = read_streamed(&store.endpoint, 1000);
+        h.until(&mut reading, || taken().body == 500).await;
+        h.release();
+        let err = reading.await.unwrap().unwrap_err();
+        assert!(is_stall(&err), "{err:?}");
+        assert!(err.to_string().contains("timed out"), "{err}");
+        assert_eq!(
+            taken(),
+            Taken {
+                heads: 1,
+                body: 500
+            }
+        );
         assert_eq!(store.requests(), 1);
     });
 }

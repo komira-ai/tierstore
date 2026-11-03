@@ -210,6 +210,13 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// Gives the `tierstore` crate (its manifest and `Cargo.lock`) the version of a release, which
+    /// the build then embeds.
+    SetVersion {
+        /// `<major>.<minor>.<patch>`, as `release version` prints it.
+        #[arg(long)]
+        version: String,
+    },
     /// The linux-x86_64 binary in `dir` says the tag and the commit it is released under.
     CheckBinary {
         dir: PathBuf,
@@ -446,6 +453,7 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
                 output.as_deref(),
             )
         }
+        Verb::Release(ReleaseVerb::SetVersion { version }) => release::set_version(&root, &version),
         Verb::Release(ReleaseVerb::CheckBinary {
             dir,
             tag,

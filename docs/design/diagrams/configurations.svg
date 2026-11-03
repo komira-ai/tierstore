@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 900" width="960" height="900" role="img" aria-label="Three configurations of a tierstore process: A local_cache plus cold_store, B hot_store plus cold_store, C all three (planned).">
+<title>tierstore configurations</title>
+<defs><marker id="configurations-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="configurations-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.6;stroke-dasharray:7 5}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="900" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16" text-anchor="start">Three configurations, each a tierstore process (the box) over its stores</text>
+<text x="20" y="56" class="b" font-size="14" text-anchor="start">A   build node: local_cache + cold_store</text>
+<rect x="20" y="101.0" width="150" height="64" rx="5" class="box-b"/>
+<text x="95.0" y="123.0" class="b" text-anchor="middle">Clients</text>
+<text x="95.0" y="141.0" class="t-m" text-anchor="middle">S3: --listen</text>
+<text x="95.0" y="159.0" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<line x1="170" y1="133.0" x2="208" y2="133.0" class="ln" marker-end="url(#configurations-ak)"/>
+<rect x="190" y="68" width="450" height="130" rx="5" class="box-t"/>
+<text x="204" y="88" class="b" text-anchor="start">tierstore process</text>
+<rect x="210" y="100" width="410" height="86" rx="5" class="box-o"/>
+<text x="415.0" y="122" class="b" text-anchor="middle">S3 front + OCI front (read-only), over local_cache</text>
+<text x="415.0" y="140" class="t-m" text-anchor="middle">read-through disk cache on local NVMe; two listeners, one cache</text>
+<text x="415.0" y="158" class="t-m" text-anchor="middle">no hot_store, journal, lease or reconciler</text>
+<text x="415.0" y="176" class="t-m" text-anchor="middle">writes refused unless write_through is set</text>
+<rect x="700" y="100" width="240" height="86" rx="5" class="box-b"/>
+<text x="820.0" y="122" class="b" text-anchor="middle">cold_store</text>
+<text x="820.0" y="140" class="t-m" text-anchor="middle">the upstream: usually a storage-node</text>
+<text x="820.0" y="158" class="t-m" text-anchor="middle">tierstore, or any S3 store</text>
+<line x1="620" y1="143" x2="700" y2="143" class="ln" marker-end="url(#configurations-ak)"/>
+<text x="20" y="220" class="t-m" text-anchor="start">Use when: a node with fast local disk reads many objects from one remote store, for example a node pulling build inputs.</text>
+<text x="20" y="274" class="b" font-size="14" text-anchor="start">B   storage node: hot_store + cold_store</text>
+<rect x="20" y="359.0" width="150" height="64" rx="5" class="box-b"/>
+<text x="95.0" y="381.0" class="b" text-anchor="middle">Clients</text>
+<text x="95.0" y="399.0" class="t-m" text-anchor="middle">S3: --listen</text>
+<text x="95.0" y="417.0" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<line x1="170" y1="391.0" x2="208" y2="391.0" class="ln" marker-end="url(#configurations-ak)"/>
+<rect x="190" y="286" width="450" height="210" rx="5" class="box-t"/>
+<text x="204" y="306" class="b" text-anchor="start">tierstore process</text>
+<rect x="210" y="318" width="410" height="66" rx="5" class="box-o"/>
+<text x="415.0" y="340" class="b" text-anchor="middle">Proxy (behind the S3 and OCI fronts)</text>
+<text x="415.0" y="358" class="t-m" text-anchor="middle">put, get, head, delete; writes the journal to hot</text>
+<rect x="210" y="404" width="410" height="66" rx="5" class="box-o"/>
+<text x="415.0" y="426" class="b" text-anchor="middle">Reconciler (holds the lease)</text>
+<text x="415.0" y="444" class="t-m" text-anchor="middle">copies hot to cold, evicts from hot</text>
+<rect x="700" y="318" width="240" height="66" rx="5" class="box-b"/>
+<text x="820.0" y="340" class="b" text-anchor="middle">hot_store</text>
+<text x="820.0" y="358" class="t-m" text-anchor="middle">dir: on local disk or</text>
+<text x="820.0" y="376" class="t-m" text-anchor="middle">S3-compatible bucket</text>
+<rect x="700" y="404" width="240" height="66" rx="5" class="box-b"/>
+<text x="820.0" y="426" class="b" text-anchor="middle">cold_store</text>
+<text x="820.0" y="444" class="t-m" text-anchor="middle">dir: on local disk or</text>
+<text x="820.0" y="462" class="t-m" text-anchor="middle">S3-compatible bucket</text>
+<line x1="620" y1="351" x2="700" y2="351" class="ln" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="381" x2="700" y2="421" class="ln" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="436" x2="700" y2="436" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="620" y1="436" x2="700" y2="436" class="ln-d" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="411" x2="700" y2="371" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="620" y1="411" x2="700" y2="371" class="ln-d" marker-end="url(#configurations-ak)"/>
+<text x="20" y="518" class="t-m" text-anchor="start">Use when: this node owns the data. Writes land in the hot tier first; the reconciler moves them to the cold tier.</text>
+<text x="20" y="548" class="b" font-size="14" text-anchor="start">C   all three: local_cache + hot_store + cold_store (planned: the loader refuses it)</text>
+<rect x="20" y="593" width="150" height="64" rx="5" class="box-b"/>
+<text x="95.0" y="615" class="b" text-anchor="middle">Clients</text>
+<text x="95.0" y="633" class="t-m" text-anchor="middle">S3: --listen</text>
+<text x="95.0" y="651" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<line x1="170" y1="625" x2="208" y2="625" class="ln" marker-end="url(#configurations-ak)"/>
+<rect x="190" y="560" width="450" height="290" rx="5" class="box-p"/>
+<text x="204" y="580" class="b" text-anchor="start">tierstore process (planned)</text>
+<rect x="210" y="592" width="410" height="66" rx="5" class="box-o"/>
+<text x="415.0" y="614" class="b" text-anchor="middle">S3 front + OCI front (read-only), over local_cache</text>
+<text x="415.0" y="632" class="t-m" text-anchor="middle">read-through disk cache on local NVMe</text>
+<rect x="210" y="678" width="410" height="66" rx="5" class="box-o"/>
+<text x="415.0" y="700" class="b" text-anchor="middle">Proxy</text>
+<text x="415.0" y="718" class="t-m" text-anchor="middle">hot first, cold on a miss; journal</text>
+<rect x="210" y="764" width="410" height="66" rx="5" class="box-o"/>
+<text x="415.0" y="786" class="b" text-anchor="middle">Reconciler (holds the lease)</text>
+<text x="415.0" y="804" class="t-m" text-anchor="middle">copies hot to cold, evicts from hot</text>
+<line x1="415" y1="658" x2="415" y2="678" class="ln" marker-end="url(#configurations-ak)"/>
+<rect x="700" y="678" width="240" height="66" rx="5" class="box-b"/>
+<text x="820.0" y="700" class="b" text-anchor="middle">hot_store</text>
+<text x="820.0" y="718" class="t-m" text-anchor="middle">dir: on local disk or</text>
+<text x="820.0" y="736" class="t-m" text-anchor="middle">S3-compatible bucket</text>
+<rect x="700" y="764" width="240" height="66" rx="5" class="box-b"/>
+<text x="820.0" y="786" class="b" text-anchor="middle">cold_store</text>
+<text x="820.0" y="804" class="t-m" text-anchor="middle">dir: on local disk or</text>
+<text x="820.0" y="822" class="t-m" text-anchor="middle">S3-compatible bucket</text>
+<line x1="620" y1="711" x2="700" y2="711" class="ln" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="738" x2="700" y2="792" class="ln" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="797" x2="700" y2="797" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="620" y1="797" x2="700" y2="797" class="ln-d" marker-end="url(#configurations-ak)"/>
+<line x1="620" y1="772" x2="700" y2="732" stroke="#FFFFFF" stroke-width="6"/>
+<line x1="620" y1="772" x2="700" y2="732" class="ln-d" marker-end="url(#configurations-ak)"/>
+<text x="20" y="872" class="t-m" text-anchor="start">Use when: one node should both serve reads from local NVMe and own the data.</text>
+<text x="20" y="890" class="t-m" text-anchor="start">Cache in front of the proxy is the proposal (design open question 13). Until C exists, chain: a node of shape A whose cold_store is a node of shape B.</text>
+</svg>

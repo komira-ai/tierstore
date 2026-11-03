@@ -41,14 +41,14 @@ yet: place it from this directory, below):
 
 ```sh
 tar -xzf tierstore-<commit>-linux-x86_64.tar.gz tierstore
-install -d -m 0755 /usr/libexec/kbf
-install -m 0755 -o root -g root tierstore /usr/libexec/kbf/tierstore
+install -d -m 0755 /usr/libexec/tierstore
+install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore
 ```
 
 With `tierstore.service`, nothing updates it afterwards: whoever runs the setup places the next
 binary the same way and restarts the unit. A host that runs the two slot units instead is
-updated by the host updater through `tierstore update-hook` ([Moving to the update
-hook](#moving-to-the-update-hook)).
+updated by the host updater (hostkeeper's, in development) through `tierstore update-hook`
+([Moving to the update hook](#moving-to-the-update-hook)).
 
 ## Placing the unit
 
@@ -857,9 +857,10 @@ says on stderr `tierstore: --capabilities takes no other flag, got <argument>`, 
 status 2. A host updater reads it from a release before it hands over to it. `tierstore --version`
 prints `tierstore <version>+<commit>`, the end of the start line is ` commit=<commit>`, and
 `/metricz` has `tierstore_build_info{version="<version>",commit="<commit>"} 1`. The commit is the
-one the binary was built from, twelve hex digits: git's, or the value of
-`TIERSTORE_BUILD_COMMIT_OVERRIDE` at build time for a build without a `.git` (a build refuses a
-value that is not twelve lowercase hex digits), or `unknown` where there is neither.
+one the binary was built from, twelve hex digits: git's, or `unknown` for a build without a
+`.git` (no environment variable supplies it). The version is the one in
+`crates/tierstore/Cargo.toml`; a release build sets it first with
+`cargo xtask release set-version --version X.Y.Z`.
 
 `tierstore --config <path> --check-config` loads the file as a start does (the same loader and the
 same refusals, the build-node checks and `write_through` included) and reads the key files it
@@ -911,13 +912,13 @@ path, never what is in them, and the file it prints is loaded back before it is 
 loads. Take the flags out of `ExecStart=`:
 
 ```sh
-/usr/libexec/kbf/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
+/usr/libexec/tierstore/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
 ```
 
 and switch the unit by changing `ExecStart=` to
 
 ```
-ExecStart=/usr/libexec/kbf/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
+ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
 The flags and the file are both accepted in this release, so a unit may stay as it is and move

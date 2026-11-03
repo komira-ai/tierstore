@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 870" width="960" height="870" role="img" aria-label="Sequence diagram of a put: Client, Node, Hot tier, Cold tier. A reservation is created in the cold tier first; if the key is taken the put is refused with 412. Otherwise the object and the journal entry are written to the hot tier concurrently, then the put is acknowledged.">
+<title>A put: reserve the key in cold, write hot, acknowledge</title>
+<defs><marker id="seq-put-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-put-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="870" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A put: reserve the key in cold, write hot, then acknowledge</text>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="110.0" y="65" class="b" text-anchor="middle">Client</text>
+<rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="340.0" y="65" class="b" text-anchor="middle">Node</text>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="600.0" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="840.0" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="110" y1="76" x2="110" y2="650" class="ln-d"/>
+<line x1="340" y1="76" x2="340" y2="650" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="650" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="650" class="ln-d"/>
+<rect x="332" y="104" width="16" height="24" rx="5" class="box"/>
+<line x1="110" y1="120" x2="340" y2="120" class="ln" marker-end="url(#seq-put-ak)"/>
+<text x="225.0" y="96" class="t-m lbl" text-anchor="middle">0  PUT key (streamed body);</text>
+<text x="225.0" y="112" class="t-m lbl" text-anchor="middle">refuse a reserved key, take a put slot</text>
+<line x1="340" y1="200" x2="840" y2="200" class="ln" marker-end="url(#seq-put-ak)"/>
+<text x="590.0" y="176" class="t-m lbl" text-anchor="middle">1  put reservation for key, create-only (If-None-Match: *)</text>
+<text x="590.0" y="192" class="t-m lbl" text-anchor="middle">a small marked object: this decides who owns the key</text>
+<line x1="840" y1="230" x2="340" y2="230" class="ln-d" marker-end="url(#seq-put-ak)"/>
+<text x="720" y="224" class="t-m lbl" text-anchor="middle">ok: the key is ours</text>
+<text x="30" y="252" class="t-m lbl">The cold tier is the truth for whether a key exists. The reservation is marked, so a HEAD tells it from a real object.</text>
+<rect x="60" y="270" width="860" height="112" rx="5" class="box-p"/>
+<text x="72" y="288" class="t-m lbl">alt  the key is taken (the cold tier already holds a reservation or the real object)</text>
+<line x1="840" y1="326" x2="340" y2="326" class="ln-od" marker-end="url(#seq-put-ao)"/>
+<text x="590.0" y="318" class="t-m lbl" text-anchor="middle">AlreadyExists (412)</text>
+<line x1="340" y1="362" x2="110" y2="362" class="ln-od" marker-end="url(#seq-put-ao)"/>
+<text x="225.0" y="354" class="t-m lbl" text-anchor="middle">412: put refused, nothing else written</text>
+<rect x="290" y="428" width="420" height="152" rx="5" class="box-p"/>
+<text x="352" y="446" class="b">concurrent</text>
+<line x1="340" y1="478" x2="600" y2="478" class="ln" marker-end="url(#seq-put-ak)"/>
+<text x="470.0" y="470" class="t-m lbl" text-anchor="middle">2a  put_stream(key), create-only</text>
+<line x1="600" y1="500" x2="340" y2="500" class="ln-d" marker-end="url(#seq-put-ak)"/>
+<text x="470" y="494" class="t-m lbl" text-anchor="middle">ok (durable after the last chunk)</text>
+<line x1="340" y1="544" x2="600" y2="544" class="ln" marker-end="url(#seq-put-ak)"/>
+<text x="470.0" y="520" class="t-m lbl" text-anchor="middle">2b  put _journal/&lt;id&gt;/&lt;seq&gt;, create-only</text>
+<text x="470.0" y="536" class="t-m lbl" text-anchor="middle">this node's journal entry, one per batch</text>
+<line x1="600" y1="566" x2="340" y2="566" class="ln-d" marker-end="url(#seq-put-ak)"/>
+<text x="470" y="560" class="t-m lbl" text-anchor="middle">ok</text>
+<rect x="30" y="592" width="900" height="64" rx="5" class="box-o"/>
+<line x1="340" y1="618" x2="110" y2="618" class="ln-o" marker-end="url(#seq-put-ao)"/>
+<text x="225" y="612" class="t-m lbl" text-anchor="middle">3  200: ACK POINT</text>
+<text x="42" y="642" class="t-m">Acknowledged when both 2a and 2b are durable in the hot tier. The cold tier holds only the reservation, not the bytes.</text>
+<text x="30" y="686" class="t-m">Later, not part of the put: the leader reads the journal entry and replaces the reservation with the bytes (If-Match, streamed),</text>
+<text x="30" y="703" class="t-m">then writes the node's checkpoint and deletes the journal object. If 2a or 2b fails, the put is not acknowledged.</text>
+<rect x="30" y="726" width="900" height="128" rx="5" class="box"/>
+<text x="42" y="748" class="b">Hot tier full (usage at budget, or the hot store answers Full)</text>
+<text x="42" y="770" class="t-m">Unsigned put: no reservation and no journal entry. The real object is written straight to the cold tier, create-only</text>
+<text x="42" y="787" class="t-m">(If-None-Match: *). That one write is the decision: AlreadyExists is a 412. The put is acknowledged when cold answers.</text>
+<text x="42" y="809" class="t-m">Presigned put (hot-only): 503 SlowDown, never cold.</text>
+<text x="42" y="831" class="t-m">There is no back-pressure sleep: a full hot tier is answered at once, by one of the two paths above. A put never waits for the leader.</text>
+</svg>

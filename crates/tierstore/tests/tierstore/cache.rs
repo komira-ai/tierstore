@@ -23,6 +23,15 @@ fn range(offset: u64, len: u64) -> Option<ByteRange> {
     Some(ByteRange::new(offset, len))
 }
 
+/// Asserts that a tagged put through the cache gives the tag of the object it created and
+/// refuses a second put of the key, as the backend does.
+#[tokio::test]
+async fn a_tagged_put_passes_through_the_cache() {
+    let f = fixture(100);
+    crate::conformance::a_tagged_put_gives_the_tag_a_head_gives(&f.cached).await;
+    assert_eq!(f.backend.calls(Op::Put), 2);
+}
+
 /// Asserts that a repeated read of one range is answered without a call to the backend, that
 /// another range of the object and the whole object are reads of their own, and that each
 /// is then cached too.
@@ -281,4 +290,19 @@ async fn a_streamed_put_is_passed_to_the_inner_store_unread() {
     f.cached.put_stream("k", Some(4), chunks).await.unwrap();
     assert_eq!(f.cached.get("k", None).await.unwrap(), body("0123"));
     assert!(!f.cached.needs_length());
+}
+
+/// Asserts that the cache does not take a conditional delete: it holds copies of what it read, so
+/// a delete that did not drop them would serve a deleted object. The call is `Unsupported`, does
+/// not reach the backend and leaves the object and its cached copy as they were.
+#[tokio::test]
+async fn a_conditional_delete_through_the_cache_is_unsupported_and_changes_nothing() {
+    let f = fixture(100);
+    f.cached.put("k", body("v")).await.unwrap();
+    let tag = f.cached.head("k").await.unwrap().tag;
+    f.cached.get("k", None).await.unwrap();
+    let refused = f.cached.delete_if_match("k", &tag).await.unwrap_err();
+    assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
+    assert_eq!(f.backend.calls(Op::DeleteIfMatch), 0);
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("v"));
 }

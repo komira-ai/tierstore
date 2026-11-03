@@ -294,10 +294,12 @@ async fn a_reconciler_killed_mid_pass_is_replaced_and_the_cold_tier_converges() 
 
     let puts = rig.hot.calls(Op::Put);
     let deletes = rig.hot.calls(Op::Delete);
+    let conditional = rig.hot.calls(Op::DeleteIfMatch);
     let cold_before = keys(&*rig.cold_mem).await;
     assert_eq!(one.pass().await, PassReport::default());
     assert_eq!(rig.hot.calls(Op::Put), puts);
     assert_eq!(rig.hot.calls(Op::Delete), deletes);
+    assert_eq!(rig.hot.calls(Op::DeleteIfMatch), conditional);
     assert_eq!(keys(&*rig.cold_mem).await, cold_before);
     assert!(
         text(&*rig.hot_mem, "_tiering/lease")

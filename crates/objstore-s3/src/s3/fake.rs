@@ -4,7 +4,9 @@
 //! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id), with S3's rules on
 //! part sizes enforced at completion and conditional writes (`If-None-Match: *`) on a
 //! PUT and a completion, a PUT that replaces an object only if it has the entity tag in
-//! `If-Match` (412 for another tag, 404 if there is no object), and DELETE of a plain object.
+//! `If-Match`, as does a completion (412 for another tag, 404 if there is no object), and DELETE, which with `If-Match`
+//! takes the object only if it has that entity tag (412 for another, 404 if there is none) unless a
+//! test asks the service to ignore the header ([`FakeS3::ignore_delete_condition`]).
 //!
 //! Every object has a time of last write: the system clock until a test sets one
 //! ([`FakeS3::set_time`]), in whole seconds as S3 keeps them. The entity tag of an object is
@@ -25,8 +27,13 @@
 //!
 //! It keeps what a test asks about: the uploads begun and not yet completed or aborted
 //! ([`FakeS3::incomplete_uploads`]), how many single PUTs and parts it took and the
-//! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload
-//! once ([`FakeS3::fail`]).
+//! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
+//! or the nth HEAD or DELETE of an object, once ([`FakeS3::fail`]).
+//!
+//! It keeps one piece of user metadata, the reservation mark (`x-amz-meta-tierstore-reservation`),
+//! as S3 keeps metadata: an object has it if the request that wrote it sent it, a HEAD and a
+//! read of the whole object or of a range give it back, and a PUT that does not send it, an `If-Match` replace
+//! included, leaves the object without it.
 //!
 //! Bytes are kept compactly: a run of zeros is counted, not stored, so an object of
 //! many GiB of zeros costs the test nothing to hold. It checks no signature unless a test
@@ -45,6 +52,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod meta;
 mod uploads;
 
 use self::uploads::list_uploads;
@@ -157,6 +165,11 @@ pub enum Failure {
     CompleteLate,
     /// AbortMultipartUpload answers 500; the upload stays open.
     Abort,
+    /// The `n`th HEAD from now on answers 500 (`Head(1)` is the next one).
+    Head(u32),
+    /// The `n`th DELETE of a whole object from now on answers 500 (`Delete(1)` is the next
+    /// one); the object stays.
+    Delete(u32),
 }
 
 impl State {
@@ -168,12 +181,13 @@ impl State {
 
     /// Keeps `kept` under `key`, stamped with the time of the service, with the entity tag
     /// `joined` if it is made of parts and the tag of its bytes if not.
-    fn store(&mut self, key: String, kept: Kept, joined: Option<String>) {
+    fn store(&mut self, key: String, kept: Kept, joined: Option<String>, marked: bool) {
         let modified = self.time.unwrap_or_else(system_seconds);
         let stored = Stored {
             kept,
             modified,
             joined,
+            marked,
         };
         self.objects.insert(key, stored);
     }
@@ -251,6 +265,8 @@ struct Stored {
     modified: u64,
     /// The entity tag of an object made of parts; none for an object of one PUT.
     joined: Option<String>,
+    /// Whether the request that wrote the object carried the reservation mark ([`meta`]).
+    marked: bool,
 }
 
 impl Stored {
@@ -278,6 +294,11 @@ struct State {
     /// The least size of a part that is not the last of its upload, when a test set one
     /// ([`FakeS3::set_min_part_bytes`]); [`super::MIN_PART_BYTES`] otherwise.
     min_part: Option<u64>,
+    /// A DELETE takes the object whatever its `If-Match` says ([`FakeS3::ignore_delete_condition`]).
+    ignore_delete_condition: bool,
+    /// How many HEADs, and how many DELETEs of a whole object, the service has taken.
+    heads: u32,
+    deletes: u32,
     /// The next AbortMultipartUpload is to be held ([`FakeS3::hold_next_abort`]).
     hold_abort: bool,
     /// AbortMultipartUpload requests held and not yet dropped.
@@ -373,7 +394,13 @@ impl FakeS3 {
 
     /// Fails the next request `failure` names, once.
     pub fn fail(&self, failure: Failure) {
-        self.lock().failures.push(failure);
+        let mut state = self.lock();
+        let due = match failure {
+            Failure::Head(n) => Failure::Head(state.heads + n),
+            Failure::Delete(n) => Failure::Delete(state.deletes + n),
+            other => other,
+        };
+        state.failures.push(due);
     }
 
     /// From now on takes a part of at least `bytes` bytes where S3 takes one of 5 MiB or
@@ -381,6 +408,13 @@ impl FakeS3 {
     /// completed. For a test that sends parts of a few bytes.
     pub fn set_min_part_bytes(&self, bytes: u64) {
         self.lock().min_part = Some(bytes);
+    }
+
+    /// From now on takes a DELETE that carries `If-Match` as one that does not: the object is
+    /// removed whatever its tag. For a test of a store that does not enforce the header (several
+    /// S3-compatible stores accept it and ignore it).
+    pub fn ignore_delete_condition(&self) {
+        self.lock().ignore_delete_condition = true;
     }
 
     /// Holds the next AbortMultipartUpload request unanswered and unhandled: the
@@ -635,7 +669,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             };
             answer("200 OK", &headers, b"")
         }
-        ("POST", None, Some(id), None) => complete(state, &id, &key, conditional, &request.body),
+        ("POST", None, Some(id), None) => complete(state, &id, &key, conditional, request),
         ("DELETE", None, Some(id), None) => {
             if state.take(Failure::Abort) {
                 return error("500 Internal Server Error", "InternalError");
@@ -651,40 +685,71 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
         ("GET", Some(_), None, None) if key.is_empty() => list_uploads(state, request),
         ("PUT", None, None, None) => put_object(state, key, conditional, request),
         ("DELETE", None, None, None) => {
-            state.objects.remove(&key);
-            answer("204 No Content", &[], b"")
+            state.deletes += 1;
+            if state.take(Failure::Delete(state.deletes)) {
+                return error("500 Internal Server Error", "InternalError");
+            }
+            delete_object(state, &key, request)
         }
         ("GET", None, None, None) if key.is_empty() => list(state, request),
         ("GET", None, None, None) => get(state, &key, request.headers.get("range")),
-        ("HEAD", None, None, None) => head(state, &key),
+        ("HEAD", None, None, None) => {
+            state.heads += 1;
+            if state.take(Failure::Head(state.heads)) {
+                return error("500 Internal Server Error", "InternalError");
+            }
+            head(state, &key)
+        }
         _ => error("501 Not Implemented", "NotImplemented"),
+    }
+}
+
+/// The answer to a write that carries `If-Match` and is refused: 404 if there is no object, 412 if
+/// it has another entity tag; `None` for a write without the header or one the object matches.
+fn if_match_refusal(state: &State, key: &str, request: &Request) -> Option<Vec<u8>> {
+    let expected = request.headers.get("if-match")?;
+    match state.objects.get(key) {
+        None => Some(error("404 Not Found", "NoSuchKey")),
+        Some(stored) if stored.etag() != *expected => {
+            Some(error("412 Precondition Failed", "PreconditionFailed"))
+        }
+        Some(_) => None,
     }
 }
 
 /// A PUT of a whole object: refused 412 if `conditional` (`If-None-Match: *`) and the key
 /// exists, or if it carries `If-Match` and the object has another entity tag (404 if there is
-/// no object). The answer to a PUT with `If-Match` carries the new object's entity tag.
+/// no object). The answer to a PUT carries the new object's entity tag, as S3's does.
 fn put_object(state: &mut State, key: String, conditional: bool, request: &Request) -> Vec<u8> {
+    if let Some(refused) = if_match_refusal(state, &key, request) {
+        return refused;
+    }
+    if conditional && state.objects.contains_key(&key) {
+        return error("412 Precondition Failed", "PreconditionFailed");
+    }
+    let kept = Kept::of(&request.body);
+    let headers = vec![("etag", etag_of(&kept))];
+    state.store(key, kept, None, meta::sent(&request.headers));
+    state.stats.single_puts += 1;
+    answer("200 OK", &headers, b"")
+}
+
+/// A DELETE of a whole object: with `If-Match` it takes the object only if it has that entity tag
+/// (412 for another tag, 404 if there is no object), unless a test told the service to ignore
+/// the header ([`FakeS3::ignore_delete_condition`]), as some stores do; without it, or with an
+/// absent key and no header, 204.
+fn delete_object(state: &mut State, key: &str, request: &Request) -> Vec<u8> {
     let expected = request.headers.get("if-match");
-    if let Some(expected) = expected {
-        let Some(stored) = state.objects.get(&key) else {
+    if let Some(expected) = expected.filter(|_| !state.ignore_delete_condition) {
+        let Some(stored) = state.objects.get(key) else {
             return error("404 Not Found", "NoSuchKey");
         };
         if stored.etag() != *expected {
             return error("412 Precondition Failed", "PreconditionFailed");
         }
     }
-    if conditional && state.objects.contains_key(&key) {
-        return error("412 Precondition Failed", "PreconditionFailed");
-    }
-    let kept = Kept::of(&request.body);
-    let headers = match expected {
-        Some(_) => vec![("etag", etag_of(&kept))],
-        None => vec![],
-    };
-    state.store(key, kept, None);
-    state.stats.single_puts += 1;
-    answer("200 OK", &headers, b"")
+    state.objects.remove(key);
+    answer("204 No Content", &[], b"")
 }
 
 /// The region in `AWS4-HMAC-SHA256 Credential=<id>/<date>/<region>/s3/aws4_request, ..`.
@@ -807,8 +872,16 @@ fn assemble(upload: &Upload, body: &[u8], min_part: u64) -> Result<(Kept, String
     Ok((object, joined))
 }
 
-/// CompleteMultipartUpload ([`assemble`]); conditional on `If-None-Match: *`.
-fn complete(state: &mut State, id: &str, key: &str, conditional: bool, body: &[u8]) -> Vec<u8> {
+/// CompleteMultipartUpload ([`assemble`]); conditional on `If-None-Match: *`, or, with `If-Match`,
+/// on the object having that entity tag (412 for another, 404 `NoSuchKey` for no object).
+fn complete(
+    state: &mut State,
+    id: &str,
+    key: &str,
+    conditional: bool,
+    request: &Request,
+) -> Vec<u8> {
+    let body = request.body.as_slice();
     let min_part = state.min_part.unwrap_or(super::MIN_PART_BYTES);
     let upload = state.uploads.get(id).filter(|u| u.key == key);
     let assembled = upload
@@ -828,8 +901,11 @@ fn complete(state: &mut State, id: &str, key: &str, conditional: bool, body: &[u
     if conditional && state.objects.contains_key(key) {
         return error("412 Precondition Failed", "PreconditionFailed");
     }
+    if let Some(refused) = if_match_refusal(state, key, request) {
+        return refused;
+    }
     state.uploads.remove(id);
-    state.store(key.to_owned(), object, Some(joined.clone()));
+    state.store(key.to_owned(), object, Some(joined.clone()), false);
     state.stats.completed += 1;
     let done = format!(
         "<CompleteMultipartUploadResult><ETag>{joined}</ETag>\
@@ -843,10 +919,11 @@ fn head(state: &State, key: &str) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return answer("404 Not Found", &[], b"");
     };
-    let headers = [
+    let mut headers = vec![
         ("etag", stored.etag()),
         ("last-modified", http_date(stored.modified)),
     ];
+    headers.extend(meta::echoed(stored.marked));
     answer_sized("200 OK", stored.kept.len, &headers, b"")
 }
 
@@ -891,14 +968,16 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     answer("200 OK", &[], body.as_bytes())
 }
 
-/// A GET of the whole object, or of one `bytes=first-last` range.
+/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the mark.
 fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return error("404 Not Found", "NoSuchKey");
     };
     let object = &stored.kept;
     let Some(range) = range else {
-        return answer("200 OK", &[], &object.read(0, object.len));
+        let mut headers = meta::echoed(stored.marked);
+        headers.push(("etag", stored.etag()));
+        return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
         .strip_prefix("bytes=")
@@ -910,93 +989,10 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let end = (last + 1).min(object.len);
     let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
     let bytes = object.read(first, end);
-    answer(
-        "206 Partial Content",
-        &[("content-range", content_range)],
-        &bytes,
-    )
+    let mut headers = meta::echoed(stored.marked);
+    headers.extend([("etag", stored.etag()), ("content-range", content_range)]);
+    answer("206 Partial Content", &headers, &bytes)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Catches: a request signed over an escaped query (defect: `unescape` leaves `%2F`
-    /// alone, so the fake signs the escape again and refuses a request it should take).
-    #[test]
-    fn escapes_are_decoded_and_what_is_not_one_stays() {
-        assert_eq!(unescape("a%2Fb%41"), "a/bA");
-        assert_eq!(unescape("100%"), "100%");
-        assert_eq!(unescape("%zz%4"), "%zz%4");
-        assert_eq!(unescape(""), "");
-    }
-
-    /// Catches: kept bytes that read back other than written (a zero run merged with
-    /// its neighbour's length wrong, a range cut at the wrong run).
-    #[test]
-    fn kept_bytes_read_back_as_written() {
-        let mut bytes = vec![0u8; 3 * RUN + 10];
-        bytes[RUN + 5] = 7;
-        bytes[3 * RUN + 9] = 9;
-        let kept = Kept::of(&bytes);
-        assert_eq!(kept.len, bytes.len() as u64);
-        assert_eq!(kept.read(0, kept.len), bytes);
-        assert_eq!(kept.read(RUN as u64, RUN as u64 + 6), bytes[RUN..RUN + 6]);
-        let mut joined = Kept::of(&bytes[..RUN]);
-        joined.extend(&Kept::of(&bytes[RUN..]));
-        assert_eq!(joined.read(1, joined.len), bytes[1..]);
-    }
-
-    /// Catches: consecutive zero runs kept separately (a 5 GiB object of zeros would
-    /// keep tens of thousands of entries), or merged with a wrong total.
-    #[test]
-    fn consecutive_zero_runs_are_kept_as_one_run() {
-        let kept = Kept::of(&vec![0u8; 3 * RUN + 1]);
-        assert_eq!(kept.runs.len(), 1);
-        assert_eq!(kept.runs[0].as_ref().err(), Some(&(3 * RUN as u64 + 1)));
-        assert_eq!(kept.len, 3 * RUN as u64 + 1);
-        assert_eq!(kept.read(RUN as u64 - 1, RUN as u64 + 1), [0, 0]);
-    }
-
-    /// Asserts that a time is written in the two forms S3 writes it in: the HTTP date, to
-    /// the weekday (the documented example, and the epoch, a Thursday), and the ISO form
-    /// of a listing with its milliseconds.
-    #[test]
-    fn times_are_written_as_s3_writes_them() {
-        assert_eq!(http_date(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
-        assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
-        assert_eq!(iso_date(1_255_369_830), "2009-10-12T17:50:30.000Z");
-    }
-
-    /// Asserts that the tag of a part is quoted and depends on the bytes of the part and
-    /// nothing else: the same for the same bytes, another for other bytes, for zeros of
-    /// another length, and for the same number of zeros with a one in another place.
-    #[test]
-    fn the_tag_of_a_part_depends_on_its_bytes() {
-        let tag = part_etag(b"hello ");
-        assert_eq!(tag, part_etag(b"hello "));
-        assert_ne!(tag, part_etag(b"HELLO "));
-        assert!(tag.starts_with('"'), "{tag}");
-        assert!(tag.ends_with('"'), "{tag}");
-        assert_eq!(tag.trim_matches('"').len(), 16);
-        let zeros = |n: usize| part_etag(&vec![0_u8; n]);
-        assert_eq!(zeros(3 * RUN), zeros(3 * RUN));
-        assert_ne!(zeros(3 * RUN), zeros(3 * RUN + 1));
-        let mut shifted = vec![0_u8; 2 * RUN];
-        shifted[RUN] = 1;
-        let mut other = vec![0_u8; 2 * RUN];
-        other[RUN + 1] = 1;
-        assert_ne!(part_etag(&shifted), part_etag(&other));
-    }
-
-    /// Asserts that the entity tag is the quoted hex MD5 of the bytes (the tag S3 gives an
-    /// object of one PUT), and does not depend on the runs the bytes are kept in.
-    #[test]
-    fn the_entity_tag_is_the_quoted_md5_of_the_bytes() {
-        let whole = Kept::of(b"abc");
-        assert_eq!(etag_of(&whole), "\"900150983cd24fb0d6963f7d28e17f72\"");
-        let mut joined = Kept::of(b"a");
-        joined.extend(&Kept::of(b"bc"));
-        assert_eq!(etag_of(&joined), etag_of(&whole));
-    }
-}
+mod tests;
