@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use futures::future::join_all;
 use tierstore::{
-    Backend, Error, MemoryBackend, PassReport, Reconciler, ReconcilerConfig, TestClock,
+    Backend, Error, MemoryBackend, Op, PassReport, Reconciler, ReconcilerConfig, TestClock,
 };
 use tokio::sync::Notify;
 
-use crate::hold::{Gate, Stall};
-use crate::support::{Rig, body, read, text};
+use crate::hold::{Gate, Interpose, Stall};
+use crate::support::{Rig, assert_absent, body, read, text};
 
 const TAKERS: usize = 8;
 
@@ -85,20 +85,20 @@ async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
     assert_one_holder(&rig, &done).await;
 }
 
-/// Asserts the documented overlap, and that it ends at the next renewal. A pass that is still
-/// copying when the lease is taken over (the copy of one object waits) is not stopped: the old
-/// holder's pass goes on to its end and reports that it held the lease, beside the new holder,
-/// whose pass is whole. The cold tier then holds every object whole; the lease is the new
-/// holder's; the old holder's next pass finds it lost the lease and does nothing. This PINS
-/// WHAT THE CODE DOES NOT DO: there is no fencing token, and the old holder learns it lost the
-/// lease only when it renews. Defects it catches: a take over while the old holder's lease is
-/// young; an old holder that renews a lease another holder replaced; an overlap that loses an
-/// object. It also pins the old holder's own work: its resumed pass copies all four objects
-/// and reports no failure (its copies are create-only and find the new holder's, and its
-/// checkpoint write is not conditioned on the lease). A fencing fix that makes the stale pass's
-/// copy or checkpoint fail turns this test red, and the test is then to be changed to say so.
+/// Asserts the documented overlap, and that the old holder stores nothing after it. A pass that
+/// is still copying when the lease is taken over (the copy of one object waits) is not stopped:
+/// the old holder's pass goes on, copies beside the new holder, whose pass is whole, and reports
+/// that it held the lease. The cold tier then holds every object whole; the lease is the new
+/// holder's; the old holder's next pass finds it lost the lease and does nothing. This PINS WHAT
+/// THE CODE DOES NOT DO: there is no fencing token, so the copies of the stale pass are not
+/// fenced (they are create-only and find the new holder's, and the pass reports no failure). What
+/// it does do is check the lease, without renewing it, before it stores: it finds the lease
+/// gone, so it forgets what it read and stores no checkpoint and prunes nothing (the test of the
+/// checkpoint below says what is stored). Defects it catches: a take over while the old holder's
+/// lease is young; an old holder that renews a lease another holder replaced; an overlap that
+/// loses an object; a stale pass that keeps its books.
 #[tokio::test(start_paused = true)]
-async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_next_renewal() {
+async fn a_pass_longer_than_the_lease_copies_beside_the_new_holder_and_stores_nothing() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
     let names = ["k1", "k2", "k3", "k4"];
@@ -126,9 +126,11 @@ async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_n
 
     assert!(first.held && second.held, "{first:?} {second:?}");
     assert_eq!(second.failed, Vec::<Error>::new());
-    // PINS A KNOWN LIMIT: nothing fences the stale pass.
+    // PINS A KNOWN LIMIT: copies are not fenced.
     assert_eq!(first.failed, Vec::<Error>::new(), "{first:?}");
     assert_eq!(first.copied, names.len(), "{first:?}");
+    assert_eq!(first.pruned, 0, "{first:?}");
+    assert_eq!(one.hot_bytes(), 0);
     for name in names {
         assert_eq!(read(&*rig.cold_mem, name).await, body(name), "{name}");
         assert_eq!(read(&*rig.hot_mem, name).await, body(name), "{name}");
@@ -140,6 +142,145 @@ async fn a_pass_longer_than_the_lease_overlaps_the_new_holder_and_stops_at_its_n
     );
     assert_eq!(one.pass().await, PassReport::default());
     assert!(two.pass().await.held);
+}
+
+/// Asserts that a checkpoint never moves backwards: reconciler `r1` has a pass that is longer
+/// than the lease (a copy waits), `r2` takes the lease over, applies two more journal objects
+/// than `r1` has read and stores its checkpoint, and then `r1`'s pass ends: it checks the lease,
+/// finds it lost, and stores nothing. The checkpoint stored for the proxy after that is still
+/// `r2`'s (journal objects up to number 4 applied), not `r1`'s (up to number 2), and a
+/// reconciler started afterwards reads the proxy's new puts, as a checkpoint that went back past
+/// pruned journal objects would keep it from doing.
+/// Catches a stale pass that stores its older checkpoint over the new holder's, so that the
+/// next holder reads and copies journal objects again and the prune of journal objects follows
+/// a number that is older than the work done.
+#[tokio::test(start_paused = true)]
+async fn a_stale_pass_does_not_move_the_stored_checkpoint_back() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1 << 20).await;
+    // One journal object for each put: numbers 1 and 2.
+    for name in ["k1", "k2"] {
+        proxy.put(name, body(name)).await.unwrap();
+    }
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let slow: Arc<dyn Backend> = Arc::new(Stall::new(
+        rig.cold.clone(),
+        "k2",
+        entered.clone(),
+        Some(release.clone()),
+    ));
+    let mut one = Reconciler::new(rig.hot.clone(), slow, rig.reconciler_config("r1", 1 << 20));
+    let mut two = rig.reconciler("r2", 1 << 20);
+    let takeover = async {
+        entered.notified().await;
+        // r1 has read journal objects 1 and 2 and waits in the copy of k2. Two more come.
+        for name in ["k3", "k4"] {
+            proxy.put(name, body(name)).await.unwrap();
+        }
+        rig.clock.set(30_000);
+        let report = two.pass().await;
+        assert!(report.held, "{report:?}");
+        let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+        assert!(stored.contains("\"seq\":4"), "r2 stored {stored}");
+        release.notify_one();
+    };
+
+    let (first, ()) = tokio::join!(one.pass(), takeover);
+
+    assert!(first.held, "{first:?}");
+    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert!(
+        stored.contains("\"seq\":4"),
+        "the stale pass put the checkpoint back: {stored}"
+    );
+
+    two.stop().await;
+    proxy.put("k5", body("k5")).await.unwrap();
+    let mut three = rig.reconciler("r3", 1 << 20);
+    let report = three.pass().await;
+    assert!(report.held, "{report:?}");
+    assert_eq!(report.copied, 1, "{report:?}");
+    assert_eq!(read(&*rig.cold_mem, "k5").await, body("k5"));
+}
+
+/// Asserts that a lease object that is deleted during a pass (the holder before it stopped, say)
+/// counts as a lost lease: the pass that finds it gone at the check reports that it held the
+/// lease at its start and no failure, stores no checkpoint and no usage, and forgets what it
+/// read; the next pass takes the lease anew, works through the journal again (the copies find
+/// the cold tier's) and stores both.
+/// Catches a pass that stores a checkpoint without a lease, and one that treats a missing lease
+/// object as still held.
+#[tokio::test(start_paused = true)]
+async fn a_lease_deleted_during_a_pass_stops_the_pass_before_its_stores() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1 << 20).await;
+    for name in ["k1", "k2"] {
+        proxy.put(name, body(name)).await.unwrap();
+    }
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let slow: Arc<dyn Backend> = Arc::new(Stall::new(
+        rig.cold.clone(),
+        "k2",
+        entered.clone(),
+        Some(release.clone()),
+    ));
+    let mut one = Reconciler::new(rig.hot.clone(), slow, rig.reconciler_config("r1", 1 << 20));
+    let gone = async {
+        entered.notified().await;
+        rig.hot_mem.delete("_tiering/lease").await.unwrap();
+        release.notify_one();
+    };
+
+    let (first, ()) = tokio::join!(one.pass(), gone);
+
+    assert!(first.held, "{first:?}");
+    assert_eq!(first.failed, Vec::<Error>::new(), "{first:?}");
+    assert_eq!(first.copied, 2, "{first:?}");
+    assert_eq!(one.hot_bytes(), 0);
+    assert_absent(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_absent(&*rig.hot_mem, "_tiering/usage").await;
+
+    let second = one.pass().await;
+    assert!(second.held, "{second:?}");
+    assert_eq!(second.failed, Vec::<Error>::new(), "{second:?}");
+    let stored = text(&*rig.hot_mem, "_tiering/checkpoint/p1").await;
+    assert_eq!(stored, r#"{"seq":2,"evict_seq":0,"evict_idx":0}"#);
+    assert!(!text(&*rig.hot_mem, "_tiering/usage").await.is_empty());
+}
+
+/// Asserts that a checkpoint that another holder stored ahead of this pass, after its check of
+/// the lease, is kept and adopted: the pass reports no failure, the stored checkpoint is the
+/// other's byte for byte, and the pass after it, which has nothing to add to that, does not read
+/// the checkpoint again (a HEAD of it that is made to fail is not made).
+/// Catches a pass that writes its own, lower checkpoint over one that is ahead, and a pass that
+/// reads the checkpoint on every pass for as long as the stored one is ahead of its books.
+#[tokio::test(start_paused = true)]
+async fn a_checkpoint_ahead_of_the_pass_is_kept_and_adopted() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1 << 20).await;
+    proxy.put("k1", body("k1")).await.unwrap();
+    let ahead = r#"{"seq":9,"evict_seq":0,"evict_idx":0}"#;
+    let hot: Arc<dyn Backend> = Arc::new(Interpose::new(
+        rig.hot.clone(),
+        rig.hot_mem.clone(),
+        "_tiering/checkpoint/p1",
+        body(ahead),
+    ));
+    let mut reconciler =
+        Reconciler::new(hot, rig.cold.clone(), rig.reconciler_config("r1", 1 << 20));
+
+    let first = reconciler.pass().await;
+    assert_eq!(first.failed, Vec::<Error>::new(), "{first:?}");
+    assert_eq!(text(&*rig.hot_mem, "_tiering/checkpoint/p1").await, ahead);
+
+    rig.hot.fail_next_on(
+        Op::Head,
+        "_tiering/checkpoint/",
+        Error::Unavailable("read".to_owned()),
+    );
+    let second = reconciler.pass().await;
+    assert_eq!(second.failed, Vec::<Error>::new(), "{second:?}");
+    assert_eq!(text(&*rig.hot_mem, "_tiering/checkpoint/p1").await, ahead);
 }
 
 /// A holder on the clock of the hot tier and a taker on a clock of its own, over a hot tier

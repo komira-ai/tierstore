@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tierstore::{Backend, ByteRange, Error, Listed, Meta, PartBody};
+use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta, PartBody};
 use tokio::sync::{Barrier, Notify};
 
 /// A backend whose first `parties` writes of one key wait for each other: every writer is
@@ -210,6 +210,94 @@ impl Backend for Stall {
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.inner.list(prefix).await
+    }
+}
+
+/// A backend that, on the first HEAD of one key, first writes a body to the key in a memory
+/// backend (the one under the wrapped backend), as another process would between two calls of the
+/// caller: the HEAD that follows sees it. Everything else goes straight through.
+pub struct Interpose {
+    inner: Arc<dyn Backend>,
+    under: Arc<MemoryBackend>,
+    key: String,
+    body: Bytes,
+    spent: AtomicBool,
+}
+
+impl Interpose {
+    pub fn new(inner: Arc<dyn Backend>, under: Arc<MemoryBackend>, key: &str, body: Bytes) -> Self {
+        Self {
+            inner,
+            under,
+            key: key.to_owned(),
+            body,
+            spent: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait]
+impl Backend for Interpose {
+    fn needs_length(&self) -> bool {
+        self.inner.needs_length()
+    }
+
+    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
+        self.inner.put(key, body).await
+    }
+
+    async fn put_stream(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_stream(key, len, body).await
+    }
+
+    async fn put_stream_hot_only(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.inner.put_stream_hot_only(key, len, body).await
+    }
+
+    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
+        self.inner.put_if_match(key, body, etag).await
+    }
+
+    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        self.inner.get(key, range).await
+    }
+
+    async fn head(&self, key: &str) -> Result<Meta, Error> {
+        if key == self.key && !self.spent.swap(true, Ordering::SeqCst) {
+            self.under.put(key, self.body.clone()).await?;
+        }
+        self.inner.head(key).await
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), Error> {
+        self.inner.delete(key).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
+        self.inner.list(prefix).await
+    }
+
+    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        self.inner.delete_if_match(key, etag).await
+    }
+
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        self.inner.list_page(prefix, start_after, max_keys).await
     }
 }
 
