@@ -430,31 +430,42 @@ async fn a_marked_replace_sends_if_match_and_the_mark_and_a_plain_one_does_not()
     );
 }
 
-/// Asserts that a conditional write the store answers with 409 is sent again until the store
-/// gives another answer, and that the third 409 is the answer: a `Service` error with status 409
-/// after three requests. A replace is sent again the same way.
+/// Asserts that a conditional write the store answers with 409 is sent once and is that answer, a
+/// `Service` error with status 409 and the code `ConditionalRequestConflict`, whatever the write
+/// (a marked create, a marked replace, a plain replace): the outcome is unknown, so the write is
+/// not sent again, and a HEAD that follows shows the object of the writer that won, here the
+/// writer whose write the 409 answered.
 #[tokio::test]
-async fn a_write_answered_409_is_sent_again_up_to_three_times() {
+async fn a_write_answered_409_is_sent_once_and_the_object_tells_who_won() {
     let conflict = answer("409 Conflict", &[], CONFLICT);
-    let created = answer("200 OK", &["etag: \"new\""], "");
-    let script_of = vec![conflict.clone(), conflict.clone(), created.clone()];
+    let landed = head_answer("200 OK", &[LENGTH, "etag: \"mine\"", MODIFIED, MARK]);
+    let script_of = vec![conflict.clone(), landed];
     let (endpoint, seen) = script(script_of).await;
     let s = conditional(endpoint);
-    let tag = s.put_new_marked(&key(), Bytes::from("abc")).await.unwrap();
-    assert_eq!(tag, "\"new\"");
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    let lost = s.put_new_marked(&key(), Bytes::from("abc")).await;
+    assert_eq!(
+        service(&lost.unwrap_err()),
+        (409, "ConditionalRequestConflict")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let head = s.head(&key()).await.unwrap();
+    assert_eq!(head.etag, "\"mine\"");
+    assert!(head.reservation);
 
-    let (endpoint, seen) = script(vec![conflict.clone(); 3]).await;
-    let s = conditional(endpoint);
-    let body = Bytes::from("abc");
-    let lost = s.put_new_marked(&key(), body).await.unwrap_err();
-    assert_eq!(service(&lost), (409, "ConditionalRequestConflict"));
-    assert_eq!(seen.lock().unwrap().len(), 3);
-
-    let (endpoint, seen) = script(vec![conflict, created]).await;
+    let (endpoint, seen) = script(vec![conflict.clone(), conflict.clone()]).await;
     let s = store(endpoint);
-    let replaced = s.put_if_match(&key(), Bytes::from("abc"), "\"old\"").await;
-    assert_eq!(replaced.unwrap(), "\"new\"");
+    let body = Bytes::from("abc");
+    let marked = s.put_if_match_marked(&key(), body.clone(), "\"old\"").await;
+    assert_eq!(
+        service(&marked.unwrap_err()),
+        (409, "ConditionalRequestConflict")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+    let plain = s.put_if_match(&key(), body, "\"old\"").await;
+    assert_eq!(
+        service(&plain.unwrap_err()),
+        (409, "ConditionalRequestConflict")
+    );
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
 

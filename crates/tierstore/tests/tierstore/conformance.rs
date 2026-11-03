@@ -3,6 +3,7 @@
 //! the loopback S3 service. A check starts from an empty backend.
 
 use bytes::Bytes;
+use futures::StreamExt;
 use tierstore::{Backend, ByteRange, Error};
 
 use crate::support::{body, broken, check_ranges, chunks, keys, page};
@@ -316,4 +317,84 @@ pub async fn a_conditional_delete_takes_a_reservation_only_on_its_tag(backend: &
     backend.delete_if_match("k", &new).await.unwrap();
     assert_eq!(keys(backend).await, Vec::<String>::new());
     backend.put_reservation("k", reservation(3)).await.unwrap();
+}
+
+/// The bytes a streamed read of `range` of `key` gives, joined; the error of the call that opens
+/// the stream or of a chunk of it.
+pub async fn streamed(
+    backend: &dyn Backend,
+    key: &str,
+    range: Option<ByteRange>,
+) -> Result<Bytes, Error> {
+    let mut read = backend.get_stream(key, range).await?;
+    let mut whole = Vec::new();
+    while let Some(chunk) = read.next().await {
+        whole.extend_from_slice(&chunk?);
+    }
+    Ok(Bytes::from(whole))
+}
+
+/// A streamed read gives the bytes of the object, or of the range, in order: the same bytes a get
+/// gives, a range cut at the end of the object, no bytes for an empty range or one that starts at
+/// the end, an error for one that starts past it, and `NotFound` for an absent key.
+pub async fn a_streamed_read_gives_the_bytes_of_its_range(backend: &dyn Backend) {
+    let held = body("0123456789");
+    backend.put("k", held.clone()).await.unwrap();
+    assert_eq!(streamed(backend, "k", None).await.unwrap(), held);
+    for (offset, len, want) in [(0, 10, "0123456789"), (3, 4, "3456"), (8, 100, "89")] {
+        let range = Some(ByteRange::new(offset, len));
+        assert_eq!(streamed(backend, "k", range).await.unwrap(), body(want));
+        assert_eq!(backend.get("k", range).await.unwrap(), body(want));
+    }
+    for (offset, len) in [(10, 5), (4, 0)] {
+        let range = Some(ByteRange::new(offset, len));
+        assert_eq!(streamed(backend, "k", range).await.unwrap(), body(""));
+    }
+    let past = streamed(backend, "k", Some(ByteRange::new(11, 1))).await;
+    assert!(matches!(past, Err(Error::Other(_))), "{past:?}");
+    let absent = streamed(backend, "absent", None).await;
+    assert_eq!(absent, Err(Error::NotFound("absent".to_owned())));
+    backend.put("empty", body("")).await.unwrap();
+    assert_eq!(streamed(backend, "empty", None).await.unwrap(), body(""));
+}
+
+/// A streamed replacement of a reservation replaces it only if it has the tag and the body ended
+/// whole: another tag and a body that fails each leave the reservation as it was; the tag gives
+/// an object that is no reservation, with the tag the replacement returned, whether the length
+/// is told or not; the old tag is then refused, an absent key is `NotFound`, and nothing else is
+/// left in the backend.
+pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Backend) {
+    let old = backend.put_reservation("k", reservation(1)).await.unwrap();
+    let wrong = backend.put_stream_if_match("k", Some(8), chunks(&["abcd", "efgh"]), "not-the-tag");
+    assert_eq!(wrong.await, Err(Error::PreconditionFailed("k".to_owned())));
+    let cut = Error::Other("cut".to_owned());
+    let failing = broken(&["abcd"], &cut);
+    let failed = backend
+        .put_stream_if_match("k", Some(8), failing, &old)
+        .await;
+    assert_eq!(failed, Err(cut));
+    let kept = backend.get_marked("k", None).await.unwrap();
+    assert_eq!(kept, (reservation(1), true));
+    assert_eq!(backend.head("k").await.unwrap().tag, old);
+
+    let told = backend.put_stream_if_match("k", Some(8), chunks(&["abcd", "efgh"]), &old);
+    let new = told.await.unwrap();
+    let head = backend.head("k").await.unwrap();
+    assert_eq!(
+        (head.reservation, head.tag.as_str(), head.size),
+        (false, new.as_str(), 8)
+    );
+    assert_eq!(backend.get("k", None).await.unwrap(), body("abcdefgh"));
+    let untold = backend.put_stream_if_match("k", None, chunks(&["12", "34"]), &new);
+    let newer = untold.await.unwrap();
+    assert_eq!(backend.head("k").await.unwrap().tag, newer);
+    assert_eq!(backend.get("k", None).await.unwrap(), body("1234"));
+
+    let stale = backend
+        .put_stream_if_match("k", Some(1), chunks(&["x"]), &old)
+        .await;
+    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
+    let absent = backend.put_stream_if_match("none", Some(1), chunks(&["x"]), &old);
+    assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
+    assert_eq!(keys(backend).await, ["k"]);
 }
