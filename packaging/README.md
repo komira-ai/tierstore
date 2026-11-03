@@ -810,7 +810,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--hot-bytes` | `hot_store.budget` | the bytes the hot tier is meant to hold: a number, or a string such as `"500GiB"` |
 | `--high-water` | `hot_store.high_water` | percent of the budget above which eviction begins |
 | `--low-water` | `hot_store.low_water` | percent of the budget eviction goes down to |
-| `--critical` | `hot_store.critical` | percent of the budget above which a put waits and a cold read is not copied back |
+| `--critical` | `hot_store.critical` | percent of the budget above which a cold read is not copied back |
 | `--bucket` | `server.bucket` | the name of the bucket served |
 | `--region` | `server.region` | the region of a request's signature |
 | `--access-key-file` | `server.access_key_file` | the full key file |
