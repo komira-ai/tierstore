@@ -241,7 +241,9 @@ impl Books {
                     }
                     self.put(proxy, at, &entry.key, entry.size, mirror);
                     if applied {
-                        self.copied(proxy, at, &entry.key, entry.time, None);
+                        // A mirror's hot tag is the tag its copy has; any other entry names none.
+                        let hot_tag = entry.hot_tag.clone();
+                        self.copied(proxy, at, &entry.key, entry.time, hot_tag);
                     }
                 }
                 JournalOp::Delete => self.forget(&entry.key),
