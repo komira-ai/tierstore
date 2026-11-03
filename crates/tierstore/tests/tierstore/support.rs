@@ -250,6 +250,9 @@ impl Backend for Retagged {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
+        if self.ranged_only && range.is_none() {
+            return Err(Error::Other(format!("a whole read of {key} is refused")));
+        }
         let (bytes, reservation, tag) = self.inner.get_marked(key, range).await?;
         Ok((bytes, reservation, format!("cold-etag:{tag}")))
     }

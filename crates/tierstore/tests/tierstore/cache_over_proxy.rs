@@ -146,6 +146,26 @@ async fn a_ranged_fill_asks_the_cold_tier_for_ranges_only_and_copies_nothing_up(
     }
 }
 
+/// Asserts that a backend made ranged-only refuses a read of a whole object with the mark as it
+/// refuses one without it, and answers the reads of a range, with the tag prefixed as a head
+/// prefixes it: the guard of the fill test above holds for the read the proxy makes of the cold
+/// tier.
+#[tokio::test]
+async fn a_ranged_only_backend_refuses_a_whole_marked_read_and_answers_a_ranged_one() {
+    let inner = Arc::new(MemoryBackend::new());
+    inner.put("k", body("0123456789")).await.unwrap();
+    let backend = Retagged::over(inner).ranged_only();
+
+    let refused = backend.get_marked("k", None).await;
+    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
+    let (bytes, reservation, tag) = backend
+        .get_marked("k", Some(ByteRange::new(2, 3)))
+        .await
+        .unwrap();
+    assert_eq!((bytes, reservation), (body("234"), false));
+    assert_eq!(tag, backend.head("k").await.unwrap().tag);
+}
+
 /// Asserts that a read through a cache of an object only the cold tier holds is kept without the
 /// tiered option too, now that the proxy copies nothing up for the ranged reads of a fill (the
 /// tag of the object does not move while it is read), and that the next read is a hit that
