@@ -24,10 +24,16 @@ use crate::{
 
 #[path = "dir_entries.rs"]
 mod entries;
+#[path = "dir_names.rs"]
+mod names;
 #[path = "dir_sync.rs"]
 mod sync;
+#[path = "dir_tags.rs"]
+mod tags;
 
+use names::{decode, encode};
 use sync::{FsyncDir, SyncDir};
+use tags::{finish, modified_of, sha256};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
@@ -121,10 +127,10 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   the upload. The uploads are files, so an upload outlives a restart of the process, and an
 ///   upload that is never completed or aborted stays until it is aborted.
 ///
-/// - The keys that start with `_entries/` are files of the subdirectory `_entries/` of the root,
-///   which is made by the first write of one and is not listed with the other keys; a listing of
+/// - The keys that start with `_entries/` are files of the subdirectory `.entries/` of the root
+///   (a name no key encodes to, so the key `_entries` keeps its own file), which is made by the first write of one and is not listed with the other keys; a listing of
 ///   the prefix `_entries/` reads that subdirectory only. Their create-only puts, replacements by
-///   the tag and deletes take an exclusive `flock` on `_entries/.lock`, so they are atomic
+///   the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
 ///   between processes over the directory too (see the module `dir_entries`).
 ///
 /// The backend counts on being the only writer of its directory but for other backends over the
@@ -156,37 +162,6 @@ pub struct DirBackend {
     root_synced: AtomicBool,
 }
 
-/// The file name of a key.
-fn encode(key: &str) -> String {
-    let mut name = String::with_capacity(key.len());
-    for (at, byte) in key.bytes().enumerate() {
-        match byte {
-            b'/' => name.push('~'),
-            b'.' if at > 0 => name.push('.'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
-            _ => name.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    name
-}
-
-/// The key a file name stands for, if the name is one [`encode`] makes.
-fn decode(name: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(name.len());
-    let mut rest = name.bytes();
-    while let Some(byte) = rest.next() {
-        match byte {
-            b'~' => bytes.push(b'/'),
-            b'%' => {
-                let pair = [rest.next()?, rest.next()?];
-                bytes.extend(hex::decode(pair).ok()?);
-            }
-            other => bytes.push(other),
-        }
-    }
-    String::from_utf8(bytes).ok()
-}
-
 /// The error of a failed call on the file `path`.
 fn failed(path: &Path, why: &std::io::Error) -> Error {
     let text = format!("{}: {why}", path.display());
@@ -215,28 +190,6 @@ fn classify(
     } else {
         failed(path, why)
     }
-}
-
-/// The SHA-256 of `body`.
-fn sha256(body: &[u8]) -> [u8; TAG_LEN] {
-    finish(Sha256::new().chain_update(body))
-}
-
-/// The digest `hasher` has computed.
-fn finish(hasher: Sha256) -> [u8; TAG_LEN] {
-    let digest = hasher.finalize();
-    let mut tag = [0_u8; TAG_LEN];
-    tag.copy_from_slice(digest.as_ref());
-    tag
-}
-
-/// When the file was last written, in milliseconds since the Unix epoch.
-fn modified_of(meta: &std::fs::Metadata) -> u64 {
-    let since = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
-    since.map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// Whether the byte can be in the id of an upload, which names a directory.

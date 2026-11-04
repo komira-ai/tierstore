@@ -106,7 +106,8 @@ impl EntryReconciler {
         let budget = self.config.base.hot_budget as f64;
         let high = (budget * self.config.base.high_water) as u64;
         let low = (budget * self.config.base.low_water) as u64;
-        if bytes <= high {
+        // A cycle opens above the high water and stays open, across steps, until the low water.
+        if bytes <= high && !self.books.evicting {
             return;
         }
         let parallel = self.config.base.parallel.max(1);
@@ -148,7 +149,8 @@ impl EntryReconciler {
             }
         }
         self.books.bytes = Some(bytes);
-        report.evicting = bytes > low;
+        self.books.evicting = bytes > low;
+        report.evicting = self.books.evicting;
     }
 
     /// Evicts the hot object of `key` by the rules of the module.

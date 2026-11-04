@@ -1,6 +1,8 @@
 //! The deletes of a proxy whose format is active (`WriteMode::Entries`): a delete is made on the
-//! journal entry of its key, and the cold tier's object is deleted at once, whatever the entry
-//! says.
+//! journal entry of its key, and the cold tier's object is deleted once the delete has acquired or
+//! amended that entry. When another operation holds or has sealed the entry, the delete first
+//! waits for it (see below), and until then neither tier is touched; if the wait runs out it is
+//! answered [`Error::Unavailable`] with both tiers untouched.
 //!
 //! A delete, in order:
 //!
@@ -13,16 +15,18 @@
 //!      object to the cold tier: the delete amends it, and waits for the release (below);
 //!    - `(DEL, PENDING)`, a delete that was handed over (this is a retry of one): the delete
 //!      claims it, and waits for the release;
-//!    - `(CB, SEALED)`, a copy-back the reconciler is landing in the hot tier: the delete changes
-//!      nothing yet and waits, as [`DeleteWait`] says, until the entry is gone or is another
-//!      operation's (the reconciler removes it as soon as the copy ends), and then takes the entry
-//!      again; a copy that lands after the delete removed the object would bring the key back;
-//!    - anything else (a put or a delete of a client in flight, any other sealed entry): the delete
-//!      is refused with [`Error::Unavailable`], and changes nothing.
+//!    - any other entry that is held or sealed (a put or a delete of a client in flight, a put
+//!      whose owner is not the reconciler, a sealed put, delete, copy-back or eviction): the delete
+//!      changes nothing yet and waits, as [`DeleteWait`] says, until the entry is gone or is no
+//!      longer held or sealed (the reconciler removes a sealed entry as soon as its work ends), and
+//!      then takes the entry again; a copy that lands after the delete removed the object would
+//!      bring the key back;
+//!    - an entry in a state this release does not know: the delete is refused with
+//!      [`Error::Unavailable`], and changes nothing.
 //!
-//!    It looks again if the entry was gone in between or the copy-back was released, at most
+//!    It looks again if the entry was gone in between or the entry was released, at most
 //!    [`ProxyConfig::entry_rounds`](super::ProxyConfig::entry_rounds) times. A delete that waits
-//!    for the copy-back to be released and then meets another one is not given the wait over
+//!    for an entry to be released and then meets another one is not given the wait over
 //!    again: it has what is left of [`DeleteWait::wait`], and at the end is answered
 //!    [`Error::Unavailable`] with nothing deleted.
 //! 3. The cold tier's object is deleted, then the hot tier's, each once and cut at the margin of
@@ -90,6 +94,12 @@ struct Held {
     step: Option<Step>,
 }
 
+/// Whether an operation of the entry's owner is in flight: the entry is held or sealed, whatever
+/// the operation. A delete that meets one waits for its release.
+fn in_flight(entry: &Entry) -> bool {
+    matches!(entry.st, EntryState::Held | EntryState::Sealed)
+}
+
 /// A missing object is as good as a deleted one.
 fn ignore_missing(answer: Result<(), Error>) -> Result<(), Error> {
     match answer {
@@ -133,15 +143,13 @@ impl Inner {
             let Some(found) = self.entries.read(key).await? else {
                 continue;
             };
-            if (found.entry.op, found.entry.st) == (EntryOp::Cb, EntryState::Sealed) {
-                let sealed =
-                    |entry: &Entry| (entry.op, entry.st) == (EntryOp::Cb, EntryState::Sealed);
-                let reason = "a copy-back is sealed and not released yet";
-                self.wait_while(key, &mut waited, sealed, reason).await?;
-                continue;
-            }
             let Some(step) = self.step_for(&found.entry).await? else {
-                return Err(retry(key, "a put, delete or copy is in flight"));
+                if !in_flight(&found.entry) {
+                    return Err(retry(key, "the entry is in a state a delete cannot take"));
+                }
+                let reason = "an operation on the key is in flight and not released yet";
+                self.wait_while(key, &mut waited, in_flight, reason).await?;
+                continue;
             };
             if let Outcome::Done(seen) = self.entries.advance(&found, step).await? {
                 return Ok(Held {

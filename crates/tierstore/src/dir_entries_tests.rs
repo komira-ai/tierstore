@@ -49,7 +49,7 @@ async fn keys(backend: &DirBackend, prefix: &str) -> Vec<String> {
     listed.into_iter().map(|object| object.key).collect()
 }
 
-/// Asserts that an object whose key starts with `_entries/` is a file of the subdirectory `_entries`
+/// Asserts that an object whose key starts with `_entries/` is a file of the subdirectory `.entries`
 /// of the root under the encoding of the rest of the key, none is made in the root, the subdirectory
 /// holds the lock file besides, and the object reads back by head, get and a streamed read.
 #[tokio::test]
@@ -57,7 +57,7 @@ async fn an_entry_key_is_a_file_of_the_entries_subdirectory() {
     let (dir, backend) = backend();
     backend.put("_entries/a b", body("one")).await.unwrap();
 
-    assert_eq!(names(dir.path()), [".uploads", "_entries"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
     let inside = dir.path().join(DIR);
     assert_eq!(names(&inside), [".lock", "a%20b"]);
     assert_eq!(backend.head("_entries/a b").await.unwrap().size, 3);
@@ -83,7 +83,7 @@ async fn the_entries_subdirectory_is_made_by_the_first_write_of_an_entry() {
     assert_eq!(names(dir.path()), [".uploads"]);
 
     backend.put("_entries/e", body("x")).await.unwrap();
-    assert_eq!(names(dir.path()), [".uploads", "_entries"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
 }
 
 /// Asserts that a listing gives the entry keys for a prefix they can match and no other, from the
@@ -228,7 +228,7 @@ async fn streamed_and_multipart_puts_of_entry_keys_land_in_the_subdirectory() {
     );
 }
 
-/// Asserts that a write of an entry fails, and does not panic, where the name `_entries` is a
+/// Asserts that a write of an entry fails, and does not panic, where the name `.entries` is a
 /// regular file, so the lock file cannot be opened, and that it leaves no temporary file behind,
 /// whether it is a put, a reservation or a streamed put.
 #[tokio::test]
@@ -241,7 +241,7 @@ async fn an_entry_write_fails_where_a_file_is_named_entries() {
     assert!(matches!(reserved, Err(Error::Other(_))));
     let streamed = backend.put_stream("_entries/e", None, part("x")).await;
     assert!(matches!(streamed, Err(Error::Other(_))));
-    assert_eq!(names(dir.path()), [".uploads", "_entries"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
 }
 
 /// Asserts that a delete of an entry fails where the root is gone, so the subdirectory cannot be
@@ -380,6 +380,84 @@ async fn keys_outside_the_entries_prefix_take_no_lock() {
         .await
         .unwrap();
     backend.delete("plain").await.unwrap();
-    assert_eq!(names(dir.path()), [".uploads", "_entries"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
     drop(held);
+}
+
+/// Writes the plain key `_entries` and the entry key `_entries/x` to a fresh directory, the
+/// plain one first when `plain_first` is true, and asserts that each reads back its own body by
+/// get and head, that a conditional replacement and a conditional delete of the entry leave the
+/// plain object alone, and that the listings of `""`, `"_entries"` and `"_entries/"` are exact.
+async fn coexist(plain_first: bool) {
+    let (dir, backend) = backend();
+    if plain_first {
+        backend.put("_entries", body("plain")).await.unwrap();
+    }
+    let tag = backend
+        .put_tagged("_entries/x", body("entry"))
+        .await
+        .unwrap();
+    if !plain_first {
+        backend.put("_entries", body("plain")).await.unwrap();
+    }
+
+    assert_eq!(backend.get("_entries", None).await.unwrap(), body("plain"));
+    assert_eq!(backend.head("_entries").await.unwrap().size, 5);
+    assert_eq!(
+        backend.get("_entries/x", None).await.unwrap(),
+        body("entry")
+    );
+    assert_eq!(keys(&backend, "").await, ["_entries", "_entries/x"]);
+    assert_eq!(keys(&backend, "_entries").await, ["_entries", "_entries/x"]);
+    assert_eq!(keys(&backend, "_entries/").await, ["_entries/x"]);
+    assert!(dir.path().join(DIR).is_dir());
+    assert!(dir.path().join("_entries").is_file());
+
+    let tag = backend
+        .put_if_match("_entries/x", body("newer"), &tag)
+        .await
+        .unwrap();
+    assert_eq!(backend.get("_entries", None).await.unwrap(), body("plain"));
+    backend.delete_if_match("_entries/x", &tag).await.unwrap();
+    assert_eq!(keys(&backend, "").await, ["_entries"]);
+    assert_eq!(backend.get("_entries", None).await.unwrap(), body("plain"));
+    backend.delete("_entries").await.unwrap();
+    assert!(keys(&backend, "").await.is_empty());
+}
+
+/// Asserts that an ordinary object at the bare key `_entries`, which is outside the reserved
+/// prefix, and an object under `_entries/` are both readable and both listed once, whichever of
+/// them is written first, because the subdirectory of the entries is not the file of that key.
+#[tokio::test]
+async fn a_plain_key_named_entries_coexists_with_entry_keys_in_either_write_order() {
+    coexist(true).await;
+    coexist(false).await;
+}
+
+/// Asserts that no client key has the name of the subdirectory: keys that begin with a dot, among
+/// them `.entries` and `.entries/.lock` (the lock file's own name), are ordinary objects with
+/// their own files, entry writes work beside them, and the listings are exact.
+#[tokio::test]
+async fn keys_that_look_like_the_entries_subdirectory_are_ordinary_objects() {
+    let (dir, backend) = backend();
+    backend.put(".entries", body("dot")).await.unwrap();
+    backend.put(".entries/.lock", body("lock")).await.unwrap();
+    backend.put("_entries/.lock", body("rest")).await.unwrap();
+    backend.put("_entries/y", body("entry")).await.unwrap();
+
+    assert_eq!(backend.get(".entries", None).await.unwrap(), body("dot"));
+    assert_eq!(
+        backend.get(".entries/.lock", None).await.unwrap(),
+        body("lock")
+    );
+    assert_eq!(
+        backend.get("_entries/.lock", None).await.unwrap(),
+        body("rest")
+    );
+    assert_eq!(
+        keys(&backend, "").await,
+        [".entries", ".entries/.lock", "_entries/.lock", "_entries/y"]
+    );
+    assert!(dir.path().join(DIR).is_dir());
+    assert_eq!(names(&dir.path().join(DIR)), ["%2Elock", ".lock", "y"]);
 }

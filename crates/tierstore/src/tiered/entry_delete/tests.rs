@@ -2,8 +2,9 @@
 //! delete do, what it leaves in the entry, and what it answers when a call or the registration
 //! fails.
 //!
-//! No test waits for a time: a delete that must wait for a release is in `wait_tests`, and a test
-//! here that would wait fails by its assertions, on the paused clock of the runtime.
+//! No test asserts a time: a delete that waits for a release is in `wait_tests`; a delete here that
+//! meets an entry held by a client waits out its deadline on the paused clock of the runtime and is
+//! answered `Unavailable`.
 
 use std::time::Duration;
 
@@ -154,20 +155,19 @@ async fn a_delete_that_cannot_read_the_lease_is_answered_with_the_failure() {
     assert_eq!(rig.shape("k").await, held(EntryOp::Put, "other"));
 }
 
-/// Asserts that a delete that finds a sealed entry that is not a copy-back (an eviction's) is
-/// answered `Unavailable` at once and changes nothing.
+/// Asserts that a delete that finds an entry in a state this release does not know (a newer
+/// writer's) is answered `Unavailable` at once and changes nothing.
 #[tokio::test(start_paused = true)]
-async fn a_delete_is_refused_while_the_entry_is_sealed() {
+async fn a_delete_is_refused_while_the_entry_is_in_a_state_this_release_does_not_know() {
     let rig = Rig::active().await;
     seed_both(&rig, "k").await;
-    rig.other().create("k", Take::Evict).await.unwrap();
+    let text =
+        r#"{"v":2,"key":"k","op":"PUT","st":"FROZEN","owner":null,"nonce":"n","created_ms":9}"#;
+    rig.hot_mem.put(&entry_key("k"), body(text)).await.unwrap();
     let answer = rig.proxy.delete("k").await;
     assert!(is_unavailable(&answer), "{answer:?}");
-    assert_eq!(
-        rig.shape("k").await,
-        Some((EntryOp::Evict, EntryState::Sealed, None))
-    );
     assert!(rig.cold_has("k").await);
+    assert!(rig.hot_has("k").await);
 }
 
 /// Asserts that a delete that finds a delete held by another client is answered `Unavailable` and

@@ -342,7 +342,7 @@ fn synced(seen: &Log) -> Vec<PathBuf> {
 #[tokio::test]
 async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_once() {
     let (dir, backend, seen) = recorded(None, false);
-    let inside = dir.path().join("_entries");
+    let inside = dir.path().join(".entries");
 
     backend.put("_entries/a", body("one")).await.unwrap();
     assert_eq!(synced(&seen), [dir.path().to_owned(), inside.clone()]);
@@ -371,7 +371,7 @@ async fn an_entry_put_fails_when_the_sync_of_the_new_subdirectory_fails() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, [".uploads", "_entries"]);
+    assert_eq!(names, [".entries", ".uploads"]);
 }
 
 /// Asserts that after a failed sync of the root, which leaves the subdirectory made, the retry of
@@ -379,7 +379,7 @@ async fn an_entry_put_fails_when_the_sync_of_the_new_subdirectory_fails() {
 #[tokio::test]
 async fn a_retry_after_a_failed_root_sync_syncs_the_root_again() {
     let (dir, backend, seen, switch) = switched(None, true, false);
-    let inside = dir.path().join("_entries");
+    let inside = dir.path().join(".entries");
     let refused = backend.put("_entries/a", body("one")).await;
     assert!(matches!(refused, Err(Error::Other(_))));
     switch.store(false, Ordering::SeqCst);
@@ -396,7 +396,7 @@ async fn a_retry_after_a_failed_root_sync_syncs_the_root_again() {
 #[tokio::test]
 async fn a_writer_that_did_not_make_the_subdirectory_syncs_the_root_first() {
     let (dir, backend, seen) = recorded(None, false);
-    let inside = dir.path().join("_entries");
+    let inside = dir.path().join(".entries");
     std::fs::create_dir(&inside).unwrap();
 
     backend.put("_entries/a", body("one")).await.unwrap();
