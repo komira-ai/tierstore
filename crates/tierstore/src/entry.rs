@@ -46,9 +46,11 @@
 //!
 //! # Nonce
 //!
-//! The nonce is `<actor id>.<counter>`, the counter being per [`Entries`]. It is unique only if an
-//! actor id is never used with a counter that starts again: an actor that makes a new [`Entries`]
-//! takes a fresh id, or shares the counter of the old one.
+//! The nonce is `<actor id>.<boot>.<counter>`, the counter being per [`Entries`]. The actor id is
+//! the configured one and is reused when a process restarts, so it cannot make the nonce unique
+//! by itself: each [`Entries`] takes a `boot` of its own (process id, the clock at its creation
+//! and a count of the [`Entries`] made in the process), so a counter that starts again under a
+//! known actor id still writes nonces no earlier instance wrote.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -306,11 +308,12 @@ fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
 
 /// The store calls on the entries of one actor: a proxy or a reconciler, named by `me`.
 ///
-/// `me` is unique to the process (a proxy id carries its boot), which is what makes the nonces it
-/// writes unique among all writers.
+/// `me` may be the same in every process of the actor, so the nonces it writes are made unique by
+/// `boot`, which differs for every [`Entries`] ever made.
 pub struct Entries {
     hot: Arc<dyn Backend>,
     me: String,
+    boot: String,
     clock: Arc<dyn Clock>,
     writes: AtomicU64,
 }
@@ -320,18 +323,38 @@ impl Entries {
     /// `created_ms`.
     #[must_use]
     pub fn new(hot: Arc<dyn Backend>, me: impl Into<String>, clock: Arc<dyn Clock>) -> Self {
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let boot = format!(
+            "{:x}-{:x}-{:x}",
+            std::process::id(),
+            clock.now(),
+            MADE.fetch_add(1, Ordering::SeqCst)
+        );
+        Self::with_boot(hot, me, clock, boot)
+    }
+
+    /// As [`Entries::new`] with the `boot` named, for a test that needs the nonces to be known.
+    #[must_use]
+    pub(crate) fn with_boot(
+        hot: Arc<dyn Backend>,
+        me: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        boot: impl Into<String>,
+    ) -> Self {
         Self {
             hot,
             me: me.into(),
+            boot: boot.into(),
             clock,
             writes: AtomicU64::new(0),
         }
     }
 
-    /// A nonce no other write has: this actor's id and the count of its writes.
+    /// A nonce no other write has: this actor's id, this instance's boot and the count of its
+    /// writes.
     fn nonce(&self) -> String {
         let count = self.writes.fetch_add(1, Ordering::SeqCst);
-        format!("{}.{count}", self.me)
+        format!("{}.{}.{count}", self.me, self.boot)
     }
 
     /// Reads the entry of `key`: its body and tag, or `None` if there is none.

@@ -39,7 +39,7 @@ impl Rig {
 
     fn actor(&self, id: &str) -> Actor {
         let gated = Arc::new(GateBackend::new(self.store.clone()));
-        let entries = Entries::new(gated.clone(), id, self.clock.clone());
+        let entries = Entries::with_boot(gated.clone(), id, self.clock.clone(), "b");
         Actor { entries, gated }
     }
 }
@@ -362,7 +362,7 @@ async fn each_take_creates_the_entry_of_its_shape() {
             op,
             st,
             owner: owner.map(str::to_owned),
-            nonce: "p1.0".to_owned(),
+            nonce: "p1.b.0".to_owned(),
             created_ms: 1234,
         };
         assert_eq!(seen.entry, want, "{how:?}");
@@ -471,7 +471,7 @@ async fn a_create_whose_reply_was_lost_after_it_landed_is_taken() {
     until_parked(&gate, &mut creating).await;
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let seen = taken(creating.await.unwrap());
-    assert_eq!(seen.entry.nonce, "a.0");
+    assert_eq!(seen.entry.nonce, "a.b.0");
     assert_eq!(read(&a, "k").await, seen);
 }
 
@@ -538,7 +538,7 @@ async fn a_put_goes_from_held_to_pending_to_held_by_the_reconciler_to_sealed_to_
     let sealed = step(&recon, &copying, Step::Seal).await;
     let all = [&held, &pending, &copying, &sealed];
     let nonces: Vec<&str> = all.iter().map(|seen| seen.entry.nonce.as_str()).collect();
-    assert_eq!(nonces, ["c1.0", "c1.1", "r1.0", "r1.1"]);
+    assert_eq!(nonces, ["c1.b.0", "c1.b.1", "r1.b.0", "r1.b.1"]);
     for seen in all {
         assert_eq!(seen.entry.created_ms, 100);
     }
@@ -739,7 +739,7 @@ async fn a_replace_whose_reply_was_lost_after_it_landed_is_done() {
     until_parked(&gate, &mut landing).await;
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let seen = done(landing.await.unwrap());
-    assert_eq!(seen.entry.nonce, "a.1");
+    assert_eq!(seen.entry.nonce, "a.b.1");
     assert_eq!(seen.entry.st, EntryState::Pending);
     assert_eq!(read(&a, "k").await, seen);
 }
@@ -944,4 +944,21 @@ async fn a_delete_that_failed_ambiguously_and_cannot_read_back_gives_its_error()
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let error = releasing.await.unwrap_err();
     assert_eq!(error, Error::Unavailable("reply lost".to_owned()));
+}
+
+/// An actor that restarts under the id it had writes a nonce no earlier instance wrote, so a create
+/// whose reply was lost does not take the entry of the earlier process for its own write. Without
+/// a boot in the nonce both instances write `p1.0` and the second one's create answers `Taken`.
+#[tokio::test]
+async fn a_restarted_actor_does_not_mistake_the_entry_of_its_earlier_run_for_its_own() {
+    let rig = Rig::new();
+    let before = Entries::new(rig.store.clone(), "p1", rig.clock.clone());
+    taken(before.create("k", Take::Put).await.unwrap());
+    let after = Entries::new(rig.store.clone(), "p1", rig.clock.clone());
+    rig.store
+        .fail_next_with(Op::Put, Error::Unavailable("reply lost".to_owned()));
+    let created = after.create("k", Take::Put).await.unwrap();
+    assert!(matches!(created, Created::Exists));
+    let stored = after.read("k").await.unwrap().unwrap();
+    assert!(stored.entry.nonce.starts_with("p1."));
 }
