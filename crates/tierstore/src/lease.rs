@@ -141,7 +141,8 @@ impl Lease {
     /// Whether the lease is held and at least the margin is left of the time it is valid.
     pub(crate) fn margin_ok(&self) -> bool {
         let until = self.shared.valid_until.load(Ordering::SeqCst);
-        until != 0 && until.saturating_sub(self.shared.mono.now()) >= self.shared.margin
+        let now = self.shared.mono.now();
+        until != 0 && now < until && until - now >= self.shared.margin
     }
 
     /// Runs `work`, and while it runs renews the lease every `renew` on a timer of its own, as
