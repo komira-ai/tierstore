@@ -95,7 +95,6 @@ fn the_macos_system_trees_are_refused() {
         "/usr/share/x",
         "/usr/local/bin/x",
         "/usr/local/etc/updater.d",
-        "/usr/local/kbf/state",
         "/usr/local/lib/x",
         "/usr/local/libexec/x",
         "/usr/local/tierstore",

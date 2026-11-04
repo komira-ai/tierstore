@@ -170,7 +170,7 @@ fn a_table_name_outside_the_alphabet_is_refused_before_any_call() {
 fn a_table_name_inside_the_alphabet_is_passed_on() {
     let runner = FakeRunner::replying(vec![exit(0, "", ""), exit(0, "", ""), exit(0, "", "")]);
     let longest = "t".repeat(64);
-    for name in ["_a1", "kbf_forward_tierstore", longest.as_str()] {
+    for name in ["_a1", "tierstore_forward", longest.as_str()] {
         assert!(tool(&runner).list_table(name).is_ok());
     }
     assert_eq!(runner.calls().len(), 3);

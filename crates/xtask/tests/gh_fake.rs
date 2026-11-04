@@ -439,6 +439,11 @@ fn a_verification_appends_its_arguments_to_the_record_file_when_one_is_named() {
     }
     assert_eq!(std::fs::read_to_string(&path).expect("the record"), want);
 
+    let unwritable = dir("record-unwritable");
+    let expect = format!("record={}\n", unwritable.display());
+    let o = verify_expecting("record-dir", BUNDLED, &expect, &first, &[]);
+    refused_for(&o, "gh-fake: cannot write the record file");
+
     let o = verify_expecting("record-none", BUNDLED, "", &first, &[]);
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
     let none = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("gh-fake-record-none");

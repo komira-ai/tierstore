@@ -18,7 +18,7 @@ fn cutover_swaps_the_rule_in_one_transaction_then_records_it() {
     assert!(done.report.reversible);
     assert_eq!(
         fake.changes()[mark..],
-        ["nft.apply kbf_forward_tierstore", "state.save"]
+        ["nft.apply tierstore_forward", "state.save"]
     );
     assert_eq!(
         fake.applied().last().unwrap(),
@@ -164,10 +164,10 @@ fn in_restart_mode_the_redirect_leaves_the_old_instance_before_it_stops() {
     assert_eq!(
         fake.changes()[mark..],
         [
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service",
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
             "state.save"
         ]
     );
@@ -199,11 +199,11 @@ fn a_failed_restart_brings_the_old_instance_back() {
     assert_eq!(
         fake.changes()[mark..],
         [
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service",
-            "nft.apply kbf_forward_tierstore",
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
+            "nft.apply tierstore_forward",
             "units.stop tierstore@9302.service",
             "units.start tierstore@9301.service"
         ]
