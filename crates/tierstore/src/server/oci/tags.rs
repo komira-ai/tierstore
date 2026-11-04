@@ -210,7 +210,7 @@ impl OciFront {
             Err(Error::NotFound(_)) => current(backend, &prefix).await,
             other => other,
         };
-        found?.ok_or_else(|| Error::NotFound(prefix))
+        found?.ok_or(Error::NotFound(prefix))
     }
 
     /// `GET` or `HEAD` of `/v2/<name>/tags/list`.

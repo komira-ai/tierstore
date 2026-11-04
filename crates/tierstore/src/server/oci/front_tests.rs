@@ -250,7 +250,7 @@ async fn an_object_that_is_not_a_manifest_is_refused() {
 }
 
 /// Asserts a tag that no push made is 404 `MANIFEST_UNKNOWN` naming the tag, for GET and HEAD,
-/// and that the store is asked for the tag only.
+/// and that the store is asked only for the versions of the tag, by listing, and reads nothing.
 #[tokio::test]
 async fn a_tag_that_nobody_pushed_is_404() {
     let rig = Rig::new();
@@ -259,7 +259,9 @@ async fn a_tag_that_nobody_pushed_is_404() {
         let (_, detail) = answer.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
         assert_eq!(detail["tag"], "latest");
     }
-    assert_eq!(rig.faulty.calls(Op::Get), 2);
+    assert_eq!(rig.faulty.calls(Op::Get), 0);
+    let listed = vec!["oci/tags/a~b/latest/".to_owned(); 2];
+    assert_eq!(rig.faulty.listed_prefixes(), listed);
     assert_eq!(rig.metrics.requests("manifest", "not_found"), 2);
 }
 
