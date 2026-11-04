@@ -209,6 +209,7 @@ mod config_combined;
 mod config_interface;
 mod config_policy;
 mod config_syntax;
+mod config_tuning;
 mod config_units;
 mod door;
 mod drain;
