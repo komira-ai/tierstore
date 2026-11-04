@@ -73,7 +73,9 @@ pub struct ProxyConfig {
     /// The age of the usage object past which it is ignored, as if it were missing.
     pub usage_stale_after: Duration,
     /// How long the format object (`_tiering/format`) that was read is used before it is read
-    /// again: the most time between the operator pausing writes and a proxy refusing them.
+    /// again. When the reads succeed, this is the most time between the operator pausing writes
+    /// and a proxy refusing them; a read that fails keeps the last answer, so writes can go on
+    /// longer.
     pub format_refresh: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
