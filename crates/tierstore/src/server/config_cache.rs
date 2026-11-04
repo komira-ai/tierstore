@@ -58,7 +58,6 @@ use std::time::Duration;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
     ConfigError, Dur, OciFlags, OciTable, PerRun, ServerTable, Size, TierParts, TierTable,
     duration, front_of, invalid, oci as oci_of, parse_size, refuse, refuse_hot_keys, require, tier,
@@ -67,6 +66,7 @@ use super::config::{
 use super::config_policy::{Policy, check_policies, require_keeping};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
+use super::oci_setup::DEFAULT_OCI_PREFIX;
 
 /// The only layout of the cache directory.
 const LAYOUT: &str = "digest-v1";

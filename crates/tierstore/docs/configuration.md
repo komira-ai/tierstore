@@ -253,6 +253,7 @@ connection_lifetime = "1h"
 | `oci.prefix` | `--oci-prefix` | string, `oci/` | the key prefix, ending in `/`; not inside `_journal/` or `_tiering/` |
 | `oci.max_connections` | `--oci-max-connections` | count, 64 (at least 1) | connections open at once |
 | `oci.connection_lifetime` | `--oci-connection-lifetime` | duration, `1h` | the longest a connection lives |
+| `oci.require_auth` | `--oci-require-auth` | boolean, `false` | on main, not in v0.0.41: clients must log in with an access key of the server (HTTP Basic, the id as user name and the secret as password); without it the front is anonymous. Refused with plain HTTP off loopback, since the secret would travel in the clear |
 
 On main, not in v0.0.41, `listen` may be a list, here the wildcard of both families:
 
@@ -261,7 +262,7 @@ On main, not in v0.0.41, `listen` may be a list, here the wildcard of both famil
 listen = ["0.0.0.0:5000", "[::]:5000"]
 ```
 
-The front reads objects at `<prefix>blobs/sha256/<hex>` and serves GET and HEAD of `/v2/`, of manifests by digest and of blobs by digest. It is anonymous: anyone who can connect can read any digest under the prefix, so the network decides who may. Tags are not served. The certificate and key are read once; a new certificate takes a restart.
+The front reads objects at `<prefix>blobs/sha256/<hex>` and serves GET and HEAD of `/v2/`, of manifests by digest and of blobs by digest. It is anonymous unless `oci.require_auth` is true: anyone who can connect can read any digest under the prefix, so the network decides who may. With `oci.require_auth` a request without a valid login is answered 401 with `WWW-Authenticate: Basic realm="tierstore"`; the full key, a read-only key and a scoped key with a read prefix over `<prefix>blobs/sha256/` may pull, and the full key and a scoped key with a write prefix over it may push (the front serves no upload yet, so a push is answered 405 for a key that may make it and 403 for one that may not). Basic was chosen over the token flow because the front then needs no token service, signing key or clock: `podman login` and `docker login` send the id and secret with each request, which is why TLS is needed off loopback. Tags are not served. The certificate and key are read once; a new certificate takes a restart.
 
 ## `[[policy]]`
 

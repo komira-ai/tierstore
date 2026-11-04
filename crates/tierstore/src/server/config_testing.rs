@@ -70,6 +70,7 @@ tls_key_file        = "/etc/tierstore/oci.key"
 prefix              = "images/"
 max_connections     = 16
 connection_lifetime = "30m"
+require_auth        = true
 "#;
 
 /// The flags that say what `GOLDEN` says.
@@ -121,6 +122,7 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--oci-prefix=images/",
         "--oci-max-connections=16",
         "--oci-connection-lifetime=30m",
+        "--oci-require-auth",
     ]
 }
 

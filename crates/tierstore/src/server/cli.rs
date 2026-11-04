@@ -40,7 +40,8 @@
 //!
 //! `--oci-listen` adds a fourth thing: a read-only OCI distribution front (see
 //! [`oci`](super::oci)), served from the same proxy, so that podman pulls an image by digest from
-//! the tiers. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS (the certificate must carry an
+//! the tiers; with `--oci-require-auth` it asks each client for an access key (HTTP Basic), and
+//! plain HTTP off loopback is then refused. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS (the certificate must carry an
 //! IP subjectAltName for the address and be valid now, and the key file must not be readable by
 //! every user; the start checks). With neither it is plain HTTP, at any address; off loopback
 //! the start prints one warning line on stderr, and a certificate is advised. One of the two
@@ -106,7 +107,7 @@ use crate::{
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
 use super::cache_cli::serve_cache_until_signalled;
 use super::combined_cli::serve_combined_until_signalled;
-use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config::{Settings, keys_for_flags};
 use super::config_print::render;
 use super::drain::late_of;
 #[cfg(test)]
@@ -114,12 +115,11 @@ use super::front::read_key;
 use super::front::{InvalidFlags, server_config};
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
-use super::listen::{bind_all, has_duplicate, joined, local_addrs};
+use super::listen::{bind_all, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
 use super::lock::{self, LockFile, check_lock_path};
-use super::oci::{
-    self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
-};
+use super::oci::{OciFront, OciListener, OciMode};
+use super::oci_setup::{OciSetup, oci_setup, oci_setup_of};
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
@@ -428,7 +428,7 @@ pub struct Cli {
     /// Serves a read-only OCI distribution front at this address, from the same tiers (see the
     /// [`oci`](super::oci) docs): `GET` and `HEAD` of `/v2/`, of `/v2/<name>/manifests/<digest>`
     /// and of `/v2/<name>/blobs/<digest>`, so that podman and other registry clients pull an
-    /// image by digest. Anonymous: no token is ever asked for. Objects are read at
+    /// image by digest. Anonymous unless `--oci-require-auth` is given. Objects are read at
     /// `<--oci-prefix>blobs/sha256/<hex>`. With `--oci-tls-cert` and `--oci-tls-key` it is
     /// HTTPS, and clients dial an IP address, so the certificate must carry an IP subjectAltName
     /// for this address (any IP, if it is unspecified), which the start checks. With neither it
@@ -465,6 +465,13 @@ pub struct Cli {
     /// timeouts (a minute, and `--body-idle-timeout`).
     #[arg(long, requires = "oci_listen", value_parser = parse_duration)]
     pub oci_connection_lifetime: Option<Duration>,
+    /// Asks each client of the OCI front for an access key of this server (HTTP Basic: the id
+    /// as the user name, the secret as the password), and answers 401 without one. A key that
+    /// reads (the read-only key, the full key, a scoped key with a read prefix over the front's
+    /// objects) may pull, and one that writes (the full key, a scoped key with such a write
+    /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
+    #[arg(long, requires = "oci_listen")]
+    pub oci_require_auth: bool,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -535,17 +542,6 @@ pub(super) struct Built {
     pub(super) hot: Arc<dyn Backend>,
     pub(super) cold: Arc<dyn Backend>,
     pub(super) oci: Option<OciSetup>,
-}
-
-/// The OCI front, as far as the flags and files go: the proxy it reads is not open yet.
-pub(super) struct OciSetup {
-    /// The addresses, which are at least one.
-    listen: Vec<SocketAddr>,
-    /// `None` serves plain HTTP.
-    acceptor: Option<tokio_rustls::TlsAcceptor>,
-    prefix: OciPrefix,
-    pub(super) metrics: Arc<OciMetrics>,
-    limits: OciLimits,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -698,100 +694,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         cold,
         oci,
     })
-}
-
-/// The default of `--oci-prefix`.
-pub(super) const DEFAULT_OCI_PREFIX: &str = "oci/";
-
-/// The default of `--oci-max-connections`.
-const DEFAULT_OCI_CONNECTIONS: u32 = 64;
-
-/// The default of `--oci-connection-lifetime`.
-const DEFAULT_OCI_LIFETIME: Duration = Duration::from_secs(3600);
-
-/// How long a client has to finish the TLS handshake with the OCI front.
-const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
-
-/// Checks the OCI front's flags and files, and makes its TLS, if `--oci-listen` is given. A prefix,
-/// certificate or key that cannot work is an `InvalidFlags` (exit 2, as a restart cannot mend it);
-/// a file that cannot be read is exit 1. `warn` says whether the warning for a plain-text listener
-/// is printed; `--check-config` leaves it out, as it prints nothing when the file is fine.
-fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciSetup>, Error> {
-    let flags = OciFlags {
-        listen: cli.oci_listen.clone(),
-        tls_cert: cli.oci_tls_cert.clone(),
-        tls_key: cli.oci_tls_key.clone(),
-        prefix: cli.oci_prefix.clone(),
-        max_connections: cli.oci_max_connections,
-        connection_lifetime: cli.oci_connection_lifetime,
-    };
-    oci_setup_of(&flags, server, warn)
-}
-
-/// [`oci_setup`] for the values the flags or the `[oci]` table of a file make: the one place the
-/// front's rules are applied, for a storage node and for a build node.
-pub(super) fn oci_setup_of(
-    flags: &OciFlags,
-    server: &ServerConfig,
-    warn: bool,
-) -> Result<Option<OciSetup>, Error> {
-    if flags.listen.is_empty() {
-        return Ok(None);
-    }
-    let listen = flags.listen.clone();
-    if has_duplicate(&listen) {
-        return Err(InvalidFlags("--oci-listen is given the same address twice".into()).into());
-    }
-    let refuse = |why: OciError| -> Error {
-        if why.is_invalid_flags() {
-            InvalidFlags(why.to_string()).into()
-        } else {
-            why.into()
-        }
-    };
-    let lifetime = flags.connection_lifetime.unwrap_or(DEFAULT_OCI_LIFETIME);
-    if lifetime.is_zero() {
-        return Err(
-            InvalidFlags("--oci-connection-lifetime must be longer than zero".into()).into(),
-        );
-    }
-    let prefix = flags.prefix.as_deref().unwrap_or(DEFAULT_OCI_PREFIX);
-    let prefix = OciPrefix::new(prefix).map_err(refuse)?;
-    let acceptor = match (&flags.tls_cert, &flags.tls_key) {
-        (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refuse)?),
-        (None, None) => {
-            let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
-            for warning in warnings.filter(|_| warn) {
-                eprintln!("{warning}");
-            }
-            None
-        }
-        _ => {
-            let why = "--oci-tls-cert and --oci-tls-key go together: give both, or neither";
-            return Err(refuse(OciError::Missing(why.to_owned())));
-        }
-    };
-    let mode = if acceptor.is_some() {
-        OciMode::Https
-    } else {
-        OciMode::Http
-    };
-    let connections = flags.max_connections.unwrap_or(DEFAULT_OCI_CONNECTIONS);
-    let limits = OciLimits {
-        max_connections: connections as usize,
-        handshake_timeout: OCI_HANDSHAKE,
-        header_timeout: server.header_timeout,
-        write_idle: server.body_idle_timeout,
-        lifetime,
-        drain_deadline: server.drain_deadline,
-    };
-    Ok(Some(OciSetup {
-        listen,
-        acceptor,
-        prefix,
-        metrics: Arc::new(OciMetrics::with_mode(mode)),
-        limits,
-    }))
 }
 
 /// How long [`reconcile`] waits for the lease to be given up once it is halted.
@@ -1080,7 +982,7 @@ pub async fn run(
 /// answer is out, and waits for them within `--drain-deadline`.
 ///
 /// # Errors
-/// As [`run`], and the OCI front's flags and files (see [`OciError`]).
+/// As [`run`], and the OCI front's flags and files (see `OciError`).
 pub async fn run_serving(
     cli: &Cli,
     stop: impl Future<Output = ()> + Send + 'static,
@@ -1175,7 +1077,8 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
+    let front = OciFront::new(backend, setup.prefix, setup.metrics).with_auth(setup.auth);
+    let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
 }

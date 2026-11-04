@@ -524,6 +524,7 @@ fn an_oci_table_makes_the_settings_its_flags_make() {
     assert_eq!(all.oci_prefix.as_deref(), Some("images/"));
     assert_eq!(all.oci_max_connections, Some(16));
     assert_eq!(all.oci_connection_lifetime, Some(Duration::from_secs(1800)));
+    assert!(all.oci_require_auth);
     assert_eq!(all, Cli::try_parse_from(golden_flags()).unwrap());
 
     let listen_only = from_text(&minimal_with_oci("listen = \"127.0.0.1:5000\""), DEFAULTS);
@@ -564,6 +565,10 @@ fn an_oci_table_is_refused_as_the_flags_are() {
         (
             "connection_lifetime = \"1h\"".to_owned(),
             "oci.connection_lifetime: it needs",
+        ),
+        (
+            "require_auth = true".to_owned(),
+            "oci.require_auth: it needs oci.listen",
         ),
         (String::new(), "oci.listen: it is needed"),
         (

@@ -53,10 +53,19 @@
 //!
 //! # Access
 //!
-//! There is no authentication and no token is ever asked for: a request that carries an
-//! `Authorization` header is served as one that does not. Only objects under the prefix, named by
-//! their digest, can be read; the images in it are meant to be public (a public registry's
+//! By default there is no authentication and no token is ever asked for: a request that carries
+//! an `Authorization` header is served as one that does not. Only objects under the prefix, named
+//! by their digest, can be read; the images in it are meant to be public (a public registry's
 //! images are the first thing seeded), and which hosts may connect is the network's to decide.
+//!
+//! With `--oci-require-auth` ([`OciFront::with_auth`]) every request, `GET /v2/` and a path that
+//! is none of the routes included, must carry `Authorization: Basic` with an access key id of the
+//! server and its secret, or is answered 401 with `WWW-Authenticate: Basic realm="tierstore"`.
+//! Read-only keys and scoped keys that read under the front's prefix may pull (`GET`, `HEAD`); the
+//! full key and scoped keys that write under it may push (`POST`, `PUT`, `PATCH`, `DELETE`); a key
+//! that lacks the right is answered 403 `DENIED`. Why Basic and not the token flow, and the rule for
+//! each kind of key, are in [`OciAuth`]'s module, `auth`. The front serves no upload, so a key that
+//! may push gets the 405 it got before.
 //!
 //! # Errors
 //!
@@ -67,6 +76,7 @@
 //! stored object that is no manifest, `DIGEST_INVALID` (500) for one that is not its digest, and
 //! `UNAVAILABLE` (503) or `UNKNOWN` (500) when the store fails.
 
+mod auth;
 mod body;
 mod listener;
 mod manifest;
@@ -75,6 +85,8 @@ mod names;
 mod range;
 mod tls;
 
+#[cfg(test)]
+mod auth_tests;
 #[cfg(test)]
 mod body_tests;
 #[cfg(test)]
@@ -95,7 +107,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use hyper::header::{
     ACCEPT_RANGES, ALLOW, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderName,
-    HeaderValue, RANGE,
+    HeaderValue, RANGE, WWW_AUTHENTICATE,
 };
 use hyper::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
@@ -104,12 +116,14 @@ use sha2::{Digest as _, Sha256};
 use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
 use crate::{Backend, ByteRange, Error};
 
+pub use auth::OciAuth;
 pub use body::{BodyError, OciBody};
 pub(crate) use listener::OciDrain;
 pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 
+use auth::{Need, Refused};
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};
 use names::{Digest, Route};
@@ -176,6 +190,8 @@ pub struct OciFront {
     backend: Arc<dyn Backend>,
     prefix: OciPrefix,
     metrics: Arc<OciMetrics>,
+    /// The keys clients must present; none serves anonymously.
+    auth: Option<OciAuth>,
 }
 
 impl OciFront {
@@ -186,7 +202,16 @@ impl OciFront {
             backend,
             prefix,
             metrics,
+            auth: None,
         }
+    }
+
+    /// The front, asking each client for a key of `auth` (see the `Access` section of the module
+    /// docs); with none it is anonymous, as [`new`](Self::new) makes it.
+    #[must_use]
+    pub fn with_auth(mut self, auth: Option<OciAuth>) -> Self {
+        self.auth = auth;
+        self
     }
 
     /// The counters the front counts into.
@@ -209,15 +234,21 @@ impl OciFront {
             Route::Blob { .. } => RouteKind::Blob,
             Route::Other => RouteKind::Other,
         };
-        let (outcome, mut response) = if !head && *method != Method::GET {
-            (Outcome::NotAllowed, not_allowed())
-        } else {
-            match route {
+        let need = Need::of(method, matches!(route, Route::Ping));
+        let refusal = self
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.check(headers, need).err());
+        let (outcome, mut response) = match refusal {
+            Some(Refused::Unauthorized) => (Outcome::Unauthorized, unauthorized()),
+            Some(Refused::Denied) => (Outcome::Denied, denied(need)),
+            None if !head && *method != Method::GET => (Outcome::NotAllowed, not_allowed()),
+            None => match route {
                 Route::Ping => (Outcome::Ok, ping()),
                 Route::Manifest { name, reference } => self.manifest(head, name, reference).await,
                 Route::Blob { name, digest } => self.blob(head, name, digest, headers).await,
                 Route::Other => (Outcome::NotFound, unsupported_route()),
-            }
+            },
         };
         self.metrics.request(kind, outcome);
         let version = HeaderValue::from_static("registry/2.0");
@@ -399,6 +430,31 @@ fn error(status: StatusCode, code: &str, message: &str, detail: Value) -> Respon
         .headers_mut()
         .insert(CONTENT_LENGTH, HeaderValue::from(bytes.len()));
     response
+}
+
+/// The call carries no key of the server, or one with a wrong secret: 401, and the challenge that
+/// tells a client to log in.
+fn unauthorized() -> Response<OciBody> {
+    let message = "this registry asks for an access key: log in with its id and secret";
+    let mut response = error(
+        StatusCode::UNAUTHORIZED,
+        "UNAUTHORIZED",
+        message,
+        Value::Null,
+    );
+    let challenge = HeaderValue::from_static("Basic realm=\"tierstore\"");
+    response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+    response
+}
+
+/// The key is the server's, and has not the right `need` asks for: 403.
+fn denied(need: Need) -> Response<OciBody> {
+    let message = match need {
+        Need::Push => "this access key may not push",
+        Need::Pull => "this access key may not pull",
+        Need::Any => "this access key may neither pull nor push here",
+    };
+    error(StatusCode::FORBIDDEN, "DENIED", message, Value::Null)
 }
 
 /// A method that is not `GET` or `HEAD`.

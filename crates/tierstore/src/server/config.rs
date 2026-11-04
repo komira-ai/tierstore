@@ -25,8 +25,8 @@
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
 //! - `[oci]`: the read-only OCI front, left out when there is none: `listen` (needed in the
-//!   table), the certificate and key files, the key prefix and the connection limits. They
-//!   follow the rules of the `--oci-*` flags. Both shapes take it: a build node serves the
+//!   table), the certificate and key files, the key prefix, the connection limits and `require_auth`.
+//!   They follow the rules of the `--oci-*` flags. Both shapes take it: a build node serves the
 //!   registry from its cache.
 //! - `[[policy]]`: the per-prefix settings. With `[local_cache]` `cache = true` keeps the keys
 //!   under the prefix in the cache; without it a policy is read and checked and has no effect,
@@ -53,6 +53,7 @@ use super::cli::{
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+pub(super) use super::config_oci::{OciFlags, oci};
 use super::config_policy::{Policy, check_policies};
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
@@ -126,6 +127,7 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-prefix", &["oci.prefix"]),
     ("oci-max-connections", &["oci.max_connections"]),
     ("oci-connection-lifetime", &["oci.connection_lifetime"]),
+    ("oci-require-auth", &["oci.require_auth"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -450,6 +452,9 @@ pub(super) struct OciTable {
     pub max_connections: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_lifetime: Option<Dur>,
+    /// Whether clients must present an access key of the server (`--oci-require-auth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_auth: Option<bool>,
 }
 
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
@@ -668,7 +673,7 @@ fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
 
 /// The addresses of the `listen` key `key`: at least one, and none twice. The message names the
 /// key and not an address.
-fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
+pub(super) fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
     if listen.0.is_empty() {
         return Err(invalid(key, "it needs at least one address"));
     }
@@ -676,69 +681,6 @@ fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
         return Err(invalid(key, "the same address is listed twice"));
     }
     Ok(listen.0)
-}
-
-/// The OCI front's table checked as its flags are: the values of the `--oci-*` flags.
-#[derive(Clone, Debug)]
-pub(super) struct OciFlags {
-    /// The addresses; none when there is no front.
-    pub listen: Vec<SocketAddr>,
-    pub tls_cert: Option<PathBuf>,
-    pub tls_key: Option<PathBuf>,
-    pub prefix: Option<String>,
-    pub max_connections: Option<u32>,
-    pub connection_lifetime: Option<Duration>,
-}
-
-/// The flags `[oci]` stands for: none when the table is left out. A table without `listen` is
-/// refused (naming the key it has that needs it, if it has one), the certificate and the key go
-/// together, and the count is at least one.
-pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
-    let Some(table) = table else {
-        return Ok(OciFlags {
-            listen: Vec::new(),
-            tls_cert: None,
-            tls_key: None,
-            prefix: None,
-            max_connections: None,
-            connection_lifetime: None,
-        });
-    };
-    if table.listen.is_none() {
-        let others = [
-            ("tls_cert_file", table.tls_cert_file.is_some()),
-            ("tls_key_file", table.tls_key_file.is_some()),
-            ("prefix", table.prefix.is_some()),
-            ("max_connections", table.max_connections.is_some()),
-            ("connection_lifetime", table.connection_lifetime.is_some()),
-        ];
-        refuse("oci", "it needs oci.listen", &others)?;
-    }
-    let listen = require("oci", "listen", table.listen)?;
-    let listen = addresses("oci.listen", listen)?;
-    match (&table.tls_cert_file, &table.tls_key_file) {
-        (Some(_), None) => {
-            let why = "it is needed with oci.tls_cert_file: give both, or neither";
-            return Err(invalid("oci.tls_key_file", why));
-        }
-        (None, Some(_)) => {
-            let why = "it is needed with oci.tls_key_file: give both, or neither";
-            return Err(invalid("oci.tls_cert_file", why));
-        }
-        _ => {}
-    }
-    let max_connections = match table.max_connections {
-        Some(count) => Some(within("oci", "max_connections", count, 1, u32::MAX)?),
-        None => None,
-    };
-    Ok(OciFlags {
-        listen,
-        tls_cert: table.tls_cert_file,
-        tls_key: table.tls_key_file,
-        prefix: table.prefix,
-        max_connections,
-        connection_lifetime: table.connection_lifetime.map(|dur| dur.0),
-    })
 }
 
 /// What a file makes: the settings of one of the three shapes.
@@ -936,6 +878,7 @@ pub(super) fn storage(
         oci_prefix: oci.prefix,
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
+        oci_require_auth: oci.require_auth,
     })
 }
 

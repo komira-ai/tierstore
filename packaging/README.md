@@ -813,6 +813,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--oci-prefix` | `oci.prefix` | the key prefix the front reads, ending in `/` (`oci/` if left out) |
 | `--oci-max-connections` | `oci.max_connections` | the most connections the front has open at once (64 if left out; at least 1) |
 | `--oci-connection-lifetime` | `oci.connection_lifetime` | the longest a connection of the front lives (`1h` if left out) |
+| `--oci-require-auth` | `oci.require_auth` | the front asks clients for an access key of the server (HTTP Basic); anonymous if left out |
 
 These stay flags, since they describe one run and not the data path: `--config`,
 `--print-config`, `--check-config`, `--capabilities`, `--drain-lb-wait` and `--drain-deadline`. A
@@ -1031,6 +1032,7 @@ the front then reads through the node's local cache, not a proxy (see The regist
 | `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
+| `--oci-require-auth` | every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. The front serves no upload yet. Refused at start (exit 2) on plain HTTP off loopback |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
 minute) to send the head of a request, which is also how long an idle connection may wait for its
@@ -1113,7 +1115,7 @@ which the specification allows, and falls back to splitting it. `If-Range`, `If-
 
 ### Anonymous reads
 
-The front never asks for a token: a request with an `Authorization` header is served as one without.
+Unless `--oci-require-auth` is given, the front never asks for a token: a request with an `Authorization` header is served as one without.
 Anyone who can connect can read any digest under the prefix, and nothing else. That is the intent:
 the images in it are public (a public registry's images are the first thing put there), and the
 network decides who can connect (the host's firewall rules). Do not put an image in
@@ -1160,7 +1162,7 @@ that client's own settings.
 `GET /metricz` on the S3 listener (unsigned, like `/healthz`; a bucket cannot be called `metricz`)
 shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcome}` (routes `ping`,
 `manifest`, `blob`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
-`range_not_satisfiable`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
+`range_not_satisfiable`, `unauthorized`, `denied`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
 responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
 which serves nothing else. Without `--oci-listen` the path says the front is not enabled.
 

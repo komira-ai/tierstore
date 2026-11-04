@@ -6,8 +6,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
+use tierstore::server::ServerConfig;
 use tierstore::server::oci::OciError;
-use tierstore::server::oci::{OciFront, OciLimits, OciListener, OciMetrics, OciPrefix, acceptor};
+use tierstore::server::oci::{
+    OciAuth, OciFront, OciLimits, OciListener, OciMetrics, OciPrefix, acceptor,
+};
 use tierstore::{Backend, MemoryBackend, Proxy, ProxyConfig, SystemClock};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
@@ -52,21 +55,33 @@ impl Rig {
     /// A plain front whose limits are the defaults of the tests, changed by `change`.
     pub async fn plain_with(change: impl FnOnce(&mut OciLimits)) -> Self {
         let listen = "127.0.0.1:0".parse().expect("an address");
-        Self::build(true, listen, change).await
+        Self::build(true, listen, None, change).await
+    }
+
+    /// A TLS front that asks for the keys of `server`, as `--oci-require-auth` does.
+    pub async fn start_with_keys(server: &ServerConfig) -> Self {
+        let listen = "127.0.0.1:0".parse().expect("an address");
+        let auth = OciAuth::from_server(server, &OciPrefix::new(PREFIX).expect("a prefix"));
+        Self::build(false, listen, Some(auth), |_| {}).await
     }
 
     /// A front whose limits are the defaults of the tests, changed by `change`.
     pub async fn with(change: impl FnOnce(&mut OciLimits)) -> Self {
         let listen = "127.0.0.1:0".parse().expect("an address");
-        Self::build(false, listen, change).await
+        Self::build(false, listen, None, change).await
     }
 
     /// A plain front at `listen`.
     pub async fn plain_at(listen: SocketAddr) -> Self {
-        Self::build(true, listen, |_| {}).await
+        Self::build(true, listen, None, |_| {}).await
     }
 
-    async fn build(plain: bool, listen: SocketAddr, change: impl FnOnce(&mut OciLimits)) -> Self {
+    async fn build(
+        plain: bool,
+        listen: SocketAddr,
+        auth: Option<OciAuth>,
+        change: impl FnOnce(&mut OciLimits),
+    ) -> Self {
         let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "oci-rig");
         let ca = ca();
         let files = leaf(dir.path(), "front", &ca, vec![ip("127.0.0.1")]);
@@ -80,7 +95,8 @@ impl Rig {
         let proxy = Arc::new(opened.expect("a proxy"));
         let metrics = Arc::new(OciMetrics::default());
         let prefix = OciPrefix::new(PREFIX).expect("a prefix");
-        let front = Arc::new(OciFront::new(proxy.clone(), prefix, metrics.clone()));
+        let front = OciFront::new(proxy.clone(), prefix, metrics.clone()).with_auth(auth);
+        let front = Arc::new(front);
         let mut limits = OciLimits {
             max_connections: 16,
             handshake_timeout: Duration::from_secs(30),
