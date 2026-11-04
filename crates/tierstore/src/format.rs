@@ -18,10 +18,13 @@
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
 //!   answered with [`Error::Unavailable`] and a text that says writes wait for the active format.
 
+#[cfg(feature = "server")]
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::journal::{FORMAT_KEY, to_body};
+use crate::journal::FORMAT_KEY;
+#[cfg(feature = "server")]
+use crate::journal::to_body;
 use crate::{Backend, Error};
 
 /// Where the store is in a change of format.
@@ -86,6 +89,7 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
 /// object changes between the two calls the tag is the older one, and a write over it by that tag
 /// fails.
+#[cfg(feature = "server")]
 pub(crate) async fn read_format_tagged(
     hot: &dyn Backend,
 ) -> Result<Option<(Format, String)>, Error> {
@@ -102,6 +106,7 @@ pub(crate) async fn read_format_tagged(
 }
 
 /// The body of a format object.
+#[cfg(feature = "server")]
 pub(crate) fn format_body(format: &Format) -> Bytes {
     to_body(format)
 }

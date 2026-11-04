@@ -2,7 +2,6 @@
 //! and the conditional call that follows it, or in a listing.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
