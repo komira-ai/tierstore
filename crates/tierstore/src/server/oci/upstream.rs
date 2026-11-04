@@ -25,6 +25,8 @@
 //!   it is requested anonymously, without the login.
 //! - `timeout` bounds each step: connecting and getting the headers of an answer, and the wait for
 //!   each piece of a body. The time a whole body takes is not bounded.
+//! - `recheck_timeout` bounds the re-check of a stored tag as a whole (see `pull`), whatever the
+//!   number of requests it makes.
 //!
 //! A body is not held whole unless it is a manifest or a token (at most [`MAX_MANIFEST_BYTES`]):
 //! a blob is handed on as a stream.
@@ -70,6 +72,8 @@ pub struct UpstreamSettings {
     pub timeout: Duration,
     /// The most redirects one request follows.
     pub max_redirects: u32,
+    /// How long the whole re-check of a stored tag may take, all its requests together.
+    pub recheck_timeout: Duration,
 }
 
 /// Why a pull from the upstream failed.
@@ -103,6 +107,7 @@ pub struct Upstream {
     tls: TlsConnector,
     timeout: Duration,
     max_redirects: u32,
+    recheck_timeout: Duration,
 }
 
 /// The answer of the upstream to a request that it granted: the headers, and the body still to
@@ -297,7 +302,14 @@ impl Upstream {
             tls: connector(settings.ca_pem.as_deref())?,
             timeout: settings.timeout,
             max_redirects: settings.max_redirects,
+            recheck_timeout: settings.recheck_timeout,
         })
+    }
+
+    /// How long the whole re-check of a stored tag may take.
+    #[must_use]
+    pub fn recheck_timeout(&self) -> Duration {
+        self.recheck_timeout
     }
 
     /// `GET path` (which starts with `/`), logged in as the upstream's challenge asks, with

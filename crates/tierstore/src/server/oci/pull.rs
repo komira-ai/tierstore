@@ -189,7 +189,8 @@ impl OciFront {
 
     /// The digest of the tag `tag` of `name` now: `stored` if the upstream still has it there (or
     /// has no such tag), or the one the upstream moved it to, written as the next version of the
-    /// tag. A failure to ask, pull or write is counted and logged and the answer is `stored`.
+    /// tag. A failure to ask, pull or write, or a re-check that takes longer than the upstream's
+    /// `recheck_timeout` as a whole, is counted and logged and the answer is `stored`.
     pub(super) async fn recheck_tag(
         &self,
         upstream: &Upstream,
@@ -197,7 +198,12 @@ impl OciFront {
         tag: &str,
         stored: Digest,
     ) -> Digest {
-        match self.upstream_tag(upstream, name, tag, &stored).await {
+        let bound = upstream.recheck_timeout();
+        let asked = tokio::time::timeout(bound, self.upstream_tag(upstream, name, tag, &stored));
+        let asked = asked
+            .await
+            .unwrap_or_else(|_| Err(format!("no answer within {bound:?}")));
+        match asked {
             Ok(current) => current,
             Err(why) => {
                 self.metrics.recheck_failed();

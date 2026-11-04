@@ -28,6 +28,7 @@ fn settings(url: &str) -> UpstreamSettings {
         ca_pem: None,
         timeout: Duration::from_secs(30),
         max_redirects: 4,
+        recheck_timeout: Duration::from_secs(5),
     }
 }
 

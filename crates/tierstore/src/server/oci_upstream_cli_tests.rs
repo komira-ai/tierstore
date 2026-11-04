@@ -47,6 +47,7 @@ fn table(url: &str) -> UpstreamTable {
         ca_file: None,
         timeout: None,
         max_redirects: None,
+        recheck_timeout: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn the_start_makes_a_client_only_for_an_upstream_table() {
         ca_file: Some(roots),
         timeout: Some(Dur(Duration::from_secs(45))),
         max_redirects: Some(2),
+        recheck_timeout: Some(Dur(Duration::from_secs(2))),
         ..with_login("https://registry.example", password)
     });
     let made = build(&given).expect("built").oci.expect("a front");

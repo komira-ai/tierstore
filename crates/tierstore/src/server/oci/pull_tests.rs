@@ -61,6 +61,9 @@ fn quiet() -> DefaultGuard {
     set_default(LineLog::new(std::io::sink(), Level::INFO))
 }
 
+/// The re-check deadline of the rig's upstream.
+const RECHECK_DEADLINE: Duration = Duration::from_secs(5);
+
 struct Rig {
     faulty: Arc<FaultyBackend>,
     memory: Arc<MemoryBackend>,
@@ -116,6 +119,7 @@ impl Rig {
             ca_pem: None,
             timeout: Duration::from_secs(30),
             max_redirects: 4,
+            recheck_timeout: RECHECK_DEADLINE,
         };
         let upstream = Upstream::new(settings).expect("an upstream");
         let memory = Arc::new(MemoryBackend::new());
@@ -551,6 +555,10 @@ struct Script {
     head_digest: Option<String>,
     /// The status of a `GET` of the tag.
     get_status: u16,
+    /// Whether a `HEAD` of the tag is never answered.
+    head_hangs: bool,
+    /// Whether a `GET` of the tag is never answered.
+    get_hangs: bool,
 }
 
 type Control = Arc<Mutex<Script>>;
@@ -561,6 +569,8 @@ fn script() -> Control {
         head_status: 200,
         head_digest: None,
         get_status: 200,
+        head_hangs: false,
+        get_hangs: false,
     }))
 }
 
@@ -575,6 +585,9 @@ async fn tag_rig(control: &Control) -> Rig {
         let now = control.lock().unwrap_or_else(PoisonError::into_inner);
         if seen.path != TAG_PATH {
             return Fake::status(404);
+        }
+        if (seen.method == "HEAD" && now.head_hangs) || (seen.method == "GET" && now.get_hangs) {
+            return Fake::ending(Vec::new(), Ending::Hang);
         }
         if seen.method == "HEAD" {
             let digest =
@@ -788,4 +801,41 @@ async fn a_pushed_tag_stands_unless_the_upstream_has_it_at_another_digest() {
         Some(upstream.as_bytes())
     );
     assert_eq!(methods(&rig), ["HEAD", "HEAD", "GET"]);
+}
+
+/// Asserts a re-check whose `HEAD` is never answered serves the stored tag once the re-check
+/// deadline (`recheck_timeout`, 5s, shorter than the upstream's per-step `timeout`) has passed on
+/// the injected clock, counts one failure, and writes no version.
+#[tokio::test(start_paused = true)]
+async fn a_head_that_is_never_answered_serves_the_stored_tag_at_the_recheck_deadline() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.head_hangs = true);
+    let before = tokio::time::Instant::now();
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(tokio::time::Instant::now() - before, RECHECK_DEADLINE);
+    assert_eq!(rig.metrics.recheck_failures(), 1);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+}
+
+/// Asserts the deadline bounds the re-check as a whole: a `HEAD` that says the tag moved followed
+/// by a `GET` that is never answered serves the stored tag at the same deadline, not after a
+/// further per-step timeout, counts one failure, and writes no version.
+#[tokio::test(start_paused = true)]
+async fn a_get_of_a_moved_tag_that_is_never_answered_is_cut_at_the_recheck_deadline() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| {
+        now.manifest = OTHER_MANIFEST;
+        now.get_hangs = true;
+    });
+    let before = tokio::time::Instant::now();
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(tokio::time::Instant::now() - before, RECHECK_DEADLINE);
+    assert_eq!(rig.metrics.recheck_failures(), 1);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
 }
