@@ -40,9 +40,11 @@
 //! version: through the proxy that version is visible before its push is acknowledged and is
 //! removed if the push fails. The loser writes the version after it, with the same create-only
 //! write, and is 201 when that is its own. A push whose create's answer is unclear (the store said
-//! `Unavailable` and the write may have landed, as an S3 conflict does) is settled by reading the
-//! key back: the digest of the key is the answer, and a key that is not there is 503 (the push
-//! may be retried). A push that reads after another has finished sees
+//! `Unavailable` and the write may have landed, as an S3 conflict does) reads the key back: the
+//! key holding another digest is 409, a key that is not there is 503 (the push may be retried),
+//! and a key holding the digest of the push is not taken as the push's own, as the write may be
+//! another push's: the push writes the version after it, as a loser of the create does, and is
+//! 201 only when that is its own, and the failure it had otherwise. A push that reads after another has finished sees
 //! what that push left. A listing that lags a write makes a push find
 //! the key of the next version taken, and it is 201 or 409 by the read-back and overwrites
 //! nothing; the stores are required to list consistently with the writes before the listing
@@ -132,7 +134,8 @@ fn before(inv: u64, key: &str) -> Result<u64, Error> {
 /// # Errors
 /// [`Error::PreconditionFailed`] if another push made the version first and it holds another
 /// digest; the store's own error otherwise, which for [`Error::Unavailable`] after a create
-/// that may not have landed is the error itself, so that the push can be tried again.
+/// that may not have landed and is not followed by a version of this push's own, so that the
+/// push can be tried again.
 pub(super) async fn point(
     backend: &dyn Backend,
     prefix: &str,
@@ -156,17 +159,20 @@ pub(super) async fn point(
                 Err(failure) => return Err(failure),
             },
             Err(unclear @ Error::Unavailable(_)) => {
-                return settle(backend, &key, digest, unclear).await;
+                settle(backend, &key, digest, unclear).await?;
+                inv = before(inv, &key)?;
             }
             other => return other,
         }
     }
 }
 
-/// Decides a create of `key` answered [`Error::Unavailable`] (`unclear`), which does not say
-/// whether the write landed: it is won if the object holds `digest` (the store holds it, as an S3
-/// conflict leaves it), lost if it holds another, and still `unclear` if it is not there (the
-/// write did not land, as far as can be told).
+/// Reads back a create of `key` answered [`Error::Unavailable`] (`unclear`), which does not say
+/// whether the write landed or whose it is. `Ok` if the object holds `digest`: that is not
+/// this push's write, as far as can be told (it may be another push's, not yet acknowledged and
+/// removed if that push fails), so the caller writes the version after it. Lost if it holds
+/// another digest, and still `unclear` if it is not there (the write did not land, as far as
+/// can be told).
 async fn settle(
     backend: &dyn Backend,
     key: &str,

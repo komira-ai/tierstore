@@ -444,8 +444,8 @@ async fn two_pushes_of_one_digest_are_both_201() {
 
 /// Asserts what a push does when the create of its version is not clear from the store's answer
 /// (`Unavailable`, as an S3 conflict is, or `AlreadyExists`), by reading the version back: the
-/// digest it asked for is 201 after `Unavailable` and, after `AlreadyExists`, 201 with a version
-/// of its own after the taken one (the taken one may be removed by its pusher), another digest is 409 `TAG_CONFLICT` and is never the tag, and a
+/// digest it asked for is, after `Unavailable` or `AlreadyExists`, 201 with a version of its own
+/// after the taken one (the taken one may be removed by its pusher), another digest is 409 `TAG_CONFLICT` and is never the tag, and a
 /// version that is not there is 503 after `Unavailable` (try again) and 409 after `AlreadyExists`.
 #[tokio::test]
 async fn an_unclear_create_is_settled_by_reading_the_version_back() {
@@ -476,15 +476,43 @@ async fn an_unclear_create_is_settled_by_reading_the_version_back() {
             None => assert!(held.is_err(), "{tag}"),
             Some(planted) => assert_eq!(held.expect("a version"), planted.as_bytes()),
         }
-        if tag == "a-landed" {
+        if tag == "a-landed" || tag == "u-landed" {
+            let tag = tag.to_owned();
             let own = rig.memory.get(&version(tag, 1), None).await;
             assert_eq!(own.expect("a version of its own"), mine_digest.as_bytes());
             rig.memory.delete(&version(tag, 0)).await.expect("a delete");
-            let by_tag = rig.send(Method::GET, "/v2/app/manifests/a-landed").await;
+            let by_tag = rig
+                .send(Method::GET, &format!("/v2/app/manifests/{tag}"))
+                .await;
             assert_eq!(&by_tag.body, &mine);
         }
     }
     assert_eq!(rig.metrics.requests("manifest", "conflict"), 3);
+}
+
+/// Asserts that a create answered `Unavailable` that finds another push's version of its digest
+/// (not yet acknowledged) is not 201 from that version: the push writes the version after it,
+/// and a later failure of the other push, which removes its version, leaves the tag pulling the
+/// manifest.
+#[tokio::test]
+async fn an_unclear_create_is_not_acknowledged_by_another_pushes_version() {
+    let (rig, meddle) = meddled();
+    let (mine, mine_digest) = manifests(&rig, 1).await.remove(0);
+    meddle.arm(
+        Some(mine_digest.as_str()),
+        Error::Unavailable("conflict".to_owned()),
+    );
+    let put = rig.tag("app", "pushed", &mine).await;
+    assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
+    let others = rig.memory.get(&version("pushed", 0), None).await;
+    assert_eq!(others.expect("the other's version"), mine_digest.as_bytes());
+    rig.memory
+        .delete(&version("pushed", 0))
+        .await
+        .expect("the other push rolls back");
+    let pulled = rig.send(Method::GET, "/v2/app/manifests/pushed").await;
+    assert_eq!(pulled.status, StatusCode::OK);
+    assert_eq!(&pulled.body, &mine);
 }
 
 /// Asserts that a push that loses the create of the second to last version to a push of its own
