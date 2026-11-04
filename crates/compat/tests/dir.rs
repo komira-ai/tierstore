@@ -264,3 +264,70 @@ async fn an_object_at_the_key_entries_and_entry_objects_coexist_across_releases(
         ["_entries"]
     );
 }
+
+/// Asserts that an object the previous release put under a key that starts with `_entries/`, a
+/// file of the root, stays that file for its whole life. The previous release puts `_entries/old`
+/// and `_entries/gone`; this branch heads and gets `_entries/old` (the size, the tag and the bytes
+/// the previous release gives it), lists it once among the plain keys, refuses a create-only put of
+/// the same key, replaces it by its tag (the previous release then reads the replacement body
+/// from the same file, and the subdirectory has no file for the key), and deletes it and the
+/// other key (the previous release then finds both not found), so that neither release lists them.
+#[tokio::test]
+async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_release_put() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-old-entry");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    before.put("plain", body(1, 20)).await.unwrap();
+    before.put("_entries/old", body(2, 40)).await.unwrap();
+    before.put("_entries/gone", body(3, 41)).await.unwrap();
+
+    let seen = before.head("_entries/old").await.unwrap();
+    let head = now.head("_entries/old").await.unwrap();
+    assert_eq!((head.size, &head.tag), (seen.size, &seen.tag));
+    assert_eq!(now.get("_entries/old", None).await.unwrap(), body(2, 40));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old", "plain"]
+    );
+    assert_eq!(
+        keys(now.list("_entries/").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old"]
+    );
+
+    let taken = now.put("_entries/old", body(4, 10)).await;
+    assert_eq!(
+        taken,
+        Err(tierstore::Error::AlreadyExists("_entries/old".to_owned()))
+    );
+    let tag = now
+        .put_if_match("_entries/old", body(5, 42), &head.tag)
+        .await
+        .unwrap();
+    assert_eq!(now.get("_entries/old", None).await.unwrap(), body(5, 42));
+    assert!(!dir.path().join(".entries").join("old").exists());
+    assert_eq!(before.get("_entries/old", None).await.unwrap(), body(5, 42));
+    assert_eq!(before.head("_entries/old").await.unwrap().tag, tag);
+    assert_eq!(
+        keys(now.list("_entries/").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old"]
+    );
+
+    now.delete_if_match("_entries/old", &tag).await.unwrap();
+    now.delete("_entries/gone").await.unwrap();
+    for key in ["_entries/old", "_entries/gone"] {
+        let missing = before.head(key).await;
+        assert_eq!(missing, Err(PrevError::NotFound(key.to_owned())));
+    }
+    assert!(now.list("_entries/").await.unwrap().is_empty());
+    assert!(before.list("_entries/").await.unwrap().is_empty());
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["plain"]
+    );
+    assert_eq!(
+        now.head("_entries/gone").await,
+        Err(tierstore::Error::NotFound("_entries/gone".to_owned()))
+    );
+}
