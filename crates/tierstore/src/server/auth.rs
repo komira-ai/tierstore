@@ -19,7 +19,7 @@ use super::keys::Role;
 use super::presign::{self, Grant, PRESIGN_ONLY};
 use super::reply::S3Error;
 use super::request::{header, query_pairs};
-use super::time::amz_date;
+use super::time::{amz_date, parse_amz_date};
 
 /// How far the time of a request may be from the server's, either way.
 const SKEW_MILLIS: u64 = 15 * 60 * 1000;
@@ -266,9 +266,9 @@ pub(crate) fn verify(config: &ServerConfig, parts: &Parts) -> Result<Signed, Ref
     }
     let stamp = header(&parts.headers, "x-amz-date").ok_or(MALFORMED)?;
     let now = config.clock.now();
-    let early = amz_date(now.saturating_sub(SKEW_MILLIS));
-    let late = amz_date(now.saturating_add(SKEW_MILLIS));
-    if !(early..=late).contains(&stamp.to_owned()) {
+    // The stamp is read as a time: as text, any text that begins like a time in range passes.
+    let sent = parse_amz_date(stamp).ok_or(MALFORMED)?;
+    if sent.abs_diff(now) > SKEW_MILLIS {
         return Err(SKEWED);
     }
     if stamp.get(..8) != Some(auth.date) {
