@@ -198,11 +198,11 @@ fn a_value_of_the_wrong_type_is_refused_without_showing_it() {
 /// `config_unknown`).
 #[test]
 fn the_io_keys_are_known_to_this_release() {
-    let text = file("header_timeout = \"61s\"\ndir_read_chunk = 4096\nnot_an_io_key = 1");
+    let text = file("header_timeout = \"61s\"\ndir_read_chunk = 4096\nnot_an_io_knob = 1");
     let table: toml::Table = toml::from_str(&text).expect("toml");
     assert_eq!(
         unknown_key_warnings(&table),
-        ["tierstore: config key server.not_an_io_key is not known to this release and is ignored"]
+        ["tierstore: config key server.not_an_io_knob is not known to this release and is ignored"]
     );
     let node = settings_from_text(&text, DEFAULTS).expect("a file");
     assert!(matches!(node, crate::server::config::Settings::Storage(_)));

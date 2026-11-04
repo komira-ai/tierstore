@@ -848,7 +848,7 @@ mod tests {
         let config = S3Config {
             endpoint: "http://127.0.0.1:9".to_owned(),
             region: "us-east-1".to_owned(),
-            bucket: "b".to_owned(),
+            bucket: "tierstore-test".to_owned(),
             credentials: Credentials::new("k", "s"),
             capabilities: Capabilities::default(),
             connect_timeout: std::time::Duration::from_secs(1),
