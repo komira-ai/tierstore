@@ -32,8 +32,9 @@
 //!   under the prefix in the cache; without it a policy is read and checked and has no effect,
 //!   and `cache = true` is refused.
 //!
-//! Any other table or key is refused, and so is a key that holds a secret: keys and credentials
-//! are paths of files (a key ending in `_file` or `_files`).
+//! Any other table or key is read past: the load succeeds, ignores it and warns on stderr with
+//! its name and never its value. A key whose name says it holds a secret is refused, unknown or
+//! not: keys and credentials are paths of files (a key ending in `_file` or `_files`).
 //!
 //! Per-run knobs are flags only: `--config` and the two parts of the drain (see [`PER_RUN`]).
 //! [`KEYS`] says which key each other flag has; the tests walk the flags of [`Cli`] against it,
