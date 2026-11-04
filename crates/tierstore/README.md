@@ -47,12 +47,12 @@ What waiting costs, as the code does it:
   `--drain-deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
-- The client of kbf (`kbf-task`) retries the 503, and a connection that broke while it was still
-  sending the body of a refused PUT, with jittered waits (see its crate docs). It does not retry
-  429, 500, 502 or 504, deliberately.
+- A client should retry the 503, and a connection that broke while it was still
+  sending the body of a refused PUT, with jittered waits. A client should not retry
+  429, 500, 502 or 504, which do not mean a full put queue.
 - The 503 is sent before the body is read, so the front may close the connection under a client
   that is still sending a large body. A client that sees the reset instead of the 503 has to treat
-  it as one; `kbf-task` does.
+  it as one.
 
 ## A build node: a read cache
 
@@ -81,9 +81,9 @@ exits 2.
 Prometheus text of the counters of the process. All are counters since the process started.
 `/metricz` renders whichever blocks the process has: the proxy's (a storage node, with a hot and
 a cold tier; the block below), the OCI read front's, and the local cache's `tierstore_cache_*`
-block (a build node; see "Local cache" below). A cache node and a storage node are different
-processes: a file with `[local_cache]` is refused together with `[hot_store]`, so one process does
-not have both the proxy's and the cache's block.
+block (a build node, or a storage node with a cache in front of its proxy; see "Local cache"
+below). A file with `[local_cache]`, `[hot_store]` and `[cold_store]` is one process with both the
+proxy's block and the cache's.
 
 The block of the proxy is one labelled family per measure, so one query serves every tier. The
 labels have a few fixed values, never a key or a client: `tier` is `hot` or `cold` here (`local`
@@ -96,9 +96,9 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 | `tierstore_read_errors_total` | `tier`, `op` | reads the tier failed with anything but "not found" (the tier is down, refused, timed out) |
 | `tierstore_reads_total` | `tier`, `op` | reads that reached the tier: hits, misses and errors. For `tier="cold"` these are the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | `tier` | bytes of object data that gets answered, by the tier that gave them (the range, if one was asked) |
-| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, whole objects whatever range was asked (the range alone when the hot tier is critical), so the ratio to `bytes_served` is the read amplification of ranged gets |
+| `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, the whole object for a get without a range and the range alone for a ranged get |
 | `tierstore_promotions_total` | none | objects a get copied from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object, whatever range the get asked |
+| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object (only a get without a range copies one) |
 | `tierstore_promotions_skipped_total` | `reason` = `critical`, `full`, `raced`, `failed` | copies not made, by reason |
 
 What the counts mean:
@@ -206,9 +206,9 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
 - the frontend's pack store: `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`,
   `delete_prefixes: []` (add the writer prefix to the delete list to let the frontend remove its
   self-test object and the object of a failed write);
-- build history, `--history-objects 's3://<bucket>/kbf-history?endpoint=...&conditional-put=true'`
+- an append-only history store, `--history-objects 's3://<bucket>/history?endpoint=...&conditional-put=true'`
   (without the last parameter a retried chunk gets `412` for good): `read_prefixes`
-  and `write_prefixes` of `["kbf-history/"]`, `delete_prefixes: []`.
+  and `write_prefixes` of `["history/"]`, `delete_prefixes: []`.
 
 See "Scoped keys" in `packaging/README.md` for the table of calls.
 

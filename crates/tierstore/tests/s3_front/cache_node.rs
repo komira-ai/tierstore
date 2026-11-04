@@ -35,7 +35,7 @@ budget = "1MiB"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-fake"
+bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
@@ -83,7 +83,7 @@ async fn a_build_node_reads_through_an_upstream_and_refuses_writes() {
         let requests = fake.requests();
         requests
             .iter()
-            .filter(|r| r.starts_with("GET /kbf-fake/cas/obj"))
+            .filter(|r| r.starts_with("GET /tierstore-fake/cas/obj"))
             .count()
     };
 
@@ -125,7 +125,8 @@ async fn a_build_node_reads_through_an_upstream_and_refuses_writes() {
 
 /// Asserts the exit status of a build node that cannot start: 1 for a cache directory that is a
 /// file and for a bucket that is the name of a probe path, with the keys of the file in the
-/// message and not flags, and 2 for a file with both a hot store and a cache.
+/// message and not flags, and 2 for a file with a hot store and a cache that is not to take
+/// writes (a node that owns the data takes them).
 #[test]
 fn a_build_node_that_cannot_start_says_why_and_exits_with_the_status_of_the_reason() {
     let files = Files::new("bin-cache-refused");
@@ -153,13 +154,13 @@ fn a_build_node_that_cannot_start_says_why_and_exits_with_the_status_of_the_reas
     let mixed = std::fs::read_to_string(&text).unwrap();
     let mixed = mixed.replacen(
         "[local_cache]",
-        "[hot_store]\nkind = \"memory\"\nbudget = 1\n\n[local_cache]",
+        "[hot_store]\nkind = \"memory\"\nbudget = 1\n\n[local_cache]\nwrite_through = false",
         1,
     );
     let mixed = files.secret("mixed.toml", &mixed).display().to_string();
     let (code, _, err) = run(&args(&mixed));
     assert_eq!(code, 2);
-    assert!(err.contains("is refused with [hot_store]"), "{err}");
+    assert!(err.contains("local_cache.write_through"), "{err}");
 }
 
 /// The file of a build node with `extra` lines in `[local_cache]`, over an upstream at `endpoint`
@@ -181,7 +182,7 @@ budget = "1MiB"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-fake"
+bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
@@ -445,7 +446,7 @@ impl Started {
         waiting.await.unwrap().unwrap()
     }
 
-    /// The client of kbf with the key of the key file.
+    /// The S3 client with the key of the key file.
     fn store(&self) -> S3Store {
         let config = S3Config {
             endpoint: format!("http://{}", self.addr),

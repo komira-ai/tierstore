@@ -13,9 +13,19 @@ What tierstore does not do on main, so that you can decide before you depend on 
 - **A reconciler pass that outlasts the lease is not fenced.** It copies, and may evict, beside the process that took the lease over. It stores no checkpoint, prunes nothing and publishes no usage once it finds the lease gone, and a stored checkpoint never moves backwards, but the check is a read, not a fence ([The reconciler's checkpoint](operations.md#the-reconcilers-checkpoint)).
 - **Checksums.** CRC-32, CRC-32C, SHA-1, SHA-256 and `Content-MD5` are checked; CRC-64/NVMe, `aws-chunked` bodies and trailing checksums are refused with 501 `NotImplemented`. A client SDK needs its checksum settings turned to "when required".
 - **Anonymous OCI reads.** The registry front never asks for a token. Put only public images under its prefix.
-- **No update mechanism in a release yet.** The update hook is written for hostkeeper's host updater, which is in development, and no release carries the hook as a step an updater calls (see [the update hook](update-hook.md#not-in-a-release-yet)); until then place the next binary and restart.
+- **No update mechanism in a release yet.** The update hook is written for a host updater that speaks its protocol, and no release carries the hook as a step an updater calls (see [the update hook](update-hook.md#not-in-a-release-yet)); until then place the next binary and restart.
 - **Release tarballs for Linux (x86_64, arm64) and macOS (Apple silicon).** The example unit and its account are for Linux. On macOS tierstore runs as one LaunchDaemon, a build node on loopback, and the update hook updates it by a plain restart with a gap in serving; the hand-over without a gap is Linux only ([The update hook](update-hook.md#on-a-mac)).
 
 ## Not in a release yet
 
 - A background scrub of a build-node cache: it re-reads each cached object at `local_cache.scrub_rate` and drops one whose bytes no longer hash to the digest the cache recorded, so the next read fills it again. A storage node's objects are not scrubbed.
+
+## A storage node with a local cache
+
+On main, not in v0.0.41. A file with `[hot_store]`, `[cold_store]` and `[local_cache]` serves reads from a disk cache in front of the node's own proxy. What it does not do:
+
+- **A kept object is not checked again.** A key that another process deletes or re-puts, over the same tiers, is served by this cache as it was until it is evicted, and its listing and the cache's hits can disagree. Several such nodes over the same tiers, or a storage node without a cache beside one, are for prefixes that are never rewritten (`cache = true` only on content-addressed prefixes, as for a build node).
+- **Versions are compared by size.** Over two tiers an object's tag moves with the tier, so a fill and a long read of a key that is not named by its content (`cas/l/<digest>` keys are hash-checked) cannot tell two same-size versions apart: another process deleting and re-putting such a key with other bytes of the same size during one fill is not detected.
+- **The ETag of a hit may differ from the ETag of a miss.** A hit gives the tag the cache recorded at its fill, a miss the tag of the tier that answers; a client that sends `If-Match` or `If-None-Match` with a tag it read before the fill can be refused for it.
+- **A fill of a cold-only object is not copied up.** The cache reads an object in ranged chunks (8 MiB), and the proxy answers a ranged read that misses the hot tier from the cold tier for that range alone, so a fill holds one chunk in memory whatever the size of the object, and the hot tier gets no copy. Only a read without a range (a client of the proxy without a cache) reads a cold-only object whole and copies it up.
+- **Paths are checked by text.** The cache path against the tiers' directories, the lock file and the key files of `[oci]` is a check by component of the strings in the file, with `.` and `..` resolved, not of the places they lead to through links. The cache path and the directory of a `dir` tier must be absolute in this shape.

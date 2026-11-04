@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 528" width="960" height="528" role="img" aria-label="Sequence diagram of eviction by the leader: Leader, Hot tier, Cold tier. The leader compares the hot and cold bytes outside any entry, then creates an EVICT SEALED entry create-only, re-checks both tags under it, deletes the hot object and deletes the entry. If any entry already exists the key is skipped.">
+<title>Eviction: compare outside the entry, then take the key sealed and delete from hot</title>
+<defs><marker id="seq-evict-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-evict-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="528" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Eviction: compare outside the entry, then take the key sealed and delete from hot</text>
+<rect x="85" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="140" y="65" class="b" text-anchor="middle">Leader</text>
+<rect x="425" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="480" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="765" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="820" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="140" y1="76" x2="140" y2="462" class="ln-d"/>
+<line x1="480" y1="76" x2="480" y2="462" class="ln-d"/>
+<line x1="820" y1="76" x2="820" y2="462" class="ln-d"/>
+<text x="310.0" y="112" class="t-m lbl" text-anchor="middle">1a  HEAD key: tag tH (a candidate has no entry)</text>
+<line x1="140" y1="124" x2="480" y2="124" class="ln" marker-end="url(#seq-evict-ak)"/>
+<text x="480.0" y="150" class="t-m lbl" text-anchor="middle">1b  HEAD key: tag tC; the real object must be there</text>
+<line x1="140" y1="162" x2="820" y2="162" class="ln" marker-end="url(#seq-evict-ak)"/>
+<text x="310.0" y="188" class="t-m lbl" text-anchor="middle">2  stream hot and cold and compare the bytes, outside any entry</text>
+<text x="310.0" y="204" class="t-m lbl" text-anchor="middle">(skipped when this leader copied the key itself and both tags are unchanged)</text>
+<line x1="140" y1="216" x2="480" y2="216" class="ln" marker-end="url(#seq-evict-ak)"/>
+<rect x="30" y="230" width="900" height="32" rx="5" fill="#FFFFFF"/>
+<rect x="30" y="230" width="900" height="32" rx="5" class="box-p"/>
+<text x="40" y="250" class="t-m">A mismatch is counted, logged with the key at error level, hot is kept, and the key is never evicted.</text>
+<text x="310.0" y="288" class="t-m lbl" text-anchor="middle">3  create _entries/&lt;sha256(key)&gt;, create-only: (EVICT, SEALED)</text>
+<text x="310.0" y="304" class="t-m lbl" text-anchor="middle">EXISTS means some actor holds the key: skip it, evict nothing</text>
+<line x1="140" y1="316" x2="480" y2="316" class="ln" marker-end="url(#seq-evict-ak)"/>
+<text x="310.0" y="342" class="t-m lbl" text-anchor="middle">4  HEAD key: tag must equal tH   (and cold HEAD: tag must equal tC)</text>
+<line x1="140" y1="354" x2="480" y2="354" class="ln" marker-end="url(#seq-evict-ak)"/>
+<text x="310.0" y="380" class="t-m lbl" text-anchor="middle">5  DELETE key (If-Match tH where the store honours it)</text>
+<text x="310.0" y="396" class="t-m lbl" text-anchor="middle">lease margin checked right before the call</text>
+<line x1="140" y1="408" x2="480" y2="408" class="ln-o" marker-end="url(#seq-evict-ao)"/>
+<text x="310.0" y="434" class="t-m lbl" text-anchor="middle">6  delete the entry</text>
+<line x1="140" y1="446" x2="480" y2="446" class="ln" marker-end="url(#seq-evict-ak)"/>
+<rect x="30" y="460" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="480" class="t-m">A tag mismatch at step 4 frees the entry and keeps the object. While the entry exists a PUT of the key is 503 or 412, a DELETE is 503 (the seal</text>
+<text x="40" y="496" class="t-m">lasts milliseconds), and a GET that misses hot is answered by cold, which holds the object. Eviction never touches a key with an open entry.</text>
+</svg>

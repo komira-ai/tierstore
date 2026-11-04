@@ -119,7 +119,9 @@
 //!   base64 of a hash of the right length;
 //! - `x-amz-checksum-crc64nvme` is answered `NotImplemented` (the crate depends on no CRC-64
 //!   implementation), and so is a trailing checksum or a signed stream (`STREAMING-` payloads,
-//!   `aws-chunked`), which the clients of kbf do not use.
+//!   `aws-chunked`). The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
+//!   body for a streamed upload, so such a client is refused with 501 until it sends a
+//!   checksum only when an operation requires one (see `packaging/README.md`).
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
@@ -194,8 +196,10 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod combined_cli;
 mod config;
 mod config_cache;
+mod config_combined;
 mod config_policy;
 mod config_print;
 mod door;
@@ -232,9 +236,13 @@ mod cache_cli_tests;
 #[cfg(test)]
 mod cache_lock_tests;
 #[cfg(test)]
+mod combined_cli_tests;
+#[cfg(test)]
 mod completion_tests;
 #[cfg(test)]
 mod config_cache_tests;
+#[cfg(test)]
+mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
 #[cfg(test)]
@@ -257,6 +265,8 @@ mod lock_tests;
 mod metrics_race_tests;
 #[cfg(test)]
 mod metrics_tests;
+#[cfg(test)]
+mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
