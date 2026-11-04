@@ -31,33 +31,38 @@ async fn recording_sleeper_returns_without_waiting() {
     assert_eq!(sleeper.asked(), [Duration::MAX]);
 }
 
-/// A task that was ready runs while another waits on the sleeper, so a loop that has only the
-/// sleeper to wait on does not keep the rest of the runtime from running.
+/// The call records its wait and then yields once before it returns: its first poll is pending,
+/// so a task that was waiting to run can be run by the test at that point, and the next poll
+/// finishes it.
 #[tokio::test]
-async fn recording_sleeper_gives_other_tasks_a_turn() {
+async fn recording_sleeper_yields_once_after_writing_the_wait_down() {
     let ran = Arc::new(AtomicBool::new(false));
     let flag = ran.clone();
     let other = tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
 
-    RecordingSleeper::new().sleep(Duration::from_secs(1)).await;
-    assert!(ran.load(Ordering::SeqCst));
+    let sleeper = RecordingSleeper::new();
+    let mut sleeping = Box::pin(sleeper.sleep(Duration::from_secs(1)));
+    assert!(futures::poll!(&mut sleeping).is_pending());
+    assert_eq!(sleeper.asked(), [Duration::from_secs(1)]);
+
     other.await.unwrap();
+    assert!(ran.load(Ordering::SeqCst));
+    sleeping.await;
 }
 
 /// The sleeper of a process waits for the runtime's clock and no longer: a sleep of ten seconds
-/// is not over a second before its end, and is over at its end. The runtime's clock is paused and
-/// moved by the test, so no real time is waited for.
+/// is not over at nine, and is over at ten. The runtime's clock is paused and moved by the test,
+/// and the sleep is polled by the test itself at each point, so no real time passes and no timer
+/// is left to advance on its own.
 #[tokio::test(start_paused = true)]
 async fn tokio_sleeper_waits_for_the_runtime_clock() {
     let sleeper: Arc<dyn Sleeper> = Arc::new(TokioSleeper);
-    let task = tokio::spawn(async move { sleeper.sleep(Duration::from_secs(10)).await });
-    tokio::task::yield_now().await;
-    assert!(!task.is_finished());
+    let mut sleeping = Box::pin(sleeper.sleep(Duration::from_secs(10)));
+    assert!(futures::poll!(&mut sleeping).is_pending());
 
     tokio::time::advance(Duration::from_secs(9)).await;
-    tokio::task::yield_now().await;
-    assert!(!task.is_finished());
+    assert!(futures::poll!(&mut sleeping).is_pending());
 
     tokio::time::advance(Duration::from_secs(1)).await;
-    task.await.unwrap();
+    assert!(futures::poll!(&mut sleeping).is_ready());
 }

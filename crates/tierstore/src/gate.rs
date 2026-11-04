@@ -136,8 +136,11 @@ impl GateBackend {
     }
 
     /// Holds the next call of kind `op` on a key that starts with `key_prefix` (for a list call,
-    /// the key is the prefix listed) at `phase`, until the returned gate releases it. Calls that
-    /// came before the gate was made are not held.
+    /// the key is the prefix listed) at `phase`, until the returned gate releases it. A gate is
+    /// looked at when a call reaches the place it names, so a call that is already under way when
+    /// the gate is made, and has not yet reached that place, is held too (a `Post` gate holds a
+    /// call that was started before it and is still with the store). A call that has already
+    /// passed that place is not held.
     #[must_use]
     pub fn gate(&self, op: Op, key_prefix: &str, phase: Phase) -> Gate {
         let shared = Arc::new(Shared {
@@ -292,6 +295,23 @@ impl Backend for GateBackend {
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         self.through(Op::List, prefix, self.inner.list(prefix))
             .await
+    }
+
+    /// A page is a call of kind [`Op::List`], and is the wrapped backend's own page, not a cut of
+    /// its whole listing.
+    async fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<Listed>, Error> {
+        let call = self.inner.list_page(prefix, start_after, max_keys);
+        self.through(Op::List, prefix, call).await
+    }
+
+    /// Asked of the wrapped backend as it is: it makes no call a gate holds.
+    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
+        self.inner.settle_conditional_delete(key).await
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {

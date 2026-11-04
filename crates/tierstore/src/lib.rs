@@ -78,8 +78,12 @@
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
-//! The keys under `_journal/` and `_tiering/` belong to the proxy and the reconciler: a
-//! client put or delete there is refused, and a listing leaves them out.
+//! The keys under `_journal/` and `_tiering/` belong to the proxy and the
+//! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
+//! a listing of either tier leaves them out. The S3 front refuses each supported call on them itself,
+//! before the operation's own processing (a request it refuses as unsupported, such as one with a
+//! `versionId`, is answered so first); the local cache refuses them as well, since its upstream
+//! may be a plain bucket.
 //!
 //! Every proxy, reconciler and cache takes its settings as constructor parameters.
 //!
@@ -150,7 +154,10 @@ mod sleeper_tests;
 mod state;
 mod tiered;
 
-pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter};
+pub use backend::{
+    Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter,
+    Window,
+};
 pub use bounded::Bounded;
 pub use cache::CachedStore;
 pub use clock::{Clock, Mono, MonotonicClock, SystemClock};

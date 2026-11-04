@@ -51,7 +51,7 @@
 //!
 //! `--listen` and `--oci-listen` may each be given more than once (the file's `listen` keys take a
 //! string or a list): a socket is bound for each address, an IPv6 one for IPv6 only (see
-//! [`listen`](super::listen)), and one server, one drain and one limit on connections serve them
+//! [`listen`](super::listen)), and one server and one drain serve them
 //! all. An address given twice is refused with status 2, and a start that cannot bind every address
 //! is refused with status 1. The start line names every address, separated by commas.
 //!
@@ -180,7 +180,7 @@ pub struct Cli {
     pub capabilities: bool,
     /// An address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. Give the flag
     /// again for each further address (for instance `0.0.0.0:P` and `[::]:P`, which a firewall
-    /// redirect to the port needs): one server, one drain and one limit on connections serve
+    /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     #[arg(long, value_name = "ADDR", required = true)]
     pub listen: Vec<SocketAddr>,
@@ -297,25 +297,21 @@ pub struct Cli {
     /// `/`; all five required, the lists may be empty but not all three): a header-signed key that
     /// gets, heads and lists under its read prefixes, creates objects and multipart uploads under
     /// its write prefixes (create-only: no `If-Match`, no copy) and deletes objects under its
-    /// delete prefixes; it is refused on a presigned URL. Give the flag once for each such key;
+    /// delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. Give the flag once for each such key;
     /// all key ids must differ. Only its owner may read it (mode 0600).
     #[arg(long)]
     pub scoped_key_file: Vec<PathBuf>,
-    /// A file that holds a grant key: the id and the secret, JSON of exactly `access_key_id` and
-    /// `secret_access_key` or two lines. The key signs no request. It is the key whose signature
-    /// on a read grant (the `x-tierstore-grant` header) the server accepts, and a request with a
-    /// grant that lists an object may get and head that object and nothing else. Give the flag
-    /// once for each such key; all key ids must differ. Only its owner may read it (mode 0600).
-    #[arg(long)]
-    pub grant_key_file: Vec<PathBuf>,
     /// The longest `X-Amz-Expires` that a presigned URL may have, whatever the ceiling of its key
     /// says: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub presign_max_expires: Duration,
-    /// The longest a read grant may have left to live when the server checks it: a grant that
-    /// ends later than this from now is refused. A number and `ms`, `s`, `m` or `h`.
-    #[arg(long, default_value = "15m", value_parser = parse_duration)]
-    pub grant_max_lifetime: Duration,
+    /// Deprecated and ignored: the read grant was removed (use a presigned GET URL). Accepted, and
+    /// its files are not read, so that a unit that sets it still starts; stderr says it is ignored.
+    #[arg(long)]
+    pub grant_key_file: Vec<PathBuf>,
+    /// Deprecated, and ignored, like `--grant-key-file`: a number and `ms`, `s`, `m` or `h`.
+    #[arg(long, value_parser = parse_duration)]
+    pub grant_max_lifetime: Option<Duration>,
     /// How long, after the drain began, the server goes on serving everything, so that the
     /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
@@ -988,3 +984,7 @@ mod tests;
 #[cfg(test)]
 #[path = "oci_cli_tests.rs"]
 mod oci_tests;
+
+#[cfg(test)]
+#[path = "grant_cli_tests.rs"]
+mod grant_tests;
