@@ -13,9 +13,10 @@ use sha2::{Digest as _, Sha256};
 use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
-use super::fake_upstream::{Ending, Fake, Registry, Seen};
-use super::{MAX_MANIFEST_BYTES, OciFront, OciMetrics, OciPrefix, Upstream, UpstreamSettings};
+use super::{MAX_MANIFEST_BYTES, OciFront, Upstream};
 use crate::server::build_info::stderr_log::LineLog;
+use crate::server::oci::fake_upstream::{Ending, Fake, Registry, Seen};
+use crate::server::oci::{OciMetrics, OciPrefix, UpstreamSettings};
 use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op};
 
 const MANIFEST: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
