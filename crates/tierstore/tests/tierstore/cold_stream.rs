@@ -517,7 +517,7 @@ async fn a_cold_body_of_another_length_than_its_meta_is_not_copied() {
 #[tokio::test(start_paused = true)]
 async fn a_streamed_range_of_a_cold_object_is_one_cold_read() {
     let object = patterned(30);
-    let mut run = start(&[("k", object.clone())], 10, |_, _| {}).await;
+    let run = start(&[("k", object.clone())], 10, |_, _| {}).await;
     let mut client = run
         .proxy
         .get_stream("k", Some(ByteRange::new(12, 4)))
