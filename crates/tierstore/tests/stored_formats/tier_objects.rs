@@ -157,21 +157,24 @@ async fn the_lease_body_is_the_holder_a_nonce_and_a_count_as_the_fixture_is() {
     assert!(lines[1].len() == 32 && lines[1].bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(first.replace(lines[1], nonce), LEASE);
 
+    // Less than the margin of the lease is left, so the pass renews it.
+    tiers.clock.set(10_001);
     assert!(reconciler.pass().await.held);
     let second = String::from_utf8(tiers.stored("_tiering/lease").await).unwrap();
     assert_eq!(second.replace(lines[1], nonce), LEASE.replace("\n1", "\n2"));
 }
 
 /// Asserts that a lease object of the fixture, held by `r1`, keeps another reconciler out until
-/// its object is as old as the ttl (30 seconds) and is taken over then, which writes the new
-/// holder's name on the first line. Catches a lease that is no longer judged by the time its
-/// object was written.
+/// the same tag has stood for the ttl (30 seconds) on the other's own clock, counted from its first
+/// look at the object, and is taken over then, which writes the new holder's name on the first
+/// line. Catches a lease that is no longer judged by how long its object has stood unchanged.
 #[tokio::test(start_paused = true)]
 async fn a_lease_object_of_the_fixture_is_held_until_it_expires() {
     let tiers = Tiers::new();
     tiers.seed("_tiering/lease", LEASE.as_bytes()).await;
     let mut other = tiers.reconciler("r2", 1000);
 
+    assert_eq!(other.pass().await, PassReport::default());
     tiers.clock.set(29_999);
     assert_eq!(other.pass().await, PassReport::default());
     tiers.clock.set(30_000);

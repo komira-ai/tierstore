@@ -581,6 +581,7 @@ The compatibility tests of section 8 run the previous release on directories and
 8. The entry module: body, nonce, transitions, store calls, nonce read-back.
 9. A deadline wrapper for destructive calls; the heartbeat body and `live_until`; a background task and drain hook in the proxy; `--heartbeat` and `--departure`; registration clean-up.
 10. The lease on its own timer, with `valid_until` and a monotonic first-seen takeover.
+   Built, in `lease.rs` and `Reconciler::pass`: a taker takes the lease over when the same tag has stood for the ttl on its own monotonic clock (`ReconcilerConfig::mono`) from its first look, and no time stamped by the hot tier is read; the holder renews on a timer of its own (`ReconcilerConfig::lease_renew`, a third of the ttl unless set) for as long as a pass works; `valid_until` is the time before the last renewal was sent plus the ttl less `ReconcilerConfig::lease_margin` (a third of the ttl unless set), and `Lease::margin_ok` says whether the margin is left. Nothing yet refuses a destructive call on it: that comes with the steps that need it. The two durations are settings of the library only; `--lease-ttl` sets both until the flags and file keys are added, when `cli.rs` and `config.rs` are under 1000 lines (item 2).
 
 *Stage 2, rollout.*
 

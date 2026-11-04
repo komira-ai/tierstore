@@ -46,7 +46,8 @@ impl Tiers {
         let opened = Proxy::open(hot.clone(), cold.clone(), config).await;
         let proxy = opened.unwrap();
         proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
-        let settings = ReconcilerConfig::new("p1", MEBIBYTE, clock);
+        let mut settings = ReconcilerConfig::new("p1", MEBIBYTE, clock.clone());
+        settings.mono = clock;
         let reconciler = Reconciler::new(seen.clone(), cold, settings);
         let tiers = Self {
             hot,
@@ -258,7 +259,8 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
     let current_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let next_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let reconciler = |seen: &Arc<FaultyBackend>, holder: &str| {
-        let settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
+        let mut settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
+        settings.mono = clock.clone();
         Reconciler::new(seen.clone(), cold.clone(), settings)
     };
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-gate-hand-over");
