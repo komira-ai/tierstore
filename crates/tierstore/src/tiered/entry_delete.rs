@@ -1,6 +1,8 @@
 //! The deletes of a proxy whose format is active (`WriteMode::Entries`): a delete is made on the
-//! journal entry of its key, and the cold tier's object is deleted at once, whatever the entry
-//! says.
+//! journal entry of its key, and the cold tier's object is deleted once the delete has acquired or
+//! amended that entry. When another operation holds or has sealed the entry, the delete first
+//! waits for it (see below), and until then neither tier is touched; if the wait runs out it is
+//! answered [`Error::Unavailable`] with both tiers untouched.
 //!
 //! A delete, in order:
 //!
@@ -13,11 +15,20 @@
 //!      object to the cold tier: the delete amends it, and waits for the release (below);
 //!    - `(DEL, PENDING)`, a delete that was handed over (this is a retry of one): the delete
 //!      claims it, and waits for the release;
-//!    - anything else (a put or a delete of a client in flight, a sealed entry): the delete is
-//!      refused with [`Error::Unavailable`], and changes nothing.
+//!    - any other entry that is held or sealed (a put or a delete of a client in flight, a put
+//!      whose owner is not the reconciler, a sealed put, delete, copy-back or eviction): the delete
+//!      changes nothing yet and waits, as [`DeleteWait`] says, until the entry is gone or is no
+//!      longer held or sealed (the reconciler removes a sealed entry as soon as its work ends), and
+//!      then takes the entry again; a copy that lands after the delete removed the object would
+//!      bring the key back;
+//!    - an entry in a state this release does not know: the delete is refused with
+//!      [`Error::Unavailable`], and changes nothing.
 //!
-//!    It looks again if the entry was gone in between, at most
-//!    [`ProxyConfig::entry_rounds`](super::ProxyConfig::entry_rounds) times.
+//!    It looks again if the entry was gone in between or the entry was released, at most
+//!    [`ProxyConfig::entry_rounds`](super::ProxyConfig::entry_rounds) times. A delete that waits
+//!    for an entry to be released and then meets another one is not given the wait over
+//!    again: it has what is left of [`DeleteWait::wait`], and at the end is answered
+//!    [`Error::Unavailable`] with nothing deleted.
 //! 3. The cold tier's object is deleted, then the hot tier's, each once and cut at the margin of
 //!    the registration. A call that fails hands the entry over, `(DEL, HELD)` to `(DEL, PENDING)`,
 //!    and the delete is refused with the failure; a retry claims the entry and does the calls again.
@@ -83,6 +94,12 @@ struct Held {
     step: Option<Step>,
 }
 
+/// Whether an operation of the entry's owner is in flight: the entry is held or sealed, whatever
+/// the operation. A delete that meets one waits for its release.
+fn in_flight(entry: &Entry) -> bool {
+    matches!(entry.st, EntryState::Held | EntryState::Sealed)
+}
+
 /// A missing object is as good as a deleted one.
 fn ignore_missing(answer: Result<(), Error>) -> Result<(), Error> {
     match answer {
@@ -117,7 +134,7 @@ impl Inner {
     }
 
     /// Takes the entry of `key` for a delete, or says why the delete is refused.
-    async fn take_delete(&self, key: &str) -> Result<Held, Error> {
+    async fn take_delete(&self, key: &str, waited: &mut Duration) -> Result<Held, Error> {
         for _ in 0..self.config.entry_rounds {
             if let Created::Taken(seen) = self.entries.create(key, Take::Del).await? {
                 return Ok(Held { seen, step: None });
@@ -126,7 +143,12 @@ impl Inner {
                 continue;
             };
             let Some(step) = self.step_for(&found.entry).await? else {
-                return Err(retry(key, "a put, delete or copy is in flight"));
+                if !in_flight(&found.entry) {
+                    return Err(retry(key, "the entry is in a state a delete cannot take"));
+                }
+                let reason = "an operation on the key is in flight and not released yet";
+                self.wait_while(key, waited, in_flight, reason).await?;
+                continue;
             };
             if let Outcome::Done(seen) = self.entries.advance(&found, step).await? {
                 return Ok(Held {
@@ -173,7 +195,7 @@ impl Inner {
 
     /// The end of a delete: a fresh one removes its entry (and hands it over if it cannot), one
     /// that amended or claimed hands it over, and one that must wait for the release does.
-    async fn end_delete(&self, key: &str, held: &Held) -> Result<(), Error> {
+    async fn end_delete(&self, key: &str, held: &Held, waited: &mut Duration) -> Result<(), Error> {
         let Some(step) = held.step else {
             let released = self.bounded(key, self.entries.release(&held.seen)).await;
             if released.is_err() {
@@ -183,35 +205,47 @@ impl Inner {
         };
         self.hand_over(key, &held.seen).await;
         if step.waits() {
-            return self.wait_for_release(key).await;
+            return self.wait_for_release(key, waited).await;
         }
         self.acknowledge(key)
     }
 
     /// Waits until the entry of `key` is gone or is another operation's, as [`DeleteWait`] says,
     /// and then acknowledges if the proxy is still live.
-    async fn wait_for_release(&self, key: &str) -> Result<(), Error> {
+    async fn wait_for_release(&self, key: &str, waited: &mut Duration) -> Result<(), Error> {
+        let ours = |entry: &Entry| entry.op == EntryOp::Del;
+        let reason = "both tiers are deleted, but the entry is not released yet";
+        self.wait_while(key, waited, ours, reason).await?;
+        self.acknowledge(key)
+    }
+
+    /// Reads the entry of `key` until it is gone or `waiting` says no more of it, sleeping as
+    /// [`DeleteWait`] says. `waited` is the time slept so far by the delete, so that all its waits
+    /// together end at [`DeleteWait::wait`], when the answer is [`Error::Unavailable`] with `reason`.
+    async fn wait_while(
+        &self,
+        key: &str,
+        waited: &mut Duration,
+        waiting: impl Fn(&Entry) -> bool,
+        reason: &str,
+    ) -> Result<(), Error> {
         let config = self.config.delete_wait;
-        let mut waited = Duration::ZERO;
         let mut pause = config.poll_min;
         loop {
-            let still_ours = matches!(
+            let still_waiting = matches!(
                 self.entries.read(key).await?,
-                Some(seen) if seen.entry.op == EntryOp::Del
+                Some(seen) if waiting(&seen.entry)
             );
-            if !still_ours {
-                return self.acknowledge(key);
+            if !still_waiting {
+                return Ok(());
             }
-            let left = config.wait.saturating_sub(waited);
+            let left = config.wait.saturating_sub(*waited);
             if left.is_zero() {
-                return Err(retry(
-                    key,
-                    "both tiers are deleted, but the entry is not released yet",
-                ));
+                return Err(retry(key, reason));
             }
             let sleep = pause.max(Duration::from_millis(1)).min(left);
             tokio::time::sleep(sleep).await;
-            waited += sleep;
+            *waited += sleep;
             pause = pause.saturating_mul(2).min(config.poll_max);
         }
     }
@@ -228,12 +262,13 @@ impl Inner {
     /// A delete of `key` on its entry.
     pub(super) async fn delete_on_entry(&self, key: &str) -> Result<(), Error> {
         self.require_live(key)?;
-        let held = self.take_delete(key).await?;
+        let mut waited = Duration::ZERO;
+        let held = self.take_delete(key, &mut waited).await?;
         if let Err(error) = self.delete_data(key).await {
             self.hand_over(key, &held.seen).await;
             return Err(error);
         }
-        self.end_delete(key, &held).await
+        self.end_delete(key, &held, &mut waited).await
     }
 }
 

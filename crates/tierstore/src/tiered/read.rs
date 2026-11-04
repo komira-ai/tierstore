@@ -74,7 +74,16 @@ impl Inner {
         self.counters.served(Tier::Cold, meta.size as usize);
         // The tag is that of the very bytes read, so the copy is journaled under it whatever the
         // key holds by then.
-        let tee = (!critical).then(|| Tee::new(self, key, meta.size, meta.tag.clone()));
+        let tee = if critical {
+            None
+        } else if self.entries_active().await {
+            // Format active: the copy is the reconciler's, under the entry; the read is the one
+            // read of the cold object, and no entry is read.
+            self.ask_copy_back(key);
+            None
+        } else {
+            Some(Tee::new(self, key, meta.size, meta.tag.clone()))
+        };
         let body = relay(self, body, tee);
         Ok(Opened {
             meta,

@@ -21,6 +21,8 @@ use crate::{
     Step, Take, TestClock, encode_entry, entry_key,
 };
 
+#[path = "entry_reconciler_tests/copy_back.rs"]
+mod copy_back;
 #[path = "entry_reconciler_tests/evict.rs"]
 mod evict;
 #[path = "entry_reconciler_tests/races.rs"]
@@ -305,26 +307,24 @@ async fn a_delete_handed_over_is_finished_on_both_tiers_and_its_entry_removed() 
     }
 }
 
-/// Asserts that a sealed put, a sealed copy-back and a sealed eviction are removed, that a pending
-/// copy-back is sealed and removed without anything copied into the hot tier, and that the objects
-/// are left as they were.
+/// Asserts that a sealed put, a sealed copy-back and a pending eviction's sealed entry are removed
+/// and that the objects are left as they were.
 #[tokio::test]
-async fn sealed_entries_and_a_pending_copy_back_are_removed_without_touching_the_objects() {
+async fn sealed_entries_are_removed_without_touching_the_objects() {
     let rig = Rig::new();
     rig.activate().await;
-    rig.cold.put("cb", bytes("v")).await.unwrap();
+    rig.cold.put("cb-sealed", bytes("v")).await.unwrap();
     rig.hot.put("evicted", bytes("v")).await.unwrap();
     let client = rig.client("p1");
-    client.create("cb", Take::CopyBack).await.unwrap();
     client.create("evicted", Take::Evict).await.unwrap();
     for (key, op) in [("put", EntryOp::Put), ("cb-sealed", EntryOp::Cb)] {
         rig.plant(key, op, EntryState::Sealed, None).await;
     }
     let step = rig.reconciler().step().await;
-    assert_eq!(step, report(4));
-    assert!(!rig.hot_has("cb").await && rig.cold_has("cb").await);
+    assert_eq!(step, report(3));
+    assert!(!rig.hot_has("cb-sealed").await && rig.cold_has("cb-sealed").await);
     assert!(rig.hot_has("evicted").await);
-    for key in ["cb", "evicted", "put", "cb-sealed"] {
+    for key in ["evicted", "put", "cb-sealed"] {
         assert!(rig.entry(key).await.is_none(), "{key}");
     }
 }

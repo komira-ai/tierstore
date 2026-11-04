@@ -148,7 +148,7 @@ fn calls(rig: &Rig) -> [u64; 4] {
 
 /// The calls made since `before`, as `calls` counts them. A read that misses the hot tier makes
 /// one more get of it than the open read: the one of the usage, which decides whether the object
-/// is copied back.
+/// is copied back (and, the first time, the one of the format object, which says how).
 fn since(rig: &Rig, before: [u64; 4]) -> [u64; 4] {
     let now = calls(rig);
     [0, 1, 2, 3].map(|at| now[at] - before[at])
@@ -313,7 +313,9 @@ async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
 
     let before = calls(&rig);
     let opened = proxy.open_read("k", None).await.unwrap();
-    assert_eq!(since(&rig, before), [2, 0, 1, 0]);
+    // The hot tier's gets: the miss, the usage, and the format object, which the first cold hit
+    // of a proxy reads to learn whether the copy-back is made on an entry.
+    assert_eq!(since(&rig, before), [3, 0, 1, 0]);
     assert_eq!(opened.meta, head);
     assert_eq!(opened.window, Window::Whole);
     assert_eq!(joined(opened).await, body(TEN));
