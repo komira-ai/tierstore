@@ -1151,7 +1151,7 @@ podman pull 192.0.2.10/library/app@sha256:<manifest digest>
 ```
 
 The reference is a digest or a tag: a tag is a mutable pointer, pushed with `PUT` of a manifest under it. The repository name (`library/app`) is any name that
-fits the grammar and means nothing to the store. A registry on another port than 443 is written
+fits the grammar. Blobs and manifests are shared by digest whatever the name; tags are scoped to the name. A registry on another port than 443 is written
 `192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
 
 A client that allows only `https` registries on port 443 (or the port in the reference), and

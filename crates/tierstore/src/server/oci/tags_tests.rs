@@ -286,6 +286,21 @@ async fn a_store_that_fails_under_a_tag_is_503() {
     served.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
 }
 
+/// Asserts that a tag object that is a valid digest followed by more bytes is 500 `UNKNOWN` and
+/// is not served, as a tag object of exactly the digest's length is the only one that is a tag.
+#[tokio::test]
+async fn a_tag_object_longer_than_a_digest_is_not_served() {
+    let rig = Rig::new();
+    let made = manifests(&rig, 1).await;
+    let digest = made[0].1.clone();
+    rig.memory
+        .put("oci/tags/app/long", Bytes::from(format!("{digest}garbage")))
+        .await
+        .expect("put");
+    let served = rig.send(Method::GET, "/v2/app/manifests/long").await;
+    served.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
+}
+
 /// Asserts that a tag that is not there is 404 `MANIFEST_UNKNOWN` naming the tag, for GET and HEAD.
 #[tokio::test]
 async fn a_tag_that_is_not_there_is_404() {

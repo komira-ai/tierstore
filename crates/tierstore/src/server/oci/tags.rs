@@ -19,11 +19,18 @@
 //!
 //! A tag that does not exist is made with the store's create-only write; a tag that does is
 //! replaced with a write that must find the content tag (`If-Match`) the push read just before.
-//! Of any number of pushes that read the same state of a tag, exactly one write is taken and the
-//! tag then points at that push's manifest; each of the others is answered 409 `TAG_CONFLICT`
-//! and changes nothing but the manifest it stored by digest, which is harmless and is still
-//! pulled by that digest. A client that wants its manifest tagged pushes again. A push that
-//! starts after another has finished reads the state that push left, and is taken.
+//! The precondition is on the content of the tag, not on a revision: of pushes that read the same
+//! content, at most one replacement is taken, but a push of the digest the tag already holds
+//! leaves the content as it was, so another push that read that content can still be taken
+//! after it. A push whose precondition fails is answered 409 `TAG_CONFLICT` and changes nothing
+//! but the manifest it stored by digest, which is harmless and is still pulled by that digest.
+//! A client that wants its manifest tagged pushes again. A push that reads after another has
+//! finished sees what that push left. The tag is read after the manifest is stored, so
+//! overlapping pushes can read successive contents and each be taken, the last one winning.
+//!
+//! Moving an existing tag needs a store that replaces an object on a content tag. The proxy
+//! keeps objects immutable and does not, so a front on the proxy creates tags but answers a
+//! push of an existing tag 500 `UNKNOWN`.
 //!
 //! Tags are not deleted by the front: the specification leaves deletion to the registry, and a
 //! tag is moved to another manifest instead.
@@ -108,8 +115,11 @@ impl OciFront {
     /// a digest.
     pub(super) async fn tagged(&self, name: &str, tag: &str) -> Result<Digest, Error> {
         let key = self.tag_key(name, tag);
-        let range = ByteRange::new(0, TAG_BYTES);
+        let range = ByteRange::new(0, TAG_BYTES + 1);
         let held = self.backend.get(&key, Some(range)).await?;
+        if held.len() as u64 != TAG_BYTES {
+            return Err(Error::Other(format!("{key} does not hold a digest")));
+        }
         Digest::parse(&String::from_utf8_lossy(&held))
             .ok_or_else(|| Error::Other(format!("{key} does not hold a digest")))
     }
