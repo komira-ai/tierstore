@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures::{StreamExt, stream};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{Inner, Level, refuse_reserved};
+use super::{Inner, Level};
 use crate::{Error, JournalOp, PartBody};
 
 /// The body of a streamed put, which more than one tier may be offered in turn: a view of it is
@@ -82,7 +82,7 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         self.check_not_in_hot(key).await?;
         self.cold.complete_upload(key, id, parts).await
     }
@@ -123,7 +123,7 @@ impl Inner {
     }
 
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         match self.cold.head(key).await {
             Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
             Err(Error::NotFound(_)) => {}
@@ -195,7 +195,7 @@ impl Inner {
         body: PartBody<'_>,
         hot_only: bool,
     ) -> Result<(), Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         match self.cold.head(key).await {
             Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
             Err(Error::NotFound(_)) => {}

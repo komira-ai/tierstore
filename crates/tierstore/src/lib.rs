@@ -117,6 +117,9 @@ mod error;
 mod faulty;
 #[cfg(test)]
 mod faulty_tests;
+mod format;
+#[cfg(test)]
+mod format_tests;
 mod gate;
 #[cfg(test)]
 mod gate_tests;
