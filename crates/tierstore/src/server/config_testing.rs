@@ -38,6 +38,7 @@ put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
 body_idle_timeout     = "20s"
+min_secret_bytes      = 24
 s3_request_timeout    = "2m"
 backend_check_wait    = "90s"
 

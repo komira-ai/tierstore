@@ -95,7 +95,7 @@ fn the_certificate_and_the_key_go_together() {
 /// A good access key file in `dir`.
 fn access_key(dir: &TestDir) -> PathBuf {
     let path = dir.path().join("access.key");
-    std::fs::write(&path, "AKID\nsecret\n").expect("key file");
+    std::fs::write(&path, "AKID\na-long-enough-secret\n").expect("key file");
     std::fs::set_permissions(&path, Permissions::from_mode(0o600)).expect("mode");
     path
 }

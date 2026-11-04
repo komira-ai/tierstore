@@ -41,7 +41,7 @@ pub const BUCKET: &str = "t1-bucket";
 /// The access key of the clients.
 pub const KEY_ID: &str = "AKIDHANDOVER";
 /// Its secret.
-pub const SECRET: &str = "handover-secret";
+pub const SECRET: &str = "handover-secret-0123456789";
 /// The double, which is each stand-in by its name.
 const DOUBLE: &str = env!("CARGO_BIN_EXE_tierstore-handover-double");
 /// The settle of each server's drain (`--drain-lb-wait`): short, so that a stop ends soon, and

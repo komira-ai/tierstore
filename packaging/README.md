@@ -735,6 +735,7 @@ instead of running with settings it did not read.
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
 | `server.tls_cert_file`, `server.tls_key_file` | the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
+| `server.min_secret_bytes` | the fewest bytes of the secret of any access key (default 16); a key file with a shorter secret refuses the start |
 | `server.presign_key_files`, `server.presign_max_expires` | presigning keys with their ceilings, and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
 | `server.gc_key_files` | GC keys; see GC keys |
 | `server.scoped_key_files` | scoped keys; see Scoped keys |
