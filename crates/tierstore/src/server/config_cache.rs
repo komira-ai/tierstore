@@ -369,6 +369,11 @@ impl CacheSettings {
         let upstream = tier("cold_store", &upstream_table(cold)?)?;
         let part = CachePart::new(table, policy)?;
         let oci = fronts.oci;
+        if oci.upstream.is_some() {
+            let why =
+                "a pull is stored, and a build node takes no writes: use a storage node's file";
+            return Err(invalid("oci interface params.upstream", why));
+        }
         let shared = front_of(server, fronts.s3, per_run)?;
         check_oci_is_kept(&oci, policy)?;
         Ok(Self {

@@ -245,7 +245,7 @@ fn oci_interfaces_must_agree_on_the_front() {
         let second = entry("oci", &format!("port = 5001, {second}"));
         let why = refusal(&[s3.clone(), first, second]);
         let want = format!(
-            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth and stage_read"
+            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read and upstream"
         );
         assert_eq!(why, want);
     }

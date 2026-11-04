@@ -227,6 +227,7 @@ mod listen;
 pub mod local_cache;
 mod lock;
 pub mod oci;
+mod oci_upstream_setup;
 mod ops;
 pub mod presign;
 mod reply;

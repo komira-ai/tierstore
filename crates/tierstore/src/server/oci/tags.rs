@@ -167,6 +167,24 @@ pub(super) async fn point(
     }
 }
 
+/// Creates the first version of the tag whose directory is `prefix`, pointing at `digest`, with
+/// the create-only write and nothing else: a tag that has a version, made by a push or another
+/// pull before this write, is left as it is (`Ok`, the caller reads which digest it holds).
+///
+/// # Errors
+/// The store's own error for a write that failed.
+pub(super) async fn create_first(
+    backend: &dyn Backend,
+    prefix: &str,
+    digest: &Digest,
+) -> Result<(), Error> {
+    let key = version_key(prefix, u64::MAX);
+    match backend.put(&key, Bytes::from(digest.text())).await {
+        Ok(()) | Err(Error::AlreadyExists(_)) => Ok(()),
+        Err(failure) => Err(failure),
+    }
+}
+
 /// Reads back a create of `key` answered [`Error::Unavailable`] (`unclear`), which does not say
 /// whether the write landed or whose it is. `Ok` if the object holds `digest`: that is not
 /// this push's write, as far as can be told (it may be another push's, not yet acknowledged and
