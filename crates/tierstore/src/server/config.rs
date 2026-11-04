@@ -103,8 +103,8 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
     ("scoped-key-file", &["server.scoped_key_files"]),
-    ("grant-key-file", &["server.grant_key_files"]),
     ("presign-max-expires", &["server.presign_max_expires"]),
+    ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
     ("journal-linger", &["hot_store.journal_linger"]),
     ("journal-retention", &["hot_store.journal_retention"]),
@@ -251,8 +251,7 @@ pub(super) struct File {
     pub policy: Vec<Policy>,
 }
 
-/// `[server]`: what the process is, and its limits. A key that is left out has the default of
-/// the flag it stands for.
+/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
@@ -272,9 +271,10 @@ pub(super) struct ServerTable {
     pub gc_key_files: Vec<PathBuf>,
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
-    #[serde(default)]
-    pub grant_key_files: Vec<PathBuf>,
     pub presign_max_expires: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_key_files: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
@@ -705,8 +705,8 @@ pub(super) fn storage(
         presign_key_file: front.presign_key_file,
         gc_key_file: front.gc_key_file,
         scoped_key_file: front.scoped_key_file,
-        grant_key_file: front.grant_key_file,
         presign_max_expires: front.presign_max_expires,
+        grant_key_file: front.grant_key_file,
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
@@ -784,9 +784,9 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,
         scoped_key_file: server.scoped_key_files,
-        grant_key_file: server.grant_key_files,
         presign_max_expires: duration(server.presign_max_expires, Duration::from_secs(15 * 60)),
-        grant_max_lifetime: duration(server.grant_max_lifetime, Duration::from_secs(15 * 60)),
+        grant_key_file: server.grant_key_files,
+        grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
