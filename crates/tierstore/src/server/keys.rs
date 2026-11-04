@@ -29,7 +29,7 @@ use serde::Deserialize;
 
 use super::ServerConfig;
 use super::auth::{READ_ONLY, Refusal};
-huse super::presign::PUT_ONLY;
+use super::presign::PUT_ONLY;
 use super::scoped::{NOT_ALLOWED as SCOPED_NOT_ALLOWED, Scopes};
 
 /// The methods of the calls a scoped key may make, whichever the call.
