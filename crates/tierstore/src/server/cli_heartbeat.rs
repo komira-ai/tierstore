@@ -1,59 +1,45 @@
-//! The flags of the heartbeat of a proxy: `--heartbeat`, `--departure` and `--deadline-margin`,
-//! which the file has as the keys of `[hot_store]` of the same names. They are in a struct of their own that
-//! [`Cli`](super::cli::Cli) flattens, so that the flags of the process stay in one place and in one
-//! file each.
+//! The settings of the heartbeat of a proxy: `hot_store.heartbeat`, `hot_store.departure` and
+//! `hot_store.deadline_margin`. They are in a struct of their own that
+//! [`Cli`](super::cli::Cli) holds. The messages of the check name the old flags, which
+//! [`keys_for_flags`](super::config::keys_for_flags) turns into the keys.
 
 use std::time::Duration;
 
-use clap::Args;
-
-use super::cli::parse_duration;
 use super::config::{TierTable, duration};
-use super::config_units::Dur;
 use crate::ProxyConfig;
 
-/// The default of `--heartbeat`.
+/// The default of `hot_store.heartbeat`.
 const HEARTBEAT: Duration = Duration::from_secs(10);
-/// The default of `--departure`.
+/// The default of `hot_store.departure`.
 const DEPARTURE: Duration = Duration::from_secs(60);
-/// The default of `--deadline-margin`.
+/// The default of `hot_store.deadline_margin`.
 const MARGIN: Duration = Duration::from_secs(10);
 
 /// How the proxy heartbeats and when its owner counts as departed.
-#[derive(Clone, Debug, PartialEq, Eq, Args)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeartbeatFlags {
     /// How often a proxy rewrites its registration in the hot tier, and the longest one such
-    /// call may take. Longer than zero, and at most a sixth of `--departure`.
-    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    /// call may take. Longer than zero, and at most a sixth of `hot_store.departure`.
     pub heartbeat: Duration,
-    /// How long a proxy that is not heard of stays live, less `--deadline-margin`: the value of
+    /// How long a proxy that is not heard of stays live, less `hot_store.deadline_margin`: the value of
     /// `Proxy::is_live`. The puts and deletes made on entries read it, and
     /// the reconciler counts the owner of an entry as departed when its registration has stood
-    /// unchanged this long. At least six times `--heartbeat`.
-    #[arg(long, default_value = "60s", value_parser = parse_duration)]
+    /// unchanged this long. At least six times `hot_store.heartbeat`.
     pub departure: Duration,
-    /// The time taken off `--departure` for `Proxy::is_live`, and the time that must be left
+    /// The time taken off `hot_store.departure` for `Proxy::is_live`, and the time that must be left
     /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. The
-    /// puts and deletes made on entries use both. Longer than zero, and at most a quarter of `--departure`.
-    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    /// puts and deletes made on entries use both. Longer than zero, and at most a quarter of `hot_store.departure`.
     pub deadline_margin: Duration,
 }
 
 impl HeartbeatFlags {
-    /// The values `[hot_store]` gives, and the default of each flag for a key it leaves out.
+    /// The values `[hot_store]` gives, and the default of each key it leaves out.
     pub(super) fn from_table(hot: &TierTable) -> Self {
         Self {
             heartbeat: duration(hot.heartbeat, HEARTBEAT),
             departure: duration(hot.departure, DEPARTURE),
             deadline_margin: duration(hot.deadline_margin, MARGIN),
         }
-    }
-
-    /// Writes the values as the keys of `[hot_store]`.
-    pub(super) fn put_in(&self, hot: &mut TierTable) {
-        hot.heartbeat = Some(Dur(self.heartbeat));
-        hot.departure = Some(Dur(self.departure));
-        hot.deadline_margin = Some(Dur(self.deadline_margin));
     }
 
     /// Refuses the values under which a process that is not heard of could still be taken for

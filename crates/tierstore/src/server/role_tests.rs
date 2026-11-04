@@ -11,7 +11,7 @@ use super::testing::{BUCKET, KEY_ID, Reply, Rig, SECRET, texts};
 const MEBIBYTE: u64 = 1 << 20;
 
 /// The id and the secret of the read-only key of the rig.
-const READER: (&str, &str) = ("AKIDREADER", "reader-secret");
+const READER: (&str, &str) = ("AKIDREADER", "reader-secret-0123456789");
 
 /// The header of a create-only put.
 const CREATE: [(&str, &str); 1] = [("if-none-match", "*")];

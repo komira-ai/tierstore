@@ -2,6 +2,12 @@
 //! object goes as a multipart upload of bounded parts, and every failure aborts the
 //! upload, so the service is left with no incomplete one.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;

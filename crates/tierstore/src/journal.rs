@@ -53,6 +53,7 @@ pub(crate) fn proxy_key(proxy_id: &str) -> String {
 }
 
 /// The JSON body of a small object.
+#[expect(clippy::expect_used, reason = "a value of these types serializes")]
 pub(crate) fn to_body<T: Serialize>(value: &T) -> Bytes {
     let json = serde_json::to_vec(value).expect("values serialize");
     Bytes::from(json)

@@ -11,7 +11,7 @@ This guide is for the person who installs and runs it. It describes what is on t
 One `tierstore` process runs three things over the same pair of tiers:
 
 - a proxy, which answers reads and takes writes;
-- the S3 front of that proxy, which checks signatures and serves one bucket, path-style, over plain HTTP, or over HTTPS with `--tls-cert` and `--tls-key`;
+- the S3 front of that proxy, which checks signatures and serves one bucket, path-style, over plain HTTP, or over HTTPS with `server.tls_cert_file` and `server.tls_key_file`;
 - a reconciler, which copies written objects to the cold tier, applies deletes, evicts from the hot tier and publishes the hot tier's usage. Only one reconciler works at a time: it holds a lease in the hot tier, so any number of processes may run over the same tiers.
 
 A tier is `memory` (lost when the process stops, for tests), `dir:<path>` (a directory of the local file system) or `s3:<bucket>` (a bucket of an S3-compatible store).
@@ -36,7 +36,7 @@ A write goes to the hot tier and is acknowledged once the entry of its key (a sm
 
 - [Install](install.md): the tarball, the account, the directories and the unit.
 - [Keys and roles](keys.md): which key may do what, and the file rules.
-- [Configuration](configuration.md): every flag and every key of the file.
+- [Configuration](configuration.md): every key of the file.
 - [Operations](operations.md): probes, usage, drain, eviction, a full disk, metrics.
 - [Troubleshooting](troubleshooting.md): the messages the process prints and what to do.
 - [Limits](limits.md).

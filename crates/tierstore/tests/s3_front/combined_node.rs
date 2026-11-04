@@ -15,8 +15,11 @@ fn node_file(files: &Files) -> String {
     let root = files.key.parent().unwrap().to_path_buf();
     let text = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "bin-combined"
 bucket          = "tier-bucket"
 access_key_file = "{key}"

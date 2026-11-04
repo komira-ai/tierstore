@@ -1,6 +1,12 @@
 //! The binary end to end: a workspace directory with crates, an lcov tracefile, and the
 //! exit status and output it gives.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

@@ -115,6 +115,36 @@ async fn a_usage_that_is_missing_unreadable_or_stale_counts_as_not_full() {
     assert_absent(&*rig.hot_mem, "d").await;
 }
 
+/// Asserts that a failed read of the usage object does not restart the age of the body that was
+/// read before it: a usage that has stood unchanged past `usage_stale_after` stays stale when the
+/// same body is read again after one read failed, while the failed read itself counts as not
+/// full.
+#[tokio::test(start_paused = true)]
+async fn a_failed_usage_read_does_not_make_an_unchanged_stale_usage_fresh() {
+    let rig = Rig::new();
+    let mono = Arc::new(Mono::new());
+    let mut config = rig.config("p1", 1000);
+    config.mono = mono.clone();
+    let proxy = rig.open(config).await.unwrap();
+    set_usage(&rig, 1000, 0).await;
+    rig.clock.set(100_000);
+    proxy.put("a", body("fresh")).await.unwrap();
+    assert_eq!(read(&*rig.cold_mem, "a").await, body("fresh"));
+
+    mono.advance(Duration::from_secs(31));
+    rig.hot.fail_next_on(
+        Op::Get,
+        "_tiering/usage",
+        Error::Unavailable("down".to_owned()),
+    );
+    proxy.put("b", body("failed read")).await.unwrap();
+    assert!(rig.hot_mem.head("b").await.is_ok());
+
+    proxy.put("c", body("same body again")).await.unwrap();
+    assert!(rig.hot_mem.head("c").await.is_ok());
+    assert_absent(&*rig.cold_mem, "c").await;
+}
+
 /// Asserts that when the hot tier answers a put with a capacity error the object goes to the
 /// cold tier instead, that the next puts go there without asking the hot tier, and that the
 /// hot tier is tried again after `usage_refresh`.

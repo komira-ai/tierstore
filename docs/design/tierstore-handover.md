@@ -50,11 +50,12 @@ listeners and the lingering drain".
 | timeouts (s), deadline | `prepare` 600, `cutover` 300, `verify` 1000, `rollback` 600, `cleanup` 1300; `verify_deadline_secs` 1600 | `verify`: `promotion_bound_secs` 900 + margin; `prepare`: self-test of the tiers (`--backend-check-wait`); `cleanup`: settle 70 + `--drain-deadline` 900 + lease 5 + margin, and the unit's `TimeoutStopSec` becomes 1100 (960 in `packaging/tierstore.service`, which assumes a 10 s wait); the deadline is at least `verify` plus `rollback` |
 | applied by the updater | `promotion_ceiling_secs` 3600, `cleanup_retries` 3; `[hook.params]` `promotion_bound_secs = 900` | the one ceiling and the forward re-runs of `cleanup`; params passed as `--params <file>` with the reserved key `updater.promotion_ceiling_secs` added (section 3, `verify`) |
 
-Slot unit template (flags only, no environment; the rest as today's `packaging/tierstore.service`):
-`ExecStart=<state_dir>/slots/%i/tierstore --listen 0.0.0.0:%i --listen [::]:%i --proxy-id tierstore-%i
---drain-lb-wait 70s --drain-deadline 15m ...` and `ConditionPathExists=` the same path, so a slot with no link does not
-start. No `[Install]`, as today's unit has none. One template starts both slots, so the settle (`--drain-lb-wait`,
-the updater protocol, Question 13) is the same for either. `--listen` repeated and the proxy id per slot are new (sections 4, 6).
+Slot unit template (no environment; the data path is the slot's file, as built in the design doc's item d2):
+`ExecStart=<state_dir>/slots/%i/tierstore --config /etc/tierstore/tierstore-%i.toml
+--drain-lb-wait 70s --drain-deadline 15m` and `ConditionPathExists=` the binary's path, so a slot with no link does not
+start. The file of a slot has an `s3` interface at `0.0.0.0:<port>` and `[::]:<port>`, `server.proxy_id = "tierstore-<port>"` and
+`server.slot = <port>`. No `[Install]`, as today's unit has none. One template starts both slots, so the settle (`--drain-lb-wait`,
+[host-updates.md][hu] Question 13) is the same for either. The two addresses of an interface and the proxy id per slot are new (sections 4, 6).
 
 **What starts the active slot at boot: the declaration's `boot = "restore"`, not an enabled unit** (recommended). The
 updater's root part runs `tierstore update-hook restore` at its own start, before any unit, with the hook's rights and
@@ -275,7 +276,7 @@ than closed as an idle one; a shorter header timeout or drain deadline wins. Lef
 bring. The door needs no privilege: a socket filter that dropped SYNs would need `CAP_NET_ADMIN` on some kernels, which
 the slot unit does not grant.
 
-The OCI front (`--oci-listen`) drains the same way and at the same moments, with the same code (`server/drain.rs`,
+The OCI front (an `oci` interface) drains the same way and at the same moments, with the same code (`server/drain.rs`,
 `server/linger.rs`, `server/door.rs`): P1 from the start of the drain, the settle, P2 for its idle connections, an answer in flight (a long
 blob) sent in full and its connection closed the same way after it, and its late requests counted in
 `tierstore_oci_drain_late_requests_total`, so that its clients see no gap either (question 4).

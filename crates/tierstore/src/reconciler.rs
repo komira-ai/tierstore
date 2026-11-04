@@ -1,10 +1,14 @@
 //! The settings of the reconciler of a node: the lease, the pool of copies and the water marks. The
 //! reconciler itself is the [`EntryReconciler`](crate::EntryReconciler).
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{Clock, MonotonicClock, Sleeper, TokioSleeper};
+
+/// The default of `hot_store.compare_range`, and of [`EntryReconcilerConfig::compare_range`](crate::EntryReconcilerConfig): 1 MiB.
+pub(crate) const COMPARE_RANGE: NonZeroU64 = NonZeroU64::MIN.saturating_add((1 << 20) - 1);
 
 /// The settings that an [`EntryReconciler`](crate::EntryReconciler) is built over: the lease it
 /// holds, the pool of its copies and the water marks of the hot tier. Its own settings are
@@ -35,6 +39,9 @@ pub struct ReconcilerConfig {
     pub lease_margin: Option<Duration>,
     /// The most objects asked for in one listing of the entries or of the hot tier.
     pub page_size: usize,
+    /// The most bytes of one object that a comparison of the hot and the cold copy reads at once;
+    /// the [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
+    pub compare_range: NonZeroU64,
     /// The time, for the usage object and the age of the objects of the hot tier. It must agree
     /// with the times the hot tier gives its objects. The lease does not use it.
     pub clock: Arc<dyn Clock>,
@@ -51,7 +58,7 @@ pub struct ReconcilerConfig {
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, listings
-    /// of 100 objects, a renewal and a margin of a third of the lease ttl, a [`MonotonicClock`]
+    /// of 100 objects, comparisons in reads of 1 MiB, a renewal and a margin of a third of the lease ttl, a [`MonotonicClock`]
     /// for the lease and the timer of the runtime.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
@@ -65,6 +72,7 @@ impl ReconcilerConfig {
             lease_renew: None,
             lease_margin: None,
             page_size: 100,
+            compare_range: COMPARE_RANGE,
             clock,
             mono: Arc::new(MonotonicClock::new()),
             sleeper: Arc::new(TokioSleeper),

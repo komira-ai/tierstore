@@ -33,9 +33,9 @@ pub struct Addresses {
     /// The S3 front, `/healthz`, `/readyz`, `/usagez` and `/metricz`: the first address of
     /// [`s3_all`](Self::s3_all).
     pub s3: SocketAddr,
-    /// Every address the S3 front is bound to, in the order of the `--listen` flags.
+    /// Every address the S3 front is bound to, in the order of the addresses of the `s3` interfaces.
     pub s3_all: Vec<SocketAddr>,
-    /// The OCI read front, if `--oci-listen` was given: the first address of
+    /// The OCI read front, if an `oci` interface was given: the first address of
     /// [`oci_all`](Self::oci_all).
     pub oci: Option<SocketAddr>,
     /// Every address the OCI front is bound to; empty when there is none.
@@ -53,7 +53,7 @@ impl Addresses {
     pub(super) fn of(s3_all: Vec<SocketAddr>, oci: Option<&OciListener>) -> std::io::Result<Self> {
         let oci_all = oci.map(OciListener::local_addrs).transpose()?;
         let oci_all = oci_all.unwrap_or_default();
-        let none = || std::io::Error::other("--listen is needed");
+        let none = || std::io::Error::other("an s3 interface is needed");
         Ok(Self {
             s3: s3_all.first().copied().ok_or_else(none)?,
             s3_all,
@@ -76,7 +76,8 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 ///
 /// The tiers are tested first (see [`self_test`](crate::self_test)): a tier that fails is an error before the
 /// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over.
+/// to, before the first request is taken. Returns when the drain is over. What it says on the
+/// way is `tracing` events: a caller that installs no subscriber sees none of it.
 ///
 /// # Errors
 /// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
@@ -150,9 +151,9 @@ pub async fn run_serving(
     };
     let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);
     watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -204,7 +205,10 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
+    let front = OciFront::new(backend, setup.prefix, setup.metrics)
+        .with_auth(setup.auth)
+        .with_stage_read(setup.stage_read);
+    let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
 }

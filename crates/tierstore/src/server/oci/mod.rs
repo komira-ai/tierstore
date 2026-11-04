@@ -1,11 +1,11 @@
-//! A read-only OCI distribution front over the objects of a [`Backend`], served by
-//! `--oci-listen` over HTTPS, or over plain HTTP, so that a container engine (podman
-//! through `certs.d`, or any client of the distribution API) pulls an image by digest from the
-//! store.
+//! An OCI distribution front over the objects of a [`Backend`], served by an `oci` interface
+//! over HTTPS, or over plain HTTP, so that a container engine (podman through `certs.d`, or any
+//! client of the distribution API) pulls an image by digest from the store, and, when the front
+//! asks for keys, pushes one to it.
 //!
 //! # Two modes
 //!
-//! With `--oci-tls-cert` and `--oci-tls-key` the front serves HTTPS ([`OciMode::Https`]) at any
+//! With the `tls_cert_file` and `tls_key_file` params the front serves HTTPS ([`OciMode::Https`]) at any
 //! address. With neither it serves plain HTTP/1.1 ([`OciMode::Http`]) at any address. A node's
 //! own container engine pulls from the front of its own store over loopback (127/8 or `::1`),
 //! and that traffic never leaves the host; on any other address a plain connection can be read
@@ -16,7 +16,8 @@
 //! # What it serves
 //!
 //! `GET` and `HEAD` of these, and nothing else (any other path is 404 with an OCI error body,
-//! and any other method on any path is 405 `UNSUPPORTED` with `Allow: GET, HEAD`):
+//! and any other method on any path is 405 `UNSUPPORTED` with `Allow: GET, HEAD`; a front that
+//! asks for keys also serves the pushes of `push`, and its 405 lists what the path serves):
 //!
 //! - `/v2/`: 200, the body `{}` and `Docker-Distribution-API-Version: registry/2.0`;
 //! - `/v2/<name>/manifests/<digest>`: the manifest, read whole (at most 4 MiB), its SHA-256
@@ -31,7 +32,7 @@
 //! # Keys, and one namespace
 //!
 //! Manifests are blobs. An object is at `<prefix>blobs/sha256/<64 lowercase hex digits>`
-//! (`--oci-prefix`, `oci/` by default), the same for a manifest, an index, a layer and a config.
+//! (the `prefix` param, `oci/` by default), the same for a manifest, an index, a layer and a config.
 //! The `<name>` in a URL is checked against the grammar of the distribution specification (a bad
 //! one is 400 `NAME_INVALID`) and then ignored: there is one content-addressed namespace, so any
 //! name reads any digest. A key is built only from a validated digest, so nothing outside the
@@ -53,10 +54,21 @@
 //!
 //! # Access
 //!
-//! There is no authentication and no token is ever asked for: a request that carries an
-//! `Authorization` header is served as one that does not. Only objects under the prefix, named by
-//! their digest, can be read; the images in it are meant to be public (a public registry's
+//! By default there is no authentication and no token is ever asked for: a request that carries
+//! an `Authorization` header is served as one that does not. Only objects under the prefix, named
+//! by their digest, can be read; the images in it are meant to be public (a public registry's
 //! images are the first thing seeded), and which hosts may connect is the network's to decide.
+//!
+//! With `params.require_auth` ([`OciFront::with_auth`]) every request, `GET /v2/` and a path that
+//! is none of the routes included, must carry `Authorization: Basic` with an access key id of the
+//! server and its secret, or is answered 401 with `WWW-Authenticate: Basic realm="tierstore"`.
+//! Read-only keys and scoped keys that read under the front's prefix may pull (`GET`, `HEAD`); the
+//! full key and scoped keys that write under it may push (`POST`, `PUT`, `PATCH`, `DELETE`); a key
+//! that lacks the right is answered 403 `DENIED`. Why Basic and not the token flow, and the rule for
+//! each kind of key, are in [`OciAuth`]'s module, `auth`. A front without keys serves no push: it
+//! is read-only, and the pushes are 405. With them, a key that may push can push, see the module
+//! `push` (blob uploads, monolithic and chunked, and `PUT` of a manifest, each blob checked against
+//! its digest in one pass as it is stored).
 //!
 //! # Errors
 //!
@@ -65,16 +77,23 @@
 //! `MANIFEST_UNKNOWN` and `BLOB_UNKNOWN` for an object that is not there (404), `UNSUPPORTED`
 //! for a route or method not served, `RANGE_NOT_SATISFIABLE` (416), `MANIFEST_INVALID` for a
 //! stored object that is no manifest, `DIGEST_INVALID` (500) for one that is not its digest, and
-//! `UNAVAILABLE` (503) or `UNKNOWN` (500) when the store fails.
+//! `UNAVAILABLE` (503) or `UNKNOWN` (500) when the store fails. A push adds `BLOB_UPLOAD_UNKNOWN`
+//! (404), `BLOB_UPLOAD_INVALID` (416 for a chunk out of order, 411 for a body of no length where the
+//! store needs one, 400 for a body that could not be read), `DIGEST_INVALID` (400) for bytes that are
+//! not the digest given, `MANIFEST_INVALID` and `MANIFEST_BLOB_UNKNOWN` (400).
 
+mod auth;
 mod body;
 mod listener;
 mod manifest;
 mod metrics;
 mod names;
+mod push;
 mod range;
 mod tls;
 
+#[cfg(test)]
+mod auth_tests;
 #[cfg(test)]
 mod body_tests;
 #[cfg(test)]
@@ -86,16 +105,23 @@ mod listener_tests;
 #[cfg(test)]
 mod parse_tests;
 #[cfg(test)]
+mod push_chunked_tests;
+#[cfg(test)]
+mod push_manifest_tests;
+#[cfg(test)]
+mod push_tests;
+#[cfg(test)]
 pub(crate) mod test_pki;
 #[cfg(test)]
 mod tls_tests;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use hyper::header::{
     ACCEPT_RANGES, ALLOW, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderName,
-    HeaderValue, RANGE,
+    HeaderValue, RANGE, WWW_AUTHENTICATE,
 };
 use hyper::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
@@ -104,12 +130,16 @@ use sha2::{Digest as _, Sha256};
 use crate::journal::RESERVED_PREFIXES;
 use crate::{Backend, ByteRange, Error};
 
+pub use auth::OciAuth;
 pub use body::{BodyError, OciBody};
 pub(crate) use listener::OciDrain;
 pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning, s3_acceptor};
 
+pub(crate) use push::DEFAULT_STAGE_READ;
+
+use auth::{Need, Refused};
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};
 use names::{Digest, Route};
@@ -176,6 +206,10 @@ pub struct OciFront {
     backend: Arc<dyn Backend>,
     prefix: OciPrefix,
     metrics: Arc<OciMetrics>,
+    /// The keys clients must present; none serves anonymously.
+    auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    stage_read: u64,
 }
 
 impl OciFront {
@@ -186,7 +220,27 @@ impl OciFront {
             backend,
             prefix,
             metrics,
+            auth: None,
+            stage_read: DEFAULT_STAGE_READ,
         }
+    }
+
+    /// The front, reading a stored chunk in ranges of at most `bytes` at the end of an upload
+    /// ([`DEFAULT_STAGE_READ`] if this is not called); zero is taken as one.
+    #[must_use]
+    pub fn with_stage_read(mut self, bytes: u64) -> Self {
+        self.stage_read = bytes.max(1);
+        self
+    }
+
+    /// The front, asking each client for a key of `auth` (see the `Access` section of the module
+    /// docs); with none it is anonymous, as [`new`](Self::new) makes it. What each key may do is
+    /// worked out from this front's own prefix, so keys made for the server cannot reach objects
+    /// outside what their prefixes cover here.
+    #[must_use]
+    pub fn with_auth(mut self, auth: Option<OciAuth>) -> Self {
+        self.auth = auth.map(|auth| auth.bound(&self.prefix));
+        self
     }
 
     /// The counters the front counts into.
@@ -194,35 +248,114 @@ impl OciFront {
         &self.metrics
     }
 
-    /// Answers a request for `path`, whose body, if it has one, is not read.
+    /// Answers a request for `path` that has no body to read: a `GET` or a `HEAD`, or a push
+    /// that carries nothing. See [`handle_with`](Self::handle_with).
     pub async fn handle(
         &self,
         method: &Method,
         path: &str,
         headers: &HeaderMap,
     ) -> Response<OciBody> {
-        let head = *method == Method::HEAD;
+        self.handle_with(method, path, headers, body::empty(), Duration::ZERO)
+            .await
+    }
+
+    /// Answers a request for `target` (the path, and the query after a `?`) whose body is
+    /// `body`. A push reads the body as it arrives, waiting at most `idle` for each piece of it.
+    /// A request that is not a push does not read it.
+    pub async fn handle_with(
+        &self,
+        method: &Method,
+        target: &str,
+        headers: &HeaderMap,
+        body: OciBody,
+        idle: Duration,
+    ) -> Response<OciBody> {
+        let (path, query) = match target.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (target, None),
+        };
         let route = names::route(path);
         let kind = match route {
             Route::Ping => RouteKind::Ping,
             Route::Manifest { .. } => RouteKind::Manifest,
             Route::Blob { .. } => RouteKind::Blob,
+            Route::Upload { .. } | Route::Session { .. } => RouteKind::Upload,
             Route::Other => RouteKind::Other,
         };
-        let (outcome, mut response) = if !head && *method != Method::GET {
-            (Outcome::NotAllowed, not_allowed())
-        } else {
-            match route {
-                Route::Ping => (Outcome::Ok, ping()),
-                Route::Manifest { name, reference } => self.manifest(head, name, reference).await,
-                Route::Blob { name, digest } => self.blob(head, name, digest, headers).await,
-                Route::Other => (Outcome::NotFound, unsupported_route()),
+        let need = Need::of(method, matches!(route, Route::Ping));
+        let refusal = self
+            .auth
+            .as_ref()
+            .and_then(|auth| auth.check(headers, need).err());
+        let (outcome, mut response) = match refusal {
+            Some(Refused::Unauthorized) => (Outcome::Unauthorized, unauthorized()),
+            Some(Refused::Denied) => (Outcome::Denied, denied(need)),
+            None => {
+                let call = Call {
+                    method,
+                    query,
+                    headers,
+                    body,
+                    idle,
+                };
+                self.answer(route, call).await
             }
         };
         self.metrics.request(kind, outcome);
         let version = HeaderValue::from_static("registry/2.0");
         response.headers_mut().insert(DISTRIBUTION_VERSION, version);
         response
+    }
+
+    /// The answer to a call whose key, if the front asks for one, may make it: a read is
+    /// answered as it always was, a push only by a front that asks for keys (an anonymous front
+    /// is read-only), and anything else is 405.
+    async fn answer(&self, route: Route<'_>, call: Call<'_>) -> (Outcome, Response<OciBody>) {
+        let Call {
+            method,
+            query,
+            headers,
+            body,
+            idle,
+        } = call;
+        let head = *method == Method::HEAD;
+        if head || *method == Method::GET {
+            return match route {
+                Route::Ping => (Outcome::Ok, ping()),
+                Route::Manifest { name, reference } => self.manifest(head, name, reference).await,
+                Route::Blob { name, digest } => self.blob(head, name, digest, headers).await,
+                Route::Upload { .. } | Route::Session { .. } | Route::Other => {
+                    (Outcome::NotFound, unsupported_route())
+                }
+            };
+        }
+        if self.auth.is_some() {
+            match (method, &route) {
+                (&Method::POST, Route::Upload { name }) => {
+                    return self.start_upload(name, query, body, idle).await;
+                }
+                (&Method::PATCH, Route::Session { name, id }) => {
+                    return self.append(name, id, headers, body, idle).await;
+                }
+                (&Method::PUT, Route::Session { name, id }) => {
+                    return self
+                        .finish_upload(name, id, query, headers, body, idle)
+                        .await;
+                }
+                (&Method::DELETE, Route::Session { name, id }) => {
+                    return self.cancel(name, id).await;
+                }
+                (&Method::PUT, Route::Manifest { name, reference }) => {
+                    return self.put_manifest(name, reference, body, idle).await;
+                }
+                _ => {}
+            }
+        }
+        (
+            Outcome::NotAllowed,
+            not_allowed(self.auth.is_some(), &route),
+        )
     }
 
     /// `GET` or `HEAD` of a manifest.
@@ -253,7 +386,9 @@ impl OciFront {
         // and a layer of gigabytes must not be read whole to find out it is not a manifest.
         let size = match self.backend.head(&key).await {
             Ok(meta) => meta.size,
-            Err(failure) => return store_failed(&failure, &key, UNKNOWN, &digest),
+            Err(failure) => {
+                return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));
+            }
         };
         if size > MAX_MANIFEST_BYTES {
             let message =
@@ -271,7 +406,9 @@ impl OciFront {
         let range = ByteRange::new(0, MAX_MANIFEST_BYTES);
         let body = match self.backend.get(&key, Some(range)).await {
             Ok(body) => body,
-            Err(failure) => return store_failed(&failure, &key, UNKNOWN, &digest),
+            Err(failure) => {
+                return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));
+            }
         };
         let found = Digest::of_hex(hex::encode(Sha256::digest(&body)));
         if found != digest {
@@ -321,7 +458,9 @@ impl OciFront {
         let key = self.prefix.key(&digest);
         let size = match self.backend.head(&key).await {
             Ok(meta) => meta.size,
-            Err(failure) => return store_failed(&failure, &key, UNKNOWN, &digest),
+            Err(failure) => {
+                return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));
+            }
         };
         let (status, outcome, start, end) = match range::parse(request.get(RANGE), size) {
             Range::Whole => (StatusCode::OK, Outcome::Ok, 0, size),
@@ -365,6 +504,15 @@ impl OciFront {
     }
 }
 
+/// What a call carries besides its route.
+struct Call<'a> {
+    method: &'a Method,
+    query: Option<&'a str>,
+    headers: &'a HeaderMap,
+    body: OciBody,
+    idle: Duration,
+}
+
 /// The headers that name an object by its digest.
 fn identify(headers: &mut HeaderMap, digest: &Digest) {
     headers.insert(CONTENT_DIGEST, header_value(&digest.text()));
@@ -401,9 +549,45 @@ fn error(status: StatusCode, code: &str, message: &str, detail: Value) -> Respon
     response
 }
 
-/// A method that is not `GET` or `HEAD`.
-fn not_allowed() -> Response<OciBody> {
-    let message = "this registry front is read-only: only GET and HEAD are served";
+/// The call carries no key of the server, or one with a wrong secret: 401, and the challenge that
+/// tells a client to log in.
+fn unauthorized() -> Response<OciBody> {
+    let message = "this registry asks for an access key: log in with its id and secret";
+    let mut response = error(
+        StatusCode::UNAUTHORIZED,
+        "UNAUTHORIZED",
+        message,
+        Value::Null,
+    );
+    let challenge = HeaderValue::from_static("Basic realm=\"tierstore\"");
+    response.headers_mut().insert(WWW_AUTHENTICATE, challenge);
+    response
+}
+
+/// The key is the server's, and has not the right `need` asks for: 403.
+fn denied(need: Need) -> Response<OciBody> {
+    let message = match need {
+        Need::Push => "this access key may not push",
+        Need::Pull => "this access key may not pull",
+        Need::Any => "this access key may neither pull nor push here",
+    };
+    error(StatusCode::FORBIDDEN, "DENIED", message, Value::Null)
+}
+
+/// A method the route does not serve. A front that asks for keys also serves the pushes of
+/// the `push` module, so its `Allow` is the route's; an anonymous one is read-only.
+fn not_allowed(pushing: bool, route: &Route<'_>) -> Response<OciBody> {
+    const NOT_HERE: &str = "this method is not served on this path";
+    let (allow, message) = match (pushing, route) {
+        (false, _) => (
+            "GET, HEAD",
+            "this registry front is read-only: only GET and HEAD are served",
+        ),
+        (true, Route::Manifest { .. }) => ("GET, HEAD, PUT", NOT_HERE),
+        (true, Route::Upload { .. }) => ("POST", NOT_HERE),
+        (true, Route::Session { .. }) => ("PATCH, PUT, DELETE", NOT_HERE),
+        (true, _) => ("GET, HEAD", NOT_HERE),
+    };
     let mut response = error(
         StatusCode::METHOD_NOT_ALLOWED,
         "UNSUPPORTED",
@@ -412,7 +596,7 @@ fn not_allowed() -> Response<OciBody> {
     );
     response
         .headers_mut()
-        .insert(ALLOW, HeaderValue::from_static("GET, HEAD"));
+        .insert(ALLOW, HeaderValue::from_static(allow));
     response
 }
 
@@ -493,9 +677,8 @@ fn store_failed(
     failure: &Error,
     key: &str,
     unknown: &str,
-    digest: &Digest,
+    detail: Value,
 ) -> (Outcome, Response<OciBody>) {
-    let detail = json!({ "digest": digest.text() });
     match failure {
         Error::NotFound(_) => {
             let failed = error(

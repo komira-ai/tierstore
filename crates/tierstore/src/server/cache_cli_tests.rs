@@ -20,6 +20,7 @@ use super::cli::Error;
 use super::cli::{checked, exit_status};
 use super::config::{PerRun, Settings, settings_from_text};
 use super::config_cache::CacheSettings;
+use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
 use super::local_cache::{Disk, SystemDisk};
@@ -30,7 +31,7 @@ use crate::{
 };
 
 const KEY_ID: &str = "AKIDCACHE";
-const SECRET: &str = "cache-secret";
+const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
 const QUICK: PerRun = PerRun {
@@ -61,8 +62,11 @@ impl Node {
     fn text(&self, server: &str, local: &str) -> String {
         format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "c1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -615,8 +619,11 @@ fn check_config_of_a_storage_node_reads_its_key_files() {
     let node = Node::new("tscache-cli-check-storage");
     let text = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "s1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -640,18 +647,21 @@ kind = "memory"
     assert!(why.to_string().contains("/no/such/access.key"), "{why}");
 }
 
-/// Asserts what `--check-config` finds in the `[oci]` table of a storage node: a plain listener
+/// Asserts what `--check-config` finds in the `oci` interface of a storage node: a plain listener
 /// off loopback passes (the warning of a start is not printed, which the binary test checks on
 /// stderr); a prefix that overlaps `_journal/` and a certificate file that is not there are
 /// refused, each with the reason; and a certificate without its key does not load at all.
 #[test]
-fn check_config_of_a_storage_node_checks_its_oci_table() {
+fn check_config_of_a_storage_node_checks_its_oci_interface() {
     let node = Node::new("tscache-cli-check-oci");
-    let with = |oci: &str| {
+    let with = |listen: &str, more: &str| {
         format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+{oci}
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "s1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -662,75 +672,73 @@ budget = 1048576
 
 [cold_store]
 kind = "memory"
-
-[oci]
-{oci}
 "#,
+            oci = oci_interface(listen, more),
             key = node.key.display()
         )
     };
-    let load = |oci: &str| settings_from_text(&with(oci), QUICK);
-    let plain = load("listen = \"0.0.0.0:0\"").unwrap();
+    let load = |listen: &str, more: &str| settings_from_text(&with(listen, more), QUICK);
+    let plain = load("0.0.0.0:0", "").unwrap();
     assert!(checked(&plain).is_ok());
 
-    let overlapping = load("listen = \"127.0.0.1:0\"\nprefix = \"_journal/x/\"").unwrap();
+    let overlapping = load("127.0.0.1:0", ", prefix = \"_journal/x/\"").unwrap();
     let why = checked(&overlapping).unwrap_err();
     assert!(why.to_string().contains("overlaps"), "{why}");
     assert_eq!(exit_status(&why), 2);
 
     let key = node.key.display();
-    let no_cert = format!(
-        "listen = \"127.0.0.1:0\"\ntls_cert_file = \"/no/such/cert.pem\"\ntls_key_file = \"{key}\""
-    );
-    let why = checked(&load(&no_cert).unwrap()).unwrap_err();
+    let no_cert = format!(", tls_cert_file = \"/no/such/cert.pem\", tls_key_file = \"{key}\"");
+    let why = checked(&load("127.0.0.1:0", &no_cert).unwrap()).unwrap_err();
     assert!(why.to_string().contains("/no/such/cert.pem"), "{why}");
 
-    let lone = format!("listen = \"127.0.0.1:0\"\ntls_cert_file = \"{key}\"");
-    let why = load(&lone).unwrap_err();
+    let lone = format!(", tls_cert_file = \"{key}\"");
+    let why = load("127.0.0.1:0", &lone).unwrap_err();
     assert!(why.to_string().contains("tls_key_file"), "{why}");
 }
 
-/// Asserts what `--check-config` finds in the `[oci]` table of a build node, as for a storage
+/// Asserts what `--check-config` finds in the `oci` interface of a build node, as for a storage
 /// node: a plain listener off loopback passes without the warning of a start; a certificate file
 /// that is not there is refused with the reason and status 2; a certificate without its key does
-/// not load; and a prefix outside every keeping policy does not load, naming `oci.prefix`.
+/// not load; and a prefix outside every keeping policy does not load, naming `params.prefix`.
 #[test]
-fn check_config_of_a_build_node_checks_its_oci_table() {
+fn check_config_of_a_build_node_checks_its_oci_interface() {
     let node = Node::new("tscache-cli-check-oci-cache");
-    let load = |oci: &str| {
-        let text = format!("{}\n[oci]\n{oci}\n", node.text("", ""));
+    let load = |listen: &str, more: &str| {
+        let text = format!("{}{}", node.text("", ""), oci_interface(listen, more));
         settings_from_text(&text, QUICK)
     };
-    let plain = load("listen = \"0.0.0.0:0\"\nprefix = \"cas/\"").unwrap();
+    let plain = load("0.0.0.0:0", ", prefix = \"cas/\"").unwrap();
     assert!(checked(&plain).is_ok());
 
     let key = node.key.display();
     let no_cert = format!(
-        "listen = \"127.0.0.1:0\"\nprefix = \"cas/\"\ntls_cert_file = \"/no/such/cert.pem\"\ntls_key_file = \"{key}\""
+        ", prefix = \"cas/\", tls_cert_file = \"/no/such/cert.pem\", tls_key_file = \"{key}\""
     );
-    let why = checked(&load(&no_cert).unwrap()).unwrap_err();
+    let why = checked(&load("127.0.0.1:0", &no_cert).unwrap()).unwrap_err();
     assert!(why.to_string().contains("/no/such/cert.pem"), "{why}");
     // A start exits 1 for a file it cannot read (a restart may mend that); `--check-config` exits
     // 2 for any refusal, which the binary test checks.
     assert_eq!(exit_status(&why), 1);
 
-    let lone = format!("listen = \"127.0.0.1:0\"\nprefix = \"cas/\"\ntls_cert_file = \"{key}\"");
-    let why = load(&lone).unwrap_err();
+    let lone = format!(", prefix = \"cas/\", tls_cert_file = \"{key}\"");
+    let why = load("127.0.0.1:0", &lone).unwrap_err();
     assert!(why.to_string().contains("tls_key_file"), "{why}");
 
-    let unkept = load("listen = \"127.0.0.1:0\"\nprefix = \"_journal/x/\"").unwrap_err();
-    assert!(unkept.to_string().contains("oci.prefix"), "{unkept}");
+    let unkept = load("127.0.0.1:0", ", prefix = \"_journal/x/\"").unwrap_err();
+    assert!(unkept.to_string().contains("params.prefix"), "{unkept}");
 }
 
-/// Asserts that a build node whose `[oci]` certificate is not a certificate is refused at start
+/// Asserts that a build node whose `oci` certificate is not a certificate is refused at start
 /// with exit status 2, before the cache directory is made, as a storage node's front is.
 #[tokio::test]
 async fn a_build_node_with_a_bad_oci_certificate_is_refused_before_the_cache_opens() {
     let node = Node::new("tscache-cli-oci-cert");
     let key = node.key.display();
+    let more = format!(", prefix = \"cas/\", tls_cert_file = \"{key}\", tls_key_file = \"{key}\"");
     let text = format!(
-        "{}\n[oci]\nlisten = \"127.0.0.1:0\"\nprefix = \"cas/\"\ntls_cert_file = \"{key}\"\ntls_key_file = \"{key}\"\n",
-        node.text("", "")
+        "{}{}",
+        node.text("", ""),
+        oci_interface("127.0.0.1:0", &more)
     );
     let settings = settings_from_text(&text, QUICK)
         .unwrap()
@@ -752,13 +760,18 @@ async fn a_build_node_with_a_bad_oci_certificate_is_refused_before_the_cache_ope
 #[tokio::test]
 async fn a_taken_oci_address_stops_the_start_and_closes_the_s3_listener() {
     let node = Node::new("tscache-cli-oci-taken");
+    // The taken listener is bound before the free address is chosen, so the system cannot hand the
+    // same port to both.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap();
     let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let s3 = free.local_addr().unwrap();
     drop(free);
-    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let busy = taken.local_addr().unwrap();
     let text = node.text("", "").replace("127.0.0.1:0", &s3.to_string());
-    let text = format!("{text}\n[oci]\nlisten = \"{busy}\"\nprefix = \"cas/\"\n");
+    let text = format!(
+        "{text}{}",
+        oci_interface(&busy.to_string(), ", prefix = \"cas/\"")
+    );
     let settings = settings_from_text(&text, QUICK)
         .unwrap()
         .into_cache()

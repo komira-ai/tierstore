@@ -251,13 +251,16 @@ pub fn scan_discards_nothing(site: &Site) {
     let config = site.base.join("conf/scan.toml");
     let text = std::fs::read_to_string(site.base.join(format!("conf/{A}.toml")))
         .expect("a slot's configuration");
+    // The scan listens where the system puts it, on loopback, and is no slot.
     let text = text
         .lines()
-        .filter(|line| !line.starts_with("slot ") && !line.starts_with("listen "))
+        .filter(|line| !line.starts_with("slot "))
+        .map(|line| match line.starts_with("params = ") {
+            true => "params = { addresses = [\"127.0.0.1:0\"] }",
+            false => line,
+        })
         .collect::<Vec<_>>()
-        .join("\n")
-        .replacen("[server]", "[server]\nlisten = \"127.0.0.1:0\"", 1)
-        .replacen("[oci]", "[oci]\nlisten = \"127.0.0.1:0\"", 1);
+        .join("\n");
     std::fs::write(&config, text).expect("the scan's configuration");
     let mut command = Command::new(&site.server);
     command

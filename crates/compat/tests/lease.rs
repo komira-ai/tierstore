@@ -6,6 +6,12 @@
 //! its wall clock, and this branch when the same tag has stood for `ttl` on its own monotonic
 //! clock. The bytes of the object and the way it is replaced are the same in both.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 

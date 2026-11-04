@@ -229,7 +229,7 @@ these series:
 
 | name | type | labels | what it counts |
 |---|---|---|---|
-| `tierstore_oci_requests_total` | counter | `route`: `ping`, `manifest`, `blob`, `other`; `outcome`: `ok`, `partial`, `not_found`, `invalid`, `not_allowed`, `range_not_satisfiable`, `failed` | requests, by the status they were answered with (`ok` 200, `partial` 206, `not_found` 404, `invalid` 400, `not_allowed` 405, `range_not_satisfiable` 416, `failed` 5xx) |
+| `tierstore_oci_requests_total` | counter | `route`: `ping`, `manifest`, `blob`, `upload`, `other`; `outcome`: `ok`, `created`, `accepted`, `no_content`, `partial`, `not_found`, `invalid`, `not_allowed`, `range_not_satisfiable`, `unauthorized`, `denied`, `failed` | requests, by the status they were answered with (`ok` 200, `created` 201, `accepted` 202, `no_content` 204, `partial` 206, `not_found` 404, `invalid` 400, 411 or 413, `not_allowed` 405, `range_not_satisfiable` 416, `unauthorized` 401, `denied` 403, `failed` 5xx). The `upload` route is the paths of blob uploads; a manifest `PUT` is counted under `manifest` |
 | `tierstore_oci_bytes_served_total` | counter | none | bytes of blobs read for responses |
 | `tierstore_oci_digest_mismatches_total` | counter | none | objects whose bytes were not the digest they are named by |
 | `tierstore_oci_front_info` | gauge | `mode`: `https`, `http` | always 1; the label is the mode the front runs in |
@@ -238,7 +238,7 @@ Every `/metricz`, with or without the front, ends with one more series:
 
 | name | type | labels | what it says |
 |---|---|---|---|
-| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `--slot` names, only when the flag is given (otherwise the gauge has no such label) | always 1; says which build answered |
+| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `server.slot` names, only when `server.slot` is given (otherwise the gauge has no such label) | always 1; says which build answered |
 
 ## Not in a release yet
 

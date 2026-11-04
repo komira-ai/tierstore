@@ -20,7 +20,7 @@ use crate::files::Files;
 use crate::support::{BUCKET, Harness, KEY_ID, SECRET};
 
 /// The id and the secret of a read-only key.
-const READER: (&str, &str) = ("AKIDSDKREADER", "sdk-reader-secret");
+const READER: (&str, &str) = ("AKIDSDKREADER", "sdk-reader-secret-0123456789");
 
 /// The settings the front needs of a client, for the key `(id, secret)` of a server.
 fn settings(h: &Harness, key: (&str, &str)) -> Builder {

@@ -48,7 +48,7 @@ async fn run_rounds(rounds: &mut Rounds, halt: &Notify, lock: Option<&LockFile>)
             () = halt.notified() => return Ended::Halted,
             round = rounds.round() => {
                 for error in &round.failed {
-                    eprintln!("tierstore: reconciler: {error}");
+                    tracing::warn!("tierstore: reconciler: {error}");
                 }
                 round.pause
             }
@@ -89,6 +89,7 @@ impl Gate {
 /// Tries the lock every `retry` until it is taken (`Some`) or `halt` is notified (`None`). A try
 /// that fails is said on stderr and tried again. It runs on a thread that may block, so nothing
 /// waits on the lock on the runtime.
+#[expect(clippy::expect_used, reason = "a task panic is passed on")]
 async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<LockFile> {
     loop {
         tokio::select! {
@@ -101,7 +102,7 @@ async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<Lo
         match trying.await.expect("a try of the lock does not panic") {
             Ok(Some(file)) => return Some(file),
             Ok(None) => {}
-            Err(why) => eprintln!("tierstore: lock file {}: {why}", path.display()),
+            Err(why) => tracing::warn!("tierstore: lock file {}: {why}", path.display()),
         }
     }
 }
@@ -125,7 +126,7 @@ pub(crate) async fn reconcile_gated(mut rounds: Rounds, halt: Arc<Notify>, mut g
         };
         let ended = run_rounds(&mut rounds, &halt, Some(&file)).await;
         if ended == Ended::Lost {
-            eprintln!(
+            tracing::warn!(
                 "tierstore: lock file {}: the file was replaced; the reconciler stops until the \
                  lock is taken again",
                 gate.path.display()
