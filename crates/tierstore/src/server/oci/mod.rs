@@ -21,8 +21,10 @@
 //!
 //! - `/v2/`: 200, the body `{}` and `Docker-Distribution-API-Version: registry/2.0`;
 //! - `/v2/<name>/manifests/<digest>`: the manifest, read whole (at most 4 MiB), its SHA-256
-//!   checked against the digest before one byte is sent. A tag in place of the digest is 404
-//!   `MANIFEST_UNKNOWN`: tags are not served, only digests;
+//!   checked against the digest before one byte is sent. A tag in place of the digest is read
+//!   first (see `tags`) and the manifest it points at is served; a tag that is not there is 404
+//!   `MANIFEST_UNKNOWN`;
+//! - `/v2/<name>/tags/list`: the tags of a name, paged with `n` and `last`;
 //! - `/v2/<name>/blobs/<digest>`: the blob, streamed, with one `Range` if the client sends one.
 //!
 //! Every answer carries `Docker-Distribution-API-Version`; the others, on the two kinds of
@@ -80,7 +82,8 @@
 //! `UNAVAILABLE` (503) or `UNKNOWN` (500) when the store fails. A push adds `BLOB_UPLOAD_UNKNOWN`
 //! (404), `BLOB_UPLOAD_INVALID` (416 for a chunk out of order, 411 for a body of no length where the
 //! store needs one, 400 for a body that could not be read), `DIGEST_INVALID` (400) for bytes that are
-//! not the digest given, `MANIFEST_INVALID` and `MANIFEST_BLOB_UNKNOWN` (400).
+//! not the digest given, `MANIFEST_INVALID` and `MANIFEST_BLOB_UNKNOWN` (400), `TAG_CONFLICT` (409) for a tag that another
+//! push moved first, and `PAGINATION_NUMBER_INVALID` (400) for an `n` that is no number.
 
 mod auth;
 mod body;
@@ -90,6 +93,7 @@ mod metrics;
 mod names;
 mod push;
 mod range;
+mod tags;
 mod tls;
 
 #[cfg(test)]
@@ -110,6 +114,8 @@ mod push_chunked_tests;
 mod push_manifest_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod tags_tests;
 #[cfg(test)]
 pub(crate) mod test_pki;
 #[cfg(test)]
@@ -265,6 +271,7 @@ impl OciFront {
             Route::Ping => RouteKind::Ping,
             Route::Manifest { .. } => RouteKind::Manifest,
             Route::Blob { .. } => RouteKind::Blob,
+            Route::Tags { .. } => RouteKind::Tags,
             Route::Upload { .. } | Route::Session { .. } => RouteKind::Upload,
             Route::Other => RouteKind::Other,
         };
@@ -310,6 +317,7 @@ impl OciFront {
                 Route::Ping => (Outcome::Ok, ping()),
                 Route::Manifest { name, reference } => self.manifest(head, name, reference).await,
                 Route::Blob { name, digest } => self.blob(head, name, digest, headers).await,
+                Route::Tags { name } => self.tag_list(head, name, query).await,
                 Route::Upload { .. } | Route::Session { .. } | Route::Other => {
                     (Outcome::NotFound, unsupported_route())
                 }
@@ -356,14 +364,13 @@ impl OciFront {
         }
         let digest = match Digest::parse(reference) {
             Some(digest) => digest,
-            None if names::is_tag(reference) => {
-                let message = "tags are not served: pull by digest (name@sha256:<hex>)";
-                let detail = json!({ "tag": echoed(reference) });
-                return (
-                    Outcome::NotFound,
-                    error(StatusCode::NOT_FOUND, UNKNOWN, message, detail),
-                );
-            }
+            None if names::is_tag(reference) => match self.tagged(name, reference).await {
+                Ok(digest) => digest,
+                Err(failure) => {
+                    let detail = json!({ "tag": echoed(reference) });
+                    return store_failed(&failure, reference, UNKNOWN, detail);
+                }
+            },
             None => return invalid_digest(reference),
         };
         let key = self.prefix.key(&digest);
@@ -587,8 +594,8 @@ fn not_allowed(pushing: bool, route: &Route<'_>) -> Response<OciBody> {
 
 /// A path that is none of the three routes.
 fn unsupported_route() -> Response<OciBody> {
-    let message =
-        "only /v2/, /v2/<name>/manifests/<digest> and /v2/<name>/blobs/<digest> are served";
+    let message = "only /v2/, /v2/<name>/manifests/<reference>, /v2/<name>/blobs/<digest> and \
+                   /v2/<name>/tags/list are served";
     error(StatusCode::NOT_FOUND, "UNSUPPORTED", message, Value::Null)
 }
 

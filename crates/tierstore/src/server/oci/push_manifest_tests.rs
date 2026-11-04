@@ -11,7 +11,7 @@ use crate::server::testing::Step;
 use crate::{Backend, Op};
 
 /// An image manifest naming `config` and `layers`.
-fn image<S: AsRef<str>>(config: &str, layers: &[S]) -> Vec<u8> {
+pub(super) fn image<S: AsRef<str>>(config: &str, layers: &[S]) -> Vec<u8> {
     let layers: Vec<Value> = layers
         .iter()
         .map(|digest| json!({ "digest": digest.as_ref() }))
@@ -36,7 +36,7 @@ fn index<S: AsRef<str>>(manifests: &[S]) -> Vec<u8> {
 }
 
 /// A rig with a config and a layer stored, and their digests.
-async fn stocked() -> (Rig, String, String) {
+pub(super) async fn stocked() -> (Rig, String, String) {
     let rig = Rig::new();
     let config = rig.seed(b"{}").await;
     let layer = rig.seed(b"layer bytes").await;
@@ -65,10 +65,10 @@ async fn a_manifest_is_stored_by_its_digest_and_served_back() {
     assert_eq!(rig.metrics.requests("manifest", "created"), 1);
 }
 
-/// Asserts that a tag as the reference is accepted and not kept: 201 with the digest, the manifest
-/// is served by that digest, and the tag is 404 `MANIFEST_UNKNOWN` as it always was.
+/// Asserts that a tag as the reference is accepted: 201 with the digest and the digest's location,
+/// the manifest is served by that digest, and the tag is served as the same manifest.
 #[tokio::test]
-async fn a_tag_is_accepted_and_not_kept() {
+async fn a_tag_is_accepted_and_points_at_the_manifest() {
     let (rig, config, layer) = stocked().await;
     let bytes = image(&config, &[&layer]);
     let digest = digest_of(&bytes);
@@ -86,7 +86,8 @@ async fn a_tag_is_accepted_and_not_kept() {
         .await;
     assert_eq!(by_digest.body, bytes);
     let by_tag = rig.send(Method::GET, "/v2/app/manifests/latest").await;
-    by_tag.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
+    assert_eq!(by_tag.body, bytes);
+    assert_eq!(by_tag.header("docker-content-digest"), digest);
 }
 
 /// Asserts that a manifest that names a blob the front does not have is refused 400

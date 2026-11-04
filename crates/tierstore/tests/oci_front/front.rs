@@ -141,13 +141,17 @@ async fn a_range_is_206_and_a_range_past_the_end_is_416() {
     rig.stop().await;
 }
 
-/// Asserts a tag in place of a digest is 404 `MANIFEST_UNKNOWN` that says tags are not served.
+/// Asserts a tag that no push made is 404 `MANIFEST_UNKNOWN` over the wire, and the list of a name
+/// with no tag is 200 with an empty list.
 #[tokio::test]
-async fn a_tag_is_refused() {
+async fn a_tag_nobody_pushed_is_404() {
     let rig = Rig::start().await;
     let reply = rig.get("/v2/library/app/manifests/latest").await;
     assert_error(&reply, 404, "MANIFEST_UNKNOWN");
-    assert!(String::from_utf8_lossy(&reply.body).contains("tags are not served"));
+    let list = rig.get("/v2/library/app/tags/list").await;
+    assert_eq!(list.status, 200);
+    let expected = br#"{"name":"library/app","tags":[]}"#;
+    assert_eq!(list.body.as_slice(), expected.as_slice());
     rig.stop().await;
 }
 

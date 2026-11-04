@@ -79,7 +79,7 @@ fn paths_are_routed_by_their_last_two_segments() {
         "/v2",
         "/v1/",
         "/v2/_catalog",
-        "/v2/a/tags/list",
+        "/v2/a/tags/lists",
         "/v2/blobs/x",
         "/v2/blobs/uploads/",
         "/healthz",

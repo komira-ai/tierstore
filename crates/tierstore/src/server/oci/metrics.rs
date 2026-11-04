@@ -12,13 +12,15 @@ pub(super) enum RouteKind {
     Ping,
     Manifest,
     Blob,
+    /// `/v2/<name>/tags/list`.
+    Tags,
     /// The paths of uploads: where one begins, and one that has begun.
     Upload,
     Other,
 }
 
 /// The label of each route, in the order of [`RouteKind`].
-const ROUTES: [&str; 5] = ["ping", "manifest", "blob", "upload", "other"];
+const ROUTES: [&str; 6] = ["ping", "manifest", "blob", "tags", "upload", "other"];
 
 /// How a request ended, by the status it was answered with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,10 +52,12 @@ pub(super) enum Outcome {
     Denied,
     /// 5xx: a store that failed, an object that is not what its name says.
     Failed,
+    /// 409: a tag that another push moved first.
+    Conflict,
 }
 
 /// The label of each outcome, in the order of [`Outcome`].
-const OUTCOMES: [&str; 12] = [
+const OUTCOMES: [&str; 13] = [
     "ok",
     "created",
     "accepted",
@@ -66,6 +70,7 @@ const OUTCOMES: [&str; 12] = [
     "unauthorized",
     "denied",
     "failed",
+    "conflict",
 ];
 
 /// What the front has done since it started: requests by route and outcome, the bytes of blobs

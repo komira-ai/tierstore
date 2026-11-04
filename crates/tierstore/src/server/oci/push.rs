@@ -24,8 +24,8 @@
 //!   [`MAX_MANIFEST_BYTES`]), must be one (see `manifest`), must hash to the reference if that is
 //!   a digest, and must name only blobs the front has: each digest of its config, layers and
 //!   manifests is looked up first, and one that is not there is 400 `MANIFEST_BLOB_UNKNOWN`. It is
-//!   stored by its digest. A tag as the reference is accepted and not kept: tags are not served,
-//!   so the manifest is pulled by the digest the 201 gives in `Docker-Content-Digest`.
+//!   stored by its digest. A tag as the reference then points at it, moved with a compare and
+//!   swap, so that of two pushes of one tag exactly one is taken and the other is 409 (see `tags`).
 //!
 //! The store's calls run on a task of their own, so a client that goes away once its body is read
 //! leaves the put to be carried to its end with its journal entry. A backend that must know the
@@ -53,6 +53,7 @@ use sha2::{Digest as _, Sha256};
 use super::body::{self, OciBody};
 use super::metrics::Outcome;
 use super::names::{self, Digest};
+use super::tags;
 use super::{
     CONTENT_DIGEST, MAX_MANIFEST_BYTES, OciFront, error, header_value, invalid_digest,
     invalid_name, manifest, store_failed,
@@ -61,7 +62,7 @@ use crate::server::ops::detached;
 use crate::server::request::query_pairs;
 use crate::{Backend, Error, Listed, PartBody};
 
-type Answer = (Outcome, Response<OciBody>);
+pub(super) type Answer = (Outcome, Response<OciBody>);
 
 const UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
 
@@ -603,6 +604,7 @@ impl OciFront {
             }
         };
         let digest = Digest::of_hex(hex::encode(Sha256::digest(&bytes)));
+        let tag_key = wanted.is_none().then(|| self.tag_key(name, reference));
         if let Some(wanted) = wanted.filter(|wanted| *wanted != digest) {
             return digest_refused(digest.hex(), &wanted);
         }
@@ -636,15 +638,21 @@ impl OciFront {
         }
         let key = self.prefix.key(&digest);
         let backend = Arc::clone(&self.backend);
+        let pointer = Bytes::from(digest.text());
         let stored = detached(async move {
             match backend.put(&key, bytes).await {
-                Ok(()) | Err(Error::AlreadyExists(_)) => Ok(()),
-                Err(failure) => Err(failure),
+                Ok(()) | Err(Error::AlreadyExists(_)) => {}
+                Err(failure) => return Err(failure),
+            }
+            match tag_key {
+                Some(tag) => tags::point(backend.as_ref(), &tag, pointer).await,
+                None => Ok(()),
             }
         })
         .await;
         match stored {
             Ok(()) => created(&format!("/v2/{name}/manifests/{}", digest.text()), &digest),
+            Err(Error::PreconditionFailed(_)) => tags::conflict(reference),
             Err(failure) => store_failed(&failure, &digest.text(), "MANIFEST_UNKNOWN", Value::Null),
         }
     }

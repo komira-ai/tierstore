@@ -110,7 +110,16 @@ async fn a_client_pushes_an_image_in_chunks_and_pulls_it_back() {
         .request("GET", "/v2/app/manifests/latest", &[auth])
         .await
         .expect("an answer");
-    assert_eq!(tag.status, 404);
+    assert_eq!(
+        (tag.status, tag.body.as_slice()),
+        (200, manifest.as_bytes())
+    );
+    let list = conn
+        .request("GET", "/v2/app/tags/list", &[auth])
+        .await
+        .expect("an answer");
+    let expected = br#"{"name":"app","tags":["latest"]}"#;
+    assert_eq!(list.body.as_slice(), expected.as_slice());
 
     let left = rig.proxy.list("oci/uploads/").await.expect("a listing");
     assert!(left.is_empty(), "{left:?}");

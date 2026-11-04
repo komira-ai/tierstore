@@ -249,19 +249,17 @@ async fn an_object_that_is_not_a_manifest_is_refused() {
     assert_eq!(rig.metrics.requests("manifest", "failed"), 2);
 }
 
-/// Asserts a tag is 404 `MANIFEST_UNKNOWN` that says tags are not served, for GET and HEAD, and
-/// that the store is not asked.
+/// Asserts a tag that no push made is 404 `MANIFEST_UNKNOWN` naming the tag, for GET and HEAD,
+/// and that the store is asked for the tag only.
 #[tokio::test]
-async fn a_tag_is_refused_because_only_digests_are_served() {
+async fn a_tag_that_nobody_pushed_is_404() {
     let rig = Rig::new();
     for method in [Method::GET, Method::HEAD] {
         let answer = rig.ask(method, "/v2/a/b/manifests/latest", &[]).await;
-        let (message, detail) = answer.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
-        assert!(message.contains("tags are not served"), "{message}");
-        assert!(message.contains("by digest"), "{message}");
+        let (_, detail) = answer.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
         assert_eq!(detail["tag"], "latest");
     }
-    assert_eq!(rig.faulty.calls(Op::Get) + rig.faulty.calls(Op::Head), 0);
+    assert_eq!(rig.faulty.calls(Op::Get), 2);
     assert_eq!(rig.metrics.requests("manifest", "not_found"), 2);
 }
 
@@ -560,7 +558,7 @@ async fn every_method_but_get_and_head_is_405() {
 async fn other_paths_are_404_and_nothing_is_challenged() {
     let rig = Rig::new();
     let digest = rig.seed(b"x").await;
-    for path in ["/", "/v2", "/v2/_catalog", "/v2/a/tags/list", "/healthz"] {
+    for path in ["/", "/v2", "/v2/_catalog", "/v2/a/tags/lists", "/healthz"] {
         let answer = rig.get(path).await;
         let (message, _) = answer.assert_error(StatusCode::NOT_FOUND, "UNSUPPORTED");
         assert!(message.contains("only /v2/"), "{message}");
