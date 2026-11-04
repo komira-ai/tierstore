@@ -1,6 +1,8 @@
 //! The deletes of a proxy whose format is active (`WriteMode::Entries`): a delete is made on the
-//! journal entry of its key, and the cold tier's object is deleted at once, whatever the entry
-//! says.
+//! journal entry of its key, and the cold tier's object is deleted once the delete has acquired or
+//! amended that entry. When another operation holds or has sealed the entry, the delete first
+//! waits for it (see below), and until then neither tier is touched; if the wait runs out it is
+//! answered [`Error::Unavailable`] with both tiers untouched.
 //!
 //! A delete, in order:
 //!
