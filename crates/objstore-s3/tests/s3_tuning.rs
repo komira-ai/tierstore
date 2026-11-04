@@ -1,6 +1,12 @@
 //! `S3Store::new_tuned` and the read retries it sets, against a server on loopback that reads each
 //! request and closes the connection without an answer.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

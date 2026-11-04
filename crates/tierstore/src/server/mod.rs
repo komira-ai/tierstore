@@ -211,6 +211,7 @@ mod config_policy;
 mod config_syntax;
 mod config_tuning;
 mod config_units;
+mod counted;
 mod door;
 mod drain;
 mod front;
@@ -353,6 +354,7 @@ pub use local_cache::LocalCache;
 pub use presign::{Grant, PresignKey, PresignRequest, presign_get, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 
+use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
 use drain::SETTLED;
@@ -578,42 +580,6 @@ pub struct Server {
     puts: Arc<Semaphore>,
 }
 
-/// A request in flight, counted until it is dropped.
-struct Flight<'a>(&'a Server);
-
-impl<'a> Flight<'a> {
-    fn enter(server: &'a Server) -> Self {
-        server.inflight.fetch_add(1, Ordering::SeqCst);
-        server.drain.idle.notify_waiters();
-        Self(server)
-    }
-}
-
-impl Drop for Flight<'_> {
-    fn drop(&mut self) {
-        self.0.inflight.fetch_sub(1, Ordering::SeqCst);
-        self.0.drain.idle.notify_waiters();
-    }
-}
-
-/// A connection that is open, counted until it is dropped.
-struct Connected(Arc<Server>);
-
-impl Connected {
-    fn enter(server: &Arc<Server>) -> Self {
-        server.open.fetch_add(1, Ordering::SeqCst);
-        server.drain.idle.notify_waiters();
-        Self(Arc::clone(server))
-    }
-}
-
-impl Drop for Connected {
-    fn drop(&mut self) {
-        self.0.open.fetch_sub(1, Ordering::SeqCst);
-        self.0.drain.idle.notify_waiters();
-    }
-}
-
 impl Server {
     /// A server over `backend`.
     #[must_use]
@@ -828,6 +794,10 @@ impl Server {
     /// [`Server::handle`] for a request that came on a connection with this `wire`: a streamed
     /// answer holds the wire until its body is over, so that the drain does not close the
     /// connection in the middle of it.
+    #[expect(
+        clippy::expect_used,
+        reason = "a request id is hex digits, which a header value holds"
+    )]
     async fn handle_on<B>(
         &self,
         request: Request<B>,
@@ -871,13 +841,13 @@ impl Server {
     /// Logs what the store said about a request it failed: the client got a fixed text.
     fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
         let (method, path) = (&parts.method, parts.uri.path());
-        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
+        tracing::warn!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
     fn log_stalled(&self, parts: &Parts, id: &str, why: &str) {
         let (method, path) = (&parts.method, parts.uri.path());
-        eprintln!("tierstore: request {id} ({method} {path}): {why} Closed.");
+        tracing::warn!("tierstore: request {id} ({method} {path}): {why} Closed.");
     }
 
     async fn respond<B>(&self, parts: &Parts, body: B) -> Result<Answer, S3Error>

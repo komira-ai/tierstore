@@ -2,6 +2,12 @@
 //! or a verification are only as good as it is, so each thing it answers is checked here, with
 //! the exit status and the words.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
