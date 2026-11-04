@@ -211,6 +211,7 @@ mod config_syntax;
 mod config_tier;
 mod config_tuning;
 mod config_units;
+mod config_unknown;
 mod counted;
 mod deprecated;
 mod door;

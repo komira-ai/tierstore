@@ -89,7 +89,6 @@ pub(super) struct Params {
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct OciTable {
     /// One address, or a list of them; needed in the table.
     pub listen: Option<Addrs>,

@@ -7,7 +7,6 @@ use crate::journal::RESERVED_PREFIXES;
 
 /// `[[policy]]`: what is done with the keys under a prefix.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Policy {
     /// The keys it is about: empty for all the rest, or ending in `/`.
     pub prefix: String,

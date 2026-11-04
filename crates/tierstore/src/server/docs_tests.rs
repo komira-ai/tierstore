@@ -28,6 +28,7 @@ use super::config::{KEYS, keys_for_flags, settings_from_text};
 use super::config_cache::LocalCacheTable;
 use super::config_policy::Policy;
 use super::config_testing::DEFAULTS;
+use super::config_unknown::fields_of;
 
 /// The title of the sections that the exists-in-code checks leave out.
 const NOT_YET: &str = "Not in a release yet";
@@ -555,22 +556,12 @@ fn code() -> Code {
     }
 }
 
-/// The `table.key` of every key that the struct `T` of a table of the file takes. The struct
-/// refuses an unknown key, and serde's message for that lists the keys it takes, so a field that
-/// is added to the struct is in the list without anyone writing it down.
+/// The `table.key` of every key that the struct `T` of a table of the file takes, as the loader
+/// knows them (see `fields_of`): a field that is added to the struct is in the list without
+/// anyone writing it down.
 fn table_keys<T: serde::de::DeserializeOwned>(table: &str) -> BTreeSet<String> {
-    let refused = toml::from_str::<T>("zz_not_a_key = 1\n").err();
-    let message = refused
-        .expect("an unknown key is refused")
-        .message()
-        .to_owned();
-    let (_, expected) = message
-        .split_once("expected")
-        .expect("serde's message lists the keys");
-    expected
-        .split('`')
-        .skip(1)
-        .step_by(2)
+    fields_of::<T>()
+        .iter()
         .map(|key| format!("{table}.{key}"))
         .collect()
 }
@@ -721,7 +712,6 @@ fn a_flag_that_only_resembles_another_programs_is_found() {
 #[test]
 fn the_keys_of_a_table_are_read_from_its_struct() {
     #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
     #[allow(dead_code)]
     struct Planted {
         first: u8,

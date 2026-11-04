@@ -5,7 +5,8 @@ use super::config::{ConfigError, KEYS};
 
 /// Whether a key's name says it holds a secret: it has a word of one, or is a key itself and
 /// not the path of a file. A hint for a message that says what to do, not a gate: what keeps a
-/// secret out of the file is that an unknown key is refused, and the name of a known key that
+/// secret out of the file is this check of every key's name, known or not (an unknown key is
+/// only warned about, so it is not what refuses one), and the name of a known key that
 /// takes a path (`credentials_file`) cannot tell a path from a secret by its value. The messages
 /// of the file never repeat a value, so a secret that is given anyway is not echoed.
 fn looks_secret(key: &str) -> bool {

@@ -116,7 +116,7 @@ async fn a_file_written_by_hand_with_directory_tiers_keeps_objects_on_disk() {
 
 /// Asserts the refusals of a start with a file, each with status 2, nothing on stdout and a
 /// message that names what is wrong: a data path flag given with the file (the first one named,
-/// with its key), a file that is not there, an unknown key, an inline secret, and `[local_cache]`
+/// with its key), a file that is not there, a mistyped key, an inline secret, and `[local_cache]`
 /// along with `[hot_store]` and nothing a cache keeps.
 #[test]
 fn a_start_with_a_file_that_must_be_refused_says_why() {
@@ -144,7 +144,7 @@ fn a_start_with_a_file_that_must_be_refused_says_why() {
     assert!(err.contains("/no/such/tierstore.toml"), "{err}");
 
     let refused = [
-        ("[server]\n", "[server]\nbogus = 1\n", "bogus"),
+        ("[server]\n", "[server]\nslot = \"x\"\n", "slot"),
         (
             "[hot_store]\n",
             "[hot_store]\nsecret_access_key = \"x\"\n",
@@ -177,4 +177,26 @@ fn a_refusal_of_the_start_speaks_of_the_keys_of_the_file() {
     assert!(err.contains("hot_store.low_water"), "{err}");
     assert!(err.contains("hot_store.high_water"), "{err}");
     assert!(!err.contains("--low-water"), "{err}");
+}
+
+/// Asserts that a file with a key this release does not know is checked and started as the file
+/// without it: `--check-config` exits 0, says nothing on stdout and says on stderr, once for each
+/// key and with exactly this text, that the key is not known and is ignored, and a file with only
+/// known keys says nothing.
+#[test]
+fn a_file_with_an_unknown_key_is_checked_with_one_warning_for_each_key() {
+    let files = Files::new("cfg-unknown-keys");
+    let good = directory_file(&files.key, files.key.parent().unwrap());
+    let plain = files.secret("plain.toml", &good);
+    let args = |file: &Path| strings(&["--config", &file.display().to_string(), "--check-config"]);
+    assert_eq!(run(&args(&plain)), (0, String::new(), String::new()));
+
+    let text = good.replacen("[server]\n", "[server]\nnew_knob = 1\n", 1) + "\n[future]\nx = 1\n";
+    let file = files.secret("future.toml", &text);
+    let (code, out, err) = run(&args(&file));
+    let line = |key: &str| {
+        format!("tierstore: config key {key} is not known to this release and is ignored\n")
+    };
+    assert_eq!((code, out), (0, String::new()));
+    assert_eq!(err, line("future") + &line("server.new_knob"));
 }

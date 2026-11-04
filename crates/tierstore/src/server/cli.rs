@@ -883,7 +883,8 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
 
 /// `--check-config`: what a start refuses before it opens anything, asked of the settings of a
 /// file: the front's settings, which reads the key files it names, and the limits a start
-/// checks first. Status 0 and no output if there is nothing to refuse; else the start's message
+/// checks first. Status 0 if there is nothing to refuse (a key the file has that this release does
+/// not know is a warning on stderr, once for each key, and no refusal); else the start's message
 /// on stderr and status 2. It binds nothing and asks nothing of a tier. It does not make the
 /// checks that a start makes of the disk and the stores: the budget of a cache against the size
 /// of its file system (`free_floor`), the cache directory, the credentials of a tier.
