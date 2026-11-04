@@ -33,7 +33,8 @@
 //! listing under `_journal/` or `_tiering/` (no prefix of a key can cover them), and a call on a
 //! key outside the list its kind needs: a read prefix does not let the key write, and a write
 //! prefix does not let it read. A put over a key that exists is `412` as for every create-only
-//! put. The key is refused on a presigned URL (the URL's key must be a presigning key).
+//! put. A presigned URL signed with the key is good for a `GET` or `HEAD` of one object under a read
+//! prefix, and for nothing else (see `presign`).
 //!
 //! The refusals come in this order: the signature and the key id, then the method, then the path
 //! and query are decoded, then a listing of uploads is held to its `prefix` (a role's
