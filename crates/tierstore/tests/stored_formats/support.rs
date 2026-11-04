@@ -28,7 +28,6 @@ impl Tiers {
     pub async fn proxy(&self, id: &str, budget: u64) -> Result<Proxy, Error> {
         let mut config = ProxyConfig::new(id, budget, self.clock.clone());
         config.linger = Duration::from_millis(1);
-        config.back_pressure = Duration::from_millis(5);
         config.usage_refresh = Duration::ZERO;
         Proxy::open(self.hot.clone(), self.cold.clone(), config).await
     }
