@@ -313,6 +313,8 @@ mod testing;
 #[cfg(test)]
 mod time_tests;
 #[cfg(test)]
+mod unlistable_key_tests;
+#[cfg(test)]
 mod uploads_tests;
 #[cfg(test)]
 mod xml_tests;
@@ -832,6 +834,10 @@ impl Server {
             if error.is_timeout() {
                 self.log_stalled(&parts, &id, error.message());
             }
+            let detail = error.detail();
+            detail
+                .into_iter()
+                .for_each(|why| self.log_failed(&parts, &id, why));
             error.into_answer(path, &id)
         });
         let name = HeaderName::from_static("x-amz-request-id");
@@ -846,6 +852,12 @@ impl Server {
             response.body_mut().hold_wire(wire);
         }
         response
+    }
+
+    /// Logs what the store said about a request it failed: the client got a fixed text.
+    fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
+        let (method, path) = (&parts.method, parts.uri.path());
+        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
