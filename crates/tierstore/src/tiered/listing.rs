@@ -42,7 +42,7 @@ impl Inner {
         let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
         let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
         let checked: Vec<Option<Listed>> = checks
-            .buffered(self.inner.config.listing_heads.max(1))
+            .buffered(self.config.listing_heads.max(1))
             .try_collect()
             .await?;
         Ok(checked.into_iter().flatten().collect())
