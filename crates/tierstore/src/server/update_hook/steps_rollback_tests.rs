@@ -28,7 +28,7 @@ fn rollback_returns_the_host_to_where_it_was() {
             fake.changes()[mark..],
             [
                 "units.start tierstore@9301.service",
-                "nft.apply kbf_forward_tierstore",
+                "nft.apply tierstore_forward",
                 "units.stop tierstore@9302.service",
                 "slots.remove 9302",
                 "state.save"
@@ -171,7 +171,7 @@ fn a_restart_rollback_moves_the_rule_then_stops_the_new_unit_before_it_starts_th
     assert_eq!(
         fake.changes()[mark..],
         [
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
             "units.stop tierstore@9302.service",
             "units.start tierstore@9301.service",
             "units.stop tierstore@9302.service",

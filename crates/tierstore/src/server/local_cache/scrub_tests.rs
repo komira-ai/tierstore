@@ -426,18 +426,23 @@ async fn a_halt_in_the_middle_of_a_big_object_ends_the_pass_at_the_next_chunk() 
     let released = std::sync::Mutex::new(released);
     let chunks = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let counting = Arc::clone(&chunks);
-    let mut state = Scrubber::new(1 << 30);
+    let state = Scrubber::new(1 << 30);
     let stop = Arc::clone(&state.stop);
-    state.on_chunk = Some(Arc::new(move || {
+    let released = Arc::new(released);
+    let hold = move || {
         counting.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         reached.send(()).unwrap();
         let _ = released.lock().unwrap().recv();
-    }));
+    };
     let (ticker, tick, mut asks) = hand();
     let cache = rig.cache.clone();
     let halt = Arc::new(Notify::new());
     let halting = Arc::clone(&halt);
-    let running = tokio::spawn(async move { cache.scrub_with(state, ticker, halting).await });
+    let running = tokio::spawn(async move {
+        cache
+            .scrub_with(state, ticker, halting, Arc::new(hold))
+            .await
+    });
     asks.recv().await.unwrap();
     tick.send(()).await.unwrap();
     reaches.recv().await.unwrap();
@@ -462,13 +467,12 @@ async fn an_object_whose_check_panics_is_counted_and_the_walk_goes_on_past_it() 
     fill(&rig, 3, 100).await;
     let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let mut state = Scrubber::new(1 << 20);
-    state.on_chunk = Some(Arc::new(move || {
+    let pass = rig.cache.inner.scrub_tick(&mut state, &move || {
         assert!(
             !first.swap(false, std::sync::atomic::Ordering::SeqCst),
             "the first object's check panics"
         );
-    }));
-    let pass = rig.cache.scrub_once(&mut state);
+    });
     assert_eq!((pass.scrubbed, pass.dropped), (2, 0));
     let counters = rig.cache.counters();
     assert_eq!(read(&counters.scrub_errors), 1);

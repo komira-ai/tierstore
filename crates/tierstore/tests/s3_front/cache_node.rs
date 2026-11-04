@@ -35,7 +35,7 @@ budget = "1MiB"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-fake"
+bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
@@ -83,7 +83,7 @@ async fn a_build_node_reads_through_an_upstream_and_refuses_writes() {
         let requests = fake.requests();
         requests
             .iter()
-            .filter(|r| r.starts_with("GET /kbf-fake/cas/obj"))
+            .filter(|r| r.starts_with("GET /tierstore-fake/cas/obj"))
             .count()
     };
 
@@ -182,7 +182,7 @@ budget = "1MiB"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-fake"
+bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
@@ -446,7 +446,7 @@ impl Started {
         waiting.await.unwrap().unwrap()
     }
 
-    /// The client of kbf with the key of the key file.
+    /// The S3 client with the key of the key file.
     fn store(&self) -> S3Store {
         let config = S3Config {
             endpoint: format!("http://{}", self.addr),

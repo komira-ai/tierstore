@@ -158,12 +158,6 @@ impl Tee {
         }
     }
 
-    /// The cold body failed: the write is abandoned, and a cold error is counted.
-    fn failed(&mut self) {
-        self.inner.counters.error(Tier::Cold, Read::Get);
-        self.abandon();
-    }
-
     /// Fails the write, which leaves nothing, unless it was ended whole.
     fn abandon(&mut self) {
         let _ = self

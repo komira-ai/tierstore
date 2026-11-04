@@ -331,7 +331,7 @@ impl FakeS3 {
         &self.endpoint
     }
 
-    /// A store for bucket `kbf-fake` on this service, claiming `capabilities`.
+    /// A store for bucket `tierstore-fake` on this service, claiming `capabilities`.
     ///
     /// # Panics
     /// Never: the configuration is valid.
@@ -340,7 +340,7 @@ impl FakeS3 {
         S3Store::new(S3Config {
             endpoint: self.endpoint.clone(),
             region: "us-east-1".to_owned(),
-            bucket: "kbf-fake".to_owned(),
+            bucket: "tierstore-fake".to_owned(),
             credentials: Credentials::new("fake-key", "fake-secret"),
             capabilities,
             connect_timeout: Duration::from_secs(5),
