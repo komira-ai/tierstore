@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 930" width="960" height="930" role="img" aria-label="Flow of one node: boot with a fresh id, register in the hot tier, serve and heartbeat, then graceful stop or silence; the leader sees it as departed, creates a sentinel, applies below it and retires it. A separate frame shows what a frozen node meets when it wakes.">
-<title>One node: boot, heartbeat, stop or silence, and how the leader retires it</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 638" width="960" height="638" role="img" aria-label="Sequence diagram of one node: boot with a fresh id and create its registration; heartbeat every 10 seconds with If-Match; on stop keep heartbeating until the in-flight requests end, then exit; if it goes silent the leader treats it as departed after 60 seconds and reaps the entries it held; after ten times that and with no entry naming it, the leader deletes the registration.">
+<title>One node: boot, heartbeat, stop or silence, and how the leader forgets it</title>
 <defs><marker id="node-lifecycle-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="node-lifecycle-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
 .box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
@@ -17,92 +17,44 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 .t-n{fill:#5A5A57;font-size:13px}
 .lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
 </style>
-<rect x="0" y="0" width="960" height="930" fill="#FFFFFF"/>
-<text x="20" y="28" class="b" font-size="16">One node: boot, heartbeat, stop or silence, and how the leader retires it</text>
-<rect x="30" y="56" width="250" height="88" rx="5" class="box-b"/>
-<text x="40" y="78" class="b">1  Boot</text>
-<text x="40" y="95">fresh id &lt;node&gt;-&lt;boot id&gt;</text>
-<text x="40" y="112" class="t-n">every process start is a new id</text>
-<line x1="280" y1="100" x2="355" y2="100" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<rect x="355" y="56" width="250" height="88" rx="5" class="box-b"/>
-<text x="365" y="78" class="b">2  Register</text>
-<text x="365" y="95">create-only put of</text>
-<text x="365" y="112">_tiering/proxies/&lt;id&gt; (hot tier)</text>
-<line x1="605" y1="100" x2="680" y2="100" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<rect x="680" y="56" width="250" height="88" rx="5" class="box-b"/>
-<text x="690" y="78" class="b">3  Serve</text>
-<text x="690" y="95">heartbeat every 1 min: If-Match</text>
-<text x="690" y="112">rewrite of the registration</text>
-<text x="690" y="129">puts write _journal/&lt;id&gt;/&lt;seq&gt;</text>
-<path d="M740,144 L740,172 L525,172 L525,196" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<text x="745" y="166" class="t-m lbl">stop</text>
-<line x1="850" y1="144" x2="850" y2="196" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<text x="858" y="170" class="t-m lbl">silence</text>
-<rect x="400" y="196" width="250" height="70" rx="5" class="box"/>
-<text x="410" y="218" class="b">4a  Graceful stop</text>
-<text x="410" y="235">drain, then write 'closed'</text>
-<text x="410" y="252">into the registration</text>
-<rect x="690" y="196" width="240" height="70" rx="5" class="box"/>
-<text x="700" y="218" class="b">4b  Silence</text>
-<text x="700" y="235">crash, freeze or partition:</text>
-<text x="700" y="252">registration stops changing</text>
-<path d="M525,266 L525,282 L120,282 L120,366" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<text x="130" y="296" class="t-m lbl">closed</text>
-<path d="M810,266 L810,300 L250,300 L250,366" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<text x="260" y="314" class="t-m lbl">unchanged for 10 min</text>
-<rect x="20" y="324" width="920" height="330" rx="8" class="box-p"/>
-<text x="924" y="346" class="b" text-anchor="end">Leader side: the process that holds _tiering/lease</text>
-<rect x="30" y="366" width="290" height="124" rx="5" class="box-b"/>
-<text x="40" y="388" class="b">5  Node has departed</text>
-<text x="40" y="406">when either holds:</text>
-<text x="40" y="424">- registration says 'closed'</text>
-<text x="40" y="442">- unchanged for 10 min on the</text>
-<text x="40" y="460">  leader's own steady clock</text>
-<text x="40" y="478" class="t-n">no timestamps compared across machines</text>
-<line x1="320" y1="428" x2="360" y2="428" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<rect x="360" y="366" width="270" height="124" rx="5" class="box-b"/>
-<text x="370" y="388" class="b">6  Sentinel</text>
-<text x="370" y="406">create-only put at the node's</text>
-<text x="370" y="424">next journal number</text>
-<text x="370" y="442" class="t-n">journal objects are create-only, so</text>
-<text x="370" y="460" class="t-n">that number can no longer be written</text>
-<line x1="630" y1="428" x2="670" y2="428" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<rect x="670" y="366" width="260" height="124" rx="5" class="box-b"/>
-<text x="680" y="388" class="b">7  Apply below the sentinel</text>
-<text x="680" y="406">copy each object to cold</text>
-<text x="680" y="424">(replace reservation, If-Match),</text>
-<text x="680" y="442">write the node's checkpoint</text>
-<line x1="800" y1="490" x2="800" y2="530" class="ln" marker-end="url(#node-lifecycle-ak)"/>
-<rect x="670" y="530" width="260" height="100" rx="5" class="box-b"/>
-<text x="680" y="552" class="b">8  Retire</text>
-<text x="680" y="570">delete the node's journal,</text>
-<text x="680" y="588">checkpoint and registration</text>
-<text x="680" y="606" class="t-n">(hot tier objects of this id)</text>
-<rect x="30" y="530" width="290" height="70" rx="5" class="box-p"/>
-<text x="42" y="552" class="t-n">A dead node's journal keeps being</text>
-<text x="42" y="569" class="t-n">copied the whole time;</text>
-<text x="42" y="586" class="t-n">only its cleanup waits.</text>
-<path d="M495,490 L495,740" class="ln-od" marker-end="url(#node-lifecycle-ao)"/>
-<text x="505" y="552" class="t-m lbl">a frozen node's next</text>
-<text x="505" y="568" class="t-m lbl">journal write lands</text>
-<text x="505" y="584" class="t-m lbl">on this sentinel</text>
-<rect x="20" y="690" width="920" height="190" rx="8" class="box-p"/>
-<text x="36" y="712" class="b">Node side: a frozen node wakes up (long pause, or a partition that heals)</text>
-<rect x="30" y="740" width="270" height="100" rx="5" class="box-o"/>
-<text x="40" y="762" class="b">Frozen node wakes</text>
-<text x="40" y="780">it still believes it is live</text>
-<text x="40" y="798">and tries its next journal write</text>
-<line x1="300" y1="790" x2="345" y2="790" class="ln-o" marker-end="url(#node-lifecycle-ao)"/>
-<rect x="345" y="740" width="270" height="100" rx="5" class="box-o"/>
-<text x="355" y="762" class="b">Journal write collides</text>
-<text x="355" y="780">create-only at the sentinel's</text>
-<text x="355" y="798">number fails, so the put fails</text>
-<text x="355" y="816" class="t-n">nothing is acknowledged past it</text>
-<line x1="615" y1="790" x2="660" y2="790" class="ln-o" marker-end="url(#node-lifecycle-ao)"/>
-<rect x="660" y="740" width="270" height="100" rx="5" class="box-o"/>
-<text x="670" y="762" class="b">Node stops, re-registers</text>
-<text x="670" y="780">under a new id: back to step 1</text>
-<text x="670" y="798" class="t-n">the old id is never reused</text>
-<path d="M795,840 L795,904 L6,904 L6,100 L30,100" class="ln-od" marker-end="url(#node-lifecycle-ao)"/>
-<text x="300" y="898" class="t-m lbl">re-register: a new boot, a new id</text>
+<rect x="0" y="0" width="960" height="638" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">One node: boot, heartbeat, stop or silence, and how the leader forgets it</text>
+<rect x="95" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="150" y="65" class="b" text-anchor="middle">A node</text>
+<rect x="425" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="480" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="755" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="810" y="65" class="b" text-anchor="middle">Leader</text>
+<line x1="150" y1="76" x2="150" y2="572" class="ln-d"/>
+<line x1="480" y1="76" x2="480" y2="572" class="ln-d"/>
+<line x1="810" y1="76" x2="810" y2="572" class="ln-d"/>
+<text x="315.0" y="112" class="t-m lbl" text-anchor="middle">1  boot: a fresh id &lt;node&gt;-&lt;boot id&gt;, never reused</text>
+<text x="315.0" y="128" class="t-m lbl" text-anchor="middle">create _tiering/proxies/&lt;id&gt;, create-only: {proto, boot, hb}</text>
+<line x1="150" y1="140" x2="480" y2="140" class="ln" marker-end="url(#node-lifecycle-ak)"/>
+<text x="315.0" y="166" class="t-m lbl" text-anchor="middle">2  every 10 s: rewrite the registration, If-Match</text>
+<text x="315.0" y="182" class="t-m lbl" text-anchor="middle">live_until = send time of the last good heartbeat + D - m</text>
+<line x1="150" y1="194" x2="480" y2="194" class="ln" marker-end="url(#node-lifecycle-ak)"/>
+<text x="164" y="220" class="t-m lbl">serves requests; each put or delete</text>
+<text x="164" y="236" class="t-m lbl">holds an entry named with its id</text>
+<rect x="142" y="208" width="16" height="36" rx="5" class="box"/>
+<line x1="20" y1="260" x2="940" y2="260" class="ln-d"/>
+<text x="20" y="284" class="b lbl">Stop: graceful</text>
+<text x="164" y="312" class="t-m lbl">3  drain: stop accepting, keep heartbeating until</text>
+<text x="164" y="328" class="t-m lbl">in-flight requests have finished (a cap cuts long ones)</text>
+<rect x="142" y="300" width="16" height="36" rx="5" class="box"/>
+<text x="164" y="360" class="t-m lbl">4  exit. There is no closed flag: the registration</text>
+<text x="164" y="376" class="t-m lbl">just goes quiet, as after a crash</text>
+<rect x="142" y="348" width="16" height="36" rx="5" class="box"/>
+<line x1="20" y1="400" x2="940" y2="400" class="ln-d"/>
+<text x="20" y="424" class="b lbl">Silence: crash, kill or freeze (and the end of a graceful stop)</text>
+<text x="645.0" y="452" class="t-m lbl" text-anchor="middle">5  scan: registration unchanged for D = 60 s on the leader's</text>
+<text x="645.0" y="468" class="t-m lbl" text-anchor="middle">own monotonic clock since it first saw that exact object: departed</text>
+<line x1="810" y1="480" x2="480" y2="480" class="ln" marker-end="url(#node-lifecycle-ak)"/>
+<text x="645.0" y="506" class="t-m lbl" text-anchor="middle">6  every HELD entry of that id: CAS to PENDING (reap); finish it</text>
+<line x1="810" y1="518" x2="480" y2="518" class="ln-o" marker-end="url(#node-lifecycle-ao)"/>
+<text x="645.0" y="544" class="t-m lbl" text-anchor="middle">7  after 10 D, with no entry naming the id: delete the registration</text>
+<line x1="810" y1="556" x2="480" y2="556" class="ln" marker-end="url(#node-lifecycle-ak)"/>
+<rect x="30" y="570" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="590" class="t-m">No timestamp from another machine is compared with anything. A restarted process has a new id, so it is never mistaken for its dead predecessor.</text>
+<text x="40" y="606" class="t-m">The old per-node journals, checkpoints, prune and sentinels are not part of this: a node leaves nothing to rebuild but its entries.</text>
 </svg>

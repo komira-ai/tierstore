@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use super::LocalCache;
-use super::evict::Pass;
+use super::evict::{Pass, joined};
 use super::layout::name_of;
 use super::metrics::{Evicted, read};
 use super::testing::{Rig, pattern};
@@ -241,4 +241,18 @@ async fn the_loop_runs_passes_until_it_is_halted_and_then_writes_the_uses() {
     looping.await.unwrap();
     let touched = rig.disk.touched.lock().unwrap().clone();
     assert!(touched.contains(&(rig.file("cas/b/k3"), 9_000)));
+}
+
+/// Asserts that the result of a blocking task that finished gives its value, and that one that
+/// panicked, and one that the runtime cancelled, give nothing, so the loops that run a pass or a
+/// tick go on to the next instead of stopping or panicking with it.
+#[tokio::test]
+async fn a_task_that_panicked_or_was_cancelled_gives_nothing() {
+    let fine = tokio::task::spawn_blocking(|| 7);
+    assert_eq!(joined(fine.await, "a pass"), Some(7));
+    let panicking = tokio::task::spawn_blocking(|| -> u8 { panic!("a pass that panics") });
+    assert_eq!(joined(panicking.await, "a pass"), None);
+    let waiting = tokio::spawn(std::future::pending::<u8>());
+    waiting.abort();
+    assert_eq!(joined(waiting.await, "a pass"), None);
 }
