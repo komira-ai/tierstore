@@ -1,8 +1,8 @@
 # Limits
 
-What tierstore does not do on main, so that you can decide before you depend on it.
+What tierstore does not do, so that you can decide before you depend on it.
 
-- **TLS on the S3 listener is optional, and a tier's endpoint has none.** On main (not in v0.0.41) `server.tls_cert_file` and `server.tls_key_file` make the S3 listener serve HTTPS; without them it serves plain HTTP and, off loopback, the start prints a warning. An S3 tier's endpoint is still `http://`, so a build node cannot use an HTTPS front as its upstream. (The OCI front has its own, `params.tls_cert_file` and `params.tls_key_file`.)
+- **TLS on the S3 listener is optional, and a tier's endpoint has none.** `server.tls_cert_file` and `server.tls_key_file` make the S3 listener serve HTTPS; without them it serves plain HTTP and, off loopback, the start prints a warning. An S3 tier's endpoint is still `http://`, so a build node cannot use an HTTPS front as its upstream. (The OCI front has its own, `params.tls_cert_file` and `params.tls_key_file`.)
 - **One bucket, path-style, SigV4 in the header.** No virtual-host addressing, no session tokens, no STS. Presigned GET and PUT URLs are the one exception to signing in the header.
 - **Objects are immutable.** A put is create-only; there is no overwrite and no copy. A delete removes both tiers' copies.
 - **Bodies are streamed, with limits.** A put or part is passed on as it arrives and never held whole, but it is bounded by `server.max_request_bytes` (256 MiB by default); a larger object needs the key raised, a multipart upload or a presigned PUT. At most `server.max_concurrent_puts` bodies are taken at once. A manifest served by the OCI front is read whole (at most 4 MiB).
@@ -22,7 +22,7 @@ What tierstore does not do on main, so that you can decide before you depend on 
 
 ## A storage node with a local cache
 
-On main, not in v0.0.41. A file with `[hot_store]`, `[cold_store]` and `[local_cache]` serves reads from a disk cache in front of the node's own proxy. What it does not do:
+A file with `[hot_store]`, `[cold_store]` and `[local_cache]` serves reads from a disk cache in front of the node's own proxy. What it does not do:
 
 - **A kept object is not checked again.** A key that another process deletes or re-puts, over the same tiers, is served by this cache as it was until it is evicted, and its listing and the cache's hits can disagree. Several such nodes over the same tiers, or a storage node without a cache beside one, are for prefixes that are never rewritten (`cache = true` only on content-addressed prefixes, as for a build node).
 - **Versions are compared by size.** Over two tiers an object's tag moves with the tier, so a fill and a long read of a key that is not named by its content (`cas/l/<digest>` keys are hash-checked) cannot tell two same-size versions apart: another process deleting and re-putting such a key with other bytes of the same size during one fill is not detected.

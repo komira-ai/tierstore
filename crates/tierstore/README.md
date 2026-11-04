@@ -65,7 +65,7 @@ floor; every other call is refused 403. It has no journal and no lease. The keys
 the rules are in "A build node" in `packaging/README.md`; `GET /metricz` shows its
 counters.
 
-With `write_through = true` in `[local_cache]` (version 0.2.0 on; `tierstore --version` shows it)
+With `write_through = true` in `[local_cache]`
 the node also takes create-only puts, presigned PUTs, multipart uploads and deletes, and sends
 each to the upstream (`src/server/local_cache/write.rs`) before it answers; a create-only put
 under a `cache = true` policy is also kept on the node (`src/server/local_cache/keep.rs`), a
@@ -185,7 +185,7 @@ is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
 ### Scoped keys
 
 A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `read_prefixes`,
-`write_prefixes` and `delete_prefixes`; the lists may be empty, but not all three, and every prefix
+`write_prefixes` and `delete_prefixes`; the lists may be empty, but not all, and every prefix
 ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
 A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
@@ -196,7 +196,7 @@ is plain data); the command line does, and exits 2.
   `prefix` parameter must be inside one);
 - `write_prefixes`: create-only PutObject (`If-None-Match: *` or no condition; `412` if the key
   exists) and the calls of a multipart upload (create, part, complete, abort);
-- `delete_prefixes`: DeleteObject.
+- `delete_prefixes`: DeleteObject (not AbortMultipartUpload: a delete prefix cannot cancel an upload).
 
 A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`). Everything else is
 `403 AccessDenied`. Two uses:
@@ -212,7 +212,7 @@ See "Scoped keys" in `packaging/README.md` for the table of calls.
 
 ## HTTPS on the S3 front
 
-On main (not in v0.0.41) the keys `server.tls_cert_file` and `server.tls_key_file` of the
+The keys `server.tls_cert_file` and `server.tls_key_file` of the
 configuration file make every socket of the S3 front serve HTTPS. Without them it serves plain
 HTTP, the default; off loopback the start then prints one warning line on stderr, naming the
 non-loopback addresses. The certificate may name the front by a DNS name, by an IP address, or both

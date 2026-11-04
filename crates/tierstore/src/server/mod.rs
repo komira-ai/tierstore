@@ -98,9 +98,10 @@
 //! A credential that may write one object under a prefix, and expires, is a presigned PUT URL: see [`presign`], and
 //! [`ServerConfig::presign_keys`] for the keys that sign them (`--presign-key-file` in the binary).
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
-//! GC key: see [`gc`], and [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
+//! GC key, which is a scoped key with a list, a delete and an abort right on its prefix: see [`gc`], and
+//! [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
-//! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
+//! A key that reads, lists, creates and deletes under the prefixes of the lists in its key file, and replaces and
 //! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
 //! binary).
 //! A client that holds no key and must read one object for a short time presents a presigned GET
@@ -298,6 +299,8 @@ mod request_tests;
 mod reserved_tests;
 #[cfg(test)]
 mod role_tests;
+#[cfg(test)]
+mod scoped_rights_tests;
 #[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
@@ -908,9 +911,6 @@ impl Server {
         }
         let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
         let check = Check::new(&signed.payload, &parts.headers, data)?;
-        if let Role::Gc(prefix) = &signed.role {
-            gc::permit(prefix, parts, &target, &query)?;
-        }
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }

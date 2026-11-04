@@ -312,9 +312,11 @@ any other method is refused). The file is JSON of exactly these five fields, all
  "delete_prefixes": []}
 ```
 
+A read prefix lets the key list as well.
+
 Every prefix ends in `/` and is not empty. None may be `_journal/`, `_tiering/` or `_entries/`, be under one, be
 a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one is refused at
-start. A list may be empty, but a key whose three lists are all empty is refused, since it could do
+start. A list may be empty, but a key whose lists are all empty is refused, since it could do
 nothing. The lists may overlap: a prefix in `read_prefixes` and in `write_prefixes` is one the key
 reads and creates under. A key file that is refused (bad JSON, a missing or unknown field, a bad
 prefix, a mode other than 0600) exits 1 at start with a message that names the key and the file and
@@ -329,12 +331,13 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 
 | call | list | allowed |
 |---|---|---|
-| GetObject, HeadObject | `read_prefixes` | yes, whole or by range |
-| ListObjectsV2 | `read_prefixes` | with a `prefix` parameter inside a read prefix; no prefix or another is 403, not filtered |
-| ListMultipartUploads | `read_prefixes` | the same rule: a `prefix` inside a read prefix |
+| GetObject | `read_prefixes` | yes, whole or by range |
+| HeadObject | `read_prefixes` (a GC key: its list prefix) | yes |
+| ListObjectsV2 | `read_prefixes` (a GC key: its list prefix) | with a `prefix` parameter inside such a prefix; no prefix or another is 403, not filtered |
+| ListMultipartUploads | `read_prefixes` (a GC key: its list prefix) | the same rule: a `prefix` inside such a prefix |
 | PutObject | `write_prefixes` | create-only: no `If-Match`, and `If-None-Match` absent or `*`; a key that exists is `412 PreconditionFailed` |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
-| AbortMultipartUpload | `write_prefixes` | of an upload of such a key (a delete prefix does not allow an abort) |
+| AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
@@ -494,7 +497,7 @@ nothing is kept. A body that is cut leaves nothing at the upstream or in the cac
 `/metricz` has `tierstore_cache_writes_through_total` (puts the upstream took),
 `tierstore_cache_write_exists_total` (puts answered 412) and
 `tierstore_cache_write_keep_skipped_total{reason}` with the reasons `budget` (also a body of no
-declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (on main, not in v0.0.41: the cache does not hold the lock of its directory, so it copies nothing);
+declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (the cache does not hold the lock of its directory, so it copies nothing);
 `tierstore_cache_keeps_expired_total` counts the puts answered before their copy was done.
 
 ```toml
@@ -643,7 +646,7 @@ put 403.
 of a read-only key, in practice, or of a key that writes with `write_through`), and without `skip_checks` and the keys of the reconciler. `[server]`
 is as for a storage node, without `backend_check_wait`. A `[[policy]]` with `cache = true` is needed.
 The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are a storage node with
-a cache in front of its own proxy (on main, not in v0.0.41): the S3 and OCI fronts read through the
+a cache in front of its own proxy: the S3 and OCI fronts read through the
 cache, the cache reads from and writes to the proxy, `write_through` is true (left out or given;
 `false` is refused), and the start does not run the upstream's self-test (the upstream is the
 proxy, whose tiers the start tests), so the table's `write_through` row below does not apply to it.
@@ -731,7 +734,7 @@ instead of running with settings it did not read.
 | `server.proxy_id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
-| `server.tls_cert_file`, `server.tls_key_file` | on main, not in v0.0.41: the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
+| `server.tls_cert_file`, `server.tls_key_file` | the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
 | `server.presign_key_files`, `server.presign_max_expires` | presigning keys with their ceilings, and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
 | `server.gc_key_files` | GC keys; see GC keys |
 | `server.scoped_key_files` | scoped keys; see Scoped keys |
@@ -749,7 +752,7 @@ flags of a run.
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP (on main, not in v0.0.41, over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -757,7 +760,7 @@ what "tested" means below.
 
 | setting | value | why |
 |---|---|---|
-| endpoint | `http://<host>:<port>` of the `s3` interface (on main, not in v0.0.41, `https://` when the file has `server.tls_cert_file` and `server.tls_key_file`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
+| endpoint | `http://<host>:<port>` of the `s3` interface (`https://` when the file has `server.tls_cert_file` and `server.tls_key_file`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
 | addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
 | bucket | the `server.bucket` name | there is one; other names are not served |
 | region | tierstore's own `server.region` (not `hot_store.region` or `cold_store.region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
@@ -1021,9 +1024,8 @@ writing, so that the client reads a clean end of stream, and reads until the cli
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered
 and is counted in `tierstore_drain_late_requests_total`. It waits for the requests in flight and
-the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0. This
-is on main, not in v0.0.41, which answers a request on a connection that is open after the settle
-503 `ServiceUnavailable`. `TimeoutStopSec=` is set above
+the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0.
+`TimeoutStopSec=` is set above
 the sum of the two drain flags and the lease's wait, so that systemd does not send SIGKILL to a drain
 in progress; if `--drain-deadline` is raised, raise it too. A start that fails is tried again
 after 30 seconds; exit status 2 (a command line or a file the process refused: an unknown flag, a flag of the data
