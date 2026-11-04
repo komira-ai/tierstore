@@ -576,6 +576,7 @@ The compatibility tests of section 8 run the previous release on directories and
 5. The `if-match-missing` start-up probe. Pull request #93.
 6. `dir:`: the `_entries/` subdirectory and a blocking cross-process file lock, with the compatibility test that the previous release lists such a root.
 7. The test harness: gate backend, injected monotonic clock, recording sleeper, call counting, each with its own tests.
+   Built: `GateBackend` with `Gate` (`Pre` and `Post`, one call per gate), `Mono` (a `Clock` that only `advance` moves), the `Sleeper` trait with `TokioSleeper` and `RecordingSleeper`, and `FaultyBackend::calls_on` and `call_log`. Nothing in production code calls them yet: the `Instant::now()` calls of `tiered.rs` move to `Mono` and the loops to `Sleeper` with the code that needs them. Not built yet: the elapsed future for the per-call timeout and the in-memory backend models of section 13.1.
 
 *Stage 1, entry layer, dark (nothing calls it).*
 
