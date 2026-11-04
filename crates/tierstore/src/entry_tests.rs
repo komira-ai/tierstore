@@ -857,6 +857,24 @@ async fn a_store_without_a_delete_on_the_tag_gets_a_plain_delete() {
     assert_eq!(a.entries.read("k").await.unwrap(), None);
 }
 
+/// Asserts the residual of a store without a delete on the tag: a stale `Seen` of an entry that was
+/// removed and created again deletes the new entry too, and answers `Done`. The tag cannot be
+/// checked there; the exclusive-holder rule is what makes it safe.
+#[tokio::test]
+async fn a_stale_seen_on_a_store_without_a_delete_on_the_tag_removes_the_replacement() {
+    let rig = Rig::new();
+    let a = rig.actor("a");
+    let old = take(&a, "k", Take::Evict).await;
+    assert_eq!(a.entries.release(&old).await.unwrap(), Outcome::Done(()));
+    let _replacement = take(&a, "k", Take::Evict).await;
+    rig.store.fail_next_with(
+        Op::DeleteIfMatch,
+        Error::Unsupported("no conditional delete".to_owned()),
+    );
+    assert_eq!(a.entries.release(&old).await.unwrap(), Outcome::Done(()));
+    assert_eq!(a.entries.read("k").await.unwrap(), None);
+}
+
 /// Asserts that a delete the store refuses for a reason that says nothing was deleted is that error
 /// and the entry stands.
 #[tokio::test]

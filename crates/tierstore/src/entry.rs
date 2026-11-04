@@ -36,6 +36,17 @@
 //! two, so the body can be newer than the tag. That is safe: the tag is the older one, and a
 //! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
 //! Nobody acts on a body without going through such a call.
+//!
+//! The one exception is a store without a delete on the tag: [`Entries::release`] falls back to a
+//! plain delete there, which does not check the tag, so a stale [`Seen`] can remove a newer entry.
+//! That is safe only because release is for the exclusive holder (the owner of a held entry, or
+//! anyone for a sealed one), whom nobody changes the entry under.
+//!
+//! # Nonce
+//!
+//! The nonce is `<actor id>.<counter>`, the counter being per [`Entries`]. It is unique only if an
+//! actor id is never used with a counter that starts again: an actor that makes a new [`Entries`]
+//! takes a fresh id, or shares the counter of the old one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -422,7 +433,7 @@ impl Entries {
 
     /// Removes the entry as `seen` has it, if this actor may (it is sealed, or a put or a delete it
     /// holds) and it still has the tag of `seen`. A store that does not do a delete on the tag
-    /// gets a plain delete, which is safe here because nobody changes an entry that is sealed or
+    /// gets a plain delete, which does not check the tag and is safe only because nobody changes an entry that is sealed or
     /// held by its owner.
     ///
     /// # Errors
