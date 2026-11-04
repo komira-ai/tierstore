@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use tierstore_testkit::dir::TestDir;
 
 use super::OciError;
-use super::test_pki::{ca, dns, ip, leaf, leaf_with};
+use super::s3_acceptor;
+use super::test_pki::{ca, dns, email, ip, leaf, leaf_with};
 use super::tls::{acceptor, acceptor_for, ip_of, unnamed};
 use rcgen::date_time_ymd;
 
@@ -132,8 +133,8 @@ fn an_expired_certificate_and_an_open_key_are_refused() {
     let ca = ca();
     let names = || vec![ip("127.0.0.1")];
     let past = leaf_with(dir.path(), "past", &ca, names(), |params| {
-        params.not_before = date_time_ymd(2020, 1, 1);
-        params.not_after = date_time_ymd(2021, 1, 1);
+        params.not_before = date_time_ymd(2026, 9, 1);
+        params.not_after = date_time_ymd(2026, 9, 2);
     });
     let future = leaf_with(dir.path(), "future", &ca, names(), |params| {
         params.not_before = date_time_ymd(3000, 1, 1);
@@ -146,7 +147,7 @@ fn an_expired_certificate_and_an_open_key_are_refused() {
         assert!(why.contains("notBefore"), "{why}");
         assert!(why.contains("notAfter"), "{why}");
     }
-    assert!(refusal(&past.cert, &past.key, "127.0.0.1:443").contains("2021"));
+    assert!(refusal(&past.cert, &past.key, "127.0.0.1:443").contains("2026"));
 
     let good = leaf(dir.path(), "good", &ca, names());
     let mode = |bits| std::fs::set_permissions(&good.key, Permissions::from_mode(bits));
@@ -184,7 +185,10 @@ fn only_unreadable_files_and_bind_errors_are_not_invalid_flags() {
     };
     for invalid in [
         pem,
-        OciError::Config("x".to_owned()),
+        OciError::Config {
+            flags: "x",
+            why: "z".to_owned(),
+        },
         OciError::Missing("y".to_owned()),
     ] {
         assert!(invalid.is_invalid_flags(), "{invalid}");
@@ -203,4 +207,107 @@ fn an_address_is_four_bytes_or_sixteen() {
     }
     assert!(unnamed(&[], addr("0.0.0.0:1")).is_some());
     assert!(unnamed(&["192.0.2.7".parse().unwrap()], addr("0.0.0.0:1")).is_none());
+}
+
+/// Why `s3_acceptor` refuses these files for `listen`.
+fn s3_refusal(cert: &Path, key: &Path, listen: &[&str]) -> String {
+    let listen: Vec<SocketAddr> = listen.iter().map(|text| addr(text)).collect();
+    let refused = s3_acceptor(cert, key, &listen).err();
+    refused.expect("refused").to_string()
+}
+
+/// Asserts the S3 front accepts a certificate that names it by a DNS name, by an IP address or by
+/// both: a DNS name is enough for any listen address (the wildcards and an address the
+/// certificate does not name included), and without one the certificate must name each address.
+#[test]
+fn the_s3_front_takes_a_dns_name_an_ip_address_or_both() {
+    let dir = TestDir::under(std::env::temp_dir(), "s3-tls-names");
+    let ca = ca();
+    let by_dns = leaf(dir.path(), "dns", &ca, vec![dns("s3.test")]);
+    let by_ip = leaf(dir.path(), "ip", &ca, vec![ip("127.0.0.1"), ip("::1")]);
+    let by_both = leaf(
+        dir.path(),
+        "both",
+        &ca,
+        vec![dns("s3.test"), ip("127.0.0.1")],
+    );
+    let other = vec![email("ops@s3.test"), dns("s3.test")];
+    let other = leaf(dir.path(), "other", &ca, other);
+    for listen in [
+        "127.0.0.1:9000",
+        "0.0.0.0:9000",
+        "[::]:9000",
+        "192.0.2.7:9000",
+    ] {
+        for files in [&by_dns, &by_both, &other] {
+            s3_acceptor(&files.cert, &files.key, &[addr(listen)]).expect(listen);
+        }
+    }
+    let both = [addr("127.0.0.1:9000"), addr("[::1]:9000")];
+    s3_acceptor(&by_ip.cert, &by_ip.key, &both).expect("each address is named");
+    s3_acceptor(&by_ip.cert, &by_ip.key, &[addr("0.0.0.0:9000")]).expect("any IP will do");
+}
+
+/// Asserts the S3 front refuses a certificate with no name for it: no subjectAltName at all (an
+/// e-mail name is not one), or only IP addresses other than its own, with the S3 flag in the
+/// message and the names the certificate does have.
+#[test]
+fn the_s3_front_refuses_a_certificate_that_does_not_name_it() {
+    let dir = TestDir::under(std::env::temp_dir(), "s3-tls-unnamed");
+    let ca = ca();
+    let bare = leaf(dir.path(), "bare", &ca, vec![]);
+    let mail = leaf(dir.path(), "mail", &ca, vec![email("ops@s3.test")]);
+    let other = leaf(dir.path(), "other", &ca, vec![ip("192.0.2.8")]);
+    for (files, listen) in [
+        (&bare, "127.0.0.1:9000"),
+        (&bare, "0.0.0.0:9000"),
+        (&mail, "[::]:9000"),
+        (&other, "192.0.2.7:9000"),
+    ] {
+        let why = s3_refusal(&files.cert, &files.key, &[listen]);
+        assert!(why.starts_with("--tls-cert "), "{why}");
+        assert!(why.contains("no IP subjectAltName"), "{why}");
+    }
+    let why = s3_refusal(
+        &other.cert,
+        &other.key,
+        &["192.0.2.8:9000", "192.0.2.7:9000"],
+    );
+    assert!(
+        why.contains("for 192.0.2.7 (it names [192.0.2.8])"),
+        "{why}"
+    );
+}
+
+/// Asserts the S3 front's refusals name its own flags: the file that is missing, a key that is
+/// not a key, a key that any user can read, an expired certificate and a key that is another
+/// certificate's, whose message is exactly the two flags and what rustls says.
+#[test]
+fn the_s3_front_names_its_own_flags_in_every_refusal() {
+    let dir = TestDir::under(std::env::temp_dir(), "s3-tls-flags");
+    let ca = ca();
+    let names = || vec![dns("s3.test")];
+    let good = leaf(dir.path(), "good", &ca, names());
+    let stranger = leaf(dir.path(), "stranger", &ca, names());
+    let expired = leaf_with(dir.path(), "expired", &ca, names(), |params| {
+        params.not_before = date_time_ymd(2026, 9, 1);
+        params.not_after = date_time_ymd(2026, 9, 2);
+    });
+    let missing = dir.path().join("missing");
+    let text = dir.path().join("text");
+    std::fs::write(&text, "not a PEM file\n").expect("write");
+    std::fs::set_permissions(&text, Permissions::from_mode(0o600)).expect("mode");
+    let listen = ["127.0.0.1:9000"];
+    assert!(s3_refusal(&missing, &good.key, &listen).starts_with("--tls-cert "));
+    assert!(s3_refusal(&good.cert, &missing, &listen).starts_with("--tls-key "));
+    assert!(s3_refusal(&good.cert, &text, &listen).starts_with("--tls-key "));
+    let why = s3_refusal(&expired.cert, &expired.key, &listen);
+    assert!(why.starts_with("--tls-cert "), "{why}");
+    assert!(why.contains("not valid now"), "{why}");
+    std::fs::set_permissions(&good.key, Permissions::from_mode(0o644)).expect("mode");
+    let why = s3_refusal(&good.cert, &good.key, &listen);
+    assert!(why.starts_with("--tls-key "), "{why}");
+    assert!(why.contains("any user can read the key"), "{why}");
+    let why = s3_refusal(&good.cert, &stranger.key, &listen);
+    assert!(why.starts_with("--tls-cert and --tls-key: "), "{why}");
 }
