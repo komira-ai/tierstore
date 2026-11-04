@@ -242,3 +242,21 @@ async fn a_put_whose_look_at_the_hot_tier_under_its_entry_fails_removes_its_entr
     assert_eq!(rig.shape("k").await, None);
     assert!(!rig.hot_has("k").await);
 }
+
+/// Asserts that a put whose first look at the hot tier found nothing, and whose entry was created
+/// after an object appeared there (no entry came with it), is refused as existing under its entry,
+/// removes its entry and leaves the object.
+#[tokio::test]
+async fn a_put_that_finds_an_object_with_no_entry_under_its_own_entry_removes_the_entry() {
+    let rig = Rig::active().await;
+    let gate = rig.hot.gate(Op::Head, "k", Phase::Post);
+    let proxy = rig.proxy.clone();
+    let put = tokio::spawn(async move { proxy.put("k", body("mine")).await });
+    gate.parked().await;
+    rig.hot_mem.put("k", body("theirs")).await.unwrap();
+    assert!(gate.release());
+    let answer = put.await.unwrap();
+    assert_eq!(answer, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(rig.shape("k").await, None);
+    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("theirs"));
+}
