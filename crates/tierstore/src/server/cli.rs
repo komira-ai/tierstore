@@ -755,10 +755,10 @@ fn capabilities(args: &[OsString]) -> ExitCode {
 pub fn main(args: Vec<OsString>) -> ExitCode {
     // Before anything can say something: the operator messages go through `tracing`.
     super::build_info::stderr_log::install();
-    // The host updater's hook: a verb of its own, answered before any flag is parsed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if args.get(1).is_some_and(|verb| verb == update_hook::VERB) {
-        return update_hook::main(&args);
+    // The verbs (the host updater's hook, the operator's `format-epoch` and `entries`): each is
+    // answered before any flag is parsed.
+    if let Some(status) = super::verbs::answer(&args) {
+        return status;
     }
     // Before the flags are parsed: it needs none of the flags a start requires.
     if args.iter().skip(1).any(|arg| arg == "--capabilities") {
