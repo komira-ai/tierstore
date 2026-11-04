@@ -12,6 +12,7 @@ mod conformance;
 mod explorer;
 mod faults;
 mod format_pause;
+mod hold;
 mod killed_put;
 mod list_uploads;
 mod list_uploads_reserved;

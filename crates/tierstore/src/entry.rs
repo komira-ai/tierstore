@@ -39,16 +39,20 @@
 //! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
 //! Nobody acts on a body without going through such a call.
 //!
-//! The one exception is a store without a delete on the tag: [`Entries::release`] falls back to a
-//! plain delete there, which does not check the tag, so a stale [`Seen`] can remove a newer entry.
-//! That is safe only because release is for the exclusive holder (the owner of a held entry, or
-//! anyone for a sealed one), whom nobody changes the entry under.
+//! The one exception is a store without a delete on the tag: there [`Entries::release`] falls back to
+//! a plain delete, which does not check the tag, so a stale [`Seen`] could remove a newer entry.
+//! It does so only for a sealed entry, which no step changes (the reconciler seals before it
+//! releases, and abandons the release when its seal is [`Outcome::Lost`]). A held entry is changed
+//! under its holder (a delete amends a held put with [`Step::AmendCopy`], the reconciler reaps a
+//! held entry), so there release returns the store's `Unsupported` and deletes nothing.
 //!
 //! # Nonce
 //!
-//! The nonce is `<actor id>.<counter>`, the counter being per [`Entries`]. It is unique only if an
-//! actor id is never used with a counter that starts again: an actor that makes a new [`Entries`]
-//! takes a fresh id, or shares the counter of the old one.
+//! The nonce is `<actor id>.<boot>.<counter>`, the counter being per [`Entries`]. The actor id is
+//! the configured one and is reused when a process restarts, so it cannot make the nonce unique
+//! by itself: each [`Entries`] takes a `boot` of its own (process id, the clock at its creation
+//! and a count of the [`Entries`] made in the process), so a counter that starts again under a
+//! known actor id still writes nonces no earlier instance wrote.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -306,11 +310,12 @@ fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
 
 /// The store calls on the entries of one actor: a proxy or a reconciler, named by `me`.
 ///
-/// `me` is unique to the process (a proxy id carries its boot), which is what makes the nonces it
-/// writes unique among all writers.
+/// `me` may be the same in every process of the actor, so the nonces it writes are made unique by
+/// `boot`, which differs for every [`Entries`] ever made.
 pub struct Entries {
     hot: Arc<dyn Backend>,
     me: String,
+    boot: String,
     clock: Arc<dyn Clock>,
     writes: AtomicU64,
 }
@@ -320,18 +325,38 @@ impl Entries {
     /// `created_ms`.
     #[must_use]
     pub fn new(hot: Arc<dyn Backend>, me: impl Into<String>, clock: Arc<dyn Clock>) -> Self {
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let boot = format!(
+            "{:x}-{:x}-{:x}",
+            std::process::id(),
+            clock.now(),
+            MADE.fetch_add(1, Ordering::SeqCst)
+        );
+        Self::with_boot(hot, me, clock, boot)
+    }
+
+    /// As [`Entries::new`] with the `boot` named, for a test that needs the nonces to be known.
+    #[must_use]
+    pub(crate) fn with_boot(
+        hot: Arc<dyn Backend>,
+        me: impl Into<String>,
+        clock: Arc<dyn Clock>,
+        boot: impl Into<String>,
+    ) -> Self {
         Self {
             hot,
             me: me.into(),
+            boot: boot.into(),
             clock,
             writes: AtomicU64::new(0),
         }
     }
 
-    /// A nonce no other write has: this actor's id and the count of its writes.
+    /// A nonce no other write has: this actor's id, this instance's boot and the count of its
+    /// writes.
     fn nonce(&self) -> String {
         let count = self.writes.fetch_add(1, Ordering::SeqCst);
-        format!("{}.{count}", self.me)
+        format!("{}.{}.{count}", self.me, self.boot)
     }
 
     /// Reads the entry of `key`: its body and tag, or `None` if there is none.
@@ -463,8 +488,10 @@ impl Entries {
 
     /// Removes the entry as `seen` has it, if this actor may (it is sealed, or a put or a delete it
     /// holds) and it still has the tag of `seen`. A store that does not do a delete on the tag
-    /// gets a plain delete, which does not check the tag and is safe only because nobody changes an entry that is sealed or
-    /// held by its owner.
+    /// gets a plain delete, which does not check the tag, only for a sealed entry, which no step
+    /// changes. For a held entry, which a delete may amend ([`Step::AmendCopy`]) or the reconciler
+    /// reap, it gets nothing deleted and the `Unsupported` error: seal first, and give up the
+    /// release when the seal is [`Outcome::Lost`].
     ///
     /// # Errors
     /// The backend's error for a failed delete (see the module for the ambiguous ones).
@@ -474,7 +501,9 @@ impl Entries {
         }
         let path = entry_key(&seen.entry.key);
         let deleted = match self.hot.delete_if_match(&path, &seen.tag).await {
-            Err(Error::Unsupported(_)) => self.hot.delete(&path).await,
+            Err(Error::Unsupported(_)) if seen.entry.st == EntryState::Sealed => {
+                self.hot.delete(&path).await
+            }
             answer => answer,
         };
         match deleted {

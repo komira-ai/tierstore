@@ -2,9 +2,13 @@
 //! that makes a conditional write of one atomic between processes.
 //!
 //! The file of a key `_entries/<name>` is `<name>`, encoded as any key is, in the subdirectory
-//! `_entries/` of the root, which is made when the first of them is written. A listing of the
-//! root keeps only regular files, so a release that does not know the subdirectory does not see
-//! it. A listing of the prefix `_entries/` reads that subdirectory and no other directory.
+//! `.entries/` of the root, which is made when the first of them is written. The name of the
+//! subdirectory starts with `.`, and `encode` writes a `.` at the start of a key as `%2E`, so no
+//! key, in this release or the one before, has a file of that name: the ordinary key `_entries`
+//! (which is outside the prefix) keeps its own file beside the subdirectory. A listing of the root
+//! keeps only regular files whose name does not start with `.`, so a release that does not know
+//! the subdirectory does not see it. A listing of the prefix `_entries/` reads that subdirectory
+//! and no other directory.
 //!
 //! The lock is an exclusive `flock(2)` on the file `.lock` in the subdirectory. It is held by
 //! each create-only put, each replacement by the content tag and each delete of such a key, from
@@ -20,8 +24,9 @@ use std::path::{Path, PathBuf};
 
 use super::{Error, PLAIN_MODE, failed, io_error};
 
-/// The name of the subdirectory of the root that holds the files of these keys.
-pub(super) const DIR: &str = "_entries";
+/// The name of the subdirectory of the root that holds the files of these keys. It starts with
+/// `.`, which no encoded key does, so it is never the file of a key.
+pub(super) const DIR: &str = ".entries";
 
 /// The prefix of a key whose file is in the subdirectory.
 pub(super) const PREFIX: &str = "_entries/";

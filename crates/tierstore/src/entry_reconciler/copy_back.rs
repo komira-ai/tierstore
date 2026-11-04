@@ -1,7 +1,8 @@
 //! The copy-back of the cold tier's object into the hot tier, for an entry `(CB, PENDING)` that a
 //! read of a cold object asked for. The request carries no bytes: the reconciler copies the object
 //! the key holds when it takes the entry, so that a copy-back cannot bring back what a delete
-//! removed.
+//! removed, as long as the reconciler that sealed the entry still holds the lease: a write still in
+//! flight after a takeover is not fenced.
 
 use std::collections::BTreeSet;
 

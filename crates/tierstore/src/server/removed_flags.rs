@@ -4,8 +4,8 @@
 //! registrations by the journal reconciler are gone. A unit file that still passes one of their
 //! flags starts all the same: the flag and its value are taken out of the arguments before they
 //! are parsed, and one line on stderr says that the flag is ignored. The flags are not in
-//! `--help` and have no key in the config file (a file that has one of the keys gets the warning
-//! of the loader for a key it does not know).
+//! `--help`. Their file keys stay recognised as retired optional keys of `[hot_store]` (see
+//! `config.rs`): a file that has one loads, and the start warns of it.
 
 use std::ffi::OsString;
 
@@ -42,6 +42,12 @@ fn removed_flag(arg: &OsString) -> Option<(&'static str, bool)> {
     })
 }
 
+/// Whether `arg` can be the value of a flag: it does not start a flag of its own. A removed flag
+/// given with no value must not take the next flag (`--check-config`) as its value.
+fn is_value(arg: &OsString) -> bool {
+    !arg.as_encoded_bytes().starts_with(b"-")
+}
+
 /// The arguments without the removed flags and their values, and one warning for each removed
 /// flag that was given (however often, and in either form, `--flag value` or `--flag=value`).
 /// The first argument is the program name and is kept.
@@ -54,7 +60,7 @@ pub(super) fn drop_removed(args: Vec<OsString>) -> (Vec<OsString>, Vec<String>) 
         match removed_flag(&arg) {
             None => kept.push(arg),
             Some((flag, has_value)) => {
-                if !has_value {
+                if !has_value && rest.as_slice().first().is_some_and(is_value) {
                     // The value is the next argument.
                     let _value = rest.next();
                 }

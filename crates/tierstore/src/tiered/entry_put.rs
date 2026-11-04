@@ -1,7 +1,8 @@
 //! The puts of a proxy whose format is active (the format says `active`): every put, held or
 //! streamed, presigned or the completion of a multipart upload, is made on the journal entry of its
-//! key. The entry decides which of several puts of one key wins, and it is what the reconciler
-//! finds to copy the object to the cold tier.
+//! key. The entry decides which of several puts of one key wins. Nothing in this release's
+//! reconciler reads these entries yet: copying the object to the cold tier, removing the entry
+//! and reaping the ones left behind are future work.
 //!
 //! A put, in order:
 //!
@@ -20,13 +21,15 @@
 //!    full (a presigned put answers [`Error::Full`] instead) or when the put is the completion of
 //!    a multipart upload.
 //! 6. The entry becomes `(PUT, PENDING)`, which is the acknowledgement of the put. If the entry
-//!    changed, the put is not acknowledged and touches nothing again.
+//!    changed, the put is not acknowledged and touches nothing again. If the proxy is no longer
+//!    live when the replace has answered, the put is not acknowledged either ([`Error::Unavailable`]),
+//!    and the entry stays pending.
 //!
 //! A put that fails before the object landed removes its entry and leaves nothing. A put whose
 //! landing may have happened (the store did not answer) makes the entry pending all the same, and
-//! fails: the reconciler finds the object, and copies it, or finds none, and removes the entry.
-//! A put that cannot reach the entry again leaves it held; the reconciler takes it once this
-//! proxy is gone.
+//! fails, and the entry stays pending. A put that cannot reach the entry again leaves it held.
+//! Copying, removing and taking over such entries is future work for the reconciler; this release
+//! leaves them unprocessed.
 
 use std::future::Future;
 
@@ -129,12 +132,18 @@ impl Inner {
     }
 
     /// The acknowledgement of a put: `(PUT, HELD, me)` to `(PUT, PENDING)`, if this proxy is still
-    /// live and the entry is still the one it holds.
+    /// live and the entry is still the one it holds. Liveness is checked again once the replace
+    /// has answered: a proxy that is no longer live then does not acknowledge, and the entry stays
+    /// pending for the reconciler.
     async fn land_put(&self, key: &str, seen: &Seen) -> Result<(), Error> {
         if !self.heartbeat.deadline.is_live() {
             return Err(retry(key, "this proxy's registration is no longer live"));
         }
         match self.entries.advance(seen, Step::LandPut).await {
+            Ok(Outcome::Done(_)) if !self.heartbeat.deadline.is_live() => Err(retry(
+                key,
+                "this proxy's registration stopped being live while the entry was written",
+            )),
             Ok(Outcome::Done(_)) => Ok(()),
             Ok(Outcome::Lost | Outcome::Refused) => Err(retry(key, "the entry changed")),
             Err(error @ Error::Unavailable(_)) => Err(error),

@@ -103,3 +103,31 @@ fn arguments_without_a_removed_flag_come_back_unchanged() {
     let (kept, warnings) = drop_removed(Vec::new());
     assert!(kept.is_empty() && warnings.is_empty());
 }
+
+/// Asserts that a removed flag given with no value, before another flag, drops only itself: the
+/// next flag (`--check-config`, so a check of the configuration cannot become a start) is kept,
+/// and the flag is warned of.
+#[test]
+fn a_removed_flag_without_a_value_does_not_take_the_next_flag() {
+    let given = args(&[
+        "tierstore",
+        "--config",
+        "/etc/tierstore/tierstore.toml",
+        "--journal-linger",
+        "--check-config",
+        "--reconcile-interval",
+        "-h",
+    ]);
+    let (kept, warnings) = drop_removed(given);
+    let want = args(&[
+        "tierstore",
+        "--config",
+        "/etc/tierstore/tierstore.toml",
+        "--check-config",
+        "-h",
+    ]);
+    assert_eq!(kept, want);
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(warnings[0].contains("--journal-linger"));
+    assert!(warnings[1].contains("--reconcile-interval"));
+}

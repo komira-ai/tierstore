@@ -318,6 +318,16 @@ pub(super) struct TierTable {
     pub departure: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_margin: Option<Dur>,
+    // Only `[hot_store]` has these, and they are retired: a file of the releases before the
+    // entries that has one still loads, the value is not used, and the start says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_linger: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_retention: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconcile_interval: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_checks: Option<Vec<String>>,
@@ -539,8 +549,47 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
+        ("journal_linger", cold.journal_linger.is_some()),
+        ("journal_retention", cold.journal_retention.is_some()),
+        ("reconcile_interval", cold.reconcile_interval.is_some()),
+        (
+            "registration_retention",
+            cold.registration_retention.is_some(),
+        ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
+}
+
+/// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
+/// journal and of the journal reconciler, whose flags are `--journal-linger`,
+/// `--journal-retention`, `--reconcile-interval` and `--registration-retention`.
+pub(super) fn retired_keys(hot: &TierTable) -> Vec<&'static str> {
+    let set = [
+        ("hot_store.journal_linger", hot.journal_linger.is_some()),
+        (
+            "hot_store.journal_retention",
+            hot.journal_retention.is_some(),
+        ),
+        (
+            "hot_store.reconcile_interval",
+            hot.reconcile_interval.is_some(),
+        ),
+        (
+            "hot_store.registration_retention",
+            hot.registration_retention.is_some(),
+        ),
+    ];
+    set.into_iter()
+        .filter_map(|(key, given)| given.then_some(key))
+        .collect()
+}
+
+/// Says on the operator's stderr, once for each key, that a retired key of `[hot_store]` is
+/// accepted and ignored: a file written for the releases before the entries still starts.
+fn warn_retired_keys(hot: &TierTable) {
+    for key in retired_keys(hot) {
+        tracing::warn!("tierstore: {key} is ignored: the journal and its reconciler were removed");
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +629,9 @@ fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
         local_cache,
         policy,
     } = file;
+    if let Some(hot) = &hot_store {
+        warn_retired_keys(hot);
+    }
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;

@@ -83,7 +83,7 @@
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
 //! The keys under `_journal/` (the per-node journals of the releases before the entries, which
-//! this release does not read), `_entries/` and `_tiering/` belong to the proxy and the
+//! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
 //! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
 //! a listing of either tier leaves them out. The S3 front refuses each supported call on them itself,
 //! before the operation's own processing (a request it refuses as unsupported, such as one with a
@@ -180,6 +180,10 @@ pub use entry_reconciler::{EntryReconciler, EntryReconcilerConfig, StepReport};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
 pub use gate::{Gate, GateBackend, Phase};
+pub use journal::{
+    Checkpoint, JournalEntry, JournalOp, decode_checkpoint, decode_journal, encode_checkpoint,
+    encode_journal,
+};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
