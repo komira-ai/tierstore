@@ -16,8 +16,12 @@ publish.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }
 rcgen.workspace = true
+# `server` for the binary's own entry point (`server::cli::main`), which `tests/config.rs` runs on
+# a configuration file with `--check-config`, in each release.
 tierstore = { workspace = true, features = ["s3", "server"] }
 # The previous release, pinned in the root `[workspace.dependencies]`.
 tierstore_prev = { workspace = true, features = ["s3", "server"] }

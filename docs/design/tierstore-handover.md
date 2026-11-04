@@ -104,7 +104,7 @@ table if this update placed it and leaves one that was there; if that removal fa
 this update placed but did not record; neither a deferral nor `rollback` removes it, and it outlives the update. That is
 safe (the guard only blocks off-host access to the two private ports), and the next update's `prepare` finds it there. Point the idle slot's link at the artifact,
 start `tierstore@<idle>`, and poll `/readyz` on `127.0.0.1:<idle>` until it answers 200 with `read-only` (a counted
-number of attempts; the unit starts only after its self-test). It records `previous = serving`. *Idempotent*: the link is
+number of attempts). It records `previous = serving`. *Idempotent*: the link is
 replaced by rename, `systemctl start` of a started unit does nothing, the guard table is loaded by replacing it, the idle
 port comes from the validated record. *Fails*: v-next never ready: `1`, class `release`.
 

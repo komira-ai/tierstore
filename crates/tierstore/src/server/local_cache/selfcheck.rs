@@ -22,7 +22,7 @@ use super::layout::{make_dirs, objects_dir, stage_dir};
 const PROBE: &[u8] = b"tierstore local cache probe\n";
 
 /// A file system that answered a question of the check wrongly, or a directory the check could
-/// not use. The binary exits with status 3 for it, as for a tier that fails its self-test.
+/// not use. The binary exits with status 3 for it.
 #[derive(Debug, thiserror::Error)]
 pub enum LocalTierFailure {
     /// The directory could not be used for the probe.

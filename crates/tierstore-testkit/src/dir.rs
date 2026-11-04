@@ -68,8 +68,10 @@ impl AsRef<Path> for TestDir {
 impl Drop for TestDir {
     #[expect(
         clippy::disallowed_methods,
+        clippy::disallowed_macros,
         reason = "the keep-on-failure variable is set by a person reading a failed test, not \
-                  configuration of the code under test; a drop has no flags to read"
+                  configuration of the code under test; a drop has no flags to read, and it \
+                  tells that person on standard error"
     )]
     fn drop(&mut self) {
         if std::thread::panicking() && std::env::var_os(KEEP_ENV).is_some() {

@@ -2,7 +2,18 @@
 //! and blobs by IP address) and over plain HTTP on loopback, the limits of the listener hold in
 //! both, the binary's flags start it, and the binary lists `handover-v1` only with the behaviours
 //! the name promises. With keys required, a client logs in with HTTP Basic and what each kind of key
-//! may do is held over TLS.
+//! may do is held over TLS. A client with the full key pushes an image, in chunks and in one call,
+//! and pulls it back.
+
+#![allow(
+    clippy::disallowed_macros,
+    reason = "an integration test says on standard error what it checked, or why it skipped (AGENTS.md T12)"
+)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
 
 mod auth;
 mod binary;
@@ -14,4 +25,5 @@ mod handover_v1;
 mod limits;
 mod pki;
 mod plain;
+mod push;
 mod rig;

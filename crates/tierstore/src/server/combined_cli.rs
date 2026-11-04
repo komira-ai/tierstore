@@ -4,20 +4,15 @@
 //!
 //! The settings come from a file with `[hot_store]`, `[cold_store]` and `[local_cache]` (see
 //! [`config_combined`](super::config_combined)). The start runs, in this order: the
-//! checks of the settings, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
-//! (which writes probe keys under `_tiering/selftest/` and deletes them), the proxy (which writes
+//! checks of the settings, the lock file of the hot tier (the reconciler's [`Gate`]), the proxy (which writes
 //! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
-//! last the addresses. Only the checks of the settings and the lock file come before a write. A refusal
-//! of the cache directory, its file system, its budget or an address comes after the self-test
-//! and the proxy's registration, so it leaves the registration (a JSON object, see `Registration`) in the hot
-//! tier, and the heartbeat, which starts with the proxy, may already have rewritten it with a
-//! positive count; the exit status is the one the same refusal has in the other starts.
-//!
-//! Left out, because the upstream of the cache is this node's own proxy: the HEAD of a probe key
-//! and the write self-test of the upstream, which a build node makes (the tiers have just been
-//! tested, and the probe keys of that test are under `_tiering/`, which both the proxy and the
-//! cache refuse), and the sweep of its probe keys.
+//! last the addresses. The tiers are not tested. Only the checks of the settings and the lock file
+//! come before a write. A refusal of the cache directory, its file system, its budget or an address
+//! comes after the proxy's registration, so it leaves the registration (a JSON object, see
+//! `Registration`) in the hot tier, and the heartbeat, which starts with the proxy, may already
+//! have rewritten it with a positive count; the exit status is the one the same refusal has in
+//! the other starts.
 //!
 //! The cache directory has its own lock beside the hot tier's lock file. A second process
 //! started beside the first serves at once from the proxy; its cache is `ready read-only` until
@@ -37,8 +32,7 @@ use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
 use super::Drained;
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{Fronts, open, serve_front};
-use super::cli::{Addresses, Error, build, signals};
-use super::cli_probe::{probe_run_id, probe_tiers};
+use super::cli::{Addresses, Error, build, probe_run_id, signals};
 use super::cli_reconcile::{reconcile, reconcile_gated};
 use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
@@ -61,13 +55,6 @@ pub(super) async fn serve_combined(
     let cli = &settings.node;
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
-    probe_tiers(
-        cli,
-        built.hot.as_ref(),
-        built.cold.as_ref(),
-        cli.backend_check_wait,
-    )
-    .await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
@@ -94,7 +81,6 @@ pub(super) async fn serve_combined(
         lb_wait: cli.drain_lb_wait,
         scrub_rate: settings.cache.scrub_rate,
         scrub_min_round: settings.cache.scrub_min_round,
-        sweep: None,
         beside_halt,
         beating: Some(beating),
     };
@@ -114,7 +100,7 @@ pub(super) async fn serve_combined_until_signalled(
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     serve_combined(&settings, disk, stop, announce).await?;

@@ -2,7 +2,7 @@
 
 tierstore is an S3-compatible object store. Clients speak S3 to one bucket; behind it are two tiers, a small fast hot tier
 (an SSD directory or an S3 bucket) and a large cold tier (spinning disks or an S3 bucket). New objects are written to the
-hot tier, copied to the cold tier in the background and evicted from the hot tier when it fills. A read-only OCI registry
+hot tier, copied to the cold tier in the background and evicted from the hot tier when it fills. An OCI registry
 front serves container blobs from the same objects, and a build-node mode puts a disk cache in front of one upstream store.
 It is one binary, `tierstore`, for Linux (x86_64, arm64) and macOS (Apple silicon), licensed Apache 2.0.
 
@@ -122,7 +122,7 @@ path = "/srv/tierstore/cold"
 ```
 
 Either tier may instead be `kind = "s3"` with a `bucket`, an `endpoint` and a `credentials_file`. An `[[interface]]` of type
-`oci` adds the read-only OCI registry front.
+`oci` adds the OCI registry front (read-only unless it asks for keys).
 
 ### Build node
 

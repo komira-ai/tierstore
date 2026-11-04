@@ -8,6 +8,12 @@
 //! hook's account, its state directory and the polkit rule of its account give it what the
 //! design gives it and no more.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -130,8 +136,8 @@ fn no_secret_is_on_the_command_line_or_in_the_environment() {
 /// that is no shorter than the wait of the load balancers plus the deadline of the drain plus the
 /// 5 s the reconciler's lease release may take (`STOP_WAIT` in `cli_reconcile.rs`), so that a drain in
 /// progress is not cut by SIGKILL; and that a start that fails is tried again, except when the
-/// argument parser refused the flags (exit status 2) or a tier answered the start-up self-test
-/// wrongly (exit status 3), which a restart cannot mend.
+/// argument parser refused the flags (exit status 2) or the file system of a cache directory
+/// answered the check of the cache wrongly (exit status 3), which a restart cannot mend.
 #[test]
 fn the_stop_timeout_covers_the_drain_and_a_refused_command_line_is_not_restarted() {
     let unit = read("tierstore.service");
@@ -143,24 +149,12 @@ fn the_stop_timeout_covers_the_drain_and_a_refused_command_line_is_not_restarted
     assert!(timeout >= drain, "{timeout:?} is less than {drain:?}");
     assert_eq!(value(&unit, "Restart"), "on-failure");
     assert_eq!(value(&unit, "RestartPreventExitStatus"), "2 3");
-    // A start that fails with exit 1 for ever (a store that answers 500 to a conditional put) is
-    // given up on after 5 starts in an hour, not retried for ever; but a store that is down for
-    // longer than the few seconds a short restart gap allows (a reboot) is not given up on: the
-    // process asks it again for --backend-check-wait, and the restart gap is 30 s, so that the 5
-    // starts take about half an hour, well inside the hour.
+    // A start that fails with exit 1 for ever (an address in use, say) is given up on after 5
+    // starts in an hour, not retried for ever, with a restart gap of 30 s.
     assert_eq!(value(&unit, "RestartSec"), "30");
     assert_eq!(value(&unit, "StartLimitIntervalSec"), "1h");
     let burst: u32 = value(&unit, "StartLimitBurst").parse().expect("a count");
     assert_eq!(burst, 5);
-    let each = cli.backend_check_wait + Duration::from_secs(30);
-    assert!(
-        each * burst < Duration::from_secs(3600),
-        "{each:?} times {burst}"
-    );
-    assert!(
-        each * burst >= Duration::from_secs(20 * 60),
-        "{each:?} times {burst}"
-    );
 }
 
 /// Asserts that placing the unit starts nothing: it has no `[Install]` section, nothing in it

@@ -2,6 +2,12 @@
 //! the attestations that exist. Each test builds the ledger of a good release, then spoils one
 //! thing, and the verb must refuse exactly that.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

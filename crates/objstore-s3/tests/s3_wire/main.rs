@@ -2,6 +2,12 @@
 //! refuses to believe. The real-store runs (MinIO, RustFS) are in CI; these pin the
 //! cases a real store does not produce on demand.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

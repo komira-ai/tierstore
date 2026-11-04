@@ -4,6 +4,11 @@
 //! Exit status: 0 when every judged crate passes; 1 when the gate fails; 2 when an input
 //! cannot be read or parsed (and for usage errors, as clap reports them).
 
+#![expect(
+    clippy::disallowed_macros,
+    reason = "a command-line tool: its report goes to standard output and its error to standard error"
+)]
+
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::path::{Path, PathBuf};

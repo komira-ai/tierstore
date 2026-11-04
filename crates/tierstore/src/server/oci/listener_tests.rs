@@ -309,6 +309,10 @@ async fn refused_at(addrs: &[SocketAddr]) -> SocketAddr {
 /// (the redirected connections of the other refused), and an IPv6 socket that holds the IPv4
 /// port too.
 #[tokio::test]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "a skipped test says why on standard error (AGENTS.md T12)"
+)]
 async fn a_listener_that_cannot_bind_both_wildcards_is_refused_and_keeps_neither() {
     // A host without IPv6 cannot have the two wildcards of a port: the test says so on stderr,
     // with the reason the system gave, and asserts nothing.

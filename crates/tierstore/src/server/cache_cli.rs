@@ -4,23 +4,15 @@
 //! The settings come from a file of the build-node shape (see
 //! [`config_cache`](super::config_cache)). Before the address is bound the start asks the file
 //! system under the cache the questions the layout stands on (see [`check_local`]; a file system
-//! that answers one wrongly is exit status 3, as for a tier that fails its self-test), and asks
-//! the upstream a HEAD of a key that is not there, which it answers with 404 when it is up and
-//! the key is accepted (an upstream that does not answer is exit status 1: a restart may mend
-//! it). A `budget` above the size of the file system less the `free_floor` is refused as
-//! flags that cannot go together (exit status 2); a file system whose size cannot be read, or
-//! that reports 0 bytes, is not judged: the start says so on stderr and goes on.
+//! that answers one wrongly is exit status 3). The upstream is not tested or probed: an upstream
+//! that cannot be reached, or a key that may not write, shows as the ordinary error of the first
+//! request that meets it. A `budget` above the size of the file system less the `free_floor` is
+//! refused as flags that cannot go together (exit status 2); a file system whose size cannot be
+//! read, or that reports 0 bytes, is not judged: the start says so on stderr and goes on.
 //!
-//! Without `write_through` the build node's upstream is read with a read-only key, so the write
-//! checks of the storage node's self-test are not run against it. With it the node writes to the
-//! upstream, and the start runs the whole self-test there (a create-only put that refuses a key
-//! that exists, a multipart completion that does the same, and the reads the checks rest on)
-//! under probe keys in `_tiering/selftest/`, which it deletes. An upstream that answers one of
-//! them wrongly, a key that may not write included, is exit status 3; one that does not answer is
-//! exit status 1, after the one try that the check of the start gives it. The probe keys that
-//! earlier starts left are deleted after the start has reported itself ready, beside the server,
-//! at most a hundred of them, and no new delete starts after ten seconds (see [`sweep_probes`]);
-//! the rest waits for the next start.
+//! With `write_through` the node writes to the upstream; without it the upstream is read with a
+//! read-only key. What tierstore requires of the upstream is in the operations guide, and is not
+//! verified.
 //!
 //! With an `[oci]` table the registry front runs beside the S3 one, over the same cache: a blob
 //! or a manifest it reads is a hit on the disk or a fill from the upstream, as an S3 GET is. Its
@@ -40,8 +32,7 @@
 //!
 //! A storage node with a cache in front of its own proxy (see
 //! [`combined_cli`](super::combined_cli)) uses the same cache directory start (`open`), the same
-//! sockets (`bind_cache_s3`) and the same two loops; its upstream is the proxy, so the HEAD and the
-//! write self-test of the upstream are left out there.
+//! sockets (`bind_cache_s3`) and the same two loops; its upstream is the proxy.
 
 use std::future::Future;
 use std::path::Path;
@@ -50,14 +41,12 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::{
-    Backend, Clock, Error as BackendError, MonotonicClock, Proxy, SelfTestOptions, SweepBudget,
-    SystemClock, self_test, settle_conditional_delete, sweep_probes,
-};
+use crate::{Backend, Clock, Proxy, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, signals};
-use super::cli_probe::probe_run_id;
+use super::cli::{
+    Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id, signals,
+};
 use super::cli_serve::{bind_oci, bind_s3, cut_note};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
@@ -91,60 +80,6 @@ pub(super) fn bind_cache_s3(
         listeners.push(socket);
     }
     Ok(listeners)
-}
-
-/// Asks the upstream a HEAD of a key that is not there: any answer but 404 is a problem.
-async fn reach(upstream: &dyn Backend, run: &str, spec: &str) -> Result<(), Error> {
-    match upstream.head(&format!("cache-probe/{run}")).await {
-        Ok(_) | Err(BackendError::NotFound(_)) => Ok(()),
-        Err(why) => {
-            Err(format!("cold tier {spec}: the upstream did not answer a HEAD: {why}").into())
-        }
-    }
-}
-
-/// Asks the upstream the questions of the self-test, all of them: the node is about to write
-/// to it. A key that may not write, or a store whose create-only answers are wrong, is a
-/// violation (exit status 3); an upstream that cannot be asked is exit status 1. The upstream
-/// has just answered `reach`, so the checks are tried once each.
-async fn test_upstream(upstream: &dyn Backend, run: &str, spec: &str) -> Result<(), Error> {
-    let name = format!("cold tier {spec}");
-    let options = SelfTestOptions {
-        name: &name,
-        run_id: run,
-        multipart: true,
-        skip: &[],
-        wait: Duration::ZERO,
-        pause: Duration::from_secs(1),
-        max_pause: Duration::from_secs(30),
-    };
-    let note = |line: String| eprintln!("tierstore: {line}");
-    eprintln!("tierstore: testing the {name} for writes");
-    self_test(upstream, &options, &note).await?;
-    settle_conditional_delete(upstream, &options, &note).await;
-    eprintln!("tierstore: tested the {name}");
-    Ok(())
-}
-
-/// Deletes the probe keys that earlier starts left in the upstream, within the default budget (see
-/// [`sweep_probes`]). It runs beside the server, after the start has reported itself ready: the
-/// keys are in a prefix nothing reads, so a node need not wait for the deletes of a slow store.
-async fn sweep_upstream(upstream: Arc<dyn Backend>, run: String, spec: String) {
-    let name = format!("cold tier {spec}");
-    let options = SelfTestOptions {
-        name: &name,
-        run_id: &run,
-        multipart: true,
-        skip: &[],
-        wait: Duration::ZERO,
-        pause: Duration::from_secs(1),
-        max_pause: Duration::from_secs(30),
-    };
-    let note = |line: String| eprintln!("tierstore: {line}");
-    let budget = SweepBudget::default();
-    // The budget is a span of time, so it runs on a clock that the machine's clock being set
-    // cannot move. The age of a key is judged on the store's clock, inside the sweep.
-    sweep_probes(&*upstream, &options, budget, &MonotonicClock::new(), &note).await;
 }
 
 /// The size of the file system under `path` in bytes, or why it is not known: the system did not
@@ -190,7 +125,7 @@ pub(super) async fn open(
     // read-only one is on the directory, and the file system, that the holder's check passed.
     match cache.mode() {
         Mode::ReadWrite => check_local(&*disk, cache.path(), run)?,
-        Mode::ReadOnly => eprintln!(
+        Mode::ReadOnly => tracing::warn!(
             "tierstore: local cache at {}: another process holds the lock; read-only, and the \
              file system check is left to it",
             config.path.display()
@@ -210,10 +145,10 @@ pub(super) async fn open(
             return Err(Box::new(InvalidFlags(text)));
         }
         Ok(_) => {}
-        Err(why) => eprintln!("{}", unjudged_warning(&why, cache.path())),
+        Err(why) => tracing::warn!("{}", unjudged_warning(&why, cache.path())),
     }
     let (bytes, objects) = cache.held();
-    eprintln!(
+    tracing::info!(
         "tierstore: local cache at {}: {objects} objects, {bytes} bytes, {} files removed at \
          start, {}",
         config.path.display(),
@@ -242,21 +177,14 @@ pub(super) async fn serve_cache(
     config.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     let run = probe_run_id(&settings.front.proxy_id, clock.now(), std::process::id());
     let cache = open(&settings.cache, &upstream, &disk, &run).await?;
-    reach(&*upstream, &run, &settings.upstream.spec).await?;
     if settings.cache.write_through {
-        test_upstream(&*upstream, &run, &settings.upstream.spec).await?;
         config.cache_writes = true;
     }
-    let sweep = settings.cache.write_through.then(|| {
-        let spec = settings.upstream.spec.clone();
-        (Arc::clone(&upstream), run, spec)
-    });
     let fronts = Fronts {
         listen: &settings.front.listen,
         lb_wait: settings.front.drain_lb_wait,
         scrub_rate: settings.scrub_rate,
         scrub_min_round: settings.scrub_min_round,
-        sweep,
         beside_halt: Arc::new(Notify::new()),
         beating: None,
     };
@@ -272,10 +200,6 @@ pub(super) async fn serve_cache(
     .await
 }
 
-/// The upstream, the run id and the name of the upstream for the sweep of the probe keys (see
-/// [`sweep_upstream`]).
-pub(super) type Sweep = (Arc<dyn Backend>, String, String);
-
 /// What [`serve_front`] needs besides the cache and the front's own settings.
 pub(super) struct Fronts<'a> {
     /// The addresses of the S3 front.
@@ -286,8 +210,6 @@ pub(super) struct Fronts<'a> {
     pub(super) scrub_rate: Option<u64>,
     /// The shortest time one round of the scrub takes.
     pub(super) scrub_min_round: Duration,
-    /// The sweep of the upstream's probe keys, run beside the server after it is ready.
-    pub(super) sweep: Option<Sweep>,
     /// Notified when the fronts have drained, for the loop the caller runs `beside` the cache.
     pub(super) beside_halt: Arc<Notify>,
     /// The proxy of a storage node, whose heartbeat is stopped when both fronts are done, so that
@@ -319,10 +241,6 @@ pub(super) async fn serve_front(
     let listeners = bind_cache_s3(fronts.listen)?;
     let oci = bind_oci(oci, backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
-    // After the ready: the sweep is the one thing of the self-test that is not a gate.
-    let sweeping = fronts
-        .sweep
-        .map(|(upstream, run, spec)| tokio::spawn(sweep_upstream(upstream, run, spec)));
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
@@ -365,12 +283,9 @@ pub(super) async fn serve_front(
     let ((drained, oci_cut), (), (), (), ()) =
         tokio::join!(serving, beside, maintaining, holding, scrubbing);
     watcher.abort();
-    if let Some(sweeping) = sweeping {
-        sweeping.abort();
-    }
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -392,6 +307,7 @@ pub(super) async fn run_cache(
         endpoint: tier.endpoint.as_deref(),
         region: tier.region.as_deref(),
         credentials: tier.credentials_file.as_deref(),
+        conditional_delete: tier.conditional_delete,
     };
     let upstream = open_tier(
         "--cold",
@@ -419,7 +335,7 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     run_cache(&settings, stop, announce).await?;
     Ok(())

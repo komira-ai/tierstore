@@ -129,6 +129,17 @@ fn the_params_make_the_front() {
     assert_eq!(setup.limits.lifetime, Duration::from_secs(90));
 }
 
+/// Asserts that the size of the reads at the end of a push is 1 MiB unless `params.stage_read`
+/// gives it.
+#[test]
+fn the_stage_read_param_sets_the_size_of_a_read() {
+    let rig = Rig::new("oci-params-stage");
+    let setup = build(&rig.cli("")).expect("built").oci.expect("a front");
+    assert_eq!(setup.stage_read, 1 << 20);
+    let given = build(&rig.cli(", stage_read = 4096")).expect("built");
+    assert_eq!(given.oci.expect("a front").stage_read, 4096);
+}
+
 /// Asserts that a prefix that cannot work, a lifetime of nothing, and a certificate or key that
 /// cannot serve are refused at start with status 2, and that a file that cannot be read is
 /// status 1, which a restart may mend.
