@@ -3,9 +3,7 @@
 //!
 //! The server says what it does with `tracing::info!`, `warn!` and `error!`, and this subscriber,
 //! which the binary installs before anything else runs, turns each event into the line an operator
-//! reads in the journal. The conversion is partial: the start line, mode changes, sweep results
-//! and drain counts in `cli.rs`, `cli_probe.rs`, `cli_serve.rs`, `cache_cli.rs` and `server/mod.rs` are still written with
-//! `eprintln!`, and the levels below are what they take when they move. Only events of the
+//! reads in the journal. Only events of the
 //! `tierstore` crate are written; events of other crates (the S3 client and its runtime, the
 //! object-store backends) are dropped, so the operator sees the same lines as before. A line is the event's message and
 //! then its fields as ` name=value`, with no time, no level and no target: the journal stamps
@@ -45,6 +43,24 @@ pub(crate) fn install() {
 /// Installs the stderr subscriber as the global default; an error says one is already set.
 pub(super) fn try_install() -> Result<(), SetGlobalDefaultError> {
     tracing::subscriber::set_global_default(LineLog::new(io::stderr(), Level::INFO))
+}
+
+/// Says each line of `text` as a `warn` event: the notes a drain ends with, each of which is
+/// empty when there is nothing to say.
+pub(crate) fn notes(text: &str) {
+    for line in text.lines() {
+        tracing::warn!("{line}");
+    }
+}
+
+/// Writes `text` to standard output: the answer of a command, or the start line a supervisor
+/// reads, which is not logging. Like `print!`, it panics when standard output cannot be written.
+#[expect(
+    clippy::disallowed_macros,
+    reason = "an answer on standard output, which is not logging"
+)]
+pub(crate) fn answer(text: &str) {
+    print!("{text}");
 }
 
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.

@@ -735,7 +735,7 @@ pub(super) fn oci_setup_of(
         (None, None) => {
             let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
             for warning in warnings.filter(|_| warn) {
-                eprintln!("{warning}");
+                tracing::warn!("{warning}");
             }
             None
         }
@@ -789,7 +789,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     run_serving(&cli, stop, announce).await?;
     Ok(())
@@ -809,11 +809,11 @@ fn capabilities(args: &[OsString]) -> ExitCode {
     match args.iter().skip(1).find(|arg| *arg != "--capabilities") {
         Some(other) => {
             let other = other.to_string_lossy();
-            eprintln!("tierstore: --capabilities takes no other flag, got {other}");
+            tracing::error!("tierstore: --capabilities takes no other flag, got {other}");
             ExitCode::from(2)
         }
         None => {
-            print!("{}", capabilities_text(CAPABILITIES));
+            super::build_info::stderr_log::answer(&capabilities_text(CAPABILITIES));
             ExitCode::SUCCESS
         }
     }
@@ -840,7 +840,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(if usage.use_stderr() { 2 } else { 0 });
         }
         Err(Refused::Config(why)) => {
-            eprintln!("tierstore: {why}");
+            tracing::error!("tierstore: {why}");
             return ExitCode::from(2);
         }
     };
@@ -860,7 +860,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             // The messages of the checks name flags; the operator wrote keys.
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(exit_status(&why))
         }
     }
@@ -877,7 +877,7 @@ fn check_config(settings: &Settings) -> ExitCode {
     match checked(settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(2)
         }
     }

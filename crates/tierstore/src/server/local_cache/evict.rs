@@ -114,7 +114,7 @@ impl Inner {
 /// What a blocking task of the cache made, or `None` after saying on stderr why it made
 /// nothing: it panicked, or the runtime cancelled it at shutdown.
 pub(super) fn joined<T>(done: Result<T, JoinError>, what: &str) -> Option<T> {
-    done.map_err(|error| eprintln!("tierstore: {what} did not finish: {error}"))
+    done.map_err(|error| tracing::warn!("tierstore: {what} did not finish: {error}"))
         .ok()
 }
 

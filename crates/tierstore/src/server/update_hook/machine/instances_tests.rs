@@ -238,6 +238,10 @@ fn one_deadline_bounds_the_whole_request() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Instant;
     let clocked = |seconds: &Arc<AtomicU64>| {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "an anchor for the injected clock, which moves by the seconds the test sets"
+        )]
         let base = Instant::now();
         let seconds = Arc::clone(seconds);
         LoopbackInstances::new(Duration::from_secs(5), Duration::from_secs(5))

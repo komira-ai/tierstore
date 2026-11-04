@@ -4,6 +4,16 @@
 //! the name promises. With keys required, a client logs in with HTTP Basic and what each kind of key
 //! may do is held over TLS.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "an integration test says on standard error what it checked, or why it skipped (AGENTS.md T12)"
+)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 mod auth;
 mod binary;
 mod cache_node;

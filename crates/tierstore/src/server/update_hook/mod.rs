@@ -176,7 +176,8 @@ mod args_tests;
 mod declaration_tests;
 #[cfg(test)]
 mod docs_tests;
-#[cfg(all(test, target_os = "linux", feature = "hook-conformance"))]
+#[cfg(test)]
+#[cfg(all(target_os = "linux", feature = "hook-conformance"))]
 mod fake_tests;
 #[cfg(test)]
 mod launchd_declaration_tests;
@@ -216,7 +217,8 @@ mod steps_restore_tests;
 mod steps_rollback_tests;
 #[cfg(test)]
 mod steps_verify_tests;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod system_tests;
 #[cfg(test)]
 mod testing;

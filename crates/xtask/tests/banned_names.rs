@@ -18,6 +18,12 @@
 //! - a scan that cannot see a defect: the same scan, run on texts that hold a word of a
 //!   test-only deny list, finds it, and finds nothing in clean text.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
