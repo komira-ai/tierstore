@@ -29,6 +29,8 @@ mod evict;
 mod races;
 #[path = "entry_reconciler_tests/sweep.rs"]
 mod sweep;
+#[path = "entry_reconciler_tests/usage.rs"]
+mod usage;
 
 /// A wait that never ends, for the renewal timer of the lease: no test sees a renewal.
 struct Pending;
