@@ -185,15 +185,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   put that has not written its object yet, and is left (the delete finds no object, so it
 ///   comes before that put).
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
-///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
-///   `_tiering/`, and without reservations: a cold object of the size of one that the hot
+///   hold the key), in key order, without the keys under the reserved prefixes
+///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
 ///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
 ///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
 ///   version of an object to know it by). A HEAD that fails fails the listing.
 ///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
 ///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
-///   short is made up from the next). A put or a delete of a key under a reserved prefix is
-///   refused with [`Error::Reserved`].
+///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
+///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
+///   local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -535,6 +536,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Bytes, Error> {
+        refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
                 self.counters.hit(Tier::Hot, Read::Get);
@@ -573,6 +575,7 @@ impl Inner {
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
+        refuse_reserved(key)?;
         match self.hot.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Hot, Read::Head);
@@ -700,7 +703,8 @@ impl Inner {
             let page = page.await?;
             let full_page = page.len() >= max_keys;
             after = page.last().map(|object| object.key.clone());
-            found.extend(self.visible_all(page, in_hot).await?);
+            let data: Vec<Listed> = page.into_iter().filter(is_data).collect();
+            found.extend(self.visible_all(data, in_hot).await?);
             if !full_page || found.len() >= max_keys {
                 break;
             }
@@ -712,7 +716,8 @@ impl Inner {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
-        let in_cold = self.cold.list(prefix).await?;
+        let mut in_cold = self.cold.list(prefix).await?;
+        in_cold.retain(is_data);
         let in_cold = self.visible_all(in_cold, &in_hot).await?;
         Ok(merge(in_hot, in_cold, usize::MAX))
     }
