@@ -117,13 +117,13 @@ test('markup the renderer does not read is an error, not a page that is quietly 
 });
 
 test('headings get the anchors the test of the crate computes, repeats are numbered, and a "Not in a release yet" section is marked', () => {
-  assert.equal(slug('The start-up self-test'), 'the-start-up-self-test');
+  assert.equal(slug('What tierstore requires of a store'), 'what-tierstore-requires-of-a-store');
   assert.equal(slug('`[hot_store]` and `[cold_store]`'), 'hot_store-and-cold_store');
   const { body } = renderMarkdown('# T\n\n## Not in a release yet\n\nx\n\n## Not in a release yet\n\ny\n', new Set());
   assert.match(body, /<h2 id="not-in-a-release-yet">Not in a release yet <span class="tag tag-planned">planned, not built<\/span><\/h2>/);
   assert.match(body, /<h2 id="not-in-a-release-yet-2">/);
   assert.match(built('/docs/configuration/'), /<h2 id="hot_store-and-cold_store">/);
-  assert.match(built('/docs/operations/'), /<h2 id="the-start-up-self-test">/);
+  assert.match(built('/docs/operations/'), /<h2 id="what-tierstore-requires-of-a-store">/);
 });
 
 test('the first paragraph is the lede, and the page names the guide in its navigation with the current page marked', () => {
