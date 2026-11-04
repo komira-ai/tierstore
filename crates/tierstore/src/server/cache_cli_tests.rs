@@ -485,10 +485,9 @@ async fn a_start_makes_no_call_of_the_upstream_and_leaves_it_no_key() {
 }
 
 /// Every call of a backend that a [`FaultyBackend`] counts.
-const ALL_OPS: [Op; 13] = [
+const ALL_OPS: [Op; 12] = [
     Op::Put,
     Op::PutIfMatch,
-    Op::PutReservation,
     Op::Get,
     Op::Head,
     Op::Delete,
