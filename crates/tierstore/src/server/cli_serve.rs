@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-use crate::{Backend, Proxy, Reconciler};
+use crate::{Backend, Proxy, Reconciler, TokioSleeper};
 
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_probe::probe_tiers;
@@ -18,7 +18,7 @@ use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::listen::{bind_all, local_addrs};
 use super::oci::{OciFront, OciListener, OciMode};
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
 /// How long a process that does not hold the `--lock-file` waits between two tries of it.
@@ -108,6 +108,8 @@ pub async fn run_serving(
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    proxy.start_heartbeat(Arc::new(TokioSleeper));
+    let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
     let server = Server::new(proxy, built.server);
@@ -121,11 +123,17 @@ pub async fn run_serving(
     let halt = Arc::new(Notify::new());
     let halting = Arc::clone(&halt);
     let serving = async move {
-        let drained = server.serve_all(listeners).await;
+        // The proxy beats until its drain is over: the in-flight requests of both fronts are
+        // finished or cut.
+        let ended = serve_fronts(
+            server.serve_all(listeners),
+            serve_oci(oci, oci_stopped),
+            beating.stop_heartbeat(),
+        )
+        .await;
         halting.notify_one();
-        drained
+        ended
     };
-    let oci_serving = serve_oci(oci, oci_stopped);
     let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
     let interval = cli.reconcile_interval;
     let reconciling = async move {
@@ -134,7 +142,7 @@ pub async fn run_serving(
             None => reconcile(reconciler, interval, halt).await,
         }
     };
-    let (drained, (), oci_cut) = tokio::join!(serving, reconciling, oci_serving);
+    let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);
     watcher.abort();
     eprint!("{}", cut_note(drained));
     eprint!("{}", oci_cut_note(oci_cut));

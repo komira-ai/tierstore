@@ -51,6 +51,7 @@ use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
     DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_skip,
 };
+use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_policy::{Policy, check_policies};
@@ -112,6 +113,13 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("copy-parallel", &["hot_store.copy_parallel"]),
     ("lease-ttl", &["hot_store.lease_ttl"]),
     ("reconcile-interval", &["hot_store.reconcile_interval"]),
+    ("heartbeat", &["hot_store.heartbeat"]),
+    ("departure", &["hot_store.departure"]),
+    ("deadline-margin", &["hot_store.deadline_margin"]),
+    (
+        "registration-retention",
+        &["hot_store.registration_retention"],
+    ),
     ("lock-file", &["hot_store.lock_file"]),
     ("usage-stale-after", &["hot_store.usage_stale_after"]),
     ("max-request-bytes", &["server.max_request_bytes"]),
@@ -316,6 +324,14 @@ pub(super) struct TierTable {
     pub journal_linger: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_retention: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_margin: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_checks: Option<Vec<String>>,
@@ -536,6 +552,13 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
         ("journal_retention", cold.journal_retention.is_some()),
+        ("heartbeat", cold.heartbeat.is_some()),
+        ("departure", cold.departure.is_some()),
+        ("deadline_margin", cold.deadline_margin.is_some()),
+        (
+            "registration_retention",
+            cold.registration_retention.is_some(),
+        ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -692,6 +715,7 @@ pub(super) fn storage(
         reconcile_interval: duration(hot.reconcile_interval, Duration::from_secs(5)),
         lock_file,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
+        heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
         put_permit_wait: front.put_permit_wait,

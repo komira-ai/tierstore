@@ -396,6 +396,10 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "usage_stale_after = \"1s\"",
         "journal_linger = \"1s\"",
         "journal_retention = \"1s\"",
+        "heartbeat = \"1s\"",
+        "departure = \"1s\"",
+        "deadline_margin = \"1s\"",
+        "registration_retention = \"1s\"",
     ];
     for line in every {
         let text = minimal_with(

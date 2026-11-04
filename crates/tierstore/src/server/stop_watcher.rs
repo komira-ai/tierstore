@@ -55,6 +55,23 @@ pub(super) async fn serve_oci(
     }
 }
 
+/// Serves both fronts, and when both are done runs `after`: what they return, in order. The
+/// proxy's heartbeat is stopped by `after`, so that it beats until the in-flight requests of the S3
+/// front and of the OCI front are finished or cut, not only those of whichever front ends first.
+pub(super) async fn serve_fronts<S, O>(
+    s3: impl Future<Output = S>,
+    oci: impl Future<Output = O>,
+    after: impl Future<Output = ()>,
+) -> (S, O) {
+    let ended = tokio::join!(s3, oci);
+    after.await;
+    ended
+}
+
+#[cfg(test)]
+#[path = "stop_watcher_tests.rs"]
+mod tests;
+
 /// What a drain reports on stderr when its deadline cut OCI connections: a line, and nothing when
 /// it cut none.
 pub(super) fn oci_cut_note(cut: usize) -> String {
