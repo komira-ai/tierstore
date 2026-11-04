@@ -16,9 +16,9 @@ use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_probe::probe_tiers;
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
-use super::handoff::{Front, Handoff, Inherited, Offer, Socket, Want, take};
+use super::handoff::{Front, Handoff, HandoffError, Inherited, Offer, Socket, Want, take};
 use super::listen::{bind_all, duplicates, local_addrs};
-use super::oci::{OciFront, OciListener, OciMode};
+use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
@@ -102,7 +102,7 @@ pub async fn run_serving(
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
-    run_handing(cli, None, stop, ready).await
+    Ok(run_handing(cli, None, stop, ready).await?)
 }
 
 /// [`run_serving`] as an instance of a live update: with a [`Handoff`], it first asks the
@@ -114,20 +114,20 @@ pub async fn run_serving(
 ///
 /// # Errors
 /// As [`run_serving`], and a hand-off that is refused, that offers other addresses than the
-/// settings name, or that is not ended in time (a [`HandoffError`](super::handoff::HandoffError)).
+/// settings name, or that is not ended in time ([`HandingError::Handoff`]).
 pub async fn run_handing(
     cli: &Cli,
     handoff: Option<&Handoff>,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
-) -> Result<Drained, Error> {
+) -> Result<Drained, HandingError> {
     let mut built = build(cli)?;
-    let gate = open_gate(cli)?;
+    let gate = open_gate(cli).map_err(Error::from)?;
     let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
     probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
-    let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
@@ -195,6 +195,31 @@ pub async fn run_handing(
     Ok(drained)
 }
 
+/// Why [`run_handing`] did not serve.
+#[derive(Debug, thiserror::Error)]
+pub enum HandingError {
+    /// The settings, a key file, a tier, the lock file, the proxy or an S3 address could not be
+    /// used (the start-up error [`run`] reports).
+    #[error("{0}")]
+    Start(Error),
+    /// The OCI front could not be set up.
+    #[error(transparent)]
+    Oci(#[from] OciError),
+    /// The hand-off was refused, mismatched or timed out.
+    #[error(transparent)]
+    Handoff(#[from] HandoffError),
+    /// The address of a listening socket cannot be read, or a socket cannot be copied for the
+    /// control socket.
+    #[error("listening sockets: {0}")]
+    Sockets(#[from] std::io::Error),
+}
+
+impl From<Error> for HandingError {
+    fn from(error: Error) -> Self {
+        Self::Start(error)
+    }
+}
+
 /// Takes the lock file of the hot tier, if the flags name one: one try now, so that a lock file
 /// that cannot be used stops the start; the reconciler's loop takes it later if another process
 /// holds it now.
@@ -247,12 +272,12 @@ pub(super) async fn bind_oci(
 /// is bound.
 ///
 /// # Errors
-/// An address that cannot be bound.
+/// An address that cannot be bound ([`OciError::Bind`]).
 async fn bind_oci_from(
     setup: Option<OciSetup>,
     backend: Arc<dyn Backend>,
     inherited: Option<Vec<TcpListener>>,
-) -> Result<Option<OciListener>, Error> {
+) -> Result<Option<OciListener>, OciError> {
     let Some(setup) = setup else {
         return Ok(None);
     };
@@ -268,12 +293,13 @@ async fn bind_oci_from(
 /// front.
 ///
 /// # Errors
-/// A socket cannot be copied, or the control socket cannot be made.
+/// A socket cannot be copied ([`HandingError::Sockets`]), or the control socket cannot be made
+/// ([`HandingError::Handoff`]).
 fn offer_of(
     handoff: &Handoff,
     s3: &[TcpListener],
     oci: Option<&OciListener>,
-) -> Result<Offer, Error> {
+) -> Result<Offer, HandingError> {
     let mut sockets: Vec<Socket> = Vec::new();
     for copy in duplicates(s3)? {
         sockets.push(Socket::new(Front::S3, copy));
