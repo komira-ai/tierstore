@@ -51,7 +51,7 @@
 //!
 //! `--listen` and `--oci-listen` may each be given more than once (the file's `listen` keys take a
 //! string or a list): a socket is bound for each address, an IPv6 one for IPv6 only (see
-//! [`listen`](super::listen)), and one server, one drain and one limit on connections serve them
+//! [`listen`](super::listen)), and one server and one drain serve them
 //! all. An address given twice is refused with status 2, and a start that cannot bind every address
 //! is refused with status 1. The start line names every address, separated by commas.
 //!
@@ -185,7 +185,7 @@ pub struct Cli {
     pub capabilities: bool,
     /// An address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. Give the flag
     /// again for each further address (for instance `0.0.0.0:P` and `[::]:P`, which a firewall
-    /// redirect to the port needs): one server, one drain and one limit on connections serve
+    /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     #[arg(long, value_name = "ADDR", required = true)]
     pub listen: Vec<SocketAddr>,
