@@ -565,7 +565,8 @@ async fn a_call_that_fails_before_the_entry_fails_the_item_and_it_is_tried_again
 /// Asserts that an eviction cycle goes on across steps until the low water: objects of 30, 40, 30
 /// and 15 bytes (115) over a budget of 100, the oldest failing once, leave 75 after the second
 /// goes, which is under the high water (80) and over the low water (70). The next step evicts the
-/// oldest, and the one after it leaves the hot tier of 45 bytes alone.
+/// oldest and the next (a batch of two), which leaves 15 bytes, and the step after that evicts
+/// nothing.
 #[tokio::test]
 async fn an_eviction_interrupted_between_the_waters_goes_on_at_the_next_step() {
     let rig = Rig::new();
@@ -589,13 +590,14 @@ async fn an_eviction_interrupted_between_the_waters_goes_on_at_the_next_step() {
     assert!(!rig.hot_has("b").await);
     rig.mono.advance(Duration::from_secs(10));
     let second = r.step().await;
-    assert_eq!(second.evicted, 1);
+    assert_eq!(second.evicted, 2);
     assert!(!second.evicting);
     assert!(!rig.hot_has("a").await);
-    assert_eq!(published(&rig).await.hot_bytes, 45);
+    assert!(!rig.hot_has("c").await);
+    assert_eq!(published(&rig).await.hot_bytes, 15);
     let third = r.step().await;
     assert_eq!(third.evicted, 0);
-    assert!(rig.hot_has("c").await && rig.hot_has("d").await);
+    assert!(rig.hot_has("d").await);
 }
 
 /// Asserts that the candidates of a listing are the oldest objects, no more than the limit: with a
