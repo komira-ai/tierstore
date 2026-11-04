@@ -41,7 +41,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hyper::header::AUTHORIZATION;
 use hyper::{HeaderMap, Method};
-use ring::constant_time::verify_slices_are_equal;
+use ring::hmac;
 
 use super::OciPrefix;
 use crate::server::ServerConfig;
@@ -170,7 +170,16 @@ impl OciAuth {
         let text = std::str::from_utf8(&decoded).ok()?;
         let (id, secret) = text.split_once(':')?;
         let entry = self.keys.iter().find(|entry| entry.id == id)?;
-        verify_slices_are_equal(entry.secret.as_bytes(), secret.as_bytes()).ok()?;
-        Some(entry.rights)
+        same_secret(&entry.secret, secret).then_some(entry.rights)
     }
+}
+
+/// Whether `offered` is `secret`, compared without stopping at the first byte that differs: the
+/// tag of a fixed text under each as an HMAC key is checked by `ring`, whose check takes the same
+/// time whatever the tags are, and whatever the length of the secrets.
+fn same_secret(secret: &str, offered: &str) -> bool {
+    const TEXT: &[u8] = b"tierstore oci login";
+    let key = |text: &str| hmac::Key::new(hmac::HMAC_SHA256, text.as_bytes());
+    let offered = hmac::sign(&key(offered), TEXT);
+    hmac::verify(&key(secret), TEXT, offered.as_ref()).is_ok()
 }
