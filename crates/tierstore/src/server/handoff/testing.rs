@@ -1,6 +1,8 @@
 //! Fixtures of the tests of the hand-off: a scratch directory for the control socket, listening
 //! sockets, and a fake running instance that says what a test wants it to.
 
+use std::fmt::Display;
+use std::future::Future;
 use std::net::{SocketAddr, TcpListener};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::PathBuf;
@@ -11,6 +13,19 @@ use tokio::net::{UnixListener, UnixStream};
 
 use super::wire::{self, Frame};
 use super::{Front, Handoff, Socket};
+
+/// The longest a test of the hand-off waits for one step: far longer than any step takes (the
+/// longest is a closing door, `door::GRACE`), so it only turns a step that never ends into a
+/// failure that names it. No test passes or fails by how long a step took.
+const BOUND: Duration = Duration::from_secs(120);
+
+/// What `waiting` gives, or a failure of the test that names `step` if it has not given it within
+/// [`BOUND`]: a test that would hang fails instead, and says where.
+pub(super) async fn within<F: Future>(step: impl Display, waiting: F) -> F::Output {
+    let waited = tokio::time::timeout(BOUND, waiting).await;
+    let hung = |_| format!("{step}: not done within {BOUND:?}, so the test stops here");
+    waited.map_err(hung).expect("every step of a test ends")
+}
 
 /// A scratch directory and the path of a control socket in it. Keep the directory while the
 /// path is used.
