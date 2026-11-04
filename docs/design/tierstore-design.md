@@ -197,7 +197,7 @@ The hot tier holds the data until it is evicted, and all coordination state, und
 - **Hot tier.** Client objects under their own keys. `_entries/<sha256 hex of the key>`: one object per key being changed, create-only and changed only by If-Match. `_tiering/proxies/<id>`: the node's registration and heartbeat. `_tiering/lease`: the leader's lease. `_tiering/usage`: published by the leader. `_tiering/format`: the rollout marker (section 13). `_tiering/selftest/<run>/`: start-up probes.
 - **Cold tier.** Client objects only: no reservation, no `_entries`, no `_tiering`.
 
-Why: the coordination state is in the hot tier because it is small, changes often and must be fast, and the hot tier is the store every node already writes to. It is not in the cold tier because a hot hit must stay one round trip and coordination traffic should not go to the slow tier. The entry's name is a hash so it has a fixed length (on `dir:` a key of 239 to 255 encoded bytes can be stored but could not take a prefixed name, because file names are limited to 255 bytes), and on `dir:` the `_entries/` prefix is a real subdirectory so that listing the entries is a `read_dir` of that directory alone, not a scan of the whole root. Section 10 lists each path with its writer and write mode.
+Why: the coordination state is in the hot tier because it is small, changes often and must be fast, and the hot tier is the store every node already writes to. It is not in the cold tier because a hot hit must stay one round trip and coordination traffic should not go to the slow tier. The entry's name is a hash so it has a fixed length (on `dir:` a key of 239 to 255 encoded bytes can be stored but could not take a prefixed name, because file names are limited to 255 bytes), and on `dir:` the `_entries/` prefix is a real subdirectory, named `.entries` (a name starts with `.` is never the encoding of a key, so the ordinary key `_entries`, which is outside the reserved prefix, keeps its own file), so that listing the entries is a `read_dir` of that directory alone, not a scan of the whole root. Section 10 lists each path with its writer and write mode.
 
 ### 6.2 The entry
 
@@ -490,7 +490,7 @@ All coordination state is small objects in the hot bucket, under reserved prefix
 
 The leader's own memory (an index of eviction candidates, retry timers, first-seen timers, a bounded map of tags it copied itself) is rebuilt from the above and is never a record.
 
-**Formats and versioning.** The rule is additive-only change: a new optional field, a new kind of object, a new table. Every new object is such an addition: `_entries/`, the heartbeat body of the registration, `_tiering/format`. The entry body carries `v` and ignores unknown fields; an entry with an unknown `op` is skipped, not fatal. On `dir:`, `_entries/` is a real subdirectory of the hot root: the previous release's `list` keeps only regular files, so it does not surface the subdirectory (a test must prove this against the previous release before anything else lands; it is the likeliest compatibility finding). Old binaries do not reserve `_entries/`, which is why the rollout needs a bridge release (section 13).
+**Formats and versioning.** The rule is additive-only change: a new optional field, a new kind of object, a new table. Every new object is such an addition: `_entries/`, the heartbeat body of the registration, `_tiering/format`. The entry body carries `v` and ignores unknown fields; an entry with an unknown `op` is skipped, not fatal. On `dir:`, `_entries/` is a real subdirectory of the hot root, named `.entries` so that no key of any release can have its name (the encoder writes a leading `.` as `%2E`; the bare key `_entries` stays an ordinary file beside it): the previous release's `list` keeps only regular files whose name does not start with `.`, so it does not surface the subdirectory (a test must prove this against the previous release before anything else lands; it is the likeliest compatibility finding). Old binaries do not reserve `_entries/`, which is why the rollout needs a bridge release (section 13).
 
 ## 11. Limits and residuals
 
@@ -572,7 +572,7 @@ The compatibility tests of section 8 run the previous release on directories and
 3. A one-call read, `open_read(key, range)` returning the tag and the body together, and a streaming `Proxy::get_stream`; the S3 front uses it. Gives the one-round-trip hot hit and removes the whole-object buffering of the read path. Pull request #94.
 4. `get_marked` becomes `get_tagged` (tag with the body, for entry reads).
 5. The `if-match-missing` start-up probe. Pull request #93.
-6. `dir:`: the `_entries/` subdirectory and a blocking cross-process file lock, with the compatibility test that the previous release lists such a root.
+6. `dir:`: the `.entries` subdirectory for the `_entries/` prefix and a blocking cross-process file lock, with the compatibility test that the previous release lists such a root.
 7. The test harness: gate backend, injected monotonic clock, recording sleeper, call counting, each with its own tests.
 
 *Stage 1, entry layer, dark (nothing calls it).*

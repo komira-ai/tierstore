@@ -116,10 +116,10 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   the upload. The uploads are files, so an upload outlives a restart of the process, and an
 ///   upload that is never completed or aborted stays until it is aborted.
 ///
-/// - The keys that start with `_entries/` are files of the subdirectory `_entries/` of the root,
-///   which is made by the first write of one and is not listed with the other keys; a listing of
+/// - The keys that start with `_entries/` are files of the subdirectory `.entries/` of the root
+///   (a name no key encodes to, so the key `_entries` keeps its own file), which is made by the first write of one and is not listed with the other keys; a listing of
 ///   the prefix `_entries/` reads that subdirectory only. Their create-only puts, replacements by
-///   the tag and deletes take an exclusive `flock` on `_entries/.lock`, so they are atomic
+///   the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
 ///   between processes over the directory too (see the module `dir_entries`).
 ///
 /// The backend counts on being the only writer of its directory but for other backends over the
