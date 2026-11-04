@@ -17,7 +17,7 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 
 Only the full key is required. The read-only, presigning, GC, scoped and grant flags may each be given once for each key. A tier that is a directory needs no credential file.
 
-A role is not a prefix: a read-only key may read every object of the bucket. To limit a client to prefixes, use a scoped key (or a GC key, or a presigned URL). The key prefixes `_journal/` and `_tiering/` belong to tierstore: a client put or delete there is refused, and a listing leaves them out.
+A role is not a prefix: a read-only key may read every object of the bucket. To limit a client to prefixes, use a scoped key (or a GC key, or a presigned URL). The key prefixes `_journal/`, `_tiering/` and `_entries/` belong to tierstore: a client put or delete there is refused, and a listing leaves them out.
 
 ## The key file
 
@@ -68,7 +68,7 @@ A scoped key file is JSON of exactly five fields, all required:
  "delete_prefixes": []}
 ```
 
-Every prefix ends in `/` and none may name or lie under `_journal/` or `_tiering/`. A key whose three lists are all empty is refused. The lists are not interchangeable: a write prefix does not let the key read what it wrote, and a read prefix does not let it write. A put by a scoped key is create-only (no `If-Match`, no copy), and a delete needs a delete prefix.
+Every prefix ends in `/` and none may name or lie under `_journal/`, `_tiering/` or `_entries/`. A key whose three lists are all empty is refused. The lists are not interchangeable: a write prefix does not let the key read what it wrote, and a read prefix does not let it write. A put by a scoped key is create-only (no `If-Match`, no copy), and a delete needs a delete prefix.
 
 ## Rotation
 

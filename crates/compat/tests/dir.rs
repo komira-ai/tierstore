@@ -165,3 +165,54 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_a_dir
     assert_eq!(read, Bytes::from(patterned(9, CHUNK + 2)));
     assert_eq!(before.head("plain").await.unwrap().tag, replaced);
 }
+
+/// The keys of a listing.
+fn keys<T>(listed: Vec<T>, key: impl Fn(T) -> String) -> Vec<String> {
+    listed.into_iter().map(key).collect()
+}
+
+/// Asserts that the previous release, over a directory in which this branch wrote objects under
+/// `_entries/` (a create-only put and a replacement by the tag, which make the subdirectory
+/// `_entries/` and the lock file in it), lists the directory without an error and lists only the
+/// plain object, lists the prefix `_entries/` as empty, reads and puts plain keys as before, and
+/// does not find an entry key; and that this branch then lists the entries and the object the
+/// previous release put.
+#[tokio::test]
+async fn the_previous_release_lists_a_directory_that_has_an_entries_subdirectory() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-entries");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    now.put("plain", body(1, CHUNK + 5)).await.unwrap();
+    now.put("_entries/first", body(2, 40)).await.unwrap();
+    let tag = now
+        .put_tagged("_entries/second", body(3, 40))
+        .await
+        .unwrap();
+    now.put_if_match("_entries/second", body(4, 41), &tag)
+        .await
+        .unwrap();
+    assert!(dir.path().join("_entries").is_dir());
+
+    let seen = keys(before.list("").await.unwrap(), |object| object.key);
+    assert_eq!(seen, ["plain"]);
+    assert!(before.list("_entries/").await.unwrap().is_empty());
+    assert_eq!(
+        before.get("plain", None).await.unwrap(),
+        now.get("plain", None).await.unwrap()
+    );
+    let missing = before.head("_entries/first").await;
+    assert_eq!(
+        missing,
+        Err(PrevError::NotFound("_entries/first".to_owned()))
+    );
+    before.put("later", body(5, 9)).await.unwrap();
+
+    let seen = keys(now.list("").await.unwrap(), |object| object.key);
+    assert_eq!(
+        seen,
+        ["_entries/first", "_entries/second", "later", "plain"]
+    );
+    assert_eq!(now.get("later", None).await.unwrap(), body(5, 9));
+}

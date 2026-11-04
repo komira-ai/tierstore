@@ -56,6 +56,10 @@ lock_file          = "/var/lib/tierstore/instance.lock"
 usage_stale_after  = "3m"
 journal_linger     = "50ms"
 journal_retention  = "12h"
+heartbeat          = "5s"
+departure          = "45s"
+deadline_margin    = "8s"
+registration_retention = "20m"
 
 [cold_store]
 kind             = "s3"
@@ -114,6 +118,10 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--usage-stale-after=3m",
         "--journal-linger=50ms",
         "--journal-retention=12h",
+        "--heartbeat=5s",
+        "--departure=45s",
+        "--deadline-margin=8s",
+        "--registration-retention=20m",
         "--cold=s3:tierstore-cold",
         "--cold-endpoint=http://127.0.0.1:30900",
         "--cold-region=us-west-2",

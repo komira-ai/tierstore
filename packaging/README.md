@@ -609,7 +609,9 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_journal/` or `_tiering/`). Every other key, and every listing, goes to the
+(and it is not under `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
+key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing
+leaves them out). Every other key that is not kept, and every other listing, goes to the
 upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
 disk and makes no call to the upstream. A GET of an object that is not there reads it from the
 upstream in chunks of 8 MiB into `<path>/.stage/`, hashing the bytes as they pass, and links it into
@@ -834,6 +836,10 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--reconcile-interval` | `hot_store.reconcile_interval` | how often the reconciler works |
 | `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
+| `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
+| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; only the puts on journal entries (active format) read `Proxy::is_live`, the journal path does not, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
+| `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; only the puts on journal entries (active format) check it, and only the heartbeat uses `Bounded` (`10s`; at most a quarter of `--departure`) |
+| `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`0s`, which removes none; otherwise at least `--departure`. Set a time only once no proxy of a release without the heartbeat runs) |
 | `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
 | `--max-concurrent-puts` | `server.max_concurrent_puts` | the most put bodies and parts taken at once |
 | `--put-permit-wait` | `server.put_permit_wait` | how long a put that arrives with all of those taken waits for one to end (15s by default; 0 answers 503 at once). No byte of its body is read while it waits. If none ends in that time it is answered 503 `SlowDown` with `Retry-After: 1`. A waiter holds a connection and no permit or body memory, is not bounded except by the connections, counts as in flight in a drain (so a drain may take up to this much longer, never past `--drain-deadline`), and does not notice its client leaving until its body is first read |

@@ -13,7 +13,9 @@ use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
-use super::cli::{Cli, Gate, open_gate, reconcile_gated};
+use super::cli::Cli;
+use super::cli_reconcile::{Gate, reconcile_gated};
+use super::cli_serve::open_gate;
 use super::lock::try_take;
 use crate::{
     Backend, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,

@@ -21,6 +21,9 @@ use crate::{
     UploadsAfter, Window,
 };
 
+#[path = "dir_entries.rs"]
+mod entries;
+
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
 
@@ -127,13 +130,19 @@ impl SyncDir for FsyncDir {
 ///   the upload. The uploads are files, so an upload outlives a restart of the process, and an
 ///   upload that is never completed or aborted stays until it is aborted.
 ///
+/// - The keys that start with `_entries/` are files of the subdirectory `_entries/` of the root,
+///   which is made by the first write of one and is not listed with the other keys; a listing of
+///   the prefix `_entries/` reads that subdirectory only. Their create-only puts, replacements by
+///   the tag and deletes take an exclusive `flock` on `_entries/.lock`, so they are atomic
+///   between processes over the directory too (see the module `dir_entries`).
+///
 /// The backend counts on being the only writer of its directory but for other backends over the
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
 /// create-only, and the temporary files of two backends never have one name, since a name holds
 /// the process id, the time the backend was opened and its number in the process);
 /// [`Backend::put_if_match`] and [`Backend::delete_if_match`] are atomic among the calls of one
-/// backend only, and so is the replacement of a part by another of its number: the parts of one
-/// upload should be taken by one backend.
+/// backend only, but for the keys under `_entries/`, and so is the replacement of a part by
+/// another of its number: the parts of one upload should be taken by one backend.
 pub struct DirBackend {
     root: PathBuf,
     /// Tells the temporary files of this backend from those of any other backend over the same
@@ -479,6 +488,47 @@ async fn stored_parts(dir: &Path) -> Result<Vec<StoredPart>, Error> {
     Ok(parts)
 }
 
+/// Adds to `found` the objects of the directory `dir` whose key, which is `base` and then what
+/// the file name decodes to, starts with `prefix`. A root (`base` empty) leaves out a file that
+/// would be a key under `_entries/`, which is read from the subdirectory, and a subdirectory
+/// that is not there has no objects.
+async fn list_dir(
+    dir: &Path,
+    base: &str,
+    prefix: &str,
+    found: &mut Vec<Listed>,
+) -> Result<(), Error> {
+    let fail = io_error(dir);
+    let opened = fs::read_dir(dir).await;
+    let mut files = match opened {
+        Err(why) if !base.is_empty() && why.kind() == ErrorKind::NotFound => return Ok(()),
+        opened => opened.map_err(&fail)?,
+    };
+    while let Some(entry) = files.next_entry().await.map_err(&fail)? {
+        let name = entry.file_name();
+        let key = name
+            .to_str()
+            .filter(|name| !name.starts_with('.'))
+            .and_then(decode)
+            .map(|key| format!("{base}{key}"))
+            .filter(|key| key.starts_with(prefix))
+            .filter(|key| !base.is_empty() || entries::rest(key).is_none());
+        let Some(key) = key else {
+            continue;
+        };
+        let meta = entry.metadata().await.ok();
+        let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
+            continue;
+        };
+        found.push(Listed {
+            key,
+            size: meta.len().saturating_sub(TAG_LEN as u64),
+            modified: modified_of(&meta),
+        });
+    }
+    Ok(())
+}
+
 impl DirBackend {
     /// A bucket in the directory `root`, which is made if it does not exist.
     ///
@@ -518,12 +568,30 @@ impl DirBackend {
 
     /// The path of the file of the object `key`.
     fn path(&self, key: &str) -> Result<PathBuf, Error> {
-        let name = encode(key);
+        let (dir, rest) = match entries::rest(key) {
+            Some(rest) => (self.root.join(entries::DIR), rest),
+            None => (self.root.clone(), key),
+        };
+        let name = encode(rest);
         if !(1..=NAME_LIMIT).contains(&name.len()) {
             let text = format!("key {key:?} is empty or too long to be a file name");
             return Err(Error::Other(text));
         }
-        Ok(self.root.join(name))
+        Ok(dir.join(name))
+    }
+
+    /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
+    /// hold (none for any other key), making the subdirectory if it is not there. It is taken
+    /// before the `replacing` lock, always, so that no two calls wait for each other.
+    async fn entry_lock(&self, key: &str) -> Result<Option<entries::EntryLock>, Error> {
+        if entries::rest(key).is_none() {
+            return Ok(None);
+        }
+        let (lock, created) = entries::take(self.root.join(entries::DIR)).await?;
+        if created {
+            self.sync(&self.root).await?;
+        }
+        Ok(Some(lock))
     }
 
     /// A name for a temporary file in `dir`, which is not listed.
@@ -558,13 +626,14 @@ impl DirBackend {
         let renamed = fs::rename(temp, &current.path).await;
         let _ = fs::remove_file(temp).await;
         renamed.map_err(io_error(&current.path))?;
-        self.sync(&self.root).await
+        self.sync(current.path.parent().unwrap_or(&self.root)).await
     }
 
     /// Removes the file of the object `key` if its content tag is `etag`, with the lock that
     /// replacements and deletes take held from the check to the removal, so that no other call
     /// of this backend replaces or deletes the object in between. The directory is not synced.
     async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
         let path = current.path.clone();
@@ -598,11 +667,13 @@ impl DirBackend {
     /// not left visible and a retry of the create-only put can succeed; if the name cannot be
     /// removed the error says that it may exist without being durable.
     async fn publish(&self, temp: &Path, path: &Path, key: &str) -> Result<(), Error> {
+        let _entry = self.entry_lock(key).await?;
+        let dir = path.parent().unwrap_or(&self.root);
         let linked = fs::hard_link(temp, path).await;
         let _ = fs::remove_file(temp).await;
         let taken = ErrorKind::AlreadyExists;
         linked.map_err(|e| classify(key, path, &e, taken, Error::AlreadyExists))?;
-        let Err(synced) = self.sync(&self.root).await else {
+        let Err(synced) = self.sync(dir).await else {
             return Ok(());
         };
         // Under the lock of the replacements, so that the rollback is no exception to a check
@@ -613,7 +684,7 @@ impl DirBackend {
         };
         match rolled_back {
             Ok(()) => {
-                let _ = self.sync(&self.root).await;
+                let _ = self.sync(dir).await;
                 Err(synced)
             }
             Err(why) => {
@@ -635,6 +706,7 @@ impl DirBackend {
         etag: &str,
         mode: u32,
     ) -> Result<String, Error> {
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
         let (temp, tag) = self.write_temp(body, mode).await?;
@@ -738,6 +810,7 @@ impl Backend for DirBackend {
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = write_object_stream(&temp, &mut body).await?;
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
         self.install(&temp, &current).await?;
@@ -804,44 +877,33 @@ impl Backend for DirBackend {
         // Not held across the sync: the name is gone, and a replacement or a delete that
         // follows needs nothing the sync would protect.
         let removed = {
+            let _entry = self.entry_lock(key).await?;
             let _replacing = self.replacing.lock().await;
             fs::remove_file(&path).await
         };
         match removed {
-            Ok(()) => self.sync(&self.root).await,
+            Ok(()) => self.sync(path.parent().unwrap_or(&self.root)).await,
             Err(why) if why.kind() != ErrorKind::NotFound => Err(failed(&path, &why)),
             Err(_) => Ok(()),
         }
     }
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+        let path = self.path(key)?;
         self.unlink_if_match(key, etag).await?;
-        self.sync(&self.root).await
+        self.sync(path.parent().unwrap_or(&self.root)).await
     }
 
+    /// The root holds the keys that do not start with `_entries/`; the subdirectory holds the
+    /// others, and is read only if `prefix` can match one of them.
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        let fail = io_error(&self.root);
-        let mut entries = fs::read_dir(&self.root).await.map_err(&fail)?;
         let mut found = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(&fail)? {
-            let name = entry.file_name();
-            let key = name
-                .to_str()
-                .filter(|name| !name.starts_with('.'))
-                .and_then(decode)
-                .filter(|key| key.starts_with(prefix));
-            let Some(key) = key else {
-                continue;
-            };
-            let meta = entry.metadata().await.ok();
-            let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
-                continue;
-            };
-            found.push(Listed {
-                key,
-                size: meta.len().saturating_sub(TAG_LEN as u64),
-                modified: modified_of(&meta),
-            });
+        if !prefix.starts_with(entries::PREFIX) {
+            list_dir(&self.root, "", prefix, &mut found).await?;
+        }
+        if entries::PREFIX.starts_with(prefix) || prefix.starts_with(entries::PREFIX) {
+            let dir = self.root.join(entries::DIR);
+            list_dir(&dir, entries::PREFIX, prefix, &mut found).await?;
         }
         found.sort();
         Ok(found)
@@ -955,3 +1017,7 @@ mod tests;
 #[cfg(test)]
 #[path = "dir_sync_tests.rs"]
 mod sync_tests;
+
+#[cfg(test)]
+#[path = "dir_entries_tests.rs"]
+mod entries_tests;

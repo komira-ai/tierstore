@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, JournalEntry, JournalOp, Listed, Meta,
+    MonotonicClock, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -33,9 +33,20 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod entry_put;
+#[cfg(test)]
+mod entry_put_race_tests;
+#[cfg(test)]
+mod entry_put_tests;
+mod heartbeat;
+#[cfg(test)]
+mod heartbeat_tests;
+mod pause;
 mod put;
 mod read;
 mod relay;
+
+use heartbeat::Heartbeat;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -59,14 +70,37 @@ pub struct ProxyConfig {
     pub usage_refresh: Duration,
     /// The age of the usage object past which it is ignored, as if it were missing.
     pub usage_stale_after: Duration,
+    /// How long the format object (`_tiering/format`) that was read is used before it is read
+    /// again: the most time between the operator pausing writes and a proxy refusing them.
+    pub format_refresh: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
+    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]). Nothing
+    /// that another machine wrote is compared with it.
+    pub mono: Arc<dyn Clock>,
+    /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
+    /// called, and the longest a call of the heartbeat may take.
+    pub heartbeat: Duration,
+    /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
+    /// is the send time of the last acknowledged beat plus this less the margin. Only the
+    /// puts made on entries read it ([`Proxy::is_live`]); the reconciler's removal of
+    /// registrations uses its own `registration_retention`.
+    pub departure: Duration,
+    /// The time that must be left before `live_until` for a call that destroys to start; the
+    /// longest such a call may take.
+    pub deadline_margin: Duration,
+    /// How many times a put on entries looks again at the entry of its key when it was gone
+    /// between the put's create and its read: past it the put is answered `Unavailable`.
+    pub entry_rounds: u32,
 }
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
+    /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
+    /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
+    /// 3 looks at an entry.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -77,7 +111,13 @@ impl ProxyConfig {
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
+            format_refresh: Duration::from_secs(5),
             clock,
+            mono: Arc::new(MonotonicClock::new()),
+            heartbeat: Duration::from_secs(10),
+            departure: Duration::from_secs(60),
+            deadline_margin: Duration::from_secs(10),
+            entry_rounds: 3,
         }
     }
 }
@@ -195,15 +235,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   put that has not written its object yet, and is left (the delete finds no object, so it
 ///   comes before that put).
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
-///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
-///   `_tiering/`, and without reservations: a cold object of the size of one that the hot
+///   hold the key), in key order, without the keys under the reserved prefixes
+///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
 ///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
 ///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
 ///   version of an object to know it by). A HEAD that fails fails the listing.
 ///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
 ///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
-///   short is made up from the next). A put or a delete of a key under a reserved prefix is
-///   refused with [`Error::Reserved`].
+///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
+///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
+///   local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -221,6 +262,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// one object at a time. The numbers of a proxy go up by one from the first; a proxy that
 /// starts lists its own journal prefix and its checkpoint, and goes on after the highest
 /// number it finds.
+///
+/// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
+/// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
+/// key, not in the journal above: see `entry_put.rs`.
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -265,7 +310,12 @@ struct Inner {
     /// the objects are written one at a time, and a number is used again if its write failed.
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
+    /// What was last read of the format object.
+    pause: Mutex<pause::Pause>,
+    /// The calls on the entries of keys, as this proxy.
+    entries: Entries,
     counters: Counters,
+    heartbeat: Heartbeat,
 }
 
 impl Proxy {
@@ -293,11 +343,10 @@ impl Proxy {
             .filter_map(|object| seq_of(&prefix, &object.key))
             .max();
         let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
-        match hot.put(&proxy_key(id), Bytes::new()).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => {}
-            Err(error) => return Err(error),
-        }
+        let heartbeat = Heartbeat::new(&config);
+        heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
+        let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,
             cold,
@@ -305,7 +354,10 @@ impl Proxy {
             open: Mutex::new(None),
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
+            pause: Mutex::default(),
+            entries,
             counters: Counters::default(),
+            heartbeat,
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -545,6 +597,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Bytes, Error> {
+        refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
                 self.counters.hit(Tier::Hot, Read::Get);
@@ -583,6 +636,7 @@ impl Inner {
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
+        refuse_reserved(key)?;
         match self.hot.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Hot, Read::Head);
@@ -619,7 +673,7 @@ impl Inner {
     /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
     /// a put in flight, and the delete, which finds no object, is one that comes before it.
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         self.remove_from_cold(key).await?;
         self.hot.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0, None))
@@ -710,7 +764,8 @@ impl Inner {
             let page = page.await?;
             let full_page = page.len() >= max_keys;
             after = page.last().map(|object| object.key.clone());
-            found.extend(self.visible_all(page, in_hot).await?);
+            let data: Vec<Listed> = page.into_iter().filter(is_data).collect();
+            found.extend(self.visible_all(data, in_hot).await?);
             if !full_page || found.len() >= max_keys {
                 break;
             }
@@ -722,7 +777,8 @@ impl Inner {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
-        let in_cold = self.cold.list(prefix).await?;
+        let mut in_cold = self.cold.list(prefix).await?;
+        in_cold.retain(is_data);
         let in_cold = self.visible_all(in_cold, &in_hot).await?;
         Ok(merge(in_hot, in_cold, usize::MAX))
     }
@@ -870,7 +926,7 @@ impl Backend for Proxy {
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         self.inner.cold.create_upload(key).await
     }
 
@@ -893,7 +949,7 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         let cold = &self.inner.cold;
         let upload = cold.upload_part_with_len(key, id, number, len, body);
         upload.await
