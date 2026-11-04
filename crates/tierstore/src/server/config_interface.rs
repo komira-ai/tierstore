@@ -38,6 +38,28 @@ use super::config::{ConfigError, OciFlags, invalid, refuse, require, within};
 use super::config_units::Dur;
 use super::listen::Addrs;
 
+/// `params.upstream` of an `oci` interface: the registry the front pulls an object from when its
+/// store has none (see `oci::upstream`). The password is in the file `password_file`, never in the
+/// configuration file.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct UpstreamTable {
+    /// The registry's address, `https://host[:port]` or `http://host[:port]`, with no path.
+    pub url: Option<String>,
+    /// The user name the registry is logged in to with; with `password_file`, or neither.
+    pub username: Option<String>,
+    /// The file that holds the password (or token) of `username`, readable by the user the
+    /// server runs as and no one else.
+    pub password_file: Option<PathBuf>,
+    /// PEM certificates the registry's certificate may be issued by, besides the system's.
+    pub ca_file: Option<PathBuf>,
+    /// How long the upstream has for each step of a pull: to answer a request, and to send the
+    /// next piece of a body (`30s` if left out).
+    pub timeout: Option<Dur>,
+    /// The most redirects one request follows (4 if left out).
+    pub max_redirects: Option<u32>,
+}
+
 /// One `[[interface]]` entry.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +84,7 @@ pub(super) struct Params {
     pub connection_lifetime: Option<Dur>,
     pub require_auth: Option<bool>,
     pub stage_read: Option<u64>,
+    pub upstream: Option<UpstreamTable>,
 }
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
@@ -119,6 +142,7 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
         ("connection_lifetime", params.connection_lifetime.is_some()),
         ("require_auth", params.require_auth.is_some()),
         ("stage_read", params.stage_read.is_some()),
+        ("upstream", params.upstream.is_some()),
     ];
     super::config::refuse(&place, "not for type \"s3\"", &others)
 }
@@ -145,6 +169,11 @@ fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags
         Some(bytes) => Some(within(&place, "stage_read", bytes, 1, u64::MAX)?),
         None => None,
     };
+    let upstream = params
+        .upstream
+        .clone()
+        .map(|table| upstream(&place, table))
+        .transpose()?;
     Ok(OciFlags {
         listen,
         tls_cert: params.tls_cert_file.clone(),
@@ -154,7 +183,31 @@ fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags
         connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
         require_auth: params.require_auth.unwrap_or(false),
         stage_read,
+        upstream,
     })
+}
+
+/// The `params.upstream` table, checked: it needs `url`, `username` and `password_file` go
+/// together, and the timeout is longer than zero.
+fn upstream(place: &str, table: UpstreamTable) -> Result<UpstreamTable, ConfigError> {
+    let place = format!("{place}.upstream");
+    require(&place, "url", table.url.clone())?;
+    match (&table.username, &table.password_file) {
+        (Some(_), None) => {
+            let why = "it is needed with username: give both, or neither";
+            return Err(invalid(&format!("{place}.password_file"), why));
+        }
+        (None, Some(_)) => {
+            let why = "it is needed with password_file: give both, or neither";
+            return Err(invalid(&format!("{place}.username"), why));
+        }
+        _ => {}
+    }
+    if table.timeout.is_some_and(|timeout| timeout.0.is_zero()) {
+        let why = "it must be longer than zero";
+        return Err(invalid(&format!("{place}.timeout"), why));
+    }
+    Ok(table)
 }
 
 /// The first param of `next` that is not that of `first`, by name.
@@ -173,6 +226,7 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
         ),
         ("require_auth", first.require_auth == next.require_auth),
         ("stage_read", first.stage_read == next.stage_read),
+        ("upstream", first.upstream == next.upstream),
     ];
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
@@ -270,7 +324,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             Some((first_at, first)) => {
                 if let Some(name) = differing(first, &this) {
                     let why = format!(
-                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth and stage_read"
+                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read and upstream"
                     );
                     return Err(invalid(&format!("{at}.params.{name}"), why));
                 }
@@ -289,3 +343,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
 #[cfg(test)]
 #[path = "config_interface_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_upstream_tests.rs"]
+mod upstream_tests;

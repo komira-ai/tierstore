@@ -20,7 +20,7 @@ import { buildReal, copyTree, plant } from './support';
  */
 const PUBLIC_HOSTS = new Set(['tierstore.dev', 'github.com', 'buck2.build', 'bazel.build', 'www.w3.org', 'token.actions.githubusercontent.com']);
 /** Placeholders and loopback the configuration reference uses as examples. */
-const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1', 'frontend', 'FRONTEND', 'bucket', 's3-hot.example', 's3-cold.example', 'tierstore.example']);
+const EXAMPLE_HOSTS = new Set(['host', 'localhost', '127.0.0.1', 'frontend', 'FRONTEND', 'bucket', 's3-hot.example', 's3-cold.example', 'tierstore.example', 'registry.example']);
 
 /** The only 40-hex string a page may carry: the example SHA of the install page (the release files it names are listed in docs/ci-and-release.md). */
 const EXAMPLE_SHA = '0123456789abcdef0123456789abcdef01234567';
