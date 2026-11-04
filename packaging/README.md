@@ -907,7 +907,8 @@ What it serves, and nothing else (any other path is 404 and any method but GET a
 | request | answer |
 |---|---|
 | `/v2/` | 200, `{}`, `Docker-Distribution-API-Version: registry/2.0` |
-| `/v2/<name>/manifests/sha256:<hex>` | the manifest (at most 4 MiB), with `Content-Type` from its `mediaType`, `Content-Length`, `Docker-Content-Digest` and an `ETag` of the digest. A tag is 404 `MANIFEST_UNKNOWN`: tags are not served |
+| `/v2/<name>/manifests/sha256:<hex>` | the manifest (at most 4 MiB), with `Content-Type` from its `mediaType`, `Content-Length`, `Docker-Content-Digest` and an `ETag` of the digest. A tag in place of the digest is read first and the manifest it points at is served; a tag nobody pushed is 404 `MANIFEST_UNKNOWN` |
+| `/v2/<name>/tags/list` | `{"name","tags"}`, the tags of the name in ascending order, paged with `n` and `last` (a `Link` header names the next page); a name with no tag is an empty list |
 | `/v2/<name>/blobs/sha256:<hex>` | the blob, streamed, `application/octet-stream`, with `Accept-Ranges: bytes`; one `Range` is 206 with `Content-Range`, one past the end 416 |
 
 The `Content-Type` of a manifest is its `mediaType` when that is the OCI image manifest or index or
@@ -980,8 +981,14 @@ install -D -m 0644 farm-ca.crt /etc/containers/certs.d/192.0.2.10/ca.crt
 podman pull 192.0.2.10/library/app@sha256:<manifest digest>
 ```
 
-The reference is by digest: a tag is refused. The repository name (`library/app`) is any name that
-fits the grammar and means nothing to the store. A registry on another port than 443 is written
+The reference is a digest or a tag: a tag is a mutable pointer, pushed with `PUT` of a manifest under it. A tag is moved by writing a new
+small object, `<prefix>tags/<name>/<tag>/<20 digits>` (the `/` of a name written `~`), whose digits count down so that the newest version lists
+first; no stored object is overwritten, and the tag is the newest version. Of two overlapping pushes of one tag with different digests one is
+201 and the other 409 `TAG_CONFLICT` (the loser pushes again); pushes of the same digest are both 201. A pull by tag lists the versions of that tag and
+reads one 71-byte object before the manifest, and `tags/list` reads every version of the name; old versions are kept (nothing deletes them yet),
+one 71-byte object per move. The store must list consistently with the writes before the listing (S3 and MinIO do); on a `dir:` tier the whole
+key, `oci/tags/<name>/<tag>/` and 20 digits, is one file name of at most 255 bytes. The repository name (`library/app`) is any name that
+fits the grammar. Blobs and manifests are shared by digest whatever the name; tags are scoped to the name. A registry on another port than 443 is written
 `192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
 
 A client that allows only `https` registries on port 443 (or the port in the reference), and
@@ -992,8 +999,8 @@ that client's own settings.
 
 `GET /metricz` on the S3 listener (unsigned, like `/healthz`; a bucket cannot be called `metricz`)
 shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcome}` (routes `ping`,
-`manifest`, `blob`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
-`range_not_satisfiable`, `unauthorized`, `denied`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
+`manifest`, `blob`, `tags`, `upload`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
+`range_not_satisfiable`, `unauthorized`, `denied`, `failed`, `conflict`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
 responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
 which serves nothing else. Without an `oci` interface the path says the front is not enabled.
 
