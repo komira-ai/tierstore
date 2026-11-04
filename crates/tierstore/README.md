@@ -25,8 +25,8 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
-release along with the file.
+in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
+file.
 
 ## When the puts are at their limit
 
@@ -103,11 +103,10 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 
 What the counts mean:
 
-- An S3 GET reaches the proxy as a head (for the size and the conditions) and then a get. A GET
-  that is answered at the head shows only under `op="head"`: a key that exists nowhere, a
-  conditional that answers 304 or 412, a range that cannot be satisfied. So `op="head"` is a
-  lookup rate: it mixes the client's HEADs with the heads that start every GET. `op="get"`
-  counts only the reads that go on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call),
+  counted under `op="get"` whatever its outcome: a key that exists nowhere, a conditional that
+  answers 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`,
+  and none is counted at `op="head"`. So `op="head"` counts the client's HEADs alone.
 - A hit or a miss is counted when the tier answers, an error when it fails with anything but
   "not found"; an error is neither a hit nor a miss, so a tier that is down does not lower its
   hit rate and shows in `read_errors_total`.
@@ -174,8 +173,8 @@ counterpart here.
 | full | `--access-key-file` | everything the front serves |
 | read-only | `--read-only-key-file` | get, head, list |
 | presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
-| GC | `--gc-key-file` | a scoped key with list and delete on one prefix: list, head, delete and abort uploads there |
-| scoped | `--scoped-key-file` | read, list, create and delete under the prefixes of four lists |
+| GC | `--gc-key-file` | a scoped key with list, delete and abort on one prefix: list, head, delete and abort uploads there |
+| scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
 
 The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
 that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
@@ -186,8 +185,7 @@ is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
 ### Scoped keys
 
 A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `read_prefixes`,
-`write_prefixes` and `delete_prefixes`, and optionally `list_prefixes` (empty when absent, so a
-file of the release before loads as it did); the lists may be empty, but not all, and every prefix
+`write_prefixes` and `delete_prefixes`; the lists may be empty, but not all, and every prefix
 ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
 A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
@@ -196,10 +194,9 @@ is plain data); the command line does, and exits 2.
 
 - `read_prefixes`: GetObject, HeadObject, ListObjectsV2 and ListMultipartUploads (a listing's
   `prefix` parameter must be inside one);
-- `list_prefixes`: HeadObject, ListObjectsV2 and ListMultipartUploads, never GetObject;
 - `write_prefixes`: create-only PutObject (`If-None-Match: *` or no condition; `412` if the key
   exists) and the calls of a multipart upload (create, part, complete, abort);
-- `delete_prefixes`: DeleteObject and AbortMultipartUpload.
+- `delete_prefixes`: DeleteObject (not AbortMultipartUpload: a delete prefix cannot cancel an upload).
 
 A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`). Everything else is
 `403 AccessDenied`. Two uses:

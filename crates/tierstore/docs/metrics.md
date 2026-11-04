@@ -25,7 +25,7 @@ upstream.
 
 **v2: storage nodes with hot and cold tiers.** A storage node runs a proxy over a hot store and a
 cold store. A read asks the hot tier first, and on a miss the cold tier. A get without a range that finds the
-object only in the cold tier reads the whole object and copies it into the hot tier (a promotion)
+object only in the cold tier reads the whole object, gives it to the client as it arrives, and copies it into the hot tier (a promotion, a streamed write fed by the same read)
 when the hot tier has room; a ranged get reads only its range and copies nothing. Its series are one labelled family per measure, with the tier as a
 label, so one query serves every tier.
 
@@ -131,14 +131,14 @@ value `local` of `tier` is reserved for the build node's cache.
 
 What they do not count, and how to read them:
 
-- An S3 GET reaches the proxy as a HEAD and then a GET. A GET that is answered at the HEAD shows only under `op="head"`: a key that exists in neither tier, a conditional request that is answered 304 or 412, and a range that cannot be satisfied. So `op="head"` is a lookup rate: it mixes the clients' HEADs with the HEAD that starts every GET. `op="get"` counts only the reads that went on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call), counted under `op="get"` whatever its outcome: a key that exists in neither tier, a conditional request answered 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`, and none of them is counted at `op="head"`. So `op="head"` counts the clients' HEADs alone. A GET answered 304 or 412 has counted its hit and its bytes read and served although the body was never sent, and one answered 416 has counted its hit and zero bytes read and served; on the cold tier that GET copies nothing (the copy is fed by the body, which was not read) and counts no promotion and no `full`, `raced` or `failed` skip; with the hot tier at its critical mark it does count a `critical` skip, which is counted when the read opens, before the body is known to be unread.
 - An error is neither a hit nor a miss. A tier that is down does not lower its hit rate; it shows in `read_errors_total`. A hot-tier error ends the read: the cold tier is not asked, so a hot outage does not show as cold reads.
-- Bytes are counted when the proxy hands them to the front, so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied after a cold read has counted the cold hit and the cold bytes read, and no bytes served.
+- Bytes are counted when the proxy hands the read to the front (for a read of the hot tier, when it opens, from the window it covers), so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied counts the hit (cold, if the hot tier missed) but zero bytes read and zero bytes served, unlike a conditional response, whose resolved window can hold bytes.
 - A ranged GET that misses the hot tier asks the cold tier for the range alone and copies nothing, so its `bytes_read` and `bytes_served` are both the range and it promotes nothing. While the hot tier is at its critical mark it also counts a `critical` skip.
 - A HEAD promotes nothing.
-- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier answering this copy with "full". `raced` is another read having copied the object first: two concurrent cold GETs of one object read it twice and promote it once, and the second counts `raced`. `failed` is any other error of the copy.
+- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier answering this copy with "full". `raced` is another read having copied the object first: two concurrent cold GETs of one object read it twice and promote it once, and the second counts `raced`. `failed` is any other error of the copy, and also a copy that was abandoned: the cold body is given to the client as it arrives and the same bytes are queued for the copy, and a copy that falls more than 16 MiB behind, one whose client dropped the body before the last byte, and one whose cold body failed or had other bytes than the cold object's size are abandoned and leave no object in the hot tier.
 - `promotions_total` counts a copy when the hot tier has taken it, before the entry for it is appended to the journal. That append can fail, and then the object can later leave the hot tier with no trace in these counters.
-- A GET that is dropped while it copies has counted its cold hit and its bytes, and neither a promotion nor a skip. So promotions plus skips can be fewer than cold hits.
+- The copy of a cold GET runs beside the response and can end after it, so a scrape just after a GET may not yet show its promotion or skip. A cold body that fails part way counts a cold error as well as its cold hit (the hit is counted when the read opens), whether the read was of the whole object or of a range. A GET whose body is never read counts its cold hit and neither a promotion nor a skip, so promotions plus skips can be fewer than cold hits.
 
 ### Tier queries
 

@@ -1,16 +1,18 @@
-//! The list right of a scoped key, every right on every call, and the key files of the release
-//! before: through `ScopedKey::from_file`, `GcKey::from_file` and `Server::handle`.
+//! Every right of a scoped key and of a GC key on every call, the list right of a GC key, and the
+//! key files of the release before: through `ScopedKey::from_file`, `GcKey::from_file` and
+//! `Server::handle`.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use hyper::StatusCode;
+use hyper::{Request, StatusCode};
 use tierstore_testkit::dir::TestDir;
 
 use super::Prefixes;
-use super::gc::gc_keys;
-use super::scoped::{ScopedKey, scoped_keys};
+use super::gc::{GcKey, gc_keys};
+use super::request::{Query, Target};
+use super::scoped::{OUT_OF_SCOPE as REFUSED, ScopedKey, permit, scoped_keys};
 use super::testing::{BUCKET, Reply, Rig, texts};
 
 const MEBIBYTE: u64 = 1 << 20;
@@ -19,9 +21,10 @@ const FLAG: &str = "--scoped-key-file";
 /// The headers of a create-only put.
 const CREATE: &[(&str, &str)] = &[("if-none-match", "*")];
 
-/// Each key has one right, on one prefix: `a/` read, `b/` list, `c/` write, `d/` delete.
+/// Each key has its rights on one prefix: `a/` read, `b/` list, delete and abort (a GC key), `c/`
+/// write, `d/` delete.
 const READ: (&str, &str) = ("k-read", "read-secret-0123456789");
-const LIST: (&str, &str) = ("k-list", "list-secret-0123456789");
+const LIST: (&str, &str) = ("k-gc", "gc-secret-0123456789");
 const WRITE: (&str, &str) = ("k-write", "write-secret-0123456789");
 const DELETE: (&str, &str) = ("k-delete", "delete-secret-0123456789");
 
@@ -45,18 +48,12 @@ async fn rig() -> Rig {
             ScopedKey::new(key.0, key.1, &prefixes).unwrap()
         };
         let none = Prefixes::default();
+        config.gc_keys = vec![GcKey::new(LIST.0, LIST.1, "b/").unwrap()];
         config.scoped_keys = vec![
             only(
                 READ,
                 Prefixes {
                     read: &["a/"],
-                    ..none
-                },
-            ),
-            only(
-                LIST,
-                Prefixes {
-                    list: &["b/"],
                     ..none
                 },
             ),
@@ -116,13 +113,14 @@ async fn attempt(rig: &Rig, key: (&str, &str), op: &str, prefix: &str, upload: &
     }
 }
 
-/// Asserts every right on every call and every prefix: of four keys that each have one right on
-/// one prefix, a key does exactly the calls its right gives, on its own prefix, and every other
-/// pair of key, call and prefix is 403 `AccessDenied` with the full out-of-scope message and
-/// changes nothing. Read gives get, head, list and list of uploads; list gives head, list and
-/// list of uploads and never get; write gives a create-only put, the start of an upload and its
-/// abort; delete gives a delete and the abort of an upload. The status of each call that is
-/// allowed is the one S3 answers.
+/// Asserts every right on every call and every prefix: of four keys (a read key, a GC key, a write
+/// key and a delete key) each on one prefix, a key does exactly the calls its rights give, on its
+/// own prefix, and every other pair of key, call and prefix is 403 `AccessDenied` with the full
+/// out-of-scope message and changes nothing. Read gives get, head, list and list of uploads; the
+/// GC key gives head, list, list of uploads, delete and abort and never get; write gives a
+/// create-only put, the start of an upload and its abort; a delete prefix gives a delete and not an
+/// abort (as before: a key that deletes cannot cancel another client's upload). The status of each
+/// call that is allowed is the one S3 answers.
 #[tokio::test(start_paused = true)]
 async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
     let rig = rig().await;
@@ -135,9 +133,13 @@ async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
     }
     let keys = [
         (READ, "a/", vec!["get", "head", "list", "list_uploads"]),
-        (LIST, "b/", vec!["head", "list", "list_uploads"]),
+        (
+            LIST,
+            "b/",
+            vec!["head", "list", "list_uploads", "delete", "abort"],
+        ),
         (WRITE, "c/", vec!["put", "start_upload", "abort"]),
-        (DELETE, "d/", vec!["delete", "abort"]),
+        (DELETE, "d/", vec!["delete"]),
     ];
     let status = |op: &str| match op {
         "abort" | "delete" => StatusCode::NO_CONTENT,
@@ -170,18 +172,22 @@ async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
     }
     assert!(rig.get("c/new", None).await.status.is_success());
     assert!(rig.get("a/obj", None).await.status.is_success());
-    assert_eq!(rig.get("d/obj", None).await.status, StatusCode::NOT_FOUND);
+    for gone in ["b/obj", "d/obj"] {
+        assert_eq!(rig.get(gone, None).await.status, StatusCode::NOT_FOUND);
+    }
+    let open = rig.list("uploads&prefix=d%2F").await;
+    assert_eq!(texts(&open.body, "UploadId"), [uploads[3].as_str()]);
     for prefix in ["a/", "b/", "d/"] {
         let stored = rig.get(&format!("{prefix}new"), None).await;
         assert_eq!(stored.status, StatusCode::NOT_FOUND, "{prefix}");
     }
 }
 
-/// Asserts the boundaries of a list prefix: a list and a head are allowed for a prefix that is a
-/// list prefix or deeper (a list may also end inside a name), and refused, with the full message,
-/// for no prefix, an empty one, a shorter one, a sibling that shares the characters, a path that
-/// climbs out, the prefix itself as the key of a head, and the keys of the proxy; and a list
-/// prefix never lets the key read.
+/// Asserts the boundaries of the list right of a GC key: a list and a head are allowed for a
+/// prefix that is its prefix or deeper (a list may also end inside a name), and refused, with the
+/// full message, for no prefix, an empty one, a shorter one, a sibling that shares the characters,
+/// a path that climbs out, the prefix itself as the key of a head, and the keys of the proxy; and
+/// the list right never lets the key read.
 #[tokio::test(start_paused = true)]
 async fn the_list_right_stops_at_its_prefix() {
     let rig = rig().await;
@@ -232,52 +238,57 @@ async fn the_list_right_stops_at_its_prefix() {
     assert!(!read.body.contains("CONTENT-OF-B"));
 }
 
-/// Asserts what the list lists of a key file are: `list_prefixes` is optional and empty when it is
-/// absent, a file with it reads back as written, a key may have only a list prefix, and a list
-/// prefix is held to the rules of every prefix (no closing slash, reserved) and to being a list
-/// of strings.
+/// Asserts that a HEAD under a list prefix is for a header-signed request only: for the scopes of
+/// a GC key, a HEAD with an `authorization` header is allowed and the same HEAD without one (as a
+/// presigned URL is) is out of scope, so a bearer URL never reaches what only a list prefix covers.
 #[test]
-fn a_scoped_key_file_may_give_list_prefixes_and_may_leave_them_out() {
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-scoped-list");
-    let with = |list: &str| {
-        format!(
-            "{{\"access_key_id\": \"packs\", \"secret_access_key\": \"s-0123456789\", \
-             \"read_prefixes\": [], \"write_prefixes\": [], \"delete_prefixes\": [], \
-             \"list_prefixes\": {list}}}"
-        )
+fn a_presigned_head_is_held_to_the_read_prefixes() {
+    let scopes = GcKey::new("k-gc", "gc-secret-0123456789", "b/")
+        .unwrap()
+        .scopes();
+    let head = |signed: bool| {
+        let mut request = Request::builder().method("HEAD").uri("/tier-bucket/b/x");
+        if signed {
+            request = request.header("authorization", "AWS4-HMAC-SHA256 x");
+        }
+        let (parts, ()) = request.body(()).unwrap().into_parts();
+        let query = Query::parse(None).unwrap();
+        permit(&scopes, &parts, &Target::Object("b/x".to_owned()), &query)
     };
-    let without = "{\"access_key_id\": \"packs\", \"secret_access_key\": \"s-0123456789\", \
-                   \"read_prefixes\": [\"r/\"], \"write_prefixes\": [\"w/\"], \
-                   \"delete_prefixes\": [\"d/\"]}";
-    let read = ScopedKey::from_file(FLAG, &file(&dir, "without", without)).unwrap();
-    assert!(read.list_prefixes().is_empty());
-    assert_eq!(read.read_prefixes(), ["r/"]);
-    assert_eq!(read.write_prefixes(), ["w/"]);
-    assert_eq!(read.delete_prefixes(), ["d/"]);
-    let only = ScopedKey::from_file(FLAG, &file(&dir, "only", &with(r#"["l/", "m/"]"#)));
-    assert_eq!(only.unwrap().list_prefixes(), ["l/", "m/"]);
-    for (name, list) in [
-        ("empty", "[]"),
-        ("noslash", r#"["l"]"#),
-        ("reserved", r#"["_journal/"]"#),
-        ("tiering", r#"["x/_tiering/"]"#),
-        ("type", r#""l/""#),
-        ("item", "[7]"),
+    assert_eq!(head(true), Ok(()));
+    assert_eq!(head(false), Err(REFUSED));
+}
+
+/// Asserts what a scoped key file may hold: exactly the five fields. A sixth, such as
+/// `list_prefixes` (a right only a GC key has), is refused with the full message, which names the
+/// flag and the file and carries no part of the secret.
+#[test]
+fn a_scoped_key_file_has_the_five_fields_and_no_list_or_abort_right() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-scoped-list");
+    let base = "\"access_key_id\": \"packs\", \"secret_access_key\": \"s-0123456789\", \
+                \"read_prefixes\": [\"r/\"], \"write_prefixes\": [], \"delete_prefixes\": []";
+    let loaded = ScopedKey::from_file(FLAG, &file(&dir, "five", &format!("{{{base}}}"))).unwrap();
+    assert_eq!(loaded.read_prefixes(), ["r/"]);
+    assert!(loaded.write_prefixes().is_empty());
+    for (name, extra) in [
+        ("list", ", \"list_prefixes\": [\"l/\"]"),
+        ("abort", ", \"abort_prefixes\": [\"a/\"]"),
     ] {
-        let path = file(&dir, name, &with(list));
+        let path = file(&dir, name, &format!("{{{base}{extra}}}"));
         let refused = ScopedKey::from_file(FLAG, &path).unwrap_err();
-        assert!(
-            refused.starts_with("--scoped-key-file "),
-            "{name}: {refused}"
+        let wanted = format!(
+            "{FLAG} {}: not JSON of exactly access_key_id, secret_access_key, read_prefixes, \
+             write_prefixes and delete_prefixes (the last three lists of strings)",
+            path.display()
         );
-        assert!(!refused.contains("s-0123456789"), "{name}: {refused}");
+        assert_eq!(refused, wanted, "{name}");
     }
 }
 
 /// Runs the previous release's key files through this release (the files as that release wrote
 /// them: a scoped key file of the five fields and a GC key file of `prefix`) and asserts they
 /// serve as they did: the scoped key reads and lists under its read prefix, writes under its write
-/// prefix and deletes under its delete prefix; the GC key lists, heads and deletes under its
+/// prefix and deletes under its delete prefix (and cannot abort an upload); the GC key lists, heads and deletes under its
 /// prefix and is refused a get, a put and anything outside it.
 #[tokio::test(start_paused = true)]
 async fn the_key_files_of_the_release_before_serve_as_they_did() {
@@ -322,6 +333,15 @@ async fn the_key_files_of_the_release_before_serve_as_they_did() {
     assert_eq!(call(s, "PUT", "/w/n".into(), CREATE).await, StatusCode::OK);
     let deleted = call(s, "DELETE", "/d/o".into(), &[]).await;
     assert_eq!(deleted, StatusCode::NO_CONTENT);
+    let started = rig.call("POST", "d/up?uploads", b"").await;
+    let upload = texts(&started.body, "UploadId").concat();
+    let abort = format!("/d/up?uploadId={upload}");
+    let refused = call(s, "DELETE", abort, &[]).await;
+    assert_eq!(
+        refused,
+        StatusCode::FORBIDDEN,
+        "a delete prefix aborts nothing"
+    );
     let outside = call(s, "GET", "/x/o".into(), &[]).await;
     assert_eq!(outside, StatusCode::FORBIDDEN);
     let listed = call(g, "GET", "?list-type=2&prefix=g%2F".into(), &[]).await;

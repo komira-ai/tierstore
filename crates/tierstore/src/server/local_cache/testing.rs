@@ -362,13 +362,13 @@ impl Backend for Tamper {
         Ok(body)
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
         if !self.marks.load(Ordering::SeqCst) {
-            return Err(Error::Unsupported("get_marked".to_owned()));
+            return Err(Error::Unsupported("get_tagged".to_owned()));
         }
         let body = self.get(key, range).await?;
         let meta = self.memory.head(key).await?;

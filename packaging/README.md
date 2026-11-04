@@ -36,8 +36,9 @@ tarball is verified (`docs/ci-and-release.md`). The release also carries
 `tierstore-<commit>-macos-arm64.tar.gz`; the files here are for Linux hosts (a Mac's: `macos/README.md`),
 and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
 binary.
-The tarball holds one member, the binary under its own name (the declaration is not in it
-yet: place it from this directory, below):
+The tarball holds the binary under its own name and `THIRD-PARTY-LICENSES.txt`, the licences of
+the crates linked into it (the declaration is not in it yet: place it from this directory, below;
+extracting `tierstore` by name leaves the notice in the tarball):
 
 ```sh
 tar -xzf tierstore-<commit>-linux-x86_64.tar.gz tierstore
@@ -267,8 +268,8 @@ variable, and the unit sets none.
 
 A GC key (`--gc-key-file`, once per key; JSON of `access_key_id`, `secret_access_key` and `prefix`,
 mode 0600, not a symbolic link, owned by the user the server runs as) is one instance of a scoped key
-(below): the server reads it as a scoped key with `list_prefixes` and `delete_prefixes` of
-`[prefix]`, so the table that follows is the table of scoped keys for those two lists. It is for
+(below): the server reads it as a scoped key with a list, a delete and an abort right on
+`[prefix]` (rights a scoped key file cannot give), so the table that follows is the table of scoped keys for those rights. It is for
 the process that collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
 with it is refused) and may do these, only for a key that starts with its prefix (which ends in `/`)
 and is longer than it:
@@ -297,19 +298,16 @@ the server runs as) reads, lists, creates and deletes under prefixes that its fi
 else. It is for a process that must touch some prefixes of the bucket and not the rest, and that
 neither replaces nor deletes what it did not write. It signs in the header, and
 signs presigned GET URLs for objects under its read prefixes (see Presigned GET URLs; a URL of it for
-any other method is refused). The file is JSON of these five fields, all required, and an optional sixth, `list_prefixes`:
+any other method is refused). The file is JSON of exactly these five fields, all required:
 
 ```json
 {"access_key_id": "frontend-packs", "secret_access_key": "the secret",
  "read_prefixes": ["cas/"],
  "write_prefixes": ["cas/f/frontend/"],
- "delete_prefixes": [],
- "list_prefixes": []}
+ "delete_prefixes": []}
 ```
 
-`list_prefixes` is empty when left out, so a key file of the release before loads and means what it
-did. A list prefix lets the key list and head under it and never read: it is what a GC key has, with
-a delete prefix. A read prefix lets the key list as well.
+A read prefix lets the key list as well.
 
 Every prefix ends in `/` and is not empty. None may be `_journal/` or `_tiering/`, be under one, be
 a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one is refused at
@@ -329,12 +327,12 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | call | list | allowed |
 |---|---|---|
 | GetObject | `read_prefixes` | yes, whole or by range |
-| HeadObject | `read_prefixes` or `list_prefixes` | yes |
-| ListObjectsV2 | `read_prefixes` or `list_prefixes` | with a `prefix` parameter inside such a prefix; no prefix or another is 403, not filtered |
-| ListMultipartUploads | `read_prefixes` or `list_prefixes` | the same rule: a `prefix` inside such a prefix |
+| HeadObject | `read_prefixes` (a GC key: its list prefix) | yes |
+| ListObjectsV2 | `read_prefixes` (a GC key: its list prefix) | with a `prefix` parameter inside such a prefix; no prefix or another is 403, not filtered |
+| ListMultipartUploads | `read_prefixes` (a GC key: its list prefix) | the same rule: a `prefix` inside such a prefix |
 | PutObject | `write_prefixes` | create-only: no `If-Match`, and `If-None-Match` absent or `*`; a key that exists is `412 PreconditionFailed` |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
-| AbortMultipartUpload | `write_prefixes` or `delete_prefixes` | of an upload of such a key |
+| AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
@@ -573,7 +571,9 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_journal/` or `_tiering/`). Every other key, and every listing, goes to the
+(and it is not under `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
+key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing
+leaves them out). Every other key that is not kept, and every other listing, goes to the
 upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
 disk and makes no call to the upstream. A GET of an object that is not there reads it from the
 upstream in chunks of 8 MiB into `<path>/.stage/`, hashing the bytes as they pass, and links it into
@@ -798,6 +798,10 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--reconcile-interval` | `hot_store.reconcile_interval` | how often the reconciler works |
 | `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
+| `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
+| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; today it only sets `Proxy::is_live`, no request path reads it yet, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
+| `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; no request path uses either yet (`10s`; at most a quarter of `--departure`) |
+| `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`0s`, which removes none; otherwise at least `--departure`. Set a time only once no proxy of a release without the heartbeat runs) |
 | `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
 | `--max-concurrent-puts` | `server.max_concurrent_puts` | the most put bodies and parts taken at once |
 | `--put-permit-wait` | `server.put_permit_wait` | how long a put that arrives with all of those taken waits for one to end (15s by default; 0 answers 503 at once). No byte of its body is read while it waits. If none ends in that time it is answered 503 `SlowDown` with `Retry-After: 1`. A waiter holds a connection and no permit or body memory, is not bounded except by the connections, counts as in flight in a drain (so a drain may take up to this much longer, never past `--drain-deadline`), and does not notice its client leaving until its body is first read |
@@ -892,9 +896,8 @@ and switch the unit by changing `ExecStart=` to
 ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
-The flags and the file are both accepted in this release, so a unit may stay as it is and move
-when it is convenient; the flags are to go in the release after, and `--config` is then the way to
-configure the data path. The shipped `tierstore.service` keeps its flags, and
+The flags and the file are both supported, and no release is planned to remove the flags, so a
+unit may stay as it is and move when it is convenient. The shipped `tierstore.service` keeps its flags, and
 `crates/tierstore/tests/packaging.rs` parses them as the binary parses them. `--print-config` does
 not convert anything else in a unit (a drop-in, the firewall rules).
 
@@ -1010,6 +1013,11 @@ stop it, and the front answers that parameter with 501 `NotImplemented`. If that
 ls` and `list_objects_v2` fail against the front, and the calls that name a key (`get_object`,
 `put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
 client before relying on either.
+
+A put or a CreateMultipartUpload of a key with a character XML 1.0 forbids (U+0000-U+0008, U+000B,
+U+000C, U+000E-U+001F, U+FFFE or U+FFFF) is answered 400 `InvalidArgument` and stores nothing: the
+front's listings are XML 1.0, which cannot carry those characters, and with no `encoding-type=url`
+there is no other way to list such a key. Tab, line feed, U+007F and the C1 controls are allowed.
 
 ## The OCI read front
 

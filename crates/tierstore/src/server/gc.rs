@@ -1,7 +1,7 @@
 //! The garbage-collection key: the file format of a scoped key (see `scoped`) that lists, heads
 //! and deletes under one prefix. A GC key is one instance of a scoped key: the server reads a
-//! `--gc-key-file` as a scoped key with a list and a delete right on the prefix of the file, and
-//! no read and no write right. Nothing in the server tells the two apart after the file is read.
+//! `--gc-key-file` as a scoped key with a list, a delete and an abort right on the prefix of the
+//! file, and no read and no write right. A key file cannot give a list or an abort right: only a GC key has them. Nothing in the server tells the two apart after the file is read.
 //!
 //! A server has any number of them (`--gc-key-file`, one file per key, mode 0600, the file
 //! itself and owned by the user the server runs as):
@@ -12,7 +12,7 @@
 //!
 //! All three fields are required and no other is allowed. The prefix ends in `/` and is not
 //! `_journal/` or `_tiering/` or under them or a prefix of them. The key may then do what a
-//! scoped key with `list_prefixes` and `delete_prefixes` of `[prefix]` may: ListObjectsV2 and
+//! scoped key with a list, a delete and an abort right on `[prefix]` may: ListObjectsV2 and
 //! ListMultipartUploads with a `prefix` parameter inside the prefix, HeadObject, DeleteObject, and
 //! AbortMultipartUpload of an upload of a key longer than the prefix. Everything else, GetObject
 //! included, is `403 AccessDenied`, answered before the body is read, with the refusals and their
