@@ -45,7 +45,7 @@ impl EntryReconciler {
                 self.config.waiter.sleep(pause).await;
                 match self.cold.head(&object.key).await {
                     Ok(_) => {}
-                    Err(Error::NotFound(_)) => self.adopt(&object.key, report).await,
+                    Err(Error::NotFound(_)) => self.adopt(&object.key, object.size, report).await,
                     Err(error) => return report.failed.push(error),
                 }
             }
@@ -57,10 +57,12 @@ impl EntryReconciler {
         self.sweep_at = Some(now.saturating_add(millis(self.config.stray_interval)));
     }
 
-    /// Makes the entry of a stray object, unless one exists.
-    async fn adopt(&mut self, key: &str, report: &mut StepReport) {
+    /// Makes the entry of a stray object of `size` bytes, unless one exists, and counts its bytes
+    /// as not held by the cold tier until it is copied.
+    async fn adopt(&mut self, key: &str, size: u64, report: &mut StepReport) {
         match self.entries.create(key, Take::Stray).await {
             Ok(Created::Taken(_)) => {
+                self.tally.lags(key, size);
                 self.strays_adopted += 1;
                 report.strays_adopted += 1;
             }
