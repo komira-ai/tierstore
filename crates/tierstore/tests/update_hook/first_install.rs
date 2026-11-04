@@ -35,7 +35,7 @@ fn first_install(name: &str) -> Rig {
 /// has already pointed the public port at the slot: the calls are the guard, the redirect and
 /// then the start, and afterwards the redirect names `a` while nothing runs there, so the public
 /// port answers nothing. And that the recovery the README gives, `nft delete table inet
-/// kbf_forward_tierstore`, takes the redirect away (the public port is the old unit's again)
+/// tierstore_forward`, takes the redirect away (the public port is the old unit's again)
 /// and leaves the guard. It would catch a README whose order trusts `restore` to start the slot
 /// before the public port moves, and a recovery that names a table the hook does not use.
 #[test]
@@ -90,7 +90,7 @@ fn the_readmes_guard_is_the_hooks_guard_for_the_declared_ports() {
     assert!(text.lines().all(|line| line.contains(" inet ")), "{text}");
     assert_eq!(
         text.lines().last(),
-        Some("add rule inet kbf_guard_tierstore in tcp dport { 9301, 9302 } drop")
+        Some("add rule inet tierstore_guard in tcp dport { 9301, 9302 } drop")
     );
     assert!(!text.contains(" ip ") && !text.contains(" ip6 "), "{text}");
 }
