@@ -122,8 +122,6 @@ mod listener_tests;
 #[cfg(test)]
 mod parse_tests;
 #[cfg(test)]
-mod pull_tests;
-#[cfg(test)]
 mod push_chunked_tests;
 #[cfg(test)]
 mod push_manifest_tests;

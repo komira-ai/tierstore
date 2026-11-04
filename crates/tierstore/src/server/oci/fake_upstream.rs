@@ -169,8 +169,7 @@ where
                 .push(asked.clone());
             let fake = handler(&asked);
             if fake.ending == Ending::Hang {
-                let never: Infallible = std::future::pending().await;
-                match never {}
+                return std::future::pending().await;
             }
             Ok::<_, Infallible>(fake.response())
         }

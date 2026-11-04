@@ -16,8 +16,8 @@ use tokio::sync::watch;
 
 use super::{Cli, Error, build, exit_status};
 use crate::server::cli_serve::bind_oci;
-use crate::server::config::Dur;
 use crate::server::config_oci::UpstreamTable;
+use crate::server::config_units::Dur;
 use crate::server::oci::fake_upstream::{Fake, Registry};
 use crate::server::oci::test_pki::ca;
 use crate::{Backend, MemoryBackend};
