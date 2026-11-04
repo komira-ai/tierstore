@@ -54,6 +54,7 @@ use super::config_combined::{CombinedSettings, combined};
 use super::config_interface::{InterfaceTable, Interfaces, OciTable, interfaces, with_legacy};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
+use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::{FrontSettings, S3Tls};
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
@@ -284,6 +285,11 @@ pub(super) struct ServerTable {
     pub min_secret_bytes: Option<u32>,
     pub s3_request_timeout: Option<Dur>,
     pub backend_check_wait: Option<Dur>,
+    pub s3_connect_timeout: Option<Dur>,
+    pub s3_min_bytes_per_sec: Option<u64>,
+    pub s3_pool_idle_timeout: Option<Dur>,
+    pub s3_read_retries: Option<u32>,
+    pub s3_read_retry_wait: Option<Dur>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
@@ -326,6 +332,21 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub journal_retention: Option<Dur>,
     #[serde(default)]
+    pub journal_batch_entries: Option<u32>,
+    #[serde(default)]
+    pub usage_refresh: Option<Dur>,
+    #[serde(default)]
+    pub journal_page_size: Option<u32>,
+    #[serde(default)]
+    pub copy_rounds: Option<u32>,
+    #[serde(default)]
+    pub compare_range: Option<Size>,
+    #[serde(default)]
+    pub delete_rounds: Option<u32>,
+    #[serde(default)]
+    pub listing_heads: Option<u32>,
+    #[serde(default)]
+    pub upload_listing_calls: Option<u32>,
     pub heartbeat: Option<Dur>,
     #[serde(default)]
     pub departure: Option<Dur>,
@@ -489,6 +510,17 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
         ("journal_retention", cold.journal_retention.is_some()),
+        (
+            "journal_batch_entries",
+            cold.journal_batch_entries.is_some(),
+        ),
+        ("usage_refresh", cold.usage_refresh.is_some()),
+        ("journal_page_size", cold.journal_page_size.is_some()),
+        ("copy_rounds", cold.copy_rounds.is_some()),
+        ("compare_range", cold.compare_range.is_some()),
+        ("delete_rounds", cold.delete_rounds.is_some()),
+        ("listing_heads", cold.listing_heads.is_some()),
+        ("upload_listing_calls", cold.upload_listing_calls.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
@@ -607,6 +639,7 @@ pub(super) fn storage(
     let critical = percent("critical", hot.critical, 95)?;
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
+    let hot_tuning = hot_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
@@ -628,6 +661,8 @@ pub(super) fn storage(
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
         s3_request_timeout: shared.s3_request_timeout,
+        s3_client: shared.s3_client,
+        hot_tuning,
         hot_bytes: hot_budget,
         high_water,
         low_water,
@@ -677,6 +712,7 @@ pub(super) fn storage(
 pub(super) struct Shared {
     pub front: FrontSettings,
     pub s3_request_timeout: Duration,
+    pub s3_client: S3Client,
     pub backend_check_wait: Duration,
 }
 
@@ -694,6 +730,7 @@ pub(super) fn front_of(
     listen: Vec<SocketAddr>,
     per_run: PerRun,
 ) -> Result<Shared, ConfigError> {
+    let s3_client = s3_client(&server)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -747,6 +784,7 @@ pub(super) fn front_of(
     Ok(Shared {
         front,
         s3_request_timeout: duration(server.s3_request_timeout, Duration::from_secs(60)),
+        s3_client,
         backend_check_wait: duration(server.backend_check_wait, Duration::from_secs(300)),
     })
 }
