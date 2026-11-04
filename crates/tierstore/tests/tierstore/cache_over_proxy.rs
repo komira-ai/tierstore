@@ -153,10 +153,10 @@ async fn a_ranged_only_backend_refuses_a_whole_marked_read_and_answers_a_ranged_
     inner.put("k", body("0123456789")).await.unwrap();
     let backend = Retagged::over(inner).ranged_only();
 
-    let refused = backend.get_marked("k", None).await;
+    let refused = backend.get_tagged("k", None).await;
     assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
     let (bytes, reservation, tag) = backend
-        .get_marked("k", Some(ByteRange::new(2, 3)))
+        .get_tagged("k", Some(ByteRange::new(2, 3)))
         .await
         .unwrap();
     assert_eq!((bytes, reservation), (body("234"), false));

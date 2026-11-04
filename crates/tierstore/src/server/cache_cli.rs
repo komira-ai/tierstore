@@ -39,11 +39,9 @@
 //! owed to the upstream: no journal, no lease, no copy in flight.
 //!
 //! A storage node with a cache in front of its own proxy (see
-//! [`combined_cli`](super::combined_cli)) starts the cache directory with the same `open` and serves it
-//! with the same function (`serve_front`: the sockets, the fronts, the loops and the drain); its
-//! upstream is the proxy, which the cache takes through the same `Backend` interface
-//! as a store, so the HEAD and
-//! the write self-test of the upstream are left out there.
+//! [`combined_cli`](super::combined_cli)) uses the same cache directory start (`open`), the same
+//! sockets (`bind_cache_s3`) and the same two loops; its upstream is the proxy, so the HEAD and the
+//! write self-test of the upstream are left out there.
 
 use std::future::Future;
 use std::path::Path;
@@ -53,15 +51,14 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use crate::{
-    Backend, Clock, Error as BackendError, MonotonicClock, SelfTestOptions, SweepBudget,
+    Backend, Clock, Error as BackendError, MonotonicClock, Proxy, SelfTestOptions, SweepBudget,
     SystemClock, self_test, settle_conditional_delete, sweep_probes,
 };
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{
-    Addresses, Error, OciSetup, S3Flags, bind_oci, bind_s3, cut_note, oci_setup_of, open_tier,
-    probe_run_id, signals,
-};
+use super::cli::{Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, signals};
+use super::cli_probe::probe_run_id;
+use super::cli_serve::{bind_oci, bind_s3, cut_note};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
@@ -70,7 +67,7 @@ use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
 use super::oci::OciListener;
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server, ServerConfig};
 
 /// How often the eviction pass runs beside the server.
@@ -261,6 +258,7 @@ pub(super) async fn serve_cache(
         scrub_min_round: settings.scrub_min_round,
         sweep,
         beside_halt: Arc::new(Notify::new()),
+        beating: None,
     };
     serve_front(
         cache,
@@ -290,8 +288,12 @@ pub(super) struct Fronts<'a> {
     pub(super) scrub_min_round: Duration,
     /// The sweep of the upstream's probe keys, run beside the server after it is ready.
     pub(super) sweep: Option<Sweep>,
-    /// Notified when the server has drained, for the loop the caller runs `beside` the cache.
+    /// Notified when the fronts have drained, for the loop the caller runs `beside` the cache.
     pub(super) beside_halt: Arc<Notify>,
+    /// The proxy of a storage node, whose heartbeat is stopped when both fronts are done, so that
+    /// it beats until the in-flight requests of the S3 front and of the OCI front are finished or
+    /// cut.
+    pub(super) beating: Option<Arc<Proxy>>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -333,12 +335,23 @@ pub(super) async fn serve_front(
         Arc::clone(&fronts.beside_halt),
     ];
     let [halt, lock_halt, scrub_halt, _] = halts.clone();
+    let beating = fronts.beating.clone();
     let serving = async move {
-        let drained = server.serve_all(listeners).await;
+        let after = async {
+            if let Some(proxy) = &beating {
+                proxy.stop_heartbeat().await;
+            }
+        };
+        let ended = serve_fronts(
+            server.serve_all(listeners),
+            serve_oci(oci, oci_stopped),
+            after,
+        )
+        .await;
         for halting in &halts {
             halting.notify_one();
         }
-        drained
+        ended
     };
     let maintaining = cache.maintain(PASS_INTERVAL, halt);
     let holding = cache.hold(LOCK_INTERVAL, lock_halt);
@@ -349,14 +362,8 @@ pub(super) async fn serve_front(
         Every::new(SCRUB_TICK),
         scrub_halt,
     );
-    let (drained, (), (), (), (), oci_cut) = tokio::join!(
-        serving,
-        beside,
-        maintaining,
-        holding,
-        scrubbing,
-        serve_oci(oci, oci_stopped)
-    );
+    let ((drained, oci_cut), (), (), (), ()) =
+        tokio::join!(serving, beside, maintaining, holding, scrubbing);
     watcher.abort();
     if let Some(sweeping) = sweeping {
         sweeping.abort();

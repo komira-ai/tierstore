@@ -6,12 +6,13 @@
 //! [`config_combined`](super::config_combined)). The start runs, in this order: the flags'
 //! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
 //! (which writes probe keys under `_tiering/selftest/` and deletes them), the proxy (which writes
-//! its marker `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
+//! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
 //! last the addresses. Only the flags' checks and the lock file come before a write. A refusal
 //! of the cache directory, its file system, its budget or an address comes after the self-test
-//! and the proxy's marker, so it leaves the marker (an empty object, with no lease) in the hot
-//! tier; the exit status is the one the same refusal has in the other starts.
+//! and the proxy's registration, so it leaves the registration (a JSON object, see `Registration`) in the hot
+//! tier, and the heartbeat, which starts with the proxy, may already have rewritten it with a
+//! positive count; the exit status is the one the same refusal has in the other starts.
 //!
 //! Left out, because the upstream of the cache is this node's own proxy: the HEAD of a probe key
 //! and the write self-test of the upstream, which a build node makes (the tiers have just been
@@ -31,15 +32,15 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, Proxy, Reconciler, SystemClock};
+use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
 
 use super::Drained;
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{Fronts, open, serve_front};
-use super::cli::{
-    Addresses, Error, build, open_gate, probe_run_id, probe_tiers, reconcile, reconcile_gated,
-    signals,
-};
+use super::cli::{Addresses, Error, build, signals};
+use super::cli_probe::{probe_run_id, probe_tiers};
+use super::cli_reconcile::{reconcile, reconcile_gated};
+use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
 use super::listen::joined;
 use super::local_cache::{Disk, SystemDisk};
@@ -70,12 +71,14 @@ pub(super) async fn serve_combined(
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    proxy.start_heartbeat(Arc::new(TokioSleeper));
+    let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;
     let run = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
     let cache = open(&settings.cache.config, &upstream, &disk, &run).await?;
-    // Both fronts read, and write, through the cache.
     built.server.cache_writes = true;
+    // Both fronts read, and write, through the cache.
     let beside_halt = Arc::new(Notify::new());
     let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
     let interval = cli.reconcile_interval;
@@ -93,6 +96,7 @@ pub(super) async fn serve_combined(
         scrub_min_round: settings.cache.scrub_min_round,
         sweep: None,
         beside_halt,
+        beating: Some(beating),
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await

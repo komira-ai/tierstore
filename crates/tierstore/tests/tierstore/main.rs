@@ -11,6 +11,7 @@ mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
 mod churn;
+mod cold_stream;
 mod conformance;
 mod faults;
 mod hold;
@@ -24,12 +25,14 @@ mod marked_reads;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
+mod open_read;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;
 mod reconciler_races;
 mod reconciler_reservations;
 mod reconciler_takeover;
+mod registration_gc;
 mod reservation;
 mod reservation_reads;
 #[cfg(feature = "s3")]

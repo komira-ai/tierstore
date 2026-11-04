@@ -19,6 +19,24 @@ pub type PartBody<'a> = BoxStream<'a, Result<Bytes, Error>>;
 /// not the whole of what was asked, and a reader must not take the body for complete.
 pub type ReadBody = BoxStream<'static, Result<Bytes, Error>>;
 
+/// [`Backend::open_read`] as a HEAD and then a streamed read of the range the size resolves the
+/// span to: the provided implementation, and what a backend that cannot ask for the span without
+/// the size does for that span.
+pub(crate) async fn open_by_head<B: Backend + ?Sized>(
+    backend: &B,
+    key: &str,
+    span: Option<Span>,
+) -> Result<Opened, Error> {
+    let meta = backend.head(key).await?;
+    let window = Window::of(span, meta.size);
+    let body = match window {
+        Window::Whole => backend.get_stream(key, None).await?,
+        Window::Part(range) => backend.get_stream(key, Some(range)).await?,
+        Window::Unsatisfiable => futures::stream::empty().boxed(),
+    };
+    Ok(Opened { meta, window, body })
+}
+
 /// The error of a multipart call that a backend does not override.
 fn not_supported(call: &str) -> Error {
     let text = format!("{call}: this backend does not do multipart uploads");
@@ -56,21 +74,137 @@ impl ByteRange {
         self.len
     }
 
-    /// The bytes of `body` this range covers.
+    /// Whether the range starts within an object of `size` bytes (at its end is within, and gives
+    /// no bytes).
     ///
     /// # Errors
-    /// [`Error::Other`] if `offset` is beyond the end of `body`.
-    pub fn slice(self, body: &Bytes) -> Result<Bytes, Error> {
-        let size = body.len() as u64;
+    /// [`Error::Other`] if `offset` is beyond the end of the object.
+    pub(crate) fn within(self, size: u64) -> Result<(), Error> {
         if self.offset > size {
             return Err(Error::Other(format!(
                 "range starting at {} is past the end of the {size}-byte object",
                 self.offset
             )));
         }
+        Ok(())
+    }
+
+    /// The bytes of `body` this range covers.
+    ///
+    /// # Errors
+    /// [`Error::Other`] if `offset` is beyond the end of `body`.
+    pub fn slice(self, body: &Bytes) -> Result<Bytes, Error> {
+        let size = body.len() as u64;
+        self.within(size)?;
         let end = size.min(self.offset.saturating_add(self.len));
         // Both bounds are at most `size`, which came from a `usize`.
         Ok(body.slice(self.offset as usize..end as usize))
+    }
+}
+
+/// A range as an HTTP `Range` header names it, which depends on the size of the object and so
+/// is resolved against the size the read itself sees ([`Span::resolve`]): a read that must be
+/// one call cannot be given the bytes to ask for by a HEAD before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Span {
+    /// From byte `first` to byte `last`, the last of the range (it may be past the end of the
+    /// object), or to the end of the object if there is none.
+    From {
+        /// The first byte.
+        first: u64,
+        /// The last byte asked for, if the range has an end.
+        last: Option<u64>,
+    },
+    /// The last bytes of the object: this many, or all of it if it is shorter.
+    Suffix(u64),
+}
+
+/// What a read of an optional [`Span`] came to, of an object of a known size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Window {
+    /// All of the object: no span was asked for.
+    Whole,
+    /// These bytes of it, cut at the end of the object.
+    Part(ByteRange),
+    /// A span that starts at or past the end of the object, or that asks for the last
+    /// none of it: no bytes are read.
+    Unsatisfiable,
+}
+
+impl Span {
+    /// The bytes of an object of `size` bytes that this span covers.
+    #[must_use]
+    pub fn resolve(self, size: u64) -> Window {
+        let (start, last) = match self {
+            Span::Suffix(count) => (size.saturating_sub(count), u64::MAX),
+            Span::From { first, last } => (first, last.unwrap_or(u64::MAX)),
+        };
+        if start >= size {
+            return Window::Unsatisfiable;
+        }
+        let end = last.min(size - 1) + 1;
+        Window::Part(ByteRange::new(start, end.saturating_sub(start)))
+    }
+}
+
+impl Window {
+    /// What `span`, if there is one, covers of an object of `size` bytes.
+    #[must_use]
+    pub fn of(span: Option<Span>, size: u64) -> Self {
+        span.map_or(Window::Whole, |span| span.resolve(size))
+    }
+
+    /// The bytes of `object`, the whole of it, that this window covers.
+    #[must_use]
+    pub fn slice(self, object: &Bytes) -> Bytes {
+        match self {
+            Window::Whole => object.clone(),
+            Window::Part(range) => {
+                let len = object.len() as u64;
+                let start = range.offset().min(len);
+                let end = range.offset().saturating_add(range.size()).min(len);
+                object.slice(start as usize..end as usize)
+            }
+            Window::Unsatisfiable => Bytes::new(),
+        }
+    }
+
+    /// The number of bytes the read gives, of an object of `size` bytes.
+    #[must_use]
+    pub fn bytes(self, size: u64) -> u64 {
+        match self {
+            Window::Whole => size,
+            Window::Part(range) => range.size(),
+            Window::Unsatisfiable => 0,
+        }
+    }
+}
+
+/// A read that is open: the object's [`Meta`], the [`Window`] of it that the body holds, and the
+/// body as the chunks it arrives in. See [`Backend::open_read`].
+pub struct Opened {
+    /// What the object that the body is read from is.
+    pub meta: Meta,
+    /// Which bytes of that object the body holds.
+    pub window: Window,
+    /// The bytes, as in [`ReadBody`]; empty for an [`Window::Unsatisfiable`] window.
+    pub body: ReadBody,
+}
+
+impl Opened {
+    /// The number of bytes the body is to give.
+    #[must_use]
+    pub fn served(&self) -> u64 {
+        self.window.bytes(self.meta.size)
+    }
+}
+
+impl std::fmt::Debug for Opened {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Opened")
+            .field("meta", &self.meta)
+            .field("window", &self.window)
+            .finish_non_exhaustive()
     }
 }
 
@@ -267,6 +401,34 @@ pub trait Backend: Send + Sync {
         self.put_stream(key, len, body).await
     }
 
+    /// [`Backend::put_tagged`] for a body that arrives as chunks (`len` is the number of bytes it
+    /// is to give, or `None` if the caller does not know): create-only, and gives the content
+    /// tag of the object this write made, with no read after it.
+    ///
+    /// As for [`Backend::put_stream`], the object becomes visible only after `body` has ended
+    /// without an error, and a body that ends with an error, or a call that is dropped half way,
+    /// leaves nothing. The directory and S3 backends do not hold the body whole (S3 gathers a
+    /// body of at most 16 MiB for one PUT, and sends a longer one as a multipart upload).
+    ///
+    /// The provided implementation collects the chunks and calls [`Backend::put_tagged`]; it
+    /// serves a backend that holds its objects in memory anyway, and the wrappers of other
+    /// backends override the call to pass the stream on.
+    ///
+    /// # Errors
+    /// As [`Backend::put_tagged`], and the error of `body`, if it ends with one.
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        _len: Option<u64>,
+        mut body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        let mut whole = BytesMut::new();
+        while let Some(chunk) = body.next().await {
+            whole.extend_from_slice(&chunk?);
+        }
+        self.put_tagged(key, whole.freeze()).await
+    }
+
     /// Replaces the object, only if its content tag is `etag` (`If-Match`), and gives the
     /// content tag of the new object.
     ///
@@ -365,12 +527,12 @@ pub trait Backend: Send + Sync {
     ///
     /// # Errors
     /// As [`Backend::get`]. [`Error::Unsupported`] unless the backend overrides this call.
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         _key: &str,
         _range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        Err(no_reservations("get_marked"))
+        Err(no_reservations("get_tagged"))
     }
 
     /// As [`Backend::get`], for a read that is given as the chunks of the bytes: the bytes of
@@ -401,6 +563,28 @@ pub trait Backend: Send + Sync {
     /// the call.
     fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         a.same_content(b)
+    }
+
+    /// Opens a read in one call: the object's [`Meta`] and the bytes of `span` of it (all of it
+    /// without one) as a body that is read chunk by chunk, so that a reader that needs both (the
+    /// S3 front answers with the headers of the object before the first byte) makes one request
+    /// and not a HEAD and a GET, and holds one chunk and not the object.
+    ///
+    /// The [`Opened::meta`] and the body are those of one object: the in-memory backend reads
+    /// both from one object, the directory backend from the one open file and the S3 backend from
+    /// the one answer of its GET (whole, or ranged by the span). A span that starts at or past
+    /// the end of the object gives [`Window::Unsatisfiable`] and an empty body, with the meta of
+    /// the object.
+    ///
+    /// The provided implementation is a HEAD, then [`Backend::get_stream`] of the range the size
+    /// resolves the span to: two calls, which may find two objects if the key is replaced between
+    /// them. It serves the fakes of tests and the wrappers that pass a read on to the call of the
+    /// backend they wrap.
+    ///
+    /// # Errors
+    /// [`Error::NotFound`] if no object has the key. Errors of the body come as its last chunk.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        open_by_head(self, key, span).await
     }
 
     /// The object's size, content tag and time of last write.
