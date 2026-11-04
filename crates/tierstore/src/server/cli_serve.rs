@@ -15,8 +15,9 @@ use crate::{Backend, Proxy, Reconciler, TokioSleeper};
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
-use super::listen::{bind_all, local_addrs};
-use super::oci::{OciFront, OciListener, OciMode};
+use super::handoff::{Front, Handoff, HandoffError, Inherited, Offer, Socket, Want, take};
+use super::listen::{bind_all, duplicates, local_addrs};
+use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
@@ -101,18 +102,64 @@ pub async fn run_serving(
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
+    run_handing(cli, None, stop, ready)
+        .await
+        .map_err(HandingError::into_boxed)
+}
+
+/// [`run_serving`] as an instance of a live update: with a [`Handoff`], it first asks the
+/// instance that answers on the control socket for its listening sockets (and takes them if their
+/// addresses are the ones the settings name), binding its own only where none answers, and then
+/// answers the control socket itself, so that the next update can take from it. When a successor
+/// takes its sockets it stops, as if `stop` had resolved: it drains, with the requests in flight
+/// finished, and returns.
+///
+/// # Errors
+/// As [`run_serving`], and a hand-off that is refused, that offers other addresses than the
+/// settings name, or that is not ended in time ([`HandingError::Handoff`]).
+pub async fn run_handing(
+    cli: &Cli,
+    handoff: Option<&Handoff>,
+    stop: impl Future<Output = ()> + Send + 'static,
+    ready: impl FnOnce(Addresses),
+) -> Result<Drained, HandingError> {
     let mut built = build(cli)?;
-    let gate = open_gate(cli)?;
+    let gate = open_gate(cli).map_err(Error::from)?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
-    let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
+    let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
     let server = Server::new(proxy, built.server);
-    let listeners = bind_s3(&cli.listen)?;
-    let oci = bind_oci(built.oci, oci_backend).await?;
+    let oci_addrs = built
+        .oci
+        .as_ref()
+        .map_or_else(Vec::new, |setup| setup.listen.clone());
+    let taken = match handoff {
+        Some(handoff) => {
+            take(
+                handoff,
+                &Want {
+                    s3: &cli.listen,
+                    oci: &oci_addrs,
+                },
+            )
+            .await?
+        }
+        None => None,
+    };
+    let (listeners, inherited_oci) = match taken {
+        Some(Inherited { s3, oci }) => (s3, Some(oci)),
+        None => (bind_s3(&cli.listen)?, None),
+    };
+    let oci = bind_oci_from(built.oci, oci_backend, inherited_oci).await?;
+    let offer = match handoff {
+        Some(handoff) => Some(offer_of(handoff, &listeners, oci.as_ref())?),
+        None => None,
+    };
+    let stop = stopped_by(stop, offer);
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
@@ -146,6 +193,42 @@ pub async fn run_serving(
     super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
     super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
+}
+
+/// Why [`run_handing`] did not serve.
+#[derive(Debug, thiserror::Error)]
+pub enum HandingError {
+    /// The settings, a key file, a tier, the lock file, the proxy or an S3 address could not be
+    /// used (the start-up error [`run`] reports).
+    #[error("{0}")]
+    Start(Error),
+    /// The OCI front could not be set up.
+    #[error(transparent)]
+    Oci(#[from] OciError),
+    /// The hand-off was refused, mismatched or timed out.
+    #[error(transparent)]
+    Handoff(#[from] HandoffError),
+    /// The address of a listening socket cannot be read, or a socket cannot be copied for the
+    /// control socket.
+    #[error("listening sockets: {0}")]
+    Sockets(#[from] std::io::Error),
+}
+
+impl HandingError {
+    /// The boxed start-up error of [`run`]: a [`Start`](Self::Start) gives back the error it holds,
+    /// so that the caller still finds its type (the exit code of the binary follows it).
+    pub(super) fn into_boxed(self) -> Error {
+        match self {
+            Self::Start(error) => error,
+            other => Box::new(other),
+        }
+    }
+}
+
+impl From<Error> for HandingError {
+    fn from(error: Error) -> Self {
+        Self::Start(error)
+    }
 }
 
 /// Takes the lock file of the hot tier, if the flags name one: one try now, so that a lock file
@@ -193,6 +276,19 @@ pub(super) async fn bind_oci(
     setup: Option<OciSetup>,
     backend: Arc<dyn Backend>,
 ) -> Result<Option<OciListener>, Error> {
+    Ok(bind_oci_from(setup, backend, None).await?)
+}
+
+/// [`bind_oci`], over the sockets of a running instance (`inherited`) in place of new ones: none
+/// is bound.
+///
+/// # Errors
+/// An address that cannot be bound ([`OciError::Bind`]).
+async fn bind_oci_from(
+    setup: Option<OciSetup>,
+    backend: Arc<dyn Backend>,
+    inherited: Option<Vec<TcpListener>>,
+) -> Result<Option<OciListener>, OciError> {
     let Some(setup) = setup else {
         return Ok(None);
     };
@@ -201,6 +297,45 @@ pub(super) async fn bind_oci(
         .with_stage_read(setup.stage_read)
         .with_upstream(setup.upstream);
     let front = Arc::new(front);
-    let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
-    Ok(Some(bound?))
+    let listener = match inherited {
+        Some(sockets) => OciListener::over(sockets, setup.acceptor, front, setup.limits),
+        None => OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await?,
+    };
+    Ok(Some(listener))
+}
+
+/// The control socket of `handoff`, offering a copy of each socket of the S3 front and of the OCI
+/// front.
+///
+/// # Errors
+/// A socket cannot be copied ([`HandingError::Sockets`]), or the control socket cannot be made
+/// ([`HandingError::Handoff`]).
+fn offer_of(
+    handoff: &Handoff,
+    s3: &[TcpListener],
+    oci: Option<&OciListener>,
+) -> Result<Offer, HandingError> {
+    let mut sockets: Vec<Socket> = Vec::new();
+    for copy in duplicates(s3)? {
+        sockets.push(Socket::new(Front::S3, copy));
+    }
+    for copy in oci
+        .map(OciListener::duplicates)
+        .transpose()?
+        .unwrap_or_default()
+    {
+        sockets.push(Socket::new(Front::Oci, copy));
+    }
+    Ok(Offer::bind(&handoff.socket, sockets)?)
+}
+
+/// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first.
+async fn stopped_by(stop: impl Future<Output = ()> + Send + 'static, offer: Option<Offer>) {
+    match offer {
+        Some(offer) => tokio::select! {
+            () = stop => {}
+            () = offer.serve() => {}
+        },
+        None => stop.await,
+    }
 }

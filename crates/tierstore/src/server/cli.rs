@@ -98,7 +98,7 @@ use super::ServerConfig;
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
 use super::cache_cli::serve_cache_until_signalled;
 use super::cli_heartbeat::HeartbeatFlags;
-pub use super::cli_serve::{Addresses, run, run_serving};
+pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_interface::UpstreamTable;

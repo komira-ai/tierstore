@@ -18,6 +18,7 @@ mod combined_node;
 mod config_file;
 mod drain;
 mod files;
+mod handoff;
 mod idle;
 mod listeners;
 mod raw;
