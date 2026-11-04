@@ -84,3 +84,32 @@ fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branc
     ))));
     assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
 }
+
+/// Asserts a file with an `[oci.upstream]` table, a table this branch adds, starts on this branch
+/// (the key files it names are read, and the pull-through is made, as `--check-config` does) and is
+/// refused by the release before, which does not know the table: a new optional table that only a
+/// file written for this branch carries. The same file without the table starts on both, as the
+/// test before this one shows for a file with none of the new keys.
+#[test]
+fn a_file_with_an_oci_upstream_starts_on_this_branch_and_not_on_the_release_before() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-upstream-config");
+    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let base = std::fs::read_to_string(file(&dir, &access, "")).unwrap();
+    let front = "\n[oci]\nlisten = \"127.0.0.1:0\"\n";
+    let upstream = "\n[oci.upstream]\nurl = \"http://127.0.0.1:5000\"\n";
+    let write = |name: &str, text: String| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        path.display().to_string()
+    };
+    let without = write("without.toml", format!("{base}{front}"));
+    let with = write("with.toml", format!("{base}{front}{upstream}"));
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(
+        &without
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&without))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&with))));
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &with
+    ))));
+}
