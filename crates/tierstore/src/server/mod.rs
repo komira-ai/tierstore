@@ -37,14 +37,9 @@
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
-<<<<<<< HEAD
 //! `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
-//! before its own processing; one refused as unsupported (see above) is answered so first.
-=======
-//! `_journal/` or `_tiering/` is refused with `AccessDenied` by each supported call before the
-//! operation's own processing, including the parsing of the XML body of an upload completion; a
-//! request refused as unsupported (see above) is answered so first.
->>>>>>> origin/main
+//! before the operation's own processing, including the parsing of the XML body of an upload
+//! completion; a request refused as unsupported (see above) is answered so first.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
 //! when the client goes away before the answer, so that no object is left without the journal

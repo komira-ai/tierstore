@@ -41,11 +41,7 @@ pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
 /// Every prefix that the proxy keeps for itself: no client names a key under one.
-<<<<<<< HEAD
 pub(crate) const RESERVED_PREFIXES: [&str; 3] = [JOURNAL_PREFIX, TIERING_PREFIX, ENTRIES_PREFIX];
-=======
-pub(crate) const RESERVED_PREFIXES: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
->>>>>>> origin/main
 
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
