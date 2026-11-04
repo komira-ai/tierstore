@@ -184,8 +184,9 @@ test('code() drops cfg(test) items and comment lines and keeps the rest', () => 
 test('every output line of the demo is a string the program prints', () => {
   const mod = binarySource().get('server/mod.rs') as string;
   for (const body of ['"ok"', '"ready"', '"draining"']) assert.ok(mod.includes(body), `${body} is not in server/mod.rs: update content/demo.html`);
-  assert.ok(mod.includes('no usage yet, {secs}s since start'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
-  assert.ok(mod.includes('usage published {secs}s ago'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
+  const probe = binarySource().get('server/usage_probe.rs') as string;
+  assert.ok(probe.includes('no usage yet, {secs}s since start'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
+  assert.ok(probe.includes('usage published {secs}s ago'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
   // (The start line is built by format!("tierstore {VERSION} listen=... in code; staleClaims checks that.)
   const demo = page('demo');
   for (const shown of ['tierstore &lt;version&gt; listen=127.0.0.1:9000', '<span class="o">ok</span>', '<span class="o">ready</span>', '<span class="o">draining</span>']) {

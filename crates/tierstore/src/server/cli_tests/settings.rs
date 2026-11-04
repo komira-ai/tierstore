@@ -54,7 +54,7 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.proxy.hot_budget, 1000);
     assert_eq!(built.proxy.critical, 0.95);
     assert_eq!(built.proxy.linger, Duration::from_millis(20));
-    assert_eq!(built.reconciler.holder, "p1");
+    assert_eq!(built.reconciler.holder, "p1/reconciler");
     assert_eq!(built.reconciler.hot_budget, 1000);
     assert_eq!(built.reconciler.high_water, 0.8);
     assert_eq!(built.reconciler.low_water, 0.7);

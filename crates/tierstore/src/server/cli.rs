@@ -622,6 +622,13 @@ fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
 }
 
 /// Checks the flags that depend on each other, and makes the settings they stand for.
+/// The name the reconciler of a process takes in the lease and in the entries it holds: not the
+/// proxy's own id, so that a delete that finds an entry held by the lease holder never takes a
+/// client put of the same process for a copy.
+pub(super) fn reconciler_name(proxy_id: &str) -> String {
+    format!("{proxy_id}/reconciler")
+}
+
 pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.low_water >= cli.high_water {
         return Err("--low-water must be below --high-water".into());
@@ -660,7 +667,8 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     proxy.delete_rounds = tuning.delete_rounds;
     proxy.listing_heads = tuning.listing_heads;
     proxy.upload_listing_calls = tuning.upload_listing_calls;
-    let mut reconciler = ReconcilerConfig::new(&cli.proxy_id, cli.hot_bytes, clock);
+    let mut reconciler =
+        ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
     reconciler.high_water = share(cli.high_water);
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
