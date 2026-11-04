@@ -207,10 +207,12 @@ impl OciFront {
     }
 
     /// The front, asking each client for a key of `auth` (see the `Access` section of the module
-    /// docs); with none it is anonymous, as [`new`](Self::new) makes it.
+    /// docs); with none it is anonymous, as [`new`](Self::new) makes it. What each key may do is
+    /// worked out from this front's own prefix, so keys made for the server cannot reach objects
+    /// outside what their prefixes cover here.
     #[must_use]
     pub fn with_auth(mut self, auth: Option<OciAuth>) -> Self {
-        self.auth = auth;
+        self.auth = auth.map(|auth| auth.bound(&self.prefix));
         self
     }
 
