@@ -11,8 +11,9 @@
 //!   applies the journals until each one is applied to its end.
 //! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
 //!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
-//!   lets every proxy read `drain` again; it does not wait for a write that a proxy admitted
-//!   earlier and is still running. Writes stay paused.
+//!   lets a proxy whose format reads succeed read `drain` again; a proxy whose reads fail keeps its
+//!   last answer, so `drained` does not show that every proxy has seen the pause. It does not wait
+//!   for a write that a proxy admitted earlier and is still running. Writes stay paused.
 //! - `active`: a phase of a later release. This release does not pause writes for it.
 
 use bytes::Bytes;
