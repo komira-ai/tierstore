@@ -28,7 +28,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="210" y="100" width="410" height="86" rx="5" class="box-o"/>
 <text x="415.0" y="122" class="b" text-anchor="middle">S3 front + OCI front (read-only), over local_cache</text>
 <text x="415.0" y="140" class="t-m" text-anchor="middle">read-through disk cache on local NVMe; two listeners, one cache</text>
-<text x="415.0" y="158" class="t-m" text-anchor="middle">no hot_store, journal, lease or reconciler</text>
+<text x="415.0" y="158" class="t-m" text-anchor="middle">no hot_store, entries, lease or reconciler</text>
 <text x="415.0" y="176" class="t-m" text-anchor="middle">writes refused unless write_through is set</text>
 <rect x="700" y="100" width="240" height="86" rx="5" class="box-b"/>
 <text x="820.0" y="122" class="b" text-anchor="middle">cold_store</text>
@@ -46,7 +46,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="204" y="306" class="b" text-anchor="start">tierstore process</text>
 <rect x="210" y="318" width="410" height="66" rx="5" class="box-o"/>
 <text x="415.0" y="340" class="b" text-anchor="middle">Proxy (behind the S3 and OCI fronts)</text>
-<text x="415.0" y="358" class="t-m" text-anchor="middle">put, get, head, delete; writes the journal to hot</text>
+<text x="415.0" y="358" class="t-m" text-anchor="middle">put, get, head, delete; takes an entry per key in hot</text>
 <rect x="210" y="404" width="410" height="66" rx="5" class="box-o"/>
 <text x="415.0" y="426" class="b" text-anchor="middle">Reconciler (holds the lease)</text>
 <text x="415.0" y="444" class="t-m" text-anchor="middle">copies hot to cold, evicts from hot</text>
@@ -78,7 +78,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="415.0" y="632" class="t-m" text-anchor="middle">read-through disk cache on local NVMe</text>
 <rect x="210" y="678" width="410" height="66" rx="5" class="box-o"/>
 <text x="415.0" y="700" class="b" text-anchor="middle">Proxy</text>
-<text x="415.0" y="718" class="t-m" text-anchor="middle">hot first, cold on a miss; journal</text>
+<text x="415.0" y="718" class="t-m" text-anchor="middle">hot first, cold on a miss; entries</text>
 <rect x="210" y="764" width="410" height="66" rx="5" class="box-o"/>
 <text x="415.0" y="786" class="b" text-anchor="middle">Reconciler (holds the lease)</text>
 <text x="415.0" y="804" class="t-m" text-anchor="middle">copies hot to cold, evicts from hot</text>
@@ -98,5 +98,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="620" y1="772" x2="700" y2="732" stroke="#FFFFFF" stroke-width="6"/>
 <line x1="620" y1="772" x2="700" y2="732" class="ln-d" marker-end="url(#configurations-ak)"/>
 <text x="20" y="872" class="t-m" text-anchor="start">Use when: one node should both serve reads from local NVMe and own the data.</text>
-<text x="20" y="890" class="t-m" text-anchor="start">Cache in front of the proxy is the proposal (design open question 13). Until C exists, chain: a node of shape A whose cold_store is a node of shape B.</text>
+<text x="20" y="890" class="t-m" text-anchor="start">Cache in front of the proxy is the proposal (design open question 12). Until C exists, chain: a node of shape A whose cold_store is a node of shape B.</text>
 </svg>

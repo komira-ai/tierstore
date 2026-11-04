@@ -49,7 +49,7 @@ install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore
 
 With `tierstore.service`, nothing updates it afterwards: whoever runs the setup places the next
 binary the same way and restarts the unit. A host that runs the two slot units instead is
-updated by the host updater (hostkeeper's, in development) through `tierstore update-hook`
+updated by the host updater through `tierstore update-hook`
 ([Moving to the update hook](#moving-to-the-update-hook)).
 
 ## Placing the unit
@@ -178,15 +178,15 @@ moves only once the new slot answers.
    loads, so `restore` later finds it in place and leaves it as it is:
 
    ```nft
-   add table inet kbf_guard_tierstore
-   flush table inet kbf_guard_tierstore
-   add chain inet kbf_guard_tierstore in { type filter hook input priority filter; policy accept; }
-   add rule inet kbf_guard_tierstore in iifname "lo" tcp dport { 9301, 9302 } accept
-   add rule inet kbf_guard_tierstore in tcp dport { 9301, 9302 } ct status dnat ct original proto-dst 9300 accept
-   add rule inet kbf_guard_tierstore in tcp dport { 9301, 9302 } drop
+   add table inet tierstore_guard
+   flush table inet tierstore_guard
+   add chain inet tierstore_guard in { type filter hook input priority filter; policy accept; }
+   add rule inet tierstore_guard in iifname "lo" tcp dport { 9301, 9302 } accept
+   add rule inet tierstore_guard in tcp dport { 9301, 9302 } ct status dnat ct original proto-dst 9300 accept
+   add rule inet tierstore_guard in tcp dport { 9301, 9302 } drop
    ```
 
-   Check that `nft list table inet kbf_guard_tierstore` shows it.
+   Check that `nft list table inet tierstore_guard` shows it.
 5. **Slot 9301, started by hand and ready.** Run `systemctl start tierstore@9301` and wait until
    a `GET` of `/readyz` on `127.0.0.1:9301` answers 200 with a body that starts with `ready`.
    Nothing has moved yet: port 9300 is still the old unit's. If the slot never answers, run
@@ -202,10 +202,10 @@ moves only once the new slot answers.
 7. **Check through the public port.** A request to port 9300 must be answered by slot 9301: the
    `slot` label of `tierstore_build_info` on `/metricz` says 9301. If it is not, or `restore`
    failed, hand port 9300 back to the old unit, which never stopped, by deleting the redirect:
-   `nft delete table inet kbf_forward_tierstore`. The guard table can stay: it drops only
+   `nft delete table inet tierstore_forward`. The guard table can stay: it drops only
    connections to 9301 and 9302 that neither come over loopback nor were redirected from 9300.
    Then stop slot 9301, mend it, and go back to step 5. A host that gives up the move deletes
-   the guard too, `nft delete table inet kbf_guard_tierstore`, once no slot runs.
+   the guard too, `nft delete table inet tierstore_guard`, once no slot runs.
 8. **The old unit, last.** Stop `tierstore.service`, which drains, and disable it if it was
    enabled (`systemctl disable tierstore`, and remove its drop-ins and the `[Install]` drop-in
    that enabled it). From now on the slot units are the only ones, and the updater updates them.
@@ -346,31 +346,30 @@ of the GC key's (see above): the signature and key id, the method, the decoding 
 query, the checksum headers, and last the key, the listing prefix and the conditions of the put; so
 a call that is both refused and malformed may get the malformed-request error.
 
-Two uses, for the pieces of kbf that keep their objects in a tierstore bucket:
+Two uses, for clients that keep their objects in a tierstore bucket:
 
-- **The frontend's pack store** (`--pack-store-endpoint`, with `--pack-store-credentials-file` set
-  to a file in the JSON form of the key above). A frontend reads packs that daemons and tasks
-  wrote under `cas/` and writes its own packs under `cas/f/<writer>/`, where `<writer>` is its
-  `--pack-writer` (`frontend` if left out), one key `cas/f/<writer>/<boot>/<sequence>` for each
-  pack. It writes with a plain `PUT` with `If-None-Match: *`, one request for a pack, and reads
-  with ranged `GET`s. So the key is `read_prefixes: ["cas/"]`, `write_prefixes:
-  ["cas/f/<writer>/"]`, `delete_prefixes: []`. With no delete prefix, two best-effort deletes the
-  frontend makes are refused with a logged warning and change nothing: the removal of its
-  create-only self-test object (`cas/f/<writer>/<boot>/selftest`, one small object left for each
-  start of the frontend) and of the object of a pack whose write failed. To have both removed,
-  give `delete_prefixes: ["cas/f/<writer>/"]`: the key then deletes only what the frontend itself
-  wrote.
-- **Build history** (`kbf-server --history-objects
-  's3://<bucket>/kbf-history?endpoint=...&conditional-put=true'`, the key
+- **A pack store** (a client set up with an endpoint and a credentials file in the JSON form of
+  the key above). The client reads packs that other processes wrote under `cas/` and writes its
+  own packs under `cas/f/<writer>/`, where `<writer>` names it, one key
+  `cas/f/<writer>/<boot>/<sequence>` for each pack. It writes with a plain `PUT` with
+  `If-None-Match: *`, one request for a pack, and reads with ranged `GET`s. So the key is
+  `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`, `delete_prefixes: []`. With no
+  delete prefix, two best-effort deletes the client makes are refused with a logged warning and
+  change nothing: the removal of its create-only self-test object
+  (`cas/f/<writer>/<boot>/selftest`, one small object left for each start of the client) and of
+  the object of a pack whose write failed. To have both removed, give
+  `delete_prefixes: ["cas/f/<writer>/"]`: the key then deletes only what the client itself wrote.
+- **An append-only history** (a writer set up with `--history-objects
+  's3://<bucket>/history?endpoint=...&conditional-put=true'`, the key
   pair in `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`). The history objects are under
-  `kbf-history/history/`. The writer makes only create-only single `PUT`s with `If-None-Match: *`
+  `history/`. The writer makes only create-only single `PUT`s with `If-None-Match: *`
   (without `conditional-put=true` it is a plain `PUT`, and tierstore answers a retry of a chunk
   whose first reply was lost with `412`, which the writer does not take for "already there", so it
   retries the chunk for good: keep `conditional-put=true`) and the reader makes only ranged
   `GET`s; neither lists, deletes, overwrites or starts a multipart upload (the code makes no list or
   delete call at all, so the expiry of old objects is for a lifecycle rule of the bucket, not the
-  server, and a sweeper that deletes would need `delete_prefixes: ["kbf-history/"]`). So the key is
-  `read_prefixes: ["kbf-history/"]`, `write_prefixes: ["kbf-history/"]`, `delete_prefixes: []`.
+  server, and a sweeper that deletes would need `delete_prefixes: ["history/"]`). So the key is
+  `read_prefixes: ["history/"]`, `write_prefixes: ["history/"]`, `delete_prefixes: []`.
 
 ## Read grants
 

@@ -179,7 +179,7 @@ budget = "8MiB"
 
 [cold_store]
 kind             = "s3"
-bucket           = "kbf-fake"
+bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
 
@@ -244,7 +244,7 @@ cache  = true
 
     /// The GETs the upstream has had of the blob `hex`.
     fn blob_gets(&self, hex: &str) -> usize {
-        let wanted = format!("GET /kbf-fake/oci/blobs/sha256/{hex}");
+        let wanted = format!("GET /tierstore-fake/oci/blobs/sha256/{hex}");
         let requests = self.fake.requests();
         requests.iter().filter(|r| r.starts_with(&wanted)).count()
     }

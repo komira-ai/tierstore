@@ -137,9 +137,6 @@ pub struct Scrubber {
     min_round: u64,
     /// Set to end the walk: looked at before each chunk of an object and each object.
     pub(super) stop: Arc<AtomicBool>,
-    /// Runs after each chunk of an object is hashed.
-    #[cfg(test)]
-    pub(super) on_chunk: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Scrubber {
@@ -154,8 +151,6 @@ impl Scrubber {
             round_at: None,
             min_round: 0,
             stop: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            on_chunk: None,
         }
     }
 
@@ -205,8 +200,8 @@ fn identity(meta: &std::fs::Metadata) -> (u64, u64) {
 
 impl Scrubber {
     /// The hex of the SHA-256 of what `file` holds, in chunks, and the bytes read; none if the walk
-    /// was told to stop first.
-    fn hash(&self, file: &mut File) -> io::Result<Option<(String, u64)>> {
+    /// was told to stop first. `chunk` runs after each chunk is hashed.
+    fn hash(&self, file: &mut File, chunk: &dyn Fn()) -> io::Result<Option<(String, u64)>> {
         let mut hasher = Sha256::new();
         let mut buffer = Vec::with_capacity(CHUNK);
         let mut total = 0;
@@ -222,10 +217,7 @@ impl Scrubber {
             }
             hasher.update(&buffer);
             total += read as u64;
-            #[cfg(test)]
-            if let Some(hook) = &self.on_chunk {
-                hook();
-            }
+            chunk();
         }
         Ok(Some((hex::encode(hasher.finalize()), total)))
     }
@@ -284,16 +276,29 @@ impl Inner {
     }
 
     /// Hashes the object `hex` again and drops it if it does not match.
-    fn scrub_object(&self, hex: &str, state: &Scrubber) -> Verdict {
-        self.scrub_object_between(hex, state, || {})
+    fn scrub_object(&self, hex: &str, state: &Scrubber, chunk: &dyn Fn()) -> Verdict {
+        self.scrub_object_judging(hex, state, chunk, || {})
     }
 
-    /// [`scrub_object`](Self::scrub_object), running `between` after the bytes are judged and
-    /// before the object is dropped.
+    /// [`scrub_object`](Self::scrub_object) with nothing run after each chunk, running `between`
+    /// after the bytes are judged and before the object is dropped.
+    #[cfg(test)]
     pub(super) fn scrub_object_between(
         &self,
         hex: &str,
         state: &Scrubber,
+        between: impl FnOnce(),
+    ) -> Verdict {
+        self.scrub_object_judging(hex, state, &|| {}, between)
+    }
+
+    /// Hashes `hex` again, running `chunk` after each chunk and `between` after the bytes are
+    /// judged and before the object is dropped.
+    fn scrub_object_judging(
+        &self,
+        hex: &str,
+        state: &Scrubber,
+        chunk: &dyn Fn(),
         between: impl FnOnce(),
     ) -> Verdict {
         if self.filling(hex) {
@@ -316,7 +321,7 @@ impl Inner {
         let (matches, read, key) = match self.recorded(hex) {
             Recorded::Unreadable => return self.scrub_error(),
             Recorded::Bad => (false, 0, hex.to_owned()),
-            Recorded::Digest(key, digest) => match state.hash(&mut file) {
+            Recorded::Digest(key, digest) => match state.hash(&mut file, chunk) {
                 Ok(Some((found, read))) => (found == digest, read, key),
                 Ok(None) => return Verdict::Stopped,
                 Err(_) => return self.scrub_error(),
@@ -333,8 +338,9 @@ impl Inner {
         Verdict::Dropped(read)
     }
 
-    /// One tick: scrubs objects while there is credit, and counts them.
-    pub(super) fn scrub_tick(&self, state: &mut Scrubber) -> ScrubPass {
+    /// One tick: scrubs objects while there is credit, and counts them. `chunk` runs after each
+    /// chunk of an object is hashed.
+    pub(super) fn scrub_tick(&self, state: &mut Scrubber, chunk: &dyn Fn()) -> ScrubPass {
         // A cache that is read-only (it does not hold the lock of its directory) leaves the files
         // to the holder: no pass reads or drops anything. A tick still counts, and the pass
         // starts when the cache takes the lock.
@@ -362,7 +368,7 @@ impl Inner {
             // An object whose check panics is counted and skipped for this round, and the walk
             // goes on past it.
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.scrub_object(&hex, state)
+                self.scrub_object(&hex, state, chunk)
             }));
             let (bytes, dropped) = match checked.unwrap_or_else(|_| self.scrub_error()) {
                 Verdict::Intact(bytes) => (bytes, false),
@@ -388,7 +394,7 @@ impl LocalCache {
     /// One tick of the scrub now, on the calling thread (which reads files): see the module docs.
     #[must_use]
     pub fn scrub_once(&self, state: &mut Scrubber) -> ScrubPass {
-        self.inner.scrub_tick(state)
+        self.inner.scrub_tick(state, &|| {})
     }
 
     /// Scrubs `per_tick` bytes of objects at each tick of `ticker`, until `halt` is notified or
@@ -407,15 +413,17 @@ impl LocalCache {
             return;
         };
         let state = Scrubber::new(per_tick).with_min_round(min_round);
-        self.scrub_with(state, ticker, halt).await;
+        self.scrub_with(state, ticker, halt, Arc::new(|| {})).await;
     }
 
-    /// [`scrub`](Self::scrub) from a walk that is already made.
+    /// [`scrub`](Self::scrub) from a walk that is already made, running `chunk` after each chunk
+    /// of an object is hashed.
     pub(super) async fn scrub_with(
         &self,
         mut state: Scrubber,
         mut ticker: impl Ticker,
         halt: Arc<Notify>,
+        chunk: Arc<dyn Fn() + Send + Sync>,
     ) {
         loop {
             let more = tokio::select! {
@@ -429,8 +437,9 @@ impl LocalCache {
             let inner = Arc::clone(&self.inner);
             let stop = Arc::clone(&state.stop);
             let (per_tick, min_round) = (state.per_tick, state.min_round);
+            let chunk = Arc::clone(&chunk);
             let mut running = tokio::task::spawn_blocking(move || {
-                let pass = inner.scrub_tick(&mut state);
+                let pass = inner.scrub_tick(&mut state, &*chunk);
                 (state, pass)
             });
             let finished = tokio::select! {
