@@ -56,7 +56,7 @@ impl Node {
 }
 
 /// The arguments of `tierstore --config <file> --check-config`.
-fn checking(file: &OsString) -> Vec<OsString> {
+fn check_args(file: &OsString) -> Vec<OsString> {
     vec![
         OsString::from("tierstore"),
         OsString::from("--config"),
@@ -73,8 +73,8 @@ fn status(code: ExitCode) -> String {
 /// The status each release exits with when it checks `file`: this branch's, then the release
 /// before's.
 fn both(file: &OsString) -> (String, String) {
-    let now = tierstore::server::cli::main(checking(file));
-    let before = tierstore_prev::server::cli::main(checking(file));
+    let now = tierstore::server::cli::main(check_args(file));
+    let before = tierstore_prev::server::cli::main(check_args(file));
     (status(now), status(before))
 }
 
@@ -165,8 +165,18 @@ fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branc
 /// paths of the two files. The key is private to its owner, as the front requires.
 fn certificate(dir: &TestDir) -> (String, String) {
     let made = rcgen::generate_simple_self_signed(vec!["tierstore.test".to_owned()]).unwrap();
-    let cert = private(dir, "front.pem", &made.cert.pem());
-    let key = private(dir, "front.key", &made.signing_key.serialize_pem());
+    let mut paths = Vec::new();
+    for (name, text) in [
+        ("front.pem", made.cert.pem()),
+        ("front.key", made.signing_key.serialize_pem()),
+    ] {
+        let path = dir.path().join(name);
+        std::fs::write(&path, text).unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        paths.push(path.display().to_string());
+    }
+    let key = paths.pop().unwrap();
+    let cert = paths.pop().unwrap();
     (cert, key)
 }
 
@@ -177,24 +187,16 @@ fn certificate(dir: &TestDir) -> (String, String) {
 /// writes for a node that does not use TLS.
 #[test]
 fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-tls-config");
-    let access = private(&dir, "access.key", "AKID\nsecret\n");
-    let (cert, key) = certificate(&dir);
+    let node = Node::new("compat-config-tls");
+    let (cert, key) = certificate(&node.dir);
+    let ok = status(ExitCode::SUCCESS);
+    assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok.clone()));
 
-    let without = file(&dir, &access, "");
-    assert!(succeeded(tierstore_prev::server::cli::main(checking(
-        &without
-    ))));
-    assert!(succeeded(tierstore::server::cli::main(checking(&without))));
-
-    let extra = format!("tls_cert_file = \"{cert}\"\ntls_key_file = \"{key}\"\n");
-    let with = file(&dir, &access, &extra);
-    assert!(
-        succeeded(tierstore::server::cli::main(checking(&with))),
-        "this branch starts a file with the TLS keys"
-    );
-    assert!(
-        !succeeded(tierstore_prev::server::cli::main(checking(&with))),
+    let extra = format!("tls_cert_file = \"{cert}\"\ntls_key_file = \"{key}\"");
+    let (now, before) = both(&node.file(&extra, "", ""));
+    assert_eq!(now, ok, "this branch starts a file with the TLS keys");
+    assert_ne!(
+        before, ok,
         "the release before refuses a key it does not know"
     );
 }
