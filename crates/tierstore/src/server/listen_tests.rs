@@ -15,7 +15,8 @@ use super::{
     local_addrs,
 };
 use crate::server::Drained;
-use crate::server::testing::Rig;
+use crate::server::cli_serve::bind_s3;
+use crate::server::testing::{Rig, established_unaccepted};
 
 fn addr(text: &str) -> SocketAddr {
     text.parse().expect("an address")
@@ -288,4 +289,24 @@ async fn a_socket_bound_with_a_backlog_takes_connections() {
     let set = [addr("127.0.0.1:0"), addr("127.0.0.1:0")];
     assert_eq!(bind_all_with(&set, 11).expect("bound").len(), 2);
     assert_eq!(ListenTuning::default().backlog, 1024);
+}
+
+/// Asserts that the backlog given to the S3 bind of the server (`bind_s3`) is the one the sockets
+/// listen with: with a backlog of 1, of six connections no more than the queue and the one the
+/// kernel lets over it are established while nothing accepts, for each address; with the default
+/// backlog more than that are.
+#[tokio::test]
+async fn the_s3_bind_listens_with_the_backlog_given() {
+    let wanted = [addr("127.0.0.1:0"), addr("127.0.0.1:0")];
+    let small = bind_s3(&wanted, 1).expect("bound");
+    for listener in &small {
+        let at = listener.local_addr().expect("an address");
+        let held = established_unaccepted(at, 6).await;
+        assert!((1..=3).contains(&held), "{held} established on {at}");
+    }
+    let large = bind_s3(&wanted, ListenTuning::default().backlog).expect("bound");
+    for listener in &large {
+        let at = listener.local_addr().expect("an address");
+        assert!(established_unaccepted(at, 6).await > 3, "{at}");
+    }
 }

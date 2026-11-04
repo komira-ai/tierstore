@@ -581,6 +581,18 @@ fn s3_tier(
     s3: &S3Flags<'_>,
     limits: (Duration, &S3Client),
 ) -> Result<Arc<dyn Backend>, String> {
+    let backend = s3_backend(flag, spec, bucket, s3, limits)?;
+    Ok(Arc::new(backend))
+}
+
+/// The backend of [`s3_tier`], before it is shared.
+pub(super) fn s3_backend(
+    flag: &str,
+    spec: &str,
+    bucket: &str,
+    s3: &S3Flags<'_>,
+    limits: (Duration, &S3Client),
+) -> Result<S3Backend, String> {
     let (timeout, client) = limits;
     let fail = |why: String| format!("{flag} {spec:?}: {why}");
     let Some(endpoint) = s3.endpoint else {
@@ -608,7 +620,7 @@ fn s3_tier(
     let backend = backend
         .with_conditional_delete(s3.conditional_delete.unwrap_or(false))
         .with_chunks_waiting(client.chunks_waiting);
-    Ok(Arc::new(backend))
+    Ok(backend)
 }
 
 /// The tier a flag names, of the kinds that need no flags besides the tier's own.
@@ -621,10 +633,8 @@ fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
 fn tier_tuned(flag: &str, spec: &str, client: &S3Client) -> Result<Arc<dyn Backend>, String> {
     match (spec, spec.strip_prefix("dir:")) {
         ("memory", _) => Ok(Arc::new(MemoryBackend::new())),
-        (_, Some(path)) => match DirBackend::open(path) {
-            Ok(dir) => Ok(Arc::new(
-                dir.with_chunks(client.dir_copy_chunk, client.dir_read_chunk),
-            )),
+        (_, Some(path)) => match dir_tier(path, client) {
+            Ok(dir) => Ok(Arc::new(dir)),
             Err(why) => Err(format!("{flag} {spec:?}: {why}")),
         },
         _ => {
@@ -632,6 +642,15 @@ fn tier_tuned(flag: &str, spec: &str, client: &S3Client) -> Result<Arc<dyn Backe
             Err(format!("{flag} {spec:?}: {why}"))
         }
     }
+}
+
+/// The directory tier at `path`, with the chunk sizes `client` gives.
+///
+/// # Errors
+/// The directory cannot be opened.
+pub(super) fn dir_tier(path: &str, client: &S3Client) -> Result<DirBackend, Error> {
+    let dir = DirBackend::open(path)?;
+    Ok(dir.with_chunks(client.dir_copy_chunk, client.dir_read_chunk))
 }
 
 /// Checks the flags that depend on each other, and makes the settings they stand for.

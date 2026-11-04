@@ -152,7 +152,8 @@ fn a_value_outside_its_range_is_refused_naming_the_key() {
 }
 
 /// Asserts the pair `door_look` and `door_grace`: a look longer than the grace is refused, naming
-/// `server.door_look`, and equal ones load.
+/// `server.door_look`, equal ones load, and a look that is left out is the default, or the grace
+/// if that is shorter, so that a file that shortens the grace alone loads.
 #[test]
 fn a_door_look_longer_than_the_grace_is_refused() {
     let why = refusal("door_grace = \"50ms\"\ndoor_look = \"51ms\"");
@@ -160,8 +161,12 @@ fn a_door_look_longer_than_the_grace_is_refused() {
     assert!(why.contains("server.door_grace"), "{why}");
     let equal = cli("door_grace = \"50ms\"\ndoor_look = \"50ms\"");
     assert_eq!(equal.io_tuning.listen.door_look, Duration::from_millis(50));
-    let short = refusal("door_grace = \"5ms\"");
-    assert!(short.contains("server.door_look"), "{short}");
+    let short = cli("door_grace = \"5ms\"");
+    assert_eq!(short.io_tuning.listen.door_look, Duration::from_millis(5));
+    let least = cli("door_grace = \"1ms\"");
+    assert_eq!(least.io_tuning.listen.door_look, Duration::from_millis(1));
+    let long = cli("door_grace = \"3s\"");
+    assert_eq!(long.io_tuning.listen.door_look, Duration::from_millis(10));
 }
 
 /// Asserts the pair `s3_multipart_threshold` and `s3_part_bytes`: a threshold over the part size

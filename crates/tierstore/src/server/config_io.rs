@@ -124,7 +124,9 @@ pub(super) fn io_tuning(
     let door_look = span(
         ("server", "door_look"),
         server.door_look,
-        old.listen.door_look,
+        // Left out, the look is the default or the grace if that is shorter, so that a file that
+        // shortens the grace alone loads.
+        old.listen.door_look.min(door_grace),
         (MS, Duration::from_secs(10)),
     )?;
     if door_look > door_grace {

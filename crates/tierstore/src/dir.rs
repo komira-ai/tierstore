@@ -482,6 +482,12 @@ impl DirBackend {
         self
     }
 
+    /// The size of the pieces in which the parts of an upload are joined.
+    #[cfg(test)]
+    pub(crate) fn copy_chunk(&self) -> usize {
+        self.copy_chunk
+    }
+
     /// Syncs `dir`, whose entries a call has just changed, so that the call does not return
     /// before the change survives a power loss.
     async fn sync(&self, dir: &Path) -> Result<(), Error> {

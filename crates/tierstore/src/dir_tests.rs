@@ -866,9 +866,11 @@ async fn a_streamed_read_gives_chunks_of_the_size_given_to_with_chunks() {
     assert_eq!(bytes, b"abc");
 }
 
-/// Asserts that parts longer than the copy chunk given to `with_chunks` (7 bytes, and 1 for a
-/// size of zero) are joined whole: the object is the parts in order, byte for byte, and its tag is
-/// that of a put of the same bytes.
+/// Asserts that `with_chunks` sets the size of the pieces in which parts are joined (7 bytes as
+/// given, 1 for a size of zero, the default when it is not called), and that parts longer than
+/// that size are joined whole: the object is the parts in order, byte for byte, and its tag is
+/// that of a put of the same bytes. The piece size is read back from the backend; the join cannot
+/// show it, since the bytes and the tag are the same for every size.
 #[tokio::test]
 async fn parts_are_joined_whole_in_the_pieces_given_to_with_chunks() {
     let (first, second) = (patterned(100), patterned(33));
@@ -876,7 +878,9 @@ async fn parts_are_joined_whole_in_the_pieces_given_to_with_chunks() {
     whole.extend_from_slice(&second);
     for copy in [7, 0] {
         let (_dir, backend) = backend();
+        assert_eq!(backend.copy_chunk(), super::COPY_CHUNK);
         let backend = backend.with_chunks(copy, super::READ_CHUNK);
+        assert_eq!(backend.copy_chunk(), copy.max(1), "{copy}");
         let id = backend.create_upload("k").await.unwrap();
         let one = backend
             .upload_part("k", &id, 1, one_piece(&first))

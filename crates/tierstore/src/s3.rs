@@ -208,6 +208,12 @@ impl S3Backend {
         self
     }
 
+    /// How many chunks of a part wait for the request that sends them.
+    #[cfg(test)]
+    pub(crate) fn chunks_waiting(&self) -> usize {
+        self.chunks_waiting
+    }
+
     /// This backend with `delete_if_match` sent as a DELETE with `If-Match` (`true`), or as a read
     /// of the tag before a plain DELETE (`false`, as [`S3Backend::new`] makes it). The store is
     /// not asked which it enforces: the caller says, from what its store documents.
