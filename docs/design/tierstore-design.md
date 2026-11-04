@@ -206,7 +206,7 @@ Why: the coordination state is in the hot tier because it is small, changes ofte
 
 ![The entry of one key: states and transitions](diagrams/entry-state-machine.svg)
 
-**The body** is JSON, unknown fields ignored: `{v, key, op, st, owner, nonce, created_ms}`. `op` is PUT, DEL, CB or EVICT; `st` is HELD, PENDING or SEALED; `owner` is a proxy id or null; `nonce` is a fresh 128-bit value in every body, so a tag never repeats; `created_ms` is wall-clock time for metrics only and is never used for a decision.
+**The body** is JSON, unknown fields ignored: `{v, key, op, st, owner, nonce, created_ms}`. `op` is PUT, DEL, CB or EVICT; `st` is HELD, PENDING or SEALED; `owner` is a proxy id or null; `nonce` is `<actor id>.<counter>`, written afresh by every write, so a body never repeats; it is unique only if an actor id is never reused with a counter that starts again, so an actor takes a fresh id whenever its entry handle is recreated, or shares the counter; `created_ms` is wall-clock time for metrics only and is never used for a decision.
 
 **The discipline.** An entry is created create-only, changed only by compare-and-swap on its tag, and deleted only by its exclusive holder: the owner of a HELD entry, or the leader for SEALED. Whoever holds a key's entry may change that key's data in either tier. Every CAS failure means: re-read the entry and decide again (at most three rounds, then the actor gives up: a client answers 503, the leader skips the entry until its own retry delay runs out). **An ambiguous error is not a failure.** A CAS or create whose error may have landed (an S3 409, a timeout) is read back and the actor compares its own nonce: equal means the call landed. Nothing is destroyed or acknowledged on an unread ambiguous result.
 
@@ -675,7 +675,7 @@ Still open, not covered by those decisions:
 | Margin (m) | 10 s; a destructive call may start only if its deadline is at least m away. |
 | Stray | A hot object with no entry and no cold copy. |
 | CAS | Compare-and-swap: a write conditional on the object's tag (`If-Match`). |
-| Nonce | A fresh 128-bit value in every entry body, so a tag never repeats and an ambiguous write can be read back. |
+| Nonce | `<actor id>.<counter>` in every entry body, so a body never repeats and an ambiguous write can be read back. |
 | Lease | The object `_tiering/lease`, whose holder is the leader. |
 | Usage / copy lag | `_tiering/usage`: logical hot bytes, and the bytes the cold tier does not yet hold. |
 | Level | The proxy's reading of capacity: `Open`, `Critical`, `Full`. |
