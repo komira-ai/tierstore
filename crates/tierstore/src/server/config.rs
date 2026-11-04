@@ -53,11 +53,12 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+use super::config_oci::{OciTable, oci};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_units::{Dur, Size};
-use super::front::FrontSettings;
+use super::front::{FrontSettings, S3Tls};
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
 
@@ -100,6 +101,8 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("bucket", &["server.bucket"]),
     ("region", &["server.region"]),
     ("access-key-file", &["server.access_key_file"]),
+    ("tls-cert", &["server.tls_cert_file"]),
+    ("tls-key", &["server.tls_key_file"]),
     ("read-only-key-file", &["server.read_only_key_files"]),
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
@@ -269,6 +272,10 @@ pub(super) struct ServerTable {
     pub bucket: String,
     pub region: Option<String>,
     pub access_key_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<PathBuf>,
     #[serde(default)]
     pub read_only_key_files: Vec<PathBuf>,
     #[serde(default)]
@@ -358,26 +365,6 @@ pub(super) struct TierTable {
     pub endpoints: Option<Vec<String>>,
 }
 
-/// `[oci]`: the read-only OCI front. The table is the front: `listen` is needed in it, and the
-/// other keys are refused without it, as the `--oci-*` flags are.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OciTable {
-    /// One address, or a list of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<Addrs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_cert_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_key_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_lifetime: Option<Dur>,
-}
-
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
     ConfigError::Invalid {
         key: key.to_owned(),
@@ -423,7 +410,7 @@ pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
 
 /// The addresses of the `listen` key `key`: at least one, and none twice. The message names the
 /// key and not an address.
-fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
+pub(super) fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
     if listen.0.is_empty() {
         return Err(invalid(key, "it needs at least one address"));
     }
@@ -431,69 +418,6 @@ fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
         return Err(invalid(key, "the same address is listed twice"));
     }
     Ok(listen.0)
-}
-
-/// The OCI front's table checked as its flags are: the values of the `--oci-*` flags.
-#[derive(Clone, Debug)]
-pub(super) struct OciFlags {
-    /// The addresses; none when there is no front.
-    pub listen: Vec<SocketAddr>,
-    pub tls_cert: Option<PathBuf>,
-    pub tls_key: Option<PathBuf>,
-    pub prefix: Option<String>,
-    pub max_connections: Option<u32>,
-    pub connection_lifetime: Option<Duration>,
-}
-
-/// The flags `[oci]` stands for: none when the table is left out. A table without `listen` is
-/// refused (naming the key it has that needs it, if it has one), the certificate and the key go
-/// together, and the count is at least one.
-pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
-    let Some(table) = table else {
-        return Ok(OciFlags {
-            listen: Vec::new(),
-            tls_cert: None,
-            tls_key: None,
-            prefix: None,
-            max_connections: None,
-            connection_lifetime: None,
-        });
-    };
-    if table.listen.is_none() {
-        let others = [
-            ("tls_cert_file", table.tls_cert_file.is_some()),
-            ("tls_key_file", table.tls_key_file.is_some()),
-            ("prefix", table.prefix.is_some()),
-            ("max_connections", table.max_connections.is_some()),
-            ("connection_lifetime", table.connection_lifetime.is_some()),
-        ];
-        refuse("oci", "it needs oci.listen", &others)?;
-    }
-    let listen = require("oci", "listen", table.listen)?;
-    let listen = addresses("oci.listen", listen)?;
-    match (&table.tls_cert_file, &table.tls_key_file) {
-        (Some(_), None) => {
-            let why = "it is needed with oci.tls_cert_file: give both, or neither";
-            return Err(invalid("oci.tls_key_file", why));
-        }
-        (None, Some(_)) => {
-            let why = "it is needed with oci.tls_key_file: give both, or neither";
-            return Err(invalid("oci.tls_cert_file", why));
-        }
-        _ => {}
-    }
-    let max_connections = match table.max_connections {
-        Some(count) => Some(within("oci", "max_connections", count, 1, u32::MAX)?),
-        None => None,
-    };
-    Ok(OciFlags {
-        listen,
-        tls_cert: table.tls_cert_file,
-        tls_key: table.tls_key_file,
-        prefix: table.prefix,
-        max_connections,
-        connection_lifetime: table.connection_lifetime.map(|dur| dur.0),
-    })
 }
 
 /// What a file makes: the settings of one of the three shapes.
@@ -664,6 +588,7 @@ pub(super) fn storage(
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
+        tls: front.tls,
         journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
         journal_retention: duration(hot.journal_retention, Duration::from_secs(24 * 3600)),
         copy_parallel,
@@ -734,6 +659,10 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
         access_key_file: server.access_key_file,
+        tls: S3Tls {
+            tls_cert: server.tls_cert_file,
+            tls_key: server.tls_key_file,
+        },
         read_only_key_file: server.read_only_key_files,
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,

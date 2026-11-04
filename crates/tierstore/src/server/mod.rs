@@ -202,6 +202,7 @@ mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
+mod config_oci;
 mod config_policy;
 mod config_print;
 mod config_syntax;
@@ -225,11 +226,13 @@ mod ops;
 pub mod presign;
 mod reply;
 mod request;
+mod s3_tls;
 pub mod scoped;
 mod stop_watcher;
 mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
+mod verbs;
 mod xml;
 
 #[cfg(test)]
@@ -357,6 +360,7 @@ use listen::Listeners;
 pub use reply::AnswerBody;
 use reply::{Answer, S3Error, answer};
 use request::{BoxError, Check, Query, Reader, Target, resolve};
+use s3_tls::TlsListeners;
 
 /// The settings of a [`Server`].
 #[derive(Clone)]
@@ -464,6 +468,9 @@ pub struct ServerConfig {
     /// not `clock`, so that a step of the clock of the machine (the time service setting it)
     /// while the server waits for a piece does not count for or against the client.
     pub rate_clock: Arc<dyn Clock>,
+    /// The TLS of the listeners: `Some` serves every connection of [`Server::serve_all`] over
+    /// HTTPS, and `None` (the default) serves plain HTTP.
+    pub tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl ServerConfig {
@@ -505,6 +512,7 @@ impl ServerConfig {
             slot: None,
             clock,
             rate_clock: Arc::new(MonotonicClock::new()),
+            tls: None,
         }
     }
 }
@@ -683,7 +691,11 @@ impl Server {
     /// the connections open, takes the connections of all of them, and the drain closes every
     /// one of them.
     pub async fn serve_all(self: &Arc<Self>, listeners: Vec<TcpListener>) -> Drained {
-        self.serve_from(Listeners::new(listeners)).await
+        let incoming = Listeners::new(listeners);
+        match self.config.tls.clone() {
+            Some(acceptor) => self.serve_from(TlsListeners::new(incoming, acceptor)).await,
+            None => self.serve_from(incoming).await,
+        }
     }
 
     /// [`Server::serve`] over any source of connections: the tests serve pipes.

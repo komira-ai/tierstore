@@ -29,7 +29,7 @@
 <span class="o">503</span>
 <span class="p">$</span> curl -s http://127.0.0.1:9000/readyz
 <span class="o">draining</span></pre></div>
-<p class="source-note">Both requests are made inside the <code>--drain-lb-wait</code> window (give the flag a few seconds to try this). The status and the body are those of <code>/readyz</code> in <code>server/mod.rs</code>; the exit status 0 is documented in <code>server/cli.rs</code> and <code>packaging/tierstore/README.md</code>, "Stopping it".</p>
+<p class="source-note">Both requests are made inside the <code>--drain-lb-wait</code> window (give the flag a few seconds to try this). The status and the body are those of <code>/readyz</code> in <code>server/mod.rs</code>; the exit status 0 is documented in <code>server/cli.rs</code> and <code>packaging/README.md</code>, "Stopping it".</p>
 
 <h2 id="print-config">4. From flags to a file <span class="tag tag-ok">v0.0.39 and later</span></h2>
 <div class="notice notice-warn"><p><strong>This step needs v0.0.39 or later.</strong> <code>--print-config</code> and <code>--config</code> are not in v0.0.38 or earlier. Steps 1 to 3 use flags only and work with any release.</p></div>

@@ -2,7 +2,7 @@
 
 What tierstore does not do on main, so that you can decide before you depend on it.
 
-- **No TLS on the S3 listener.** It serves plain HTTP, and an S3 tier's endpoint is `http://`. Put it on a network you trust, or terminate TLS in front of it. (The OCI front has TLS, `--oci-tls-cert` and `--oci-tls-key`.)
+- **TLS on the S3 listener is optional, and a tier's endpoint has none.** On main (not in v0.0.41) `--tls-cert` and `--tls-key` make the S3 listener serve HTTPS; without them it serves plain HTTP and, off loopback, the start prints a warning. An S3 tier's endpoint is still `http://`, so a build node cannot use an HTTPS front as its upstream. (The OCI front has its own, `--oci-tls-cert` and `--oci-tls-key`.)
 - **One bucket, path-style, SigV4 in the header.** No virtual-host addressing, no session tokens, no STS. Presigned GET and PUT URLs are the one exception to signing in the header.
 - **Objects are immutable.** A put is create-only; there is no overwrite and no copy. A delete removes both tiers' copies.
 - **Bodies are streamed, with limits.** A put or part is passed on as it arrives and never held whole, but it is bounded by `--max-request-bytes` (256 MiB by default); a larger object needs the flag raised, a multipart upload or a presigned PUT. At most `--max-concurrent-puts` bodies are taken at once. A manifest served by the OCI front is read whole (at most 4 MiB).
