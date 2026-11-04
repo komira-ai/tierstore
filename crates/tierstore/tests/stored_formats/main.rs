@@ -13,6 +13,7 @@
 )]
 
 mod entry_objects;
+mod format_object;
 mod hook_records;
 mod journal_objects;
 mod local_cache_sidecar;

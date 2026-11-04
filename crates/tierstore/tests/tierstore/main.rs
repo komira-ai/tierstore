@@ -18,6 +18,8 @@ mod churn;
 mod cold_stream;
 mod conformance;
 mod faults;
+mod format_drain;
+mod format_pause;
 mod hold;
 mod journal;
 mod killed_put;

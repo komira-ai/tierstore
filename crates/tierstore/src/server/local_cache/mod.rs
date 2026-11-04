@@ -22,7 +22,7 @@
 //! # What is kept
 //!
 //! A key is kept if the longest prefix of the policies that holds it says `cache = true` and it
-//! is not under `_journal/` or `_tiering/`. A get, ranged get or head of a key
+//! is not under `_journal/`, `_tiering/` or `_entries/`. A get, ranged get or head of a key
 //! under those prefixes is refused with [`Error::Reserved`] without a look at the disk or the
 //! upstream, and a listing leaves them out. Every other key that is not kept, and every other
 //! listing, goes to the upstream as it is.
