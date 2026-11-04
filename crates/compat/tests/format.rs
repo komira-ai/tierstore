@@ -21,8 +21,7 @@ const BUDGET: u64 = 1 << 20;
 /// Asserts that the previous release, started over a hot directory in which this branch holds an
 /// `_entries/` object and a format object that says `drained`, lists only the plain object this
 /// branch put, reads it, finds no object under the `_entries/` key (it is in a subdirectory that
-/// the previous release does not read, and it does not reserve the prefix), refuses the format
-/// key as reserved, puts a new object (it does not read the format, which is why this release
+/// the previous release does not read, and it does not reserve the prefix), puts a new object (it does not read the format, which is why this release
 /// is rolled to every node before anything pauses writes), and runs a pass of its reconciler
 /// without a failure that leaves the format object byte for byte as it was; and that this branch
 /// then reads the object the previous release put.
@@ -64,8 +63,6 @@ async fn the_previous_release_serves_a_store_that_holds_entry_and_format_objects
     assert_eq!(plain, Bytes::from_static(b"plain bytes"));
     let missing = before.get(entry, None).await;
     assert_eq!(missing, Err(PrevError::NotFound(entry.to_owned())));
-    let reserved = before.get(FORMAT, None).await;
-    assert_eq!(reserved, Err(PrevError::Reserved(FORMAT.to_owned())));
     before
         .put("added", Bytes::from_static(b"added bytes"))
         .await

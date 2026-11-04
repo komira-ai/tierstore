@@ -169,3 +169,27 @@ async fn only_a_reconciler_with_the_lease_marks_a_drain_and_only_a_drain_is_mark
     assert!(!waiting.pass().await.held);
     assert_eq!(format(&rig).await, r#"{"phase":"drain"}"#);
 }
+
+/// Asserts that a format object that is not there any more when the reconciler reads it again just
+/// before the write (the head says so) is left alone: no failure, no write, and the next pass
+/// writes `drained`; and that a failed read of the tag is a failure of the pass.
+#[tokio::test(start_paused = true)]
+async fn an_object_that_vanishes_before_the_write_is_not_written() {
+    let (rig, _proxy, mut reconciler) = rig_with_a_put().await;
+    set_format(&rig, r#"{"phase":"drain"}"#).await;
+    assert_clean(&reconciler.pass().await);
+    tokio::time::advance(SETTLE).await;
+
+    let gone = Error::NotFound(FORMAT.to_owned());
+    rig.hot.fail_next_on(Op::Head, FORMAT, gone);
+    assert_clean(&reconciler.pass().await);
+    assert_eq!(format(&rig).await, r#"{"phase":"drain"}"#);
+
+    let down = Error::Unavailable("hot".to_owned());
+    rig.hot.fail_next_on(Op::Head, FORMAT, down.clone());
+    assert_eq!(reconciler.pass().await.failed, [down]);
+    assert_eq!(format(&rig).await, r#"{"phase":"drain"}"#);
+
+    assert_clean(&reconciler.pass().await);
+    assert_eq!(format(&rig).await, r#"{"phase":"drained"}"#);
+}

@@ -5,8 +5,7 @@
 use tokio::time::Instant;
 
 use super::{PassReport, Reconciler};
-use crate::Backend;
-use crate::format::{Format, FormatPhase, format_body, read_format_tagged};
+use crate::format::{Format, FormatPhase, format_body, read_format, read_format_tagged};
 use crate::journal::FORMAT_KEY;
 
 impl Reconciler {
@@ -19,27 +18,32 @@ impl Reconciler {
     /// [`ReconcilerConfig::drain_settle`](super::ReconcilerConfig::drain_settle) (so that every
     /// proxy has read it and stopped writing journals), and the pass had no failure: every journal
     /// object listed was read and applied, and each checkpoint stored, since a step that fails
-    /// is in `report.failed`. The write is over the tag of the object that was read, so
-    /// an operator who cancelled in between keeps the cancel.
+    /// is in `report.failed`. The object is read again with its tag just before the write, and the
+    /// write is over that tag, so an operator who cancelled in between keeps the cancel.
     pub(super) async fn settle_drain(&mut self, report: &mut PassReport) {
         if !report.failed.is_empty() {
             return;
         }
-        let (format, tag) = match read_format_tagged(self.hot.as_ref()).await {
-            Ok(Some(found)) => found,
-            Ok(None) => return self.forget_drain(),
+        match read_format(self.hot.as_ref()).await {
+            Ok(Some(format)) if format.phase == FormatPhase::Drain => {}
+            Ok(_) => return self.forget_drain(),
             Err(error) => {
                 report.failed.push(error);
                 return;
             }
-        };
-        if format.phase != FormatPhase::Drain {
-            return self.forget_drain();
         }
         let since = *self.draining.get_or_insert_with(Instant::now);
         if since.elapsed() < self.config.drain_settle {
             return;
         }
+        let (format, tag) = match read_format_tagged(self.hot.as_ref()).await {
+            Ok(Some(found)) if found.0.phase == FormatPhase::Drain => found,
+            Ok(_) => return,
+            Err(error) => {
+                report.failed.push(error);
+                return;
+            }
+        };
         let drained = Format {
             phase: FormatPhase::Drained,
             epoch: format.epoch,

@@ -68,13 +68,19 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
     }
 }
 
-/// As [`read_format`], with the content tag of the object the bytes were read from, so that a
-/// write over it by that tag fails if the object changed since.
+/// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
+/// object changes between the two calls the tag is the older one, and a write over it by that tag
+/// fails.
 pub(crate) async fn read_format_tagged(
     hot: &dyn Backend,
 ) -> Result<Option<(Format, String)>, Error> {
-    match hot.get_marked(FORMAT_KEY, None).await {
-        Ok((body, _, tag)) => Ok(Some((decode(&body)?, tag))),
+    let read = async {
+        let tag = hot.head(FORMAT_KEY).await?.tag;
+        let body = hot.get(FORMAT_KEY, None).await?;
+        Ok((decode(&body)?, tag))
+    };
+    match read.await {
+        Ok(found) => Ok(Some(found)),
         Err(Error::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
