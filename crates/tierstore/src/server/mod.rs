@@ -103,9 +103,9 @@
 //! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
 //! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
 //! binary).
-//! A request that carries no key at all but a read grant (`x-tierstore-grant`), a token signed by a
-//! grant key, may `GET` and `HEAD` the objects the token lists and nothing else: see [`grant`], and
-//! [`ServerConfig::grant_keys`] (`--grant-key-file` in the binary).
+//! A client that holds no key and must read one object for a short time presents a presigned GET
+//! URL, signed with the full key, a read-only key or a scoped key (for an object under one of its
+//! read prefixes): see [`presign`], and [`ServerConfig::presign_max_expires`].
 //!
 //! # Checksums
 //!
@@ -198,17 +198,21 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod cli_probe;
+mod cli_reconcile;
+mod cli_serve;
 mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
 mod config_policy;
 mod config_print;
+mod config_syntax;
+mod config_units;
 mod door;
 mod drain;
 mod front;
 pub mod gc;
-pub mod grant;
 mod handover;
 mod idle;
 mod keys;
@@ -259,8 +263,6 @@ mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
-mod grant_server_tests;
-#[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
 mod lock_tests;
@@ -269,11 +271,15 @@ mod metrics_race_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
+mod one_call_get_tests;
+#[cfg(test)]
 mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
 mod pipes;
+#[cfg(test)]
+mod presign_get_tests;
 #[cfg(test)]
 mod presign_server_tests;
 #[cfg(test)]
@@ -305,6 +311,8 @@ mod testing;
 #[cfg(test)]
 mod time_tests;
 #[cfg(test)]
+mod unlistable_key_tests;
+#[cfg(test)]
 mod uploads_tests;
 #[cfg(test)]
 mod xml_tests;
@@ -332,11 +340,10 @@ use tokio::sync::{Notify, Semaphore};
 use crate::{Backend, Clock, MonotonicClock, Proxy};
 
 pub use gc::GcKey;
-pub use grant::{GRANT_HEADER, GrantError, MIN_GRANT_SECRET_BYTES, mint_grant};
 pub use keys::AccessKey;
 use keys::Role;
 pub use local_cache::LocalCache;
-pub use presign::{Grant, PresignKey, PresignRequest, presign_put};
+pub use presign::{Grant, PresignKey, PresignRequest, presign_get, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 
 use drain::Drain;
@@ -374,16 +381,9 @@ pub struct ServerConfig {
     /// the prefixes of three lists. None by default. Their ids differ from each other's and from
     /// the other keys'.
     pub scoped_keys: Vec<ScopedKey>,
-    /// The grant keys (see [`grant`]): the keys whose signature on a read grant the server
-    /// accepts. None by default. Their ids differ from each other's and from the other keys'; a
-    /// grant key signs no request.
-    pub grant_keys: Vec<AccessKey>,
-    /// The longest `X-Amz-Expires` a presigned URL may have, whatever the ceiling of its key says.
+    /// The longest `X-Amz-Expires` a presigned URL may have, whatever the ceiling of its key says
+    /// (a presigned GET has no ceiling: this is its limit).
     pub presign_max_expires: Duration,
-    /// The longest a read grant may still have to live when the server checks it: a grant that
-    /// ends more than this after the server's clock is refused as any bad grant is. 15 minutes by
-    /// default.
-    pub grant_max_lifetime: Duration,
     /// The most bytes of a request body: the longest object that one put takes, and the
     /// longest part of an upload. It is an upper bound on a length, not on memory: the body of
     /// a put or of a part is streamed to the backend and is never held whole. (The body of a
@@ -485,9 +485,7 @@ impl ServerConfig {
             presign_keys: Vec::new(),
             gc_keys: Vec::new(),
             scoped_keys: Vec::new(),
-            grant_keys: Vec::new(),
             presign_max_expires: Duration::from_secs(900),
-            grant_max_lifetime: Duration::from_secs(900),
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
             max_concurrent_puts: 32,
@@ -834,6 +832,10 @@ impl Server {
             if error.is_timeout() {
                 self.log_stalled(&parts, &id, error.message());
             }
+            let detail = error.detail();
+            detail
+                .into_iter()
+                .for_each(|why| self.log_failed(&parts, &id, why));
             error.into_answer(path, &id)
         });
         let name = HeaderName::from_static("x-amz-request-id");
@@ -848,6 +850,12 @@ impl Server {
             response.body_mut().hold_wire(wire);
         }
         response
+    }
+
+    /// Logs what the store said about a request it failed: the client got a fixed text.
+    fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
+        let (method, path) = (&parts.method, parts.uri.path());
+        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
@@ -875,6 +883,9 @@ impl Server {
         let query = Query::parse(parts.uri.query())?;
         if let Some(grant) = &signed.presign {
             grant.permit(parts, &target, &query)?;
+        } else if !parts.headers.contains_key("authorization") {
+            // No header: a presigned URL of a key that reads.
+            presign::permit_read(&target, &query)?;
         }
         // After the presigning grant, which refuses a listing: a presigned request may only PUT.
         if parts.method == Method::GET && query.has("uploads") && target == Target::Bucket {
@@ -889,9 +900,6 @@ impl Server {
         }
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
-        }
-        if let Role::Grant(names) = &signed.role {
-            grant::permit(names, &target, &query)?;
         }
         let limit = self.config.max_request_bytes;
         let limit = signed.presign.as_ref().map_or(limit, |grant| {

@@ -142,7 +142,10 @@ mod sleeper_tests;
 mod state;
 mod tiered;
 
-pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter};
+pub use backend::{
+    Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter,
+    Window,
+};
 pub use cache::CachedStore;
 pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use dir::DirBackend;

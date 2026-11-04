@@ -111,6 +111,14 @@ pub async fn page(backend: &dyn Backend, start: Option<&str>, max_keys: usize) -
     listed.into_iter().map(|object| object.key).collect()
 }
 
+/// Lets the runtime's other tasks run until the hot tier holds `key`: the copy of a streamed cold
+/// read is a task of its own, beside the response. It waits on that progress and on no clock.
+pub async fn copied(rig: &Rig, key: &str) {
+    while rig.hot_mem.head(key).await.is_err() {
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Asserts that the backend holds no object under `key`.
 pub async fn assert_absent(backend: &dyn Backend, key: &str) {
     let error = backend.head(key).await.unwrap_err();
