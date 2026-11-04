@@ -43,10 +43,9 @@
 use std::path::{Component, Path, PathBuf};
 
 use super::cli::Cli;
-use super::config::{
-    ConfigError, OciFlags, OciTable, PerRun, ServerTable, TierTable, invalid, storage,
-};
+use super::config::{ConfigError, PerRun, ServerTable, TierTable, invalid, storage};
 use super::config_cache::{CachePart, LocalCacheTable, check_oci_is_kept};
+use super::config_oci::{OciFlags, OciTable};
 use super::config_policy::{Policy, check_policies, require_keeping};
 
 /// What a file with all three tables stands for.

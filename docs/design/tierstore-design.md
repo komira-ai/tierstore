@@ -52,7 +52,7 @@ Non-goals:
 - Scrubbing stored objects for bit rot.
 - Protection against clock skew between machines: no decision uses a clock of another machine, the store's included (sections 6.3 and 6.9); tierstore does not measure the store's clock.
 - Per-write ids in object metadata (section 12).
-- TLS on the S3 listener (the OCI front has it).
+- Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`--tls-cert`, `--tls-key`, as on the OCI front).
 
 ## 3. The design in one picture
 
@@ -367,7 +367,7 @@ There is no back-pressure sleep. A put at `Open` or `Critical` takes the normal 
 |---|---|---|---|
 | Heartbeat (registration rewrite) | 10 seconds (`--heartbeat`) | the node | cheap evidence of life; one small write per node per 10 s |
 | Departure of a silent node (D) | 60 seconds without a change (`--departure`) | the leader's own monotonic clock | at least 6 heartbeats; no clocks compared across machines |
-| Margin (m) | 10 seconds | the holder's monotonic clock | a call may start only if its deadline is at least m away; at most D/4 |
+| Margin (m) | 10 seconds | the holder's monotonic clock | subtracted from D to give a holder's deadline `live_until`; a holder's destructive call is bounded by min(m, live_until - now), and a leader keeps a full m of lease before a destructive call or a cold publication; at most D/4 |
 | Lease ttl | 30 seconds; about 30 s from a crash to a new leader | the taker's own monotonic clock | the longest pause in replication after a leader crash |
 | Lease renewal | every ttl/3, on its own timer | the leader | a long copy cannot starve it |
 | Loop wait | 1 s when idle, doubling to `--reconcile-idle-max` (default 10 s) | the leader | bounds ack to cold after a quiet period; no wake ping |
@@ -384,7 +384,7 @@ Every arbitrary number is a config key with a default, from the start (section 1
 |---|---|---|
 | `heartbeat` (`--heartbeat`) | 10 s | registration rewrite interval |
 | `departure` (D, `--departure`) | 60 s | silence before an owner is departed; at least 6 heartbeats |
-| `margin` (m) | 10 s | a call starts only if its deadline is at least m away; at most D/4 |
+| `margin` (m) | 10 s | subtracted from D to give a holder's deadline; a holder's destructive call is bounded by min(m, live_until - now); a leader keeps a full m of lease before a destructive call; at most D/4 |
 | `lease_ttl` | 30 s | time an unchanged lease is believed; renewal every ttl/3 |
 | `reconcile_idle_min` | 1 s | the leader loop's wait when idle, the start of the back-off |
 | `reconcile_idle_max` (`--reconcile-idle-max`) | 10 s | the back-off ceiling; the allowed range is 1 to 10 s |
@@ -575,7 +575,7 @@ The shape is the end of a sequence of designs, each rejected for a concrete brea
 
 New formats are only additions, but the rollout still has to be safe beside old binaries. Two facts shape it: today a registration is an empty object with no heartbeat, so a new binary cannot tell whether an old writer is alive; and an old binary does not reserve `_entries/`, so it would list, serve and delete entries as client keys. Hence a bridge release and a drain.
 
-**Pre-flight (operator, once).** A lifecycle rule `AbortIncompleteMultipartUpload` on the cold bucket. The hot credential's IAM extended to `_entries/*` and `_tiering/proxies/*`. If the hot bucket is versioned, entry churn (a create and a delete per put) piles up delete markers and slows listing: use an unversioned bucket or expire noncurrent versions after one day. Check that the hot store meets the requirement of section 9 (nothing probes it: the operator is responsible).
+**Pre-flight (operator, once).** A lifecycle rule `AbortIncompleteMultipartUpload` on the cold bucket. The hot credential's IAM extended to `_entries/*` and `_tiering/proxies/*`. If the hot bucket is versioned, entry churn (a create and a delete per put) piles up delete markers and slows listing: use an unversioned bucket or expire noncurrent versions after one day. Run `tierstore format-epoch --check`: it reports the format, each registration with its class and the open entries, and says whether `--drain` would be accepted. It asks the store nothing (no probe, no `if-match-missing` check); the store requirement of section 9 is documented, and the operator is responsible for choosing a store that meets it.
 
 1. **Bridge release.** The previous release plus: `_entries/` is a reserved prefix everywhere it is listed (a client key that already starts with `_entries/` can no longer be read, written or listed through the proxy, which refuses it; on `dir:` the file stays on disk and is kept readable by the backend); the registration becomes a heartbeat object; the release watches `_tiering/format` and, under phase `drain`, answers writes 503 and keeps serving reads while its leader applies the journals until every checkpoint is at the head of its journal; it then writes phase `drained`. It changes no data or wire format. It rolls out with the existing hand-off while writes stay up.
 2. **The operator verb `tierstore format-epoch`** (a subcommand, so its tests are Rust; dry-run default; held, never run by CI). `--check` changes nothing. `--drain` refuses unless every registration is of the bridge release with a recent heartbeat, or is named by the operator after a process check (older registrations have no heartbeat and cannot be classified by the tool), then waits for `drained`. `--cancel` writes the previous phase back. Tell the owners of the client fleet before `--drain`: the write pause is minutes, scales with fleet size and cold health, and a cold outage makes the drain wait.
@@ -694,7 +694,7 @@ The decisions of 2026-11-03, taken by the CEO on the design as drafted (1 to 7, 
 | Reconciler / leader | The one process, chosen by lease, that lists the entries and copies to cold, finishes deletes, copies back, evicts, reaps and publishes usage. The only actor that releases entries it did not take itself. |
 | Departed / D | An owner whose registration is absent or unchanged for D (60 s) on the leader's own monotonic clock. |
 | `live_until` | A proxy's deadline: its last heartbeat's send time plus D minus the margin m. Past it, the proxy answers 503 and touches nothing. |
-| Margin (m) | 10 s; a destructive call may start only if its deadline is at least m away. |
+| Margin (m) | 10 s; subtracted from D in `live_until`. A holder's destructive call is bounded by min(m, live_until - now); a leader needs a full m of lease left before one. |
 | Stray | A hot object with no entry and no cold copy. |
 | CAS | Compare-and-swap: a write conditional on the object's tag (`If-Match`). |
 | Nonce | `<actor id>.<counter>` in every entry body, so a body never repeats and an ambiguous write can be read back. |
