@@ -362,7 +362,7 @@ These describe one run, not the data path, and have no key:
 
 Each of these exits with status 2 and names the file and the key (a syntax error names the line and the column, never the value):
 
-- a key or a table the format does not have, and a value of the wrong type;
+- a value of the wrong type in a key this release has (a key or a table it does not have is not refused, see the next section);
 - a key that holds a secret: keys and credentials are paths of files whose names end in `_file` or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the like are refused anywhere;
 - a file that is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`) and a storage node's with a cache (all three tables);
 - in a storage node's file with a cache, `write_through = false`, a relative cache `path`, `dir` tier directory, `lock_file` or `oci` key file, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of an `oci` interface);
@@ -371,6 +371,16 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 - a water mark outside 1 to 100, and a budget, count or limit of zero;
 - an `[[interface]]` that breaks the rules of its section above: a type that is not `s3` or `oci` (`fs` is named as not served yet), neither `params.port` nor `params.addresses` or both, a port of zero, an address listened on twice, a param its type does not take, only one of the certificate and the key, `params.max_connections = 0`, `oci` entries that disagree, and a file with no `s3` entry;
 - a `[[policy]]` that breaks the rules above.
+
+## Keys this release does not know
+
+A key or a table that this release does not have is not a fault. The loader reads the file without it, and says on stderr, once for each such key, with the table and the name of the key (a table of the top level, or a table inside a table, is one key, named by its own name, and what is in it is not read):
+
+```text
+tierstore: config key <table>.<key> is not known to this release and is ignored
+```
+
+This is so that a downgrade works: a later release adds an optional key, an operator sets it, and the release before still starts from the same file, without the setting. The warning names only the key, never a value. This holds from the release that introduced it: a release before it still refuses an unknown key, so a file with a key of a later release is downgrade-safe only to a release that has this rule. A key that this release has but whose value is of the wrong type is still refused, and so is a key of an `[[interface]]` entry (its `type` and `params`) that the release does not have, and so is an unknown key whose name says it holds a secret (see above). `--check-config` prints the same warnings and exits 0.
 
 ## Moving from flags
 

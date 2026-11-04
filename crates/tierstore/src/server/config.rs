@@ -32,8 +32,9 @@
 //!   under the prefix in the cache; without it a policy is read and checked and has no effect,
 //!   and `cache = true` is refused.
 //!
-//! Any other table or key is refused, and so is a key that holds a secret: keys and credentials
-//! are paths of files (a key ending in `_file` or `_files`).
+//! Any other table or key is read past: the load succeeds, ignores it and warns on stderr with
+//! its name and never its value. A key whose name says it holds a secret is refused, unknown or
+//! not: keys and credentials are paths of files (a key ending in `_file` or `_files`).
 //!
 //! Per-run knobs are flags only: `--config`, `--check-config` and the two parts of the drain.
 
@@ -59,6 +60,7 @@ use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
+use super::config_unknown::announce_unknown_keys;
 use super::front::{FrontSettings, S3Tls};
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
@@ -159,8 +161,8 @@ pub enum ConfigError {
         /// What the system said.
         source: std::io::Error,
     },
-    /// The file is not TOML, or has a key or a table it must not (the message names it), or lacks
-    /// one it must, or a value of the wrong type. The message holds the place and the key, never
+    /// The file is not TOML, or lacks a key it must have, or has a value of the wrong type (the
+    /// message names the key). The message holds the place and the key, never
     /// the line or the value: the line may hold a secret, and the message goes to a journal.
     #[error("line {line}, column {column}: {what}")]
     Syntax {
@@ -232,7 +234,6 @@ pub(super) enum Kind {
 
 /// The whole file.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct File {
     pub server: ServerTable,
     #[serde(default)]
@@ -256,7 +257,6 @@ pub(super) struct File {
 /// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys. A key that
 /// is left out has its default.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
     /// The address of the S3 front as the release before wrote it: an `s3` interface (see
     /// [`with_legacy`]).
@@ -307,7 +307,6 @@ pub(super) struct ServerTable {
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
 /// two has (the others are refused in the other).
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct TierTable {
     pub kind: Kind,
     #[serde(default)]
@@ -844,10 +843,12 @@ pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError
             return Err(ConfigError::Read { path, source });
         }
     };
-    settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
+    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
         path: path.to_owned(),
         source: Box::new(source),
-    })
+    })?;
+    announce_unknown_keys(&text);
+    Ok(settings)
 }
 
 /// `message` with the name of each flag in it replaced by the key that stands for it in the

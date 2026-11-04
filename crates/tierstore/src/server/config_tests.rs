@@ -149,32 +149,29 @@ fn a_file_is_read_from_its_path_and_its_refusals_name_it() {
     assert!(matches!(missing, ConfigError::Read { .. }), "{missing}");
     assert!(missing.to_string().contains("none.toml"), "{missing}");
     let bad = dir.path().join("bad.toml");
-    std::fs::write(&bad, golden_with("[cold_store]", "[cold_store]\nwhat = 1")).unwrap();
+    std::fs::write(&bad, golden_with("[server]", "[server]\nslot = \"x\"")).unwrap();
     let why = load(&bad, DEFAULTS).unwrap_err().to_string();
     assert!(why.contains("bad.toml"), "{why}");
-    assert!(why.contains("what"), "{why}");
+    assert!(why.contains("slot"), "{why}");
 }
 
-/// Asserts that a key or a table the format does not have is refused with its name, whichever
-/// table it is in: the file is a closed set.
+/// Asserts that a key or a table this release does not have, in any table of the file, does not
+/// refuse the file: it loads to the settings the file makes without the key, so that a file
+/// written by a later release starts here. A key it has, given a value of the wrong type, is still
+/// refused with its name, and so are a file that is not TOML and one that lacks a needed key.
 #[test]
-fn an_unknown_key_or_table_is_refused_by_name() {
+fn an_unknown_key_or_table_is_ignored_and_a_known_one_is_still_checked() {
     let cases = [
         golden_with("[server]", "[server]\nbogus = 1"),
         golden_with("[hot_store]", "[hot_store]\nbogus = 1"),
         golden_with("[cold_store]", "[cold_store]\nbogus = 1"),
-        golden_with("type   = \"oci\"", "type   = \"oci\"\nbogus = 1"),
-        golden_with(
-            "params = { addresses = [\"192.0.2.10:9300\"] }",
-            "params = { addresses = [\"192.0.2.10:9300\"], bogus = 1 }",
-        ),
         format!("{GOLDEN}\n[bogus]\nx = 1\n"),
         format!("{GOLDEN}\n[[policy]]\nprefix = \"a/\"\nbogus = 1\n"),
         format!("bogus = 1\n{GOLDEN}"),
     ];
+    let plain = from_text(GOLDEN, DEFAULTS).unwrap();
     for text in cases {
-        let why = refusal(&text);
-        assert!(why.contains("bogus"), "{why}");
+        assert_eq!(from_text(&text, DEFAULTS).unwrap(), plain, "{text}");
     }
     let why = refusal(&golden_with(
         "addresses = [\"192.0.2.10:9300\"]",
@@ -265,16 +262,12 @@ fn a_secret_by_another_name_is_refused_without_its_value() {
 }
 
 /// Asserts that no message about a fault in the file repeats the line or the value of the key:
-/// a key that is unknown (and so a secret by a name no rule knows), a line that is not TOML, a
+/// a line that is not TOML, a
 /// value of the wrong type, a size, a duration, a kind and a skipped check that are not valid. Each
 /// still says which key (and, but for a skipped check, where).
 #[test]
 fn a_fault_in_the_file_is_reported_without_the_value() {
     let cases = [
-        (
-            golden_with("[server]", "[server]\npasskey = \"SENTINEL\""),
-            "passkey",
-        ),
         (
             golden_with("[server]", "[server]\nbroken = SENTINEL"),
             "line ",
