@@ -129,6 +129,7 @@ impl EntryReconciler {
         self.require_lease()?;
         let key = &sealed.entry.key;
         ignore_missing(self.cold.delete(key).await)?;
+        self.require_lease()?;
         ignore_missing(self.hot.delete(key).await)?;
         self.release(sealed).await
     }
@@ -169,6 +170,7 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return Ok(Replicated::Same),
             Err(error) => return Err(error),
         };
+        self.require_lease()?;
         match self.cold.put_stream(key, Some(hot.size), body).await {
             Ok(()) => {
                 // The tag of the copy is read to be remembered; a copy that cannot be read back

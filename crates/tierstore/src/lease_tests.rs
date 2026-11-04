@@ -284,6 +284,25 @@ async fn margin_ok_holds_while_at_least_the_margin_is_left() {
     assert!(!pair.holder.margin_ok());
 }
 
+/// Asserts that a lease with a margin of zero is not valid at or after its end: the holder that
+/// wrote at 0 is valid until 30 s, `margin_ok` is true at 29.999 s, and at 30 s it is false and
+/// `ensure` renews it with an `If-Match` put instead of answering from the expired time.
+#[tokio::test]
+async fn a_lease_with_no_margin_is_not_valid_at_its_end() {
+    let mono = Arc::new(Mono::new());
+    let memory = Arc::new(MemoryBackend::new());
+    let counted = Arc::new(FaultyBackend::new(memory));
+    let lease = Lease::new(counted.clone(), mono.clone(), "p", TTL, RENEW, 0);
+    assert!(lease.ensure().await);
+
+    mono.advance(ms(TTL - 1));
+    assert!(lease.margin_ok());
+    mono.advance(ms(1));
+    assert!(!lease.margin_ok());
+    assert!(lease.ensure().await);
+    assert_eq!(counted.calls(Op::PutIfMatch), 1);
+}
+
 /// Asserts that `ensure` writes nothing while the margin is left (the timer does the renewing)
 /// and renews, with an `If-Match` put, once less than the margin is left.
 #[tokio::test]
