@@ -105,7 +105,28 @@ On main, not in v0.0.41, `--lock-file` (`hot_store.lock_file`) says which of the
 
 Before a release that changes what is stored, the operator pauses writes: the hot tier's object `_tiering/format` with the body `{"phase":"drain"}`. Within 5 seconds (the proxy's `format_refresh`) every proxy answers a put, a delete and the multipart calls that write with 503 `ServiceUnavailable`, and goes on serving reads. The reconciler applies every journal; after the format has said `drain` for 15 seconds (`drain_settle`) and a pass ends without a failure, it replaces the object with `{"phase":"drained"}`. Deleting the object lifts the pause. The pause lasts as long as the cold tier takes to take the copies, and while the cold tier is down the journals are not applied, so the object stays `drain`. Neither time is a flag of the binary yet: both are fields of `ProxyConfig` and `ReconcilerConfig`.
 
+The verb `tierstore format-epoch` (below) writes and removes this object, with checks, and waits for `drained`.
+
 The release that has this pause must run on every node before anything writes `_tiering/format`: a node of an earlier release does not read it, and goes on writing.
+
+## The write pause of a format change: format-epoch and entries
+
+Two verbs of the binary run the one planned pause of writes and look at the journal entries of keys. They are on main, not in a release yet. Each is a short-lived process, answered before the server's flags are read, that takes the hot tier by the server's flags (`--hot`, `--hot-endpoint`, `--hot-region`, `--hot-credentials-file`, `--s3-request-timeout`). They read and write only tierstore's own objects in the hot tier (`_tiering/format`, `_tiering/proxies/`, `_entries/`); they never ask a store how it behaves, so what the stores must do is documented, not checked. The credential they run with needs create, read, replace and delete on those prefixes.
+
+`tierstore format-epoch` takes exactly one of four actions. Run from a machine that is not a proxy, with the same clock discipline as the proxies, since a heartbeat's age is the difference of that machine's clock and the hot tier's time of the write.
+
+- `--check` prints the format object (its phase and epoch), each registration with how it is classified, and the number of open entries, then says whether `--drain` would be accepted. It writes nothing. It exits 1 with the refusal if `--drain` would be refused.
+- `--drain` writes `{"phase":"drain"}` and waits, with no time limit, until the format says `drained`, reading it every `--poll` (5 seconds) and printing what it waits for: the reconciler that holds the lease writes `drained` once every journal is applied. Interrupt it to stop waiting; the pause stays. Run it again to wait again: a format that already says `drain` is not written over. If the format is at an epoch, the epoch is kept.
+- `--cancel` resumes writes: it deletes the format object, or, if the format was at an epoch before the drain, writes `active` with that epoch back. It refuses when the format is not `drain` or `drained`.
+- `--activate` writes `{"epoch":2,"phase":"active"}` over `drained`, after the checks below. It does not rotate the write credential; it prints that the operator does, and that processes of the new release get the new credential first.
+
+`--drain`, `--cancel` and `--activate` are held: without `--apply` they make every check, print what they would write, and write nothing. A write is over the content tag that was read, so a format object changed by someone else in between is refused, not overwritten.
+
+A registration (`_tiering/proxies/<id>`) says whether its process is alive only if its body has a protocol number and the object is rewritten on every beat. A registration is live when it has a protocol number and was written less than `--beats` (3) times `--beat` (5 seconds) ago, silent when it has one and was not, and unlabelled when its body has none, as the registration of a release before the heartbeat. A silent or unlabelled registration says nothing of whether its process is gone, and a process of an old release that goes on writing during the pause is what the pause is meant to rule out. So `--drain` and `--activate` refuse until the operator has looked at the machines and named each such id on `--departed` (repeat the flag or separate ids by commas). `--departed` refuses an id that has no registration and an id that is live. `--activate` also refuses a live registration below protocol 2.
+
+Before the pause: tell the owners of the clients that write (builds, image pushes), since writes answer 503 for as long as the drain takes, which grows with the number of keys to copy and does not end while the cold tier is down. Run `--check` first, with nothing at stake. After `--drain` has printed `drained`, roll the new release over the proxies, then `--activate`. To go back before `--activate`, `--cancel`.
+
+`tierstore entries ls` prints a line for each open entry (`_entries/<sha256 of the key in hex>`): the name, the operation (`PUT`, `DEL`, `CB`, `EVICT`), the state (`HELD`, `PENDING`, `SEALED`), the owner (`-` for none), the whole seconds since the entry was last written, and the key, quoted and escaped. An entry whose body cannot be read is listed with the reason. `tierstore entries show --key <key>` prints the entry of one key, or says there is none. Both only read.
 
 ## The start-up self-test
 
