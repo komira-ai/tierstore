@@ -62,7 +62,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
   <li>
     <h3>Place the unit <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The repository has an example systemd unit, <code>tierstore.service</code>, a configuration file, <code>tierstore.toml</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging/tierstore</code>. The values in the file are examples: edit the address of the <code>s3</code> interface, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
+    <p>The repository has an example systemd unit, <code>tierstore.service</code>, a configuration file, <code>tierstore.toml</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging</code>. The values in the file are examples: edit the address of the <code>s3</code> interface, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
     <div class="code"><pre><span class="p">$</span> install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> systemd-sysusers /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> install -d -m 0750 -o root -g tierstore /etc/tierstore
