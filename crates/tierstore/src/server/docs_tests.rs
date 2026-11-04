@@ -1,7 +1,7 @@
 //! The operator guide (`docs/*.md`) held to the code.
 //!
 //! Every page of `crates/tierstore/docs/` is read, not only the guide's: a flag it names must be
-//! one of the binary's (read from clap, `Cli::command().get_arguments()`), a `section.key` it
+//! one of the binary's (read from clap, `Args::command().get_arguments()`), a `section.key` it
 //! names must be in the config file's key table, a TOML block must load through the real loader
 //! (or be marked `toml fragment`, which has only its keys checked), a metric name must occur in
 //! the source, and a block marked `message` must quote text that the source holds. The other way
@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use clap::CommandFactory;
 
-use super::cli::Cli;
-use super::config::{KEYS, settings_from_text};
+use super::cli::Args;
+use super::config::{KEYS, keys_for_flags, settings_from_text};
 use super::config_cache::LocalCacheTable;
 use super::config_policy::Policy;
 use super::config_testing::DEFAULTS;
@@ -35,7 +35,7 @@ const NOT_YET: &str = "Not in a release yet";
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
 /// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
 /// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flags of the
-/// `update-hook` verb, which are read before the server's flags and are not among them.
+/// verbs (`update-hook`, `format-epoch`, `entries`), which are read before the server's flags and are not among them (the verbs `format-epoch` and `entries` take the hot tier by `--hot` and its four companions, which the server no longer has).
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
     "--repo",
@@ -57,6 +57,21 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--public-port",
     "--poll-interval-ms",
     "--pattern",
+    "--check",
+    "--drain",
+    "--cancel",
+    "--activate",
+    "--apply",
+    "--departed",
+    "--beat",
+    "--beats",
+    "--poll",
+    "--key",
+    "--hot",
+    "--hot-endpoint",
+    "--hot-region",
+    "--hot-credentials-file",
+    "--s3-request-timeout",
 ];
 
 /// Flags of the binary the pages need not name.
@@ -75,7 +90,8 @@ const SECTIONS: &[&str] = &[
     "server",
     "hot_store",
     "cold_store",
-    "oci",
+    "interface",
+    "params",
     "policy",
     "local_cache",
 ];
@@ -375,6 +391,12 @@ fn toml_keys(table: &toml::Table) -> Vec<String> {
                 keys.push(format!("{section}."));
             }
             keys.extend(inner.keys().map(|key| format!("{section}.{key}")));
+            // The params of an interface are an inline table: their names are keys of the file.
+            if section == "interface"
+                && let Some(params) = inner.get("params").and_then(toml::Value::as_table)
+            {
+                keys.extend(params.keys().map(|key| format!("params.{key}")));
+            }
         }
     }
     keys
@@ -477,20 +499,35 @@ fn source_of(dir: &Path, out: &mut String) {
 }
 
 fn code() -> Code {
-    let command = Cli::command();
+    let command = Args::command();
     let flags = command
         .get_arguments()
         .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
         .collect();
+    // The keys of an `[[interface]]` that are in no flag: its `type` and `params`, and the two
+    // params that say where it listens.
+    let interface = [
+        "interface.type",
+        "interface.params",
+        "params.port",
+        "params.addresses",
+    ];
     let keys = KEYS
         .iter()
-        .flat_map(|(_, keys)| keys.iter().map(|key| (*key).to_owned()))
+        .flat_map(|(_, keys)| keys.iter().copied())
+        .chain(interface)
+        .map(str::to_owned)
         .collect();
     let mut source = String::new();
     source_of(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         &mut source,
     );
+    // A start says the keys of the file where the source says a flag (`keys_for_flags`), so a
+    // message the guide quotes is held to the source as the operator reads it, too.
+    let said = keys_for_flags(&source);
+    source.push('\n');
+    source.push_str(&said);
     Code {
         flags,
         keys,
@@ -613,7 +650,7 @@ fn the_pages_say_what_the_code_has() {
     );
     let (pages, flags, keys, metrics, messages) = amounts(&docs);
     assert!(pages >= 8, "the guide has {pages} pages");
-    assert!(flags >= 80, "the pages name {flags} flags");
+    assert!(flags >= 60, "the pages name {flags} flags");
     assert!(keys >= 40, "the pages name {keys} keys");
     assert!(metrics >= 5, "the pages name {metrics} metrics");
     assert!(messages >= 3, "the pages hold {messages} message blocks");
@@ -623,13 +660,16 @@ fn the_pages_say_what_the_code_has() {
 /// Asserts that a flag that is not the binary's is found, in a span and in a block.
 #[test]
 fn a_flag_that_is_not_the_binarys_is_found() {
-    let wrong = changed("configuration.md", "`--listen`", "`--listn`");
+    let wrong = changed("configuration.md", "`--check-config`", "`--chek-config`");
     let problems = check(&wrong, &code());
-    assert!(said(&problems, "--listn is not a flag"), "{problems:?}");
-    // `--listen` is named in a span and in a block of this page, and in no other page.
-    let problems = check(&without_page("configuration.md"), &code());
     assert!(
-        said(&problems, "no page names the flag --listen"),
+        said(&problems, "--chek-config is not a flag"),
+        "{problems:?}"
+    );
+    // Taken out of every page, the flag is named by none.
+    let problems = check(&without("--check-config"), &code());
+    assert!(
+        said(&problems, "no page names the flag --check-config"),
         "{problems:?}"
     );
     let block = with_appended("operations.md", "\n```sh\ntierstore --no-such-flag\n```\n");
@@ -683,13 +723,20 @@ fn the_keys_of_a_table_are_read_from_its_struct() {
 /// that a key the pages leave out is found.
 #[test]
 fn a_key_that_is_not_in_the_table_is_found() {
-    let span = changed("configuration.md", "`server.listen`", "`server.listn`");
+    let span = changed(
+        "configuration.md",
+        "`server.proxy_id`",
+        "`server.proxy_idd`",
+    );
     let problems = check(&span, &code());
-    assert!(said(&problems, "server.listn is not a key"), "{problems:?}");
-    // `server.listen` is named in the table and in the TOML blocks of this page, and in no other.
+    assert!(
+        said(&problems, "server.proxy_idd is not a key"),
+        "{problems:?}"
+    );
+    // `params.port` is named in the table of this page, and in no other.
     let problems = check(&without_page("configuration.md"), &code());
     assert!(
-        said(&problems, "no page names the key server.listen"),
+        said(&problems, "no page names the key params.port"),
         "{problems:?}"
     );
     let block = with_appended(
@@ -705,9 +752,9 @@ fn a_key_that_is_not_in_the_table_is_found() {
 /// Asserts that a flag and a key of the code that no page names are found.
 #[test]
 fn a_flag_or_key_no_page_names_is_found() {
-    let problems = check(&without("--oci-prefix"), &code());
+    let problems = check(&without("--drain-deadline"), &code());
     assert!(
-        said(&problems, "no page names the flag --oci-prefix"),
+        said(&problems, "no page names the flag --drain-deadline"),
         "{problems:?}"
     );
     let problems = check(&without("`server.presign_max_expires`"), &code());
@@ -724,7 +771,7 @@ fn a_flag_or_key_no_page_names_is_found() {
 /// fragment is not loaded (a fragment is not a whole file).
 #[test]
 fn a_toml_file_that_does_not_load_is_found() {
-    let file = "\n```toml\n[server]\nlisten = \"192.0.2.10:9000\"\n```\n";
+    let file = "\n```toml\n[server]\nproxy_id = \"p1\"\n```\n";
     let problems = check(&with_appended("configuration.md", file), &code());
     assert!(
         said(&problems, "the loader refuses the file"),
@@ -752,7 +799,7 @@ fn a_quoted_message_that_is_not_in_the_source_is_found() {
     let wrong = "\n```message\ntierstore: this text is nowhere in the program\n```\n";
     let problems = check(&with_appended("troubleshooting.md", wrong), &code());
     assert!(said(&problems, "is not in the source"), "{problems:?}");
-    let right = "\n```message\n--low-water must be below --high-water\n```\n";
+    let right = "\n```message\nhot_store.low_water must be below hot_store.high_water\n```\n";
     let problems = check(&with_appended("troubleshooting.md", right), &code());
     assert!(!said(&problems, "the message"), "{problems:?}");
 }

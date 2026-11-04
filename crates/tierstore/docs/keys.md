@@ -4,17 +4,17 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 
 ## The keys, and what each may do
 
-| Key | Flag | Key of the file | May do |
-|---|---|---|---|
-| full | `--access-key-file` | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads; also signs presigned GET URLs |
-| read-only | `--read-only-key-file` | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket; also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
-| presigning | `--presign-key-file` | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
-| GC | `--gc-key-file` | `server.gc_key_files` | a scoped key with a list, a delete and an abort right on one prefix: list, head, delete and abort uploads under it, and nothing else; it never reads a body |
-| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
-| hot tier credential | `--hot-credentials-file` | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
-| cold tier credential | `--cold-credentials-file` | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
+| Key | Key of the file | May do |
+|---|---|---|
+| full | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads; also signs presigned GET URLs |
+| read-only | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket; also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
+| presigning | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
+| GC | `server.gc_key_files` | a scoped key with a list, a delete and an abort right on one prefix: list, head, delete and abort uploads under it, and nothing else; it never reads a body |
+| scoped | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
+| hot tier credential | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
+| cold tier credential | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
 
-Only the full key is required. The read-only, presigning, GC and scoped flags may each be given once for each key. A tier that is a directory needs no credential file.
+Only the full key is required. The read-only, presigning, GC, scoped keys of the file are lists, one file for each key. A tier that is a directory needs no credential file.
 
 A role is not a prefix: a read-only key may read every object of the bucket. To limit a client to prefixes, use a scoped key (or a GC key, or a presigned URL). The key prefixes `_journal/`, `_tiering/` and `_entries/` belong to tierstore: a client put or delete there is refused, and a listing leaves them out.
 
@@ -50,7 +50,7 @@ A presigning key file holds the key and its ceiling, all required:
  "ceiling": {"prefix": "cas/b/", "max_expires_secs": 600, "max_object_bytes": 134217728}}
 ```
 
-A presigned URL is good for one PUT of a key under the prefix, for at most the smaller of `max_expires_secs` and `--presign-max-expires` (15 minutes by default), with a body of at most `max_object_bytes` (up to 5 GiB). The body is also held to `--max-request-bytes`; the smaller of the two applies. A second PUT of the key is 412. The signature does not cover the body, so whoever reads the object must check its content.
+A presigned URL is good for one PUT of a key under the prefix, for at most the smaller of `max_expires_secs` and `server.presign_max_expires` (15 minutes by default), with a body of at most `max_object_bytes` (up to 5 GiB). The body is also held to `server.max_request_bytes`; the smaller of the two applies. A second PUT of the key is 412. The signature does not cover the body, so whoever reads the object must check its content.
 
 ## GC keys
 
@@ -87,6 +87,6 @@ A change to the tier credentials takes the same restart.
 
 ## Presigned GET URLs
 
-A client that holds no key and must read an object for a short time presents a presigned GET URL: the URL of the object with the SigV4 query-string parameters, signed with the full key, a read-only key or a scoped key. Any SDK presigner makes one (the library has `presign_get`). No flag and no key file is added for it: the key that signs is one of those above, and the URL has that key's rights and no more. A scoped key's URL reads an object under one of its read prefixes and nothing outside them; a GC key and a presigning key sign no read URL.
+A client that holds no key and must read an object for a short time presents a presigned GET URL: the URL of the object with the SigV4 query-string parameters, signed with the full key, a read-only key or a scoped key. Any SDK presigner makes one (the library has `presign_get`). No key and no key file is added for it: the key that signs is one of those above, and the URL has that key's rights and no more. A scoped key's URL reads an object under one of its read prefixes and nothing outside them; a GC key and a presigning key sign no read URL.
 
-The URL is good for a `GET` or `HEAD` (the method it was signed for) of one object, with or without a `Range` header, and for nothing else: another method, a call on the bucket, a multipart call or a parameter beyond the SigV4 ones and `x-id` is 403 `AccessDenied`. The `Range` header is not part of the signature, so one URL serves every part of a parallel download of a large object. The URL is refused from the second `X-Amz-Date + X-Amz-Expires` on, and its `X-Amz-Expires` may not be over `--presign-max-expires` (15 minutes by default). The cap is measured on the server's clock, so a service whose clock runs ahead of the server's should sign URLs shorter than the cap by at least that skew. A URL is a bearer credential: whoever holds it can use it until it expires, so use TLS where that matters. The calls and the answers are in `packaging/README.md`, under Presigned GET URLs. The read grant of the release before (the `x-tierstore-grant` header, `--grant-key-file`, `--grant-max-lifetime`) is gone: the two flags and their keys are still accepted and ignored, with a warning at start, so that an old unit starts, and a request that carries the header is refused as an unsigned request is, 403 `AccessDenied`.
+The URL is good for a `GET` or `HEAD` (the method it was signed for) of one object, with or without a `Range` header, and for nothing else: another method, a call on the bucket, a multipart call or a parameter beyond the SigV4 ones and `x-id` is 403 `AccessDenied`. The `Range` header is not part of the signature, so one URL serves every part of a parallel download of a large object. The URL is refused from the second `X-Amz-Date + X-Amz-Expires` on, and its `X-Amz-Expires` may not be over `server.presign_max_expires` (15 minutes by default). The cap is measured on the server's clock, so a service whose clock runs ahead of the server's should sign URLs shorter than the cap by at least that skew. A URL is a bearer credential: whoever holds it can use it until it expires, so use TLS where that matters. The calls and the answers are in `packaging/README.md`, under Presigned GET URLs. The read grant of the release before (the `x-tierstore-grant` header, `server.grant_key_files`, `server.grant_max_lifetime`) is gone: the two keys are still accepted and ignored, with a warning at start, so that an old file starts, and a request that carries the header is refused as an unsigned request is, 403 `AccessDenied`.

@@ -340,6 +340,39 @@ fn a_request_must_be_within_fifteen_minutes_of_the_servers_time() {
     assert_eq!(verify(&too_early, &signed), Err(SKEWED));
 }
 
+/// Asserts that the skew is judged by the time the stamp stands for, to the second, on both
+/// sides: exactly 15 minutes away is accepted and a second more is `RequestTimeTooSkewed`.
+#[test]
+fn the_skew_is_judged_to_the_second_on_both_sides() {
+    let config = server_config(SECRET, NOW);
+    let signed = sign(&config, "GET", "/b/k", &[], b"").into_parts().0;
+    let second = 1000;
+    let on_time = [NOW + 15 * MINUTE, NOW - 15 * MINUTE];
+    for now in on_time {
+        assert!(
+            verify(&server_config(SECRET, now), &signed).is_ok(),
+            "{now}"
+        );
+    }
+    let late = [NOW + 15 * MINUTE + second, NOW - 15 * MINUTE - second];
+    for now in late {
+        let refusal = verify(&server_config(SECRET, now), &signed);
+        assert_eq!(refusal, Err(SKEWED), "{now}");
+    }
+}
+
+/// Asserts that a date header that is not a date, though it begins as the time of the request
+/// does and so sorts inside the window as text, is malformed and not read as a time in range.
+#[test]
+fn a_date_header_that_is_not_a_date_is_malformed_even_where_it_sorts_in_range() {
+    let config = server_config(SECRET, NOW);
+    let stamp = amz_date(NOW);
+    for junk in ["x", "0", "Z", "999"] {
+        let odd = changed(|parts| set(parts, "x-amz-date", &format!("{stamp}{junk}")));
+        assert_eq!(verify(&config, &odd), Err(MALFORMED), "{junk}");
+    }
+}
+
 /// Asserts that a request is malformed when the day of its credential is not the day of its
 /// date, and when it lacks the date header or the payload hash header it says it signed.
 #[test]

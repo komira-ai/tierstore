@@ -1,56 +1,49 @@
-//! The flags of the heartbeat of a proxy and of the removal of registrations that its owner left:
-//! `--heartbeat`, `--departure`, `--deadline-margin` and `--registration-retention`, which the file
-//! has as the keys of `[hot_store]` of the same names. They are in a struct of their own that
-//! [`Cli`](super::cli::Cli) flattens, so that the flags of the process stay in one place and in one
-//! file each.
+//! The settings of the heartbeat of a proxy and of the removal of registrations that its owner left:
+//! `hot_store.heartbeat`, `hot_store.departure`, `hot_store.deadline_margin` and
+//! `hot_store.registration_retention`. They are in a struct of their own that
+//! [`Cli`](super::cli::Cli) holds. The messages of the check name the old flags, which
+//! [`keys_for_flags`](super::config::keys_for_flags) turns into the keys.
 
 use std::time::Duration;
 
-use clap::Args;
-
-use super::cli::parse_duration;
 use super::config::{TierTable, duration};
-use super::config_units::Dur;
 use crate::{ProxyConfig, ReconcilerConfig};
 
-/// The default of `--heartbeat`.
+/// The default of `hot_store.heartbeat`.
 const HEARTBEAT: Duration = Duration::from_secs(10);
-/// The default of `--departure`.
+/// The default of `hot_store.departure`.
 const DEPARTURE: Duration = Duration::from_secs(60);
-/// The default of `--deadline-margin`.
+/// The default of `hot_store.deadline_margin`.
 const MARGIN: Duration = Duration::from_secs(10);
-/// The default of `--registration-retention`.
+/// The default of `hot_store.registration_retention`.
 const RETENTION: Duration = Duration::ZERO;
 
 /// How the proxy heartbeats and how long the reconciler waits.
-#[derive(Clone, Debug, PartialEq, Eq, Args)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeartbeatFlags {
     /// How often a proxy rewrites its registration in the hot tier, and the longest one such
-    /// call may take. Longer than zero, and at most a sixth of `--departure`.
-    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    /// call may take. Longer than zero, and at most a sixth of `hot_store.departure`.
     pub heartbeat: Duration,
-    /// How long a proxy that is not heard of stays live, less `--deadline-margin`: the value of
-    /// `Proxy::is_live`. Today it only sets that value; no request path reads it yet, and the
-    /// removal of registrations uses `--registration-retention`. At least six times
-    /// `--heartbeat`.
-    #[arg(long, default_value = "60s", value_parser = parse_duration)]
+    /// How long a proxy that is not heard of stays live, less `hot_store.deadline_margin`: the value of
+    /// `Proxy::is_live`. Only the puts on journal entries (active format) read it, to
+    /// admit and to acknowledge; the journal path does not, and the removal of registrations uses
+    /// `hot_store.registration_retention`. At least six times `hot_store.heartbeat`.
     pub departure: Duration,
-    /// The time taken off `--departure` for `Proxy::is_live`, and the time that must be left
-    /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. No
-    /// request path uses either yet. Longer than zero, and at most a quarter of `--departure`.
-    #[arg(long, default_value = "10s", value_parser = parse_duration)]
+    /// The time taken off `hot_store.departure` for `Proxy::is_live`, and the time that must be left
+    /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. Only the
+    /// puts on journal entries (active format) check that time; `Bounded` is used by the
+    /// heartbeat alone. Longer than zero, and at most a quarter of `hot_store.departure`.
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
     /// reconciler sees it, before the reconciler removes it, if the proxy left no journal object.
-    /// At least `--departure`, or zero, which is the default and removes no registration: a proxy
+    /// At least `hot_store.departure`, or zero, which is the default and removes no registration: a proxy
     /// of a release without the heartbeat that reopens a registration written by this release
     /// never rewrites it, so set a time only once no such proxy runs.
-    #[arg(long, default_value = "0s", value_parser = parse_duration)]
     pub registration_retention: Duration,
 }
 
 impl HeartbeatFlags {
-    /// The values `[hot_store]` gives, and the default of each flag for a key it leaves out.
+    /// The values `[hot_store]` gives, and the default of each key it leaves out.
     pub(super) fn from_table(hot: &TierTable) -> Self {
         Self {
             heartbeat: duration(hot.heartbeat, HEARTBEAT),
@@ -58,14 +51,6 @@ impl HeartbeatFlags {
             deadline_margin: duration(hot.deadline_margin, MARGIN),
             registration_retention: duration(hot.registration_retention, RETENTION),
         }
-    }
-
-    /// Writes the values as the keys of `[hot_store]`.
-    pub(super) fn put_in(&self, hot: &mut TierTable) {
-        hot.heartbeat = Some(Dur(self.heartbeat));
-        hot.departure = Some(Dur(self.departure));
-        hot.deadline_margin = Some(Dur(self.deadline_margin));
-        hot.registration_retention = Some(Dur(self.registration_retention));
     }
 
     /// Refuses the values under which a process that is not heard of could still be taken for

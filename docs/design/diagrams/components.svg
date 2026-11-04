@@ -27,11 +27,11 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="105.0" y="380" class="t-m" text-anchor="middle">podman, other OCI pulls</text>
 <rect x="270" y="130" width="140" height="64" rx="5" class="box-o"/>
 <text x="340.0" y="152" class="b" text-anchor="middle">S3 front</text>
-<text x="340.0" y="170" class="t-m" text-anchor="middle">--listen</text>
+<text x="340.0" y="170" class="t-m" text-anchor="middle">s3 interface</text>
 <rect x="270" y="340" width="140" height="76" rx="5" class="box-o"/>
 <text x="340" y="362" class="b" text-anchor="middle">OCI front</text>
 <text x="340" y="380" class="t-m" text-anchor="middle">read-only</text>
-<text x="340" y="398" class="t-m" text-anchor="middle">--oci-listen</text>
+<text x="340" y="398" class="t-m" text-anchor="middle">oci interface</text>
 <rect x="470" y="190" width="240" height="140" rx="5" class="box-o"/>
 <text x="590" y="214" class="b" text-anchor="middle">Proxy</text>
 <text x="590" y="236" class="t-m" text-anchor="middle">one proxy behind both fronts</text>

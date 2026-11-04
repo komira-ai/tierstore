@@ -11,7 +11,7 @@
 //! client (podman, docker, skopeo, crane, containerd) that is given a `Basic` challenge sends the
 //! credentials it holds for the registry (`podman login`, `docker login`) with each request, and
 //! the front checks them against the keys the server already has. The price is that the secret
-//! travels with every request, so `--oci-require-auth` is refused on plain HTTP off loopback
+//! travels with every request, so `params.require_auth` is refused on plain HTTP off loopback
 //! (see `oci_setup`): the front is then served over TLS, or only to its own host.
 //!
 //! # Keys and rights
