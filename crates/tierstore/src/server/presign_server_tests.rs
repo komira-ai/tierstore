@@ -36,7 +36,7 @@ async fn fixture_with(change: impl FnOnce(&mut ServerConfig)) -> Fixture {
     let made = Rig::with(MEBIBYTE, move |config| {
         config.clock = shared;
         config.presign_keys = vec![held];
-        config.read_only_keys = vec![AccessKey::new("AKIDREADER", "reader-secret")];
+        config.read_only_keys = vec![AccessKey::new("AKIDREADER", "reader-secret-0123456789")];
         change(config);
     });
     Fixture {
@@ -369,7 +369,7 @@ async fn the_presigning_key_signs_urls_only_and_other_keys_do_not() {
     assert!(!f.holds("cas/b/x").await);
     for who in [
         AccessKey::new(KEY_ID, super::testing::SECRET),
-        AccessKey::new("AKIDREADER", "reader-secret"),
+        AccessKey::new("AKIDREADER", "reader-secret-0123456789"),
     ] {
         let url = presign_url("PUT", &who, &request("cas/b/x", 300), &[]).unwrap();
         let reply = f.put(&url, b"x").await;
@@ -453,7 +453,7 @@ async fn static_keys_work_unchanged_beside_a_presigning_key() {
     );
     assert_eq!(f.rig.put("cas/a", b"a").await.status, StatusCode::OK);
     assert_eq!(f.rig.get("cas/a", None).await.body, "a");
-    let reader = ("AKIDREADER", "reader-secret");
+    let reader = ("AKIDREADER", "reader-secret-0123456789");
     let read = f
         .rig
         .send_as(reader, "GET", &format!("/{BUCKET}/cas/a"), &[], b"")

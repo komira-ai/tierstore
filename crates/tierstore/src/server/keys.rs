@@ -186,6 +186,30 @@ pub(super) fn ensure_distinct(full: &str, read_only: &[AccessKey]) -> Result<(),
     Ok(())
 }
 
+/// The fewest bytes a secret access key has unless `--min-secret-bytes` says otherwise.
+pub(super) const DEFAULT_MIN_SECRET_BYTES: u32 = 16;
+
+/// Refuses a server with a key whose secret has fewer than `min` bytes. Each key is the flag
+/// of its file, its id and its secret.
+///
+/// # Errors
+/// What is wrong, naming the flag, the id, the length and the minimum (never the secret).
+pub(super) fn ensure_secrets_long_enough<'a>(
+    min: u32,
+    keys: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> Result<(), String> {
+    for (flag, id, secret) in keys {
+        let len = secret.len();
+        if len < min as usize {
+            return Err(format!(
+                "{flag}: the secret of the access key {id:?} has {len} bytes; at least {min} \
+                 are required (--min-secret-bytes)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The keys in the files of the flag `--read-only-key-file`, in the order of the flags.
 ///
 /// # Errors

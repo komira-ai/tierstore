@@ -25,7 +25,7 @@ impl Rig {
     fn new(name: &str) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let key = dir.path().join("key");
-        std::fs::write(&key, "AKID\nsecret\n").expect("write");
+        std::fs::write(&key, "AKID\nsecret-0123456789\n").expect("write");
         std::fs::set_permissions(&key, Permissions::from_mode(0o600)).expect("mode");
         let leaf = leaf(dir.path(), "front", &ca(), vec![ip("127.0.0.1")]);
         let path = dir.path().to_owned();

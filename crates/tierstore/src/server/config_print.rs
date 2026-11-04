@@ -114,6 +114,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         put_min_bytes_per_sec: Some(cli.put_min_bytes_per_sec),
         put_rate_grace: Some(Dur(cli.put_rate_grace)),
         body_idle_timeout: Some(Dur(cli.body_idle_timeout)),
+        min_secret_bytes: Some(cli.min_secret_bytes),
         s3_request_timeout: Some(Dur(cli.s3_request_timeout)),
         backend_check_wait: Some(Dur(cli.backend_check_wait)),
     };

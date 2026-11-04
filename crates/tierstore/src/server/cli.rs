@@ -112,7 +112,7 @@ use super::drain::late_of;
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, server_config};
-use super::keys::read_credentials;
+use super::keys::{DEFAULT_MIN_SECRET_BYTES, read_credentials};
 use super::launch::{Launch, Refused, resolve};
 use super::listen::{bind_all, has_duplicate, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
@@ -412,6 +412,11 @@ pub struct Cli {
     /// logged on stderr, and a drain waits no longer than this for a stalled client.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub body_idle_timeout: Duration,
+    /// The fewest bytes a secret access key may have, whichever kind of key it is (full,
+    /// read-only, presigning, GC, scoped or grant): a server whose key file holds a shorter
+    /// secret does not start.
+    #[arg(long, default_value_t = DEFAULT_MIN_SECRET_BYTES)]
+    pub min_secret_bytes: u32,
     /// Leaves the multipart-completion check of the start-up self-test out, for a reason:
     /// `multipart-conditional=REASON`, where REASON says why the store cannot pass it (for
     /// example `multipart-conditional=store-ignores-if-none-match-on-completion`). It is the

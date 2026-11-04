@@ -12,7 +12,7 @@ use super::ServerConfig;
 use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
 use super::grant::{ensure_distinct as grant_distinct, grant_keys, ids as grant_ids};
-use super::keys::{ensure_distinct, read_credentials, read_only_keys};
+use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
 use super::listen::has_duplicate;
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
 use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scoped_keys};
@@ -52,6 +52,7 @@ pub(super) struct FrontSettings {
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
     pub body_idle_timeout: Duration,
+    pub min_secret_bytes: u32,
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
 }
@@ -79,6 +80,7 @@ impl Cli {
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
             body_idle_timeout: self.body_idle_timeout,
+            min_secret_bytes: self.min_secret_bytes,
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
         }
@@ -121,6 +123,29 @@ pub(super) fn server_config(
     grant_distinct(&others, &grant).map_err(InvalidFlags)?;
     others.extend(grant_ids(&grant));
     presign_distinct(&others, &presign).map_err(InvalidFlags)?;
+    let secrets = std::iter::once(("--access-key-file", key_id.as_str(), secret.as_str()))
+        .chain(
+            read_only
+                .iter()
+                .map(|k| ("--read-only-key-file", k.id.as_str(), k.secret.as_str())),
+        )
+        .chain(
+            presign
+                .iter()
+                .map(|k| ("--presign-key-file", k.id(), k.secret())),
+        )
+        .chain(gc.iter().map(|k| ("--gc-key-file", k.id(), k.secret())))
+        .chain(
+            scoped
+                .iter()
+                .map(|k| ("--scoped-key-file", k.id(), k.secret())),
+        )
+        .chain(
+            grant
+                .iter()
+                .map(|k| ("--grant-key-file", k.id.as_str(), k.secret.as_str())),
+        );
+    ensure_secrets_long_enough(front.min_secret_bytes, secrets).map_err(InvalidFlags)?;
     let mut server = ServerConfig::new(&front.bucket, &key_id, &secret, clock);
     server.read_only_keys = read_only;
     server.presign_keys = presign;

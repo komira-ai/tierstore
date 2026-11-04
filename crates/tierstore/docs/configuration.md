@@ -169,6 +169,7 @@ The keys of each table are those of the storage node and of the build node. What
 | `server.put_min_bytes_per_sec` | `--put-min-bytes-per-sec` | bytes a second, 1024 | the least average rate of a body, counted over the time spent waiting for the client; 0 turns it off |
 | `server.put_rate_grace` | `--put-rate-grace` | duration, `30s` | the time spent waiting for the client before that rate is held |
 | `server.body_idle_timeout` | `--body-idle-timeout` | duration, `30s` | how long a body or an answer may go without a byte; more than zero |
+| `server.min_secret_bytes` | `--min-secret-bytes` | bytes, 16 | the fewest bytes of the secret of any access key (full, read-only, presigning, GC, scoped, grant); a key file with a shorter secret refuses the start. A grant key needs at least 32 whatever this is |
 | `server.s3_request_timeout` | `--s3-request-timeout` | duration, `60s` | the limit on a request to an `s3` tier (both tiers); more than zero. Set it longer than the longest multipart completion your store takes |
 | `server.backend_check_wait` | `--backend-check-wait` | duration, `5m` | how long the start-up self-test asks again of a tier that does not answer; `0s` asks once |
 
