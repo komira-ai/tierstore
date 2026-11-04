@@ -79,3 +79,32 @@ fn a_command_is_read_from_a_code_block_of_either_page() {
     assert_eq!(flags("gh a <f> --b c --d"), ["--b", "--d"]);
     assert_eq!(value_of("gh a <f> --b c --d", "--b"), "c");
 }
+
+/// Whether every `systemctl start tierstore` line of `page` directly follows a
+/// `systemctl daemon-reload` line, and the page has at least one such start.
+fn reloads_before_every_start(page: &str) -> bool {
+    let lines = commands(page, "systemctl", "");
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|&at| lines[at] == "systemctl start tierstore")
+        .collect();
+    !starts.is_empty()
+        && starts
+            .iter()
+            .all(|&at| at > 0 && lines[at - 1] == "systemctl daemon-reload")
+}
+
+#[test]
+fn a_start_block_reloads_the_unit_first_and_a_start_without_a_reload_is_rejected() {
+    // Catches: an install page that starts the service after the edit without a `daemon-reload`
+    // directly before the start.
+    let good = "```sh\nsystemctl daemon-reload\nsystemctl start tierstore\n```\n";
+    let bare = "```sh\nsystemctl start tierstore\n```\n";
+    let apart = "```sh\nsystemctl daemon-reload\nsystemctl status tierstore\nsystemctl start tierstore\n```\n";
+    assert!(reloads_before_every_start(good));
+    assert!(!reloads_before_every_start(bare));
+    assert!(!reloads_before_every_start(apart));
+    assert!(!reloads_before_every_start("no commands here"));
+    for (name, page) in pages() {
+        assert!(reloads_before_every_start(&page), "{name}");
+    }
+}
