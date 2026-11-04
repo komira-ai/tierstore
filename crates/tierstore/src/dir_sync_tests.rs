@@ -406,13 +406,12 @@ async fn a_writer_that_did_not_make_the_subdirectory_syncs_the_root_first() {
     assert_eq!(synced(&seen), [root, inside.clone(), inside]);
 }
 
-/// Asserts that a replacement of a key the previous release made as a file of the root syncs the
-/// subdirectory, which then holds the new body while the old file is still there, and only then
-/// the root, from which the old file is gone.
+/// Asserts that a replacement of a key the previous release made as a file of the root writes that
+/// file in place and syncs the root it is in (after the sync of the root that the first entry
+/// write of a backend makes), with the new body in the file, and makes no file in the subdirectory.
 #[tokio::test]
-async fn a_replacement_of_a_root_file_syncs_the_new_file_before_the_old_is_removed() {
+async fn a_replacement_of_a_root_file_syncs_the_root_holding_the_new_body() {
     let (dir, backend, seen) = recorded(Some("_entries~old"), false);
-    let inside = dir.path().join(".entries");
     let tag = super::sha256(b"shipped");
     let mut file = tag.to_vec();
     file.extend_from_slice(b"shipped");
@@ -425,9 +424,10 @@ async fn a_replacement_of_a_root_file_syncs_the_new_file_before_the_old_is_remov
         .unwrap();
 
     let root = dir.path().to_owned();
-    assert_eq!(synced(&seen), [root.clone(), inside.clone(), root]);
+    assert_eq!(synced(&seen), [root.clone(), root]);
     let seen = seen.lock().unwrap();
-    assert_eq!(seen[1].names, [".lock", "old"]);
-    assert!(seen[1].watched.is_some());
-    assert!(seen[2].watched.is_none());
+    let watched = seen[1].watched.as_ref().unwrap();
+    assert_eq!(watched.len(), TAG_LEN + 5);
+    assert!(watched.ends_with(b"newer"));
+    assert!(!seen[1].names.contains(&"old".to_owned()));
 }

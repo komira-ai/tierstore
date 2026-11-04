@@ -16,7 +16,9 @@ impl Reconciler {
 
     /// Writes `drained` over `drain` if the format says `drain` and has said so for
     /// [`ReconcilerConfig::drain_settle`](super::ReconcilerConfig::drain_settle) (long enough for
-    /// every proxy to read it again, which is all the wait gives: a write that a proxy admitted
+    /// a proxy whose format reads succeed to read it again, which is all the wait gives; a proxy whose
+    /// format reads fail keeps its earlier state, so `drained` does not show that every proxy saw
+    /// the pause: a write that a proxy admitted
     /// before it read `drain` and that is still running is not waited for), and the pass had no
     /// failure: every journal
     /// object listed was read and applied, and each checkpoint stored, since a step that fails
