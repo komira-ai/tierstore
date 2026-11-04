@@ -38,11 +38,14 @@ chmod 0600 access.key
 mkdir hot cold
 ```
 
-Write `tierstore.toml` in the same directory:
+Write `tierstore.toml` in the same directory (`[[interface]]` says what the process serves: here the S3 API on loopback port 9000):
 
 ```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9000"] }
+
 [server]
-listen          = "127.0.0.1:9000"
 proxy_id        = "tierstore-1"
 bucket          = "tierstore"
 access_key_file = "access.key"
@@ -98,8 +101,11 @@ and its default is in the [configuration reference](crates/tierstore/docs/config
 A hot tier on SSD in front of a cold tier on spinning disks, with a read-only key for daemons that only read.
 
 ```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9000"] }
+
 [server]
-listen              = "192.0.2.10:9000"
 proxy_id            = "tierstore-1"
 bucket              = "tierstore"
 access_key_file     = "/etc/tierstore/access.key"
@@ -115,8 +121,8 @@ kind = "dir"
 path = "/srv/tierstore/cold"
 ```
 
-Either tier may instead be `kind = "s3"` with a `bucket`, an `endpoint` and a `credentials_file`. A `[oci]` table with a
-`listen` address adds the read-only OCI registry front.
+Either tier may instead be `kind = "s3"` with a `bucket`, an `endpoint` and a `credentials_file`. An `[[interface]]` of type
+`oci` adds the read-only OCI registry front.
 
 ### Build node
 
@@ -124,8 +130,11 @@ A read cache on local disk in front of one upstream, with no hot tier. The upstr
 read-only key, and `[[policy]]` says which key prefixes are kept.
 
 ```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9400"] }
+
 [server]
-listen          = "127.0.0.1:9400"
 proxy_id        = "tierstore-cache-1"
 bucket          = "tierstore"
 access_key_file = "/etc/tierstore-cache/access.key"

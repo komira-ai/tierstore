@@ -1,10 +1,10 @@
-//! Repeated `--listen` and `--oci-listen`: one server over every address, in this process and as
-//! the binary.
+//! Several addresses of the `s3` and `oci` interfaces: one server over every address, in this
+//! process and as the binary.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use clap::Parser;
 use reqwest::Client;
 use rustix::process::Signal;
 use tierstore::server::Drained;
@@ -12,8 +12,8 @@ use tierstore::server::cli::{Addresses, Cli, run_serving};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
-use crate::binary::start;
-use crate::files::Files;
+use crate::binary::{run, start};
+use crate::files::{Files, Tables, oci_interface};
 
 /// Whether this host has IPv6 loopback, decided by trying to bind it.
 fn has_v6() -> bool {
@@ -35,38 +35,33 @@ fn client() -> Client {
     Client::builder().pool_max_idle_per_host(0).build().unwrap()
 }
 
-fn parse(flags: Vec<String>) -> Cli {
-    let argv = std::iter::once("tierstore".to_owned()).chain(flags);
-    Cli::try_parse_from(argv).unwrap()
+/// The settings of a start with these tables, with a drain that waits no longer than it must.
+fn cli(files: &Files, tables: &Tables) -> Cli {
+    let mut cli = Cli::from_config_text(&files.text(tables)).expect("a file");
+    cli.drain_lb_wait = Duration::from_millis(50);
+    cli
 }
 
-/// How many times `flag` is in `flags`.
-fn given(flags: &[String], flag: &str) -> usize {
-    flags.iter().filter(|word| *word == flag).count()
-}
-
-/// Asserts that `run_serving` binds a socket for each `--listen` and each `--oci-listen`, says
-/// every address to `ready` (the first as `s3` and `oci`), serves the S3 and the registry calls on
-/// all of them, and that the stop ends the one drain with nothing cut and closes every socket.
+/// Asserts that `run_serving` binds a socket for each address of the `s3` interfaces and of the
+/// `oci` interfaces, says every address to `ready` (the first as `s3` and `oci`), serves the S3
+/// and the registry calls on all of them, and that the stop ends the one drain with nothing cut and
+/// closes every socket.
 #[tokio::test]
-async fn every_listen_flag_is_served_and_drained_together() {
+async fn every_address_is_served_and_drained_together() {
     let files = Files::new("listeners-all");
-    let mut extra = vec![
-        "--drain-lb-wait",
-        "50ms",
-        "--listen",
-        "0.0.0.0:0",
-        "--oci-listen",
-        "127.0.0.1:0",
-        "--oci-listen",
-        "0.0.0.0:0",
-    ];
+    let mut s3 = vec!["127.0.0.1:0", "0.0.0.0:0"];
+    let mut oci = vec!["127.0.0.1:0", "0.0.0.0:0"];
     if has_v6() {
-        extra.extend(["--listen", "[::1]:0", "--oci-listen", "[::1]:0"]);
+        s3.push("[::1]:0");
+        oci.push("[::1]:0");
     }
-    let flags = files.flags(&extra);
-    let (s3_asked, oci_asked) = (given(&flags, "--listen"), given(&flags, "--oci-listen"));
-    let cli = parse(flags);
+    let tables = Tables {
+        listen: s3.iter().map(|address| (*address).to_owned()).collect(),
+        more: oci_interface(&oci, ""),
+        ..Tables::default()
+    };
+    let (s3_asked, oci_asked) = (s3.len(), oci.len());
+    let cli = cli(&files, &tables);
     let (stop, stopped) = oneshot::channel::<()>();
     let (told, bound) = oneshot::channel::<Addresses>();
     let running = run_serving(
@@ -106,24 +101,54 @@ async fn every_listen_flag_is_served_and_drained_together() {
     }
 }
 
-/// Asserts that an address given twice is refused before anything is bound or served, for
-/// `--listen` and for `--oci-listen`, with the flag in the message and the address not in it.
-#[tokio::test]
-async fn an_address_given_twice_is_refused() {
+/// Asserts that an address given twice is refused before anything is bound or served, for an
+/// `s3` interface and for an `oci` one, with status 2, nothing on stdout and the exact message
+/// that names the entry, and that two entries on one address are refused naming both.
+#[test]
+fn an_address_given_twice_is_refused() {
     let files = Files::new("listeners-twice");
-    // `Files::flags` has `--listen 127.0.0.1:0` already.
-    let again = ["--listen", "127.0.0.1:0"];
-    let twice = ["--oci-listen", "127.0.0.1:0", "--oci-listen", "127.0.0.1:0"];
-    for (flag, extra) in [("--listen", &again[..]), ("--oci-listen", &twice[..])] {
-        let mut words = vec!["--drain-lb-wait", "50ms"];
-        words.extend(extra);
-        let cli = parse(files.flags(&words));
-        let refused = run_serving(&cli, async {}, |_| {}).await.err();
-        let why = refused.expect("a refused start").to_string();
-        assert!(why.contains(flag), "{why}");
-        assert!(why.contains("the same address twice"), "{why}");
-        assert!(!why.contains("127.0.0.1"), "{why}");
+    let twice = Tables {
+        listen: vec!["127.0.0.1:7".to_owned(), "127.0.0.1:7".to_owned()],
+        ..Tables::default()
+    };
+    let oci_twice = Tables {
+        more: oci_interface(&["127.0.0.1:6", "127.0.0.1:6"], ""),
+        listen: vec!["127.0.0.1:5".to_owned()],
+        ..Tables::default()
+    };
+    let entries = Tables {
+        more: oci_interface(&["127.0.0.1:0"], ""),
+        listen: vec!["127.0.0.1:5".to_owned()],
+        ..Tables::default()
+    };
+    let oci_on_the_s3_port = Tables {
+        more: oci_interface(&["127.0.0.1:5"], ""),
+        listen: vec!["127.0.0.1:5".to_owned()],
+        ..Tables::default()
+    };
+    let cases = [
+        (
+            twice,
+            "interface[0].params: the address 127.0.0.1:7 is listed twice",
+        ),
+        (
+            oci_twice,
+            "interface[1].params: the address 127.0.0.1:6 is listed twice",
+        ),
+        (
+            oci_on_the_s3_port,
+            "interface[1].params: the address 127.0.0.1:5 is already used by interface[0]",
+        ),
+    ];
+    for (tables, want) in cases {
+        let flags = files.flags_of(&tables, &["--drain-lb-wait", "50ms"]);
+        let (code, out, err) = run(&flags);
+        assert_eq!((code, out.as_str()), (2, ""), "{want}");
+        let expected = format!("tierstore: config file {}: {want}\n", flags[1]);
+        assert_eq!(err, expected);
     }
+    // Both entries on different addresses are fine.
+    assert!(Cli::from_config_text(&files.text(&entries)).is_ok());
 }
 
 /// Asserts that the binary's start line names every address of the S3 front, separated by
@@ -132,8 +157,11 @@ async fn an_address_given_twice_is_refused() {
 #[tokio::test]
 async fn the_start_line_names_every_address() {
     let files = Files::new("listeners-line");
-    let flags = files.flags(&["--listen", "0.0.0.0:0", "--drain-lb-wait", "50ms"]);
-    let mut running = start(&flags);
+    let tables = Tables {
+        listen: vec!["127.0.0.1:0".to_owned(), "0.0.0.0:0".to_owned()],
+        ..Tables::default()
+    };
+    let mut running = start(&files.flags_of(&tables, &["--drain-lb-wait", "50ms"]));
     let named: Vec<SocketAddr> = running
         .addr()
         .split(',')
@@ -150,9 +178,9 @@ async fn the_start_line_names_every_address() {
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that a start given the wildcard of both families on one port, for `--listen` and for
-/// `--oci-listen`, is refused when the IPv4 one is taken, and is never ready: the refusal names
-/// `0.0.0.0:P`, the address that is taken, so the IPv6 socket on that port, asked first, was
+/// Asserts that a start given the wildcard of both families on one port, for an `s3` interface
+/// and for an `oci` one, is refused when the IPv4 one is taken, and is never ready: the refusal
+/// names `0.0.0.0:P`, the address that is taken, so the IPv6 socket on that port, asked first, was
 /// bound (`IPV6_V6ONLY`; without it the refusal would name `[::]:P`, its socket holding the IPv4
 /// port too). It would catch a start that serves on one family when the other cannot be bound,
 /// which refuses the redirected connections of the other.
@@ -168,21 +196,22 @@ async fn a_start_that_cannot_bind_both_wildcards_is_refused() {
     let taken = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
     let port = taken.local_addr().unwrap().port();
     let (v6, v4) = (format!("[::]:{port}"), format!("0.0.0.0:{port}"));
-    for flag in ["--listen", "--oci-listen"] {
-        let words = [
-            "--drain-lb-wait",
-            "50ms",
-            flag,
-            v6.as_str(),
-            flag,
-            v4.as_str(),
-        ];
-        let cli = parse(files.flags(&words));
+    let both = [v6.as_str(), v4.as_str()];
+    let s3 = Tables {
+        listen: both.map(str::to_owned).to_vec(),
+        ..Tables::default()
+    };
+    let oci = Tables {
+        more: oci_interface(&both, ""),
+        ..Tables::default()
+    };
+    for (kind, tables) in [("s3", s3), ("oci", oci)] {
+        let cli = cli(&files, &tables);
         let ready = AtomicBool::new(false);
         let told = |_: Addresses| ready.store(true, Ordering::SeqCst);
         let refused = run_serving(&cli, async {}, told).await.err();
         let why = refused.expect("a refused start").to_string();
-        assert!(why.starts_with(&format!("binding {v4}: ")), "{flag}: {why}");
-        assert!(!ready.load(Ordering::SeqCst), "{flag}");
+        assert!(why.starts_with(&format!("binding {v4}: ")), "{kind}: {why}");
+        assert!(!ready.load(Ordering::SeqCst), "{kind}");
     }
 }

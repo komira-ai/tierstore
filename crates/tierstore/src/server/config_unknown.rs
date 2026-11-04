@@ -13,7 +13,7 @@ use serde::de::{self, DeserializeOwned, Deserializer, Error as _, Visitor};
 
 use super::config::{File, ServerTable, TierTable};
 use super::config_cache::LocalCacheTable;
-use super::config_oci::OciTable;
+use super::config_interface::OciTable;
 use super::config_policy::Policy;
 
 /// A deserializer that is asked for a struct and answers with the names of its fields, which is
@@ -80,6 +80,8 @@ pub(super) fn unknown_key_warnings(file: &toml::Table) -> Vec<String> {
             "oci" => fields_of::<OciTable>(),
             "local_cache" => fields_of::<LocalCacheTable>(),
             "policy" => fields_of::<Policy>(),
+            // An `[[interface]]` entry keeps refusing a key it does not have: see `config_interface`.
+            "interface" => continue,
             _ => &[],
         };
         if top.contains(&name.as_str()) {

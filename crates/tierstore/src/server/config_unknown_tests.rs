@@ -3,7 +3,7 @@
 use super::{fields_of, unknown_key_warnings};
 use crate::server::config::{TierTable, from_text};
 use crate::server::config_policy::Policy;
-use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
+use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, oci_interface};
 
 /// The warnings for the file `text`.
 fn warnings(text: &str) -> Vec<String> {
@@ -31,7 +31,6 @@ fn an_unknown_key_is_one_warning_naming_it_and_the_node_starts() {
         ("[server]", "server.new_knob"),
         ("[hot_store]", "hot_store.new_knob"),
         ("[cold_store]", "cold_store.new_knob"),
-        ("[oci]", "oci.new_knob"),
     ];
     let plain = from_text(GOLDEN, DEFAULTS).unwrap();
     for (table, key) in cases {
@@ -39,6 +38,22 @@ fn an_unknown_key_is_one_warning_naming_it_and_the_node_starts() {
         assert_eq!(warnings(&text), [warning(key)], "{table}");
         assert_eq!(from_text(&text, DEFAULTS).unwrap(), plain, "{table}");
     }
+}
+
+/// Asserts that the `[oci]` table of the release before, which is still read, warns about a key it
+/// does not have, and that an `[[interface]]` entry is not walked: it refuses such a key on its own
+/// (see `config_interface`), so a warning for it would be a second word for the same fault.
+#[test]
+fn the_oci_table_warns_and_an_interface_entry_is_left_to_its_own_refusal() {
+    let oci = "\n[oci]\nlisten = \"127.0.0.1:5000\"\nnew_knob = 1\n";
+    assert_eq!(
+        warnings(&format!("{MINIMAL}{oci}")),
+        [warning("oci.new_knob")]
+    );
+    let entry = oci_interface("127.0.0.1:5000", ", bogus = 1");
+    assert_eq!(warnings(&format!("{MINIMAL}{entry}")), Vec::<String>::new());
+    let why = from_text(&format!("{MINIMAL}{entry}"), DEFAULTS).unwrap_err();
+    assert!(why.to_string().contains("bogus"), "{why}");
 }
 
 /// Asserts the top level and the nested forms: a key outside every table, a table the release does

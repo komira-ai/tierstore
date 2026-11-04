@@ -2,24 +2,22 @@
 
 use super::*;
 
-/// Asserts that `--skip-backend-check` takes `multipart-conditional` and a reason, may be given
-/// more than once, trims the reason and keeps a `=` inside it; that a value with no `=` or an
+/// Asserts that `cold_store.skip_checks` takes `multipart-conditional` and a reason, may list
+/// more than one, trims the reason and keeps a `=` inside it; that a value with no `=` or an
 /// unknown check is refused with a message that lists the checks; that a blank reason is refused
 /// with a message that says a reason is needed; and that every check but
-/// `multipart-conditional` is refused as a usage error (exit status 2), whatever its reason.
+/// `multipart-conditional` is refused when the file is read, whatever its reason.
 #[test]
 fn only_the_multipart_check_can_be_skipped_and_with_a_reason() {
-    let mut args = flags("key", &[]);
-    args.extend(
-        [
-            "--skip-backend-check",
-            "multipart-conditional= store ignores it on completion ",
-            "--skip-backend-check",
-            "multipart-conditional=a=b",
-        ]
-        .map(str::to_owned),
+    let with_skips = |list: &str| {
+        let cold = "[cold_store]\nkind = \"memory\"";
+        assert!(MINIMAL.contains(cold));
+        MINIMAL.replacen(cold, &format!("{cold}\nskip_checks = [{list}]"), 1)
+    };
+    let given = with_skips(
+        "\"multipart-conditional= store ignores it on completion \", \"multipart-conditional=a=b\"",
     );
-    let cli = Cli::try_parse_from(args).unwrap();
+    let cli = Cli::from_config_text(&given).unwrap();
     let want = [
         SkippedCheck {
             check: Check::MultipartConditional,
@@ -49,8 +47,10 @@ fn only_the_multipart_check_can_be_skipped_and_with_a_reason() {
         let why = parse_skip(&value).unwrap_err();
         assert!(why.contains("cannot be skipped"), "{value}: {why}");
         assert!(why.contains(check.name()), "{value}: {why}");
-        let refused = Cli::try_parse_from(flags("key", &[("--skip-backend-check", &value)]));
-        assert_eq!(refused.unwrap_err().exit_code(), 2, "{value}");
+        let refused = Cli::from_config_text(&with_skips(&format!("\"{value}\"")));
+        let text = refused.unwrap_err().to_string();
+        let expected = "cold_store.skip_checks: each is CHECK=REASON; only multipart-conditional can be skipped, and it needs a reason";
+        assert_eq!(text, expected, "{value}");
     }
 }
 

@@ -1,12 +1,12 @@
 //! The `[[policy]]` tables of the configuration file and the rules every shape applies to them.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::config::{ConfigError, invalid};
 use crate::journal::RESERVED_PREFIXES;
 
 /// `[[policy]]`: what is done with the keys under a prefix.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 pub(super) struct Policy {
     /// The keys it is about: empty for all the rest, or ending in `/`.
     pub prefix: String,
