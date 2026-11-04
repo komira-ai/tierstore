@@ -31,16 +31,6 @@
 //!   listing follows the continuation tokens. It does the multipart calls too: the chunks of
 //!   a part are sent to the store as they arrive, never collected, and a completion is
 //!   create-only.
-//! - [`self_test`] asks a backend the questions its guarantees rest on (a create-only put that
-//!   refuses a key that exists, a replace on the right content tag only, a ranged read that
-//!   gives the range, a head, a listing that pages, and on the cold tier a create-only
-//!   completion) under a probe key in `_tiering/selftest/`, and names the first one it answers
-//!   wrongly (a [`SelfTestError::Violation`]; a store it could not ask is
-//!   [`SelfTestError::Unreachable`], and one that is full is not in doubt). The `tierstore`
-//!   binary runs it on both tiers and refuses to start if one answers wrongly.
-//!   [`settle_conditional_delete`] then asks a tier once how it does [`Backend::delete_if_match`]
-//!   (an S3 tier: `If-Match` on the DELETE where the store enforces it, else a read of the tag
-//!   and a delete) and never fails the start.
 //! - [`Proxy`] is a store over a hot and a cold backend that is itself a [`Backend`]. Any
 //!   number of proxies (one per node, each with its own id) work over the same two backends,
 //!   and none needs state for correctness. A get reads the hot tier, else the cold tier, and
@@ -59,10 +49,9 @@
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. Only the heartbeat
-//!   calls use [`Bounded`]; the put on a journal entry (see [`Entries`]), once the format is
-//!   active, checks the [`Deadline`] to be admitted, to be acknowledged and to clean up. The
-//!   journal path of a put, a delete and a read uses neither yet.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. The deletes made on
+//!   entries (format active) send their calls through [`Bounded`]; the puts made on entries check
+//!   the [`Deadline`] themselves; no other request path does either.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
@@ -76,8 +65,8 @@
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. The puts of a [`Proxy`] whose format is active, and the
-//!   [`EntryReconciler`], call them.
+//!   body is an [`Entry`]. So far only the puts and deletes of a [`Proxy`] whose format is active and the
+//!   [`EntryReconciler`] call them.
 //! - The [`EntryReconciler`] works on the entries in place of the journals: it holds the lease,
 //!   lists `_entries/`, copies each landed put to the cold tier after it has taken the entry,
 //!   finishes the deletes handed over to it, reaps the entries of owners that departed, and adopts
@@ -157,9 +146,6 @@ mod registrations;
 mod registrations_tests;
 #[cfg(feature = "s3")]
 pub mod s3;
-mod selftest;
-#[cfg(test)]
-mod selftest_tests;
 #[cfg(feature = "server")]
 pub mod server;
 mod sleeper;
@@ -190,9 +176,5 @@ pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
-pub use selftest::{
-    Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
-    settle_conditional_delete, sweep_probes,
-};
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{Proxy, ProxyConfig};
+pub use tiered::{DeleteWait, Proxy, ProxyConfig};

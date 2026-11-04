@@ -1,9 +1,10 @@
 //! The puts of a proxy whose format is active (`WriteMode::Entries`): every put, held or
 //! streamed, presigned or the completion of a multipart upload, is made on the journal entry of its
 //! key. The entry decides which of several puts of one key wins. The entry reconciler
-//! (`EntryReconciler`) copies the object to the cold tier, removes the entry, and reaps the ones
-//! left behind by a proxy that departed; no binary starts it yet, so until the activation wiring
-//! lands the entries a put leaves stay where they are.
+//! (`EntryReconciler`, implemented in the library) copies the object to the cold tier, removes the
+//! entry, and reaps the ones left behind by a proxy that departed. The binary does not start it
+//! yet, so until the activation wiring lands the entries a put leaves in a running server stay
+//! where they are.
 //!
 //! A put, in order:
 //!
@@ -58,7 +59,7 @@ fn landing(error: Error) -> Failed {
 }
 
 /// A refusal that a client retries.
-fn retry(key: &str, why: &str) -> Error {
+pub(super) fn retry(key: &str, why: &str) -> Error {
     Error::Unavailable(format!("{why} for {key}; retry later"))
 }
 
@@ -94,7 +95,7 @@ impl Inner {
     }
 
     /// Fails with [`Error::Unavailable`] unless this proxy may destroy and acknowledge now.
-    fn require_live(&self, key: &str) -> Result<(), Error> {
+    pub(super) fn require_live(&self, key: &str) -> Result<(), Error> {
         if self.heartbeat.deadline.allows_start() {
             Ok(())
         } else {

@@ -1,6 +1,6 @@
 //! [`S3Backend`]: a [`Backend`] over the S3 client of `objstore-s3` (feature `s3`).
 //!
-//! The backend is an adapter and keeps one bit of state (how `delete_if_match` is done, below):
+//! The backend is an adapter and keeps one bit of configuration (how `delete_if_match` is done, below):
 //! each call of the trait is the S3 request of the same meaning, sent by the client the
 //! workspace already has (path-style addressing, SigV4, a timeout on every request), and each
 //! answer is read into this crate's [`Error`].
@@ -49,15 +49,15 @@
 //!   so at most one part and one chunk are held. It is sent once. The tag
 //!   that does not match is [`Error::PreconditionFailed`] and no object is [`Error::NotFound`].
 //! - `delete` is a DELETE; a 404 is a success.
-//! - `delete_if_match` is best effort, in one of two ways, which
-//!   [`Backend::settle_conditional_delete`] picks once at start-up by asking the store. Where the store enforces `If-Match` on a DELETE
-//!   (Amazon S3 does) it is a DELETE with `If-Match: "<tag>"`: a 412 is
-//!   [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. Where it does not (some
-//!   stores take the header and delete anyway) it is a HEAD, a comparison of the tags, and a
-//!   plain DELETE, which leaves a window in which another writer's replacement of the key is
-//!   deleted. Until the store has been asked it is the second way, which is right on every
-//!   store, only less tight. A store that answers 404 or 412 for a key that is absent is the
-//!   same to a caller: not the object it read.
+//! - `delete_if_match` is best effort, in one of two ways, which the tier's `conditional_delete`
+//!   setting picks ([`S3Backend::with_conditional_delete`]; the backend does not ask the store).
+//!   When it is on (set it for a store that enforces `If-Match` on a DELETE, as Amazon S3 does) it
+//!   is a DELETE with `If-Match: "<tag>"`: a 412 is [`Error::PreconditionFailed`] and a 404 is
+//!   [`Error::NotFound`]. When it is off, the default, it is a HEAD, a comparison of the tags,
+//!   and a plain DELETE, which leaves a window in which another writer's replacement of the key
+//!   is deleted; that is right on every store, only less tight. A store that takes the header
+//!   and deletes anyway must have the setting off. A store that answers 404 or 412 for a key
+//!   that is absent is the same to a caller: not the object it read.
 //! - `list` and `list_page` are ListObjectsV2 with `prefix`, a `max-keys` of at most 1000,
 //!   `start-after` on the first request and the `continuation-token` of each answer on the
 //!   next. A page that repeats the token it was sent ends the listing with an
@@ -128,7 +128,6 @@
 //! `request_timeout` is cut, as an [`Error::Unavailable`].
 
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -164,9 +163,9 @@ const INVALID_PART_CODES: [&str; 3] = ["InvalidPart", "InvalidPartOrder", "Entit
 #[derive(Debug)]
 pub struct S3Backend {
     store: S3Store,
-    /// Whether the store was found to enforce `If-Match` on a DELETE
-    /// ([`Backend::settle_conditional_delete`]); until then `delete_if_match` reads the tag first.
-    if_match_delete: AtomicBool,
+    /// Whether `delete_if_match` sends `If-Match` with the DELETE; otherwise it reads the tag
+    /// first. Set from the tier's `conditional_delete` setting; off unless set.
+    conditional_delete: bool,
 }
 
 impl S3Backend {
@@ -193,8 +192,17 @@ impl S3Backend {
         };
         Ok(Self {
             store: S3Store::new_tuned(config, tuning)?,
-            if_match_delete: AtomicBool::new(false),
+            conditional_delete: false,
         })
+    }
+
+    /// This backend with `delete_if_match` sent as a DELETE with `If-Match` (`true`), or as a read
+    /// of the tag before a plain DELETE (`false`, as [`S3Backend::new`] makes it). The store is
+    /// not asked which it enforces: the caller says, from what its store documents.
+    #[must_use]
+    pub fn with_conditional_delete(mut self, enabled: bool) -> Self {
+        self.conditional_delete = enabled;
+        self
     }
 
     /// The bytes of `range` of the object, from the client's ranged read.
@@ -264,47 +272,6 @@ impl S3Backend {
         Ok((stream::empty().boxed(), Some(head.etag)))
     }
 
-    /// What the store does with a DELETE of `object` that carries `If-Match`, asked of the
-    /// object this writes: `Ok(true)` if the store enforces the header (a wrong tag refused
-    /// with 412, the object still there after it, the right tag accepted, the object gone
-    /// after it), `Ok(false)` if it answered and did otherwise, and the [`ProbeError`] naming
-    /// the request if one failed in a way that says nothing of the header, so that the store
-    /// was not asked.
-    async fn enforces_if_match(&self, object: &ObjectKey) -> Result<bool, ProbeError> {
-        let store = &self.store;
-        let probe = Bytes::from_static(b"probe");
-        let put = store.put_new(object, probe, None).await;
-        put.map_err(|e| ProbeError::request("write", e))?;
-        let head = store.head(object).await;
-        let head = head.map_err(|e| ProbeError::request("read of the tag", e))?;
-        let tag = head.etag;
-        match store.delete_if_match(object, "\"wrong\"").await {
-            Err(ObjectStoreError::Service { status: 412, .. }) => {}
-            Ok(()) => return Ok(false),
-            Err(other) => return Err(ProbeError::request("delete with a wrong tag", other)),
-        }
-        let after_wrong = self.tag_of(object, "read after the wrong tag").await?;
-        let kept = after_wrong == Some(tag.clone());
-        let right = store.delete_if_match(object, &tag).await;
-        right.map_err(|e| ProbeError::request("delete with the right tag", e))?;
-        let after_right = self.tag_of(object, "read after the right tag").await?;
-        Ok([kept, after_right.is_none()] == [true; 2])
-    }
-
-    /// The tag of `object`, or `None` if there is no such object, or the [`ProbeError`] of any
-    /// other failure, naming the `stage` of the probe it was.
-    async fn tag_of(
-        &self,
-        object: &ObjectKey,
-        stage: &'static str,
-    ) -> Result<Option<String>, ProbeError> {
-        match self.store.head(object).await {
-            Ok(head) => Ok(Some(head.etag)),
-            Err(ObjectStoreError::NotFound(_)) => Ok(None),
-            Err(other) => Err(ProbeError::request(stage, other)),
-        }
-    }
-
     /// At most `limit` of the objects under `prefix` that sort after `start_after`, in key
     /// order, asking for a page of the client at a time.
     async fn listed(
@@ -342,26 +309,6 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     let room = LAST_POSITION.saturating_sub(range.offset());
     let len = range.size().min(room);
     objstore_s3::ByteRange::new(range.offset(), len)
-}
-
-/// Why the probe of the conditional delete could not ask the store.
-#[derive(Debug, thiserror::Error)]
-enum ProbeError {
-    /// The probe key cannot be named, so no request was sent.
-    #[error("{0}")]
-    Key(Error),
-    /// The request of the named stage of the probe failed.
-    #[error("{stage}: {source}")]
-    Request {
-        stage: &'static str,
-        source: ObjectStoreError,
-    },
-}
-
-impl ProbeError {
-    fn request(stage: &'static str, source: ObjectStoreError) -> Self {
-        Self::Request { stage, source }
-    }
 }
 
 /// The key as the client names it, or [`Error::Other`] if it cannot be named.
@@ -721,7 +668,7 @@ impl Backend for S3Backend {
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
         let object = object_key(key)?;
-        if self.if_match_delete.load(Ordering::Acquire) {
+        if self.conditional_delete {
             let etag = quoted(etag);
             let delete = self.store.delete_if_match(&object, &etag);
             return delete.await.map_err(|e| map_error(e, key));
@@ -733,25 +680,6 @@ impl Backend for S3Backend {
         }
         let delete = self.store.delete(&object);
         delete.await.map_err(|e| map_error(e, key))
-    }
-
-    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
-        let object = object_key(key);
-        let asked = match &object {
-            Ok(object) => {
-                let asked = self.enforces_if_match(object).await;
-                let _ = self.store.delete(object).await;
-                asked
-            }
-            Err(why) => Err(ProbeError::Key(why.clone())),
-        };
-        let enforced = matches!(asked, Ok(true));
-        self.if_match_delete.store(enforced, Ordering::Release);
-        Some(match asked {
-            Ok(true) => "if-match".to_owned(),
-            Ok(false) => "head-then-delete".to_owned(),
-            Err(why) => format!("head-then-delete (could not ask: {why})"),
-        })
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {

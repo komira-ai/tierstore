@@ -22,10 +22,10 @@
 //!   The keys of the release before, `server.listen` and the `[oci]` table, are still read and
 //!   make an `s3` and an `oci` interface (see [`config_interface`](super::config_interface)).
 //! - `[server]`: the id, the bucket and region, the key files, the limits on requests and
-//!   bodies, and the start-up self-test's wait.
+//!   bodies.
 //! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
 //!   the reconciler and its lease.
-//! - `[cold_store]`: the cold tier, and the start-up check it may skip.
+//! - `[cold_store]`: the cold tier.
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
 //! - `[[policy]]`: the per-prefix settings. With `[local_cache]` `cache = true` keeps the keys
@@ -46,7 +46,7 @@ use serde::Deserialize;
 
 use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_skip,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
@@ -54,6 +54,7 @@ use super::config_combined::{CombinedSettings, combined};
 use super::config_interface::{InterfaceTable, Interfaces, OciTable, interfaces, with_legacy};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
+pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::{FrontSettings, S3Tls};
@@ -119,6 +120,11 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("put-min-bytes-per-sec", &["server.put_min_bytes_per_sec"]),
     ("put-rate-grace", &["server.put_rate_grace"]),
     ("body-idle-timeout", &["server.body_idle_timeout"]),
+    ("hot-conditional-delete", &["hot_store.conditional_delete"]),
+    (
+        "cold-conditional-delete",
+        &["cold_store.conditional_delete"],
+    ),
     ("min-secret-bytes", &["server.min_secret_bytes"]),
     ("skip-backend-check", &["cold_store.skip_checks"]),
     ("backend-check-wait", &["server.backend_check_wait"]),
@@ -285,6 +291,9 @@ pub(super) struct ServerTable {
     pub body_idle_timeout: Option<Dur>,
     pub min_secret_bytes: Option<u32>,
     pub s3_request_timeout: Option<Dur>,
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
+    #[serde(default)]
     pub backend_check_wait: Option<Dur>,
     pub s3_connect_timeout: Option<Dur>,
     pub s3_min_bytes_per_sec: Option<u64>,
@@ -309,6 +318,11 @@ pub(super) struct TierTable {
     pub region: Option<String>,
     #[serde(default)]
     pub credentials_file: Option<PathBuf>,
+    /// Whether a conditional delete is sent as a DELETE with `If-Match`; the default is the one
+    /// of the kind (`true` for `memory` and `dir`, `false` for `s3`), and `false` is refused for
+    /// the two that delete in one atomic step.
+    #[serde(default)]
+    pub conditional_delete: Option<bool>,
     // Only `[hot_store]` has these.
     #[serde(default)]
     pub budget: Option<Size>,
@@ -358,6 +372,8 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
     #[serde(default)]
     pub skip_checks: Option<Vec<String>>,
     /// Only the `[cold_store]` of a build node: the upstream, as a list of one in place of
@@ -407,55 +423,6 @@ pub(super) fn within<T: PartialOrd + fmt::Display>(
 /// The duration of a key, or the default of its flag.
 pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
     value.map_or(default, |dur| dur.0)
-}
-
-/// What a tier table says about the tier: the spec of `--hot` or `--cold`, and the endpoint,
-/// region and credentials file of its S3 flags.
-#[derive(Debug)]
-pub(super) struct TierParts {
-    pub spec: String,
-    pub endpoint: Option<String>,
-    pub region: Option<String>,
-    pub credentials_file: Option<PathBuf>,
-}
-
-/// The tier `table` names, if its keys fit its kind.
-pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigError> {
-    let s3_only = [
-        ("endpoint", table.endpoint.is_some()),
-        ("region", table.region.is_some()),
-        ("credentials_file", table.credentials_file.is_some()),
-    ];
-    let bucket = ("bucket", table.bucket.is_some());
-    let path = ("path", table.path.is_some());
-    let spec = match (table.kind, &table.path, &table.bucket) {
-        (Kind::Memory, ..) => {
-            let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2]];
-            refuse(name, "not for kind \"memory\"", &keys)?;
-            "memory".to_owned()
-        }
-        (Kind::Dir, path_value, _) => {
-            let keys = [bucket, s3_only[0], s3_only[1], s3_only[2]];
-            refuse(name, "not for kind \"dir\"", &keys)?;
-            format!(
-                "dir:{}",
-                require(name, "path", path_value.as_ref())?.display()
-            )
-        }
-        (Kind::S3, _, bucket_value) => {
-            refuse(name, "not for kind \"s3\"", &[path])?;
-            let bucket = require(name, "bucket", bucket_value.as_ref())?;
-            require(name, "endpoint", table.endpoint.as_ref())?;
-            require(name, "credentials_file", table.credentials_file.as_ref())?;
-            format!("s3:{bucket}")
-        }
-    };
-    Ok(TierParts {
-        spec,
-        endpoint: table.endpoint.clone(),
-        region: table.region.clone(),
-        credentials_file: table.credentials_file.clone(),
-    })
 }
 
 /// The settings of the OCI front, as the `oci` interfaces make them: the values the front checks
@@ -617,22 +584,7 @@ pub(super) fn storage(
         &[("endpoints", cold.endpoints.is_some())],
     )?;
     let skipping = [("skip_checks", hot.skip_checks.is_some())];
-    refuse(
-        "hot_store",
-        "only [cold_store] has it: the check it skips runs there",
-        &skipping,
-    )?;
-    let mut skip_backend_check: Vec<SkippedCheck> = Vec::new();
-    for text in cold.skip_checks.iter().flatten() {
-        match parse_skip(text) {
-            Ok(skipped) => skip_backend_check.push(skipped),
-            // Not the reason of the flag: it holds the text, free text that is never repeated.
-            Err(_) => {
-                let why = "each is CHECK=REASON; only multipart-conditional can be skipped, and it needs a reason";
-                return Err(invalid("cold_store.skip_checks", why));
-            }
-        }
-    }
+    refuse("hot_store", "only [cold_store] has it", &skipping)?;
     let hot_parts = tier("hot_store", &hot)?;
     let cold_parts = tier("cold_store", &cold)?;
     let budget = require("hot_store", "budget", hot.budget)?.0;
@@ -666,6 +618,8 @@ pub(super) fn storage(
         cold_endpoint: cold_parts.endpoint,
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
+        hot_conditional_delete: hot_parts.conditional_delete,
+        cold_conditional_delete: cold_parts.conditional_delete,
         s3_request_timeout: shared.s3_request_timeout,
         s3_client: shared.s3_client,
         hot_tuning,
@@ -701,7 +655,7 @@ pub(super) fn storage(
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
         min_secret_bytes: front.min_secret_bytes,
-        skip_backend_check,
+        skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
         oci_tls_cert: oci.tls_cert,
@@ -720,7 +674,7 @@ pub(super) struct Shared {
     pub front: FrontSettings,
     pub s3_request_timeout: Duration,
     pub s3_client: S3Client,
-    pub backend_check_wait: Duration,
+    pub backend_check_wait: Option<Duration>,
 }
 
 /// The `server.slot` key: a port, so not zero (a number past 65535 does not parse as one).
@@ -792,7 +746,7 @@ pub(super) fn front_of(
         front,
         s3_request_timeout: duration(server.s3_request_timeout, Duration::from_secs(60)),
         s3_client,
-        backend_check_wait: duration(server.backend_check_wait, Duration::from_secs(300)),
+        backend_check_wait: server.backend_check_wait.map(|wait| wait.0),
     })
 }
 

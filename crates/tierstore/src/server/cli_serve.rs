@@ -13,7 +13,6 @@ use tokio::sync::Notify;
 use crate::{Backend, Proxy, Reconciler, TokioSleeper};
 
 use super::cli::{Cli, Error, OciSetup, build};
-use super::cli_probe::probe_tiers;
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::listen::{bind_all, local_addrs};
@@ -71,15 +70,15 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
 ///
-/// The tiers are tested first (see [`self_test`](crate::self_test)): a tier that fails is an error before the
-/// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over. What it says on the
+/// The tiers are not tested or probed. The proxy is opened over them, which reads and writes the
+/// hot tier's own state, so a hot tier that cannot be reached is an error here; the cold tier is
+/// first asked by the first request that needs it. `ready` is called with the address the server
+/// is bound to, before the first request is taken. Returns when the drain is over. What it says on the
 /// way is `tracing` events: a caller that installs no subscriber sees none of it.
 ///
 /// # Errors
-/// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
-/// that fails the self-test (a [`SelfTestError`](crate::SelfTestError)), a proxy that cannot be opened, or an address
-/// that cannot be bound.
+/// A flag that is not valid with the others, a key file or a tier that cannot be used, a proxy
+/// that cannot be opened, or an address that cannot be bound.
 pub async fn run(
     cli: &Cli,
     stop: impl Future<Output = ()> + Send + 'static,
@@ -104,8 +103,6 @@ pub async fn run_serving(
 ) -> Result<Drained, Error> {
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
-    let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
-    probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);

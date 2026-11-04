@@ -292,11 +292,6 @@ impl Backend for GateBackend {
         self.through(Op::List, prefix, call).await
     }
 
-    /// Asked of the wrapped backend as it is: it makes no call a gate holds.
-    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
-        self.inner.settle_conditional_delete(key).await
-    }
-
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         let call = self.inner.create_upload(key);
         self.through(Op::CreateUpload, key, call).await

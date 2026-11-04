@@ -326,9 +326,11 @@ pub fn lease_held_by(site: &Site, port: u16) {
     let text = String::from_utf8_lossy(&body);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text:?}");
-    assert_eq!(
-        lines[0],
-        format!("tierstore-{port}"),
+    // A release before the reconciler had a name of its own wrote the proxy id; this one writes
+    // `<proxy id>/reconciler`. Either names the slot.
+    let proxy = format!("tierstore-{port}");
+    assert!(
+        lines[0] == proxy || lines[0] == format!("{proxy}/reconciler"),
         "the holder: {text:?}"
     );
     assert_eq!(lines[1].len(), 32, "the nonce: {text:?}");
