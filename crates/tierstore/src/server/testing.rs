@@ -215,6 +215,14 @@ impl Rig {
         self.send("GET", &uri, &extra, b"").await
     }
 
+    /// Lets the runtime's other tasks run until the hot tier holds `key`: the copy of a cold read
+    /// is a task of its own, beside the response. It waits on that progress and on no clock.
+    pub(super) async fn copied(&self, key: &str) {
+        while self.hot_mem.head(key).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// A listing of the bucket (`query` is what follows `list-type=2&`).
     pub(super) async fn list(&self, query: &str) -> Reply {
         let uri = format!("/{BUCKET}?list-type=2&{query}");

@@ -109,16 +109,16 @@ async fn a_backend_without_reservations_refuses_the_calls_that_need_them() {
         .put_reservation_if_match("k", reservation(1), "t")
         .await
         .unwrap_err();
-    let read = Bare.get_marked("k", None).await.unwrap_err();
-    let ranged = Bare.get_marked("k", Some(ByteRange::new(0, 1)));
+    let read = Bare.get_tagged("k", None).await.unwrap_err();
+    let ranged = Bare.get_tagged("k", Some(ByteRange::new(0, 1)));
     let ranged = ranged.await.unwrap_err();
     let streamed = Bare.put_stream_if_match("k", None, chunks(&["x"]), "t");
     let streamed = streamed.await.unwrap_err();
     let calls = [
         (created, "put_reservation"),
         (replaced, "put_reservation_if_match"),
-        (read, "get_marked"),
-        (ranged, "get_marked"),
+        (read, "get_tagged"),
+        (ranged, "get_tagged"),
         (streamed, "put_stream_if_match"),
     ];
     for (error, call) in calls {
@@ -163,13 +163,13 @@ async fn an_injector_counts_a_read_with_the_mark_as_a_get() {
     let backend = faulty();
     let tag = backend.put_reservation("k", reservation(1)).await.unwrap();
     let range = Some(ByteRange::new(2, 3));
-    let read = backend.get_marked("k", range).await.unwrap();
+    let read = backend.get_tagged("k", range).await.unwrap();
     assert_eq!(read, (reservation(1).slice(2..5), true, tag));
     assert_eq!(backend.calls(Op::Get), 1);
     assert_eq!(backend.get_ranges(), [Some((2, 3))]);
 
     backend.fail_next(Op::Get, 1);
-    let failed = backend.get_marked("k", None).await.unwrap_err();
+    let failed = backend.get_tagged("k", None).await.unwrap_err();
     assert!(failed.is_unavailable(), "{failed}");
 }
 
@@ -229,12 +229,12 @@ impl Backend for Pausing {
         self.inner.get(key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        self.inner.get_marked(key, range).await
+        self.inner.get_tagged(key, range).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
@@ -276,10 +276,10 @@ async fn a_read_with_the_mark_through_a_cache_is_the_backends_read_and_not_its_c
     });
     inner.committed.notified().await;
     assert_eq!(cache.get("k", None).await.unwrap(), body("plain a"));
-    let whole = cache.get_marked("k", None).await.unwrap();
+    let whole = cache.get_tagged("k", None).await.unwrap();
     assert_eq!((whole.0, whole.1), (reservation(2), true));
     let range = Some(ByteRange::new(0, 4));
-    let part = cache.get_marked("k", range).await.unwrap();
+    let part = cache.get_tagged("k", range).await.unwrap();
     assert_eq!((part.0, part.1), (reservation(2).slice(0..4), true));
 
     inner.release.notify_one();
