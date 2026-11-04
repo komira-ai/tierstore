@@ -51,20 +51,38 @@ pub(super) fn media_type(body: &[u8]) -> Result<&'static str, String> {
 }
 
 /// The digests a manifest or an index names: its config, its layers and its manifests, as the
-/// text they are written with. An entry with no digest is not listed.
-pub(super) fn references(body: &[u8]) -> Vec<String> {
-    let json: Value = serde_json::from_slice(body).unwrap_or_default();
-    let config = json.get("config");
-    let lists = ["layers", "manifests"]
-        .into_iter()
-        .filter_map(|field| json.get(field))
-        .filter_map(Value::as_array)
-        .flatten();
-    config
-        .into_iter()
-        .chain(lists)
-        .filter_map(|entry| entry.get("digest"))
-        .filter_map(Value::as_str)
+/// text they are written with. A manifest names no more than it lists, so a `config` that is not
+/// an object with a `digest` text, a `layers` or `manifests` that is not an array, or an entry of
+/// one that has no `digest` text, is refused.
+///
+/// # Errors
+/// What is wrong with `body`, for the client: it is not JSON, or a descriptor has no digest.
+pub(super) fn references(body: &[u8]) -> Result<Vec<String>, String> {
+    let json: Value =
+        serde_json::from_slice(body).map_err(|why| format!("the object is not JSON: {why}"))?;
+    let mut found = Vec::new();
+    if let Some(config) = json.get("config") {
+        found.push(digest_of(config, "config")?);
+    }
+    for field in ["layers", "manifests"] {
+        let Some(list) = json.get(field) else {
+            continue;
+        };
+        let entries = list
+            .as_array()
+            .ok_or_else(|| format!("the manifest's {field} is not a list"))?;
+        for entry in entries {
+            found.push(digest_of(entry, field)?);
+        }
+    }
+    Ok(found)
+}
+
+/// The `digest` text of the descriptor `entry`, of the `field` of a manifest.
+fn digest_of(entry: &Value, field: &str) -> Result<String, String> {
+    entry
+        .get("digest")
+        .and_then(Value::as_str)
         .map(str::to_owned)
-        .collect()
+        .ok_or_else(|| format!("an entry of the manifest's {field} has no digest text"))
 }

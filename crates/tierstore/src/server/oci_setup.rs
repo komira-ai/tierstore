@@ -23,6 +23,8 @@ pub(super) struct OciSetup {
     pub(super) limits: OciLimits,
     /// The keys the front asks of a client, with `--oci-require-auth`; `None` serves anonymously.
     pub(super) auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of a push.
+    pub(super) stage_read: u64,
 }
 
 /// The default of `--oci-prefix`.
@@ -54,6 +56,7 @@ pub(super) fn oci_setup(
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
+        stage_read: cli.oci_stage_read,
     };
     oci_setup_of(&flags, server, warn)
 }
@@ -136,5 +139,6 @@ pub(super) fn oci_setup_of(
         auth: flags
             .require_auth
             .then(|| OciAuth::from_server(server, &prefix)),
+        stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
     }))
 }

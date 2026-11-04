@@ -128,6 +128,7 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-max-connections", &["oci.max_connections"]),
     ("oci-connection-lifetime", &["oci.connection_lifetime"]),
     ("oci-require-auth", &["oci.require_auth"]),
+    ("oci-stage-read", &["oci.stage_read"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -455,6 +456,10 @@ pub(super) struct OciTable {
     /// Whether clients must present an access key of the server (`--oci-require-auth`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_auth: Option<bool>,
+    /// The most bytes of a stored chunk read in one call at the end of an upload
+    /// (`--oci-stage-read`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_read: Option<u64>,
 }
 
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
@@ -878,6 +883,7 @@ pub(super) fn storage(
         oci_prefix: oci.prefix,
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
+        oci_stage_read: oci.stage_read,
         oci_require_auth: oci.require_auth,
     })
 }

@@ -20,9 +20,9 @@
 //!   upload, 201. The blob is made in one pass: the chunks stored, in order, and then the body, are
 //!   read, hashed and handed to the store's streamed put as they pass, and the put is ended with an
 //!   error, which stores nothing, if the hash is not the digest. The chunks are read in ranges of
-//!   at most [`STAGE_READ`] bytes. A blob the store says it has already is not taken on that word:
-//!   the bytes are read to their end and must hash to the digest, or the answer is the refusal
-//!   and the upload is as it was. The chunks and the session are then deleted. Nothing is held
+//!   at most [`OciFront::with_stage_read`] bytes. A blob the store says it has already is not
+//!   taken on that word: the bytes are read to their end and must hash to the digest, or the
+//!   answer is the refusal and the upload is as it was. The chunks and the session are then deleted. Nothing is held
 //!   whole, whatever the size of the blob; there is no limit on it.
 //! - `DELETE <location>`: cancels the upload and deletes what it stored, 204.
 //! - `PUT /v2/<name>/manifests/<reference>`: a manifest or an index. It is read whole (at most
@@ -74,9 +74,10 @@ const UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
 /// The code of an upload that is not open.
 const UNKNOWN_UPLOAD: &str = "BLOB_UPLOAD_UNKNOWN";
 
-/// The most bytes of a stored chunk that the end of an upload reads in one call, so that a chunk of
-/// any size is held a piece at a time whatever the backend does with a read of a whole object.
-pub(super) const STAGE_READ: u64 = 1 << 20;
+/// The default of `--oci-stage-read`: the most bytes of a stored chunk that the end of an upload
+/// reads in one call, so that a chunk of any size is held a piece at a time whatever the backend
+/// does with a read of a whole object.
+pub(crate) const DEFAULT_STAGE_READ: u64 = 1 << 20;
 
 /// Why a streamed body was refused, for the answer to send.
 pub(super) enum Refusal {
@@ -457,15 +458,16 @@ impl OciFront {
         Ok(chunks)
     }
 
-    /// The chunks stored as one stream, in order, each read in ranges of at most [`STAGE_READ`]
+    /// The chunks stored as one stream, in order, each read in ranges of at most [`OciFront::with_stage_read`]
     /// bytes by the sizes the listing gave, so that no read holds a whole chunk.
     fn staged(&self, chunks: Vec<Listed>) -> PartBody<'static> {
         let backend = Arc::clone(&self.backend);
-        let reads = chunks.into_iter().flat_map(|chunk| {
+        let step = self.stage_read;
+        let reads = chunks.into_iter().flat_map(move |chunk| {
             let Listed { key, size, .. } = chunk;
-            (0..size.div_ceil(STAGE_READ)).map(move |at| {
-                let offset = at * STAGE_READ;
-                let range = ByteRange::new(offset, STAGE_READ.min(size - offset));
+            (0..size.div_ceil(step)).map(move |at| {
+                let offset = at * step;
+                let range = ByteRange::new(offset, step.min(size - offset));
                 (key.clone(), range)
             })
         });
@@ -732,7 +734,11 @@ impl OciFront {
         if let Err(why) = manifest::media_type(&bytes) {
             return manifest_invalid(&why, json!({ "digest": digest.text() }));
         }
-        for text in manifest::references(&bytes) {
+        let named = match manifest::references(&bytes) {
+            Ok(named) => named,
+            Err(why) => return manifest_invalid(&why, json!({ "digest": digest.text() })),
+        };
+        for text in named {
             let Some(blob) = Digest::parse(&text) else {
                 let message =
                     "the manifest names a digest that is not sha256:<64 lowercase hex digits>";

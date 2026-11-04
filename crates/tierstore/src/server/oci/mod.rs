@@ -137,6 +137,8 @@ pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 
+pub(crate) use push::DEFAULT_STAGE_READ;
+
 use auth::{Need, Refused};
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};
@@ -206,6 +208,8 @@ pub struct OciFront {
     metrics: Arc<OciMetrics>,
     /// The keys clients must present; none serves anonymously.
     auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    stage_read: u64,
 }
 
 impl OciFront {
@@ -217,7 +221,16 @@ impl OciFront {
             prefix,
             metrics,
             auth: None,
+            stage_read: DEFAULT_STAGE_READ,
         }
+    }
+
+    /// The front, reading a stored chunk in ranges of at most `bytes` at the end of an upload
+    /// ([`DEFAULT_STAGE_READ`] if this is not called); zero is taken as one.
+    #[must_use]
+    pub fn with_stage_read(mut self, bytes: u64) -> Self {
+        self.stage_read = bytes.max(1);
+        self
     }
 
     /// The front, asking each client for a key of `auth` (see the `Access` section of the module

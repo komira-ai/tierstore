@@ -472,6 +472,10 @@ pub struct Cli {
     /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
     #[arg(long, requires = "oci_listen")]
     pub oci_require_auth: bool,
+    /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
+    /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
+    #[arg(long, value_name = "BYTES", requires = "oci_listen", value_parser = clap::value_parser!(u64).range(1..))]
+    pub oci_stage_read: Option<u64>,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -1077,7 +1081,9 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = OciFront::new(backend, setup.prefix, setup.metrics).with_auth(setup.auth);
+    let front = OciFront::new(backend, setup.prefix, setup.metrics)
+        .with_auth(setup.auth)
+        .with_stage_read(setup.stage_read);
     let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))

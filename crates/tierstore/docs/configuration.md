@@ -243,6 +243,7 @@ tls_key_file        = "/etc/tierstore/oci.key"
 prefix              = "oci/"
 max_connections     = 64
 connection_lifetime = "1h"
+stage_read          = 1048576
 ```
 
 | Key | Flag | Type, default | What |
@@ -253,6 +254,7 @@ connection_lifetime = "1h"
 | `oci.prefix` | `--oci-prefix` | string, `oci/` | the key prefix, ending in `/`; not inside `_journal/` or `_tiering/` |
 | `oci.max_connections` | `--oci-max-connections` | count, 64 (at least 1) | connections open at once |
 | `oci.connection_lifetime` | `--oci-connection-lifetime` | duration, `1h` | the longest a connection lives |
+| `oci.stage_read` | `--oci-stage-read` | bytes, 1048576 (1 MiB; at least 1) | the most bytes of a stored chunk that the end of a push reads in one call, so that a chunk of any size is held a piece at a time. On main, not in v0.0.41: v0.0.41 and before refuse a file with this key (an unknown key, exit 2), so leave it out of a file the older release reads |
 | `oci.require_auth` | `--oci-require-auth` | boolean, `false` | on main, not in v0.0.41: clients must log in with an access key of the server (HTTP Basic, the id as user name and the secret as password); without it the front is anonymous. Refused with plain HTTP off loopback, since the secret would travel in the clear |
 
 On main, not in v0.0.41, `listen` may be a list, here the wildcard of both families:
@@ -296,7 +298,7 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 - in the file of a build node or of a storage node with a cache, an `[oci]` table whose blobs no `[[policy]]` with `cache = true` keeps, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
 - a key a tier's `kind` does not take, a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);
 - a water mark outside 1 to 100, and a budget, count or limit of zero;
-- an `[oci]` table without `listen`, with only one of the certificate and the key, or with `max_connections = 0`;
+- an `[oci]` table without `listen`, with only one of the certificate and the key, or with `max_connections = 0` or `stage_read = 0`;
 - on main, not in v0.0.41: a `server.listen` or `oci.listen` that is an empty list or names one address twice;
 - a `[[policy]]` that breaks the rules above.
 
