@@ -13,7 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
@@ -41,7 +41,7 @@ mod sync;
 #[path = "dir_tags.rs"]
 mod tags;
 
-use names::{encode, is_id_byte, parse_part, part_name};
+use names::{encode, is_id_byte, parse_part, part_name, unique_nanos};
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
 
@@ -473,12 +473,7 @@ impl DirBackend {
             .mode(DIR_MODE)
             .create(&uploads);
         made.map_err(io_error(&uploads))?;
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a name no other open of this directory shares, not a time anyone judges"
-        )]
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let opened = OPENED.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
             root,
@@ -893,12 +888,7 @@ impl Backend for DirBackend {
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         self.path(key)?;
         let number = self.counter.fetch_add(1, Ordering::SeqCst);
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a name no other upload shares, not a time anyone judges"
-        )]
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
         let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;
