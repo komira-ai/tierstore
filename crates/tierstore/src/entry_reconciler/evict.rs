@@ -21,8 +21,10 @@
 //!    hot object is deleted on its tag where the store honours that, and the entry is removed. An
 //!    entry whose removal failed is sealed, and a later step removes it.
 //!
-//! A put, a delete or a copy-back of the key needs an entry too, so while the eviction's entry
-//! stands they find it and wait or fail instead of acting on an object that is going.
+//! Only the active-format puts take an entry today, so while the eviction's entry stands they find
+//! it and wait or fail instead of acting on an object that is going. A delete and a copy-back do
+//! not take an entry yet: they act on the objects directly, and making them wait for an entry is
+//! work still to be done.
 
 use std::collections::BTreeMap;
 use std::sync::{MutexGuard, PoisonError};

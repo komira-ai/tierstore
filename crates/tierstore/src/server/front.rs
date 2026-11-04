@@ -1,6 +1,7 @@
 //! The S3 front of a start, whatever it fronts: the settings of the address, the names, the key
 //! files and the limits, and the server settings made of them.
 
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,8 +12,9 @@ use crate::Clock;
 use super::ServerConfig;
 use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
-use super::keys::{ensure_distinct, read_credentials, read_only_keys};
-use super::listen::has_duplicate;
+use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
+use super::listen::joined;
+use super::oci::{self, OciError};
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
 use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scoped_keys};
 
@@ -22,9 +24,62 @@ use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scope
 #[error("{0}")]
 pub(super) struct InvalidFlags(pub String);
 
-/// The access key id and the secret access key in the file of `--access-key-file`.
+/// The access key id and the secret access key in the file of `server.access_key_file`.
 pub(super) fn read_key(path: &Path) -> Result<(String, String), String> {
     read_credentials("--access-key-file", path)
+}
+
+/// The certificate and the key that make the S3 front serve HTTPS (`server.tls_cert_file` and
+/// `server.tls_key_file`). Left out, it serves plain HTTP.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct S3Tls {
+    /// The certificate chain (PEM) of the `s3` interfaces, leaf first, issued by the CA the clients
+    /// trust. With it every connection of the front (the loopback socket a build node adds as
+    /// well) is HTTPS. The leaf must name the front: a DNS subjectAltName (any), or else an IP
+    /// subjectAltName for each `s3` address; it may have both. The files are read once, so a new
+    /// certificate takes a restart. Give it with `tls_key` or not at all.
+    pub tls_cert: Option<PathBuf>,
+    /// The private key (PEM) of `tls_cert`. A file any user can read (a mode with the permission
+    /// bits for others) is refused. Give it with `tls_cert` or not at all.
+    pub tls_key: Option<PathBuf>,
+}
+
+impl S3Tls {
+    /// The two files, or `None` when there are none.
+    ///
+    /// # Errors
+    /// Only one of the two is given.
+    pub(super) fn files(&self) -> Result<Option<(&Path, &Path)>, InvalidFlags> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => Ok(Some((cert.as_path(), key.as_path()))),
+            (None, None) => Ok(None),
+            _ => Err(InvalidFlags(
+                "--tls-cert and --tls-key go together: give both, or neither".into(),
+            )),
+        }
+    }
+}
+
+/// Writes to `out` the one line that says the front serves plain HTTP at `listen`, if any of the
+/// addresses is not loopback (127/8, `::1` or an IPv4-mapped loopback address; `0.0.0.0` and
+/// `::` are not loopback). Off loopback a connection can be read and changed by whoever is on
+/// its path, so the line names those addresses and advises a certificate. Nothing is written for
+/// an address that is loopback.
+pub(super) fn warn_plain(listen: &[SocketAddr], mut out: impl Write) {
+    let open: Vec<SocketAddr> = listen
+        .iter()
+        .copied()
+        .filter(|addr| !addr.ip().to_canonical().is_loopback())
+        .collect();
+    if !open.is_empty() {
+        // A warning that cannot be written is not worth stopping a start for.
+        let _ = writeln!(
+            out,
+            "tierstore: warning: the s3 interface at {} serves plain HTTP on a non-loopback address; \
+             set server.tls_cert_file and server.tls_key_file to serve HTTPS",
+            joined(&open)
+        );
+    }
 }
 
 /// What the S3 front is made of, which a storage node and a build node both are: the address,
@@ -51,8 +106,10 @@ pub(super) struct FrontSettings {
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
     pub body_idle_timeout: Duration,
+    pub min_secret_bytes: u32,
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
+    pub tls: S3Tls,
 }
 
 impl Cli {
@@ -78,8 +135,10 @@ impl Cli {
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
             body_idle_timeout: self.body_idle_timeout,
+            min_secret_bytes: self.min_secret_bytes,
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
+            tls: self.tls.clone(),
         }
     }
 }
@@ -92,20 +151,22 @@ const GRANT_IGNORED: &str = "is ignored: the read grant was removed; use a presi
 /// The key files are not read.
 fn warn_grant_ignored(front: &FrontSettings) {
     if !front.grant_key_file.is_empty() {
-        tracing::warn!("tierstore: --grant-key-file (server.grant_key_files) {GRANT_IGNORED}");
+        tracing::warn!("tierstore: server.grant_key_files {GRANT_IGNORED}");
     }
     if front.grant_max_lifetime.is_some() {
-        tracing::warn!(
-            "tierstore: --grant-max-lifetime (server.grant_max_lifetime) {GRANT_IGNORED}"
-        );
+        tracing::warn!("tierstore: server.grant_max_lifetime {GRANT_IGNORED}");
     }
 }
 
-/// The settings of the server for `front`: reads its key files (which must differ in id), and
-/// refuses a bucket that is the name of a probe path and a body timeout of zero.
+/// The settings of the server for `front`: reads its key files (which must differ in id) and its
+/// certificate and key, and refuses a bucket that is the name of a probe path and a body timeout
+/// of zero. A certificate or key that cannot work is an `InvalidFlags` (exit 2); one that cannot
+/// be read is exit 1. `warn` says whether the warning for a plain HTTP front off loopback is
+/// printed on stderr: `--check-config` leaves it out, as it prints nothing when the file is fine.
 pub(super) fn server_config(
     front: &FrontSettings,
     clock: Arc<dyn Clock>,
+    warn: bool,
 ) -> Result<ServerConfig, Error> {
     if matches!(
         front.bucket.as_str(),
@@ -117,9 +178,6 @@ pub(super) fn server_config(
     warn_grant_ignored(front);
     if front.body_idle_timeout.is_zero() {
         return Err("--body-idle-timeout must be longer than zero".into());
-    }
-    if has_duplicate(&front.listen) {
-        return Err(InvalidFlags("--listen is given the same address twice".into()).into());
     }
     let (key_id, secret) = read_key(&front.access_key_file)?;
     let read_only = read_only_keys(&front.read_only_key_file)?;
@@ -135,7 +193,34 @@ pub(super) fn server_config(
     scoped_distinct(&others, &scoped).map_err(InvalidFlags)?;
     others.extend(scoped_ids(&scoped));
     presign_distinct(&others, &presign).map_err(InvalidFlags)?;
+    let secrets = std::iter::once(("--access-key-file", key_id.as_str(), secret.as_str()))
+        .chain(
+            read_only
+                .iter()
+                .map(|k| ("--read-only-key-file", k.id.as_str(), k.secret.as_str())),
+        )
+        .chain(
+            presign
+                .iter()
+                .map(|k| ("--presign-key-file", k.id(), k.secret())),
+        )
+        .chain(gc.iter().map(|k| ("--gc-key-file", k.id(), k.secret())))
+        .chain(
+            scoped
+                .iter()
+                .map(|k| ("--scoped-key-file", k.id(), k.secret())),
+        );
+    ensure_secrets_long_enough(front.min_secret_bytes, secrets)
+        .map_err(|short| InvalidFlags(short.to_string()))?;
     let mut server = ServerConfig::new(&front.bucket, &key_id, &secret, clock);
+    match front.tls.files()? {
+        Some((cert, key)) => {
+            let acceptor = oci::s3_acceptor(cert, key, &front.listen).map_err(refuse)?;
+            server.tls = Some(acceptor);
+        }
+        None if warn => warn_plain(&front.listen, std::io::stderr()),
+        None => {}
+    }
     server.read_only_keys = read_only;
     server.presign_keys = presign;
     server.gc_keys = gc;
@@ -153,3 +238,17 @@ pub(super) fn server_config(
     server.drain_deadline = front.drain_deadline;
     Ok(server)
 }
+
+/// The refusal for a certificate or key: a file that cannot be read is an error a restart may mend,
+/// and the rest are flags and files that are wrong as they are (exit 2).
+pub(super) fn refuse(why: OciError) -> Error {
+    if why.is_invalid_flags() {
+        InvalidFlags(why.to_string()).into()
+    } else {
+        why.into()
+    }
+}
+
+#[cfg(test)]
+#[path = "front_tests.rs"]
+mod tests;

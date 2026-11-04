@@ -102,17 +102,18 @@ install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore
 
 ## Create the account and the directories
 
-The example unit runs as a `tierstore` account with no login and no home. The sysusers entry and the unit are in `packaging` of the repository.
+The example unit runs as a `tierstore` account with no login and no home. The sysusers entry, the unit and the example configuration file are in `packaging` of the repository.
 
 ```sh
 install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 systemd-sysusers /etc/sysusers.d/tierstore.conf
 install -d -m 0750 -o root -g tierstore /etc/tierstore
+install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
 install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 systemctl daemon-reload
 ```
 
-`/etc/tierstore` holds the key files and, if you use one, the configuration file. If a tier is a directory (`dir:<path>`), create it, give it to the `tierstore` account, and add its path to `ReadWritePaths=` in the unit: the unit runs with `ProtectSystem=strict`, so the process cannot write anywhere else. Put the hot tier's directory on the SSD and the cold tier's on the spinning disks.
+`/etc/tierstore` holds the key files and the configuration file. If a tier is a directory (`kind = "dir"`), create it, give it to the `tierstore` account, and add its path to `ReadWritePaths=` in the unit: the unit runs with `ProtectSystem=strict`, so the process cannot write anywhere else. Put the hot tier's directory on the SSD and the cold tier's on the spinning disks.
 
 ```sh
 install -d -m 0700 -o tierstore -g tierstore /srv/tierstore/hot
@@ -123,9 +124,9 @@ install -d -m 0700 -o tierstore -g tierstore /srv/tierstore/cold
 
 Write each key file owned by `tierstore` with mode 0600 or 0400. [Keys and roles](keys.md) says which files you need and what each may do. A start with a key file that its group or others can access is refused.
 
-## Edit the unit
+## Edit the configuration file
 
-The values in the example unit are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the listen address, the proxy id, the bucket names, the tiers and `--hot-bytes`. Keep the proxy id across restarts and give each process over the same tiers one of its own. [Configuration](configuration.md) lists every flag.
+The values in the example file are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the address of the `s3` interface, the proxy id, the bucket names, the tiers and `hot_store.budget` in `/etc/tierstore/tierstore.toml`. Keep the proxy id across restarts and give each process over the same tiers one of its own. [Configuration](configuration.md) lists every key. The unit gives only `--config` and the two flags of the drain.
 
 The unit has no `[Install]` section, so installing it starts nothing and `systemctl enable` has nothing to link; it is also skipped while `/etc/tierstore/access.key` does not exist. Start it by hand once the files are in place:
 
@@ -149,6 +150,7 @@ A host can instead run tierstore as two slot units that the host updater updates
 |---|---|
 | `updater.d/tierstore.toml`, the declaration | `/etc/updater.d/tierstore.toml` |
 | `tierstore@.service`, the slot unit template | `/etc/systemd/system/tierstore@.service` |
+| `tierstore-9301.toml` and `tierstore-9302.toml`, the configuration of each slot | `/etc/tierstore/tierstore-9301.toml` and `/etc/tierstore/tierstore-9302.toml` |
 | `tierstore-update.conf`, the hook's account | `/etc/sysusers.d/tierstore-update.conf` |
 | `tmpfiles.d/tierstore-update.conf`, the hook's state directory | `/etc/tmpfiles.d/tierstore-update.conf` |
 | `polkit/50-tierstore-update.rules`, the hook's right to start and stop the two slots | `/etc/polkit-1/rules.d/50-tierstore-update.rules` |
@@ -160,7 +162,7 @@ The hook runs as `tierstore-update`, not as root and not as `tierstore`. Its sta
 A host that runs `tierstore.service` moves to the slot units once, in this order ([packaging/README.md](https://github.com/komira-ai/tierstore/blob/main/packaging/README.md#first-install) has each step in full):
 
 1. Create the account and the state directory: place the sysusers.d and tmpfiles.d entries and have `systemd-sysusers` and `systemd-tmpfiles` create what they list.
-2. Place the declaration, the slot unit (with the edits of the host's `tierstore.service` and its drop-ins) and the polkit rule, and run `systemctl daemon-reload`.
+2. Place the declaration, the slot unit and the two slot files (with the edits of the host's `tierstore.service` and its drop-ins and of its configuration file; the two slot files differ only in the port, the proxy id and `server.slot`) and the polkit rule, and run `systemctl daemon-reload`.
 3. Place the binary as slot 9301: the release's `tierstore` in a directory that root owns, `slots/9301` a link to it, and the record `{"schema":1,"serving":9301,"mode":"handover","markers":[]}` as `state.json`, owned by `tierstore-update`, mode 0600, so that the redirect points at 9301.
 4. Load the hook's guard table, `tierstore_guard`, as root, with the text the README gives (exactly what `restore` loads): it drops every connection to 9301 and 9302, IPv4 and IPv6, that neither comes over loopback nor was redirected from 9300. The slot unit listens on the wildcard of both families, so the guard comes before any slot runs.
 5. Start the slot unit `tierstore@9301` by hand and wait until `/readyz` on `127.0.0.1:9301` answers 200 `ready`. Port 9300 is still the old unit's.
