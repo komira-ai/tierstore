@@ -129,6 +129,17 @@ fn the_params_make_the_front() {
     assert_eq!(setup.limits.lifetime, Duration::from_secs(90));
 }
 
+/// Asserts that the size of the reads at the end of a push is 1 MiB unless `params.stage_read`
+/// gives it.
+#[test]
+fn the_stage_read_param_sets_the_size_of_a_read() {
+    let rig = Rig::new("oci-params-stage");
+    let setup = build(&rig.cli("")).expect("built").oci.expect("a front");
+    assert_eq!(setup.stage_read, 1 << 20);
+    let given = build(&rig.cli(", stage_read = 4096")).expect("built");
+    assert_eq!(given.oci.expect("a front").stage_read, 4096);
+}
+
 /// Asserts that a prefix that cannot work, a lifetime of nothing, and a certificate or key that
 /// cannot serve are refused at start with status 2, and that a file that cannot be read is
 /// status 1, which a restart may mend.
@@ -292,4 +303,46 @@ fn a_certificate_and_key_allow_an_address_off_loopback() {
     let (status, why) = refused(&cli);
     assert_eq!(status, 2, "{why}");
     assert!(why.contains("no IP subjectAltName for 192.0.2.1"), "{why}");
+}
+
+/// Asserts that `params.require_auth` makes the front ask for keys and that the front is
+/// anonymous without it (and with `false`): the setup holds the keys of the server only with it.
+#[test]
+fn the_param_makes_the_front_ask_for_keys() {
+    let rig = Rig::new("oci-params-auth");
+    let off = build(&rig.cli("")).expect("built").oci.expect("a front");
+    assert!(off.auth.is_none());
+    let off = build(&rig.cli(", require_auth = false")).expect("built");
+    assert!(off.oci.expect("a front").auth.is_none());
+    let on = build(&rig.cli(", require_auth = true")).expect("built");
+    assert!(on.oci.expect("a front").auth.is_some());
+}
+
+/// Asserts that keys are not asked for over plain HTTP off loopback, where Basic would carry the
+/// secret in the clear (exit 2, naming the address and the way out), and are over loopback and
+/// over TLS at any address.
+#[test]
+fn the_keys_are_not_asked_for_in_the_clear() {
+    let rig = Rig::new("oci-params-auth-clear");
+    for listen in ["0.0.0.0:0", "[::]:0", "192.0.2.1:9500"] {
+        let text = rig.file(Some((listen, ", require_auth = true")));
+        let cli = Cli::from_config_text(&text).expect("a file");
+        let (status, why) = refused(&cli);
+        assert_eq!(status, 2, "{listen}: {why}");
+        assert!(why.contains(listen), "{why}");
+        assert!(why.contains("--oci-tls-cert and --oci-tls-key"), "{why}");
+    }
+    for listen in ["127.0.0.1:0", "[::1]:0"] {
+        let text = rig.file(Some((listen, ", require_auth = true")));
+        let cli = Cli::from_config_text(&text).expect("a file");
+        let setup = build(&cli).expect("built").oci.expect("a front");
+        assert!(setup.auth.is_some(), "{listen}");
+    }
+    let wide = leaf(&rig.dir, "wide-auth", &ca(), vec![ip("192.0.2.1")]);
+    let mut cli = rig.cli(", require_auth = true");
+    cli.oci_listen = vec!["192.0.2.1:9500".parse().expect("an address")];
+    cli.oci_tls_cert = Some(wide.cert);
+    cli.oci_tls_key = Some(wide.key);
+    let setup = build(&cli).expect("built").oci.expect("a front");
+    assert!(setup.auth.is_some());
 }

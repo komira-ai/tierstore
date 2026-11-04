@@ -31,7 +31,8 @@ pub struct HeartbeatFlags {
     pub departure: Duration,
     /// The time taken off `hot_store.departure` for `Proxy::is_live`, and the time that must be left
     /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. The
-    /// puts and deletes made on entries use both. Longer than zero, and at most a quarter of `hot_store.departure`.
+    /// deletes made on entries send their calls through `Bounded`; the puts made on entries check
+    /// the time themselves and cut their own cleanup call at it. Longer than zero, and at most a quarter of `hot_store.departure`.
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
     /// reconciler sees it, before the reconciler removes it, if the proxy left no journal object.

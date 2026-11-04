@@ -1,12 +1,22 @@
-//! The dates of the service's answers: a `Last-Modified` header and a listing's `<LastModified>`.
+//! The dates of the fake service: the second its clock says, and the two forms a stamp is written in.
 
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::s3::sigv4::Utc;
 use crate::s3::times::MONTHS;
 
 /// The weekday names of an HTTP date, from Thursday: the day of the epoch.
 const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+
+/// The second the system clock says.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fake service stamps objects with the machine's time, as a real service does"
+)]
+pub(super) fn system_seconds() -> u64 {
+    let since = SystemTime::now().duration_since(UNIX_EPOCH);
+    since.map_or(0, |since| since.as_secs())
+}
 
 /// `Tue, 03 Nov 2026 08:49:37 GMT`, the form of a `Last-Modified` header.
 pub(super) fn http_date(seconds: u64) -> String {

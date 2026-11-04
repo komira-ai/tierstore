@@ -63,8 +63,9 @@
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. The puts and deletes
-//!   made on entries (format active) ask for both; no other request path does.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. The deletes made on
+//!   entries (format active) send their calls through [`Bounded`]; the puts made on entries check
+//!   the [`Deadline`] themselves; no other request path does either.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
@@ -104,7 +105,7 @@
 //! (`cargo build -p tierstore --features server`), over memory, directory or S3 tiers; the
 //! feature turns `s3` on.
 //!
-//! The same feature adds a read-only OCI distribution front, over HTTPS or over plain HTTP on
+//! The same feature adds an OCI distribution front (read-only unless it asks for keys), over HTTPS or over plain HTTP on
 //! loopback (an `oci` interface, `server::oci`), which serves the objects under a key prefix by
 //! their SHA-256 digest, so that a container engine pulls an image from the tiers.
 

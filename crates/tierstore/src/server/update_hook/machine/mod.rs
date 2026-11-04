@@ -86,17 +86,20 @@ mod host_tests;
 mod instances_tests;
 #[cfg(test)]
 mod launchd_tests;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod nft_tests;
 #[cfg(test)]
 mod releases_tests;
 #[cfg(test)]
 mod runner_tests;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod slots_tests;
 #[cfg(test)]
 mod state_tests;
 #[cfg(test)]
 pub(super) mod testing;
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 mod units_tests;

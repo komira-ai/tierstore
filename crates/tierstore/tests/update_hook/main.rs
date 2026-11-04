@@ -10,6 +10,11 @@
 //! No test sleeps or asserts how long anything takes; each host has ports of its own, so the
 //! tests run side by side.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
 #![cfg(target_os = "linux")]
 
 mod failures;

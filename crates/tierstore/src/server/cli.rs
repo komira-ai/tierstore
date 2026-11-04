@@ -38,7 +38,8 @@
 //!
 //! An `oci` interface adds a fourth thing: a read-only OCI distribution front (see
 //! [`oci`](super::oci)), served from the same proxy, so that podman pulls an image by digest from
-//! the tiers. With `params.tls_cert_file` and `params.tls_key_file` it is HTTPS (the certificate must carry an
+//! the tiers; with `params.require_auth` it asks each client for an access key (HTTP Basic), and
+//! plain HTTP off loopback is then refused. With `params.tls_cert_file` and `params.tls_key_file` it is HTTPS (the certificate must carry an
 //! IP subjectAltName for the address and be valid now, and the key file must not be readable by
 //! every user; the start checks). With neither it is plain HTTP, at any address; off loopback
 //! the start prints one warning line on stderr, and a certificate is advised. One of the two
@@ -84,7 +85,6 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -105,6 +105,7 @@ use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, run, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config_tuning::{HotTuning, S3Client};
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, S3Tls, refuse, server_config};
@@ -113,7 +114,7 @@ use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
-use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
+use super::oci::{self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -132,13 +133,6 @@ pub(super) const DEFAULT_PUT_MIN_BYTES_PER_SEC: u64 = 1024;
 
 /// The signing region of an S3 tier whose region is not given.
 pub(super) const DEFAULT_REGION: &str = "us-east-1";
-
-/// How long a connection to an S3 tier may take to be opened.
-const S3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The slowest rate, in bytes a second, at which the body of a write to an S3 tier is taken for
-/// granted to go: a write may take its request timeout plus its length at this rate.
-const S3_MIN_BODY_RATE: Option<NonZeroU64> = NonZeroU64::new(1 << 20);
 
 /// What `tierstore` is started with: the flags of one run. Everything that describes the data
 /// path is in the file `--config` names (see [`config`](super::config)); a flag that used to
@@ -235,6 +229,11 @@ pub struct Cli {
     /// of a multipart upload has a small body, so it may take this long in all, and a store may
     /// take minutes to put a large object together: set this longer than the longest.
     pub s3_request_timeout: Duration,
+    /// The connect timeout, body rate, idle-connection timeout and read retries of the client of
+    /// an S3 tier (the `server.s3_*` keys other than `s3_request_timeout`).
+    pub s3_client: S3Client,
+    /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
+    pub hot_tuning: HotTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
     pub hot_bytes: u64,
     /// The percent of `hot_store.budget` above which the oldest copied objects are evicted from the
@@ -384,7 +383,7 @@ pub struct Cli {
     /// Serves a read-only OCI distribution front at this address, from the same tiers (see the
     /// [`oci`](super::oci) docs): `GET` and `HEAD` of `/v2/`, of `/v2/<name>/manifests/<digest>`
     /// and of `/v2/<name>/blobs/<digest>`, so that podman and other registry clients pull an
-    /// image by digest. Anonymous: no token is ever asked for. Objects are read at
+    /// image by digest. Anonymous unless `params.require_auth` is true. Objects are read at
     /// `<params.prefix>blobs/sha256/<hex>`. With `params.tls_cert_file` and `params.tls_key_file` it is
     /// HTTPS, and clients dial an IP address, so the certificate must carry an IP subjectAltName
     /// for this address (any IP, if it is unspecified), which the start checks. With neither it
@@ -415,6 +414,15 @@ pub struct Cli {
     /// send a request, and the time it may leave an answer unread, are those of the S3 front's
     /// timeouts (a minute, and `server.body_idle_timeout`).
     pub oci_connection_lifetime: Option<Duration>,
+    /// `params.require_auth`: asks each client of the OCI front for an access key of this server (HTTP Basic: the id
+    /// as the user name, the secret as the password), and answers 401 without one. A key that
+    /// reads (the read-only key, the full key, a scoped key with a read prefix over the front's
+    /// objects) may pull, and one that writes (the full key, a scoped key with such a write
+    /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
+    pub oci_require_auth: bool,
+    /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
+    /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
+    pub oci_stage_read: Option<u64>,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -496,6 +504,10 @@ pub(super) struct OciSetup {
     pub(super) prefix: OciPrefix,
     pub(super) metrics: Arc<OciMetrics>,
     pub(super) limits: OciLimits,
+    /// The keys the front asks of a client, with `params.require_auth`; `None` serves anonymously.
+    pub(super) auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of a push.
+    pub(super) stage_read: u64,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -544,9 +556,10 @@ pub(super) fn open_tier(
     spec: &str,
     s3: &S3Flags<'_>,
     timeout: Duration,
+    client: &S3Client,
 ) -> Result<Arc<dyn Backend>, String> {
     match spec.strip_prefix("s3:") {
-        Some(bucket) => s3_tier(flag, spec, bucket, s3, timeout),
+        Some(bucket) => s3_tier(flag, spec, bucket, s3, (timeout, client)),
         None if s3.given() => {
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
@@ -562,8 +575,9 @@ fn s3_tier(
     spec: &str,
     bucket: &str,
     s3: &S3Flags<'_>,
-    timeout: Duration,
+    limits: (Duration, &S3Client),
 ) -> Result<Arc<dyn Backend>, String> {
+    let (timeout, client) = limits;
     let fail = |why: String| format!("{flag} {spec:?}: {why}");
     let Some(endpoint) = s3.endpoint else {
         return Err(fail(format!("it needs {flag}-endpoint")));
@@ -579,11 +593,11 @@ fn s3_tier(
         bucket: bucket.to_owned(),
         credentials: Credentials::new(key_id, secret),
         capabilities: Capabilities::default(),
-        connect_timeout: S3_CONNECT_TIMEOUT,
+        connect_timeout: client.connect_timeout,
         request_timeout: timeout,
-        min_body_rate: S3_MIN_BODY_RATE,
+        min_body_rate: client.min_body_rate,
     };
-    let built = S3Backend::new(config);
+    let built = S3Backend::new_tuned(config, client.tuning);
     let backend = built.map_err(|why| fail(why.to_string()))?;
     Ok(Arc::new(backend))
 }
@@ -635,11 +649,17 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let mut server = server_config(&cli.front(), Arc::clone(&clock), true)?;
     server.usage_stale_after = cli.usage_stale_after;
     let timeout = cli.s3_request_timeout;
-    let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout)?;
-    let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout)?;
+    let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout, &cli.s3_client)?;
+    let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.critical = share(cli.critical);
     proxy.linger = cli.journal_linger;
+    let tuning = &cli.hot_tuning;
+    proxy.batch_entries = tuning.journal_batch_entries;
+    proxy.usage_refresh = tuning.usage_refresh;
+    proxy.delete_rounds = tuning.delete_rounds;
+    proxy.listing_heads = tuning.listing_heads;
+    proxy.upload_listing_calls = tuning.upload_listing_calls;
     let mut reconciler =
         ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
     reconciler.high_water = share(cli.high_water);
@@ -647,6 +667,9 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
+    reconciler.page_size = tuning.journal_page_size;
+    reconciler.copy_rounds = tuning.copy_rounds;
+    reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
@@ -684,6 +707,8 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         prefix: cli.oci_prefix.clone(),
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime,
+        require_auth: cli.oci_require_auth,
+        stage_read: cli.oci_stage_read,
     };
     oci_setup_of(&flags, server, warn)
 }
@@ -707,12 +732,24 @@ pub(super) fn oci_setup_of(
     }
     let prefix = flags.prefix.as_deref().unwrap_or(DEFAULT_OCI_PREFIX);
     let prefix = OciPrefix::new(prefix).map_err(refuse)?;
+    let plain = flags.tls_cert.is_none() && flags.tls_key.is_none();
+    let in_the_clear = listen
+        .iter()
+        .find(|addr| oci::plain_warning(**addr).is_some());
+    if let (true, true, Some(addr)) = (flags.require_auth, plain, in_the_clear) {
+        let why = format!(
+            "--oci-require-auth sends each client's secret as HTTP Basic, which plain HTTP at \
+             {addr} would carry in the clear: give --oci-tls-cert and --oci-tls-key, or listen \
+             on loopback"
+        );
+        return Err(InvalidFlags(why).into());
+    }
     let acceptor = match (&flags.tls_cert, &flags.tls_key) {
         (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refuse)?),
         (None, None) => {
             let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
             for warning in warnings.filter(|_| warn) {
-                eprintln!("{warning}");
+                tracing::warn!("{warning}");
             }
             None
         }
@@ -741,6 +778,8 @@ pub(super) fn oci_setup_of(
         prefix,
         metrics: Arc::new(OciMetrics::with_mode(mode)),
         limits,
+        auth: flags.require_auth.then(|| OciAuth::from_server(server)),
+        stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
     }))
 }
 
@@ -765,7 +804,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     run_serving(&cli, stop, announce).await?;
     Ok(())
@@ -785,11 +824,11 @@ fn capabilities(args: &[OsString]) -> ExitCode {
     match args.iter().skip(1).find(|arg| *arg != "--capabilities") {
         Some(other) => {
             let other = other.to_string_lossy();
-            eprintln!("tierstore: --capabilities takes no other flag, got {other}");
+            tracing::error!("tierstore: --capabilities takes no other flag, got {other}");
             ExitCode::from(2)
         }
         None => {
-            print!("{}", capabilities_text(CAPABILITIES));
+            super::build_info::stderr_log::answer(&capabilities_text(CAPABILITIES));
             ExitCode::SUCCESS
         }
     }
@@ -816,7 +855,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(if usage.use_stderr() { 2 } else { 0 });
         }
         Err(Refused::Config(why)) => {
-            eprintln!("tierstore: {why}");
+            tracing::error!("tierstore: {why}");
             return ExitCode::from(2);
         }
     };
@@ -836,7 +875,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             // The messages of the checks name flags; the operator wrote keys.
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(exit_status(&why))
         }
     }
@@ -853,7 +892,7 @@ fn check_config(settings: &Settings) -> ExitCode {
     match checked(settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(2)
         }
     }

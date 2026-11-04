@@ -6,6 +6,12 @@
 //! a key that is renamed, fails here. A fixture is changed only by adding a field the readers may
 //! ignore, as `docs/stored-formats.md` says; a changed fixture in a diff is the thing to review.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 mod entry_objects;
 mod format_object;
 mod hook_records;

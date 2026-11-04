@@ -1,6 +1,19 @@
 //! The file names of the keys of a directory tier: how a key is written as a file name and read
 //! back.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Nanoseconds since the epoch, or 0 before it: part of a name no other open or upload shares,
+/// not a time anyone judges.
+pub(super) fn unique_nanos() -> u128 {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a name no other open or upload shares, not a time anyone judges"
+    )]
+    let since = SystemTime::now().duration_since(UNIX_EPOCH);
+    since.map_or(0, |elapsed| elapsed.as_nanos())
+}
+
 /// The file name of a key. A `.` at the start of a key is written as `%2E`, so no file name made
 /// here starts with `.`: those names are the backend's own (`.uploads`, `.entries`, temporary
 /// files).
@@ -32,4 +45,20 @@ pub(super) fn decode(name: &str) -> Option<String> {
         }
     }
     String::from_utf8(bytes).ok()
+}
+
+/// Whether the byte can be in the id of an upload, which names a directory.
+pub(super) fn is_id_byte(byte: u8) -> bool {
+    matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'-')
+}
+
+/// The name of the file of a part of an upload: its number and its content tag.
+pub(super) fn part_name(number: u32, tag: &str) -> String {
+    format!("{number:05}-{tag}")
+}
+
+/// The number and the content tag a file name of a part has, if it is one.
+pub(super) fn parse_part(name: &str) -> Option<(u32, &str)> {
+    let (number, tag) = name.split_once('-')?;
+    Some((number.parse().ok()?, tag))
 }

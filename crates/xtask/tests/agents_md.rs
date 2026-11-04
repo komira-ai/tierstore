@@ -15,6 +15,12 @@
 //!   outside a fenced code block of backticks or tildes (an import inside a fence, inside a
 //!   sentence or with anything after it, a carriage return included, is not read as one).
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};

@@ -41,6 +41,11 @@
 //! - `print <text>` and `fail <text>` print on stdout and exit 0, and print on stderr and
 //!   exit 1.
 
+#![expect(
+    clippy::disallowed_macros,
+    reason = "a stand-in for a command-line tool: what it prints is what the program under test reads"
+)]
+
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
