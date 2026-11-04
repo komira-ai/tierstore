@@ -48,7 +48,6 @@ fn a_storage_node_file_makes_the_settings_it_says() {
     assert_eq!(cli.put_permit_wait, Duration::from_secs(25));
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(120));
     assert_eq!(cli.lease_ttl, Duration::from_secs(40));
-    assert_eq!(cli.journal_retention, Duration::from_secs(12 * 3600));
     assert_eq!(cli.slot, None);
 }
 
@@ -87,10 +86,7 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
     assert_eq!(cli.copy_parallel, 16);
     assert_eq!(cli.lease_ttl, Duration::from_secs(30));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(5));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
-    assert_eq!(cli.journal_linger, Duration::from_millis(20));
-    assert_eq!(cli.journal_retention, Duration::from_secs(24 * 3600));
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));

@@ -3,11 +3,12 @@
 //! `cli_reconcile_tests`.
 
 use std::fs::Permissions;
-
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
 use crate::selftest_tests::{Flaw, Flawed};

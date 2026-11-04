@@ -1,24 +1,20 @@
 //! The format of a hot tier that is made at the start.
 
-use clap::Parser;
-
 use super::start_format;
 use crate::journal::FORMAT_KEY;
 use crate::server::cli::Cli;
+use crate::server::config_testing::MINIMAL;
 use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op};
 
 fn cli(hot: &str) -> Cli {
-    let flags = [
-        "tierstore",
-        "--listen=127.0.0.1:0",
-        "--proxy-id=p1",
-        "--cold=memory",
-        "--hot-bytes=1000",
-        "--bucket=tier-bucket",
-        "--access-key-file=key",
-    ];
-    let hot = format!("--hot={hot}");
-    Cli::try_parse_from(flags.into_iter().chain([hot.as_str()])).unwrap()
+    let tier = match hot.strip_prefix("dir:") {
+        Some(path) => format!("kind = \"dir\"\npath = {path:?}"),
+        None => "kind = \"memory\"".to_owned(),
+    };
+    let memory = "[hot_store]\nkind   = \"memory\"";
+    assert!(MINIMAL.contains(memory));
+    let text = MINIMAL.replacen(memory, &format!("[hot_store]\n{tier}"), 1);
+    Cli::from_config_text(&text).unwrap()
 }
 
 /// Asserts that a `memory` hot tier is given the active format at epoch 2, byte for byte as the
