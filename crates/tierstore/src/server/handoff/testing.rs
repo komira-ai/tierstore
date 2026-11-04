@@ -14,9 +14,10 @@ use tokio::net::{UnixListener, UnixStream};
 use super::wire::{self, Frame};
 use super::{Front, Handoff, Socket};
 
-/// The longest a test of the hand-off waits for one step: far longer than any step takes (the
-/// longest is a closing door, `door::GRACE`), so it only turns a step that never ends into a
-/// failure that names it. No test passes or fails by how long a step took.
+/// The longest a test of the hand-off waits for one step: twice the longest step (the lingering
+/// close of a connection whose client keeps its end open, which waits the server's
+/// `header_timeout` of 60s), so it only turns a step that never ends into a failure that names
+/// it. No test passes or fails by how long a step took.
 const BOUND: Duration = Duration::from_secs(120);
 
 /// What `waiting` gives, or a failure of the test that names `step` if it has not given it within
@@ -91,4 +92,12 @@ pub(super) fn pretending(
             wire::send(&stream, &then, &[]).await.expect("sent");
         }
     })
+}
+
+/// Asserts that a step that never ends fails the test with the step's name, on the paused clock
+/// (no real time passes).
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "a step that never ends: not done within 120s, so the test stops here")]
+async fn a_step_that_never_ends_fails_with_its_name() {
+    within("a step that never ends", std::future::pending::<()>()).await;
 }
