@@ -75,6 +75,10 @@
 //!   removes the registration of a proxy that heartbeated, left no journal object and has not
 //!   changed for [`ReconcilerConfig::registration_retention`] by its own monotonic clock; by
 //!   default that is zero and nothing is removed.
+//! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
+//!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
+//!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
+//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -116,6 +120,9 @@ mod deadline;
 #[cfg(test)]
 mod deadline_tests;
 mod dir;
+mod entry;
+#[cfg(test)]
+mod entry_tests;
 mod error;
 mod faulty;
 #[cfg(test)]
@@ -163,6 +170,10 @@ pub use cache::CachedStore;
 pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use deadline::Deadline;
 pub use dir::DirBackend;
+pub use entry::{
+    Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,
+    encode_entry, entry_key,
+};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
 pub use gate::{Gate, GateBackend, Phase};
