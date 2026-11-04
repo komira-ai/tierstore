@@ -62,8 +62,11 @@ impl Node {
     fn text(&self, hot_extra: &str) -> String {
         format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "n1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"

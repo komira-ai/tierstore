@@ -43,10 +43,13 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a
-/// `[local_cache]` key or a `[[policy]]` key.
+/// `[local_cache]` key, a `[[policy]]` key or a key of an `[[interface]]` (its `params` are in
+/// [`KEYS`] by their last part).
 fn known_key(key: &str) -> bool {
-    matches!(key, "prefix" | "cache")
-        || LOCAL_CACHE_KEYS.contains(&key)
+    matches!(
+        key,
+        "prefix" | "cache" | "type" | "params" | "port" | "addresses"
+    ) || LOCAL_CACHE_KEYS.contains(&key)
         || KEYS
             .iter()
             .flat_map(|(_, keys)| keys.iter())

@@ -76,7 +76,7 @@ fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_bra
 }
 
 /// Asserts the other direction: a file with no key of the read grant, which is what this branch
-/// writes (`--print-config` leaves them out), starts on the release before and on this branch.
+/// documents, starts on the release before and on this branch.
 #[test]
 fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branch() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-plain-config");
@@ -86,6 +86,40 @@ fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branc
         &plain
     ))));
     assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
+}
+
+/// Asserts that a file with the `listen` key of `[server]` and the `[oci]` table, the shape the
+/// release before reads, starts on this branch as it does on that release: this branch reads the
+/// two as an `s3` and an `oci` interface. A file with an `[oci]` table that has no `listen` is
+/// refused by both.
+#[test]
+fn a_file_with_the_oci_table_of_the_release_before_starts_on_both() {
+    use std::io::Write;
+
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-config");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
+    let with = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&with)
+        .unwrap();
+    text.write_all(b"\n[oci]\nlisten = \"127.0.0.1:0\"\nprefix = \"images/\"\n")
+        .unwrap();
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(
+        &with
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&with))));
+
+    let bare = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&bare)
+        .unwrap();
+    text.write_all(b"\n[oci]\nprefix = \"images/\"\n").unwrap();
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &bare
+    ))));
+    assert!(!succeeded(tierstore::server::cli::main(checking(&bare))));
 }
 
 /// Asserts the change of the default minimum on a file of the release before: a file whose key has
@@ -120,8 +154,7 @@ fn certificate(dir: &TestDir) -> (String, String) {
 /// Asserts that a file with `tls_cert_file` and `tls_key_file`, the keys of the S3 front's TLS, is
 /// started by this branch and is refused by the release before, which does not know the keys (its
 /// tables refuse an unknown key, as for every key added since): an operator gives the keys after
-/// the upgrade. The same file without the two keys starts on both, and is what `--print-config`
-/// writes for a node that does not use TLS.
+/// the upgrade. The same file without the two keys starts on both.
 #[test]
 fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-tls-config");

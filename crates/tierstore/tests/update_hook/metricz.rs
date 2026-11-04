@@ -1,5 +1,5 @@
 //! The probe through the public port, fed what the real server says: `/metricz` of a
-//! `tierstore` process started with `--slot` (and one started without it), served verbatim by
+//! `tierstore` process started with `slot` in its file (and one started without it), served verbatim by
 //! the stub as the new slot's answer, and read by the real hook's `cutover`.
 
 use std::fs::{self, Permissions};
@@ -14,35 +14,27 @@ use tierstore_testkit::reaped::{first_line, spawn};
 use crate::rig::{HOOK, Rig, Setup};
 use crate::stub::SlotScript;
 
-/// Starts the real server (memory tiers, a scratch key file) with `--slot <slot>` when a slot is
+/// Starts the real server (memory tiers, a scratch key file) with `server.slot` set when a slot is
 /// given, and returns the body of its `/metricz`.
 fn served_metricz(rig: &Rig, slot: Option<u16>) -> String {
     let key = rig.root.join("server-key");
     fs::write(&key, "AKIDHOOK\nhook-secret-0123456789\n").unwrap();
     fs::set_permissions(&key, Permissions::from_mode(0o600)).unwrap();
+    let slot_line = slot.map_or_else(String::new, |slot| format!("slot = {slot}\n"));
+    let config = rig.root.join("server.toml");
+    let text = format!(
+        "[[interface]]\ntype = \"s3\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n\
+         [server]\nproxy_id = \"hook-probe\"\n{slot_line}bucket = \"tier-bucket\"\naccess_key_file = {:?}\n\n\
+         [hot_store]\nkind = \"memory\"\nbudget = 1048576\n\n[cold_store]\nkind = \"memory\"\n",
+        key.display().to_string()
+    );
+    fs::write(&config, text).unwrap();
     let mut command = Command::new(HOOK);
     command
-        .args([
-            "--listen",
-            "127.0.0.1:0",
-            "--proxy-id",
-            "hook-probe",
-            "--hot",
-            "memory",
-            "--cold",
-            "memory",
-            "--hot-bytes",
-            "1048576",
-            "--bucket",
-            "tier-bucket",
-            "--access-key-file",
-        ])
-        .arg(&key)
+        .arg("--config")
+        .arg(&config)
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(slot) = slot {
-        command.args(["--slot", &slot.to_string()]);
-    }
     let mut child = spawn(&mut command, 3).unwrap();
     let (line, _reader) =
         first_line(child.stdout.take().unwrap(), Duration::from_secs(30)).unwrap();
@@ -57,10 +49,10 @@ fn served_metricz(rig: &Rig, slot: Option<u16>) -> String {
     body
 }
 
-/// Asserts that the body of `/metricz` the server itself serves when started with `--slot`
+/// Asserts that the body of `/metricz` the server itself serves when started with `server.slot`
 /// carries the server's build gauge with that slot, and that the real hook's probe, given that
 /// body through the public port, finds the new slot and the staged version in it (`cutover`
-/// succeeds and records `swapped`); and that the body of a server started without `--slot`
+/// succeeds and records `swapped`); and that the body of a server started without `server.slot`
 /// fails the same probe (`probe_failed`), after which the redirect is back on the old slot. It
 /// would catch a probe that reads a label the server does not render, which a stub written by
 /// hand would not.

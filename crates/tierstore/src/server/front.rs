@@ -13,7 +13,7 @@ use super::ServerConfig;
 use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
 use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
-use super::listen::{has_duplicate, joined};
+use super::listen::joined;
 use super::oci::{self, OciError};
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
 use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scoped_keys};
@@ -24,25 +24,23 @@ use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scope
 #[error("{0}")]
 pub(super) struct InvalidFlags(pub String);
 
-/// The access key id and the secret access key in the file of `--access-key-file`.
+/// The access key id and the secret access key in the file of `server.access_key_file`.
 pub(super) fn read_key(path: &Path) -> Result<(String, String), String> {
     read_credentials("--access-key-file", path)
 }
 
-/// The certificate and the key that make the S3 front serve HTTPS. Left out, it serves plain
-/// HTTP.
-#[derive(Clone, Debug, Default, PartialEq, Eq, clap::Args)]
+/// The certificate and the key that make the S3 front serve HTTPS (`server.tls_cert_file` and
+/// `server.tls_key_file`). Left out, it serves plain HTTP.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct S3Tls {
-    /// The certificate chain (PEM) of `--listen`, leaf first, issued by the CA the clients trust.
-    /// With it every connection of the front (the loopback socket a build node adds as well) is
-    /// HTTPS. The leaf must name the front: a DNS subjectAltName (any), or else an IP
-    /// subjectAltName for each `--listen` address; it may have both. The files are read once, so
-    /// a new certificate takes a restart. Give it with `--tls-key` or not at all.
-    #[arg(long, value_name = "PATH", requires = "tls_key")]
+    /// The certificate chain (PEM) of the `s3` interfaces, leaf first, issued by the CA the clients
+    /// trust. With it every connection of the front (the loopback socket a build node adds as
+    /// well) is HTTPS. The leaf must name the front: a DNS subjectAltName (any), or else an IP
+    /// subjectAltName for each `s3` address; it may have both. The files are read once, so a new
+    /// certificate takes a restart. Give it with `tls_key` or not at all.
     pub tls_cert: Option<PathBuf>,
-    /// The private key (PEM) of `--tls-cert`. A file any user can read (a mode with the
-    /// permission bits for others) is refused. Give it with `--tls-cert` or not at all.
-    #[arg(long, value_name = "PATH", requires = "tls_cert")]
+    /// The private key (PEM) of `tls_cert`. A file any user can read (a mode with the permission
+    /// bits for others) is refused. Give it with `tls_cert` or not at all.
     pub tls_key: Option<PathBuf>,
 }
 
@@ -77,8 +75,8 @@ pub(super) fn warn_plain(listen: &[SocketAddr], mut out: impl Write) {
         // A warning that cannot be written is not worth stopping a start for.
         let _ = writeln!(
             out,
-            "tierstore: warning: --listen {} serves plain HTTP on a non-loopback address; \
-             give --tls-cert and --tls-key to serve HTTPS",
+            "tierstore: warning: the s3 interface at {} serves plain HTTP on a non-loopback address; \
+             set server.tls_cert_file and server.tls_key_file to serve HTTPS",
             joined(&open)
         );
     }
@@ -153,12 +151,10 @@ const GRANT_IGNORED: &str = "is ignored: the read grant was removed; use a presi
 /// The key files are not read.
 fn warn_grant_ignored(front: &FrontSettings) {
     if !front.grant_key_file.is_empty() {
-        tracing::warn!("tierstore: --grant-key-file (server.grant_key_files) {GRANT_IGNORED}");
+        tracing::warn!("tierstore: server.grant_key_files {GRANT_IGNORED}");
     }
     if front.grant_max_lifetime.is_some() {
-        tracing::warn!(
-            "tierstore: --grant-max-lifetime (server.grant_max_lifetime) {GRANT_IGNORED}"
-        );
+        tracing::warn!("tierstore: server.grant_max_lifetime {GRANT_IGNORED}");
     }
 }
 
@@ -182,9 +178,6 @@ pub(super) fn server_config(
     warn_grant_ignored(front);
     if front.body_idle_timeout.is_zero() {
         return Err("--body-idle-timeout must be longer than zero".into());
-    }
-    if has_duplicate(&front.listen) {
-        return Err(InvalidFlags("--listen is given the same address twice".into()).into());
     }
     let (key_id, secret) = read_key(&front.access_key_file)?;
     let read_only = read_only_keys(&front.read_only_key_file)?;

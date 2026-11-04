@@ -1,16 +1,16 @@
-//! The configuration file: what a file makes, what it refuses, and that every flag has a key.
+//! The configuration file: what a file makes, what it refuses, and that every flag that went has
+//! a refusal that names its key.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use super::super::config_units::{format_duration, parse_size};
-use super::{ConfigError, KEYS, PER_RUN, PerRun, from_text, keys_for_flags, load};
+use super::super::config_units::parse_size;
+use super::{ConfigError, KEYS, PerRun, from_text, keys_for_flags, load, removed};
 use crate::server::cli::{Cli, parse_duration};
-use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, MINIMAL_FLAGS, golden_flags};
+use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
 
 /// The message of the refusal of this file text.
 fn refusal(text: &str) -> String {
@@ -29,26 +29,32 @@ fn minimal_with(from: &str, to: &str) -> String {
     MINIMAL.replacen(from, to, 1)
 }
 
-/// Asserts that the golden storage-node file makes the settings the same values given as flags
-/// make: every key of the table holds what its flag holds, so a server started from the file is
-/// the server started from the flags.
+/// Asserts that the golden storage-node file makes the settings it says, key by key: the
+/// addresses of its interfaces, the tiers, the key files and the front's params.
 #[test]
-fn a_storage_node_file_makes_the_settings_its_flags_make() {
-    let from_file = from_text(GOLDEN, DEFAULTS).unwrap();
-    let from_flags = Cli::try_parse_from(golden_flags()).unwrap();
-    assert_eq!(from_file, from_flags);
-    assert_eq!(from_file.hot_bytes, 500 << 30);
-    assert_eq!(from_file.hot, "s3:tierstore-hot");
-    assert_eq!(from_file.skip_backend_check.len(), 1);
-    assert_eq!(from_file.read_only_key_file.len(), 2);
-    assert_eq!(from_file.config, None);
-    assert!(!from_file.print_config);
+fn a_storage_node_file_makes_the_settings_it_says() {
+    let cli = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert_eq!(cli.listen, vec!["192.0.2.10:9300".parse().unwrap()]);
+    assert_eq!(cli.proxy_id, "tierstore-1");
+    assert_eq!(cli.bucket, "tierstore");
+    assert_eq!(cli.region, "eu-west-1");
+    assert_eq!(cli.hot, "s3:tierstore-hot");
+    assert_eq!(cli.cold, "s3:tierstore-cold");
+    assert_eq!(cli.hot_bytes, 500 << 30);
+    assert_eq!((cli.high_water, cli.low_water, cli.critical), (85, 60, 97));
+    assert_eq!(cli.skip_backend_check.len(), 1);
+    assert_eq!(cli.read_only_key_file.len(), 2);
+    assert_eq!(cli.max_request_bytes, 134_217_728);
+    assert_eq!(cli.put_permit_wait, Duration::from_secs(25));
+    assert_eq!(cli.s3_request_timeout, Duration::from_secs(120));
+    assert_eq!(cli.lease_ttl, Duration::from_secs(40));
+    assert_eq!(cli.journal_retention, Duration::from_secs(12 * 3600));
+    assert_eq!(cli.slot, None);
 }
 
 /// Asserts that a file written for the release before, which sets the two keys of the removed read
-/// grant, still loads: the settings are those the same flags make (the keys and the flags are
-/// accepted and kept, to be ignored with a warning at the start), and every other key is read as
-/// it was.
+/// grant, still loads: the settings keep both keys (to be ignored with a warning at the start),
+/// every other key is read as it was, and a file without them has none.
 #[test]
 fn a_file_with_the_keys_of_the_removed_read_grant_still_loads() {
     let old = golden_with(
@@ -58,28 +64,50 @@ fn a_file_with_the_keys_of_the_removed_read_grant_still_loads() {
          grant_max_lifetime    = \"5m\"",
     );
     let from_file = from_text(&old, DEFAULTS).unwrap();
-    let mut flags = golden_flags();
-    flags.extend([
-        "--grant-key-file=/etc/tierstore/grant.key",
-        "--grant-max-lifetime=5m",
-    ]);
-    let from_flags = Cli::try_parse_from(flags).unwrap();
-    assert_eq!(from_file, from_flags);
+    assert_eq!(
+        from_file.grant_key_file,
+        vec![PathBuf::from("/etc/tierstore/grant.key")]
+    );
     assert_eq!(from_file.grant_max_lifetime, Some(Duration::from_secs(300)));
+    assert_eq!(
+        from_file.access_key_file,
+        PathBuf::from("/etc/tierstore/access.key")
+    );
     let without = from_text(GOLDEN, DEFAULTS).unwrap();
     assert!(without.grant_key_file.is_empty());
     assert_eq!(without.grant_max_lifetime, None);
 }
 
 /// Asserts that a file that gives the least a start needs gets, for every key it leaves out, the
-/// value the flag has when it is left out, so there is one set of defaults.
+/// documented default, and that the knobs of the run come from the run.
 #[test]
-fn a_key_that_is_left_out_has_the_default_of_its_flag() {
-    let from_file = from_text(MINIMAL, DEFAULTS).unwrap();
-    let from_flags = Cli::try_parse_from(MINIMAL_FLAGS).unwrap();
-    assert_eq!(from_file, from_flags);
-    assert_eq!(DEFAULTS.drain_lb_wait, from_flags.drain_lb_wait);
-    assert_eq!(DEFAULTS.drain_deadline, from_flags.drain_deadline);
+fn a_key_that_is_left_out_has_its_default() {
+    let cli = from_text(MINIMAL, DEFAULTS).unwrap();
+    assert_eq!(cli.region, "us-east-1");
+    assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
+    assert_eq!(cli.copy_parallel, 16);
+    assert_eq!(cli.lease_ttl, Duration::from_secs(30));
+    assert_eq!(cli.reconcile_interval, Duration::from_secs(5));
+    assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
+    assert_eq!(cli.journal_linger, Duration::from_millis(20));
+    assert_eq!(cli.journal_retention, Duration::from_secs(24 * 3600));
+    assert_eq!(cli.max_request_bytes, 256 << 20);
+    assert_eq!(cli.max_concurrent_puts, 32);
+    assert_eq!(cli.put_permit_wait, Duration::from_secs(15));
+    assert_eq!(cli.put_min_bytes_per_sec, 1024);
+    assert_eq!(cli.put_rate_grace, Duration::from_secs(30));
+    assert_eq!(cli.body_idle_timeout, Duration::from_secs(30));
+    assert_eq!(cli.s3_request_timeout, Duration::from_secs(60));
+    assert_eq!(cli.backend_check_wait, Duration::from_secs(300));
+    assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
+    assert_eq!(cli.grant_max_lifetime, None);
+    assert!(cli.grant_key_file.is_empty());
+    assert!(cli.oci_listen.is_empty());
+    assert!(cli.skip_backend_check.is_empty());
+    assert_eq!(DEFAULTS.drain_lb_wait, Duration::from_secs(10));
+    assert_eq!(DEFAULTS.drain_deadline, Duration::from_secs(900));
+    assert_eq!(cli.drain_lb_wait, DEFAULTS.drain_lb_wait);
+    assert_eq!(cli.drain_deadline, DEFAULTS.drain_deadline);
     let slow = PerRun {
         drain_lb_wait: Duration::from_secs(1),
         drain_deadline: Duration::from_secs(2),
@@ -89,8 +117,8 @@ fn a_key_that_is_left_out_has_the_default_of_its_flag() {
     assert_eq!(with_run.drain_deadline, Duration::from_secs(2));
 }
 
-/// Asserts that the tiers of the other kinds are made as `--hot dir:<path>` and `--cold memory`
-/// make them, and that a size is a number or a string with a unit.
+/// Asserts that the tiers of the other kinds are made as the specs `dir:<path>` and `memory`, and
+/// that a size is a number or a string with a unit.
 #[test]
 fn a_directory_tier_and_a_size_in_bytes_are_read() {
     let text = minimal_with(
@@ -132,7 +160,11 @@ fn an_unknown_key_or_table_is_refused_by_name() {
         golden_with("[server]", "[server]\nbogus = 1"),
         golden_with("[hot_store]", "[hot_store]\nbogus = 1"),
         golden_with("[cold_store]", "[cold_store]\nbogus = 1"),
-        golden_with("[oci]", "[oci]\nbogus = 1"),
+        golden_with("type   = \"oci\"", "type   = \"oci\"\nbogus = 1"),
+        golden_with(
+            "params = { addresses = [\"192.0.2.10:9300\"] }",
+            "params = { addresses = [\"192.0.2.10:9300\"], bogus = 1 }",
+        ),
         format!("{GOLDEN}\n[bogus]\nx = 1\n"),
         format!("{GOLDEN}\n[[policy]]\nprefix = \"a/\"\nbogus = 1\n"),
         format!("bogus = 1\n{GOLDEN}"),
@@ -142,10 +174,13 @@ fn an_unknown_key_or_table_is_refused_by_name() {
         assert!(why.contains("bogus"), "{why}");
     }
     let why = refusal(&golden_with(
-        "listen                = \"192.0.2.10:9300\"",
-        "listen = \"nowhere\"",
+        "addresses = [\"192.0.2.10:9300\"]",
+        "addresses = [\"nowhere\"]",
     ));
-    assert!(why.contains("listen"), "{why}");
+    assert!(
+        why.contains("params: invalid socket address syntax"),
+        "{why}"
+    );
     let syntax = from_text("this is = not toml [", DEFAULTS);
     assert!(matches!(syntax, Err(ConfigError::Syntax { .. })));
     let lines: Vec<&str> = GOLDEN
@@ -503,16 +538,16 @@ fn a_value_out_of_range_is_refused_with_its_key() {
     }
 }
 
-/// `MINIMAL` with the text of an `[oci]` table after it.
-fn minimal_with_oci(oci: &str) -> String {
-    format!("{MINIMAL}\n[oci]\n{oci}\n")
+/// `MINIMAL` with an `oci` interface that has `params` after it.
+fn minimal_with_oci(params: &str) -> String {
+    format!("{MINIMAL}\n[[interface]]\ntype = \"oci\"\nparams = {{ {params} }}\n")
 }
 
-/// Asserts that an `[oci]` table makes the settings the `--oci-*` flags make: with every key
-/// given (the golden file) and with `listen` alone, where the other keys stay unset so that the
-/// front's own defaults apply; and that a file without the table opens no front.
+/// Asserts that the `oci` interface of the golden file makes the front's settings, every param
+/// given; that an interface with an address alone leaves the other settings unset so that the
+/// front's own defaults apply; and that a file without the interface opens no front.
 #[test]
-fn an_oci_table_makes_the_settings_its_flags_make() {
+fn an_oci_interface_makes_the_front_it_says() {
     let all = from_text(GOLDEN, DEFAULTS).unwrap();
     assert_eq!(all.oci_listen, vec!["192.0.2.10:5000".parse().unwrap()]);
     assert_eq!(
@@ -526,80 +561,27 @@ fn an_oci_table_makes_the_settings_its_flags_make() {
     assert_eq!(all.oci_prefix.as_deref(), Some("images/"));
     assert_eq!(all.oci_max_connections, Some(16));
     assert_eq!(all.oci_connection_lifetime, Some(Duration::from_secs(1800)));
-    assert_eq!(all, Cli::try_parse_from(golden_flags()).unwrap());
 
-    let listen_only = from_text(&minimal_with_oci("listen = \"127.0.0.1:5000\""), DEFAULTS);
-    let mut flags = MINIMAL_FLAGS.to_vec();
-    flags.push("--oci-listen=127.0.0.1:5000");
-    assert_eq!(listen_only.unwrap(), Cli::try_parse_from(flags).unwrap());
+    let alone = from_text(&minimal_with_oci("port = 5000"), DEFAULTS).unwrap();
+    assert_eq!(alone.oci_listen, vec!["0.0.0.0:5000".parse().unwrap()]);
+    assert_eq!(alone.oci_tls_cert, None);
+    assert_eq!(alone.oci_prefix, None);
+    assert_eq!(alone.oci_max_connections, None);
+    assert_eq!(alone.oci_connection_lifetime, None);
 
     let none = from_text(MINIMAL, DEFAULTS).unwrap();
     assert!(none.oci_listen.is_empty());
 }
 
-/// Asserts that the `[oci]` rules are the flags' rules, each refusal naming its key: a
-/// certificate without a key and a key without a certificate, any other key without `listen`
-/// (and an empty table), a connection count of zero, a duration that is not one, a table with a
-/// key it does not have, and a key that holds a secret.
-#[test]
-fn an_oci_table_is_refused_as_the_flags_are() {
-    let listen = "listen = \"127.0.0.1:5000\"\n";
-    let both = "tls_cert_file = \"/c\"\ntls_key_file = \"/k\"";
-    let cases = [
-        (
-            format!("{listen}tls_cert_file = \"/c\""),
-            "oci.tls_key_file",
-        ),
-        (
-            format!("{listen}tls_key_file = \"/k\""),
-            "oci.tls_cert_file",
-        ),
-        (both.to_owned(), "oci.tls_cert_file: it needs oci.listen"),
-        (
-            "prefix = \"oci/\"".to_owned(),
-            "oci.prefix: it needs oci.listen",
-        ),
-        (
-            "max_connections = 4".to_owned(),
-            "oci.max_connections: it needs",
-        ),
-        (
-            "connection_lifetime = \"1h\"".to_owned(),
-            "oci.connection_lifetime: it needs",
-        ),
-        (String::new(), "oci.listen: it is needed"),
-        (
-            format!("{listen}max_connections = 0"),
-            "oci.max_connections",
-        ),
-        (format!("{listen}max_connections = -1"), "max_connections"),
-        (
-            format!("{listen}connection_lifetime = \"1\""),
-            "connection_lifetime: not a value this key takes (it is not shown); expected a duration such as",
-        ),
-        (
-            format!("{listen}connection_lifetime = 3600"),
-            "connection_lifetime",
-        ),
-        (format!("{listen}bogus = 1"), "bogus"),
-        (format!("{listen}tls_key = \"/k\""), "oci.tls_key: a secret"),
-        ("listen = \"nowhere\"".to_owned(), "listen"),
-    ];
-    for (oci, want) in cases {
-        let why = refusal(&minimal_with_oci(&oci));
-        assert!(why.contains(want), "{oci}: {why}");
-    }
-}
-
 /// Asserts that a refusal the start makes about an `--oci-*` flag names the key of the file.
 #[test]
 fn a_message_about_the_oci_flags_names_their_keys() {
-    let message = "--oci-tls-cert and --oci-tls-key go together; --oci-listen, --oci-prefix, \
+    let message = "--oci-tls-cert and --oci-tls-key go together; --oci-prefix, \
                    --oci-max-connections, --oci-connection-lifetime";
     assert_eq!(
         keys_for_flags(message),
-        "oci.tls_cert_file and oci.tls_key_file go together; oci.listen, oci.prefix, \
-         oci.max_connections, oci.connection_lifetime"
+        "params.tls_cert_file and params.tls_key_file go together; params.prefix, \
+         params.max_connections, params.connection_lifetime"
     );
 }
 
@@ -651,59 +633,33 @@ fn a_policy_is_checked_and_has_no_effect_on_a_storage_node() {
     assert!(why.contains("policy[1].prefix"), "{why}");
 }
 
-/// Asserts that sizes and durations read as the flags and the docs say, and that a duration is
-/// written back as a text that reads as the same duration.
+/// Asserts that sizes and durations read as the docs say.
 #[test]
-fn sizes_and_durations_are_read_and_written_back() {
+fn sizes_and_durations_are_read() {
     assert_eq!(parse_size("500GiB"), Ok(500 << 30));
     assert_eq!(parse_size("3B"), Ok(3));
     assert_eq!(parse_size("2KiB"), Ok(2048));
     assert_eq!(parse_size("1TiB"), Ok(1 << 40));
     assert!(parse_size("").is_err());
-    let durations = [
-        0, 1, 20, 999, 1000, 1500, 59_000, 60_000, 90_000, 3_600_000, 7_200_000, 86_400_000,
-    ];
-    for millis in durations {
-        let duration = Duration::from_millis(millis);
-        let text = format_duration(duration);
-        assert_eq!(parse_duration(&text), Ok(duration), "{text}");
-    }
-    assert_eq!(format_duration(Duration::ZERO), "0s");
-    assert_eq!(format_duration(Duration::from_secs(900)), "15m");
-    assert_eq!(format_duration(Duration::from_secs(7200)), "2h");
-    assert_eq!(format_duration(Duration::from_millis(1500)), "1500ms");
+    assert_eq!(parse_duration("0s"), Ok(Duration::ZERO));
+    assert_eq!(parse_duration("15m"), Ok(Duration::from_secs(900)));
+    assert_eq!(parse_duration("2h"), Ok(Duration::from_secs(7200)));
+    assert_eq!(parse_duration("1500ms"), Ok(Duration::from_millis(1500)));
 }
 
-/// Asserts that the flags of the parser are, each one, either in the key table or a per-run flag,
-/// once; that every entry of the table is a flag; and that no flag is in both. A flag added to
-/// `Cli` without a key fails here.
+/// Asserts that the key table is well formed: a flag at most once, every flag with at least one
+/// key, each key of a table of the file (or a param of an interface) and one name deep.
 #[test]
-fn every_flag_has_one_key_or_is_a_per_run_knob() {
-    let command = Cli::command();
-    let flags: Vec<&str> = command
-        .get_arguments()
-        .filter_map(|arg| arg.get_long())
-        .collect();
+fn the_key_table_is_well_formed() {
     let keyed: Vec<&str> = KEYS.iter().map(|(flag, _)| *flag).collect();
     let unique: BTreeSet<&str> = keyed.iter().copied().collect();
     assert_eq!(unique.len(), keyed.len(), "a flag twice in the key table");
-    for flag in &flags {
-        let keys = keyed.contains(flag);
-        let per_run = PER_RUN.contains(flag);
-        assert!(
-            keys != per_run,
-            "--{flag} must be in the key table or a per-run knob, once"
-        );
-    }
-    for flag in keyed.iter().chain(PER_RUN) {
-        assert!(flags.contains(flag), "--{flag} is not a flag");
-    }
     for (flag, keys) in KEYS {
         assert!(!keys.is_empty(), "--{flag}");
         for key in *keys {
             let (table, name) = key.split_once('.').unwrap();
             assert!(
-                ["server", "hot_store", "cold_store", "oci"].contains(&table),
+                ["server", "hot_store", "cold_store", "params"].contains(&table),
                 "{key}"
             );
             assert!(!name.is_empty(), "{key}");
@@ -712,31 +668,44 @@ fn every_flag_has_one_key_or_is_a_per_run_knob() {
     }
 }
 
-/// Asserts that both READMEs say how to use the file and that the key table in the README of the
-/// package lists every flag with every key it stands for, and the per-run flags as flags.
+/// Asserts that each flag the data path had is refused with a message that names it and the key
+/// that replaces it: the flags of the key table by their first key, `--listen` and `--oci-listen`
+/// by the interface that replaces them, `--print-config` by the file; and that a name the data
+/// path never had is none of this.
 #[test]
-fn the_readmes_document_every_flag_and_key() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let packaging = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
-    let package = std::fs::read_to_string(root.join("README.md")).unwrap();
-    for text in [&packaging, &package] {
-        assert!(text.contains("--config"));
-        assert!(text.contains("--print-config"));
-    }
+fn a_flag_that_went_is_refused_naming_its_key() {
     for (flag, keys) in KEYS {
-        let mut rows = packaging.lines().filter(|line| line.starts_with('|'));
-        let row = rows.find(|line| line.contains(&format!("`--{flag}`")));
-        assert!(row.is_some(), "no row for --{flag}");
-        let row = row.unwrap();
-        for key in *keys {
-            assert!(
-                row.contains(&format!("`{key}`")),
-                "--{flag}: {key} is not in its row: {row}"
-            );
-        }
+        let why = removed(flag).unwrap();
+        assert!(why.starts_with(&format!("--{flag} was removed:")), "{why}");
+        assert!(why.contains(keys.first().unwrap()), "{flag}: {why}");
     }
-    for flag in PER_RUN {
-        assert!(packaging.contains(&format!("`--{flag}`")), "--{flag}");
+    let hot = removed("hot-bytes").unwrap();
+    assert_eq!(
+        hot,
+        "--hot-bytes was removed: the file given with --config holds it; set hot_store.budget"
+    );
+    let oci = removed("oci-prefix").unwrap();
+    assert!(
+        oci.ends_with("set params.prefix of an oci interface"),
+        "{oci}"
+    );
+    let listen = removed("listen").unwrap();
+    assert!(
+        listen.contains("[[interface]] with type = \"s3\""),
+        "{listen}"
+    );
+    let oci_listen = removed("oci-listen").unwrap();
+    assert!(oci_listen.contains("type = \"oci\""), "{oci_listen}");
+    let print = removed("print-config").unwrap();
+    assert!(print.starts_with("--print-config was removed:"), "{print}");
+    for kept in [
+        "config",
+        "check-config",
+        "capabilities",
+        "drain-lb-wait",
+        "no-such",
+    ] {
+        assert_eq!(removed(kept), None, "{kept}");
     }
 }
 
@@ -758,104 +727,14 @@ fn a_message_about_flags_names_keys_for_a_file() {
     );
 }
 
-/// Asserts that the example file in the README of the packaging is a file that loads: its first
-/// TOML block makes settings, with the budget `1TiB` the unit's `--hot-bytes` is.
+/// Asserts that `server.slot` makes the slot (a port, 1 to 65535), that a file without it has
+/// none, and that zero, a number past a port, a string and a negative number are refused with
+/// the key named.
 #[test]
-fn the_example_in_the_readme_loads() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let readme = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
-    let (_, after) = readme.split_once("```toml\n").expect("a TOML block");
-    let (example, _) = after.split_once("\n```").expect("the end of the block");
-    let cli = from_text(example, DEFAULTS).unwrap();
-    assert_eq!(cli.hot_bytes, 1 << 40);
-    assert_eq!(cli.hot, "s3:tierstore-hot");
-    assert_eq!(cli.cold, "s3:tierstore-cold");
-    assert_eq!(cli.read_only_key_file.len(), 1);
-}
-
-/// `GOLDEN` with the value of `server.listen` and of `oci.listen` replaced.
-fn golden_listening(server: &str, oci: &str) -> String {
-    let text = golden_with("\"192.0.2.10:9300\"", server);
-    assert!(text.contains("\"192.0.2.10:5000\""));
-    text.replacen("\"192.0.2.10:5000\"", oci, 1)
-}
-
-/// Asserts that `server.listen` and `oci.listen` take one address as a string or a list of
-/// addresses: the list of one makes the settings the string does (so a file written before the
-/// lists loads as it did), and a list of two makes the settings two repeated flags make.
-#[test]
-fn a_listen_key_takes_one_address_or_a_list_of_them() {
-    let single = from_text(GOLDEN, DEFAULTS).unwrap();
-    let listed = golden_listening("[\"192.0.2.10:9300\"]", "[\"192.0.2.10:5000\"]");
-    assert_eq!(from_text(&listed, DEFAULTS).unwrap(), single);
-
-    let server = "[\"0.0.0.0:9300\", \"[::]:9300\"]";
-    let oci = "[\"0.0.0.0:5000\", \"[::]:5000\"]";
-    let from_file = from_text(&golden_listening(server, oci), DEFAULTS).unwrap();
-    let flags: Vec<&str> = golden_flags()
-        .into_iter()
-        .flat_map(|flag| match flag {
-            "--listen=192.0.2.10:9300" => vec!["--listen=0.0.0.0:9300", "--listen=[::]:9300"],
-            "--oci-listen=192.0.2.10:5000" => {
-                vec!["--oci-listen=0.0.0.0:5000", "--oci-listen=[::]:5000"]
-            }
-            other => vec![other],
-        })
-        .collect();
-    assert_eq!(from_file, Cli::try_parse_from(flags).unwrap());
-    assert_eq!(from_file.listen.len(), 2);
-    assert_eq!(from_file.oci_listen.len(), 2);
-}
-
-/// Asserts that a `listen` list that cannot work is refused with its key, and with no address and
-/// no text of the value in the message: an empty list, an address twice, and a value that is
-/// no address.
-#[test]
-fn a_listen_list_that_cannot_work_is_refused_by_its_key() {
-    let one_server = "\"192.0.2.10:9300\"";
-    let one_oci = "\"192.0.2.10:5000\"";
-    let twice_server = "[\"192.0.2.10:9300\", \"192.0.2.10:9300\"]";
-    let twice_oci = "[\"192.0.2.10:5000\", \"192.0.2.10:5000\"]";
-    let cases = [
-        (
-            golden_listening("[]", one_oci),
-            "server.listen: it needs at least one address",
-        ),
-        (
-            golden_listening(one_server, "[]"),
-            "oci.listen: it needs at least one address",
-        ),
-        (
-            golden_listening(twice_server, one_oci),
-            "server.listen: the same address is listed twice",
-        ),
-        (
-            golden_listening(one_server, twice_oci),
-            "oci.listen: the same address is listed twice",
-        ),
-        (
-            golden_listening("[\"192.0.2.10:9300\", \"secret-word\"]", one_oci),
-            "listen: invalid socket address syntax",
-        ),
-    ];
-    for (text, want) in cases {
-        let why = refusal(&text);
-        assert!(why.contains(want), "{want}: {why}");
-        assert!(!why.contains("192.0.2.10"), "{why}");
-        assert!(!why.contains("secret-word"), "{why}");
-    }
-}
-
-/// Asserts that `server.slot` makes the setting `--slot` makes (a port, 1 to 65535), that a file
-/// without it has none, as the flag left out has, and that zero, a number past a port, a string
-/// and a negative number are refused with the key named.
-#[test]
-fn the_slot_key_makes_the_slot_flag_and_is_a_port() {
+fn the_slot_key_is_a_port() {
     let with = |value: &str| minimal_with("[server]", &format!("[server]\nslot = {value}"));
     let cli = from_text(&with("9301"), DEFAULTS).unwrap();
     assert_eq!(cli.slot, Some(9301));
-    let flags = [MINIMAL_FLAGS.to_vec(), vec!["--slot=9301"]].concat();
-    assert_eq!(cli, Cli::try_parse_from(flags).unwrap());
     assert_eq!(from_text(MINIMAL, DEFAULTS).unwrap().slot, None);
     assert_eq!(
         from_text(&with("65535"), DEFAULTS).unwrap().slot,
@@ -866,6 +745,19 @@ fn the_slot_key_makes_the_slot_flag_and_is_a_port() {
         assert!(why.contains("slot"), "{bad}: {why}");
     }
     assert!(refusal(&with("0")).contains("server.slot"));
+}
+
+/// Asserts that a storage node's settings are made of the text with `Cli::from_config_text`, and
+/// that the file of a build node is refused there with the shape named.
+#[test]
+fn the_settings_of_a_storage_node_are_made_of_the_text() {
+    assert_eq!(
+        Cli::from_config_text(MINIMAL).unwrap(),
+        from_text(MINIMAL, DEFAULTS).unwrap()
+    );
+    let cache = "[[interface]]\ntype = \"s3\"\nparams = { port = 9300 }\n\n[server]\nproxy_id = \"c\"\nbucket = \"b\"\naccess_key_file = \"k\"\n\n[local_cache]\npath = \"/c\"\nbudget = 1\n\n[cold_store]\nkind = \"s3\"\nbucket = \"b\"\nendpoint = \"http://x\"\ncredentials_file = \"/k\"\n\n[[policy]]\nprefix = \"a/\"\ncache = true\n";
+    let why = Cli::from_config_text(cache).unwrap_err().to_string();
+    assert!(why.contains("the file of a build node"), "{why}");
 }
 
 /// Asserts that `server.min_secret_bytes`, a number whose name holds the word `secret`, is read
