@@ -250,7 +250,7 @@ impl Backend for GateBackend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         let call = self.inner.get_tagged(key, range);
         self.through(Op::Get, key, call).await
     }

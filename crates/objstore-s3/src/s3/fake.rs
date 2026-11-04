@@ -47,6 +47,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
+mod dates;
 mod uploads;
 
 use self::dates::{http_date, iso_date};
