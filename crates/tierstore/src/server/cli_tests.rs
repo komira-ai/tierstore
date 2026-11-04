@@ -1,5 +1,5 @@
 //! The flags of the binary: their defaults, parsing and help. The settings made of them and the
-//! checks before a start are in the two modules below.
+//! skipped checks and checks before a start are in the two modules below.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;

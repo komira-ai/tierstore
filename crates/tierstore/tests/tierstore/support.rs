@@ -58,9 +58,12 @@ impl Rig {
     }
 
     /// The settings of a reconciler `holder` for a hot tier of `budget` bytes: the water
-    /// marks at 0.8 and 0.7, a lease of 30 seconds and a retention of an hour.
+    /// marks at 0.8 and 0.7, a lease of 30 seconds and a retention of an hour. The rig's clock
+    /// is also the monotonic clock of the lease, so that setting it moves the lease on.
     pub fn reconciler_config(&self, holder: &str, budget: u64) -> ReconcilerConfig {
-        ReconcilerConfig::new(holder, budget, self.clock.clone())
+        let mut config = ReconcilerConfig::new(holder, budget, self.clock.clone());
+        config.mono = self.clock.clone();
+        config
     }
 
     /// A reconciler with these settings over the rig's backends.
