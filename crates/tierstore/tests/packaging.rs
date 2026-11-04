@@ -126,7 +126,7 @@ fn no_secret_is_on_the_command_line_or_in_the_environment() {
 
 /// Asserts that systemd stops the unit with SIGTERM, which the binary drains on, after a timeout
 /// that is no shorter than the wait of the load balancers plus the deadline of the drain plus the
-/// 5 s the reconciler's lease release may take (`STOP_WAIT` in `cli.rs`), so that a drain in
+/// 5 s the reconciler's lease release may take (`STOP_WAIT` in `cli_reconcile.rs`), so that a drain in
 /// progress is not cut by SIGKILL; and that a start that fails is tried again, except when the
 /// argument parser refused the flags (exit status 2) or a tier answered the start-up self-test
 /// wrongly (exit status 3), which a restart cannot mend.

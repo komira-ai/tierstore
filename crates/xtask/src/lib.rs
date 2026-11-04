@@ -3,6 +3,7 @@
 //!
 //! - [`fetch`]: download a pinned tool, check its SHA-256, install it.
 //! - [`package`]: one binary and its SBOM as release assets, with their `SHA256SUMS` lines.
+//! - [`licenses`]: the third-party licence notice of a binary, which `package` puts in its tarball.
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
 //! - [`build_commit`]: a built binary names the commit it was built from.
 //! - [`release`]: find the successful build of a commit, check its files, publish them.
@@ -15,6 +16,7 @@ pub mod advisories;
 pub mod build_commit;
 pub mod bundles;
 pub mod fetch;
+pub mod licenses;
 pub mod package;
 pub mod release;
 pub mod sums;
@@ -109,6 +111,19 @@ enum Verb {
         #[arg(long)]
         member: Option<PathBuf>,
     },
+    /// The third-party licence notice of the crates a binary is built from, from the output of
+    /// `cargo metadata`.
+    Licenses {
+        /// The output of `cargo metadata --format-version 1` for the binary's build.
+        #[arg(long)]
+        metadata: PathBuf,
+        /// The workspace package the binary is built from.
+        #[arg(long)]
+        package: String,
+        /// The notice file to write; it may not exist.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Package one binary and its SBOM as release assets in `--out`.
     Package {
         /// The binary; its file name is the asset's name.
@@ -117,6 +132,9 @@ enum Verb {
         /// Its CycloneDX SBOM.
         #[arg(long)]
         sbom: PathBuf,
+        /// The third-party licence notice (`licenses`) to put in the tarball beside the binary.
+        #[arg(long)]
+        licenses: Option<PathBuf>,
         /// The platform it was built for.
         #[arg(long, value_enum)]
         platform: package::Platform,
@@ -361,13 +379,19 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             let roots = fetch::host_roots();
             Ok(vec![fetch::fetch(&url, &sha256, &unpack, &out, &roots)?])
         }
+        Verb::Licenses {
+            metadata,
+            package,
+            out,
+        } => licenses::licenses(&metadata, &package, &out),
         Verb::Package {
             binary,
             sbom,
+            licenses,
             platform,
             commit,
             out,
-        } => package::package(&binary, &sbom, platform, &commit, &out),
+        } => package::package_with(&binary, &sbom, licenses.as_deref(), platform, &commit, &out),
         Verb::Sums(SumsVerb::Assemble {
             dir,
             expect,

@@ -2,8 +2,8 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::super::sigv4::Utc;
-use super::super::times::MONTHS;
+use crate::s3::sigv4::Utc;
+use crate::s3::times::MONTHS;
 
 /// The weekday names of an HTTP date, from Thursday: the day of the epoch.
 const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
@@ -18,7 +18,7 @@ pub(super) fn system_seconds() -> u64 {
     since.map_or(0, |since| since.as_secs())
 }
 
-/// `Sun, 06 Nov 1994 08:49:37 GMT`, the form of a `Last-Modified` header.
+/// `Tue, 03 Nov 2026 08:49:37 GMT`, the form of a `Last-Modified` header.
 pub(super) fn http_date(seconds: u64) -> String {
     let utc = Utc::of(UNIX_EPOCH + Duration::from_secs(seconds), false);
     let weekday = WEEKDAYS[((seconds / 86_400) % 7) as usize];
@@ -29,7 +29,7 @@ pub(super) fn http_date(seconds: u64) -> String {
     )
 }
 
-/// `2009-10-12T17:50:30.000Z`, the form of a `<LastModified>` of a listing.
+/// `2026-11-03T08:49:37.000Z`, the form of a `<LastModified>` of a listing.
 pub(super) fn iso_date(seconds: u64) -> String {
     let utc = Utc::of(UNIX_EPOCH + Duration::from_secs(seconds), false);
     utc.iso8601().replace('Z', ".000Z")

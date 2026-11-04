@@ -58,13 +58,13 @@ impl Backend for MarkedReads {
         self.mem.get(key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        let (mut bytes, reservation, tag) = self.mem.get_marked(key, range).await?;
+        let (mut bytes, reservation, tag) = self.mem.get_tagged(key, range).await?;
         match self.ending {
             Ending::Short => bytes.truncate(bytes.len().saturating_sub(1)),
             Ending::Long => bytes = Bytes::from([bytes.as_ref(), b"z"].concat()),

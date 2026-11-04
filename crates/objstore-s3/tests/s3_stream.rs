@@ -131,21 +131,26 @@ async fn whole(body: objstore_s3::s3::ObjectBody) -> Vec<u8> {
 }
 
 /// Asserts that a streamed read of the whole object is a GET with no `Range`, that its body is
-/// given as it arrives, and that the mark is the one of the answer's own header: present on one
-/// answer, absent on the next.
+/// given as it arrives, and that the mark, the size and the time of last write are those of the
+/// answer's own headers: present on one answer (the size is its `Content-Length`, the time its
+/// `Last-Modified`), absent on the next (no time).
 #[tokio::test]
 async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answer() {
-    let marked = answer("200 OK", &[MARK, "etag: \"one\""], "abcdefg");
+    let stamp = "last-modified: Tue, 03 Nov 2026 08:49:37 GMT";
+    let marked = answer("200 OK", &[MARK, "etag: \"one\"", stamp], "abcdefg");
     let plain = answer("200 OK", &[], "xyz");
     let (endpoint, seen) = script(vec![marked, plain]).await;
     let s = store(endpoint);
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"one\""));
+    assert_eq!(read.size, Some(7));
+    assert_eq!(read.modified_millis, Some(1_793_695_777_000));
     assert_eq!(whole(read.body).await, b"abcdefg");
     let read = s.get_stream(key(), None).await.unwrap();
     assert!(!read.reservation);
     assert_eq!(read.etag, None);
+    assert_eq!(read.modified_millis, None);
     assert_eq!(whole(read.body).await, b"xyz");
 
     let heads = seen.lock().unwrap();
@@ -158,7 +163,9 @@ async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answ
 }
 
 /// Asserts that a streamed ranged read sends the `Range` of the bytes asked for, checks the
-/// `Content-Range` and the length of the 206 against it, and gives the mark of that answer.
+/// `Content-Range` and the length of the 206 against it, and gives the mark of that answer and the
+/// size of the whole object, which is the total of the `Content-Range` and not the length of the
+/// bytes read.
 #[tokio::test]
 async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer() {
     let part = answer(
@@ -173,6 +180,7 @@ async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer
         .unwrap();
     assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"two\""));
+    assert_eq!(read.size, Some(10));
     assert_eq!(whole(read.body).await, b"cde");
     let get = seen.lock().unwrap()[0].to_ascii_lowercase();
     assert!(get.contains("\r\nrange: bytes=2-4\r\n"), "{get}");
@@ -585,4 +593,85 @@ async fn an_unsized_streamed_replace_refused_at_completion_is_typed_and_aborted(
         .await
         .unwrap_err();
     assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");
+}
+
+/// Asserts that a streamed create of at most one PUT's size is one PUT with `If-None-Match: *`
+/// and no `If-Match`, that it gives the `ETag` of the answer, that a body that fails or has
+/// another length sends no request, and that an object that is already there is typed.
+#[tokio::test]
+async fn a_small_streamed_create_is_one_put_with_if_none_match_and_gives_its_tag() {
+    let done = answer("200 OK", &["etag: \"made\""], "");
+    let (endpoint, seen) = script(vec![done]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_tagged(key(), 3 << 20, zeros(3 << 20, None));
+    assert_eq!(put.await.unwrap(), "\"made\"");
+    let put = seen.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(put.starts_with("put /test-bucket/cas/seg-1 "), "{put}");
+    assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
+    assert!(!put.contains("if-match: "), "{put}");
+
+    let (endpoint, seen) = script(Vec::new()).await;
+    let s = store(endpoint);
+    let cut = ObjectStoreError::Body("cut".to_owned());
+    let failing = zeros(2 << 20, Some(cut.clone()));
+    let failed = s.put_stream_new_tagged(key(), 2 << 20, failing);
+    assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    let short = s.put_stream_new_tagged(key(), 100, zeros(10, None));
+    assert!(matches!(short.await, Err(ObjectStoreError::Body(_))));
+    assert_eq!(seen.lock().unwrap().len(), 0);
+
+    let refused = answer(
+        "412 Precondition Failed",
+        &[],
+        "<Error><Code>PreconditionFailed</Code></Error>",
+    );
+    let (endpoint, _) = script(vec![refused]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_tagged(key(), 3, zeros(3, None));
+    let err = put.await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
+}
+
+/// Asserts that a streamed create of more than one PUT's size is a multipart upload whose
+/// completion alone carries `If-None-Match: *`, that it gives the `ETag` the completion names,
+/// that a completion with no `ETag` is a protocol error, and that the upload is aborted when the
+/// completion fails.
+#[tokio::test]
+async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
+    let ok =
+        "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
+    let (endpoint, seen) = script(upload_answers(answer("200 OK", &[], ok), false)).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    assert_eq!(put.await.unwrap(), "\"joined-2\"");
+    let requests = seen.lock().unwrap().clone();
+    assert_eq!(requests.len(), 4);
+    for (at, request) in requests.iter().enumerate() {
+        let request = request.to_ascii_lowercase();
+        assert_eq!(
+            request.contains("\r\nif-none-match: *\r\n"),
+            at == 3,
+            "{request}"
+        );
+        assert!(!request.contains("if-match: "), "{request}");
+    }
+
+    let unnamed = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
+    let (endpoint, _) = script(upload_answers(answer("200 OK", &[], unnamed), false)).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let err = put.await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");
+
+    let refused = answer(
+        "412 Precondition Failed",
+        &[],
+        "<Error><Code>PreconditionFailed</Code></Error>",
+    );
+    let (endpoint, seen) = script(upload_answers(refused, true)).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let err = put.await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
+    assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
 }

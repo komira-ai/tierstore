@@ -64,14 +64,14 @@ pub(crate) fn answer(text: &str) {
 }
 
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.
-pub(super) struct LineLog<W> {
+pub(crate) struct LineLog<W> {
     out: Mutex<W>,
     max: Level,
 }
 
 impl<W: Write> LineLog<W> {
     /// A subscriber over `out` that shows events at `max` and more severe ones.
-    pub(super) fn new(out: W, max: Level) -> Self {
+    pub(crate) fn new(out: W, max: Level) -> Self {
         Self {
             out: Mutex::new(out),
             max,

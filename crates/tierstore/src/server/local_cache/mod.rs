@@ -22,8 +22,10 @@
 //! # What is kept
 //!
 //! A key is kept if the longest prefix of the policies that holds it says `cache = true` and it
-//! is not under `_journal/` or `_tiering/`. Every other key, and every listing, goes to the
-//! upstream as it is and is never kept.
+//! is not under `_journal/` or `_tiering/`. A get, ranged get or head of a key
+//! under those prefixes is refused with [`Error::Reserved`] without a look at the disk or the
+//! upstream, and a listing leaves them out. Every other key that is not kept, and every other
+//! listing, goes to the upstream as it is.
 //!
 //! - A hit (HEAD, GET, ranged GET of an object that is in the cache) is answered from the disk
 //!   and makes no call to the upstream.
@@ -328,6 +330,15 @@ impl CacheConfig {
     }
 }
 
+/// Refuses a read of a key that the proxy keeps for itself: the upstream may be a plain bucket
+/// that holds it, and nothing else on the way refuses it.
+fn refuse_reserved(key: &str) -> Result<(), Error> {
+    if is_reserved(key) {
+        return Err(Error::Reserved(key.to_owned()));
+    }
+    Ok(())
+}
+
 /// `percent` percent of `total`.
 fn percent_of(total: u64, percent: u8) -> u64 {
     let share = u128::from(total) * u128::from(percent) / 100;
@@ -584,11 +595,9 @@ impl Inner {
         }
     }
 
-    /// The on-disk name of `key` if the cache keeps it.
+    /// The on-disk name of `key` if the cache keeps it. A reserved key never gets here: every
+    /// read and write refuses it first.
     fn cacheable(&self, key: &str) -> Option<Name> {
-        if is_reserved(key) {
-            return None;
-        }
         let policies = &self.config.policies;
         let holding = policies
             .iter()
@@ -711,6 +720,7 @@ impl Backend for LocalCache {
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        refuse_reserved(key)?;
         let inner = &self.inner;
         let passed = |range: Option<ByteRange>| {
             let offset = range.map_or(0, ByteRange::offset);
@@ -746,6 +756,7 @@ impl Backend for LocalCache {
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
+        refuse_reserved(key)?;
         let inner = &self.inner;
         let kept = inner.cacheable(key).and_then(|name| inner.kept(&name));
         match kept {
