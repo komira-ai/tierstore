@@ -182,7 +182,7 @@ At least one entry has type `s3`. The entries of a type are served together: one
 | `params.addresses` | address or list of addresses | listen on exactly these. To listen on the wildcard of both families give `["0.0.0.0:<port>", "[::]:<port>"]`: an IPv6 address is bound for IPv6 only, so the two do not clash. A start that cannot bind every address is refused |
 | `params.tls_cert_file` | path, `oci` only | the certificate chain (PEM), leaf first. It must carry an IP subjectAltName for each listen address. Both this and the key, or neither. An `s3` entry has no TLS yet and refuses it |
 | `params.tls_key_file` | path, `oci` only | the private key (PEM); a file any user can read is refused |
-| `params.prefix` | string, `oci/`, `oci` only | the key prefix the registry reads, ending in `/`; not inside `_journal/` or `_tiering/` |
+| `params.prefix` | string, `oci/`, `oci` only | the key prefix the registry reads, ending in `/`; not inside `_journal/`, `_tiering/` or `_entries/` |
 | `params.max_connections` | count, 64 (at least 1), `oci` only | connections open at once |
 | `params.connection_lifetime` | duration, `1h`, `oci` only | the longest a connection lives |
 
@@ -282,7 +282,7 @@ The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may h
 
 ## `[[policy]]`
 
-`[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. Without `[local_cache]` a policy is read and checked and has no effect, and `policy.cache = true` is refused, since there is no cache. With `[local_cache]` (a build node, or a storage node with a cache) a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/` or `_tiering/`.
+`[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. Without `[local_cache]` a policy is read and checked and has no effect, and `policy.cache = true` is refused, since there is no cache. With `[local_cache]` (a build node, or a storage node with a cache) a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/`, `_tiering/` or `_entries/`.
 
 ## The flags of a run
 

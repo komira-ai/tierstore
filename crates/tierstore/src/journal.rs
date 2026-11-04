@@ -15,6 +15,10 @@
 //!   lower value.
 //! - `_tiering/usage`: the usage the reconciler publishes, for the proxies.
 //! - `_tiering/lease`: the lease that makes one reconciler the runner.
+//! - `_tiering/format`: the [`Format`](crate::format::Format) of the store, which says whether
+//!   writes are paused for a change of format.
+//! - `_entries/<sha256 of the key>`: the journal entry of one key (see the module `entry`). The
+//!   prefix is reserved here, so that no client names a key under it, before anything writes it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -27,13 +31,17 @@ pub(crate) const JOURNAL_PREFIX: &str = "_journal/";
 pub(crate) const TIERING_PREFIX: &str = "_tiering/";
 /// The prefix of the objects that say which proxies have journals.
 pub(crate) const PROXIES_PREFIX: &str = "_tiering/proxies/";
+/// The prefix of the journal entries of keys, one object for each key.
+pub(crate) const ENTRIES_PREFIX: &str = "_entries/";
+/// The format of the store: whether writes are paused for a change of format.
+pub(crate) const FORMAT_KEY: &str = "_tiering/format";
 /// The usage the reconciler publishes.
 pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 /// The lease of the reconciler.
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
 /// Every prefix that the proxy keeps for itself: no client names a key under one.
-pub(crate) const RESERVED_PREFIXES: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
+pub(crate) const RESERVED_PREFIXES: [&str; 3] = [JOURNAL_PREFIX, TIERING_PREFIX, ENTRIES_PREFIX];
 
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
