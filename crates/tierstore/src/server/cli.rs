@@ -52,7 +52,7 @@
 //! The `s3` interfaces and the `oci` interfaces may each be given more than once (`port` is one
 //! address, `addresses` a list; see [`config`](super::config)): a socket is bound for each
 //! address, an IPv6 one for IPv6 only (see
-//! [`listen`](super::listen)), and one server, one drain and one limit on connections serve them
+//! [`listen`](super::listen)), and one server and one drain serve them
 //! all. An address given twice is refused with status 2, and a start that cannot bind every address
 //! is refused with status 1. The start line names every address, separated by commas.
 //!
@@ -188,7 +188,7 @@ pub struct Args {
 pub struct Cli {
     /// The addresses the S3 API, `/healthz`, `/readyz` and `/usagez` are served on: those of the
     /// `s3` interfaces (for instance `0.0.0.0:P` and `[::]:P`, which a firewall
-    /// redirect to the port needs): one server, one drain and one limit on connections serve
+    /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     pub listen: Vec<SocketAddr>,
     /// The id of this proxy, which names its journal in the hot tier and its lease. Keep it

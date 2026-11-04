@@ -172,7 +172,7 @@ type   = "oci"
 params = { addresses = ["127.0.0.1:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/" }
 ```
 
-At least one entry has type `s3`. The entries of a type are served together: one server, one drain and one limit on connections for all the `s3` entries, and the same for the `oci` entries, on every address of the entries of that type. An address two entries listen on, or one entry lists twice, is refused, naming the entries (a port of 0, which asks the system for a port, is never the same as another). Each entry says where it listens with one of `params.port` and `params.addresses`, and not both.
+At least one entry has type `s3`. The entries of a type are served together: one server and one drain for all the `s3` entries (no limit on connections), and the same for the `oci` entries (with their one `max_connections`), on every address of the entries of that type. An address two entries listen on, or one entry lists twice, is refused, naming the entries (a port of 0, which asks the system for a port, is never the same as another). Each entry says where it listens with one of `params.port` and `params.addresses`, and not both.
 
 | Key | Type, default | What |
 |---|---|---|
