@@ -65,7 +65,7 @@ floor; every other call is refused 403. It has no journal and no lease. The keys
 the rules are in "A build node" in `packaging/README.md`; `GET /metricz` shows its
 counters.
 
-With `write_through = true` in `[local_cache]` (version 0.2.0 on; `tierstore --version` shows it)
+With `write_through = true` in `[local_cache]`
 the node also takes create-only puts, presigned PUTs, multipart uploads and deletes, and sends
 each to the upstream (`src/server/local_cache/write.rs`) before it answers; a create-only put
 under a `cache = true` policy is also kept on the node (`src/server/local_cache/keep.rs`), a

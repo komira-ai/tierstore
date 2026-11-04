@@ -4,7 +4,7 @@ tierstore is an S3-compatible object store server that puts a small, fast tier i
 
 This guide is for the person who installs and runs it. It describes what is on the main branch of the source today. A piece that is planned and not in the code is described only under a heading titled "Not in a release yet", so you can tell the two apart.
 
-> Every flag and key these pages describe is in the release built from main. Versions before 0.3.0 came from another repository, and these pages do not cover them.
+> Every flag and key these pages describe is in the release built from main.
 
 ## The shape of a deployment
 
