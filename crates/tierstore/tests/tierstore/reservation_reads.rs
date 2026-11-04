@@ -1,17 +1,16 @@
 //! The proxy over a cold tier that holds reservations (marked 56-byte objects, made here by hand
-//! since nothing in this release writes one): reads, heads and listings do not show them, a
-//! delete treats them by what the put they belong to has done, and a copy-back of a cold object
-//! is journaled as a mirror of it.
+//! since nothing in this release writes one): reads, heads and listings do not show them, and a
+//! read of a cold object asks for its copy-back on an entry.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{ByteRange, Error, Op, Proxy};
+use tierstore::{Backend, ByteRange, Error, Op, Proxy};
 
 use crate::churn::Ghost;
 use crate::conformance::reservation;
 
-use crate::support::{Rig, assert_absent, body, keys, page, read, set_usage};
+use crate::support::{Rig, assert_absent, body, keys, page, set_usage};
 
 /// The line of a metric of the proxy, as `Proxy::metrics` renders it, with its value.
 fn metric(proxy: &Proxy, line: &str) -> String {

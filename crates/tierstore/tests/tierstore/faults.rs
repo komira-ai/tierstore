@@ -2,7 +2,7 @@
 
 use tierstore::{Error, Op};
 
-use crate::support::{Rig, assert_absent, body, read};
+use crate::support::{Rig, assert_absent, body};
 use tierstore::Backend;
 
 /// Asserts that a read or a head the hot tier fails with an outage is that error, and is not
