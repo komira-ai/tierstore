@@ -20,13 +20,13 @@ Include what you can of:
 - the configuration involved (remove key material first);
 - the steps that reproduce the problem, and what you expected instead;
 - the impact you see, for example reading or writing another role's objects, bypassing the signature check, or running
-  code as root through the update hook.
+  code as a privileged account through the update hook.
 
 ## What is in scope
 
 - The S3 listener: request signing and presigned URLs, key roles and their grants, and request parsing.
 - Key and configuration handling, including key files and their permissions.
-- The root-run update hook and the firewall (nftables) and launchd changes it makes.
+- The update hook, which runs as `tierstore-update` with `CAP_NET_ADMIN` on Linux and as root on macOS, and the firewall (nftables) and launchd changes it makes.
 - The release artifacts and their attestations.
 
 Reports about a deployment's own misconfiguration (for example a key file readable by every user, or a listener bound
