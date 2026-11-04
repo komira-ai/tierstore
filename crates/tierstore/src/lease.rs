@@ -1,6 +1,7 @@
 //! The lease that makes one reconciler the runner.
 
 use std::collections::hash_map::RandomState;
+use std::convert::Infallible;
 use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
 use std::pin::pin;
@@ -141,7 +142,9 @@ impl Lease {
     /// Whether the lease is held and at least the margin is left of the time it is valid.
     pub(crate) fn margin_ok(&self) -> bool {
         let until = self.shared.valid_until.load(Ordering::SeqCst);
-        until != 0 && until.saturating_sub(self.shared.mono.now()) >= self.shared.margin
+        let now = self.shared.mono.now();
+        // A time that has been reached is past the end, even with a margin of zero.
+        until != 0 && now < until && until - now >= self.shared.margin
     }
 
     /// Runs `work`, and while it runs renews the lease every `renew` on a timer of its own, as
@@ -155,13 +158,22 @@ impl Lease {
         sleeper: &dyn Sleeper,
         work: impl Future<Output = T>,
     ) -> T {
-        let mut work = pin!(work);
+        let work = pin!(work);
+        let timer = pin!(self.renew_forever(sleeper));
+        match select(work, timer).await {
+            Either::Left((done, _)) => done,
+            Either::Right((never, _)) => match never {},
+        }
+    }
+
+    /// Waits a period and renews, again and again. It is polled beside the work, as one future,
+    /// so that the work keeps running while a renewal waits for the lock of a check of the work.
+    async fn renew_forever(&self, sleeper: &dyn Sleeper) -> Infallible {
         loop {
-            let wait = sleeper.sleep(Duration::from_millis(self.shared.period));
-            match select(work.as_mut(), wait).await {
-                Either::Left((done, _)) => return done,
-                Either::Right(((), _)) => self.renew_held().await,
-            }
+            sleeper
+                .sleep(Duration::from_millis(self.shared.period))
+                .await;
+            self.renew_held().await;
         }
     }
 
@@ -266,10 +278,12 @@ impl Shared {
     /// clock of this process, by replacing the object that was seen. The first look at a tag
     /// only writes it down.
     async fn take_over(&self, state: &mut State) -> bool {
-        let looked = self.mono.now();
         let Ok(meta) = self.hot.head(LEASE_KEY).await else {
             return false;
         };
+        // After the HEAD: a tag is first seen when the answer is, not when the question was
+        // asked, as the object may have been written while the call was under way.
+        let looked = self.mono.now();
         let since = match &state.seen {
             Some(seen) if seen.tag == meta.tag => seen.since,
             _ => {
