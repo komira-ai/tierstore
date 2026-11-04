@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::body::{self, OciBody};
 use super::names::Digest;
-use super::push::{Pieces, Refusal, Tally, counted, pieces};
+use super::push::{Pieces, Refusal, Tally, counted, measured, pieces};
 use super::{OciAuth, OciFront, OciMetrics, OciPrefix};
 use crate::server::testing::{Scripted, Step};
 use crate::server::{AccessKey, ServerConfig};
@@ -655,6 +655,18 @@ async fn the_pieces_of_a_request_body_end_at_its_failure() {
         Some(Refusal::Body(message)) => assert!(message.contains("could not be read"), "{message}"),
         _ => panic!("the reason is kept"),
     }
+}
+
+/// Asserts the stream of a chunk held to its range: a chunk longer than the range ends in an error
+/// at the piece that passes it, the refusal is a range one, and nothing is read after the error.
+#[tokio::test]
+async fn a_chunk_longer_than_its_range_ends_the_stream_at_the_error() {
+    let tally = Arc::new(Tally::default());
+    let mut body = measured(pieces_of(&[b"abc", b"def"]), 4, Arc::clone(&tally));
+    assert_eq!(body.next().await, Some(Ok(Bytes::from_static(b"abc"))));
+    assert!(matches!(body.next().await, Some(Err(_))));
+    assert!(body.next().await.is_none());
+    assert!(matches!(tally.take(), Some(Refusal::Range)));
 }
 
 /// Asserts that a tally keeps the first refusal and not a later one.
