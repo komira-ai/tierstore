@@ -571,3 +571,93 @@ async fn the_lease_is_renewed_on_the_timer_while_a_pass_is_stuck_in_a_copy() {
     assert_eq!(report.copied, 1);
     assert_eq!(report.failed, Vec::<Error>::new());
 }
+
+/// Asserts that a margin of zero does not keep a lease that has run out: the holder wrote at 0
+/// and is valid until the ttl, and `margin_ok` is true before that time and false at it and
+/// after it. Catches a check that compares only the time left, which is zero at and after the
+/// end, and so passes for a margin of zero.
+#[tokio::test]
+async fn a_zero_margin_does_not_keep_a_lease_that_has_expired() {
+    let mono = Arc::new(Mono::new());
+    let hot = Arc::new(MemoryBackend::with_clock(Arc::new(TestClock::new())));
+    let lease = Lease::new(hot, mono.clone(), "p", TTL, RENEW, 0);
+    assert!(lease.ensure().await);
+
+    mono.advance(ms(TTL - 1));
+    assert!(lease.margin_ok());
+    mono.advance(ms(1));
+    assert!(!lease.margin_ok());
+    mono.advance(ms(1));
+    assert!(!lease.margin_ok());
+}
+
+/// Asserts that a taker counts the wait from when the answer of its look came: the HEAD is held
+/// before the store, the lease object is replaced while it is held, and the taker's clock reads 29 s when the
+/// answer arrives; so at 30 s, one second after the first sight of the new tag, the taker does
+/// not take it, and does at 59 s. Catches a first sight stamped when the question was asked.
+#[tokio::test]
+async fn a_taker_counts_the_wait_from_the_answer_of_its_look() {
+    let stamps = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(stamps));
+    let gated = Arc::new(GateBackend::new(hot.clone()));
+    let mono = Arc::new(Mono::new());
+    let taker = Lease::new(gated.clone(), mono.clone(), "taker", TTL, RENEW, MARGIN);
+    hot.put(LEASE_KEY, Bytes::from_static(b"old"))
+        .await
+        .unwrap();
+    let gate = gated.gate(Op::Head, LEASE_KEY, Phase::Pre);
+
+    let mut look = pin!(taker.ensure());
+    tokio::select! {
+        _ = &mut look => panic!("the look ended while its HEAD was held"),
+        () = gate.parked() => {}
+    }
+    hot.delete(LEASE_KEY).await.unwrap();
+    hot.put(LEASE_KEY, Bytes::from_static(b"new"))
+        .await
+        .unwrap();
+    mono.advance(ms(TTL - 1_000));
+    assert!(gate.release());
+    assert!(!look.await);
+
+    mono.advance(ms(1_000));
+    assert!(!taker.ensure().await);
+    mono.advance(ms(TTL - 1_000));
+    assert!(taker.ensure().await);
+}
+
+/// Asserts that the timer does not stop the work while a renewal waits for the lock of a check of
+/// the work: the holder's `still_held` parks in its HEAD with the lock, the timer's wait ends and
+/// its renewal waits for the lock, and when the HEAD is let go the check ends with the lease held
+/// (the pass is done, so the renewal that waited is dropped and no second body is written). Catches a timer that stops polling the work
+/// to renew, which then waits for a lock only the work can give up.
+#[tokio::test]
+async fn a_renewal_waiting_for_the_lock_does_not_stop_the_work_that_holds_it() {
+    let stamps = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(stamps));
+    let gated = Arc::new(GateBackend::new(hot.clone()));
+    let mono = Arc::new(Mono::new());
+    let holder = Lease::new(gated.clone(), mono, "p", TTL, RENEW, MARGIN);
+    assert!(holder.ensure().await);
+    let (sleeper, mut waits, go) = StepSleeper::new();
+    let gate = gated.gate(Op::Head, LEASE_KEY, Phase::Pre);
+
+    let mut run = pin!(holder.renewing(&sleeper, holder.still_held()));
+    tokio::select! {
+        _ = &mut run => panic!("the check ended while its HEAD was held"),
+        () = gate.parked() => {}
+    }
+    assert_eq!(waits.recv().await, Some(ms(RENEW)));
+    go.send(()).unwrap();
+    for _ in 0..8 {
+        tokio::select! {
+            _ = &mut run => panic!("the check ended while its HEAD was held"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+    assert_eq!(count(&hot).await, "1");
+
+    assert!(gate.release());
+    assert!(run.await.unwrap());
+    assert_eq!(count(&hot).await, "1");
+}
