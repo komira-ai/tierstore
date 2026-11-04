@@ -14,7 +14,7 @@ use futures::{StreamExt, stream};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
-use crate::{Backend, DirBackend, Error, PartBody};
+use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
 use super::SyncDir;
 use super::entries::{self, DIR};
@@ -108,20 +108,18 @@ async fn a_listing_reads_the_subdirectory_for_the_prefixes_that_can_match_an_ent
     assert_eq!(listed[0].size, 4);
 }
 
-/// Asserts that a listing of the prefix `_entries/` reads the subdirectory and not the root: with
-/// the root made unreadable (but still searchable) it lists the entries, and a listing of every
-/// key fails.
+/// Asserts that a listing of the prefix `_entries/` reads the root as well as the subdirectory,
+/// since the files of the previous release for those keys are in the root: with the root made
+/// unreadable (but still searchable) it fails, and with the subdirectory unreadable it fails too.
 #[tokio::test]
-async fn a_listing_of_the_entries_prefix_does_not_read_the_root() {
+async fn a_listing_of_the_entries_prefix_reads_the_root() {
     let (dir, backend) = backend();
     backend.put("_entries/e", body("x")).await.unwrap();
     std::fs::set_permissions(dir.path(), Permissions::from_mode(0o311)).unwrap();
-    let inside = keys(&backend, "_entries/").await;
-    let everything = backend.list("").await;
+    let inside = backend.list("_entries/").await;
     std::fs::set_permissions(dir.path(), Permissions::from_mode(0o700)).unwrap();
 
-    assert_eq!(inside, ["_entries/e"]);
-    assert!(matches!(everything, Err(Error::Other(_))));
+    assert!(matches!(inside, Err(Error::Other(_))));
 }
 
 /// Asserts that a subdirectory that cannot be read fails a listing that needs it.
@@ -136,17 +134,242 @@ async fn an_unreadable_entries_subdirectory_fails_the_listing() {
     assert!(matches!(listed, Err(Error::Other(_))));
 }
 
-/// Asserts that a file in the root whose name stands for a key under `_entries/` (as a release that
-/// did not know the subdirectory wrote it) is neither listed nor read as that key.
+/// The tag of the file the previous release made for `key` with the body `text`: the file in the
+/// root, named as any key, holding the SHA-256 of the body and then the body. Gives the tag.
+fn old_release(dir: &TestDir, key: &str, text: &str) -> String {
+    let tag = super::sha256(text.as_bytes());
+    let mut file = tag.to_vec();
+    file.extend_from_slice(text.as_bytes());
+    std::fs::write(dir.path().join(super::encode(key)), file).unwrap();
+    hex::encode(tag)
+}
+
+/// Asserts that a key under `_entries/` that the previous release put as a file of the root is
+/// still that key: head gives its size and tag, get gives the body and a range of it, a streamed
+/// read and an open read give it, and a listing of every prefix that matches it has it once with
+/// its size, with an ordinary key beside it; no file is made by the reads.
 #[tokio::test]
-async fn a_root_file_named_like_an_entry_key_is_not_that_key() {
+async fn a_root_file_of_the_previous_release_is_still_that_entry_key() {
     let (dir, backend) = backend();
-    std::fs::write(dir.path().join("_entries~old"), [7_u8; 40]).unwrap();
+    let tag = old_release(&dir, "_entries/old", "shipped");
     backend.put("kept", body("x")).await.unwrap();
 
-    assert_eq!(keys(&backend, "").await, ["kept"]);
-    let missing = Error::NotFound("_entries/old".to_owned());
-    assert_eq!(backend.head("_entries/old").await, Err(missing));
+    let meta = backend.head("_entries/old").await.unwrap();
+    assert_eq!((meta.size, meta.tag.as_str()), (7, tag.as_str()));
+    let whole = backend.get("_entries/old", None).await.unwrap();
+    assert_eq!(whole, body("shipped"));
+    let range = ByteRange::new(2, 3);
+    let part = backend.get("_entries/old", Some(range)).await.unwrap();
+    assert_eq!(part, body("ipp"));
+    let streamed = backend.get_stream("_entries/old", None).await.unwrap();
+    let chunks: Vec<_> = streamed.collect().await;
+    assert_eq!(chunks, [Ok(body("shipped"))]);
+    let opened = backend.open_read("_entries/old", None).await.unwrap();
+    assert_eq!(opened.meta.tag, tag);
+
+    for prefix in ["", "_e", "_entries", "_entries/", "_entries/o"] {
+        let listed = backend.list(prefix).await.unwrap();
+        let old = listed.iter().filter(|object| object.key == "_entries/old");
+        assert_eq!(old.map(|object| object.size).collect::<Vec<_>>(), [7]);
+    }
+    assert_eq!(keys(&backend, "").await, ["_entries/old", "kept"]);
+    assert!(keys(&backend, "_entries/x").await.is_empty());
+    assert_eq!(names(dir.path()), [".uploads", "_entries~old", "kept"]);
+}
+
+/// Asserts that a key present both as a file of the previous release and as a file of the
+/// subdirectory reads from the subdirectory and is listed once, with the size of that one.
+#[tokio::test]
+async fn a_key_in_both_places_is_read_and_listed_from_the_subdirectory() {
+    let (dir, backend) = backend();
+    old_release(&dir, "_entries/x", "older");
+    backend.put("_entries/y", body("other")).await.unwrap();
+    let inside = dir.path().join(DIR);
+    let tag = super::sha256(b"newer!");
+    let mut file = tag.to_vec();
+    file.extend_from_slice(b"newer!");
+    std::fs::write(inside.join("x"), file).unwrap();
+
+    assert_eq!(
+        backend.get("_entries/x", None).await.unwrap(),
+        body("newer!")
+    );
+    assert_eq!(keys(&backend, "").await, ["_entries/x", "_entries/y"]);
+    let listed = backend.list("_entries/x").await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].size, 6);
+}
+
+/// Asserts that a create-only put of a key the previous release put as a file of the root is
+/// refused as taken, whether it is a put, a reservation, a streamed put or a completed multipart
+/// upload, and that none of them makes a file for the key or leaves a temporary file.
+#[tokio::test]
+async fn a_create_only_put_of_a_key_the_previous_release_made_is_refused() {
+    let (dir, backend) = backend();
+    old_release(&dir, "_entries/old", "shipped");
+    let key = "_entries/old";
+    let taken = Error::AlreadyExists(key.to_owned());
+
+    assert_eq!(backend.put(key, body("new")).await, Err(taken.clone()));
+    let reserved = backend.put_reservation(key, body("new")).await;
+    assert_eq!(reserved, Err(taken.clone()));
+    let streamed = backend.put_stream(key, None, part("new")).await;
+    assert_eq!(streamed, Err(taken.clone()));
+    let id = backend.create_upload(key).await.unwrap();
+    let tag = backend.upload_part(key, &id, 1, part("new")).await;
+    let joined = backend
+        .complete_upload(key, &id, &[(1, tag.unwrap())])
+        .await;
+    assert_eq!(joined, Err(taken));
+
+    assert_eq!(backend.get(key, None).await.unwrap(), body("shipped"));
+    assert_eq!(names(&dir.path().join(DIR)), [".lock"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads", "_entries~old"]);
+}
+
+/// Asserts that a replacement by the tag of a key the previous release put as a file of the root
+/// writes the file of the subdirectory and removes the file of the root, for a replacement, a
+/// streamed replacement and a reservation; that a stale tag changes nothing; and that the key is
+/// listed once with the new body.
+#[tokio::test]
+async fn a_replacement_of_a_key_the_previous_release_made_moves_it_to_the_subdirectory() {
+    let (dir, backend) = backend();
+    let inside = dir.path().join(DIR);
+    let key = "_entries/old";
+    let tag = old_release(&dir, key, "shipped");
+
+    let stale = backend.put_if_match(key, body("n"), "stale").await;
+    assert_eq!(stale, Err(Error::PreconditionFailed(key.to_owned())));
+    assert_eq!(names(dir.path()), [".entries", ".uploads", "_entries~old"]);
+
+    let second = backend.put_if_match(key, body("two"), &tag).await.unwrap();
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+    assert_eq!(names(&inside), [".lock", "old"]);
+    assert_eq!(backend.get(key, None).await.unwrap(), body("two"));
+    assert_eq!(keys(&backend, "").await, [key]);
+
+    old_release(&dir, key, "shipped again");
+    let streamed = backend.put_stream_if_match(key, None, part("three"), &second);
+    let third = streamed.await.unwrap();
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+    assert_eq!(backend.get(key, None).await.unwrap(), body("three"));
+
+    old_release(&dir, key, "and again");
+    let marked = backend.put_reservation_if_match(key, body("four"), &third);
+    marked.await.unwrap();
+    assert!(backend.head(key).await.unwrap().reservation);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+}
+
+/// Asserts that a delete of a key removes the file of the previous release and the file of the
+/// subdirectory, one or both; that a conditional delete by the tag of the file read removes both
+/// and by a stale one removes neither; and that a conditional delete by the tag of the file of the
+/// root, while the subdirectory has the key too, is refused as stale.
+#[tokio::test]
+async fn a_delete_of_an_entry_key_removes_the_file_of_the_previous_release_too() {
+    let (dir, backend) = backend();
+    let inside = dir.path().join(DIR);
+    let key = "_entries/old";
+    old_release(&dir, key, "shipped");
+    backend.delete(key).await.unwrap();
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+    assert_eq!(
+        backend.head(key).await,
+        Err(Error::NotFound(key.to_owned()))
+    );
+
+    let tag = old_release(&dir, key, "shipped");
+    let stale = backend.delete_if_match(key, "stale").await;
+    assert_eq!(stale, Err(Error::PreconditionFailed(key.to_owned())));
+    assert_eq!(backend.head(key).await.unwrap().tag, tag);
+    backend.delete_if_match(key, &tag).await.unwrap();
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+
+    let old = old_release(&dir, key, "shipped");
+    let new = backend.put_tagged(key, body("n")).await;
+    assert_eq!(new, Err(Error::AlreadyExists(key.to_owned())));
+    std::fs::remove_file(dir.path().join("_entries~old")).unwrap();
+    let new = backend.put_tagged(key, body("n")).await.unwrap();
+    old_release(&dir, key, "shipped");
+    let refused = backend.delete_if_match(key, &old).await;
+    assert_eq!(refused, Err(Error::PreconditionFailed(key.to_owned())));
+    backend.delete_if_match(key, &new).await.unwrap();
+    assert_eq!(names(&inside), [".lock"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+
+    old_release(&dir, key, "shipped");
+    backend.delete(key).await.unwrap();
+    assert!(keys(&backend, "").await.is_empty());
+}
+
+/// Asserts that a delete fails, and does not panic, where the file of the subdirectory cannot be
+/// removed, and that a read fails where the subdirectory is a regular file.
+#[tokio::test]
+async fn a_delete_fails_where_the_subdirectory_is_read_only_and_a_read_where_it_is_a_file() {
+    let (dir, backend) = backend();
+    backend.put("_entries/e", body("x")).await.unwrap();
+    let inside = dir.path().join(DIR);
+    std::fs::set_permissions(&inside, Permissions::from_mode(0o500)).unwrap();
+    let refused = backend.delete("_entries/e").await;
+    let conditional = backend.delete_if_match("_entries/e", "tag").await;
+    std::fs::set_permissions(&inside, Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(conditional, Err(Error::PreconditionFailed(_))));
+
+    let tag = backend.head("_entries/e").await.unwrap().tag;
+    std::fs::set_permissions(&inside, Permissions::from_mode(0o500)).unwrap();
+    let stuck = backend.delete_if_match("_entries/e", &tag).await;
+    std::fs::set_permissions(&inside, Permissions::from_mode(0o700)).unwrap();
+    assert!(matches!(stuck, Err(Error::Other(_))));
+
+    std::fs::remove_dir_all(&inside).unwrap();
+    std::fs::write(&inside, b"in the way").unwrap();
+    assert!(matches!(
+        backend.head("_entries/e").await,
+        Err(Error::Other(_))
+    ));
+}
+
+/// Asserts that a file of the root that has the name of a key under `_entries/` but not the name
+/// the key is written to (`%2F` for the `/`) is not listed, and that the bare key `_entries` and
+/// the keys `_entries.x` and `_entriesx` are ordinary keys beside a file of the previous release.
+#[tokio::test]
+async fn only_the_name_a_key_is_written_to_is_that_entry_key_in_the_root() {
+    let (dir, backend) = backend();
+    std::fs::write(dir.path().join("_entries%2Fodd"), [7_u8; 40]).unwrap();
+    old_release(&dir, "_entries/old", "shipped");
+    for key in ["_entries", "_entries.x", "_entriesx"] {
+        backend.put(key, body("plain")).await.unwrap();
+    }
+
+    assert_eq!(
+        keys(&backend, "").await,
+        ["_entries", "_entries.x", "_entries/old", "_entriesx"]
+    );
+    assert_eq!(keys(&backend, "_entries/").await, ["_entries/old"]);
+    let missing = backend.head("_entries/odd").await;
+    assert_eq!(missing, Err(Error::NotFound("_entries/odd".to_owned())));
+}
+
+/// Asserts the keys of the previous release that this branch cannot write: a key under `_entries/`
+/// with an empty rest, which the previous release accepted, is still listed, read and deleted but
+/// refused for a replacement; and a key too long to be a file name is refused by a read, for
+/// a key under `_entries/` and for any other.
+#[tokio::test]
+async fn keys_that_make_no_file_name_are_read_only_where_the_previous_release_made_them() {
+    let (dir, backend) = backend();
+    let tag = old_release(&dir, "_entries/", "bare");
+
+    assert_eq!(keys(&backend, "").await, ["_entries/"]);
+    assert_eq!(backend.head("_entries/").await.unwrap().tag, tag);
+    let refused = backend.put_if_match("_entries/", body("n"), &tag).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    backend.delete("_entries/").await.unwrap();
+    assert!(keys(&backend, "").await.is_empty());
+
+    for long in [format!("_entries/{}", "a".repeat(256)), "a".repeat(256)] {
+        assert!(matches!(backend.head(&long).await, Err(Error::Other(_))));
+    }
 }
 
 /// Asserts that the rest of an entry key must make a file name: empty is refused, and 255 encoded
@@ -460,4 +683,40 @@ async fn keys_that_look_like_the_entries_subdirectory_are_ordinary_objects() {
     );
     assert!(dir.path().join(DIR).is_dir());
     assert_eq!(names(&dir.path().join(DIR)), ["%2Elock", ".lock", "y"]);
+}
+
+/// Asserts that a delete, and a conditional delete by the tag, of a key whose file of the previous
+/// release cannot be removed (it is a directory here) fail and leave the object of the
+/// subdirectory in place, so that the key does not read back as the stale old body.
+#[tokio::test]
+async fn a_failed_delete_of_the_previous_releases_file_keeps_the_current_object() {
+    let (dir, backend) = backend();
+    let key = "_entries/a";
+    let tag = backend.put_tagged(key, body("v2")).await.unwrap();
+    let stuck = dir.path().join("_entries~a");
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("inside"), b"x").unwrap();
+
+    assert!(matches!(backend.delete(key).await, Err(Error::Other(_))));
+    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
+    let refused = backend.delete_if_match(key, &tag).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
+}
+
+/// Asserts that a read of a key the previous release put as a file of the root never reports it
+/// missing while a replacement by the tag moves it to the subdirectory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_during_the_move_of_a_previous_release_key_finds_the_key() {
+    let (dir, backend) = backend();
+    let backend = Arc::new(backend);
+    for number in 0..100 {
+        let key = format!("_entries/k{number}");
+        let tag = old_release(&dir, &key, "shipped");
+        let reader = Arc::clone(&backend);
+        let name = key.clone();
+        let read = tokio::spawn(async move { reader.get(&name, None).await });
+        backend.put_if_match(&key, body("two"), &tag).await.unwrap();
+        assert!(read.await.unwrap().is_ok(), "{key} read as missing");
+    }
 }
