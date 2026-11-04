@@ -232,6 +232,7 @@ mod stop_watcher;
 mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
+mod verbs;
 mod xml;
 
 #[cfg(test)]
