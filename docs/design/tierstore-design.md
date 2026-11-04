@@ -32,7 +32,7 @@ What is needed is a way to make the four actors take turns on one key, with no c
 
 Goals:
 
-- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned put) and, beside it, a read-only OCI distribution front, both over one proxy.
+- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned get and put) and, beside it, a read-only OCI distribution front, both over one proxy.
 - Create-only puts across two tiers: a key that exists in either tier is refused (412). The actor holding the key's entry decides, with one cold HEAD under the entry.
 - **No lost acknowledged write, no resurrected deleted key, no wrong bytes.** A residual is accepted only where it needs a frozen or stalled actor that only a fencing primitive could stop, and each such residual is stated (section 11).
 - **No correctness step relies on a conditional DELETE.** Where the store honours it (`dir:`, AWS), it is used only as a fence against a frozen or stalled actor.
@@ -123,6 +123,8 @@ Why this order: one atomic place, the entry, serialises every actor on the key. 
 ### Get
 
 ![Get: hot first, then cold on a miss; no entry is read](diagrams/seq-get.svg)
+
+The front calls `Proxy::open_read(key, span)` once. It gives the object's meta (size, tag, time of last write) and the body as chunks, so the front builds its headers, decides a condition (304, 412) or an unsatisfiable range, and streams the body from one call. `span` is the `Range` header as it came (`first-last`, `first-` or `-count`); the read resolves it against the size it finds. A hit in the hot tier is one call to the hot tier (`hot.open_read`: one GET on S3, one open file on `dir:`), whose body the proxy passes on without holding it. `Proxy::get_stream` is the same read for a byte range and returns the body alone. The numbers below are the numbers of the diagram, which shows `Proxy::get`; `open_read` follows the same steps, with step 1 as `hot.open_read` and the cold read of step 2 as `cold.open_read`, whose meta says whether the object is a reservation. In the current code, before the copy-back below is built, a read of the whole object that misses the hot tier (`open_read`, `get_stream`) is held nowhere: its body is given to the caller as it arrives and the same chunks are queued for a streamed create-only write into the hot tier (`put_stream_tagged`), which runs beside the response, never delays or fails it, and is abandoned if it falls more than 16 MiB behind or the caller drops the body before the last byte (so no partial object is left in the hot tier). A read of a range that misses the hot tier is the cold tier's own stream of the range and copies nothing. `Proxy::get` still holds the object whole when it has no range.
 
 1. **Hot hit.** One hot call, `open_read(key, range)`, returns the tag and the body together, at the client's key. The reply is made at once: **a hot hit is one hot round trip and reads no entry.** A hot error other than not-found is returned as it is; cold is not tried (fail closed).
 2. **Hot miss: read cold.** Straight away, with no entry read (a range reads only the range; the body is streamed). The result stands: the bytes, or 404. **A get never reads the journal entry.** A hot miss is one cold read, plus the copy-back request of step 3.
@@ -680,6 +682,7 @@ Still open, not covered by those decisions:
 | Copy-back | Writing an object read from cold into hot, by the leader under a CB entry. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
+| Presigned get | A get or head of one object signed in the URL by a key that reads (full, read-only or scoped), with the rights of that key; any `Range` is allowed, so one URL serves a parallel download. |
 | Reserved prefix | `_entries/`, `_journal/` and `_tiering/`; refused to clients. |
 | Bridge release | The release that reserves `_entries/` everywhere and drains the old journals, so the new protocol can start beside no old writer. |
 | Residual | A stated outcome that needs a frozen or stalled actor (R1 to R4, section 11). |
