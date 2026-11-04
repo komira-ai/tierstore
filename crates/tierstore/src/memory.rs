@@ -10,7 +10,10 @@ use futures::StreamExt;
 use sha2::{Digest, Sha256};
 
 use crate::backend::upload_page;
-use crate::{Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
+use crate::{
+    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, Span,
+    UploadsAfter, Window,
+};
 
 /// A clock a test sets by hand, for the times a [`MemoryBackend`] gives its objects. It starts
 /// at zero and moves only when told to, so two tiers that share one clock agree on the time.
@@ -241,6 +244,20 @@ impl Backend for MemoryBackend {
             None => body,
         };
         Ok((read, tag))
+    }
+
+    /// The meta and the bytes of one object, read under one look at the key.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        let (body, modified) = self.object(key)?;
+        let meta = Meta {
+            size: body.len() as u64,
+            tag: tag_of(&body),
+            modified,
+        };
+        let window = Window::of(span, meta.size);
+        let read = window.slice(&body);
+        let body = futures::stream::once(std::future::ready(Ok(read))).boxed();
+        Ok(Opened { meta, window, body })
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

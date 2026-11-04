@@ -185,6 +185,15 @@ impl Backend for CachedStore {
         self.inner.put_stream(key, len, body).await
     }
 
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        self.inner.put_stream_tagged(key, len, body).await
+    }
+
     async fn put_stream_hot_only(
         &self,
         key: &str,

@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter,
 };
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
@@ -19,7 +20,8 @@ pub enum Op {
     Put,
     /// [`Backend::put_if_match`].
     PutIfMatch,
-    /// [`Backend::get`] and [`Backend::get_tagged`].
+    /// [`Backend::get`], [`Backend::get_tagged`], [`Backend::get_stream`] and
+    /// [`Backend::open_read`].
     Get,
     /// [`Backend::head`].
     Head,
@@ -73,6 +75,11 @@ struct Plan {
     down: bool,
     /// How many calls of a kind were made, failed or not.
     calls: BTreeMap<Op, u64>,
+    /// How many calls of a kind were made on a key, failed or not (for a list call, the key is
+    /// the prefix listed).
+    keyed_calls: BTreeMap<(Op, String), u64>,
+    /// The kind and key of every call, failed or not, in the order of the calls.
+    log: Vec<(Op, String)>,
     /// The prefix of every list call, failed or not, in the order of the calls.
     listed: Vec<String>,
     /// The length every call that uploads a part was given, failed or not, in the order of the
@@ -145,6 +152,21 @@ impl FaultyBackend {
         self.plan().calls.get(&op).copied().unwrap_or(0)
     }
 
+    /// How many calls of kind `op` were made on exactly `key`, the failed ones included (for a
+    /// list call, `key` is the prefix listed).
+    #[must_use]
+    pub fn calls_on(&self, op: Op, key: &str) -> u64 {
+        let asked = (op, key.to_owned());
+        self.plan().keyed_calls.get(&asked).copied().unwrap_or(0)
+    }
+
+    /// The kind and key of every call made, the failed ones included, in the order of the calls
+    /// (for a list call, the key is the prefix listed).
+    #[must_use]
+    pub fn call_log(&self) -> Vec<(Op, String)> {
+        self.plan().log.clone()
+    }
+
     /// The prefix of every list call made, the failed ones included, in the order of the
     /// calls. A paged listing is a list call too.
     #[must_use]
@@ -176,6 +198,8 @@ impl FaultyBackend {
     fn arrive(&self, op: Op, key: &str) -> (Option<Duration>, Option<Error>) {
         let mut plan = self.plan();
         *plan.calls.entry(op).or_insert(0) += 1;
+        *plan.keyed_calls.entry((op, key.to_owned())).or_insert(0) += 1;
+        plan.log.push((op, key.to_owned()));
         let delay = plan.delay.get(&op).copied();
         let injected = match plan.fail.get_mut(&op) {
             Some(planned) => planned.pop_front(),
@@ -235,6 +259,17 @@ impl Backend for FaultyBackend {
     }
 
     /// As `put_stream`, a call of kind [`Op::Put`].
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        self.enter(Op::Put, key).await?;
+        self.inner.put_stream_tagged(key, len, body).await
+    }
+
+    /// As `put_stream`, a call of kind [`Op::Put`].
     async fn put_stream_hot_only(
         &self,
         key: &str,
@@ -290,6 +325,13 @@ impl Backend for FaultyBackend {
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;
         self.inner.get_stream(key, range).await
+    }
+
+    /// An open read is one call of kind [`Op::Get`], as a streamed read is, and is the wrapped
+    /// backend's own open read, so a test can count the calls a read makes.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        self.enter(Op::Get, key).await?;
+        self.inner.open_read(key, span).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

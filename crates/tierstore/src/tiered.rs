@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell};
 use tokio::time::Instant;
 
@@ -15,8 +16,8 @@ use crate::journal::{
 };
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, PartBody,
-    UploadsAfter,
+    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, MonotonicClock,
+    OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -28,7 +29,15 @@ const UPLOAD_LISTING_CALLS: u32 = 100;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod heartbeat;
+#[cfg(test)]
+mod heartbeat_tests;
+mod pause;
 mod put;
+mod read;
+mod relay;
+
+use heartbeat::Heartbeat;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -52,14 +61,36 @@ pub struct ProxyConfig {
     pub usage_refresh: Duration,
     /// The age of the usage object past which it is ignored, as if it were missing.
     pub usage_stale_after: Duration,
+    /// How long the format object (`_tiering/format`) that was read is used before it is read
+    /// again. When the reads succeed, this is the most time between the operator pausing writes
+    /// and a proxy refusing them; a read that fails keeps the last answer, so writes can go on
+    /// longer.
+    pub format_refresh: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
+    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]). Nothing
+    /// that another machine wrote is compared with it.
+    pub mono: Arc<dyn Clock>,
+    /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
+    /// called, and the longest a call of the heartbeat may take.
+    pub heartbeat: Duration,
+    /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
+    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
+    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
+    /// removal of registrations uses its own `registration_retention`.
+    pub departure: Duration,
+    /// The time that must be left before `live_until` for a call that destroys to start; the
+    /// longest such a call may take.
+    pub deadline_margin: Duration,
 }
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
+    /// heartbeat every 10 seconds, a departure time of 60 seconds and a margin of 10 seconds, on
+    /// a [`MonotonicClock`] that reads zero now, and a format object that is read every 5
+    /// seconds.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -70,7 +101,12 @@ impl ProxyConfig {
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
+            format_refresh: Duration::from_secs(5),
             clock,
+            mono: Arc::new(MonotonicClock::new()),
+            heartbeat: Duration::from_secs(10),
+            departure: Duration::from_secs(60),
+            deadline_margin: Duration::from_secs(10),
         }
     }
 }
@@ -141,10 +177,18 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
 ///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A ranged read that misses the hot tier asks the
-///   cold tier for that range alone and copies nothing back: the memory of a read is its range,
-///   whatever the size of the object, and a cache that reads a long object in chunks does not
-///   make the proxy read it whole once for each chunk.
+///   A failed copy-back does not fail the read. A read through [`Backend::open_read`] or
+///   [`Backend::get_stream`] of the whole object reads the cold object once and gives its body to
+///   the caller as it arrives, never held whole; the same chunks are queued for a streamed
+///   create-only write into the hot tier (`put_stream_tagged`, which gives the hot tag of the
+///   object it made), in a task of its own. The caller is never made to wait for that write: if it
+///   falls more than 16 MiB behind, fails, or the caller drops the body before the last byte (a
+///   client that went away), the write is abandoned and leaves no object, and a body of another
+///   length than the cold meta's is not copied. A read that is not given its body (a 304, a 412)
+///   copies nothing. A ranged read that misses the hot tier asks the cold tier for that range
+///   alone and copies nothing back: the memory of a read is its range, whatever the size of the
+///   object, and a cache that reads a long object in chunks does not make the proxy read it whole
+///   once for each chunk.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back.
 /// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
 ///   may have been evicted from the hot tier) or in the hot tier. The cold tier is asked
@@ -174,12 +218,13 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Delete** removes the object from the cold tier first, by its content tag (looking again if
 ///   it changed, three times at most), then from the hot tier, then appends a delete entry.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
-///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
-///   `_tiering/`. [`Backend::list_page`] pages through the merged listing: the last key of a page is
-///   the continuation token, and `max_keys` is kept to (a page of the hot tier that the filter of
-///   the reserved prefixes cut short is made up from the next). A put or a delete of a key under a
-///   reserved prefix is
-///   refused with [`Error::Reserved`].
+///   hold the key), in key order, without the keys under the reserved prefixes
+///   `_journal/` and `_tiering/` (whichever tier holds them).
+///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
+///   continuation token, and `max_keys` is kept to (a page of a tier that the filter of
+///   the reserved prefixes cut short is made up from the next). A get, a head, a put, a delete and
+///   every multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The
+///   S3 front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -241,7 +286,10 @@ struct Inner {
     /// the objects are written one at a time, and a number is used again if its write failed.
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
+    /// What was last read of the format object.
+    pause: AsyncMutex<pause::Pause>,
     counters: Counters,
+    heartbeat: Heartbeat,
 }
 
 impl Proxy {
@@ -269,10 +317,8 @@ impl Proxy {
             .filter_map(|object| seq_of(&prefix, &object.key))
             .max();
         let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
-        match hot.put(&proxy_key(id), Bytes::new()).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => {}
-            Err(error) => return Err(error),
-        }
+        let heartbeat = Heartbeat::new(&config);
+        heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
         let inner = Inner {
             hot,
@@ -281,7 +327,9 @@ impl Proxy {
             open: Mutex::new(None),
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
+            pause: AsyncMutex::default(),
             counters: Counters::default(),
+            heartbeat,
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -505,6 +553,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Bytes, Error> {
+        refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
                 self.counters.hit(Tier::Hot, Read::Get);
@@ -543,6 +592,7 @@ impl Inner {
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
+        refuse_reserved(key)?;
         match self.hot.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Hot, Read::Head);
@@ -573,7 +623,7 @@ impl Inner {
     /// Deletes the object: the cold tier's object first, by its content tag, then the hot tier's,
     /// then a delete entry is appended (the books forget the key).
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         self.remove_from_cold(key).await?;
         self.hot.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0, None))
@@ -602,7 +652,8 @@ impl Inner {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
-        let in_cold = self.cold.list(prefix).await?;
+        let mut in_cold = self.cold.list(prefix).await?;
+        in_cold.retain(is_data);
         Ok(merge(in_hot, in_cold, usize::MAX))
     }
 
@@ -613,16 +664,16 @@ impl Inner {
         max_keys: usize,
     ) -> Result<Vec<Listed>, Error> {
         let in_hot = data_page(self.hot.as_ref(), prefix, start_after, max_keys).await?;
-        let in_cold = self.cold.list_page(prefix, start_after, max_keys).await?;
+        let in_cold = data_page(self.cold.as_ref(), prefix, start_after, max_keys).await?;
         Ok(merge(in_hot, in_cold, max_keys))
     }
 }
 
-/// The first `max_keys` objects of the listing of `hot` after `start_after`, without the
-/// objects under the reserved prefixes: pages of the hot tier are read until enough objects
+/// The first `max_keys` objects of the listing of `tier` after `start_after`, without the
+/// objects under the reserved prefixes: pages of the tier are read until enough objects
 /// are left or the listing ends.
 async fn data_page(
-    hot: &dyn Backend,
+    tier: &dyn Backend,
     prefix: &str,
     start_after: Option<&str>,
     max_keys: usize,
@@ -630,7 +681,7 @@ async fn data_page(
     let mut found: Vec<Listed> = Vec::new();
     let mut after = start_after.map(str::to_owned);
     loop {
-        let page = hot.list_page(prefix, after.as_deref(), max_keys).await?;
+        let page = tier.list_page(prefix, after.as_deref(), max_keys).await?;
         let full_page = page.len() >= max_keys;
         after = page.last().map(|object| object.key.clone());
         found.extend(page.into_iter().filter(is_data));
@@ -693,6 +744,36 @@ impl Backend for Proxy {
         self.inner.get_object(key, range).await
     }
 
+    /// One call to the hot tier on a hit, with the object's meta, and a body that is the hot
+    /// tier's own stream (see `open_object`).
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        self.inner.open_object(key, span).await
+    }
+
+    /// A streamed read: the hot tier's own stream on a hit, and not the object collected as
+    /// [`Backend::get`] gives it. A range of no bytes, or one that starts at or past the end, is
+    /// answered as `get` answers it (an empty body, or an error if it starts past the end), from
+    /// the size the open read gave and with no read of the object collected.
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        // A range of no bytes is opened as one of the byte at its start: no body of it is read.
+        let span = range.map(|range| Span::From {
+            first: range.offset(),
+            last: Some(
+                range
+                    .offset()
+                    .saturating_add(range.size().saturating_sub(1)),
+            ),
+        });
+        let opened = self.inner.open_object(key, span).await?;
+        match range {
+            Some(range) if range.size() == 0 || opened.window == Window::Unsatisfiable => {
+                range.within(opened.meta.size)?;
+                Ok(futures::stream::empty().boxed())
+            }
+            _ => Ok(opened.body),
+        }
+    }
+
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         self.inner.head_object(key).await
     }
@@ -717,7 +798,7 @@ impl Backend for Proxy {
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         self.inner.cold.create_upload(key).await
     }
 
@@ -740,7 +821,7 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         let cold = &self.inner.cold;
         let upload = cold.upload_part_with_len(key, id, number, len, body);
         upload.await

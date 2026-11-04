@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::journal::{Checkpoint, JournalEntry, JournalOp};
+use crate::registrations::Registrations;
 
 /// Where a journal entry sits in the journal of a proxy: the number of the object, and the
 /// index of the entry in the object. Positions are ordered as the entries were appended.
@@ -100,6 +101,8 @@ pub(crate) struct Books {
     /// wrote it removed the cold tier's object itself, before it deleted from the hot tier). A key
     /// whose latest put entry is a plain put is not here.
     mirrored: BTreeMap<String, u64>,
+    /// What the leader has seen of the registrations of the proxies.
+    pub(crate) registrations: Registrations,
 }
 
 impl Books {

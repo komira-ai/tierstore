@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use tokio::time::Instant;
 
 use crate::backend::ByteRange;
 use crate::journal::{
@@ -12,9 +13,14 @@ use crate::journal::{
     seq_of, store_checkpoint, to_body, write_object,
 };
 use crate::lease::Lease;
+use crate::registrations::remove_if_departed;
 use crate::state::Candidate;
 use crate::state::{Books, Stream};
-use crate::{Backend, Clock, Error, JournalEntry, JournalOp, Meta};
+use crate::{
+    Backend, Clock, Error, JournalEntry, JournalOp, Meta, MonotonicClock, Sleeper, TokioSleeper,
+};
+
+mod drain;
 
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
@@ -31,23 +37,53 @@ pub struct ReconcilerConfig {
     /// The most objects copied to the cold tier at once. Size it to what the cold tier
     /// takes in parallel.
     pub parallel: usize,
-    /// How long after its last renewal a lease may be taken over. Passes must be run more
-    /// often than this.
+    /// How long a lease object must stand unchanged, on this process's own monotonic clock
+    /// (`mono`), before another reconciler may take it over.
     pub lease_ttl: Duration,
+    /// How often the holder renews the lease, on a timer of its own that runs while a pass
+    /// works. `None` is a third of `lease_ttl`.
+    pub lease_renew: Option<Duration>,
+    /// How much of `lease_ttl` the holder keeps in hand: it counts the lease as held until
+    /// `lease_ttl` less this after it sent its last renewal, and a pass that starts with less
+    /// than this left renews first. `None` is a third of `lease_ttl`.
+    pub lease_margin: Option<Duration>,
     /// How long a journal object is kept, counted from the time it was written, once it is
     /// applied and evicted past.
     pub retention: Duration,
     /// The most journal objects asked for in one listing.
     pub page_size: usize,
-    /// The time, for the lease, the retention and the usage object. It must agree with the
-    /// times the hot tier gives its objects to within the lease ttl and the retention.
+    /// How long the format object must have said `drain` (by the monotonic clock of the
+    /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
+    /// (`ProxyConfig::format_refresh`), so that a proxy whose format reads succeed has read the
+    /// format again. A proxy whose reads fail keeps its last answer, so `drained` does not show
+    /// that every proxy has seen the pause.
+    pub drain_settle: Duration,
+    /// The time, for the retention and the usage object. It must agree with the times the hot
+    /// tier gives its objects to within the retention. The lease does not use it.
     pub clock: Arc<dyn Clock>,
+    /// The monotonic clock of this process. It times the lease (when a lease object was first
+    /// seen unchanged, and until when the holder is valid) and the time since a registration was
+    /// first seen as it is. It is read only on this process, and nothing that another machine
+    /// wrote is compared with it, so it must not step back or follow the clock of the machine
+    /// ([`MonotonicClock`]).
+    pub mono: Arc<dyn Clock>,
+    /// What the renewal timer waits on between two renewals.
+    pub sleeper: Arc<dyn Sleeper>,
+    /// How long a registration of a proxy that heartbeats must have gone unchanged before the
+    /// reconciler removes it, if the proxy left no journal object. It is at least the departure
+    /// time of the proxies (see `ProxyConfig::departure`), so a registration does not go while
+    /// the proxy's `live_until` may still be ahead. Zero removes none: a proxy of a release
+    /// without the heartbeat that reopens such a registration never rewrites it.
+    pub registration_retention: Duration,
 }
 
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
-    /// retention of an hour, and listings of 100 journal objects.
+    /// retention of an hour, listings of 100 journal objects, a renewal and a margin of a third
+    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime, and no
+    /// removal of registrations (a registration retention of zero), and a drain settle time of 15
+    /// seconds.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -57,9 +93,15 @@ impl ReconcilerConfig {
             low_water: 0.7,
             parallel: 16,
             lease_ttl: Duration::from_secs(30),
+            lease_renew: None,
+            lease_margin: None,
             retention: Duration::from_secs(3600),
             page_size: 100,
+            drain_settle: Duration::from_secs(15),
             clock,
+            mono: Arc::new(MonotonicClock::new()),
+            sleeper: Arc::new(TokioSleeper),
+            registration_retention: Duration::ZERO,
         }
     }
 }
@@ -153,7 +195,10 @@ fn millis(duration: Duration) -> u64 {
 /// [`Reconciler::pass`] on an interval shorter than the lease ttl, on as many machines as
 /// there are, and call [`Reconciler::stop`] to give the lease up. A pass that finds the lease
 /// held by another does nothing; a pass that fails to renew it stops, and forgets what it
-/// knew, since another reconciler may have worked meanwhile.
+/// knew, since another reconciler may have worked meanwhile. A pass renews the lease on a timer
+/// of its own while it works, and a reconciler takes a lease over only when the object has
+/// stood unchanged for the ttl on its own monotonic clock, so no clock of another machine is
+/// compared with its own.
 ///
 /// A pass does these steps, and never lists the data prefixes of either tier (it lists
 /// `_tiering/proxies/`, one small object for each proxy, and, for each proxy, the journal
@@ -241,14 +286,15 @@ fn millis(duration: Duration) -> u64 {
 ///   deletes on, and is deleted from the hot tier unless its own journal entry shows in the
 ///   read that precedes the eviction. It is in the cold tier by then in the common case (the
 ///   copy found it), so only the hot copy goes.
-/// - A pass that takes longer than the lease ttl loses the lease. It still copies, and may still
+/// - A pass that loses the lease (a renewal of the timer failed because the hot tier did not
+///   answer it or another reconciler took the lease over, or the hot tier did not answer for the
+///   ttl) still copies, and may still
 ///   evict, beside the reconciler that took over (there is no fencing token; copies are
 ///   create-only), but once it finds the lease gone, before the checkpoint, it stores no
 ///   checkpoint, prunes nothing and publishes no usage. A checkpoint is never stored lower. The
 ///   check is a HEAD, not a fence: a pass that takes the lease over between the check and the
 ///   stores can still prune or publish usage, and the checkpoint it stores is joined with the
-///   stored one. Keep a pass shorter than the ttl (set `parallel` and the ttl accordingly), and
-///   do not cancel a pass.
+///   stored one. Do not cancel a pass.
 /// - A checkpoint object that does not decode fails the pass of its proxy each time, until the
 ///   object is deleted (the proxy then starts over from journal object 1).
 /// - A delete entry of a key that a mirror last put (by what the reconciler read
@@ -256,6 +302,9 @@ fn millis(duration: Duration) -> u64 {
 ///   itself. One that is applied after more than the retention since that put is applied as a
 ///   plain key's is, which can take an object that a put that went straight to the cold tier made
 ///   after the delete.
+/// - While `_tiering/format` says `drain`, the last step of a pass that had no failure, after
+///   [`ReconcilerConfig::drain_settle`] of seeing it, replaces it by `drained` (see the module
+///   `format`).
 /// - After a restart the journal objects before the position of the stored checkpoint that
 ///   are still younger than the retention are not read again, and are never deleted.
 pub struct Reconciler {
@@ -264,6 +313,8 @@ pub struct Reconciler {
     config: ReconcilerConfig,
     lease: Lease,
     books: Books,
+    /// Since when the format object has said `drain`, as this reconciler has seen it.
+    draining: Option<Instant>,
 }
 
 impl Reconciler {
@@ -271,14 +322,18 @@ impl Reconciler {
     #[must_use]
     pub fn new(hot: Arc<dyn Backend>, cold: Arc<dyn Backend>, config: ReconcilerConfig) -> Self {
         let ttl = millis(config.lease_ttl);
-        let clock = Arc::clone(&config.clock);
-        let lease = Lease::new(Arc::clone(&hot), clock, &config.holder, ttl);
+        let third = ttl / 3;
+        let renew = config.lease_renew.map_or(third, millis);
+        let margin = config.lease_margin.map_or(third, millis);
+        let mono = Arc::clone(&config.mono);
+        let lease = Lease::new(Arc::clone(&hot), mono, &config.holder, ttl, renew, margin);
         Self {
             hot,
             cold,
             config,
             lease,
             books: Books::default(),
+            draining: None,
         }
     }
 
@@ -298,16 +353,29 @@ impl Reconciler {
     pub async fn stop(&mut self) {
         self.lease.release().await;
         self.books = Books::default();
+        self.forget_drain();
     }
 
-    /// Takes or renews the lease and, if it holds it, does the steps above once.
+    /// Takes the lease, or renews it if less than the margin of it is left, and, if it holds
+    /// it, does the steps above once. While the steps run, a timer of its own renews the
+    /// lease every [`ReconcilerConfig::lease_renew`], however long one step takes.
     pub async fn pass(&mut self) -> PassReport {
-        let mut report = PassReport::default();
         if !self.lease.ensure().await {
             self.books = Books::default();
-            return report;
+            self.forget_drain();
+            return PassReport::default();
         }
-        report.held = true;
+        let lease = self.lease.clone();
+        let sleeper = Arc::clone(&self.config.sleeper);
+        lease.renewing(&*sleeper, self.steps()).await
+    }
+
+    /// The steps of a pass, once the lease is held.
+    async fn steps(&mut self) -> PassReport {
+        let mut report = PassReport {
+            held: true,
+            ..PassReport::default()
+        };
         self.discover(&mut report).await;
         let ids: Vec<String> = self.books.streams.keys().cloned().collect();
         // Every proxy's journal is read before any is applied, so that a mirror of one proxy
@@ -329,6 +397,7 @@ impl Reconciler {
             Ok(true) => {}
             Ok(false) => {
                 self.books = Books::default();
+                self.forget_drain();
                 return report;
             }
             Err(error) => {
@@ -340,6 +409,8 @@ impl Reconciler {
             self.persist(id, &mut report).await;
             self.prune(id, &mut report).await;
         }
+        self.settle_drain(&mut report).await;
+        self.remove_departed_registrations(&mut report).await;
         self.publish(&mut report).await;
         report
     }
@@ -353,6 +424,9 @@ impl Reconciler {
                 return;
             }
         };
+        self.books
+            .registrations
+            .observe(self.config.mono.now(), &listed);
         let ids = listed
             .iter()
             .filter_map(|object| object.key.strip_prefix(PROXIES_PREFIX));
@@ -366,6 +440,24 @@ impl Reconciler {
                     self.books.streams.insert(id.to_owned(), stream);
                 }
                 Err(error) => report.failed.push(error),
+            }
+        }
+    }
+
+    /// Removes the registrations of proxies that heartbeat and have left: unchanged for
+    /// [`ReconcilerConfig::registration_retention`] by the monotonic clock, with no journal object;
+    /// none if that is zero.
+    /// Each is asked about once in that time, not at every pass.
+    async fn remove_departed_registrations(&mut self, report: &mut PassReport) {
+        let now = self.config.mono.now();
+        let wait = self.config.registration_retention;
+        if wait.is_zero() {
+            return;
+        }
+        for id in self.books.registrations.due(now, wait) {
+            let version = self.books.registrations.ask(&id, now).unwrap_or_default();
+            if let Err(error) = remove_if_departed(self.hot.as_ref(), &id, version).await {
+                report.failed.push(error);
             }
         }
     }

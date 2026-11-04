@@ -10,8 +10,11 @@ mod capacity;
 mod chain;
 mod churn;
 mod cold_reads;
+mod cold_stream;
 mod conformance;
 mod faults;
+mod format_drain;
+mod format_pause;
 mod hold;
 mod journal;
 mod killed_put;
@@ -22,12 +25,14 @@ mod list_uploads_reserved;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
+mod open_read;
 mod recheck;
 mod reconciler;
 mod reconciler_copies;
 mod reconciler_faults;
 mod reconciler_races;
 mod reconciler_takeover;
+mod registration_gc;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]
