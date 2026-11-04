@@ -160,9 +160,9 @@ The keys of each table are those of the storage node and of the build node. What
 | `server.presign_key_files` | `--presign-key-file` | paths, none | presigning key files |
 | `server.gc_key_files` | `--gc-key-file` | paths, none | GC key files |
 | `server.scoped_key_files` | `--scoped-key-file` | paths, none | scoped key files |
-| `server.grant_key_files` | `--grant-key-file` | paths, none | grant key files |
-| `server.grant_max_lifetime` | `--grant-max-lifetime` | duration, `15m` | the longest a read grant may still have to live when it is checked: a grant that ends later is refused 403 |
-| `server.presign_max_expires` | `--presign-max-expires` | duration, `15m` | the longest expiry of any presigned URL |
+| `server.presign_max_expires` | `--presign-max-expires` | duration, `15m` | the longest expiry of any presigned URL, a GET or a PUT |
+| `server.grant_key_files` | `--grant-key-file` | paths, none | deprecated, ignored: the read grant was removed (use a presigned GET URL). Accepted so that a file written for the release before still starts; the files are not read, and the server logs `tierstore: --grant-key-file (server.grant_key_files) is ignored: the read grant was removed; use a presigned GET URL` |
+| `server.grant_max_lifetime` | `--grant-max-lifetime` | duration, none | deprecated, ignored, like `server.grant_key_files`; its warning names `--grant-max-lifetime (server.grant_max_lifetime)` |
 | `server.max_request_bytes` | `--max-request-bytes` | bytes, 268435456 (256 MiB) | the longest body of a request: the longest object and the longest part. A body over it is refused with 413 and nothing is stored |
 | `server.max_concurrent_puts` | `--max-concurrent-puts` | count, 32 | the most put bodies and parts taken at once; one more waits for one to end, up to `server.put_permit_wait` |
 | `server.put_permit_wait` | `--put-permit-wait` | duration, `15s` | on main, not in v0.0.41. How long a put that finds every put slot taken waits for one to end before it is answered 503 `SlowDown` with `Retry-After: 1`; `0s` answers at once. No byte of its body is read while it waits, and a waiter counts as in flight in a drain (never past `--drain-deadline`) |

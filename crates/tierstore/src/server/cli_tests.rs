@@ -1,5 +1,6 @@
 //! The flags of the binary: their defaults, parsing and help. The settings made of them and the
-//! checks before a start are in the two modules below.
+//! checks run before a start are in the two modules below. The reconciler's loop is tested in
+//! `cli_reconcile_tests`.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -151,7 +152,7 @@ fn the_flags_have_their_defaults() {
     assert!(cli.scoped_key_file.is_empty());
     assert!(cli.grant_key_file.is_empty());
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
-    assert_eq!(cli.grant_max_lifetime, Duration::from_secs(900));
+    assert_eq!(cli.grant_max_lifetime, None);
     assert!(
         cli.skip_backend_check.is_empty(),
         "no check is skipped by default"
