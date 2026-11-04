@@ -12,6 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
+use super::pause::{self, WriteMode};
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::{FORMAT_KEY, proxy_key};
 use crate::registration::{PROTO, Registration};
@@ -408,4 +409,92 @@ async fn a_beat_takes_up_the_format_without_a_request() {
     sleeper.beat_done().await;
     assert!(!proxy.inner.entries_active().await);
     proxy.stop_heartbeat().await;
+}
+
+const ACTIVE: &[u8] = br#"{"epoch":2,"phase":"active"}"#;
+const DRAINED: &[u8] = br#"{"phase":"drained"}"#;
+
+/// A proxy over `hot` that does not read the format object again for an hour.
+async fn proxy_over(hot: Arc<dyn Backend>) -> Proxy {
+    let mut settings = config(&Arc::new(Mono::new()));
+    settings.format_refresh = Duration::from_secs(3600);
+    Proxy::open(hot, Arc::new(MemoryBackend::new()), settings)
+        .await
+        .unwrap()
+}
+
+/// Asserts that a look at the format by the heartbeat does not overtake the read of a request: a
+/// request has read "no format" and is held before it is told, the format becomes `active`, and the
+/// look, started while the request is held, waits for it. Once the request is released the look
+/// reads the newer object, so the proxy ends with the epoch and not with the older answer.
+#[tokio::test]
+async fn a_look_at_the_format_that_starts_during_a_request_read_keeps_the_newer_object() {
+    let memory = Arc::new(MemoryBackend::new());
+    let hot = Arc::new(GateBackend::new(memory.clone()));
+    let proxy = proxy_over(hot.clone()).await;
+    let gate = hot.gate(Op::Get, FORMAT_KEY, Phase::Post);
+    let inner = Arc::clone(&proxy.inner);
+    let request = tokio::spawn(async move { inner.entries_active().await });
+    gate.parked().await;
+    memory
+        .put(FORMAT_KEY, bytes::Bytes::from_static(ACTIVE))
+        .await
+        .unwrap();
+
+    let look = pause::refresh(
+        &proxy.inner.pause,
+        &proxy.inner.format_gate,
+        memory.as_ref(),
+        Duration::from_secs(3600),
+    );
+    let release = async {
+        tokio::task::yield_now().await;
+        assert!(gate.release());
+    };
+    tokio::join!(look, release);
+
+    assert!(!request.await.unwrap());
+    assert!(proxy.inner.entries_active().await);
+}
+
+/// Asserts the other order: a look at the format has read `active` and is held before it keeps it,
+/// the format becomes `drained`, and a write that comes while the look is held does not read the
+/// object beside it: it waits, and when the look is released it uses what the look kept, so the
+/// older read is not replaced by a read that ran at the same time.
+#[tokio::test]
+async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_what_it_kept() {
+    let memory = Arc::new(MemoryBackend::new());
+    memory
+        .put(FORMAT_KEY, bytes::Bytes::from_static(ACTIVE))
+        .await
+        .unwrap();
+    let proxy = proxy_over(memory.clone()).await;
+    let looking = Arc::new(GateBackend::new(memory.clone()));
+    let gate = looking.gate(Op::Get, FORMAT_KEY, Phase::Post);
+    let inner = Arc::clone(&proxy.inner);
+    let look = tokio::spawn(async move {
+        pause::refresh(
+            &inner.pause,
+            &inner.format_gate,
+            looking.as_ref(),
+            Duration::from_secs(3600),
+        )
+        .await;
+    });
+    gate.parked().await;
+    memory.delete(FORMAT_KEY).await.unwrap();
+    memory
+        .put(FORMAT_KEY, bytes::Bytes::from_static(DRAINED))
+        .await
+        .unwrap();
+
+    let inner = Arc::clone(&proxy.inner);
+    let request = tokio::spawn(async move { inner.admit_write_mode("k").await });
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert!(!request.is_finished());
+    assert!(gate.release());
+    look.await.unwrap();
+
+    assert_eq!(request.await.unwrap().unwrap(), WriteMode::Entries);
 }

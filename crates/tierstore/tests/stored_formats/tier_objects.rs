@@ -48,7 +48,7 @@ async fn a_proxy_reads_a_usage_with_a_field_added_later() {
 }
 
 /// Asserts that opening a proxy writes a registration under `_tiering/proxies/<proxy_id>` that is
-/// JSON with `proto` 1, a `boot` and `hb` 0 (a proxy that does not beat yet), and that opening over
+/// JSON with `proto` 2, a `boot` and `hb` 0 (a proxy that does not beat yet), and that opening over
 /// the empty marker of the fixture, which a release before the heartbeat wrote, leaves it as it
 /// is.
 #[tokio::test(start_paused = true)]

@@ -234,11 +234,11 @@ these series:
 | `tierstore_oci_digest_mismatches_total` | counter | none | objects whose bytes were not the digest they are named by |
 | `tierstore_oci_front_info` | gauge | `mode`: `https`, `http` | always 1; the label is the mode the front runs in |
 
-Every `/metricz`, with or without the front, ends with one more series, on main and not in v0.0.41:
+Every `/metricz`, with or without the front, ends with one more series:
 
 | name | type | labels | what it says |
 |---|---|---|---|
-| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `--slot` names, on main and only when the flag is given (otherwise the gauge has no such label) | always 1; says which build answered |
+| `tierstore_build_info` | gauge | `version`: the crate version; `commit`: the commit the binary was built from, twelve hex digits, or `unknown` outside a git checkout; `slot`: the port `--slot` names, only when the flag is given (otherwise the gauge has no such label) | always 1; says which build answered |
 
 ## Not in a release yet
 
@@ -248,7 +248,7 @@ updated when they land. Do not build alerts on them until they are in a release.
 
 ### The drain
 
-On main, not in v0.0.41. One series of the server itself, with a `# TYPE` line, shown on every
+One series of the server itself, with a `# TYPE` line, shown on every
 node whatever sources it has (it comes after the blocks of the proxy, the OCI front and the
 cache):
 

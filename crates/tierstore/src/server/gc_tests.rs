@@ -1,4 +1,4 @@
-//! The GC key files and the checks of a GC key's calls.
+//! The GC key files and the checks of a GC key's calls, which are those of the scoped key it is.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -7,12 +7,24 @@ use std::path::PathBuf;
 use hyper::Request;
 use tierstore_testkit::dir::TestDir;
 
-use super::gc::{GcKey, NOT_ALLOWED, OUT_OF_SCOPE, ensure_distinct, gc_keys, permit};
+use super::gc::{GcKey, ensure_distinct, gc_keys};
 use super::presign::PresignError;
 use super::request::{Query, Target};
+use super::scoped::{NOT_ALLOWED, OUT_OF_SCOPE, Scopes, permit};
 
 const SECRET: &str = "gc-secret-0123456789";
 const FLAG: &str = "--gc-key-file";
+
+/// The check of a call by a GC key of `prefix`.
+fn permit_gc(
+    prefix: &str,
+    parts: &hyper::http::request::Parts,
+    target: &Target,
+    query: &Query,
+) -> Result<(), super::auth::Refusal> {
+    let scopes = GcKey::new("pack-gc", SECRET, prefix).unwrap().scopes();
+    permit(&scopes, parts, target, query)
+}
 
 fn file(dir: &TestDir, name: &str, text: &str, mode: u32) -> PathBuf {
     let path = dir.path().join(name);
@@ -95,6 +107,7 @@ fn a_gc_key_may_list_head_delete_and_abort_and_nothing_else() {
         let (parts, ()) = Request::builder()
             .method(method)
             .uri(uri)
+            .header("authorization", "AWS4-HMAC-SHA256 header-signed")
             .body(())
             .unwrap()
             .into_parts();
@@ -103,7 +116,7 @@ fn a_gc_key_may_list_head_delete_and_abort_and_nothing_else() {
             Some(key) if !key.is_empty() => Target::Object(key.to_owned()),
             _ => Target::Bucket,
         };
-        permit("cas/b/", &parts, &target, &query)
+        permit_gc("cas/b/", &parts, &target, &query)
     };
     for (method, uri) in [
         ("GET", "/b?list-type=2&prefix=cas%2Fb%2F"),
@@ -115,23 +128,21 @@ fn a_gc_key_may_list_head_delete_and_abort_and_nothing_else() {
     ] {
         assert_eq!(call(method, uri), Ok(()), "{method} {uri}");
     }
-    for (method, uri) in [
-        ("GET", "/b/cas/b/x"),
-        ("GET", "/b?list-type=2"),
-        ("GET", "/b?list-type=2&prefix=cas%2F"),
-        ("HEAD", "/b"),
-        ("HEAD", "/b/cas/b/"),
-        ("HEAD", "/b/cas/b/x?uploadId=u"),
-        ("DELETE", "/b/cas/c/x"),
-        ("DELETE", "/b/cas/b/"),
-        ("PUT", "/b/cas/b/x"),
-        ("POST", "/b/cas/b/x?uploads"),
-        ("PUT", "/b"),
+    for (method, uri, wanted) in [
+        ("GET", "/b/cas/b/x", OUT_OF_SCOPE),
+        ("GET", "/b?list-type=2", OUT_OF_SCOPE),
+        ("GET", "/b?list-type=2&prefix=cas%2F", OUT_OF_SCOPE),
+        ("HEAD", "/b", NOT_ALLOWED),
+        ("HEAD", "/b/cas/b/", OUT_OF_SCOPE),
+        ("HEAD", "/b/cas/b/x?uploadId=u", NOT_ALLOWED),
+        ("DELETE", "/b/cas/c/x", OUT_OF_SCOPE),
+        ("DELETE", "/b/cas/b/", OUT_OF_SCOPE),
+        ("PUT", "/b/cas/b/x", OUT_OF_SCOPE),
+        ("POST", "/b/cas/b/x?uploads", OUT_OF_SCOPE),
+        ("PUT", "/b", NOT_ALLOWED),
     ] {
-        let refused = call(method, uri).unwrap_err();
-        assert_eq!(refused.code, "AccessDenied", "{method} {uri}");
+        assert_eq!(call(method, uri), Err(wanted), "{method} {uri}");
     }
-    assert_eq!(call("PUT", "/b/cas/b/x"), Err(NOT_ALLOWED));
 }
 
 /// Asserts that a key needs an id and a secret that are not empty and an id that a credential
@@ -185,7 +196,7 @@ fn a_name_under_the_prefix_that_is_not_a_valid_name_is_refused() {
             .into_parts();
         let query = Query::parse(None).unwrap();
         let target = Target::Object(name.to_owned());
-        let key = permit("cas/b/", &parts, &target, &query);
+        let key = permit_gc("cas/b/", &parts, &target, &query);
         assert_eq!(key, Err(OUT_OF_SCOPE), "key {name:?}");
         let (parts, ()) = Request::builder()
             .method("GET")
@@ -196,17 +207,18 @@ fn a_name_under_the_prefix_that_is_not_a_valid_name_is_refused() {
         let encoded: String = name.bytes().map(|byte| format!("%{byte:02X}")).collect();
         let uri = format!("/b?list-type=2&prefix={encoded}");
         let query = Query::parse(Some(uri.split_once('?').unwrap().1)).unwrap();
-        let listed = permit("cas/b/", &parts, &Target::Bucket, &query);
+        let listed = permit_gc("cas/b/", &parts, &Target::Bucket, &query);
         assert_eq!(listed, Err(OUT_OF_SCOPE), "list {name:?}");
     }
 }
 
 /// Asserts the second guard on the keys of the proxy: the check of a call, given a reserved
-/// prefix directly (as a grant built another way than `GcKey::new`, which refuses one, would
+/// prefix directly (as scopes built another way than `GcKey::new`, which refuses one, would
 /// have), refuses a delete of a key under it and a list of it.
 #[test]
 fn the_keys_of_the_proxy_are_refused_even_under_a_reserved_prefix() {
     for prefix in ["_journal/", "_tiering/"] {
+        let reserved = Scopes::listing_and_deleting(prefix);
         let (parts, ()) = Request::builder()
             .method("DELETE")
             .uri("/b/k")
@@ -215,7 +227,7 @@ fn the_keys_of_the_proxy_are_refused_even_under_a_reserved_prefix() {
             .into_parts();
         let target = Target::Object(format!("{prefix}p1/0001"));
         let query = Query::parse(None).unwrap();
-        let deleted = permit(prefix, &parts, &target, &query);
+        let deleted = permit(&reserved, &parts, &target, &query);
         assert_eq!(deleted, Err(OUT_OF_SCOPE), "delete under {prefix}");
         let (parts, ()) = Request::builder()
             .method("GET")
@@ -226,7 +238,7 @@ fn the_keys_of_the_proxy_are_refused_even_under_a_reserved_prefix() {
         let encoded = prefix.replace('/', "%2F");
         let listing = format!("list-type=2&prefix={encoded}");
         let query = Query::parse(Some(&listing)).unwrap();
-        let listed = permit(prefix, &parts, &Target::Bucket, &query);
+        let listed = permit(&reserved, &parts, &Target::Bucket, &query);
         assert_eq!(listed, Err(OUT_OF_SCOPE), "list of {prefix}");
     }
 }
