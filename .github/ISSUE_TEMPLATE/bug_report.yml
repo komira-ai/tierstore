@@ -1,0 +1,43 @@
+name: Bug report
+description: Something tierstore does that it should not, or does not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security problem, do not file an issue. Use the private report link on the issue chooser.
+        Remove keys, secrets and internal host names from anything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The output of `tierstore --version`.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: For example linux-x86_64, linux-arm64 or macos-arm64.
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Setup
+      description: The tiers (directory or S3), the fronts in use, and the relevant part of the configuration file.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and what happened
+      description: Include log lines and the response status if there are any.
+    validations:
+      required: true
