@@ -36,8 +36,9 @@ tarball is verified (`docs/ci-and-release.md`). The release also carries
 `tierstore-<commit>-macos-arm64.tar.gz`; the files here are for Linux hosts (a Mac's: `macos/README.md`),
 and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
 binary.
-The tarball holds one member, the binary under its own name (the declaration is not in it
-yet: place it from this directory, below):
+The tarball holds the binary under its own name and `THIRD-PARTY-LICENSES.txt`, the licences of
+the crates linked into it (the declaration is not in it yet: place it from this directory, below;
+extracting `tierstore` by name leaves the notice in the tarball):
 
 ```sh
 tar -xzf tierstore-<commit>-linux-x86_64.tar.gz tierstore
