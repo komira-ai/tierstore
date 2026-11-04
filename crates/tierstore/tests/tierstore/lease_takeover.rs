@@ -2,8 +2,9 @@
 //! longer than the lease, and when the clocks disagree.
 //!
 //! The lease is the object `_tiering/lease` of the hot tier. It is taken create-only, renewed and
-//! taken over with `If-Match`, and it expires when the object was last written `ttl` ago by the
-//! contender's own clock. Nothing here sleeps: every clock is set by hand.
+//! taken over with `If-Match`, and a contender takes it over when the object has stood with one
+//! content tag for `ttl` on the contender's own monotonic clock. Nothing here sleeps: every clock
+//! is set by hand.
 //!
 //! Gap: these tests run over the in-memory backend only, whose replace-on-tag is a mutex-held
 //! check and write. `put_if_match` over the directory backend (atomic only within one process,
@@ -22,16 +23,19 @@ use crate::support::{Rig, assert_absent, body, read, text};
 
 const TAKERS: usize = 8;
 
-/// Eight reconcilers with names of their own over `hot`, each running one pass, all polled
-/// together: a pass that waits at the gate lets the others run. Gives the number of each with what
-/// its pass reported.
-async fn passes(rig: &Rig, hot: Arc<dyn Backend>) -> Vec<(usize, PassReport)> {
-    let mut reconcilers: Vec<Reconciler> = (0..TAKERS)
+/// Eight reconcilers with names of their own over `hot`, none of which has run a pass.
+fn takers(rig: &Rig, hot: Arc<dyn Backend>) -> Vec<Reconciler> {
+    (0..TAKERS)
         .map(|number| {
             let config = rig.reconciler_config(&format!("taker-{number}"), 1 << 20);
             Reconciler::new(hot.clone(), rig.cold.clone(), config)
         })
-        .collect();
+        .collect()
+}
+
+/// One pass of each of `reconcilers`, all polled together: a pass that waits at the gate lets the
+/// others run. Gives the number of each with what its pass reported.
+async fn passes(reconcilers: &mut [Reconciler]) -> Vec<(usize, PassReport)> {
     let reports = join_all(reconcilers.iter_mut().map(|reconciler| reconciler.pass())).await;
     reports.into_iter().enumerate().collect()
 }
@@ -66,10 +70,15 @@ async fn assert_one_holder(rig: &Rig, done: &[(usize, PassReport)]) {
 async fn eight_reconcilers_that_find_the_lease_expired_at_once_have_one_holder() {
     let rig = Rig::new();
     assert!(rig.reconciler("old", 1 << 20).pass().await.held);
-    rig.clock.set(30_000);
     let hot: Arc<dyn Backend> =
         Arc::new(Gate::on_replaces(rig.hot.clone(), "_tiering/lease", TAKERS));
-    let done = passes(&rig, hot).await;
+    // Every taker sees the lease at time zero and finds it unchanged for the ttl at 30 seconds.
+    let mut takers = takers(&rig, hot);
+    for taker in &mut takers {
+        assert!(!taker.pass().await.held);
+    }
+    rig.clock.set(30_000);
+    let done = passes(&mut takers).await;
     assert_one_holder(&rig, &done).await;
 }
 
@@ -81,7 +90,7 @@ async fn eight_reconcilers_that_find_the_lease_expired_at_once_have_one_holder()
 async fn eight_reconcilers_that_find_no_lease_at_once_have_one_holder() {
     let rig = Rig::new();
     let hot: Arc<dyn Backend> = Arc::new(Gate::new(rig.hot.clone(), "_tiering/lease", TAKERS));
-    let done = passes(&rig, hot).await;
+    let done = passes(&mut takers(&rig, hot)).await;
     assert_one_holder(&rig, &done).await;
 }
 
@@ -116,6 +125,8 @@ async fn a_pass_longer_than_the_lease_copies_beside_the_new_holder_and_stores_no
     let mut two = rig.reconciler("r2", 1 << 20);
     let takeover = async {
         entered.notified().await;
+        // r2 looks at the lease of r1 at time zero, and finds it unchanged 30 seconds later.
+        assert!(!two.pass().await.held);
         rig.clock.set(30_000);
         let report = two.pass().await;
         release.notify_one();
@@ -177,6 +188,7 @@ async fn a_stale_pass_does_not_move_the_stored_checkpoint_back() {
         for name in ["k3", "k4"] {
             proxy.put(name, body(name)).await.unwrap();
         }
+        assert!(!two.pass().await.held);
         rig.clock.set(30_000);
         let report = two.pass().await;
         assert!(report.held, "{report:?}");
@@ -283,89 +295,91 @@ async fn a_checkpoint_ahead_of_the_pass_is_kept_and_adopted() {
     assert_eq!(text(&*rig.hot_mem, "_tiering/checkpoint/p1").await, ahead);
 }
 
-/// A holder on the clock of the hot tier and a taker on a clock of its own, over a hot tier
-/// whose objects are stamped by the first.
+/// A holder and a taker over one hot tier, each with the monotonic clock of its own process and
+/// the taker with a wall clock of its own too, over a hot tier whose objects are stamped by the
+/// holder's clock.
 struct Skewed {
     store: Arc<TestClock>,
-    taker_clock: Arc<TestClock>,
+    taker_wall: Arc<TestClock>,
+    taker_mono: Arc<TestClock>,
     holder: Reconciler,
     taker: Reconciler,
 }
 
 impl Skewed {
-    /// The holder has taken the lease at time zero of the hot tier.
+    /// The holder has taken the lease at time zero of its clock and of the hot tier.
     async fn new() -> Self {
         let store = Arc::new(TestClock::new());
-        let taker_clock = Arc::new(TestClock::new());
+        let taker_wall = Arc::new(TestClock::new());
+        let taker_mono = Arc::new(TestClock::new());
         let hot = Arc::new(MemoryBackend::with_clock(store.clone()));
         let cold = Arc::new(MemoryBackend::with_clock(store.clone()));
-        let config = |name: &str, clock: &Arc<TestClock>| {
-            ReconcilerConfig::new(name, 1 << 20, clock.clone())
-        };
-        let mut holder = Reconciler::new(hot.clone(), cold.clone(), config("holder", &store));
-        let taker = Reconciler::new(hot, cold, config("taker", &taker_clock));
+        let mut holder_config = ReconcilerConfig::new("holder", 1 << 20, store.clone());
+        holder_config.mono = store.clone();
+        let mut taker_config = ReconcilerConfig::new("taker", 1 << 20, taker_wall.clone());
+        taker_config.mono = taker_mono.clone();
+        let mut holder = Reconciler::new(hot.clone(), cold.clone(), holder_config);
+        let taker = Reconciler::new(hot, cold, taker_config);
         assert!(holder.pass().await.held);
         Self {
             store,
-            taker_clock,
+            taker_wall,
+            taker_mono,
             holder,
             taker,
         }
     }
 
-    /// The taker's pass when the hot tier's time is `store` and the taker's own clock reads
-    /// `taker`.
-    async fn taker_passes(&mut self, store: u64, taker: u64) -> bool {
+    /// The taker's pass when the hot tier stamps its objects with `store`, the taker's wall clock
+    /// reads `wall` and its monotonic clock reads `mono`.
+    async fn taker_passes(&mut self, store: u64, wall: u64, mono: u64) -> bool {
         self.store.set(store);
-        self.taker_clock.set(taker);
+        self.taker_wall.set(wall);
+        self.taker_mono.set(mono);
         self.taker.pass().await.held
     }
 }
 
-/// Asserts what the design says of skew when the taker's clock is ahead of the hot tier's by 10
-/// seconds and the ttl is 30: the lease changes hands when its object is 20 seconds old, not
-/// 30, because the age is the taker's clock minus the hot tier's stamp. Not a second earlier.
-/// The holder, still alive, is stopped at its next renewal. Defect it catches: an age computed
-/// from anything but the contender's own clock and the stamp of the hot tier.
+/// Asserts that a taker whose wall clock is 40 seconds (more than the ttl) ahead of the stamps of
+/// the hot tier does not take a lease that was just written: it first sees the tag at its
+/// monotonic time zero, takes the lease at 30 seconds of that clock and not a millisecond before,
+/// and the holder, which did nothing wrong, is stopped at its next pass. Catches a take over that
+/// compares the stamp of the hot tier with a wall clock, which hands a live holder's lease over at
+/// once when the clocks differ by more than the ttl.
 #[tokio::test]
-async fn a_taker_10_seconds_ahead_takes_the_lease_when_it_is_20_seconds_old() {
+async fn a_taker_with_its_wall_clock_far_ahead_waits_the_ttl_on_its_own_monotonic_clock() {
     let mut skew = Skewed::new().await;
-    assert!(!skew.taker_passes(19_999, 29_999).await);
-    assert!(skew.taker_passes(20_000, 30_000).await);
+    assert!(!skew.taker_passes(0, 40_000, 0).await);
+    assert!(!skew.taker_passes(0, 40_000, 29_999).await);
+    assert!(skew.taker_passes(0, 40_000, 30_000).await);
+    skew.store.set(30_000);
     assert_eq!(skew.holder.pass().await, PassReport::default());
 }
 
-/// Asserts that a taker 40 seconds ahead, which is more than the ttl, takes the lease at once
-/// from a holder that wrote it in the same instant: the lease changes hands early when the skew
-/// is more than the ttl, and the old holder, which has done nothing wrong, is stopped at its next
-/// renewal. This is why the lease needs bounded skew. Defect it catches: a
-/// lease that is never early.
+/// Asserts that a taker whose wall clock is 10 seconds behind the stamps of the hot tier takes
+/// the lease at 30 seconds of its monotonic clock, as one with a right wall clock does, even
+/// though the hot tier's stamp is 40 seconds old by then. Catches a take over that waits for the
+/// age of the stamp as the wall clock of the taker reads it.
 #[tokio::test]
-async fn a_taker_40_seconds_ahead_takes_a_lease_that_was_just_written() {
+async fn a_taker_with_its_wall_clock_behind_takes_the_lease_at_the_same_time() {
     let mut skew = Skewed::new().await;
-    assert!(skew.taker_passes(0, 40_000).await);
-    assert_eq!(skew.holder.pass().await, PassReport::default());
+    assert!(!skew.taker_passes(0, 0, 0).await);
+    assert!(!skew.taker_passes(39_999, 29_999, 29_999).await);
+    assert!(skew.taker_passes(40_000, 30_000, 30_000).await);
 }
 
-/// Asserts that a taker whose clock is 10 seconds behind takes the lease late, at 40 seconds of
-/// the hot tier's time and not before: skew in this direction costs availability, not safety.
-/// Defect it catches: an age computed from the hot tier's own clock.
+/// Asserts that a renewal restarts the wait of a taker: the holder renews at 25 seconds, the
+/// taker that first saw the lease at zero sees another tag at 30 seconds, and takes the lease at
+/// 60 seconds of its clock (30 after it saw that tag) and not at 30. Catches a taker that counts
+/// the wait from the first tag it ever saw, which replaces a live holder a ttl after it first
+/// took the lease.
 #[tokio::test]
-async fn a_taker_10_seconds_behind_takes_the_lease_late() {
+async fn a_renewal_restarts_the_wait_of_a_taker() {
     let mut skew = Skewed::new().await;
-    assert!(!skew.taker_passes(39_999, 29_999).await);
-    assert!(skew.taker_passes(40_000, 30_000).await);
-}
-
-/// Asserts that a renewal moves the age of the lease on: a taker waits the whole ttl from the
-/// holder's last renewal, not from the time the lease was first taken. Defect it catches: a
-/// renewal that does not move the time of the lease object on, which lets a live holder be
-/// replaced a ttl after it first took the lease.
-#[tokio::test]
-async fn a_renewal_moves_the_age_of_the_lease_on() {
-    let mut skew = Skewed::new().await;
+    assert!(!skew.taker_passes(0, 0, 0).await);
     skew.store.set(25_000);
     assert!(skew.holder.pass().await.held);
-    assert!(!skew.taker_passes(54_999, 54_999).await);
-    assert!(skew.taker_passes(55_000, 55_000).await);
+    assert!(!skew.taker_passes(25_000, 30_000, 30_000).await);
+    assert!(!skew.taker_passes(25_000, 59_999, 59_999).await);
+    assert!(skew.taker_passes(25_000, 60_000, 60_000).await);
 }

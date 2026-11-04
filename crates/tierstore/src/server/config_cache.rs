@@ -3,7 +3,6 @@
 //!
 //! ```toml
 //! [server]                      # as for a storage node, without backend_check_wait
-//! listen          = "127.0.0.1:9400"
 //! proxy_id        = "tierstore-cache-1"
 //! bucket          = "tierstore"
 //! access_key_file = "/etc/tierstore-cache/access.key"
@@ -30,14 +29,14 @@
 //!
 //! [[interface]]
 //! type   = "s3"
-//! params = { port = 9300 }
+//! params = { addresses = ["127.0.0.1:9400"] }
 //!
 //! [[interface]]                 # optional: the registry front, served from the cache
 //! type   = "oci"
 //! params = { addresses = ["127.0.0.1:5000"] }
 //!
 //! [[policy]]
-//! prefix = "cas/b/"
+//! prefix = "oci/"             # covers the registry blobs, which the oci interface needs cached
 //! cache  = true
 //! ```
 //!
