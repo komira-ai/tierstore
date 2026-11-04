@@ -234,13 +234,13 @@ async fn an_entry_write_fails_where_a_file_is_named_entries() {
     assert!(matches!(blocked, Err(Error::Other(_))));
 }
 
-/// Asserts that a write of an entry fails where the root is gone, so the subdirectory cannot be
-/// made.
+/// Asserts that a delete of an entry fails where the root is gone, so the subdirectory cannot be
+/// made for the lock.
 #[tokio::test]
-async fn an_entry_write_fails_where_the_root_is_gone() {
+async fn an_entry_delete_fails_where_the_root_is_gone() {
     let (dir, backend) = backend();
     std::fs::remove_dir_all(dir.path()).unwrap();
-    let lost = backend.put("_entries/e", body("x")).await;
+    let lost = backend.delete("_entries/e").await;
     assert!(matches!(lost, Err(Error::Other(_))));
 }
 
