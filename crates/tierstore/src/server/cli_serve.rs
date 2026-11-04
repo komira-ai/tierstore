@@ -102,7 +102,9 @@ pub async fn run_serving(
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
-    Ok(run_handing(cli, None, stop, ready).await?)
+    run_handing(cli, None, stop, ready)
+        .await
+        .map_err(HandingError::into_boxed)
 }
 
 /// [`run_serving`] as an instance of a live update: with a [`Handoff`], it first asks the
@@ -212,6 +214,17 @@ pub enum HandingError {
     /// control socket.
     #[error("listening sockets: {0}")]
     Sockets(#[from] std::io::Error),
+}
+
+impl HandingError {
+    /// The boxed start-up error of [`run`]: a [`Start`](Self::Start) gives back the error it holds,
+    /// so that the caller still finds its type (the exit code of the binary follows it).
+    pub(super) fn into_boxed(self) -> Error {
+        match self {
+            Self::Start(error) => error,
+            other => Box::new(other),
+        }
+    }
 }
 
 impl From<Error> for HandingError {
