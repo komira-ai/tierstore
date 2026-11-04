@@ -145,7 +145,7 @@ fn valid_prefix(prefix: &str) -> Result<(), PresignError> {
     let reserved = RESERVED_PREFIXES.map(|name| name.trim_end_matches('/'));
     if prefix.split('/').any(|segment| reserved.contains(&segment)) {
         return Err(PresignError::Key(
-            "a prefix is, or contains, _journal/ or _tiering/",
+            "a prefix is, or contains, _journal/, _tiering/ or _entries/",
         ));
     }
     Ok(())
