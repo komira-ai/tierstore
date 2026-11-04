@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
+use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 
 use super::Drained;
 use super::build_info::{COMMIT, VERSION};
@@ -38,6 +38,7 @@ use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
 use super::listen::joined;
 use super::local_cache::{Disk, SystemDisk};
+use super::rounds::Rounds;
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
 /// then drains. `ready` is called with the addresses the fronts are bound to, before the first
@@ -56,6 +57,7 @@ pub(super) async fn serve_combined(
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
+    let departure = built.proxy.departure;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
@@ -67,7 +69,7 @@ pub(super) async fn serve_combined(
     built.server.cache_writes = true;
     // Both fronts read, and write, through the cache.
     let beside_halt = Arc::new(Notify::new());
-    let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
+    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
     let interval = cli.reconcile_interval;
     let halt = Arc::clone(&beside_halt);
     let reconciling = async move {

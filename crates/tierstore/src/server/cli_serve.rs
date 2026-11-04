@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-use crate::{Backend, Proxy, Reconciler, TokioSleeper};
+use crate::{Backend, Proxy, TokioSleeper};
 
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
@@ -18,6 +18,7 @@ use super::drain::late_of;
 use super::handoff::{Front, Handoff, HandoffError, Inherited, Offer, Socket, Want, take};
 use super::listen::{bind_all, duplicates, local_addrs};
 use super::oci::{OciError, OciFront, OciListener, OciMode};
+use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
@@ -126,6 +127,7 @@ pub async fn run_handing(
     let mut built = build(cli)?;
     let gate = open_gate(cli).map_err(Error::from)?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
+    let departure = built.proxy.departure;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
@@ -179,7 +181,7 @@ pub async fn run_handing(
         halting.notify_one();
         ended
     };
-    let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
+    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
     let interval = cli.reconcile_interval;
     let reconciling = async move {
         match gate {

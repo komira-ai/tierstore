@@ -14,7 +14,7 @@ fn registration(hb: u64) -> Registration {
 #[test]
 fn the_body_is_the_json_of_proto_boot_and_hb() {
     let body = registration(2).encode();
-    assert_eq!(&body[..], br#"{"proto":1,"boot":"b","hb":2}"#);
+    assert_eq!(&body[..], br#"{"proto":2,"boot":"b","hb":2}"#);
 }
 
 /// Asserts that a body reads back as the registration that was encoded.

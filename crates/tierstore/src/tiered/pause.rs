@@ -4,11 +4,15 @@
 //! The same read says which way a write is made: through the journal, or, once the format says
 //! `{"epoch": 2, "phase": "active"}`, on the entry of its key.
 
+use std::sync::Mutex;
+use std::time::Duration;
+
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
-use super::{Inner, refuse_reserved};
-use crate::Error;
+use super::{Inner, locked, refuse_reserved};
 use crate::format::{Format, read_format};
+use crate::{Backend, Error};
 
 /// What the proxy last read of the format object.
 #[derive(Default)]
@@ -19,6 +23,41 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
+}
+
+impl Pause {
+    /// Keeps what `format` (none if there is no object) says.
+    fn keep(&mut self, format: Option<&Format>) {
+        self.paused = format.is_some_and(Format::pauses_writes);
+        self.entries = format.is_some_and(Format::runs_entries);
+    }
+}
+
+/// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write
+/// does, so that the proxy sees a change of the format at its next heartbeat even if no write or
+/// read comes. The read goes through `gate`, the one that the reads of the writes go through, so
+/// that reads are made one at a time and an older read never replaces a newer one. A read that
+/// fails or runs out of time (the wait for the gate counts) changes nothing: what was kept stays,
+/// and the next write reads the object itself.
+pub(super) async fn refresh(
+    pause: &Mutex<Pause>,
+    gate: &AsyncMutex<()>,
+    hot: &dyn Backend,
+    limit: Duration,
+) {
+    // The gate is held until the answer is kept, so no other read can be kept between this read
+    // and its publication, and an older read never replaces a newer one.
+    let read = async {
+        let _gate = gate.lock().await;
+        let at = Instant::now();
+        let format = read_format(hot).await?;
+        let mut seen = locked(pause);
+        seen.read = Some(at);
+        seen.keep(format.as_ref());
+        Ok::<(), Error>(())
+    };
+    // A read that fails or runs out of time changes nothing.
+    let _ = tokio::time::timeout(limit, read).await;
 }
 
 /// The way a write is made.
@@ -60,23 +99,30 @@ impl Inner {
     /// Whether writes are paused and whether they are made on entries, as of a read of the format
     /// object that is at most `format_refresh` old.
     async fn format_state(&self) -> (bool, bool) {
-        // One caller reads at a time, and the freshness is checked again once the lock is held, so
-        // a caller that waited uses the read of the caller before it, and an older read never
-        // replaces a newer one.
-        let mut seen = self.pause.lock().await;
-        let now = Instant::now();
-        if seen
-            .read
-            .is_some_and(|at| now.duration_since(at) < self.config.format_refresh)
-        {
-            return (seen.paused, seen.entries);
+        if let Some(state) = self.fresh_format_state() {
+            return state;
         }
+        // One caller reads at a time, and the freshness is checked again once the gate is held, so
+        // a caller that waited uses the read of the caller before it.
+        let _gate = self.format_gate.lock().await;
+        if let Some(state) = self.fresh_format_state() {
+            return state;
+        }
+        let now = Instant::now();
         let found = read_format(self.hot.as_ref()).await;
+        let mut seen = locked(&self.pause);
         seen.read = Some(now);
         if let Ok(format) = found {
-            seen.paused = format.as_ref().is_some_and(Format::pauses_writes);
-            seen.entries = format.as_ref().is_some_and(Format::runs_entries);
+            seen.keep(format.as_ref());
         }
         (seen.paused, seen.entries)
+    }
+
+    /// What the last read of the format object says, if it is at most `format_refresh` old.
+    fn fresh_format_state(&self) -> Option<(bool, bool)> {
+        let seen = locked(&self.pause);
+        seen.read
+            .is_some_and(|at| Instant::now().duration_since(at) < self.config.format_refresh)
+            .then_some((seen.paused, seen.entries))
     }
 }

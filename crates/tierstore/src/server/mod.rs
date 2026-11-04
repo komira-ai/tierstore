@@ -233,6 +233,7 @@ mod ops;
 pub mod presign;
 mod reply;
 mod request;
+mod rounds;
 mod s3_tls;
 pub mod scoped;
 mod stop_watcher;
