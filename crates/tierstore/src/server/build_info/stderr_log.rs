@@ -25,7 +25,7 @@
 //!   may say more at `debug` without the operator seeing it.
 //!
 //! The output of a command that answers the operator who ran it (`--version`,
-//! `--capabilities`, `--print-config`) is not logging and stays on stdout.
+//! `--capabilities`) is not logging and stays on stdout.
 
 use std::fmt::{Debug, Write as _};
 use std::io::{self, Write};

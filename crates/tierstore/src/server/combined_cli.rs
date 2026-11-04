@@ -3,12 +3,12 @@
 //! cache, and the reconciler beside them.
 //!
 //! The settings come from a file with `[hot_store]`, `[cold_store]` and `[local_cache]` (see
-//! [`config_combined`](super::config_combined)). The start runs, in this order: the flags'
-//! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the proxy (which writes
+//! [`config_combined`](super::config_combined)). The start runs, in this order: the
+//! checks of the settings, the lock file of the hot tier (the reconciler's [`Gate`]), the proxy (which writes
 //! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
-//! last the addresses. The tiers are not tested. Only the flags' checks and the lock file come
-//! before a write. A refusal of the cache directory, its file system, its budget or an address
+//! last the addresses. The tiers are not tested. Only the checks of the settings and the lock file
+//! come before a write. A refusal of the cache directory, its file system, its budget or an address
 //! comes after the proxy's registration, so it leaves the registration (a JSON object, see
 //! `Registration`) in the hot tier, and the heartbeat, which starts with the proxy, may already
 //! have rewritten it with a positive count; the exit status is the one the same refusal has in

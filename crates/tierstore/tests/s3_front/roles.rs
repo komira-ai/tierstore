@@ -16,10 +16,10 @@ use crate::raw::{call, send, upload_id};
 use crate::support::{BUCKET, Harness, KEY_ID, SECRET};
 
 /// The id and the secret of the first read-only key.
-const READER: (&str, &str) = ("AKIDREADER", "reader-secret");
+const READER: (&str, &str) = ("AKIDREADER", "reader-secret-0123456789");
 
 /// The id and the secret of the second read-only key.
-const OTHER_READER: (&str, &str) = ("AKIDREADER2", "reader-secret-2");
+const OTHER_READER: (&str, &str) = ("AKIDREADER2", "reader-secret-2-0123456789");
 
 /// The two read-only keys of the servers of these tests.
 fn readers() -> Vec<AccessKey> {

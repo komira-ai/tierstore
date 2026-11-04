@@ -1,0 +1,33 @@
+# /etc/tierstore/tierstore.toml: the configuration of tierstore.service, root:tierstore, mode 0640.
+# crates/tierstore/docs/configuration.md says what every key does.
+#
+# Edit before use: the address of the s3 interface (192.0.2.10 is a documentation address), the
+# proxy id (keep it across restarts, and give each process over the same tiers one of its own), the
+# buckets, the endpoints (http://host[:port], no path) and the hot tier's budget (the bytes it is
+# meant to hold).
+#
+# The key files are owned by the account of the unit (User=), mode 0600; the process refuses one
+# that its group or others can read. The file holds no secret, only their paths.
+
+[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9000"] }
+
+[server]
+proxy_id            = "tierstore-1"
+bucket              = "tierstore"
+access_key_file     = "/etc/tierstore/access.key"
+read_only_key_files = ["/etc/tierstore/daemons.key"]
+
+[hot_store]
+kind             = "s3"
+bucket           = "tierstore-hot"
+endpoint         = "http://s3-hot.example:9000"
+credentials_file = "/etc/tierstore/hot.credentials"
+budget           = "1TiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-cold"
+endpoint         = "http://s3-cold.example:9000"
+credentials_file = "/etc/tierstore/cold.credentials"

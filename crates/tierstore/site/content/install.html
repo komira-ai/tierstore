@@ -62,19 +62,21 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
   <li>
     <h3>Place the unit <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
-    <p>The repository has an example systemd unit, <code>tierstore.service</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging</code>. The values in the unit are examples: edit the listen address, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
+    <p>The repository has an example systemd unit, <code>tierstore.service</code>, a configuration file, <code>tierstore.toml</code>, and a sysusers entry, <code>tierstore.conf</code>, in <code>packaging</code>. The values in the file are examples: edit the address of the <code>s3</code> interface, the proxy id, the buckets, the endpoints and the hot-tier size to your setup.</p>
     <div class="code"><pre><span class="p">$</span> install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> systemd-sysusers /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> install -d -m 0750 -o root -g tierstore /etc/tierstore
+<span class="p">$</span> install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
 <span class="p">$</span> install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 <span class="p">$</span> systemctl daemon-reload</pre></div>
+    <p>Edit the installed <code>/etc/tierstore/tierstore.toml</code> before you start the unit: the unit reads that file and no other.</p>
   </li>
   <li>
     <h3>Write the key files <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>
     <p>Four files, each owned by <code>tierstore</code> with mode 0600 or 0400 (the process refuses a key file that its group or others can read). A secret is never on the command line and the process reads no environment variable.</p>
     <ul>
-      <li><code>/etc/tierstore/access.key</code>: the full key, the one clients that write sign with (<code>--access-key-file</code>);</li>
-      <li><code>/etc/tierstore/daemons.key</code>: a read-only key (<code>--read-only-key-file</code>), which may get, head and list and nothing else;</li>
+      <li><code>/etc/tierstore/access.key</code>: the full key, the one clients that write sign with (<code>server.access_key_file</code>);</li>
+      <li><code>/etc/tierstore/daemons.key</code>: a read-only key (<code>server.read_only_key_files</code>), which may get, head and list and nothing else;</li>
       <li><code>/etc/tierstore/hot.credentials</code> and <code>/etc/tierstore/cold.credentials</code>: the keys tierstore signs its requests to the two stores with.</li>
     </ul>
     <p>A file holds its key as JSON or as two lines, the access key id and then the secret access key. The <a href="/docs/keys/">configuration page</a> has both forms.</p>
@@ -92,10 +94,10 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
 <div class="table-wrap"><table>
 <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
 <tbody>
-<tr><td>endpoint</td><td><code>http://&lt;host&gt;:&lt;port&gt;</code> of <code>--listen</code></td><td>the front has no TLS; an <code>https://</code> endpoint fails</td></tr>
+<tr><td>endpoint</td><td><code>http://&lt;host&gt;:&lt;port&gt;</code> of the <code>s3</code> interface</td><td>the front has no TLS; an <code>https://</code> endpoint fails</td></tr>
 <tr><td>addressing</td><td>path-style</td><td>the bucket is in the path; virtual-host addressing is not served</td></tr>
-<tr><td>bucket</td><td>the <code>--bucket</code> name</td><td>there is one</td></tr>
-<tr><td>region</td><td>tierstore's own <code>--region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature</td></tr>
+<tr><td>bucket</td><td>the <code>server.bucket</code> name</td><td>there is one</td></tr>
+<tr><td>region</td><td>tierstore's own <code>server.region</code>, <code>us-east-1</code> by default</td><td>the region is in the credential scope of the signature</td></tr>
 <tr><td>request and response checksums</td><td><code>when_required</code></td><td>the SDK default sends a checksum trailer in an <code>aws-chunked</code> body, which the front refuses with 501</td></tr>
 </tbody></table></div>
 <div class="code"><pre>use aws_sdk_s3::config::{Credentials, Region, RequestChecksumCalculation, ResponseChecksumValidation};

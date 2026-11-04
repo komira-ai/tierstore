@@ -10,28 +10,28 @@ other crate of this workspace unless the `s3` feature is on.
 - Feature `s3`: `S3Backend`, a bucket of an S3-compatible store as a `Backend`.
 - Feature `server` (turns `s3` on): `server`, the S3 API front of a proxy, and the `tierstore`
   binary that runs a proxy, that front and a reconciler in one process.
-  `packaging/README.md` has the flags, the keys and the unit.
+  `packaging/README.md` has the keys and the unit.
 
 An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
-`Authorization` header (and presigned GET and PUT URLs). The packaging notes, the flags and the key files
+`Authorization` header (and presigned GET and PUT URLs). The packaging notes and the key files
 are in `packaging/README.md`; the roles of a key are in `src/server/keys.rs`.
 
 The operator guide (install, keys and roles, configuration, operations, troubleshooting, limits) is in `docs/`; a test of the crate (`src/server/docs_tests.rs`) holds every page of it to the code, and the site's docs pages are made from it.
 
-## Flags or a file
+## The configuration file
 
-The settings that describe the data path are flags, or one TOML file given with `--config <path>`
-(`[server]`, `[hot_store]`, `[cold_store]`, `[oci]` and `[[policy]]`; `src/server/config.rs`). The two make
-the same settings and run the same code. `--print-config`, given the flags of a start, prints the
-file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
-a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
-file.
+The settings that describe the data path are in one TOML file given with `--config <path>`:
+`[[interface]]` (the fronts: `type = "s3"` or `"oci"`, with `params`), `[server]`, `[hot_store]`,
+`[cold_store]`, `[local_cache]` and `[[policy]]` (`src/server/config.rs`). The binary takes no flag
+for any of it; the flags of a run are `--config`, `--check-config`, `--capabilities` and the two
+of the drain, and a flag that used to hold a setting is refused with the key that replaces it. A
+file holds no secret, only the paths of key files, and refuses a key or a table it does not know.
+The format and the rules are in `docs/configuration.md`.
 
 ## When the puts are at their limit
 
-At most `--max-concurrent-puts` put bodies and upload parts are taken at once. A request that
-arrives when all are taken waits up to `--put-permit-wait` (`server.put_permit_wait`, 15s by
+At most `server.max_concurrent_puts` put bodies and upload parts are taken at once. A request that
+arrives when all are taken waits up to `server.put_permit_wait` (15s by
 default) for one to end, without reading its body, and is taken if one ends in that time. If none
 does, it is answered 503 `SlowDown` with `Retry-After: 1` and its body is never read. With a tier
 that is slow to take a body, clients queue here for up to that long instead of retrying at once.
@@ -43,7 +43,7 @@ What waiting costs, as the code does it:
   been authenticated (a valid signature) before it waits. The number of waiters is bounded only by
   the number of connections the server accepts.
 - A waiter counts as a request in flight. During a drain the server waits for it, so a drain can
-  take up to `--put-permit-wait` longer than without waiting, and never longer than
+  take up to `server.put_permit_wait` longer than without waiting, and never longer than
   `--drain-deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
@@ -169,17 +169,17 @@ counterpart here.
 
 ## Roles of a key
 
-| role | flag | may do |
+| role | key of the file | may do |
 |---|---|---|
-| full | `--access-key-file` | everything the front serves |
-| read-only | `--read-only-key-file` | get, head, list |
-| presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
-| GC | `--gc-key-file` | a scoped key with list, delete and abort on one prefix: list, head, delete and abort uploads there |
-| scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
+| full | `server.access_key_file` | everything the front serves |
+| read-only | `server.read_only_key_files` | get, head, list |
+| presigning | `server.presign_key_files` | sign presigned PUT URLs for one object each under a prefix |
+| GC | `server.gc_key_files` | list, head, delete and abort uploads under one prefix |
+| scoped | `server.scoped_key_files` | read, create and delete under the prefixes of three lists |
 
 The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
 that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
-key that signed it, until it expires (at most `--presign-max-expires`, 15 minutes by default). A URL
+key that signed it, until it expires (at most `server.presign_max_expires`, 15 minutes by default). A URL
 is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
 `packaging/README.md`.
 
@@ -213,47 +213,46 @@ See "Scoped keys" in `packaging/README.md` for the table of calls.
 
 ## HTTPS on the S3 front
 
-On main (not in v0.0.41) `--tls-cert PATH --tls-key PATH` (the keys `server.tls_cert_file` and
-`server.tls_key_file`) make every socket of the S3 front serve HTTPS. Without them it serves plain
+The keys `server.tls_cert_file` and `server.tls_key_file` of the
+configuration file make every socket of the S3 front serve HTTPS. Without them it serves plain
 HTTP, the default; off loopback the start then prints one warning line on stderr, naming the
 non-loopback addresses. The certificate may name the front by a DNS name, by an IP address, or both
 (a DNS name is enough whatever the listen address; with none, each listen address needs an IP name).
 A key file that any user can read, a key that is not the certificate's, an expired certificate, one
-of the two flags without the other (exit 2) and a file that cannot be read (exit 1) stop the start.
+of the two keys without the other (exit 2) and a file that cannot be read (exit 1) stop the start.
 The files are read once; a new certificate takes a restart. A tier's `endpoint` is still `http://`.
 
 ## The OCI read front
 
-With `--oci-listen ADDR` the binary also serves the objects of the store as a read-only container
-registry (`server::oci`), so that podman and other registry clients pull an image by digest from the
-same tiers. It runs in one of two modes:
+With an `oci` interface in the file (`type = "oci"`) the binary also serves the objects of the store
+as a read-only container registry (`server::oci`), so that podman and other registry clients pull an
+image by digest from the same tiers. It runs in one of two modes:
 
-- **HTTPS**, with `--oci-tls-cert PATH --oci-tls-key PATH`, at any address.
-- **Plain HTTP**, with neither flag, at any address. A node's own container engine pulls from the
+- **HTTPS**, with the `tls_cert_file` and `tls_key_file` params, at any address.
+- **Plain HTTP**, with neither, at any address. A node's own container engine pulls from the
   front of its own store over loopback (127/8 or `::1`), so the traffic never leaves the host.
   Off loopback (`0.0.0.0` and `::` included) the front still starts, and prints one warning line
   on stderr saying it serves plain HTTP on a non-loopback address, since a plain connection can be
-  read and changed on its path: give the certificate and key there. One of the two flags without
+  read and changed on its path: give the certificate and key there. One of the two params without
   the other is refused (exit 2).
 
 The start line and `/metricz` say which mode runs.
 
-In a file given with `--config`, the front is the optional `[oci]` table (`listen`, `tls_cert_file`,
-`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`), with the rules of the flags
-(`listen` is needed in it, the certificate and the key go together, `max_connections` is at least
-1); the `--oci-*` flags are refused with the file, and `--print-config` writes them as the table.
+The params of an `oci` interface are `port` or `addresses` (where it listens), `tls_cert_file`,
+`tls_key_file`, `prefix`, `max_connections` and `connection_lifetime`: the certificate and the key
+go together and `max_connections` is at least 1. Several `oci` interfaces make one front on every
+address of theirs and must agree on the last five.
 
 The front runs on both shapes of the file. On a storage node it reads through the proxy. On a
-build node (`[local_cache]` and `[cold_store]`, see above) the same `[oci]` table, with the same
-keys and rules, starts the front beside the S3 listener over the node's local cache: a blob or a
+build node (`[local_cache]` and `[cold_store]`, see above) the same interfaces, with the same
+params and rules, start the front beside the S3 listener over the node's local cache: a blob or a
 manifest is a hit on the disk when the cache holds it, and a miss under a `[[policy]]` prefix with
-`cache = true` is filled from the upstream, as an S3 GET is. A build node has no flag form, so its
-front is set only in the file; the start line ends with ` oci-listen=<address> (http|https)`, and
-`/metricz` shows the OCI block and the cache block.
+`cache = true` is filled from the upstream, as an S3 GET is. The start line ends with
+` oci-listen=<address> (http|https)`, and `/metricz` shows the OCI block and the cache block.
 
 - `GET` and `HEAD` of `/v2/`, `/v2/<name>/manifests/sha256:<hex>` and
   `/v2/<name>/blobs/sha256:<hex>`; anything else is 404, and any other method 405.
-- An object is at `<--oci-prefix>blobs/sha256/<hex>` (`oci/` by default), manifests included. The
+- An object is at `<prefix>blobs/sha256/<hex>` (`oci/` by default), manifests included. The
   repository name in a URL is checked against the distribution grammar and then ignored: one
   content-addressed namespace.
 - Anonymous: no token is asked for and `Authorization` is ignored. Only digest-named objects under
@@ -262,9 +261,9 @@ front is set only in the file; the start line ends with ` oci-listen=<address> (
   short, not delivered whole, if it is not its digest. Tags are not served. A manifest is measured
   and then read in two store calls, so one replaced between them can be answered 500
   `DIGEST_INVALID` once; a retry succeeds.
-- Memory is bounded by `--oci-max-connections` (64 by default) times the buffer a connection holds,
+- Memory is bounded by `max_connections` (64 by default) times the buffer a connection holds,
   up to 4 MiB (a blob chunk or a manifest).
-- In HTTPS mode the certificate must carry an IP subjectAltName for the listen address (clients dial
+- In HTTPS mode the certificate must carry an IP subjectAltName for each address of the interface (clients dial
   an IP), checked at start. The files are read once: a new certificate takes a restart. The
   connection limits, timeouts and drain are the same in both modes (a plain connection has no
   handshake to time).

@@ -18,7 +18,7 @@ use crate::{Backend, Error, Op};
 
 const GC: (&str, &str) = ("pack-gc", "gc-secret-0123456789");
 const SCOPED: (&str, &str) = ("scoped-a", "scoped-secret-0123456789");
-const READER: (&str, &str) = ("AKIDREADER", "reader-secret");
+const READER: (&str, &str) = ("AKIDREADER", "reader-secret-0123456789");
 const PRESIGN: (&str, &str) = ("pack-presign", PRESIGN_SECRET);
 
 /// A server in front of a cache, with one key of each kind: the full key, a read-only key, a GC

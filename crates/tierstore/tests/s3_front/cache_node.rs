@@ -16,15 +16,18 @@ use rustix::process::{Pid, Signal, kill_process};
 use tierstore_testkit::reaped::{Reaped, spawn};
 
 use crate::binary::{run, start};
-use crate::files::{BIN_KEY_ID, BIN_SECRET, Files};
+use crate::files::{BIN_KEY_ID, BIN_SECRET, Files, oci_interface};
 
 /// The file of a build node whose upstream is `endpoint`, read with the key file `upstream_key`,
 /// with its cache in `cache_dir`.
 fn node_file(files: &Files, endpoint: &str, upstream_key: &Path, cache_dir: &Path) -> String {
     let text = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "bin-cache"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -169,8 +172,11 @@ fn check_file(files: &Files, extra: &str, endpoint: &str, cache_dir: &Path) -> S
     let upstream_key = files.secret("upstream.key", "UPKEY\nup-secret\n");
     let text = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "bin-cache"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -259,27 +265,28 @@ fn check_config_refuses_what_a_start_refuses_with_the_same_message() {
     assert!(said.contains("/no/such/access.key"), "{said}");
 }
 
-/// Asserts that `--check-config` without `--config` is a usage error: status 2, and a message
-/// that names the flag it needs when every other flag is given.
+/// Asserts that `--check-config` without `--config` is refused with status 2 and a message that
+/// names the flag it needs, whatever other flags of the run are given.
 #[test]
-fn check_config_without_a_file_is_a_usage_error() {
-    let (code, _, said) = run(&["--check-config".to_owned()]);
-    assert_eq!(code, 2);
-    assert!(!said.is_empty());
-    let files = Files::new("bin-check-usage");
-    let mut flags = files.flags(&[]);
-    flags.push("--check-config".to_owned());
-    let (code, _, said) = run(&flags);
-    assert_eq!(code, 2);
-    assert!(said.contains("--config"), "{said}");
+fn check_config_without_a_file_is_refused_naming_the_flag_it_needs() {
+    let want = "tierstore: --check-config checks the file that --config names; give --config\n";
+    let (code, out, said) = run(&["--check-config".to_owned()]);
+    assert_eq!((code, out.as_str(), said.as_str()), (2, "", want));
+    let flags = ["--check-config", "--drain-lb-wait", "1s"].map(str::to_owned);
+    let (code, out, said) = run(&flags);
+    assert_eq!((code, out.as_str(), said.as_str()), (2, "", want));
 }
 
-/// The file of a storage node with an `[oci]` table holding `oci`.
-fn oci_file(files: &Files, oci: &str) -> String {
+/// The file of a storage node with an `oci` interface at `listen`, with `params` after the address.
+fn oci_file(files: &Files, listen: &str, params: &str) -> String {
+    let oci = oci_interface(&[listen], params);
     let text = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+{oci}
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "bin-oci"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -290,16 +297,13 @@ budget = 1048576
 
 [cold_store]
 kind = "memory"
-
-[oci]
-{oci}
 "#,
         key = files.key.display(),
     );
     files.secret("oci.toml", &text).display().to_string()
 }
 
-/// Asserts that `--check-config` of a storage-node file with a valid `[oci]` table passes with
+/// Asserts that `--check-config` of a storage-node file with a valid `oci` interface passes with
 /// no output and status 0, on a loopback address and on an address that is not loopback (where a
 /// start warns that it serves plain HTTP, and the check does not), and that it binds nothing: the
 /// OCI address is held by a listener of the test, which a check that bound it would have found in
@@ -310,7 +314,7 @@ fn check_config_accepts_a_storage_node_with_oci_without_a_warning_or_a_bind() {
     let held = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
     let port = held.local_addr().unwrap().port();
     for listen in [format!("127.0.0.1:{port}"), format!("0.0.0.0:{port}")] {
-        let config = oci_file(&files, &format!("listen = \"{listen}\""));
+        let config = oci_file(&files, &listen, "");
         assert_eq!(
             run(&checking(&config)),
             (0, String::new(), String::new()),
@@ -320,83 +324,72 @@ fn check_config_accepts_a_storage_node_with_oci_without_a_warning_or_a_bind() {
     drop(held);
 }
 
-/// Asserts that `--check-config` refuses an `[oci]` table a start refuses, with the start's
+/// Asserts that `--check-config` refuses an `oci` interface a start refuses, with the start's
 /// message and status 2: a certificate file that is not there, and a prefix that overlaps
 /// `_journal/`; and a certificate without its key.
 #[test]
-fn check_config_refuses_a_bad_oci_table_with_the_message_of_a_start() {
+fn check_config_refuses_a_bad_oci_interface_with_the_message_of_a_start() {
     let files = Files::new("bin-check-oci-bad");
     let key = files.secret("oci.key", "not a key\n").display().to_string();
     let cases = [
         (
-            format!(
-                "listen = \"127.0.0.1:0\"\ntls_cert_file = \"/no/such/cert.pem\"\ntls_key_file = \"{key}\""
-            ),
+            format!(", tls_cert_file = \"/no/such/cert.pem\", tls_key_file = \"{key}\""),
             "/no/such/cert.pem",
         ),
-        (
-            "listen = \"127.0.0.1:0\"\nprefix = \"_journal/x/\"".to_owned(),
-            "overlaps",
-        ),
-        (
-            format!("listen = \"127.0.0.1:0\"\ntls_cert_file = \"{key}\""),
-            "tls_key_file",
-        ),
+        (", prefix = \"_journal/x/\"".to_owned(), "overlaps"),
+        (format!(", tls_cert_file = \"{key}\""), "tls_key_file"),
     ];
-    for (oci, want) in cases {
-        let config = oci_file(&files, &oci);
+    for (params, want) in cases {
+        let config = oci_file(&files, "127.0.0.1:0", &params);
         let (code, out, said) = run(&checking(&config));
-        assert_eq!((code, out.as_str()), (2, ""), "{oci}");
+        assert_eq!((code, out.as_str()), (2, ""), "{params}");
         assert!(said.contains(want), "{want}: {said}");
         let (_, _, started) = run(&["--config".to_owned(), config]);
-        assert_eq!(said, started, "{oci}");
+        assert_eq!(said, started, "{params}");
     }
 }
 
-/// Asserts that `--check-config` of a build-node file with an `[oci]` table passes with no output
-/// and status 0 on an address that is not loopback (no warning, no bind), and refuses a bad
+/// Asserts that `--check-config` of a build-node file with an `oci` interface passes with no
+/// output and status 0 on an address that is not loopback (no warning, no bind), and refuses a bad
 /// certificate and a certificate without its key with the start's message and status 2.
 #[test]
-fn check_config_checks_the_oci_table_of_a_build_node() {
+fn check_config_checks_the_oci_interface_of_a_build_node() {
     let files = Files::new("bin-check-oci-cache");
     let cache_dir = files.key.with_file_name("cache");
     let base = check_file(&files, "", "http://192.0.2.1:9300", &cache_dir);
     let base = std::fs::read_to_string(&base).unwrap();
-    let with = |name: &str, oci: &str| {
-        let text = format!("{base}\n[oci]\nprefix = \"cas/\"\n{oci}\n");
+    let with = |name: &str, listen: &str, params: &str| {
+        let text = format!(
+            "{base}{}",
+            oci_interface(&[listen], &format!(", prefix = \"cas/\"{params}"))
+        );
         files.secret(name, &text).display().to_string()
     };
     let held = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
     let port = held.local_addr().unwrap().port();
-    let good = with("oci-good.toml", &format!("listen = \"0.0.0.0:{port}\""));
+    let good = with("oci-good.toml", &format!("0.0.0.0:{port}"), "");
     assert_eq!(run(&checking(&good)), (0, String::new(), String::new()));
     drop(held);
 
     let key = files.secret("oci.key", "not a key\n").display().to_string();
     let cases = [
         (
-            format!(
-                "listen = \"127.0.0.1:0\"\ntls_cert_file = \"/no/such/cert.pem\"\ntls_key_file = \"{key}\""
-            ),
+            format!(", tls_cert_file = \"/no/such/cert.pem\", tls_key_file = \"{key}\""),
             "/no/such/cert.pem",
             1,
         ),
-        (
-            format!("listen = \"127.0.0.1:0\"\ntls_cert_file = \"{key}\""),
-            "tls_key_file",
-            2,
-        ),
+        (format!(", tls_cert_file = \"{key}\""), "tls_key_file", 2),
     ];
     // The check exits 2 for every refusal; a start exits 1 for a file it cannot read, as the
     // storage node's does, and 2 for a file that does not load.
-    for (n, (oci, want, started_status)) in cases.into_iter().enumerate() {
-        let config = with(&format!("oci-bad-{n}.toml"), &oci);
+    for (n, (params, want, started_status)) in cases.into_iter().enumerate() {
+        let config = with(&format!("oci-bad-{n}.toml"), "127.0.0.1:0", &params);
         let (code, out, said) = run(&checking(&config));
-        assert_eq!((code, out.as_str()), (2, ""), "{oci}");
+        assert_eq!((code, out.as_str()), (2, ""), "{params}");
         assert!(said.contains(want), "{want}: {said}");
         let (code, _, started) = run(&["--config".to_owned(), config]);
-        assert_eq!(code, started_status, "{oci}");
-        assert_eq!(said, started, "{oci}");
+        assert_eq!(code, started_status, "{params}");
+        assert_eq!(said, started, "{params}");
     }
 }
 

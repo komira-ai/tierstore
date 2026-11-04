@@ -23,19 +23,24 @@ fn the_settings_are_made_from_the_flags() {
     cli.drain_lb_wait = Duration::from_secs(7);
     cli.drain_deadline = Duration::from_secs(11);
     cli.put_permit_wait = Duration::from_secs(4);
-    let lines = key_file(&dir, "reader-lines", "READ1\nread-secret-1\n", 0o600);
+    let lines = key_file(
+        &dir,
+        "reader-lines",
+        "READ1\nread-secret-0123456789\n",
+        0o600,
+    );
     let json = key_file(&dir, "reader-json", JSON_KEY, 0o400);
     cli.read_only_key_file = vec![lines, json];
     let built = build(&cli).expect("built");
     let readers = [
-        AccessKey::new("READ1", "read-secret-1"),
-        AccessKey::new("JSONID", "json-secret"),
+        AccessKey::new("READ1", "read-secret-0123456789"),
+        AccessKey::new("JSONID", "json-secret-0123456789"),
     ];
     assert_eq!(built.server.read_only_keys, readers);
     assert_eq!(built.server.bucket, "tier-bucket");
     assert_eq!(built.server.region, "eu-west-1");
     assert_eq!(built.server.access_key_id, "AKID");
-    assert_eq!(built.server.secret_access_key, "secret");
+    assert_eq!(built.server.secret_access_key, "secret-0123456789");
     assert_eq!(built.server.max_request_bytes, 256 << 20);
     assert_eq!(built.server.max_concurrent_puts, 32);
     assert_eq!(built.server.put_permit_wait, Duration::from_secs(4));
@@ -129,7 +134,7 @@ fn flags_that_do_not_fit_together_are_refused() {
 fn two_keys_with_one_id_are_invalid_flags_refused_before_a_tier_is_opened() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-twice");
     let same = key_file(&dir, "same", "AKID\nanother-secret\n", 0o600);
-    let reader = key_file(&dir, "reader", "READ1\nread-secret-1\n", 0o600);
+    let reader = key_file(&dir, "reader", "READ1\nread-secret-0123456789\n", 0o600);
     let again = key_file(&dir, "again", JSON_KEY, 0o600);
     let json_twice = key_file(&dir, "twice", JSON_KEY, 0o600);
     let made = dir.path().join("made");
@@ -162,7 +167,7 @@ fn scoped_key_files_are_built_into_the_server_and_their_ids_must_differ() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-scoped-flag");
     let text = |id: &str| {
         format!(
-            "{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"s3cret\", \
+            "{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"s3cret-0123456789\", \
              \"read_prefixes\": [\"cas/\"], \"write_prefixes\": [\"cas/f/a/\"], \
              \"delete_prefixes\": []}}"
         )
@@ -379,4 +384,64 @@ fn the_key_file_is_an_id_and_a_secret_that_only_its_owner_reads() {
     std::fs::set_permissions(&folder, Permissions::from_mode(0o700)).unwrap();
     let unreadable = read_key(&folder).unwrap_err();
     assert!(unreadable.contains("--access-key-file"), "{unreadable}");
+}
+
+/// Asserts that a key file whose secret is one byte under the minimum refuses the start, for
+/// each kind of key (full, read-only, presigning, GC, scoped), as invalid flags with exactly the
+/// message of the flag, the id, the length and the minimum and no secret; that a secret of the
+/// minimum starts; and that `--min-secret-bytes` moves the minimum either way.
+#[test]
+fn a_secret_under_the_minimum_refuses_the_start_for_every_kind_of_key() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-min-secret");
+    let short = "0123456789abcde";
+    let json = |id: &str, secret: &str, more: &str| {
+        format!("{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"{secret}\"{more}}}")
+    };
+    let presign = ", \"ceiling\": {\"prefix\": \"cas/b/\", \"max_expires_secs\": 600, \"max_object_bytes\": 1048576}";
+    let gc = ", \"prefix\": \"cas/b/\"";
+    let scoped = ", \"read_prefixes\": [\"cas/\"], \"write_prefixes\": [], \"delete_prefixes\": []";
+    let refusal = |flag: &str, id: &str, len: usize, min: u32| {
+        format!(
+            "{flag}: the secret of the access key \"{id}\" has {len} bytes; at least {min} are \
+             required (--min-secret-bytes)"
+        )
+    };
+    let full = key_file(&dir, "full", &format!("AKID\n{short}\n"), 0o600);
+    let mut by_full = cli(&dir);
+    by_full.access_key_file = full;
+    let reader = key_file(&dir, "reader", &format!("READ1\n{short}\n"), 0o600);
+    let mut by_reader = cli(&dir);
+    by_reader.read_only_key_file = vec![reader];
+    let presign_file = key_file(&dir, "presign", &json("PRE1", short, presign), 0o600);
+    let mut by_presign = cli(&dir);
+    by_presign.presign_key_file = vec![presign_file];
+    let gc_file = key_file(&dir, "gc", &json("GC1", short, gc), 0o600);
+    let mut by_gc = cli(&dir);
+    by_gc.gc_key_file = vec![gc_file];
+    let scoped_file = key_file(&dir, "scoped", &json("SC1", short, scoped), 0o600);
+    let mut by_scoped = cli(&dir);
+    by_scoped.scoped_key_file = vec![scoped_file];
+    let cases = [
+        (by_full, "--access-key-file", "AKID"),
+        (by_reader, "--read-only-key-file", "READ1"),
+        (by_presign, "--presign-key-file", "PRE1"),
+        (by_gc, "--gc-key-file", "GC1"),
+        (by_scoped, "--scoped-key-file", "SC1"),
+    ];
+    for (cli, flag, id) in cases {
+        let why = build(&cli).err().expect("refused");
+        assert!(
+            why.downcast_ref::<InvalidFlags>().is_some(),
+            "{flag}: {why}"
+        );
+        assert_eq!(why.to_string(), refusal(flag, id, 15, 16), "{flag}");
+        let mut lowered = cli.clone();
+        lowered.min_secret_bytes = 15;
+        assert!(build(&lowered).is_ok(), "{flag}");
+    }
+
+    let at_minimum = key_file(&dir, "at-minimum", "AKID\n0123456789abcdef\n", 0o600);
+    let mut ok = cli(&dir);
+    ok.access_key_file = at_minimum;
+    assert!(build(&ok).is_ok());
 }

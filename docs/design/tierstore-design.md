@@ -52,13 +52,13 @@ Non-goals:
 - Scrubbing stored objects for bit rot.
 - Protection against clock skew between machines: no decision uses a clock of another machine, the store's included (sections 6.3 and 6.9); tierstore does not measure the store's clock.
 - Per-write ids in object metadata (section 12).
-- Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`--tls-cert`, `--tls-key`, as on the OCI front).
+- Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`server.tls_cert_file`, `server.tls_key_file`, as on the OCI front).
 
 ## 3. The design in one picture
 
 ![Components: clients, one tierstore process with two fronts, one proxy and a reconciler, and the hot and cold tiers](diagrams/components.svg)
 
-One `tierstore` process serves an S3 front (`--listen`) and, if asked, a read-only OCI front (`--oci-listen`, its own address). Both fronts call the same **proxy**, so an image pulled over OCI and an object read over S3 are answered from the same tiers by the same code ([server/cli.rs](../../crates/tierstore/src/server/cli.rs) module docs). The pieces:
+One `tierstore` process serves an S3 front (an `s3` interface) and, if asked, a read-only OCI front (an `oci` interface, its own address). Both fronts call the same **proxy**, so an image pulled over OCI and an object read over S3 are answered from the same tiers by the same code ([server/cli.rs](../../crates/tierstore/src/server/cli.rs) module docs). The pieces:
 
 - **Tiers.** A **hot tier** (small, fast: `dir:` on local disk or an S3-compatible bucket) and a **cold tier** (large, cheap: `dir:` or an S3-compatible bucket). Both are used through one trait, [`Backend`](../../crates/tierstore/src/backend.rs). `memory` is also accepted as a tier kind; it keeps nothing across a restart and stamps every object with time zero, so it is for tests.
 - **Proxy** ([tiered.rs](../../crates/tierstore/src/tiered.rs), `Proxy`). Answers every request against the two tiers. It keeps no durable state. In the decided design it also heartbeats (section 6.3) and holds a small cached reading of capacity.
@@ -80,8 +80,8 @@ The configuration file ([server/config.rs](../../crates/tierstore/src/server/con
 
 | | Tables | What the process runs | Status |
 |---|---|---|---|
-| A. Build node | `[local_cache]` + `[cold_store]` | Fronts over a `LocalCache` over one upstream. No entries, lease or reconciler. | supported |
-| B. Storage node | `[hot_store]` + `[cold_store]` (or the flags) | Fronts, proxy, per-node journals today (entries once built, section 14), reconciler, lease. | supported |
+| A. Build node | `[local_cache]` + `[cold_store]` | Fronts over a `LocalCache` over one upstream. No journal, lease or reconciler. | supported |
+| B. Storage node | `[hot_store]` + `[cold_store]` | Fronts, proxy, journal, reconciler, lease. | supported |
 | C. All three | `[local_cache]` + `[hot_store]` + `[cold_store]` | A and B in one process: fronts, then local cache, then proxy over hot and cold, with the reconciler. | planned (the loader refuses it) |
 
 **A: build node.** `cold_store` is the upstream: usually the S3 endpoint of a storage node's tierstore, or any S3-compatible store. A hit is answered from local disk with no call upstream. A miss on a whole get fills the object; a miss on a ranged get fills the whole object if it is at most 64 MiB and otherwise passes the range through and keeps nothing; the misses of one key fill it once. By default the front refuses every write, so the cache has nothing to recover but files it can delete. With `write_through = true` the cache accepts writes and sends every one to the upstream before acknowledging it; a create-only put under a `cache = true` policy is also kept on the node, best effort, and never fails the put. OCI reads are served from the cache too ([server/local_cache/mod.rs](../../crates/tierstore/src/server/local_cache/mod.rs) module docs). The cache's keep check compares sizes, not content: a key deleted and re-put with a same-size body can be served from an old copy on a build node. That is a separate, documented limit (section 11, R8); no write id is added to fix it (section 12).
@@ -640,7 +640,7 @@ The bridge release of step 11 must ship and be rolled to every node before any s
 
 Why: the earlier gaps, a lost object, a resurrected delete, a double acknowledgement, all came from steps that were not serialised on the key, and from two stores that cannot decide a key together. The entry serialises them; the model and the tests of section 8 show the smaller machine is enough.
 
-**(d2) Interfaces and configuration (decided, not built).** What: tierstore takes only `--config`, and the file declares the interfaces it serves as a list, so the data-path flags and the old `listen` keys go:
+**(d2) Interfaces and configuration (built).** What: tierstore takes only `--config` for its data path, and the file declares the interfaces it serves as a list, so the data-path flags and the old `listen` keys are gone:
 
 ```toml
 [[interface]]
@@ -652,7 +652,7 @@ type = "oci"
 params = { port = 5000, tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/" }
 ```
 
-An interface is a front over the same proxy; a later `type = "fs"` (item b) has a mount point and no port. Why: one configuration surface instead of 53 flags and a second spelling of them in the file, and a place where new interfaces plug in. Touches: `server/config.rs` and `cli.rs` (the loader and the start), every front's start-up, `packaging/`, the operator docs, and the tests that start the binary. It is a breaking change of the configuration, made before the first public release.
+An interface is a front over the same proxy. `port` is the IPv4 wildcard at that port and `addresses` a list of socket addresses; exactly one is given. The entries of a type are served together by one server on every address of theirs, so the `oci` entries share one certificate, key, prefix and limits (an entry that differs from the first is refused), an address two entries listen on is refused, and a file needs an `s3` entry. An `s3` interface has no TLS params yet (that waits for TLS on the S3 front); `type = "fs"` (item b) has a mount point and no port, and is refused today with a message that says so. A flag that used to hold a data-path setting is refused at the start with the key that replaces it (exit 2); `--config`, `--check-config`, `--capabilities` and the two flags of the drain remain, and so do the verbs such as `update-hook`. Why: one configuration surface instead of 53 flags and a second spelling of them in the file, and a place where new interfaces plug in. The slot units of the hand-over have a file each, since a port cannot be a unit's `%i` in a file. It is a breaking change of the configuration, made before the first public release. Touches: `server/config.rs`, `server/config_interface.rs`, `server/launch.rs` and `server/cli.rs` (the loader and the start), `packaging/`, the operator docs, and the tests that start the binary.
 
 **(d4) A full OCI registry (decided, not built).** What: beyond pull by digest, (1) **push**: blob uploads, monolithic and chunked, and manifest `PUT`; blobs are content-addressed, so they are ordinary create-only objects; (2) **tags**: a tag is a mutable pointer to a manifest digest, kept as a small object in a reserved namespace and moved with `If-Match` compare-and-swap, as the lease is; (3) **pull-through cache**: on a miss, the front fetches the image from a configured upstream registry, verifies every digest, stores the pieces as objects and serves them, so later pulls are local. Authentication reuses tierstore's S3 keys: a read-only key may pull, a full key may push (HTTP Basic over TLS, or the registry token flow backed by the same keys). Why: a complete registry on top of the object store, not only a read path. Touches: `server/oci/` (routes, upload sessions, tag objects, the upstream client), the key roles in `server/keys.rs`, the reserved prefixes, the limits, and the operator docs. A pull-through cache makes tierstore an outbound client of public registries, with their credentials and rate limits.
 

@@ -23,7 +23,7 @@ use crate::{Backend, Clock, DirBackend, Error as BackendError, MemoryBackend, Sy
 use std::time::Duration;
 
 const KEY_ID: &str = "AKIDCACHE";
-const SECRET: &str = "cache-secret";
+const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
 const QUICK: PerRun = PerRun {
@@ -62,8 +62,11 @@ impl Node {
     fn text(&self, hot_extra: &str) -> String {
         format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "n1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"

@@ -10,6 +10,9 @@ use std::process::ExitCode;
 
 use tierstore_testkit::dir::TestDir;
 
+/// A key as both releases take it: the secret has 16 bytes, the least this branch asks by default.
+const LONG_ENOUGH: &str = "AKID\n0123456789abcdef\n";
+
 /// A scratch directory with the key files a storage-node file names, and the file's text made of
 /// them: two tiers (the hot one an S3 bucket, the cold one in memory) with `hot_extra` in
 /// `[hot_store]`, `cold_extra` in `[cold_store]` and `server_extra` in `[server]`.
@@ -21,11 +24,16 @@ struct Node {
 
 impl Node {
     fn new(name: &str) -> Self {
+        Self::with_secret(name, LONG_ENOUGH)
+    }
+
+    /// As `new`, with `access` as the text of the access key file.
+    fn with_secret(name: &str, access: &str) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let mut paths = Vec::new();
-        for file in ["access.key", "hot.credentials"] {
+        for (file, text) in [("access.key", access), ("hot.credentials", LONG_ENOUGH)] {
             let path = dir.path().join(file);
-            std::fs::write(&path, "AKID\nsecret\n").unwrap();
+            std::fs::write(&path, text).unwrap();
             std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
             paths.push(path.display().to_string());
         }
@@ -153,12 +161,52 @@ fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_bra
 }
 
 /// Asserts the other direction: a file with no key of the read grant, which is what this branch
-/// writes (`--print-config` leaves them out), starts on the release before and on this branch.
+/// documents, starts on the release before and on this branch.
 #[test]
 fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branch() {
     let node = Node::new("compat-config-no-grant");
     let ok = status(ExitCode::SUCCESS);
     assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
+}
+
+/// Asserts that a file with the `listen` key of `[server]` and the `[oci]` table, the shape the
+/// release before reads, starts on this branch as it does on that release: this branch reads the
+/// two as an `s3` and an `oci` interface. A file with an `[oci]` table that has no `listen` is
+/// refused by both.
+#[test]
+fn a_file_with_the_oci_table_of_the_release_before_starts_on_both() {
+    let node = Node::new("compat-config-oci");
+    let ok = status(ExitCode::SUCCESS);
+    let with = node.file(
+        "",
+        "",
+        "\n[oci]\nlisten = \"127.0.0.1:0\"\nprefix = \"images/\"",
+    );
+    assert_eq!(both(&with), (ok.clone(), ok.clone()));
+
+    let bare = node.file("", "", "\n[oci]\nprefix = \"images/\"");
+    let (now, before) = both(&bare);
+    assert_ne!(now, ok);
+    assert_ne!(before, ok);
+}
+
+/// Asserts the change of the default minimum on a file of the release before: a file whose key has
+/// a secret of 6 bytes, which the release before starts, is refused on this branch with the
+/// minimum at its default, which is the one deliberate break; with `min_secret_bytes = 0` in the
+/// file it starts on this branch again. A file with `min_secret_bytes = 6` is only for this
+/// branch (the release before does not know the key), and starts on it.
+#[test]
+fn a_short_secret_of_the_release_before_is_refused_here_until_the_minimum_is_lowered() {
+    let node = Node::with_secret("compat-config-short-secret", "AKID\nsecret\n");
+    let ok = status(ExitCode::SUCCESS);
+    let (now, before) = both(&node.file("", "", ""));
+    assert_ne!(now, ok);
+    assert_eq!(before, ok);
+
+    let (now, _) = both(&node.file("min_secret_bytes = 0", "", ""));
+    assert_eq!(now, ok);
+    let (now, _) = both(&node.file("min_secret_bytes = 6", "", ""));
+    assert_eq!(now, ok);
 }
 
 /// A self-signed certificate that names `tierstore.test`, and its key, written under `dir`; the
@@ -183,8 +231,7 @@ fn certificate(dir: &TestDir) -> (String, String) {
 /// Asserts that a file with `tls_cert_file` and `tls_key_file`, the keys of the S3 front's TLS, is
 /// started by this branch and is refused by the release before, which does not know the keys (its
 /// tables refuse an unknown key, as for every key added since): an operator gives the keys after
-/// the upgrade. The same file without the two keys starts on both, and is what `--print-config`
-/// writes for a node that does not use TLS.
+/// the upgrade. The same file without the two keys starts on both.
 #[test]
 fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
     let node = Node::new("compat-config-tls");
