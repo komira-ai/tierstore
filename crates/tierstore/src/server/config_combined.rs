@@ -30,7 +30,8 @@
 //! In this shape a `[[policy]]` with `cache = true` keeps the keys under its prefix in the cache,
 //! and at least one is needed. `write_through` is true, left out or given: the node owns the data
 //! and takes writes, and they pass through the cache so that its entries stay right; `false` is
-//! refused. The cache's versions are compared by size (see `CacheConfig::tiered_upstream`).
+//! refused. The cache's upstream is the proxy, which says what one version of an object is (see
+//! `Backend::same_version`).
 //!
 //! What it refuses, besides what every file does: the refusals of a storage node's file, those of
 //! a build node's `[local_cache]` table, `write_through = false`, and a cache directory that is
@@ -77,7 +78,6 @@ pub(super) fn combined(
     overlap(&table.path, &node)?;
     let mut cache = CachePart::new(table, policy)?;
     cache.config.write_through = true;
-    cache.config.tiered_upstream = true;
     check_oci_is_kept(&oci_flags(&node), policy)?;
     Ok(CombinedSettings { node, cache })
 }

@@ -225,6 +225,10 @@ impl Backend for FaultyBackend {
         self.inner.needs_length()
     }
 
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        self.inner.same_version(a, b)
+    }
+
     /// A streamed put is a call of kind [`Op::Put`], so what is planned for puts applies to it.
     async fn put_stream(
         &self,
