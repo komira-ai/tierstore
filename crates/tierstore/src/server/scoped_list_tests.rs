@@ -193,8 +193,9 @@ async fn the_list_right_stops_at_its_prefix() {
         assert_eq!(listed.status, StatusCode::OK, "{prefix}");
         assert_eq!(texts(&listed.body, "Key"), keys, "{prefix}");
     }
-    let head = rig.send_as(LIST, "HEAD", &format!("/{BUCKET}/b/x"), &[], b"");
-    assert_eq!(head.await.status, StatusCode::OK);
+    let uri = format!("/{BUCKET}/b/x");
+    let head = rig.send_as(LIST, "HEAD", &uri, &[], b"").await;
+    assert_eq!(head.status, StatusCode::OK);
     for query in [
         "list-type=2",
         "list-type=2&prefix=",
