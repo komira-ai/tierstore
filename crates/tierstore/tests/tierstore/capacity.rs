@@ -130,11 +130,10 @@ async fn a_capacity_error_from_the_hot_tier_sends_puts_to_cold_until_the_refresh
     proxy.put("k1", body("1")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k1").await, body("1"));
     assert_absent(&*rig.hot_mem, "k1").await;
-    let hot_puts = rig.hot.calls(Op::Put);
 
     proxy.put("k2", body("2")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k2").await, body("2"));
-    assert_eq!(rig.hot.calls(Op::Put), hot_puts);
+    assert_absent(&*rig.hot_mem, "k2").await;
 
     tokio::time::sleep(Duration::from_secs(11)).await;
     proxy.put("k3", body("3")).await.unwrap();
@@ -142,8 +141,9 @@ async fn a_capacity_error_from_the_hot_tier_sends_puts_to_cold_until_the_refresh
     assert_absent(&*rig.cold_mem, "k3").await;
 }
 
-/// Asserts that a get of an object only the cold tier holds does not copy it into the hot tier
-/// while the usage is above the critical mark, and does once the usage is under it.
+/// Asserts that a get of an object only the cold tier holds asks for no copy-back while the usage
+/// is above the critical mark, and asks for one (an entry of the key) once the usage is under it;
+/// the read copies nothing itself.
 #[tokio::test(start_paused = true)]
 async fn a_get_does_not_copy_back_above_the_critical_mark() {
     let rig = Rig::new();
@@ -156,10 +156,12 @@ async fn a_get_does_not_copy_back_above_the_critical_mark() {
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_absent(&*rig.hot_mem, "k").await;
+    assert!(rig.hot_mem.head(&tierstore::entry_key("k")).await.is_err());
 
     set_usage(&rig, 100, 0).await;
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
+    crate::support::copy_back_asked(&rig, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
 }
 
 /// Asserts that a ranged get of an object only the cold tier holds asks the cold tier for the

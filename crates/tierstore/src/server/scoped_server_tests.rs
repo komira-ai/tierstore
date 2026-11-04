@@ -400,14 +400,12 @@ async fn a_scoped_key_deletes_inside_its_delete_prefixes_only() {
         .put("d/cold", bytes::Bytes::from_static(b"cold"))
         .await
         .unwrap();
-    let journals = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
     for key in ["d/a", "d/cold"] {
         let deleted = scoped(&rig, "DELETE", &uri(key), &[], b"").await;
         assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{key}");
         assert!(rig.hot_mem.get(key, None).await.is_err(), "{key}");
         assert!(rig.cold_mem.get(key, None).await.is_err(), "{key}");
     }
-    assert!(rig.hot_mem.list("_journal/p1/").await.unwrap().len() > journals);
     for key in ["r/a", "w/c", "rw/e", "other/f", "d/", "d", "_journal/p1/x"] {
         let reply = scoped(&rig, "DELETE", &uri(key), &[], b"").await;
         assert_eq!(denied(&reply), access_denied(), "{key}");

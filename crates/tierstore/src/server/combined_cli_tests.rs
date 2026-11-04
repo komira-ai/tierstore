@@ -100,6 +100,14 @@ cache  = true
         settings.into_combined().unwrap()
     }
 
+    /// Writes the active format into the hot directory, as `format-epoch --activate` does for a
+    /// new store, so that the node takes writes.
+    async fn activate(&self) {
+        let active = bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+        let hot = Self::tier(self.hot());
+        hot.put("_tiering/format", active).await.unwrap();
+    }
+
     /// The tier directory `path` as a backend, to read what the node stored there.
     fn tier(path: PathBuf) -> DirBackend {
         DirBackend::open(path).unwrap()
@@ -146,6 +154,7 @@ where
 #[tokio::test]
 async fn a_combined_node_serves_a_put_and_answers_the_next_read_from_its_cache() {
     let node = Node::new("tscombined-serve");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let hot = node.hot();
@@ -181,6 +190,7 @@ async fn a_combined_node_serves_a_put_and_answers_the_next_read_from_its_cache()
 #[tokio::test]
 async fn a_delete_through_a_combined_node_removes_the_object_everywhere() {
     let node = Node::new("tscombined-delete");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let hot = node.hot();
@@ -208,6 +218,7 @@ async fn a_delete_through_a_combined_node_removes_the_object_everywhere() {
 #[tokio::test]
 async fn a_combined_node_over_a_held_directory_is_read_only_and_still_writes_through() {
     let node = Node::new("tscombined-held");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let elsewhere: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
@@ -239,6 +250,7 @@ async fn a_combined_node_over_a_held_directory_is_read_only_and_still_writes_thr
 #[tokio::test]
 async fn a_combined_node_with_a_lock_file_serves() {
     let node = Node::new("tscombined-lock");
+    node.activate().await;
     let lock = node.dir.path().join("instance.lock");
     let settings = node.settings(&format!("lock_file = \"{}\"", lock.display()));
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);

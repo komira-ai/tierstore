@@ -62,6 +62,9 @@ async fn an_object_is_put_read_described_and_deleted() {
     assert_eq!(gone.status, StatusCode::NOT_FOUND);
     assert_eq!(gone.code(), "NoSuchKey");
     assert_eq!(gone.header("content-type"), "application/xml");
+    // The delete left its entry for the reconciler; one step releases it, so that the next delete
+    // does not wait for the release.
+    rig.settle().await;
     let again = rig.call("DELETE", "cas/a", b"").await;
     assert_eq!(again.status, StatusCode::NO_CONTENT);
     let absent = rig.call("HEAD", "cas/a", b"").await;
@@ -448,9 +451,10 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     assert_eq!(texts(&done.body, "ETag").concat(), tag);
     assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "hello world");
     assert!(rig.hot_mem.get("big", None).await.is_err());
+    // The completion is a put on the entry of the key, which finds the object and refuses first.
     let again = complete(&rig, "big", &id, &body).await;
-    assert_eq!(again.status, StatusCode::NOT_FOUND);
-    assert_eq!(again.code(), "NoSuchUpload");
+    assert_eq!(again.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(again.code(), "PreconditionFailed");
     let head = rig.call("HEAD", "big", b"").await;
     assert_eq!(head.header("etag"), tag);
     assert_eq!(rig.get("big", None).await.body, "hello world");

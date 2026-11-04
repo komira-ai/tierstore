@@ -10,8 +10,8 @@ use objstore_s3::Capabilities;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use tierstore::server::{Drained, Server, ServerConfig};
 use tierstore::{
-    Backend, Clock, Error, FaultyBackend, MemoryBackend, Proxy, ProxyConfig, Sleeper, SystemClock,
-    TestClock,
+    Backend, Clock, EntryReconciler, EntryReconcilerConfig, Error, FaultyBackend, MemoryBackend,
+    Proxy, ProxyConfig, ReconcilerConfig, Sleeper, SystemClock, TestClock,
 };
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -106,6 +106,17 @@ impl Harness {
             cold,
             served,
         }
+    }
+
+    /// Runs the entry reconciler over the tiers until a step changes nothing, as the reconciler of
+    /// the node would between two requests: it removes the entries that a delete handed over, which
+    /// releases what waits for them.
+    pub async fn settle(&self) {
+        let base = ReconcilerConfig::new("harness/reconciler", 1 << 30, Arc::new(SystemClock));
+        let config = EntryReconcilerConfig::new(base);
+        let mut reconciler = EntryReconciler::new(self.hot.clone(), self.cold.clone(), config);
+        while reconciler.step().await.progress() {}
+        reconciler.stop().await;
     }
 
     /// The `S3Store` client, with the key of the server.

@@ -1,7 +1,7 @@
 //! One round of a storage node's reconciler: a step of the [`EntryReconciler`] and how long to
 //! wait before the next.
 //!
-//! The step does nothing until the format object (`_tiering/format`) says
+//! A round does nothing until the format object (`_tiering/format`) says
 //! `{"epoch": 2, "phase": "active"}`, and a format that cannot be read makes the round fail and do
 //! nothing. The wait is the idle wait of the entry reconciler's own loop: none while a round makes
 //! progress, and otherwise one that doubles from `idle_min` to `idle_max`.
@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::entry_reconciler::Idle;
-use crate::{Backend, EntryReconciler, EntryReconcilerConfig, Error, ReconcilerConfig};
+use crate::format::{Format, read_format};
+use crate::{Backend, EntryReconciler, EntryReconcilerConfig, Error, ReconcilerConfig, StepReport};
 
 /// What one round did that the loop acts on.
 #[derive(Debug, Default)]
@@ -24,6 +25,7 @@ pub(crate) struct Round {
 
 /// The reconciler of a node and the pace of its rounds.
 pub(crate) struct Rounds {
+    hot: Arc<dyn Backend>,
     reconciler: EntryReconciler,
     idle: Idle,
 }
@@ -41,19 +43,33 @@ impl Rounds {
         entry_config.departure = departure;
         let idle = Idle::new(entry_config.idle_min, entry_config.idle_max);
         Self {
-            reconciler: EntryReconciler::new(hot, cold, entry_config),
+            reconciler: EntryReconciler::new(Arc::clone(&hot), cold, entry_config),
+            hot,
             idle,
         }
     }
 
     /// Does one round, as the module says.
     pub(crate) async fn round(&mut self) -> Round {
+        // The entry reconciler goes on any `active` format; a node works the entries only from
+        // epoch 2, so the epoch is looked at here.
+        match read_format(self.hot.as_ref()).await {
+            Ok(format) if format.as_ref().is_some_and(Format::runs_entries) => {}
+            Ok(_) => return self.waiting(Vec::new()),
+            Err(error) => return self.waiting(vec![error]),
+        }
         let step = self.reconciler.step().await;
         let pause = self.idle.after(&step);
         Round {
             failed: step.failed,
             pause,
         }
+    }
+
+    /// A round that did nothing, with the calls that failed in it.
+    fn waiting(&mut self, failed: Vec<Error>) -> Round {
+        let pause = self.idle.after(&StepReport::default());
+        Round { failed, pause }
     }
 
     /// Gives the lease up, if it is held.

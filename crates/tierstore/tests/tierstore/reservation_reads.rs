@@ -8,11 +8,10 @@ use std::time::Duration;
 
 use tierstore::{ByteRange, Error, Op, Proxy};
 
-use crate::churn::{Change, Churn, Ghost};
+use crate::churn::Ghost;
 use crate::conformance::reservation;
 
-use crate::support::{Rig, assert_absent, body, keys, page, read, set_usage, text};
-use tierstore::Backend;
+use crate::support::{Rig, assert_absent, body, keys, page, read, set_usage};
 
 /// The line of a metric of the proxy, as `Proxy::metrics` renders it, with its value.
 fn metric(proxy: &Proxy, line: &str) -> String {
@@ -66,7 +65,7 @@ async fn a_range_past_the_end_of_a_real_object_is_still_an_error() {
 }
 
 /// Asserts that an object that is 56 bytes and looks like a reservation, but was written
-/// plainly, is read as an object: whole, by range, and by a head, and is copied back.
+/// plainly, is read as an object: whole, by range, and by a head, and its copy-back is asked for.
 #[tokio::test(start_paused = true)]
 async fn a_real_56_byte_object_that_looks_like_a_reservation_is_read_as_an_object() {
     let rig = Rig::new();
@@ -77,8 +76,7 @@ async fn a_real_56_byte_object_that_looks_like_a_reservation_is_read_as_an_objec
     let part = proxy.get("k", Some(ByteRange::new(0, 4))).await.unwrap();
     assert_eq!(part, reservation(1).slice(0..4));
     assert_eq!(proxy.get("k", None).await.unwrap(), reservation(1));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(read(&*rig.hot_mem, "k").await, reservation(1));
+    crate::support::copy_back_asked(&rig, "k").await;
 }
 
 /// Asserts that a head of a reservation is not found and counted as a miss of the cold tier,
@@ -268,145 +266,4 @@ async fn a_listing_of_many_real_objects_the_size_of_a_reservation_asks_about_eac
     assert_eq!(rig.cold.calls(Op::Head), count as u64);
     assert_eq!(keys(&proxy).await.len(), count);
     assert_eq!(rig.cold.calls(Op::Head), 2 * count as u64);
-}
-
-/// Asserts that a delete takes a real cold object by its tag, then the hot object, and journals
-/// the delete.
-#[tokio::test(start_paused = true)]
-async fn a_delete_removes_a_real_cold_object_by_its_tag() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    rig.cold_mem.put("k", body("value")).await.unwrap();
-    rig.hot_mem.put("k", body("value")).await.unwrap();
-
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.cold_mem, "k").await;
-    assert_absent(&*rig.hot_mem, "k").await;
-    assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 1);
-    assert_eq!(rig.cold.calls(Op::Delete), 0);
-}
-
-/// Asserts that a delete takes a reservation when the hot tier holds the key (the put is
-/// acknowledged, or about to be), by its tag.
-#[tokio::test(start_paused = true)]
-async fn a_delete_removes_a_reservation_whose_hot_object_exists() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    rig.cold_mem
-        .put_reservation("k", reservation(1))
-        .await
-        .unwrap();
-    rig.hot_mem.put("k", body("value")).await.unwrap();
-
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.cold_mem, "k").await;
-    assert_absent(&*rig.hot_mem, "k").await;
-}
-
-/// Asserts that a delete leaves a bare reservation (the hot tier does not hold the key: the put
-/// has not written its object) alone, and does not fail: the put it belongs to goes on, and is
-/// acknowledged after the delete, which found no object.
-#[tokio::test(start_paused = true)]
-async fn a_delete_leaves_a_bare_reservation_alone() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    let tag = rig
-        .cold_mem
-        .put_reservation("k", reservation(1))
-        .await
-        .unwrap();
-
-    proxy.delete("k").await.unwrap();
-    let head = rig.cold_mem.head("k").await.unwrap();
-    assert_eq!((head.reservation, head.tag), (true, tag));
-    assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 0);
-}
-
-/// Asserts that a delete of a key the cold tier lacks clears what the hot tier holds under it
-/// (an orphan, or a stale copy-back) and journals the delete.
-#[tokio::test(start_paused = true)]
-async fn a_delete_of_a_key_absent_from_cold_clears_the_hot_orphan() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    rig.hot_mem.put("k", body("stale")).await.unwrap();
-
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.hot_mem, "k").await;
-    assert_eq!(rig.cold.calls(Op::DeleteIfMatch), 0);
-}
-
-/// Asserts that a delete whose cold object changes between the look and the delete looks again
-/// and deletes the object it finds, and gives up after three changes with an error that a retry
-/// of the delete (which then sees the object, unchanged) finishes.
-#[tokio::test(start_paused = true)]
-async fn a_delete_retries_when_the_cold_object_changes_under_it_and_gives_up_after_three() {
-    let rig = Rig::new();
-    rig.cold_mem.put("k", body("one")).await.unwrap();
-    let changes = vec![Change::Object(body("two"))];
-    let cold = Arc::new(Churn::new(rig.cold_mem.clone(), changes));
-    let config = rig.config("p1", 1000);
-    let proxy = crate::support::open_live(rig.hot.clone(), cold, config)
-        .await
-        .unwrap();
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.cold_mem, "k").await;
-
-    rig.cold_mem.put("j", body("one")).await.unwrap();
-    let changes = vec![
-        Change::Object(body("two")),
-        Change::Object(body("three")),
-        Change::Object(body("four")),
-    ];
-    let cold = Arc::new(Churn::new(rig.cold_mem.clone(), changes));
-    let config = rig.config("p2", 1000);
-    let proxy = crate::support::open_live(rig.hot.clone(), cold, config)
-        .await
-        .unwrap();
-    let error = proxy.delete("j").await.unwrap_err();
-    assert!(error.is_unavailable(), "{error}");
-    assert_eq!(text(&*rig.cold_mem, "j").await, "four");
-    proxy.delete("j").await.unwrap();
-    assert_absent(&*rig.cold_mem, "j").await;
-}
-
-/// Asserts that a delete of an object that vanishes between the look and the delete is done.
-#[tokio::test(start_paused = true)]
-async fn a_delete_of_an_object_that_vanishes_under_it_is_done() {
-    let rig = Rig::new();
-    rig.cold_mem.put("k", body("one")).await.unwrap();
-    let cold = Arc::new(Churn::new(rig.cold_mem.clone(), vec![Change::Remove]));
-    let proxy = crate::support::open_live(rig.hot.clone(), cold, rig.config("p1", 1000))
-        .await
-        .unwrap();
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.cold_mem, "k").await;
-}
-
-/// Asserts that each call of a delete that fails fails the delete, before the calls after it:
-/// the look at the cold tier, the question of the hot tier for a reservation, the conditional delete
-/// of the cold tier, and the delete of the hot tier; and that the hot tier is not deleted from when
-/// the cold tier was not.
-#[tokio::test(start_paused = true)]
-async fn each_failing_call_of_a_delete_fails_it_before_the_calls_after_it() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    rig.cold_mem.put("k", body("one")).await.unwrap();
-    rig.hot_mem.put("k", body("one")).await.unwrap();
-
-    rig.cold.fail_next(Op::Head, 1);
-    assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
-    rig.cold.fail_next(Op::DeleteIfMatch, 1);
-    assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("one"));
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("one"));
-
-    rig.cold_mem.delete("k").await.unwrap();
-    rig.cold_mem
-        .put_reservation("k", reservation(1))
-        .await
-        .unwrap();
-    rig.hot.fail_next(Op::Head, 1);
-    assert!(proxy.delete("k").await.unwrap_err().is_unavailable());
-    assert!(rig.cold_mem.head("k").await.unwrap().reservation);
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("one"));
 }

@@ -184,6 +184,20 @@ impl Rig {
         }
     }
 
+    /// Runs the entry reconciler over the rig's tiers until a step changes nothing, as the
+    /// reconciler of the node would between two requests: it copies what the puts left, finishes
+    /// the deletes handed over and removes the entries, which releases what waits for them.
+    pub(super) async fn settle(&self) {
+        let clock = self.hot_mem.clock();
+        let mut base = crate::ReconcilerConfig::new("rig/reconciler", 1 << 30, clock);
+        base.mono = self.mono.clone();
+        let config = crate::EntryReconcilerConfig::new(base);
+        let mut reconciler =
+            crate::EntryReconciler::new(self.hot.clone(), self.cold.clone(), config);
+        while reconciler.step().await.progress() {}
+        reconciler.stop().await;
+    }
+
     /// Sends a request signed for the server and reads the answer.
     pub(super) async fn send(
         &self,

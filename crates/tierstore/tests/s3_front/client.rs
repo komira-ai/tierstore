@@ -78,6 +78,7 @@ async fn an_object_is_put_read_by_range_and_deleted() {
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
     assert_eq!(read(&store, "cas/pack-1", 0, 5).await, "hello");
     store.delete(&k).await.unwrap();
+    h.settle().await;
     store.delete(&k).await.unwrap();
     let gone = store.get_range(&k, window(0, 5)).await.unwrap_err();
     assert!(matches!(gone, ObjectStoreError::NotFound(_)), "{gone}");

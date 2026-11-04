@@ -211,6 +211,7 @@ mod config_syntax;
 mod config_units;
 mod door;
 mod drain;
+mod first_beat;
 mod front;
 pub mod gc;
 mod handover;

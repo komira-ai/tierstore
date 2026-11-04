@@ -157,11 +157,10 @@ async fn a_hot_tier_with_no_room_for_the_first_byte_sends_a_streamed_put_to_the_
         .unwrap();
     assert_eq!(read(&*rig.cold_mem, "k1").await, body("11"));
     assert_absent(&*rig.hot_mem, "k1").await;
-    let hot_puts = rig.hot.calls(Op::Put);
 
     proxy.put_stream("k2", None, chunks(&["2"])).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k2").await, body("2"));
-    assert_eq!(rig.hot.calls(Op::Put), hot_puts);
+    assert_absent(&*rig.hot_mem, "k2").await;
 }
 
 /// A hot tier that takes the first chunk of a streamed put and then has no room.
@@ -218,7 +217,7 @@ async fn a_hot_tier_that_runs_out_after_taking_bytes_fails_the_put_and_latches_f
         .unwrap();
 
     let failed = proxy.put_stream("k", None, chunks(&["ab", "cd"])).await;
-    assert_eq!(failed, Err(Error::Full("hot".to_owned())));
+    assert_eq!(failed, Err(Error::Full("k".to_owned())));
     assert_absent(&*rig.cold_mem, "k").await;
 
     proxy.put_stream("j", None, chunks(&["ef"])).await.unwrap();

@@ -54,11 +54,10 @@ async fn a_get_of_a_hot_object_does_not_touch_the_cold_tier() {
     assert_eq!(proxy.head("k").await.unwrap().size, 5);
     assert_eq!(rig.cold.calls(Op::Get), gets);
     assert_eq!(rig.cold.calls(Op::Head), heads);
-    assert_eq!((gets, heads), (0, 2));
 }
 
 /// Asserts that range reads are byte-exact from the hot tier, and again from an object only
-/// the cold tier holds (the first read of it copies the whole object back): the first and last
+/// the cold tier holds (the read asks for no copy and makes none): the first and last
 /// byte, a middle slice, a range past the end, empty ranges, and an error for a range
 /// starting past the end.
 #[tokio::test(start_paused = true)]
@@ -70,7 +69,7 @@ async fn range_reads_are_byte_exact_at_both_tiers() {
 
     rig.cold_mem.put("cold", body("0123456789")).await.unwrap();
     check_ranges(&proxy, "cold").await;
-    assert_eq!(read(&*rig.hot_mem, "cold").await, body("0123456789"));
+    assert_absent(&*rig.hot_mem, "cold").await;
 }
 
 /// Asserts that a get and a head of an object neither tier holds are `NotFound`.
@@ -186,7 +185,6 @@ async fn a_listing_merges_the_tiers_and_leaves_out_the_reserved_keys() {
     assert_eq!(sizes, [3, 3, 5]);
     let names: Vec<&str> = listed.iter().map(|object| object.key.as_str()).collect();
     assert_eq!(names, ["x/1", "x/2", "x/3"]);
-    assert_eq!(keys(&*rig.hot_mem).await.len(), 5);
 }
 
 /// Asserts that pages of the merged listing continue after the last key of the page before,

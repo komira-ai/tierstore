@@ -129,6 +129,7 @@ async fn a_file_written_by_hand_with_directory_tiers_keeps_objects_on_disk() {
         "--drain-lb-wait",
         "50ms",
     ]);
+    crate::files::activate_dir(&root.join("hot")).await;
     let said = served(&args).await;
     assert!(said[0].contains("Ok"), "{said:?}");
     assert!(root.join("hot/cas~a").is_file());
