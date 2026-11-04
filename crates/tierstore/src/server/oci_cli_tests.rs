@@ -393,10 +393,7 @@ fn the_auth_flag_needs_the_front() {
     let args = rig.args(&[]);
     let mut off: Vec<String> = args[..args.len() - 6].to_vec();
     off.push("--oci-require-auth".to_owned());
-    let refused = Cli::try_parse_from(off)
-        .err()
-        .expect("a refusal")
-        .to_string();
+    let refused = Cli::try_parse_from(off).expect_err("a refusal").to_string();
     assert!(refused.contains("--oci-listen"), "{refused}");
 }
 
