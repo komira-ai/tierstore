@@ -12,6 +12,7 @@
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::AsFd;
 use std::task::{Context, Poll};
 
 use rustix::io::{FdFlags, fcntl_setfd};
@@ -150,6 +151,20 @@ pub(crate) fn local_addrs(listeners: &[TcpListener]) -> io::Result<Vec<SocketAdd
     listeners.iter().map(TcpListener::local_addr).collect()
 }
 
+/// A copy of the descriptor of each of `listeners`, as a listener of `std`: the same sockets, which
+/// stay open after the front that serves from them has closed its own (the hand-off offers them to
+/// a successor, see `handoff`).
+///
+/// # Errors
+/// A descriptor cannot be copied.
+pub(crate) fn duplicates(listeners: &[TcpListener]) -> io::Result<Vec<std::net::TcpListener>> {
+    let copy = |listener: &TcpListener| listener.as_fd().try_clone_to_owned();
+    listeners
+        .iter()
+        .map(|listener| copy(listener).map(std::net::TcpListener::from))
+        .collect()
+}
+
 /// The addresses as the start line shows them: separated by commas, with no space, so that the
 /// line is still words of `name=value`.
 pub(crate) fn joined(addrs: &[SocketAddr]) -> String {
@@ -168,6 +183,11 @@ impl Listeners {
     /// The source of the connections of `listeners`.
     pub(crate) fn new(listeners: Vec<TcpListener>) -> Self {
         Self { listeners, next: 0 }
+    }
+
+    /// A copy of each socket's descriptor (see [`duplicates`]).
+    pub(crate) fn duplicates(&self) -> io::Result<Vec<std::net::TcpListener>> {
+        duplicates(&self.listeners)
     }
 
     /// The address of each socket, in the order they were given.
