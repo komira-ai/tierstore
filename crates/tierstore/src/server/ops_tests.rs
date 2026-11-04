@@ -353,12 +353,14 @@ async fn the_failures_of_the_store_are_answered_with_their_codes() {
     assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(down.code(), "ServiceUnavailable");
     rig.put("c", b"x").await;
-    let boom = Error::Other("boom".to_owned());
+    let boom = Error::Other("/srv/tier/boom: disk detail".to_owned());
     rig.hot.fail_next_with(Op::Get, boom);
     let failed = rig.get("c", None).await;
     assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(failed.code(), "InternalError");
-    assert!(texts(&failed.body, "Message").concat().contains("boom"));
+    let message = texts(&failed.body, "Message").concat();
+    assert_eq!(message, "We encountered an internal error.");
+    assert!(!failed.body.contains("boom"));
 }
 
 /// Asserts that a request whose body is not the one the signature covers is refused before
