@@ -593,6 +593,29 @@ async fn an_https_upstream_is_trusted_through_the_ca_file_and_not_without_it() {
     assert_eq!(registry.seen().len(), 1);
 }
 
+/// Asserts that a client that speaks no TLS to an https registry has its connection closed after
+/// the failed handshake, and that no request is seen.
+#[tokio::test]
+async fn a_client_that_speaks_no_tls_to_an_https_registry_is_disconnected() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let dir = TestDir::under(std::env::temp_dir(), "oci-upstream-plain");
+    let files = leaf(dir.path(), "registry", &ca(), vec![ip("127.0.0.1")]);
+    let listen = "127.0.0.1:443".parse().expect("an address");
+    let tls = acceptor(&files.cert, &files.key, listen).expect("an acceptor");
+    let registry = Registry::start_tls(tls, |_| Fake::ok("secure")).await;
+    let mut raw = tokio::net::TcpStream::connect(registry.authority())
+        .await
+        .expect("connected");
+    raw.write_all(b"GET /v2/ HTTP/1.1\r\n\r\n")
+        .await
+        .expect("written");
+    // The server closes the connection once the handshake has failed, so this ends.
+    let mut rest = Vec::new();
+    let _ = raw.read_to_end(&mut rest).await;
+    assert!(registry.seen().is_empty());
+}
+
 /// Serves one request on one end of a duplex and gives the reply to it from the other, with
 /// `idle` as the wait for each piece of the body. No socket and no clock but the paused one.
 async fn over_a_duplex(fake: Fake, idle: Duration) -> Reply {
