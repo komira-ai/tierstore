@@ -117,8 +117,6 @@ use super::listen::{has_duplicate, joined};
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::update_hook;
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
