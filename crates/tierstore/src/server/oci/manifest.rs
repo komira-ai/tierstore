@@ -49,3 +49,22 @@ pub(super) fn media_type(body: &[u8]) -> Result<&'static str, String> {
          schemaVersion 2 with a config and layers (or manifests)"
     ))
 }
+
+/// The digests a manifest or an index names: its config, its layers and its manifests, as the
+/// text they are written with. An entry with no digest is not listed.
+pub(super) fn references(body: &[u8]) -> Vec<String> {
+    let json: Value = serde_json::from_slice(body).unwrap_or_default();
+    let config = json.get("config");
+    let lists = ["layers", "manifests"]
+        .into_iter()
+        .filter_map(|field| json.get(field))
+        .filter_map(Value::as_array)
+        .flatten();
+    config
+        .into_iter()
+        .chain(lists)
+        .filter_map(|entry| entry.get("digest"))
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}

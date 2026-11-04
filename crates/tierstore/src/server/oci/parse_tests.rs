@@ -4,7 +4,7 @@
 use hyper::header::HeaderValue;
 
 use super::metrics::{Outcome, RouteKind};
-use super::names::{Digest, Route, is_tag, route, valid_name};
+use super::names::{Digest, Route, is_tag, is_upload_id, route, valid_name};
 use super::range::{self, Range};
 use super::{OciMetrics, OciMode, OciPrefix, header_value, manifest};
 
@@ -80,12 +80,62 @@ fn paths_are_routed_by_their_last_two_segments() {
         "/v1/",
         "/v2/_catalog",
         "/v2/a/tags/list",
-        "/v2/a/blobs/uploads/",
         "/v2/blobs/x",
+        "/v2/blobs/uploads/",
         "/healthz",
         "",
     ] {
         assert_eq!(route(other), Route::Other, "{other}");
+    }
+}
+
+/// Asserts the paths of uploads are told before blobs: the start of an upload, and an upload by
+/// its last segment, whatever the name holds (even a component called `uploads`), and that a
+/// blob digest called `uploads` is still a blob.
+#[test]
+fn the_paths_of_uploads_are_routed_before_blobs() {
+    assert_eq!(route("/v2/a/blobs/uploads/"), Route::Upload { name: "a" });
+    assert_eq!(
+        route("/v2/lib/app/blobs/uploads/"),
+        Route::Upload { name: "lib/app" }
+    );
+    assert_eq!(
+        route("/v2/a/blobs/uploads/abc"),
+        Route::Session {
+            name: "a",
+            id: "abc"
+        }
+    );
+    assert_eq!(
+        route("/v2/blobs/uploads/blobs/uploads/abc"),
+        Route::Session {
+            name: "blobs/uploads",
+            id: "abc"
+        }
+    );
+    assert_eq!(
+        route("/v2/a/blobs/uploads"),
+        Route::Blob {
+            name: "a",
+            digest: "uploads"
+        }
+    );
+}
+
+/// Asserts that an upload id is 32 lowercase hex digits and nothing else.
+#[test]
+fn an_upload_id_is_thirty_two_lowercase_hex_digits() {
+    assert!(is_upload_id(&HEX[..32]));
+    for bad in [
+        "",
+        &HEX[..31],
+        HEX,
+        "..",
+        "../../../etc/passwd/................",
+        &HEX.to_uppercase()[..32],
+        "0123456789abcdef0123456789abcdeg",
+    ] {
+        assert!(!is_upload_id(bad), "{bad}");
     }
 }
 
@@ -306,6 +356,9 @@ fn the_counters_count_and_render() {
     metrics.request(RouteKind::Other, Outcome::NotAllowed);
     metrics.request(RouteKind::Ping, Outcome::Unauthorized);
     metrics.request(RouteKind::Blob, Outcome::Denied);
+    metrics.request(RouteKind::Upload, Outcome::Created);
+    metrics.request(RouteKind::Upload, Outcome::Accepted);
+    metrics.request(RouteKind::Upload, Outcome::NoContent);
     metrics.sent(7);
     metrics.sent(5);
     metrics.mismatch();
@@ -319,6 +372,9 @@ fn the_counters_count_and_render() {
     assert_eq!(metrics.requests("ping", "ok"), 0);
     assert_eq!(metrics.requests("ping", "unauthorized"), 1);
     assert_eq!(metrics.requests("blob", "denied"), 1);
+    assert_eq!(metrics.requests("upload", "created"), 1);
+    assert_eq!(metrics.requests("upload", "accepted"), 1);
+    assert_eq!(metrics.requests("upload", "no_content"), 1);
     assert_eq!(metrics.requests("nothing", "ok"), 0);
     assert_eq!(metrics.requests("blob", "nothing"), 0);
     assert_eq!((metrics.bytes_sent(), metrics.mismatches()), (12, 1));
@@ -346,8 +402,8 @@ fn the_counters_count_and_render() {
         plain.contains("tierstore_oci_front_info{mode=\"http\"} 1\n"),
         "{plain}"
     );
-    // Four routes by nine outcomes, five counters' type lines, three totals, the mode.
-    assert_eq!(text.lines().count(), 4 * 9 + 5 + 3 + 1);
+    // Five routes by twelve outcomes, five counters' type lines, three totals, the mode.
+    assert_eq!(text.lines().count(), 5 * 12 + 5 + 3 + 1);
 }
 
 /// Asserts a header value that cannot be one is replaced by an empty value, not a panic.

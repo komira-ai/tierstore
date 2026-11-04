@@ -548,7 +548,8 @@ async fn every_method_but_get_and_head_is_405() {
     assert_eq!(rig.metrics.requests("ping", "not_allowed"), 5);
     assert_eq!(rig.metrics.requests("blob", "not_allowed"), 5);
     assert_eq!(rig.metrics.requests("manifest", "not_allowed"), 5);
-    assert_eq!(rig.metrics.requests("other", "not_allowed"), 10);
+    assert_eq!(rig.metrics.requests("upload", "not_allowed"), 5);
+    assert_eq!(rig.metrics.requests("other", "not_allowed"), 5);
     // Nothing was read.
     assert_eq!(rig.faulty.calls(Op::Get) + rig.faulty.calls(Op::Head), 0);
 }

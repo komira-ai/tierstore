@@ -25,8 +25,8 @@
 //!   scoped key with a read prefix that is a prefix of the front's (a read prefix inside the
 //!   front's would cover only some digests, and is not enough);
 //! - **push** (`POST`, `PUT`, `PATCH` and `DELETE`): the full key, and a scoped key with a write
-//!   prefix that is a prefix of the front's. The front serves no upload yet, so a key that may push
-//!   is answered 405 as before; a key that may not is answered 403 first.
+//!   prefix that is a prefix of the front's. A key that may not is answered 403; a front without
+//!   keys serves no push at all.
 //!
 //! `GET /v2/`, the call a client makes to log in, asks only that the key has either right.
 //!

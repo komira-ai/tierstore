@@ -48,8 +48,8 @@ pub struct OciLimits {
     /// wait, idle, for its next request; and how long a lingering close in the drain waits for
     /// the client to close its end.
     pub header_timeout: Duration,
-    /// How long a client may go without taking a byte of an answer before the connection is
-    /// closed.
+    /// How long a client may go without taking a byte of an answer, or, in a push, without
+    /// sending the next piece of the body, before the connection is closed.
     pub write_idle: Duration,
     /// The longest a connection lives. A request being answered when it ends is finished first,
     /// for at most [`drain_deadline`](Self::drain_deadline) more.
@@ -428,8 +428,14 @@ impl Serving {
             let (front, drain, wire) =
                 (Arc::clone(&front), Arc::clone(&drain), Arc::clone(&on_wire));
             async move {
-                let (method, uri, headers) = (request.method(), request.uri(), request.headers());
-                let mut answer = front.handle(method, uri.path(), headers).await;
+                let (parts, body) = request.into_parts();
+                let target = parts
+                    .uri
+                    .path_and_query()
+                    .map_or("/", |target| target.as_str());
+                let (method, headers) = (&parts.method, &parts.headers);
+                let idle = limits.write_idle;
+                let mut answer = front.handle_with(method, target, headers, body, idle).await;
                 if drain.closes_answers() {
                     let close = HeaderValue::from_static("close");
                     answer.headers_mut().insert(CONNECTION, close);

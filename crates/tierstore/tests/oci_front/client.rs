@@ -105,6 +105,26 @@ impl Conn {
         self.reply(method == "HEAD").await
     }
 
+    /// Sends a request with a body, and its `Content-Length`, in one write (so that an answer that
+    /// comes before the body was read finds all of it sent), and reads the answer.
+    pub async fn request_with_body(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Option<Reply> {
+        let mut text = format!("{method} {path} HTTP/1.1\r\nhost: oci.test\r\n");
+        for (name, value) in headers {
+            text.push_str(&format!("{name}: {value}\r\n"));
+        }
+        text.push_str(&format!("content-length: {}\r\n\r\n", body.len()));
+        let mut wire = text.into_bytes();
+        wire.extend_from_slice(body);
+        self.stream.write_all(&wire).await.expect("send");
+        self.reply(false).await
+    }
+
     pub async fn send(&mut self, method: &str, path: &str, headers: &[(&str, &str)]) {
         let mut text = format!("{method} {path} HTTP/1.1\r\nhost: oci.test\r\n");
         for (name, value) in headers {
