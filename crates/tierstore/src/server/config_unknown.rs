@@ -103,7 +103,7 @@ pub(super) fn unknown_key_warnings(file: &toml::Table) -> Vec<String> {
 pub(super) fn announce_unknown_keys(text: &str) {
     let file = toml::from_str::<toml::Table>(text).unwrap_or_default();
     for warning in unknown_key_warnings(&file) {
-        eprintln!("{warning}");
+        tracing::warn!("{warning}");
     }
 }
 
