@@ -32,7 +32,7 @@ What is needed is a way to make the four actors take turns on one key, with no c
 
 Goals:
 
-- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned put) and, beside it, a read-only OCI distribution front, both over one proxy.
+- One bucket with the S3 object calls clients need (put, get with ranges, head, delete, list, multipart, presigned get and put) and, beside it, a read-only OCI distribution front, both over one proxy.
 - Create-only puts across two tiers: a key that exists in either tier is refused (412). The actor holding the key's entry decides, with one cold HEAD under the entry.
 - **No lost acknowledged write, no resurrected deleted key, no wrong bytes.** A residual is accepted only where it needs a frozen or stalled actor that only a fencing primitive could stop, and each such residual is stated (section 11).
 - **No correctness step relies on a conditional DELETE.** Where the store honours it (`dir:`, AWS), it is used only as a fence against a frozen or stalled actor.
@@ -683,6 +683,7 @@ Still open, not covered by those decisions:
 | Copy-back | Writing an object read from cold into hot, by the leader under a CB entry. |
 | Create-only | A write that fails with `AlreadyExists` if the key exists (`If-None-Match: *`). |
 | Presigned put | A put signed in the URL; hot-only. |
+| Presigned get | A get or head of one object signed in the URL by a key that reads (full, read-only or scoped), with the rights of that key; any `Range` is allowed, so one URL serves a parallel download. |
 | Reserved prefix | `_entries/`, `_journal/` and `_tiering/`; refused to clients. |
 | Bridge release | The release that reserves `_entries/` everywhere and drains the old journals, so the new protocol can start beside no old writer. |
 | Residual | A stated outcome that needs a frozen or stalled actor (R1 to R4, section 11). |

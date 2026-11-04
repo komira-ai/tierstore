@@ -13,8 +13,9 @@ use crate::TestClock;
 
 use super::super::auth::{MALFORMED, MISMATCH, SKEWED, UNKNOWN_KEY, UNSIGNED};
 use super::{
-    AccessKey, EXPIRED, Grant, PresignError, PresignKey, PresignRequest, TOO_LONG, check_name,
-    ensure_distinct, presign_keys, presign_put, presign_url, validate_prefix, verify_query,
+    AccessKey, EXPIRED, Grant, PresignError, PresignKey, PresignRequest, READ_URL_ONLY, TOO_LONG,
+    check_name, ensure_distinct, presign_keys, presign_put, presign_url, validate_prefix,
+    verify_query,
 };
 use super::{Parts, Role, ServerConfig};
 
@@ -325,15 +326,16 @@ fn a_url_that_is_not_well_formed_is_refused() {
     assert_eq!(plain.unwrap_err(), UNSIGNED);
 }
 
-/// Asserts that a URL signed with a key that is not a presigning key of the server is refused, the
-/// full key's included: a URL is never signed with the rights of the full key.
+/// Asserts that a PUT URL signed with the full key is refused (`READ_URL_ONLY`): a URL of a key
+/// that reads is good for a GET or HEAD only, so a URL is never a write with the rights of the
+/// full key.
 #[test]
-fn the_full_key_cannot_sign_a_url() {
+fn the_full_key_cannot_sign_a_put_url() {
     let (config, _) = config(vec![key("pack-presign")], NOW);
     let full = AccessKey::new("FULL", "full-secret");
     let url = presign_put(&full, &request("cas/b/x", 300)).unwrap();
     let refused = verify_query(&config, &parts_of("PUT", &url));
-    assert_eq!(refused.unwrap_err(), UNKNOWN_KEY);
+    assert_eq!(refused.unwrap_err(), READ_URL_ONLY);
 }
 
 /// Asserts the names a key or a prefix may be, and the prefixes a key may have.
