@@ -58,9 +58,12 @@ impl Rig {
     }
 
     /// The settings of a reconciler `holder` for a hot tier of `budget` bytes: the water
-    /// marks at 0.8 and 0.7, a lease of 30 seconds and a retention of an hour.
+    /// marks at 0.8 and 0.7, a lease of 30 seconds and a retention of an hour. The rig's clock
+    /// is also the monotonic clock of the lease, so that setting it moves the lease on.
     pub fn reconciler_config(&self, holder: &str, budget: u64) -> ReconcilerConfig {
-        ReconcilerConfig::new(holder, budget, self.clock.clone())
+        let mut config = ReconcilerConfig::new(holder, budget, self.clock.clone());
+        config.mono = self.clock.clone();
+        config
     }
 
     /// A reconciler with these settings over the rig's backends.
@@ -253,7 +256,7 @@ impl Backend for Retagged {
 
     /// The read of the inner backend, with the tag prefixed as [`Backend::head`] prefixes it:
     /// the trait says the tag of a marked read is the one `head` gives for that object.
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -261,7 +264,7 @@ impl Backend for Retagged {
         if self.ranged_only && range.is_none() {
             return Err(Error::Other(format!("a whole read of {key} is refused")));
         }
-        let (bytes, reservation, tag) = self.inner.get_marked(key, range).await?;
+        let (bytes, reservation, tag) = self.inner.get_tagged(key, range).await?;
         Ok((bytes, reservation, format!("cold-etag:{tag}")))
     }
 

@@ -32,6 +32,7 @@ mod reconciler_faults;
 mod reconciler_races;
 mod reconciler_reservations;
 mod reconciler_takeover;
+mod registration_gc;
 mod reservation;
 mod reservation_reads;
 #[cfg(feature = "s3")]
