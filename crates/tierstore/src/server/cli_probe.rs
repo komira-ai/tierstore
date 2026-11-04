@@ -1,14 +1,14 @@
 //! The start-up self-test of the tiers of a storage node (see [`self_test`]): the probe key of a
 //! start and the run of the checks over the hot tier and the cold tier.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::{
     Backend, Clock, MonotonicClock, SelfTestOptions, SweepBudget, SystemClock, self_test,
     settle_conditional_delete, sweep_probes,
 };
 
-use super::cli::{Cli, Error};
+use super::cli::{Cli, Error, SkippedCheck};
 
 /// The id of a start for the probe keys of its self-test: the proxy id (with any character a
 /// key cannot carry replaced by `_`), the time of the start and the process id, so that two
@@ -49,12 +49,9 @@ pub(super) async fn probe_tiers(
     wait: Duration,
 ) -> Result<(), Error> {
     let mut skip = Vec::new();
-    for skipped in &cli.skip_backend_check {
-        eprintln!(
-            "tierstore: skipping the {} check of the tiers: {}",
-            skipped.check, skipped.reason
-        );
-        skip.push(skipped.check);
+    for SkippedCheck { check, reason } in &cli.skip_backend_check {
+        tracing::info!("tierstore: skipping the {check} check of the tiers: {reason}");
+        skip.push(*check);
     }
     let run_id = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
     let hot_name = format!("hot tier {}", cli.hot);
@@ -70,12 +67,12 @@ pub(super) async fn probe_tiers(
             pause: SELF_TEST_FIRST_PAUSE,
             max_pause: SELF_TEST_MAX_PAUSE,
         };
-        let note = |line: String| eprintln!("tierstore: {line}");
-        eprintln!("tierstore: testing the {name}");
-        let started = Instant::now();
+        let note = |line: String| tracing::info!("tierstore: {line}");
+        tracing::info!("tierstore: testing the {name}");
+        let started = crate::clock::MonotonicClock::new();
         let outcome = self_test(backend, &options, &note).await;
-        let took = started.elapsed().as_millis();
-        eprintln!("tierstore: tested the {name} in {took} ms");
+        let took = started.now();
+        tracing::info!("tierstore: tested the {name} in {took} ms");
         outcome?;
         settle_conditional_delete(backend, &options, &note).await;
         // Bounded in keys and in time (no delete starts after it), on a clock the machine's clock does not move.

@@ -3,6 +3,12 @@
 //! (src/bin/gh-fake.rs), which answers from files named after what it is asked, so each
 //! reply, 404, failure and spawn error of the wrappers is taken.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 

@@ -58,6 +58,10 @@ impl Cache {
     }
 
     /// The least recently used key. Only asked for while there is a slot.
+    #[expect(
+        clippy::expect_used,
+        reason = "only asked for while the cache holds a slot"
+    )]
     fn oldest(&self) -> CacheKey {
         let first = self.order.values().next();
         first.cloned().expect("the cache holds a slot")

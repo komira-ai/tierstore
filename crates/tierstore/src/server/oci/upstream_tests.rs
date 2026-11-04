@@ -145,23 +145,23 @@ fn an_address_that_cannot_work_is_refused() {
     };
     assert_eq!(
         refuse(settings("not an address ")),
-        "oci.upstream: url: it is not an address"
+        "params.upstream: url: it is not an address"
     );
     assert_eq!(
         refuse(settings("ftp://registry.example")),
-        "oci.upstream: url: it must start with https:// or http://"
+        "params.upstream: url: it must start with https:// or http://"
     );
     let with_secret = refuse(settings("https://alice:hunter2@registry.example"));
     assert_eq!(
         with_secret,
-        "oci.upstream: url: it must not hold a user name or password: use username and password_file"
+        "params.upstream: url: it must not hold a user name or password: use username and password_file"
     );
-    let path = "oci.upstream: url: it must be a host and a port, with no path or query";
+    let path = "params.upstream: url: it must be a host and a port, with no path or query";
     assert_eq!(refuse(settings("https://registry.example/v2/")), path);
     assert_eq!(refuse(settings("https://registry.example?x=1")), path);
     assert_eq!(
         refuse(logged_in("http://registry.example")),
-        "oci.upstream: url: a password is sent only over https, or to a loopback address"
+        "params.upstream: url: a password is sent only over https, or to a loopback address"
     );
 }
 
@@ -192,12 +192,12 @@ fn a_ca_file_that_holds_no_certificate_is_refused() {
     };
     assert_eq!(
         refuse("nothing here"),
-        "oci.upstream: ca_file: it holds no certificate"
+        "params.upstream: ca_file: it holds no certificate"
     );
     let bad = "-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
-    assert!(refuse(bad).starts_with("oci.upstream: ca_file: not PEM certificates: "));
+    assert!(refuse(bad).starts_with("params.upstream: ca_file: not PEM certificates: "));
     let junk = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
-    assert!(refuse(junk).starts_with("oci.upstream: ca_file: "));
+    assert!(refuse(junk).starts_with("params.upstream: ca_file: "));
 }
 
 /// Asserts a 200 is a reply with the length it announced and its body, that the request had the

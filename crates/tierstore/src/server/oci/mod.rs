@@ -1,11 +1,11 @@
-//! An OCI distribution front over the objects of a [`Backend`], served by `--oci-listen` over
-//! HTTPS, or over plain HTTP, so that a container engine (podman through `certs.d`, or any client
-//! of the distribution API) pulls an image by digest from the store, and, when the front asks for
-//! keys, pushes one to it.
+//! An OCI distribution front over the objects of a [`Backend`], served by an `oci` interface
+//! over HTTPS, or over plain HTTP, so that a container engine (podman through `certs.d`, or any
+//! client of the distribution API) pulls an image by digest from the store, and, when the front
+//! asks for keys, pushes one to it.
 //!
 //! # Two modes
 //!
-//! With `--oci-tls-cert` and `--oci-tls-key` the front serves HTTPS ([`OciMode::Https`]) at any
+//! With the `tls_cert_file` and `tls_key_file` params the front serves HTTPS ([`OciMode::Https`]) at any
 //! address. With neither it serves plain HTTP/1.1 ([`OciMode::Http`]) at any address. A node's
 //! own container engine pulls from the front of its own store over loopback (127/8 or `::1`),
 //! and that traffic never leaves the host; on any other address a plain connection can be read
@@ -34,7 +34,7 @@
 //! # Keys, and one namespace
 //!
 //! Manifests are blobs. An object is at `<prefix>blobs/sha256/<64 lowercase hex digits>`
-//! (`--oci-prefix`, `oci/` by default), the same for a manifest, an index, a layer and a config.
+//! (the `prefix` param, `oci/` by default), the same for a manifest, an index, a layer and a config.
 //! The `<name>` in a URL is checked against the grammar of the distribution specification (a bad
 //! one is 400 `NAME_INVALID`) and then ignored: there is one content-addressed namespace, so any
 //! name reads any digest. A key is built only from a validated digest, so nothing outside the
@@ -61,7 +61,7 @@
 //! by their digest, can be read; the images in it are meant to be public (a public registry's
 //! images are the first thing seeded), and which hosts may connect is the network's to decide.
 //!
-//! With `--oci-require-auth` ([`OciFront::with_auth`]) every request, `GET /v2/` and a path that
+//! With `params.require_auth` ([`OciFront::with_auth`]) every request, `GET /v2/` and a path that
 //! is none of the routes included, must carry `Authorization: Basic` with an access key id of the
 //! server and its secret, or is answered 401 with `WWW-Authenticate: Basic realm="tierstore"`.
 //! Read-only keys and scoped keys that read under the front's prefix may pull (`GET`, `HEAD`); the
@@ -74,7 +74,7 @@
 //!
 //! # Pull-through
 //!
-//! A front made with [`OciFront::with_upstream`] (the `[oci.upstream]` table of the file) does not
+//! A front made with [`OciFront::with_upstream`] (the `params.upstream` of an `oci` interface) does not
 //! answer 404 for a manifest or a blob its store lacks: it pulls the object from the upstream
 //! registry, stores it, and answers from the store. The process is then an outbound client of that
 //! registry, which `upstream` is the code of. The rules of what is pulled, checked and stored, and

@@ -1,4 +1,4 @@
-//! `[oci.upstream]` at the start: what the client is made of, what refuses to start and with
+//! `params.upstream` at the start: what the client is made of, what refuses to start and with
 //! which exit status, and that the front the start binds pulls through.
 
 use std::fs::Permissions;
@@ -9,35 +9,26 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use clap::Parser;
 use sha2::{Digest as _, Sha256};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
 
 use super::{Cli, Error, build, exit_status};
 use crate::server::cli_serve::bind_oci;
-use crate::server::config_oci::UpstreamTable;
+use crate::server::config_interface::UpstreamTable;
 use crate::server::config_units::Dur;
 use crate::server::oci::fake_upstream::{Fake, Registry};
 use crate::server::oci::test_pki::ca;
 use crate::{Backend, MemoryBackend};
 
-/// The flags of a start with a plain OCI front on loopback and no upstream.
+/// The settings of a start with a plain OCI front on loopback and no upstream.
 fn cli(dir: &Path) -> Cli {
-    let key = file(dir, "key", "AKID\nsecret\n", 0o600);
-    let args = [
-        "tierstore",
-        "--listen=127.0.0.1:0",
-        "--proxy-id=p1",
-        "--hot=memory",
-        "--cold=memory",
-        "--hot-bytes=1000",
-        "--bucket=tier-bucket",
-        "--oci-listen=127.0.0.1:0",
-    ];
-    let mut args: Vec<String> = args.map(str::to_owned).to_vec();
-    args.push(format!("--access-key-file={}", key.display()));
-    Cli::try_parse_from(args).expect("flags")
+    let key = file(dir, "key", "AKID\nsecret-0123456789\n", 0o600);
+    let text = format!(
+        "[[interface]]\ntype = \"s3\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n[[interface]]\ntype = \"oci\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n[server]\nproxy_id = \"p1\"\nbucket = \"tier-bucket\"\naccess_key_file = \"{}\"\n\n[hot_store]\nkind = \"memory\"\nbudget = 1000\n\n[cold_store]\nkind = \"memory\"\n",
+        key.display()
+    );
+    Cli::from_config_text(&text).expect("a file")
 }
 
 /// A file with `text` and `mode` in `dir`.
@@ -73,7 +64,7 @@ fn refused(cli: &Cli) -> (u8, String) {
     (exit_status(&error), error.to_string())
 }
 
-/// Asserts a start with no `[oci.upstream]` makes no client, and that one with the table makes
+/// Asserts a start with no `params.upstream` makes no client, and that one with the table makes
 /// one, with a login, a CA file and both limits given.
 #[test]
 fn the_start_makes_a_client_only_for_an_upstream_table() {
@@ -143,7 +134,7 @@ fn an_upstream_that_cannot_be_used_is_refused_with_the_status_of_its_kind() {
             with_login(https, open.clone()),
             2,
             format!(
-                "oci.upstream.password_file {}: others can read it; make it mode 0600",
+                "params.upstream.password_file {}: others can read it; make it mode 0600",
                 open.display()
             ),
         ),
@@ -151,14 +142,14 @@ fn an_upstream_that_cannot_be_used_is_refused_with_the_status_of_its_kind() {
             with_login(https, empty.clone()),
             2,
             format!(
-                "oci.upstream.password_file {}: it is empty",
+                "params.upstream.password_file {}: it is empty",
                 empty.display()
             ),
         ),
         (
             with_login(https, missing.clone()),
             2,
-            format!("oci.upstream.password_file {}: ", missing.display()),
+            format!("params.upstream.password_file {}: ", missing.display()),
         ),
         (
             UpstreamTable {
@@ -166,7 +157,7 @@ fn an_upstream_that_cannot_be_used_is_refused_with_the_status_of_its_kind() {
                 ..table(https)
             },
             2,
-            "oci.upstream: ca_file: it holds no certificate".to_owned(),
+            "params.upstream: ca_file: it holds no certificate".to_owned(),
         ),
         (
             UpstreamTable {
@@ -174,12 +165,12 @@ fn an_upstream_that_cannot_be_used_is_refused_with_the_status_of_its_kind() {
                 ..table(https)
             },
             1,
-            "oci.upstream.ca_file ".to_owned(),
+            "params.upstream.ca_file ".to_owned(),
         ),
         (
             table("https://registry.example/v2/"),
             2,
-            "oci.upstream: url: it must be a host and a port, with no path or query".to_owned(),
+            "params.upstream: url: it must be a host and a port, with no path or query".to_owned(),
         ),
         (
             UpstreamTable {
@@ -187,7 +178,7 @@ fn an_upstream_that_cannot_be_used_is_refused_with_the_status_of_its_kind() {
                 ..table(https)
             },
             2,
-            "oci.upstream: url: it is not an address".to_owned(),
+            "params.upstream: url: it is not an address".to_owned(),
         ),
     ];
     for (upstream, status, message) in cases {

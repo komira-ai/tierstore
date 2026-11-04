@@ -1,4 +1,4 @@
-//! The two flags of the removed read grant: still accepted, and ignored with a warning.
+//! The two keys of the removed read grant: still accepted, and ignored with a warning.
 
 use std::fs::Permissions;
 use std::io::{self, Write};
@@ -6,13 +6,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 use tracing::Level;
 use tracing::subscriber::with_default;
 
 use super::{Cli, build};
 use crate::server::build_info::stderr_log::LineLog;
+use crate::server::config_testing::MINIMAL;
 
 /// A writer whose bytes the test reads back: the operator's stderr.
 #[derive(Clone, Default)]
@@ -37,41 +37,33 @@ impl Write for Stderr {
     }
 }
 
-/// The flags of a start with the key file `key`, then `more`.
-fn flags(key: &str, more: &[&str]) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "tierstore",
-        "--listen=127.0.0.1:0",
-        "--proxy-id=p1",
-        "--hot=memory",
-        "--cold=memory",
-        "--hot-bytes=1000",
-        "--bucket=tier-bucket",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    args.push(format!("--access-key-file={key}"));
-    args.extend(more.iter().map(|flag| (*flag).to_owned()));
-    args
+/// The file of a start with the key file `key`, and `more` after `presign_max_expires` in
+/// `[server]`.
+fn text(key: &str, more: &str) -> String {
+    let given = format!("access_key_file = \"{key}\"\n{more}");
+    assert!(MINIMAL.contains("access_key_file = \"key\""));
+    MINIMAL.replacen("access_key_file = \"key\"", &given, 1)
 }
 
-/// Asserts that the two flags of the removed read grant, which the release before had, are still
-/// accepted so that an old unit starts: with a grant key file that does not exist (it is not read)
-/// and a lifetime, the flags parse, the settings are built, and the operator's stderr gets one
-/// warning for each flag, word for word, naming the flag and its key and saying to use a
-/// presigned GET URL; with neither flag it gets nothing; and a lifetime that is not a duration is
+/// Asserts that the two keys of the removed read grant, which the release before had, are still
+/// accepted so that an old file starts: with a grant key file that does not exist (it is not read)
+/// and a lifetime, the keys are read, the settings are built, and the operator's stderr gets one
+/// warning for each flag, word for word, naming the key and saying to use a
+/// presigned GET URL; with neither key it gets nothing; and a lifetime that is not a duration is
 /// still refused.
 #[test]
-fn the_flags_of_the_removed_read_grant_start_a_server_and_each_warns_once() {
+fn the_keys_of_the_removed_read_grant_start_a_server_and_each_warns_once() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-flags");
     let key = dir.path().join("key");
-    std::fs::write(&key, "AKID\nsecret\n").unwrap();
+    std::fs::write(&key, "AKID\nsecret-0123456789abcdef\n").unwrap();
     std::fs::set_permissions(&key, Permissions::from_mode(0o600)).unwrap();
     let key = key.to_str().unwrap();
     let missing = dir.path().join("no-such-grant.key");
-    let grant = format!("--grant-key-file={}", missing.display());
-    let old = flags(key, &[&grant, "--grant-max-lifetime=5m"]);
-    let cli = Cli::try_parse_from(old).expect("the old flags parse");
+    let grant = format!(
+        "grant_key_files = [\"{}\"]\ngrant_max_lifetime = \"5m\"",
+        missing.display()
+    );
+    let cli = Cli::from_config_text(&text(key, &grant)).expect("the old keys are read");
     assert_eq!(cli.grant_key_file, vec![missing]);
     assert_eq!(cli.grant_max_lifetime, Some(Duration::from_secs(300)));
     let stderr = Stderr::default();
@@ -79,17 +71,17 @@ fn the_flags_of_the_removed_read_grant_start_a_server_and_each_warns_once() {
     assert!(built.is_ok(), "an old unit still starts");
     let warn = "is ignored: the read grant was removed; use a presigned GET URL";
     let wanted = format!(
-        "tierstore: --grant-key-file (server.grant_key_files) {warn}\n\
-         tierstore: --grant-max-lifetime (server.grant_max_lifetime) {warn}\n"
+        "tierstore: server.grant_key_files {warn}\n\
+         tierstore: server.grant_max_lifetime {warn}\n"
     );
     assert_eq!(stderr.text(), wanted);
 
     let quiet = Stderr::default();
-    let plain = Cli::try_parse_from(flags(key, &[])).unwrap();
+    let plain = Cli::from_config_text(&text(key, "")).unwrap();
     let built = with_default(LineLog::new(quiet.clone(), Level::INFO), || build(&plain));
     assert!(built.is_ok());
     assert_eq!(quiet.text(), "");
 
-    let soon = flags(key, &["--grant-max-lifetime=soon"]);
-    assert!(Cli::try_parse_from(soon).is_err());
+    let soon = text(key, "grant_max_lifetime = \"soon\"");
+    assert!(Cli::from_config_text(&soon).is_err());
 }

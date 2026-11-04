@@ -5,6 +5,16 @@
 //! may do is held over TLS. A client with the full key pushes an image, in chunks and in one call,
 //! and pulls it back.
 
+#![allow(
+    clippy::disallowed_macros,
+    reason = "an integration test says on standard error what it checked, or why it skipped (AGENTS.md T12)"
+)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 mod auth;
 mod binary;
 mod cache_node;

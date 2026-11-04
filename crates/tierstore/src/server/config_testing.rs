@@ -1,10 +1,5 @@
-//! Fixtures of the tests of the configuration file, which `config_tests.rs`,
-//! `config_print_tests.rs` and `launch_tests.rs` share.
-
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-
-use tierstore_testkit::dir::TestDir;
+//! Fixtures of the tests of the configuration file, which `config_tests.rs` and
+//! `launch_tests.rs` share.
 
 use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
 
@@ -15,10 +10,17 @@ pub(crate) const DEFAULTS: PerRun = PerRun {
 };
 
 /// A storage node's file: two S3 tiers, every key of the key table given, a value that is not
-/// the flag's default wherever the key has a default.
+/// the default wherever the key has a default.
 pub(crate) const GOLDEN: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9300"] }
+
+[[interface]]
+type   = "oci"
+params = { addresses = ["192.0.2.10:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "images/", max_connections = 16, connection_lifetime = "30m" }
+
 [server]
-listen                = "192.0.2.10:9300"
 proxy_id              = "tierstore-1"
 bucket                = "tierstore"
 region                = "eu-west-1"
@@ -36,6 +38,7 @@ put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
 body_idle_timeout     = "20s"
+min_secret_bytes      = 24
 s3_request_timeout    = "2m"
 backend_check_wait    = "90s"
 
@@ -68,82 +71,15 @@ endpoint         = "http://127.0.0.1:30900"
 region           = "us-west-2"
 credentials_file = "/etc/tierstore/cold.credentials"
 skip_checks      = ["multipart-conditional=store-ignores-if-none-match-on-completion"]
-
-[oci]
-listen              = "192.0.2.10:5000"
-tls_cert_file       = "/etc/tierstore/oci.crt"
-tls_key_file        = "/etc/tierstore/oci.key"
-prefix              = "images/"
-max_connections     = 16
-connection_lifetime = "30m"
-require_auth        = true
-stage_read          = 65536
 "#;
-
-/// The flags that say what `GOLDEN` says.
-pub(crate) fn golden_flags() -> Vec<&'static str> {
-    vec![
-        "tierstore",
-        "--listen=192.0.2.10:9300",
-        "--proxy-id=tierstore-1",
-        "--bucket=tierstore",
-        "--region=eu-west-1",
-        "--max-request-bytes=134217728",
-        "--access-key-file=/etc/tierstore/access.key",
-        "--tls-cert=/etc/tierstore/s3.crt",
-        "--tls-key=/etc/tierstore/s3.key",
-        "--read-only-key-file=/etc/tierstore/daemons.key",
-        "--read-only-key-file=/etc/tierstore/other.key",
-        "--presign-key-file=/etc/tierstore/pack-presign.key",
-        "--gc-key-file=/etc/tierstore/pack-gc.key",
-        "--scoped-key-file=/etc/tierstore/scoped.key",
-        "--presign-max-expires=10m",
-        "--max-concurrent-puts=8",
-        "--put-permit-wait=25s",
-        "--put-min-bytes-per-sec=2048",
-        "--put-rate-grace=45s",
-        "--body-idle-timeout=20s",
-        "--s3-request-timeout=2m",
-        "--backend-check-wait=90s",
-        "--hot=s3:tierstore-hot",
-        "--hot-endpoint=http://192.0.2.10:9200",
-        "--hot-region=us-east-1",
-        "--hot-credentials-file=/etc/tierstore/hot.credentials",
-        "--hot-bytes=536870912000",
-        "--high-water=85",
-        "--low-water=60",
-        "--critical=97",
-        "--copy-parallel=8",
-        "--lease-ttl=40s",
-        "--reconcile-interval=4s",
-        "--lock-file=/var/lib/tierstore/instance.lock",
-        "--usage-stale-after=3m",
-        "--journal-linger=50ms",
-        "--journal-retention=12h",
-        "--heartbeat=5s",
-        "--departure=45s",
-        "--deadline-margin=8s",
-        "--registration-retention=20m",
-        "--cold=s3:tierstore-cold",
-        "--cold-endpoint=http://127.0.0.1:30900",
-        "--cold-region=us-west-2",
-        "--cold-credentials-file=/etc/tierstore/cold.credentials",
-        "--skip-backend-check=multipart-conditional=store-ignores-if-none-match-on-completion",
-        "--oci-listen=192.0.2.10:5000",
-        "--oci-tls-cert=/etc/tierstore/oci.crt",
-        "--oci-tls-key=/etc/tierstore/oci.key",
-        "--oci-prefix=images/",
-        "--oci-max-connections=16",
-        "--oci-connection-lifetime=30m",
-        "--oci-require-auth",
-        "--oci-stage-read=65536",
-    ]
-}
 
 /// The least a file can say: two tiers that are in memory.
 pub(crate) const MINIMAL: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:0"] }
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "p1"
 bucket          = "tier-bucket"
 access_key_file = "key"
@@ -156,22 +92,8 @@ budget = 1000
 kind = "memory"
 "#;
 
-/// The flags that say what `MINIMAL` says.
-pub(crate) const MINIMAL_FLAGS: [&str; 8] = [
-    "tierstore",
-    "--listen=127.0.0.1:0",
-    "--proxy-id=p1",
-    "--bucket=tier-bucket",
-    "--access-key-file=key",
-    "--hot=memory",
-    "--hot-bytes=1000",
-    "--cold=memory",
-];
-
-/// Writes `text` as a key file in `dir` that only its owner can read.
-pub(crate) fn write_private(dir: &TestDir, name: &str, text: &str) -> std::path::PathBuf {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).unwrap();
-    std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
-    path
+/// An `[[interface]]` entry of type `oci` that listens at `listen`, with `more` after the address
+/// (each param after a comma: `, prefix = "cas/"`), as text to append to a file.
+pub(crate) fn oci_interface(listen: &str, more: &str) -> String {
+    format!("\n[[interface]]\ntype = \"oci\"\nparams = {{ addresses = [\"{listen}\"]{more} }}\n")
 }

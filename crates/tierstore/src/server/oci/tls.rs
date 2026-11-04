@@ -17,7 +17,7 @@ use x509_parser::extensions::GeneralName;
 /// Why the OCI front cannot start, or why the certificate and key of the S3 front are refused.
 #[derive(Debug, thiserror::Error)]
 pub enum OciError {
-    /// `--oci-prefix` is not usable.
+    /// The `prefix` param of an `oci` interface is not usable.
     #[error("--oci-prefix {prefix:?}: {why}")]
     Prefix {
         /// The prefix given.
@@ -25,7 +25,7 @@ pub enum OciError {
         /// What is wrong with it.
         why: String,
     },
-    /// Only one of `--oci-tls-cert` and `--oci-tls-key` is given.
+    /// Only one of the `tls_cert_file` and `tls_key_file` params is given.
     #[error("{0}")]
     Missing(String),
     /// A certificate or key file cannot be read.
@@ -57,8 +57,8 @@ pub enum OciError {
         /// What is wrong with them.
         why: String,
     },
-    /// `[oci.upstream]` cannot be used: what is wrong with it.
-    #[error("oci.upstream: {0}")]
+    /// `params.upstream` cannot be used: what is wrong with it.
+    #[error("params.upstream: {0}")]
     Upstream(String),
     /// The address cannot be bound.
     #[error("binding {addr}: {source}")]
@@ -112,8 +112,8 @@ pub fn plain_warning(listen: SocketAddr) -> Option<String> {
         None
     } else {
         Some(format!(
-            "tierstore: warning: --oci-listen {listen} serves plain HTTP on a non-loopback \
-             address; give --oci-tls-cert and --oci-tls-key to serve HTTPS"
+            "tierstore: warning: the oci interface at {listen} serves plain HTTP on a non-loopback \
+             address; give params tls_cert_file and tls_key_file to serve HTTPS"
         ))
     }
 }
@@ -171,7 +171,7 @@ pub fn acceptor_for(
     })
 }
 
-/// The acceptor of the S3 front, which `--tls-cert` and `--tls-key` name, for a front that listens
+/// The acceptor of the S3 front, which `server.tls_cert_file` and `server.tls_key_file` name, for a front that listens
 /// at `listen`: as [`acceptor_for`], except that the leaf may name the front by a DNS name. A leaf
 /// with at least one DNS subjectAltName is accepted whatever IP addresses it names; one with
 /// none must carry an IP subjectAltName for each address, as [`acceptor_for`] asks.

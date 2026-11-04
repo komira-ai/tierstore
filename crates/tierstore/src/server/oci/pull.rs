@@ -1,6 +1,6 @@
 //! Pull-through: a miss is filled from the upstream registry, stored, and then served.
 //!
-//! With `[oci.upstream]` (see `upstream`) the front no longer answers 404 for an object its store
+//! With `params.upstream` (see `upstream`) the front no longer answers 404 for an object its store
 //! lacks. The first request for it is paused while the front asks the upstream for it, stores it
 //! as a push does, and then answers from the store as it would for any object it has; every later
 //! request is answered from the store and never reaches the upstream.

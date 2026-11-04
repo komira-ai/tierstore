@@ -7,6 +7,13 @@
 //! conformance test; on another system (a Mac's hook runs one instance under launchd) this
 //! program only says so and fails.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_macros,
+    reason = "a stand-in program of a test: what it prints is what the test reads, and a failure of it is the failure the test reports"
+)]
+
 #[cfg(target_os = "linux")]
 use std::io::{self, Write};
 use std::process::ExitCode;

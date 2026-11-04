@@ -8,7 +8,7 @@
 
 <h2 id="shape">The shape</h2>
 <ul>
-  <li><strong>Hot tier</strong>: where new objects are written first. It is meant to hold a bounded number of bytes (<code>--hot-bytes</code>).</li>
+  <li><strong>Hot tier</strong>: where new objects are written first. It is meant to hold a bounded number of bytes (<code>hot_store.budget</code>).</li>
   <li><strong>Cold tier</strong>: where every object ends up. It is large.</li>
   <li><strong>The proxy</strong> serves the one bucket and keeps no database. Its only state is a set of journal, checkpoint and lease objects in the hot tier. Any number of proxies, each with an id of its own, can run over the same two tiers.</li>
   <li><strong>The reconciler</strong> runs inside each process but works only while it holds a lease object in the hot tier, so one runs at a time.</li>
@@ -20,14 +20,14 @@
 <p>That is a write-back arrangement: the cold copy trails the acknowledgement. When the hot tier is full, the proxy writes new objects straight to the cold tier instead, which is write-through for those objects.</p>
 
 <h2 id="eviction">Freeing the hot tier</h2>
-<p>When the hot tier passes its high-water mark (80 percent of <code>--hot-bytes</code> by default), the reconciler evicts the oldest objects from it, only those its checkpoint says the cold tier already holds, until usage is down to the low-water mark (70 percent by default). Above the critical mark (95 percent by default) a read of a cold object is not copied back. The reconciler never lists the data prefixes: what to copy comes from the journals, so neither tier is scanned.</p>
+<p>When the hot tier passes its high-water mark (80 percent of <code>hot_store.budget</code> by default), the reconciler evicts the oldest objects from it, only those its checkpoint says the cold tier already holds, until usage is down to the low-water mark (70 percent by default). Above the critical mark (95 percent by default) a read of a cold object is not copied back. The reconciler never lists the data prefixes: what to copy comes from the journals, so neither tier is scanned.</p>
 
 <h2 id="reads">Reads: hot, then cold, and copy back</h2>
 <p>A get reads the hot tier, then the cold tier, and copies what it found in the cold tier back into the hot tier. A head does not copy. A listing merges both tiers. A ranged read that misses the hot tier reads the whole object from the cold tier, because the hot tier takes whole objects, and cuts the range from it.</p>
 <p>The copy-back means the hot tier also works as a read cache of what was used lately. On a storage node that is the only caching.</p>
 
 <h2 id="cache">The per-node read-through cache is a build node</h2>
-<p>The crate has a <code>CachedStore</code>, a read cache in RAM for any backend. The <code>tierstore</code> binary does not use it. Its per-node cache is on disk: a configuration file (from v0.0.40) with <code>[local_cache]</code> and <code>[cold_store]</code> and no <code>[hot_store]</code> runs the binary as a read cache in front of one upstream. It serves GET and HEAD of the keys that a <code>[[policy]]</code> with <code>cache = true</code> holds from a directory of raw files, fills it from the upstream on a miss, evicts the least recently used objects under a byte budget, refuses every write, and does not scrub. It has no flag form. See <a href="/docs/configuration/#a-file-for-a-build-node">configuration</a>.</p>
+<p>The crate has a <code>CachedStore</code>, a read cache in RAM for any backend. The <code>tierstore</code> binary does not use it. Its per-node cache is on disk: a configuration file with <code>[local_cache]</code> and <code>[cold_store]</code> and no <code>[hot_store]</code> runs the binary as a read cache in front of one upstream. It serves GET and HEAD of the keys that a <code>[[policy]]</code> with <code>cache = true</code> holds from a directory of raw files, fills it from the upstream on a miss, evicts the least recently used objects under a byte budget, refuses every write, and does not scrub. It has no flag form. See <a href="/docs/configuration/#a-file-for-a-build-node">configuration</a>.</p>
 
 <h2 id="guards">What keeps it honest</h2>
 <ul>

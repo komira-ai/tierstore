@@ -136,14 +136,14 @@ roxmltree = { workspace = true, optional = true }
 # the client side of the pull-through from an upstream registry.
 rustls = { workspace = true, optional = true }
 # The system's trusted CA certificates, which the pull-through from an https upstream registry
-# trusts beside the `oci.upstream.ca_file` (`server`).
+# trusts beside the `params.upstream.ca_file` (`server`).
 rustls-native-certs = { workspace = true, optional = true }
 # The journal objects, the checkpoints and the usage object are JSON.
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# The `--config` file of the `tierstore` binary and the file `--print-config` writes (`server`).
+# The `--config` file of the `tierstore` binary (`server`).
 toml = { workspace = true, optional = true }
 # `fs` and `io-util` for the directory backend, `rt` to journal a copy-back in the background,
 # `sync` for the batches of the journal, `time` for the linger and the injected delays.

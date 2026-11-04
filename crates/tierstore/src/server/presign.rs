@@ -352,6 +352,11 @@ impl PresignKey {
         &self.key.id
     }
 
+    /// The secret of the key.
+    pub(super) fn secret(&self) -> &str {
+        &self.key.secret
+    }
+
     /// What the key is limited to.
     #[must_use]
     pub fn grant(&self) -> &Grant {

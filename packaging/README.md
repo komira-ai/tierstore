@@ -8,8 +8,10 @@ no package and no container image. These files, for Linux hosts, go beside the b
 
 | file | what |
 |---|---|
-| `tierstore.service` | the unit: the binary as `tierstore`, an account that is not root, a two-tier S3 setup, a stop that waits for the drain, and the hardening of the other example units |
+| `tierstore.service` | the unit: the binary as `tierstore` run with the file, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
+| `tierstore.toml` | the configuration file of `tierstore.service`: one `s3` interface, the keys, and an S3 bucket for each tier |
+| `tierstore-9301.toml`, `tierstore-9302.toml` | the configuration file of each slot of the hand-over: the same settings, with the slot's own port, proxy id and `slot` |
 | `tierstore@.service` | the slot unit template of the update hook's hand-over: `tierstore@9301.service` and `tierstore@9302.service`, each running the binary its slot link points at, on its own port and proxy id ([Moving to the update hook](#moving-to-the-update-hook)) |
 | `updater.d/tierstore.toml` | the declaration the host updater reads: the hook, its account and rights, the two slot units, the state directory and the boot entry |
 | `tierstore-update.conf` | the sysusers.d entry of the hook's own account, `tierstore-update`, with `tierstore` listed in its group |
@@ -18,8 +20,8 @@ no package and no container image. These files, for Linux hosts, go beside the b
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads these files and
-checks that the command line parses as the binary parses it, that no secret is on it (every key
-and credential flag names a file), that the stop timeout covers the drain, and that nothing
+checks that the command line parses as the binary parses it and names a file that the binary's loader takes, that no secret is on it or in the file (every key
+and credential names a file), that the stop timeout covers the drain, and that nothing
 starts the unit by itself. It also checks the files of the update hook: that the hook's own
 parser takes the declaration and that it names the ports, units, state directory and account the
 slot unit is built on, that the hook holds `CAP_NET_ADMIN` hook-wide, that the slot unit parses
@@ -57,6 +59,7 @@ updated by the host updater through `tierstore update-hook`
 install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 systemd-sysusers /etc/sysusers.d/tierstore.conf
 install -d -m 0750 -o root -g tierstore /etc/tierstore
+install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
 install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 systemctl daemon-reload
 ```
@@ -65,19 +68,19 @@ Then write the four key files, each owned by `tierstore` with mode 0600 or 0400 
 refuses a key file that its group or others can read):
 
 - `/etc/tierstore/access.key`: the full key, the one clients that write sign their requests to
-  `tierstore` with (`--access-key-file`). It may do everything the server serves: put, get, head,
+  `tierstore` with (`server.access_key_file`). It may do everything the server serves: put, get, head,
   list, delete, and the calls of a multipart upload;
-- `/etc/tierstore/daemons.key`: a read-only key (`--read-only-key-file`), for the daemons that
+- `/etc/tierstore/daemons.key`: a read-only key (`server.read_only_key_files`), for the daemons that
   read blobs and must not write or delete them. A request signed with it may get and head an
   object, list the bucket (objects, and the open multipart uploads) and head the bucket; a put, a
   delete, CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
-  Give the flag once for each read-only key, to give each reader a key of its own. The access key
+  List one file for each read-only key, to give each reader a key of its own. The access key
   ids of all the keys of one server must differ: a request names its key by its id, so a start
   with two keys that have one id is refused with exit status 2;
 - `/etc/tierstore/hot.credentials` and `/etc/tierstore/cold.credentials`: the keys `tierstore`
-  signs its requests to the two stores with (`--hot-credentials-file`,
-  `--cold-credentials-file`). The two tiers may be two stores, and have a key each.
+  signs its requests to the two stores with (`hot_store.credentials_file`,
+  `cold_store.credentials_file`). The two tiers may be two stores, and have a key each.
 
 Every one of these files holds its key in one of two forms, and the process tells them apart by
 the first byte of the file that is not white space: `{` is JSON, anything else is two lines.
@@ -115,6 +118,7 @@ port 9300 to the one that serves. These files go on the host, each owned by root
 |---|---|---|
 | `updater.d/tierstore.toml` | `/etc/updater.d/tierstore.toml` (the directory owned by root, no group or other write bit) | 0644 |
 | `tierstore@.service` | `/etc/systemd/system/tierstore@.service` | 0644 |
+| `tierstore-9301.toml`, `tierstore-9302.toml` | `/etc/tierstore/tierstore-9301.toml`, `/etc/tierstore/tierstore-9302.toml` (owner root, group `tierstore`) | 0640 |
 | `tierstore-update.conf` | `/etc/sysusers.d/tierstore-update.conf` | 0644 |
 | `tmpfiles.d/tierstore-update.conf` | `/etc/tmpfiles.d/tierstore-update.conf` | 0644 |
 | `polkit/50-tierstore-update.rules` | `/etc/polkit-1/rules.d/50-tierstore-update.rules` | 0644 |
@@ -129,11 +133,13 @@ slot unit runs that binary, and does not start while its slot has no link. Nothi
 unit: at boot the updater runs `tierstore update-hook restore` (the declaration's
 `boot = "restore"`), which applies the redirect and starts the one slot the record names.
 
-The slot unit takes the flags of `tierstore.service`, with the listen addresses, the proxy id,
-`--slot` and `--lock-file` fixed by the slot, a 70 s `--drain-lb-wait` and a `TimeoutStopSec=` of
-1100. Copy the edits of the host's `tierstore.service` and its drop-ins (the bucket, the tiers,
-the endpoints, `--hot-bytes`, `ReadWritePaths=`) into `tierstore@.service`, or into a drop-in of
-the template (`/etc/systemd/system/tierstore@.service.d/`), which applies to both slots.
+The slot unit takes the file of its slot, `/etc/tierstore/tierstore-%i.toml`, and a 70 s
+`--drain-lb-wait`, with a `TimeoutStopSec=` of 1100. The two files, `tierstore-9301.toml` and
+`tierstore-9302.toml`, differ in the port of the `s3` interface (the wildcard of both families),
+`server.proxy_id` and `server.slot`, and in nothing else; `hot_store.lock_file` is the same
+file in both. Copy the edits of the host's `tierstore.toml` (the bucket, the tiers, the endpoints,
+`hot_store.budget`) into both, and those of `ReadWritePaths=` into `tierstore@.service`, or into a
+drop-in of the template (`/etc/systemd/system/tierstore@.service.d/`), which applies to both slots.
 
 The declaration has no `min_version` yet: the first release that carries the hook sets it.
 
@@ -150,8 +156,9 @@ moves only once the new slot answers.
    for them. Check that `/etc/group` lists `tierstore` in the group `tierstore-update`, and that
    `/var/lib/updater/hooks/tierstore` and its `slots` are mode 0750, owner and group
    `tierstore-update`: the hook refuses any other.
-2. **The declaration, the slot unit and the polkit rule.** Place the three files as the table
-   above says, copy the host's edits into the slot unit, and run `systemctl daemon-reload`.
+2. **The declaration, the slot unit, the slot files and the polkit rule.** Place the files as the
+   table above says, copy the host's edits into the slot unit and the two slot files, and run
+   `systemctl daemon-reload`.
    polkit reads its rules directory by itself.
 3. **The binary as slot 9301, and the record.** Place the verified release's `tierstore` in a
    directory of its own that root owns and nobody else can write (the updater keeps releases under
@@ -240,7 +247,7 @@ A client that holds a presigned URL writes one object with a plain `PUT` of the 
 checks SigV4 query-string authentication as the AWS documentation has it (`X-Amz-Algorithm`,
 `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`, `X-Amz-Signature`;
 payload `UNSIGNED-PAYLOAD`; `host` signed), so any SDK presigner or `tierstore::server::presign_put`
-makes one. Only a presigning key (`--presign-key-file`, once per key, mode 0600) can sign a URL; the
+makes one. Only a presigning key (`server.presign_key_files`, once per key, mode 0600) can sign a URL; the
 full and read-only keys cannot, and a presigning key is refused for any request signed in the
 header. The file holds the key and its ceiling, all required (a file without one is refused at
 start):
@@ -252,9 +259,9 @@ start):
 
 A URL is good for one `PUT` of a key that starts with the prefix (after the path is decoded: no
 `..`, no `.` segment, no control character, never `_journal/`, `_tiering/` or `_entries/`), with an
-`X-Amz-Expires` of at most the smaller of `max_expires_secs` and `--presign-max-expires` (default
+`X-Amz-Expires` of at most the smaller of `max_expires_secs` and `server.presign_max_expires` (default
 15m), and a body of at most `max_object_bytes` (5 GiB at most, the S3 single-PUT limit; each key file chooses its own), checked on
-`Content-Length` and on the bytes received (and held to `--max-request-bytes`, 256 MiB by default, too: a key with a larger
+`Content-Length` and on the bytes received (and held to `server.max_request_bytes`, 256 MiB by default, too: a key with a larger
 cap needs that raised, and the smaller of the two applies; the body is streamed to the tier and
 never held whole). It is refused from `X-Amz-Date` plus `X-Amz-Expires` on, with no grace. The
 object appears only after a complete body, a second `PUT` of the key is `412`, and no multipart
@@ -266,11 +273,9 @@ variable, and the unit sets none.
 
 ## GC keys
 
-A GC key (`--gc-key-file`, once per key; JSON of `access_key_id`, `secret_access_key` and `prefix`,
-mode 0600, not a symbolic link, owned by the user the server runs as) is one instance of a scoped key
-(below): the server reads it as a scoped key with a list, a delete and an abort right on
-`[prefix]` (rights a scoped key file cannot give), so the table that follows is the table of scoped keys for those rights. It is for
-the process that collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
+A GC key (`server.gc_key_files`, once per key; JSON of `access_key_id`, `secret_access_key` and `prefix`,
+mode 0600, not a symbolic link, owned by the user the server runs as) is for the process that
+collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
 with it is refused) and may do these, only for a key that starts with its prefix (which ends in `/`)
 and is longer than it:
 
@@ -293,8 +298,8 @@ create-only; it is the only way an object leaves the prefix that presigned PUTs 
 
 ## Scoped keys
 
-A scoped key (`--scoped-key-file`, once per key; mode 0600, not a symbolic link, owned by the user
-the server runs as) reads, lists, creates and deletes under prefixes that its file lists, and does nothing
+A scoped key (`server.scoped_key_files`, once per key; mode 0600, not a symbolic link, owned by the user
+the server runs as) reads, creates and deletes under prefixes that its file lists, and does nothing
 else. It is for a process that must touch some prefixes of the bucket and not the rest, and that
 neither replaces nor deletes what it did not write. It signs in the header, and
 signs presigned GET URLs for objects under its read prefixes (see Presigned GET URLs; a URL of it for
@@ -314,7 +319,7 @@ a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one
 start. A list may be empty, but a key whose lists are all empty is refused, since it could do
 nothing. The lists may overlap: a prefix in `read_prefixes` and in `write_prefixes` is one the key
 reads and creates under. A key file that is refused (bad JSON, a missing or unknown field, a bad
-prefix, a mode other than 0600) exits 1 at start with a message that names the flag and the file and
+prefix, a mode other than 0600) exits 1 at start with a message that names the key and the file and
 never the secret, as a bad GC key file does. The access key id differs from those of all other
 keys: two keys with one id are refused with exit status 2 (the command line does this; a
 `ServerConfig` built in code, as a library user does, is not checked for distinct ids by the server).
@@ -385,7 +390,7 @@ The URL carries `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expi
 reads any object a header-signed request of that key reads, and a URL of a scoped key reads an
 object under one of its `read_prefixes` and is `403` for any other. A GC key and a presigning key
 sign no read URL (a URL naming either is refused). A URL is good from its `X-Amz-Date` for at most
-`--presign-max-expires` (default 15 minutes), counted on the server's clock, so a URL made by a
+`server.presign_max_expires` (default 15 minutes), counted on the server's clock, so a URL made by a
 service whose clock runs ahead of the server's must be made shorter than the cap by at least that
 skew. It is a bearer credential: whoever holds the URL can replay it until it expires, and on
 plain HTTP anyone on the path can read it, so use TLS where that matters.
@@ -410,67 +415,28 @@ PUT URLs); any SDK presigner makes the same URL.
 
 ## The configuration file
 
-`tierstore --config <path>` reads one TOML file in place of the flags that describe the data path
-(the listen address, the tiers, the key files, the limits and the reconciler's settings). A server
-started from a file runs the code of one started from the same settings as flags: the file is read
-into the settings the flags make, and the defaults are the flags' defaults. The unit above keeps
-its flags; a file is for a setup that would rather keep its settings in one place.
+`tierstore --config <path>` reads one TOML file, the only place the data path is described: the
+interfaces it serves (`[[interface]]`), the tiers, the key files, the limits and the reconciler's
+settings. The process takes no flag for any of it: the flags of earlier builds that did are
+refused at the start, with exit status 2 and the key that replaces each. The unit above gives the
+file and the two flags of the drain, and nothing else. `crates/tierstore/docs/configuration.md`
+lists every key with its default and what the loader refuses; this section has what only the
+packaging needs. The example for the unit is `tierstore.toml`, placed as
+`/etc/tierstore/tierstore.toml`; it lists one `s3` interface, the full and one read-only key, and
+an S3 bucket for each tier. `crates/tierstore/tests/packaging.rs` loads it with the binary's own
+loader.
 
-A file holds no secret, and a message about it repeats no value except a `[[policy]]` prefix (a prefix is
-a key name, not a secret): a syntax refusal names the line, the column and the key; any other refusal names
-the key. A number above 9223372036854775807 (the largest TOML integer) cannot go in a file; as a flag it
-is accepted, and `--print-config` refuses it with exit 2. A `--print-config` that cannot write its output
-(a closed pipe, a full disk) exits 1; a refusal of the file or the flags exits 2.
+A file holds no secret, and a message about it repeats no value except a `[[policy]]` prefix (a
+prefix is a key name, not a secret) and the address of an interface that is listed twice: a syntax
+refusal names the line, the column and the key; any other refusal names the key. A number above
+9223372036854775807 (the largest TOML integer) cannot go in a file.
 
-A file has one of three shapes, told apart by its tables: a storage node (`[server]`, `[hot_store]`
-and `[cold_store]`, as the flags are, and an optional `[oci]` (the read-only registry front) and
-`[[policy]]`), a build node (`[server]`, `[local_cache]` and `[cold_store]` with no
-`[hot_store]`, an optional `[oci]`, and `[[policy]]`), which is a read cache and has no flag form (see
-"A build node" below), and, on main, a storage node with a cache in front of its own proxy (all
-three tables, no flag form either; see the end of "A build node"). All three take the same `[oci]`
-table. A file for a storage node:
-
-```toml
-[server]
-listen              = "192.0.2.10:9000"
-proxy_id            = "tierstore-1"
-bucket              = "tierstore"
-region              = "us-east-1"
-max_request_bytes   = 268435456
-access_key_file     = "/etc/tierstore/access.key"
-read_only_key_files = ["/etc/tierstore/daemons.key"]
-presign_key_files   = ["/etc/tierstore/pack-presign.key"]
-gc_key_files        = ["/etc/tierstore/pack-gc.key"]
-
-[hot_store]
-kind              = "s3"
-bucket            = "tierstore-hot"
-endpoint          = "http://s3-hot.example:9000"
-region            = "us-east-1"
-credentials_file  = "/etc/tierstore/hot.credentials"
-budget            = "1TiB"
-high_water        = 80
-low_water         = 70
-critical          = 95
-copy_parallel     = 16
-lease_ttl         = "30s"
-reconcile_interval = "5s"
-usage_stale_after = "2m"
-journal_linger    = "20ms"
-journal_retention = "24h"
-
-[cold_store]
-kind             = "s3"
-bucket           = "tierstore-cold"
-endpoint         = "http://s3-cold.example:9000"
-credentials_file = "/etc/tierstore/cold.credentials"
-skip_checks      = []
-```
-
-A key that is left out has the default of its flag (`tierstore --help` lists them); `listen`,
-`proxy_id`, `bucket` and `access_key_file` of `[server]`, `kind` of each tier and `budget` of
-`[hot_store]` are needed. Durations are a whole number and `ms`, `s`, `m` or `h`, as in the flags.
-The water marks are percents, as in the flags (1 to 100).
+A file has one of three shapes, told apart by its tables: a storage node (`[server]`,
+`[hot_store]` and `[cold_store]`, `[[interface]]` entries (an `s3` one is needed, an `oci` one,
+the registry front, is optional) and `[[policy]]`), a build node (`[server]`,
+`[local_cache]` and `[cold_store]` with no `[hot_store]`, the same interfaces, and `[[policy]]`),
+which is a read cache (see "A build node" below), and a storage node with a cache in front of its
+own proxy (all three tables; see the end of "A build node").
 
 ### A build node
 
@@ -531,12 +497,15 @@ nothing is kept. A body that is cut leaves nothing at the upstream or in the cac
 `/metricz` has `tierstore_cache_writes_through_total` (puts the upstream took),
 `tierstore_cache_write_exists_total` (puts answered 412) and
 `tierstore_cache_write_keep_skipped_total{reason}` with the reasons `budget` (also a body of no
-declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (on main, not in v0.0.41: the cache does not hold the lock of its directory, so it copies nothing);
+declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (the cache does not hold the lock of its directory, so it copies nothing);
 `tierstore_cache_keeps_expired_total` counts the puts answered before their copy was done.
 
 ```toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9400"] }
+
 [server]
-listen          = "127.0.0.1:9400"
 proxy_id        = "tierstore-cache-1"
 bucket          = "tierstore"
 access_key_file = "/etc/tierstore-cache/access.key"
@@ -677,7 +646,7 @@ put 403.
 of a read-only key, in practice, or of a key that writes with `write_through`), and without `skip_checks` and the keys of the reconciler. `[server]`
 is as for a storage node, without `backend_check_wait`. A `[[policy]]` with `cache = true` is needed.
 The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are a storage node with
-a cache in front of its own proxy (on main, not in v0.0.41): the S3 and OCI fronts read through the
+a cache in front of its own proxy: the S3 and OCI fronts read through the
 cache, the cache reads from and writes to the proxy, `write_through` is true (left out or given;
 `false` is refused), and the start does not run the upstream's self-test (the upstream is the
 proxy, whose tiers the start tests), so the table's `write_through` row below does not apply to it.
@@ -704,24 +673,24 @@ slot taken), `fill_failures_total{reason}` (`hash_mismatch`, `upstream_error`,
 `short_body`, `local_io`, `changed`, `aborted`), `evictions_total{reason}` (`budget`, `floor`), `pinned_skips_total`, `scrubbed_objects_total`, `scrubbed_bytes_total`, `scrub_mismatches_total`, `scrub_errors_total`,
 `discarded_at_start_total`, and the gauges `bytes`, `objects`, `fs_free_bytes` and `staging_files`.
 A storage node has the proxy's counters instead, the same path on a node with the OCI front (a
-storage node, or a build node with an `[oci]` table) also has the OCI counters (see Counters), and
+storage node, or a build node with an `oci` interface) also has the OCI counters (see Counters), and
 a build node with the front shows the OCI block and then the cache block; a process with none of
 the three has one line that says so; the proxy's series are in "Metrics" in
 `crates/tierstore/README.md`.
 
 ### The registry front
 
-The registry front (see The OCI read front) is the optional `[oci]` table of a storage node's file
-or of a build node's, left out for a server with no front. The two shapes have the same keys and
-the same rules. On a storage node the front reads through the proxy; on a build node it reads
-through the local cache, so a blob or a manifest under a `[[policy]]` prefix with `cache = true`
-is served from the disk when it is there and filled from the upstream when it is not, as an S3 GET
-is. The blobs the front reads are the keys under `<prefix>blobs/sha256/` (`oci/` by default), so the
-file is refused at load, naming `oci.prefix`, unless the longest `[[policy]]` prefix that covers
-them has `cache = true`: a front whose blobs are kept nowhere would send every pull to the upstream,
-and there is no use of that to keep (a registry that passes through is a storage node's front). A
-blob over `local_cache.whole_fill_limit` is passed through, still checked against its digest, and
-not kept.
+The registry front (see The OCI read front) is an `[[interface]]` of type `oci` in a storage
+node's file or in a build node's, left out for a server with no front. The two shapes have the
+same params and the same rules. On a storage node the front reads through the proxy; on a build
+node it reads through the local cache, so a blob or a manifest under a `[[policy]]` prefix with
+`cache = true` is served from the disk when it is there and filled from the upstream when it is
+not, as an S3 GET is. The blobs the front reads are the keys under `<prefix>blobs/sha256/`
+(`oci/` by default), so the file is refused at load, naming `params.prefix` of the `oci`
+interface, unless the longest `[[policy]]` prefix that covers them has `cache = true`: a front whose
+blobs are kept nowhere would send every pull to the upstream, and there is no use of that to keep
+(a registry that passes through is a storage node's front). A blob over
+`local_cache.whole_fill_limit` is passed through, still checked against its digest, and not kept.
 
 A kept object is not checked again on a hit, so a blob that rotted on the cache's disk is detected
 by the front when it is read whole (the response ends in an error or a cut connection, and
@@ -733,201 +702,59 @@ evicts it, and every pull of it fails until then. To refill it, remove its data 
 read finds the file gone, drops the entry and fills the object again from the upstream.
 
 The front is another listener of the same process: it starts with the node, drains with it,
-and its counters are on the `/metricz` of the S3 listener beside the cache's. A key of the table
-that is left out has the default of its flag:
+and its counters are on the `/metricz` of the S3 listener beside the cache's. The entry, with
+the params at their defaults spelled out:
 
 ```toml
-[oci]
-listen              = "192.0.2.10:5000"
-tls_cert_file       = "/etc/tierstore/oci.crt"
-tls_key_file        = "/etc/tierstore/oci.key"
-prefix              = "oci/"
-max_connections     = 64
-connection_lifetime = "1h"
-stage_read          = 1048576
+[[interface]]
+type   = "oci"
+params = { addresses = ["192.0.2.10:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/", max_connections = 64, connection_lifetime = "1h", stage_read = 1048576 }
 ```
 
-The table has the rules of the `--oci-*` flags: `listen` is needed in it, and the other keys are
-refused without it; `tls_cert_file` and `tls_key_file` go together; `max_connections` is at least
-one; `connection_lifetime` is a duration as elsewhere; `stage_read` is a count of bytes, at least one. The certificate and the key are named by
-path, as every key file is, so the names end in `_file`.
+`tls_cert_file` and `tls_key_file` go together; `max_connections` is at least one;
+`connection_lifetime` is a duration as elsewhere; `stage_read` is a count of bytes, at least one
+(on main, not in v0.0.41, which refuses the param). The certificate and the key are named by path,
+as every key file is, so the names end in `_file`. Several `oci` entries make one front on every
+address of theirs, and must agree on these params.
 
-### Which key each flag has
+### Moving from flags
 
-Every flag that describes the data path has the key or keys below, and no other has one. A flag
-that takes a list (`--read-only-key-file`, given once for each key) is a list in the file. A tier
-flag is a `kind` and the key its kind needs: `--hot dir:<path>` is `kind = "dir"` and `path`,
-`--hot s3:<bucket>` is `kind = "s3"` and `bucket`. The keys of the reconciler, the journal and the
-lease are in `[hot_store]`, since only a process with a hot tier has them. The crate's tests walk
-the flags of the binary against this table, so a flag added without a key fails them.
+A unit that gave the flags of earlier builds is moved by writing the file and changing
+`ExecStart=` to `--config <path>` and the two flags of the drain (`crates/tierstore/docs/configuration.md`,
+"Moving from flags", says where each setting went). A start that still gives one of the removed
+flags exits with status 2 and a message that names the key that replaces it, so the unit stops
+instead of running with settings it did not read.
 
-| flag | key | what |
-|---|---|---|
-| `--listen` | `server.listen` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses, served by one server (see Filling in the flags) |
-| `--proxy-id` | `server.proxy_id` | names the journal and the lease of this process |
-| `--slot` | `server.slot` | on main, not in v0.0.41: the private port of a hand-over slot (1 to 65535), the `slot` label of `tierstore_build_info`; the slot unit passes `--slot %i` |
-| `--hot` | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | the hot tier: `kind` is `memory`, `dir` (with `path`) or `s3` (with `bucket`, `endpoint` and `credentials_file`); in a flag, `memory`, `dir:<path>` or `s3:<bucket>` |
-| `--cold` | `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | the cold tier, in the same three kinds |
-| `--hot-endpoint` | `hot_store.endpoint` | `http://host[:port]` of an `s3` hot tier |
-| `--hot-region` | `hot_store.region` | the signing region of an `s3` hot tier |
-| `--hot-credentials-file` | `hot_store.credentials_file` | the key file of an `s3` hot tier |
-| `--cold-endpoint` | `cold_store.endpoint` | `http://host[:port]` of an `s3` cold tier |
-| `--cold-region` | `cold_store.region` | the signing region of an `s3` cold tier |
-| `--cold-credentials-file` | `cold_store.credentials_file` | the key file of an `s3` cold tier |
-| `--s3-request-timeout` | `server.s3_request_timeout` | the limit on a request to an `s3` tier (both tiers) |
-| `--hot-bytes` | `hot_store.budget` | the bytes the hot tier is meant to hold: a number, or a string such as `"500GiB"` |
-| `--high-water` | `hot_store.high_water` | percent of the budget above which eviction begins |
-| `--low-water` | `hot_store.low_water` | percent of the budget eviction goes down to |
-| `--critical` | `hot_store.critical` | percent of the budget above which a cold read is not copied back |
-| `--bucket` | `server.bucket` | the name of the bucket served |
-| `--region` | `server.region` | the region of a request's signature |
-| `--access-key-file` | `server.access_key_file` | the full key file |
-| `--tls-cert` | `server.tls_cert_file` | on main, not in v0.0.41: the certificate chain (PEM) that makes the S3 front serve HTTPS; with `server.tls_key_file`, or neither |
-| `--tls-key` | `server.tls_key_file` | on main, not in v0.0.41: the private key (PEM) of the S3 front's certificate |
-| `--read-only-key-file` | `server.read_only_key_files` | a list of read-only key files |
-| `--presign-key-file` | `server.presign_key_files` | a list of presigning key files |
-| `--gc-key-file` | `server.gc_key_files` | a list of GC key files |
-| `--scoped-key-file` | `server.scoped_key_files` | a list of scoped key files |
-| `--presign-max-expires` | `server.presign_max_expires` | the longest expiry of any presigned URL, a PUT or a GET (see Presigned GET URLs) |
-| `--grant-key-file` | `server.grant_key_files` | deprecated and ignored (the read grant was removed): accepted so that an old unit or file starts; the server logs a warning and does not read the files |
-| `--grant-max-lifetime` | `server.grant_max_lifetime` | deprecated and ignored, like `--grant-key-file` |
-| `--journal-linger` | `hot_store.journal_linger` | how long a batch of journal entries waits for more |
-| `--journal-retention` | `hot_store.journal_retention` | how long an applied journal object is kept |
-| `--copy-parallel` | `hot_store.copy_parallel` | the most objects the reconciler copies at once |
-| `--lease-ttl` | `hot_store.lease_ttl` | how long the reconciler's lease lasts without a renewal |
-| `--reconcile-interval` | `hot_store.reconcile_interval` | how often the reconciler works |
-| `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
-| `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
-| `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
-| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; only the puts on journal entries (active format) read `Proxy::is_live`, the journal path does not, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
-| `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; only the puts on journal entries (active format) check it, and only the heartbeat uses `Bounded` (`10s`; at most a quarter of `--departure`) |
-| `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`0s`, which removes none; otherwise at least `--departure`. Set a time only once no proxy of a release without the heartbeat runs) |
-| `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
-| `--max-concurrent-puts` | `server.max_concurrent_puts` | the most put bodies and parts taken at once |
-| `--put-permit-wait` | `server.put_permit_wait` | how long a put that arrives with all of those taken waits for one to end (15s by default; 0 answers 503 at once). No byte of its body is read while it waits. If none ends in that time it is answered 503 `SlowDown` with `Retry-After: 1`. A waiter holds a connection and no permit or body memory, is not bounded except by the connections, counts as in flight in a drain (so a drain may take up to this much longer, never past `--drain-deadline`), and does not notice its client leaving until its body is first read |
-| `--put-min-bytes-per-sec` | `server.put_min_bytes_per_sec` | the least average rate of a body (0 turns it off) |
-| `--put-rate-grace` | `server.put_rate_grace` | the time waiting for the client before that rate is held |
-| `--body-idle-timeout` | `server.body_idle_timeout` | how long a body or an answer may go without a byte |
-| `--skip-backend-check` | `cold_store.skip_checks` | a list of `CHECK=REASON` texts: the start-up check that is left out, with its reason (only `multipart-conditional`; it runs on the cold tier) |
-| `--backend-check-wait` | `server.backend_check_wait` | how long the start-up self-test asks again of a tier that does not answer |
-| `--oci-listen` | `oci.listen` | where the registry front listens; the front is off without the `[oci]` table. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses |
-| `--oci-tls-cert` | `oci.tls_cert_file` | the certificate chain (PEM) of the front; with `oci.tls_key_file`, or neither |
-| `--oci-tls-key` | `oci.tls_key_file` | the private key (PEM) of the front |
-| `--oci-prefix` | `oci.prefix` | the key prefix the front reads, ending in `/` (`oci/` if left out) |
-| `--oci-max-connections` | `oci.max_connections` | the most connections the front has open at once (64 if left out; at least 1) |
-| `--oci-connection-lifetime` | `oci.connection_lifetime` | the longest a connection of the front lives (`1h` if left out) |
-| `--oci-stage-read` | `oci.stage_read` | the most bytes of a stored chunk the end of a push reads in one call (1048576 if left out; at least 1). On main, not in v0.0.41, which refuses the key |
-| `--oci-require-auth` | `oci.require_auth` | the front asks clients for an access key of the server (HTTP Basic); anonymous if left out |
+## Filling in the file
 
-These stay flags, since they describe one run and not the data path: `--config`,
-`--print-config`, `--check-config`, `--capabilities`, `--drain-lb-wait` and `--drain-deadline`. A
-start that gives `--config` and any other flag is refused with status 2 and a message that names
-the flags (`--drain-lb-wait`, `--drain-deadline` and `--check-config` may go with it). A refusal
-that the checks of the start make (water marks out of order, a key file others can read) names the
-keys of the file where the flag-mode message names the flags.
+`tierstore.toml` is the file to edit, and the unit does not change:
 
-`tierstore --capabilities` (on main, not in v0.0.41) prints what this build can do, one
-capability to a line, and exits with status 0; a build with none prints nothing. It takes no other
-flag and needs none of those a start requires: with any other argument it prints nothing on stdout,
-says on stderr `tierstore: --capabilities takes no other flag, got <argument>`, and exits with
-status 2. A host updater reads it from a release before it hands over to it. `tierstore --version`
-prints `tierstore <version>+<commit>`, the end of the start line is ` commit=<commit>`, and
-`/metricz` has `tierstore_build_info{version="<version>",commit="<commit>"} 1`. The commit is the
-one the binary was built from, twelve hex digits: git's, or `unknown` for a build without a
-`.git` (no environment variable supplies it). The version is the one in
-`crates/tierstore/Cargo.toml`; a release build sets it first with
-`cargo xtask release set-version --version X.Y.Z`.
-
-`tierstore --config <path> --check-config` loads the file as a start does (the same loader and the
-same refusals, the build-node checks and `write_through` included) and reads the key files it
-names; it binds nothing, makes no directory and calls no store or network. It prints nothing and
-exits 0 if the file would start; if the file is refused it prints the message a start prints and
-exits 2. `--check-config` without `--config` is a usage error (status 2). It does not reach the
-tiers, so a tier that is down, or a key that the store would refuse, is found by a start (its
-self-test) and not by the check. It does not look at the disk either: the start's refusal of a
-`budget` over the size of the file system less `free_floor` (exit status 2), the cache directory
-and the credentials file of a tier are checked by a start only. For a storage node with an `[oci]`
-table the check does validate the OCI front as a start does (the prefix, the connection lifetime,
-and the TLS certificate and key files, which it reads and parses; the S3 front's `--tls-cert` and `--tls-key` are checked the same way, for either shape), without binding the address
-and without the warning that a start gives for plain HTTP off loopback. A TLS file that is not
-there or cannot be used is exit status 2 under `--check-config`, where a start exits 1.
-
-### What the loader refuses
-
-Each of these exits with status 2 and names the file and the key:
-
-- a key or a table the format does not have (the file is a closed set), and a value of the wrong
-  type;
-- a key that holds a secret: keys and credentials are paths of files, whose names end in `_file`
-  or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the
-  like are refused wherever they are;
-- `[local_cache]` along with `[hot_store]`, and a file with neither shape's tables (it needs both
-  `[hot_store]` and `[cold_store]`, or `[local_cache]` and `[cold_store]`); the refusals of a build
-  node are with its table above;
-- a key of a tier that its `kind` does not take (`path` for a `memory` tier, `endpoint` for a `dir`
-  tier), a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` or
-  `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys
-  are `[hot_store]`'s; `skip_checks` is `[cold_store]`'s, since the check it skips runs there);
-- a water mark outside 1 to 100, and a budget, a count or a limit of zero;
-- an `[oci]` table without `listen`, with a key but no `listen` (the message names that key), with
-  only one of `tls_cert_file` and `tls_key_file`, or with `max_connections = 0`;
-- a `[[policy]]` prefix that is listed twice, that lies inside another listed prefix (or holds
-  one), that does not end in `/`, or that is under `_journal/`, `_tiering/` or `_entries/`, which tierstore
-  keeps for itself.
-
-`[[policy]]` has a `prefix` (empty for all the rest) and `cache`. With `[local_cache]` `cache = true`
-keeps the keys under the prefix; without it a policy is read and checked and has no effect,
-and `cache = true` is refused, since a node without `[local_cache]` keeps no cache. The empty prefix may be listed
-along with others (it is the rest); two non-empty prefixes may not nest.
-
-### Moving from flags to a file
-
-`tierstore --print-config` with the flags of a unit (without `--config`) prints the file that is
-equivalent to them on stdout and exits 0 without starting anything; it prints the key files by
-path, never what is in them, and the file it prints is loaded back before it is printed, so it
-loads. Take the flags out of `ExecStart=`:
-
-```sh
-/usr/libexec/tierstore/tierstore --print-config --listen 192.0.2.10:9000 ... > /etc/tierstore/tierstore.toml
-```
-
-and switch the unit by changing `ExecStart=` to
-
-```
-ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
-```
-
-The flags and the file are both supported, and no release is planned to remove the flags, so a
-unit may stay as it is and move when it is convenient. The shipped `tierstore.service` keeps its flags, and
-`crates/tierstore/tests/packaging.rs` parses them as the binary parses them. `--print-config` does
-not convert anything else in a unit (a drop-in, the firewall rules).
-
-## Filling in the flags
-
-The unit's `ExecStart=` is a complete command line. The flags to edit:
-
-| flag | what |
+| key | what |
 |---|---|
-| `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. On main, not in v0.0.41: give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server and one drain serve them all (connections to the S3 front are not capped; only `--oci-max-connections` caps those of the registry front), an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
-| `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
-| `--bucket` | the name of the one bucket clients see |
-| `--tls-cert`, `--tls-key` | on main, not in v0.0.41. Both or neither (one without the other is refused, exit 2). The certificate chain (leaf first) and the private key, PEM, that make every socket of the S3 front serve HTTPS; without them it serves plain HTTP, and off loopback the start prints one warning line on stderr naming the addresses. The leaf may name the front by a DNS name (any), by an IP address, or both; with no DNS name it needs an IP name for each `--listen` address. A key file that any user can read, a key that is not the certificate's and a leaf that is expired are refused. The files are read once. Tier endpoints are still `http://`, so a build node cannot use an HTTPS front as its upstream |
-| `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
-| `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
-| `--gc-key-file` | a GC key (given once for each key); see GC keys |
-| `--scoped-key-file` | a scoped key (given once for each key); see Scoped keys |
-| `--hot`, `--cold` | the tiers: `s3:<bucket>` for a bucket of an S3-compatible store (also `dir:<path>` and `memory`; a `dir:` path must also be writable under `ProtectSystem=strict`, so add it to `ReadWritePaths=`) |
-| `--hot-endpoint`, `--cold-endpoint` | where the tier's store is, `http://host[:port]` (TLS is not built yet); `--hot-region` and `--cold-region` set the signing region of a tier, `us-east-1` if not given |
-| `--hot-bytes` | the bytes the hot tier is meant to hold; the water marks are shares of it (`--high-water`, `--low-water`, `--critical`) |
-| `--drain-lb-wait`, `--drain-deadline` | the drain on SIGTERM: how long `/readyz` says 503 while the server goes on accepting and serving (the settle), and how long it then waits for requests in flight and for the connections it closes (see "Stopping it") |
-| `--usage-stale-after` | how old the usage that the reconciler publishes may be (2m by default, longer than `--lease-ttl`) before `/usagez` says 503 with the reason (200 and the age while fresh). Puts ignore a usage older than 30 s, so a stopped reconciler means a hot tier that is never taken to be full; puts are not refused. A load balancer probes `/readyz`, which does not look at the usage (one stopped reconciler would otherwise take every node out); alerting probes `/usagez` |
-| `--oci-listen`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-prefix` | the read-only registry front, off unless `--oci-listen` is given; see The OCI read front |
+| `[[interface]]` of type `s3` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on: `params.addresses`, or `params.port` for the IPv4 wildcard. Further entries or addresses are served by the same server |
+| `server.proxy_id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
+| `server.bucket` | the name of the one bucket clients see |
+| `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
+| `server.tls_cert_file`, `server.tls_key_file` | the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
+| `server.min_secret_bytes` | the fewest bytes of the secret of any access key (default 16); a key file with a shorter secret refuses the start |
+| `server.presign_key_files`, `server.presign_max_expires` | presigning keys with their ceilings, and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
+| `server.gc_key_files` | GC keys; see GC keys |
+| `server.scoped_key_files` | scoped keys; see Scoped keys |
+| `server.grant_key_files`, `server.grant_max_lifetime` | deprecated and ignored (the read grant was removed; use a presigned GET URL, see Presigned GET URLs): accepted so that an old file starts; the server logs a warning and does not read the files |
+| `hot_store.kind`, `cold_store.kind` | the tiers: `s3` for a bucket of an S3-compatible store (also `dir` with a `path`, which must also be writable under `ProtectSystem=strict`, so add it to `ReadWritePaths=`, and `memory`) |
+| `hot_store.endpoint`, `cold_store.endpoint` | where the tier's store is, `http://host[:port]` (TLS is not built yet); `hot_store.region` and `cold_store.region` set the signing region of a tier, `us-east-1` if not given |
+| `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
+| `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
+| an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
 
-`tierstore --help` lists them all, with their defaults.
+The unit's two flags are the drain on SIGTERM: `--drain-lb-wait` is how long `/readyz` says 503
+while the server goes on accepting and serving (the settle), and `--drain-deadline` is how long it
+then waits for requests in flight and for the connections it closes. `tierstore --help` lists the
+flags of a run.
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP (on main, not in v0.0.41, over HTTPS when it is given `--tls-cert` and `--tls-key`), and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -935,10 +762,10 @@ what "tested" means below.
 
 | setting | value | why |
 |---|---|---|
-| endpoint | `http://<host>:<port>` of `--listen` (on main, not in v0.0.41, `https://` when the front has `--tls-cert` and `--tls-key`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
+| endpoint | `http://<host>:<port>` of the `s3` interface (`https://` when the file has `server.tls_cert_file` and `server.tls_key_file`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
 | addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
-| bucket | the `--bucket` name | there is one; other names are not served |
-| region | tierstore's own `--region` (not `--hot-region` or `--cold-region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
+| bucket | the `server.bucket` name | there is one; other names are not served |
+| region | tierstore's own `server.region` (not `hot_store.region` or `cold_store.region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
 | request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
@@ -1023,32 +850,32 @@ there is no other way to list such a key. Tab, line feed, U+007F and the C1 cont
 
 ## The OCI read front
 
-With `--oci-listen`, the process also serves the objects of the store as a read-only container
-registry, over HTTPS or over plain HTTP (see Two modes), so that podman (and the
-other clients of the OCI distribution API) pulls an image by digest from the same hot and cold tiers the S3 front writes to. It reads through the
-proxy in the process: no S3 credential and no hop through the S3 listener. It is off unless
-`--oci-listen` is given, and then nothing else about the process changes.
+With an `oci` interface (`[[interface]]` with `type = "oci"` in the file), the process also
+serves the objects of the store as a read-only container registry, over HTTPS or over plain HTTP
+(see Two modes), so that podman (and the other clients of the OCI distribution API) pulls an image
+by digest from the same hot and cold tiers the S3 front writes to. It reads through the proxy in
+the process: no S3 credential and no hop through the S3 listener. It is off unless the file has
+such an interface, and then nothing else about the process changes.
 
-With `--config` the front is the `[oci]` table of the file and the `--oci-*` flags are refused
-(see The configuration file, which lists the key of each flag below). `--print-config` writes
-the front's flags as that table. A build node's file takes the same `[oci]` table (it has no flags):
-the front then reads through the node's local cache, not a proxy (see The registry front).
+The front is the `oci` interfaces of the file (see The configuration file). A build node's file
+takes the same interfaces: the front then reads through the node's local cache, not a proxy (see
+The registry front). The params of the entry:
 
-| flag | what |
+| param | what |
 |---|---|
-| `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. On main, not in v0.0.41: give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
-| `--oci-tls-cert PATH`, `--oci-tls-key PATH` | both or neither (one without the other is refused at start, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for `--oci-listen` (for each of them, when it is given more than once; any IP subjectAltName, if the address is `0.0.0.0` or `::`); a certificate without one, one that is expired or not yet valid, a key file any user can read (the "other" mode bits; a group may), or an unreadable file, is refused at start. The files are read once: a new certificate takes a restart, so renew it before it expires |
-| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
-| `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
-| `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
-| `--oci-stage-read BYTES` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1 |
-| `--oci-require-auth` | every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Refused at start (exit 2) on plain HTTP off loopback |
+| `port`, `addresses` | where the registry front listens (one of the two): `port` is the IPv4 wildcard, `addresses` a list. With `params.tls_cert_file` and `params.tls_key_file` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line on stderr for each such address, and a certificate and key are advised |
+| `params.tls_cert_file`, `params.tls_key_file` | both or neither (one without the other is refused, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for each address of the interface; the certificate and key are read once at start, so a new certificate takes a restart |
+| `params.prefix` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
+| `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
+| `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
+| `params.stage_read` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Without it the front is read-only. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
 minute) to send the head of a request, which is also how long an idle connection may wait for its
-next request. A connection holds one of the `--oci-max-connections` slots from accept to close and
+next request. A connection holds one of the `params.max_connections` slots from accept to close and
 there is no limit per client address, so a host that opens that many connections and says nothing
-can keep the others waiting: the host's firewall rules are the control for that. A client that takes no byte of an answer for `--body-idle-timeout`
+can keep the others waiting: the host's firewall rules are the control for that. A client that takes no byte of an answer for `server.body_idle_timeout`
 is cut. A connection that reaches its lifetime finishes the answer it is sending for at most
 `--drain-deadline`, and is cut then. On the drain the front goes on serving through `--drain-lb-wait`, takes no new connection,
 lets the requests being answered finish, and closes what is left at `--drain-deadline`. The start
@@ -1058,13 +885,13 @@ so the handshake time does not apply; the other limits are the same.
 
 ### Two modes
 
-- **HTTPS**: with `--oci-tls-cert` and `--oci-tls-key`, at any address.
+- **HTTPS**: with `params.tls_cert_file` and `params.tls_key_file`, at any address.
 - **Plain HTTP**: with neither, at any address. A node's own container engine can pull from the
   front of its own tierstore over loopback, so the pull is a connection from the host to itself and
   the traffic never leaves it. A connection to any address beyond loopback can be read and changed on
   its way: the process starts, prints one warning line on stderr, and a certificate and key are
   advised there. Loopback is reachable by every local process, and by containers that
-  share the host's network namespace; the front is anonymous in either mode.
+  share the host's network namespace; the front is anonymous in either mode unless `params.require_auth` is true.
 
 A container engine that pulls over plain HTTP has to be told it may:
 
@@ -1126,7 +953,7 @@ which the specification allows, and falls back to splitting it. `If-Range`, `If-
 
 ### Anonymous reads
 
-Unless `--oci-require-auth` is given, the front never asks for a token: a request with an `Authorization` header is served as one without.
+Unless `params.require_auth` is true, the front never asks for a token: a request with an `Authorization` header is served as one without.
 Anyone who can connect can read any digest under the prefix, and nothing else. That is the intent:
 the images in it are public (a public registry's images are the first thing put there), and the
 network decides who can connect (the host's firewall rules). Do not put an image in
@@ -1139,8 +966,8 @@ Take the blobs of an OCI layout (the files under `blobs/sha256/` of a layout mad
 `<prefix>blobs/sha256/<hex>` through the S3 front with the full key: the layers, the config, the
 manifest, and the index of a multi-platform image, all by the file's own name, which is its digest.
 `index.json` of the layout is not put; the digest of the manifest (or index) to pull is in it, and
-is what a client is given. A layer larger than `--max-request-bytes` (256 MiB if not given) needs the
-flag raised, or a multipart upload, or a presigned PUT whose key has a `max_object_bytes` of up to
+is what a client is given. A layer larger than `server.max_request_bytes` (256 MiB if not given) needs the
+key raised, or a multipart upload, or a presigned PUT whose key has a `max_object_bytes` of up to
 5 GiB (see Presigned PUT URLs; the ceiling prefix must cover `oci/`). An object that is already
 there is refused (412), which is a retry that is safe.
 
@@ -1154,7 +981,7 @@ Over plain HTTP on loopback there is no CA to trust; see Two modes for the clien
 podman, from a host that trusts the CA of the certificate:
 
 ```sh
-# the CA that issued --oci-tls-cert, in the directory named like the registry in the reference
+# the CA that issued params.tls_cert_file, in the directory named like the registry in the reference
 # (the address, with :port when the reference has one)
 install -D -m 0644 farm-ca.crt /etc/containers/certs.d/192.0.2.10/ca.crt
 podman pull 192.0.2.10/library/app@sha256:<manifest digest>
@@ -1181,7 +1008,7 @@ shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcom
 `manifest`, `blob`, `tags`, `upload`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
 `range_not_satisfiable`, `unauthorized`, `denied`, `failed`, `conflict`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
 responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
-which serves nothing else. Without `--oci-listen` the path says the front is not enabled.
+which serves nothing else. Without an `oci` interface the path says the front is not enabled.
 
 ## Starting it
 
@@ -1208,14 +1035,13 @@ writing, so that the client reads a clean end of stream, and reads until the cli
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered
 and is counted in `tierstore_drain_late_requests_total`. It waits for the requests in flight and
-the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0. This
-is on main, not in v0.0.41, which answers a request on a connection that is open after the settle
-503 `ServiceUnavailable`. `TimeoutStopSec=` is set above
-the sum of the two flags and the lease's wait, so that systemd does not send SIGKILL to a drain
+the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0.
+`TimeoutStopSec=` is set above
+the sum of the two drain flags and the lease's wait, so that systemd does not send SIGKILL to a drain
 in progress; if `--drain-deadline` is raised, raise it too. A start that fails is tried again
-after 30 seconds; exit status 2 (a command line the argument parser refused: an unknown flag, a
-missing or malformed value; or two keys with one access key id) is not, since a restart cannot
-mend it. Other flag combinations and key files refused after parsing exit 1, and are tried again
+after 30 seconds; exit status 2 (a command line or a file the process refused: an unknown flag, a flag of the data
+path that went, a file that does not load; or two keys with one access key id) is not, since a
+restart cannot mend it. Other combinations of settings and key files refused after parsing exit 1, and are tried again
 every 30 seconds.
 
 ## The start-up self-test
@@ -1233,7 +1059,7 @@ with the tier, the check and the answer on stderr, and is not restarted
 (`RestartPreventExitStatus=2 3`): fix or replace the store. That includes answers that are a
 configuration error, such as 403 `AccessDenied` or `NoSuchBucket`, which are not retried either.
 A tier that cannot be reached (down, a timeout, 408, 429, any 5xx but 501 and 507) is asked again,
-after pauses from one second doubling to thirty, for `--backend-check-wait` (five minutes by
+after pauses from one second doubling to thirty, for `server.backend_check_wait` (five minutes by
 default, for each tier; `0s` asks once), so that a store that is slow to come up after a reboot
 does not fail the start. Then the start exits 1 and the unit tries it again after 30 seconds, up to
 its start limit (5 starts in an hour, so about half an hour of real failures, then systemd gives up
@@ -1245,7 +1071,7 @@ A tier that is full (a full hot tier is a designed state) starts: the checks tha
 skipped, with a line on stderr that says so. For a full cold tier the line is a warning that writes
 to the cold tier will fail.
 
-`--skip-backend-check multipart-conditional=<reason>` leaves out the multipart check, for a store
+`cold_store.skip_checks multipart-conditional=<reason>` leaves out the multipart check, for a store
 that lacks a conditional completion; the reason is written to stderr at every start. No other check
 can be skipped (exit 2). Without that check a multipart upload to the cold tier may replace an
 object that exists.

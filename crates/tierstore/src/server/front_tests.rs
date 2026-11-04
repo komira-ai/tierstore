@@ -1,4 +1,4 @@
-//! The TLS of the S3 front: its two flags, the warning for plain HTTP off loopback, and the
+//! The TLS of the S3 front: its two keys, the warning for plain HTTP off loopback, and the
 //! server settings made of the certificate and key.
 
 use std::fs::Permissions;
@@ -7,14 +7,13 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 
 use super::{FrontSettings, InvalidFlags, S3Tls, server_config, warn_plain};
 use crate::SystemClock;
 use crate::server::cli::Cli;
 use crate::server::config::keys_for_flags;
-use crate::server::config::settings_from_text;
+use crate::server::config::{Settings, settings_from_text};
 use crate::server::config_testing::{DEFAULTS, MINIMAL};
 use crate::server::oci::OciError;
 use crate::server::oci::test_pki::{ca, dns, leaf};
@@ -33,14 +32,14 @@ fn warned(listen: &[&str]) -> String {
 }
 
 /// Asserts the warning of a plain HTTP front, by exact equality: one line for every address that
-/// is not loopback, naming those addresses and the two flags, and nothing when every address is
+/// is not loopback, naming those addresses and the two keys, and nothing when every address is
 /// loopback (127/8, `::1`, an IPv4-mapped loopback address), the wildcards not being loopback.
 #[test]
 fn plain_http_off_loopback_is_warned_in_one_line() {
     let line = |named: &str| {
         format!(
-            "tierstore: warning: --listen {named} serves plain HTTP on a non-loopback address; \
-             give --tls-cert and --tls-key to serve HTTPS\n"
+            "tierstore: warning: the s3 interface at {named} serves plain HTTP on a non-loopback \
+             address; set server.tls_cert_file and server.tls_key_file to serve HTTPS\n"
         )
     };
     assert_eq!(warned(&["0.0.0.0:9000"]), line("0.0.0.0:9000"));
@@ -93,59 +92,53 @@ fn the_certificate_and_the_key_go_together() {
     }
 }
 
-/// The flags of a start with the key file `key`, and `more`.
-fn flags(key: &std::path::Path, more: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "tierstore",
-        "--listen=127.0.0.1:0",
-        "--proxy-id=p1",
-        "--hot=memory",
-        "--cold=memory",
-        "--hot-bytes=1000",
-        "--bucket=tier-bucket",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    args.push(format!("--access-key-file={}", key.display()));
-    args.extend(more.iter().cloned());
-    args
-}
-
 /// A good access key file in `dir`.
 fn access_key(dir: &TestDir) -> PathBuf {
     let path = dir.path().join("access.key");
-    std::fs::write(&path, "AKID\nsecret\n").expect("key file");
+    std::fs::write(&path, "AKID\na-long-enough-secret\n").expect("key file");
     std::fs::set_permissions(&path, Permissions::from_mode(0o600)).expect("mode");
     path
 }
 
-/// The front settings of the flags `more` over a good key file in `dir`.
-fn front(dir: &TestDir, more: &[String]) -> FrontSettings {
-    let args = flags(&access_key(dir), more);
-    Cli::try_parse_from(args).expect("flags").front()
+/// The storage node of a file over the good key file in `dir`, with the lines `extra` added to its
+/// `[server]` table.
+fn node(dir: &TestDir, extra: &str) -> Cli {
+    let key = access_key(dir);
+    let line = format!("access_key_file = {:?}\n{extra}", key.display().to_string());
+    let text = MINIMAL.replacen("access_key_file = \"key\"", &line, 1);
+    match settings_from_text(&text, DEFAULTS).expect("a file") {
+        Settings::Storage(cli) => *cli,
+        other => panic!("a storage node, not {other:?}"),
+    }
 }
 
-/// Asserts the parser takes the two flags together and refuses one without the other.
+/// The two TLS keys of a file, for the certificate `cert` and the key `key`.
+fn tls_keys(cert: &std::path::Path, key: &std::path::Path) -> String {
+    format!(
+        "tls_cert_file = {:?}\ntls_key_file = {:?}\n",
+        cert.display().to_string(),
+        key.display().to_string()
+    )
+}
+
+/// The front settings of the file with `extra` in its `[server]` table, over a good key file in
+/// `dir`.
+fn front(dir: &TestDir, extra: &str) -> FrontSettings {
+    node(dir, extra).front()
+}
+
+/// Asserts that the two TLS keys of a file reach the front settings, and that a file without them
+/// has none.
 #[test]
-fn one_tls_flag_without_the_other_is_a_usage_error() {
-    let dir = TestDir::under(std::env::temp_dir(), "front-tls-flags");
-    let key = access_key(&dir);
-    let parse = |more: &[&str]| {
-        let more: Vec<String> = more.iter().map(|flag| (*flag).to_owned()).collect();
-        Cli::try_parse_from(flags(&key, &more))
-    };
-    let both = parse(&["--tls-cert=c.pem", "--tls-key=k.pem"]).expect("both");
+fn the_tls_keys_of_a_file_reach_the_front_settings() {
+    let dir = TestDir::under(std::env::temp_dir(), "front-tls-keys");
+    let both = front(
+        &dir,
+        "tls_cert_file = \"c.pem\"\ntls_key_file = \"k.pem\"\n",
+    );
     assert_eq!(both.tls.tls_cert, Some(PathBuf::from("c.pem")));
     assert_eq!(both.tls.tls_key, Some(PathBuf::from("k.pem")));
-    assert_eq!(parse(&[]).expect("neither").tls, S3Tls::default());
-    for one in ["--tls-cert=c.pem", "--tls-key=k.pem"] {
-        let refused = parse(&[one]).expect_err("one alone");
-        assert_eq!(
-            refused.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument,
-            "{one}"
-        );
-    }
+    assert_eq!(front(&dir, "").tls, S3Tls::default());
 }
 
 /// Asserts that the server settings carry the TLS of a certificate and key that work, and none
@@ -154,14 +147,11 @@ fn one_tls_flag_without_the_other_is_a_usage_error() {
 fn the_server_serves_tls_with_a_certificate_and_key_and_plain_http_without() {
     let dir = TestDir::under(std::env::temp_dir(), "front-tls-config");
     let files = leaf(dir.path(), "front", &ca(), vec![dns("tierstore.test")]);
-    let tls = [
-        format!("--tls-cert={}", files.cert.display()),
-        format!("--tls-key={}", files.key.display()),
-    ];
+    let tls = tls_keys(&files.cert, &files.key);
     let secure = server_config(&front(&dir, &tls), Arc::new(SystemClock), true).expect("settings");
     assert!(secure.tls.is_some());
     for warn in [true, false] {
-        let plain = server_config(&front(&dir, &[]), Arc::new(SystemClock), warn);
+        let plain = server_config(&front(&dir, ""), Arc::new(SystemClock), warn);
         assert!(plain.expect("settings").tls.is_none());
     }
 }
@@ -182,10 +172,7 @@ fn a_certificate_or_key_that_cannot_work_stops_the_start() {
     );
     let bare = leaf(dir.path(), "bare", &authority, vec![]);
     let start = |cert: &std::path::Path, key: &std::path::Path| {
-        let tls = [
-            format!("--tls-cert={}", cert.display()),
-            format!("--tls-key={}", key.display()),
-        ];
+        let tls = tls_keys(cert, key);
         server_config(&front(&dir, &tls), Arc::new(SystemClock), false).err()
     };
     let mismatched = start(&named.cert, &stranger.key).expect("refused");
@@ -206,7 +193,7 @@ fn a_certificate_or_key_that_cannot_work_stops_the_start() {
             ..
         }
     ));
-    let mut half = front(&dir, &[]);
+    let mut half = front(&dir, "");
     half.tls.tls_cert = Some(named.cert);
     let alone = server_config(&half, Arc::new(SystemClock), false).err();
     assert!(
@@ -217,26 +204,23 @@ fn a_certificate_or_key_that_cannot_work_stops_the_start() {
     );
 }
 
-/// Asserts the file's two keys are the flags' two, and that a file with one of them alone is
-/// refused by `--check-config` with the message naming the keys the operator wrote.
+/// Asserts that a file with one of the two TLS keys alone is refused by `--check-config` with the
+/// message naming the keys the operator wrote.
 #[test]
 fn a_file_with_one_tls_key_is_refused_naming_both_keys() {
     let dir = TestDir::under(std::env::temp_dir(), "front-tls-file");
-    let key = access_key(&dir);
-    let text = |extra: &str| {
-        let line = format!("access_key_file = {:?}\n{extra}", key.display().to_string());
-        MINIMAL.replacen("access_key_file = \"key\"", &line, 1)
-    };
-    let loaded = settings_from_text(&text("tls_cert_file = \"c.pem\"\n"), DEFAULTS);
-    let crate::server::config::Settings::Storage(cli) = loaded.expect("a file") else {
-        panic!("a storage node");
-    };
-    assert_eq!(cli.tls.tls_cert, Some(PathBuf::from("c.pem")));
-    assert_eq!(cli.tls.tls_key, None);
-    let alone = crate::server::cli::checked(&crate::server::config::Settings::Storage(cli));
-    let why = alone.expect_err("one of the two keys").to_string();
-    assert_eq!(
-        keys_for_flags(&why),
-        "server.tls_cert_file and server.tls_key_file go together: give both, or neither"
-    );
+    for (extra, cert) in [
+        ("tls_cert_file = \"c.pem\"\n", true),
+        ("tls_key_file = \"k.pem\"\n", false),
+    ] {
+        let cli = node(&dir, extra);
+        assert_eq!(cli.tls.tls_cert.is_some(), cert);
+        assert_eq!(cli.tls.tls_key.is_some(), !cert);
+        let alone = crate::server::cli::checked(&Settings::Storage(Box::new(cli)));
+        let why = alone.expect_err("one of the two keys").to_string();
+        assert_eq!(
+            keys_for_flags(&why),
+            "server.tls_cert_file and server.tls_key_file go together: give both, or neither"
+        );
+    }
 }

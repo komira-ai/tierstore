@@ -1,6 +1,6 @@
 //! The registry the front pulls from when its store has no object: an outbound HTTP client.
 //!
-//! With `[oci.upstream]` in the file, tierstore is not only a server. On a request for a manifest
+//! With `params.upstream` in the file, tierstore is not only a server. On a request for a manifest
 //! or a blob that the store does not have, the front opens a connection to the upstream registry,
 //! asks for the object and stores what it is sent (see `pull`). This module is that client, and
 //! the only code of the process that dials out for the registry front.

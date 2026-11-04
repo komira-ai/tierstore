@@ -8,6 +8,12 @@
 //! in the same directory: the previous release, which serves no tag, still pulls by digest what
 //! the tag pointed at before and after the move, and this branch tags over what it stored.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::Arc;
 use std::time::Duration;
 
