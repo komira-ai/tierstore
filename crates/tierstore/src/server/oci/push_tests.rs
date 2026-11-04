@@ -69,7 +69,7 @@ pub(super) fn full(bytes: &[u8]) -> OciBody {
 
 /// A body that plays `steps`.
 pub(super) fn scripted(steps: Vec<Step>) -> OciBody {
-    body::request(scripted(steps))
+    body::request(Scripted::new(steps))
 }
 
 /// A body of pieces that does not say how long it is.
