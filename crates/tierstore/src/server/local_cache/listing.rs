@@ -15,7 +15,7 @@
 //! reserved key that sorts after the jump is left out as well; the jump never passes a key that
 //! is not reserved.
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX, is_reserved};
+use crate::journal::{RESERVED_PREFIXES, is_reserved};
 use crate::{Error, Listed, OpenUpload, UploadsAfter};
 
 use super::Inner;
@@ -26,7 +26,7 @@ pub(super) const LISTING_CALLS: u32 = 100;
 /// The key to continue a listing after, when the last key the upstream gave is `last`: the end of
 /// the reserved range `last` is in, or `last` itself if it is in none or already past that end.
 fn continue_after(last: &str) -> String {
-    for prefix in [JOURNAL_PREFIX, TIERING_PREFIX] {
+    for prefix in RESERVED_PREFIXES {
         if last.starts_with(prefix) {
             let end = format!("{prefix}~");
             return if end.as_str() > last {

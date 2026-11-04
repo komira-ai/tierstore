@@ -251,7 +251,7 @@ start):
 ```
 
 A URL is good for one `PUT` of a key that starts with the prefix (after the path is decoded: no
-`..`, no `.` segment, no control character, never `_journal/` or `_tiering/`), with an
+`..`, no `.` segment, no control character, never `_journal/`, `_tiering/` or `_entries/`), with an
 `X-Amz-Expires` of at most the smaller of `max_expires_secs` and `--presign-max-expires` (default
 15m), and a body of at most `max_object_bytes` (5 GiB at most, the S3 single-PUT limit; each key file chooses its own), checked on
 `Content-Length` and on the bytes received (and held to `--max-request-bytes`, 256 MiB by default, too: a key with a larger
@@ -281,7 +281,7 @@ and is longer than it:
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
 | put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
-| `_journal/`, `_tiering/`, any key outside the prefix, the prefix itself | no |
+| `_journal/`, `_tiering/`, `_entries/`, any key outside the prefix, the prefix itself | no |
 
 A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
 refusals are made in this order: the signature and key id, the method, the decoding of the path and
@@ -305,7 +305,7 @@ any other method is refused). The file is JSON of exactly these five fields, all
  "delete_prefixes": []}
 ```
 
-Every prefix ends in `/` and is not empty. None may be `_journal/` or `_tiering/`, be under one, be
+Every prefix ends in `/` and is not empty. None may be `_journal/`, `_tiering/` or `_entries/`, be under one, be
 a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one is refused at
 start. A list may be empty, but a key whose three lists are all empty is refused, since it could do
 nothing. The lists may overlap: a prefix in `read_prefixes` and in `write_prefixes` is one the key
@@ -331,7 +331,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
-| `_journal/`, `_tiering/`, any key outside the list the call needs | none | no |
+| `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote (add the
 prefix to `read_prefixes` too), and a read prefix does not let it write. A key with a write
@@ -490,7 +490,7 @@ read, and answers 412 at once if the object is there; the upstream's conditional
 arbiter of two writers. A full upstream (507) is 503 `SlowDown` with `Retry-After`; an upstream that
 does not answer is 503. A delete drops the cache's copy and then deletes at the upstream, and a fill
 that was reading the object does not keep it; the completion of an upload drops the cache's copy of
-the key. Listings leave out the keys under `_journal/` and `_tiering/`, always. The upstream key
+the key. Listings leave out the keys under `_journal/`, `_tiering/` and `_entries/`, always. The upstream key
 must now be one that writes: with `write_through` the start runs the self-test of the storage node
 against the upstream, under `_tiering/selftest/` (a create-only put that refuses a key that exists,
 a replace on a tag, ranged reads, paging, and a multipart completion that refuses a key that
@@ -566,10 +566,7 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
-key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing
-leaves them out). Every other key that is not kept, and every other listing, goes to the
-upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
+(and it is not under `_journal/`, `_tiering/` or `_entries/`: a GET, ranged GET or HEAD of such a key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing leaves them out). Every other key that is not kept, and every other listing, goes to the upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
 disk and makes no call to the upstream. A GET of an object that is not there reads it from the
 upstream in chunks of 8 MiB into `<path>/.stage/`, hashing the bytes as they pass, and links it into
 `<path>/obj/<aa>/<bb>/<hex>` (raw bytes, mode 0444; `<hex>` is the SHA-256 of the key, or, for a
@@ -779,6 +776,8 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--bucket` | `server.bucket` | the name of the bucket served |
 | `--region` | `server.region` | the region of a request's signature |
 | `--access-key-file` | `server.access_key_file` | the full key file |
+| `--tls-cert` | `server.tls_cert_file` | on main, not in v0.0.41: the certificate chain (PEM) that makes the S3 front serve HTTPS; with `server.tls_key_file`, or neither |
+| `--tls-key` | `server.tls_key_file` | on main, not in v0.0.41: the private key (PEM) of the S3 front's certificate |
 | `--read-only-key-file` | `server.read_only_key_files` | a list of read-only key files |
 | `--presign-key-file` | `server.presign_key_files` | a list of presigning key files |
 | `--gc-key-file` | `server.gc_key_files` | a list of GC key files |
@@ -794,8 +793,8 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
 | `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
-| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; today it only sets `Proxy::is_live`, no request path reads it yet, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
-| `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; no request path uses either yet (`10s`; at most a quarter of `--departure`) |
+| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; only the puts on journal entries (active format) read `Proxy::is_live`, the journal path does not, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
+| `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; only the puts on journal entries (active format) check it, and only the heartbeat uses `Bounded` (`10s`; at most a quarter of `--departure`) |
 | `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`0s`, which removes none; otherwise at least `--departure`. Set a time only once no proxy of a release without the heartbeat runs) |
 | `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
 | `--max-concurrent-puts` | `server.max_concurrent_puts` | the most put bodies and parts taken at once |
@@ -841,7 +840,7 @@ self-test) and not by the check. It does not look at the disk either: the start'
 `budget` over the size of the file system less `free_floor` (exit status 2), the cache directory
 and the credentials file of a tier are checked by a start only. For a storage node with an `[oci]`
 table the check does validate the OCI front as a start does (the prefix, the connection lifetime,
-and the TLS certificate and key files, which it reads and parses), without binding the address
+and the TLS certificate and key files, which it reads and parses; the S3 front's `--tls-cert` and `--tls-key` are checked the same way, for either shape), without binding the address
 and without the warning that a start gives for plain HTTP off loopback. A TLS file that is not
 there or cannot be used is exit status 2 under `--check-config`, where a start exits 1.
 
@@ -865,7 +864,7 @@ Each of these exits with status 2 and names the file and the key:
 - an `[oci]` table without `listen`, with a key but no `listen` (the message names that key), with
   only one of `tls_cert_file` and `tls_key_file`, or with `max_connections = 0`;
 - a `[[policy]]` prefix that is listed twice, that lies inside another listed prefix (or holds
-  one), that does not end in `/`, or that is under `_journal/` or `_tiering/`, which tierstore
+  one), that does not end in `/`, or that is under `_journal/`, `_tiering/` or `_entries/`, which tierstore
   keeps for itself.
 
 `[[policy]]` has a `prefix` (empty for all the rest) and `cache`. With `[local_cache]` `cache = true`
@@ -904,6 +903,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. Give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server and one drain serve them all (connections to the S3 front are not capped; only `--oci-max-connections` caps those of the registry front), an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
 | `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
+| `--tls-cert`, `--tls-key` | on main, not in v0.0.41. Both or neither (one without the other is refused, exit 2). The certificate chain (leaf first) and the private key, PEM, that make every socket of the S3 front serve HTTPS; without them it serves plain HTTP, and off loopback the start prints one warning line on stderr naming the addresses. The leaf may name the front by a DNS name (any), by an IP address, or both; with no DNS name it needs an IP name for each `--listen` address. A key file that any user can read, a key that is not the certificate's and a leaf that is expired are refused. The files are read once. Tier endpoints are still `http://`, so a build node cannot use an HTTPS front as its upstream |
 | `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
 | `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
 | `--gc-key-file` | a GC key (given once for each key); see GC keys |
@@ -919,7 +919,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style, over plain HTTP (on main, not in v0.0.41, over HTTPS when it is given `--tls-cert` and `--tls-key`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -927,7 +927,7 @@ what "tested" means below.
 
 | setting | value | why |
 |---|---|---|
-| endpoint | `http://<host>:<port>` of `--listen` | the front has no TLS; an `https://` endpoint fails |
+| endpoint | `http://<host>:<port>` of `--listen` (on main, not in v0.0.41, `https://` when the front has `--tls-cert` and `--tls-key`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
 | addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
 | bucket | the `--bucket` name | there is one; other names are not served |
 | region | tierstore's own `--region` (not `--hot-region` or `--cold-region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
@@ -1030,7 +1030,7 @@ the front then reads through the node's local cache, not a proxy (see The regist
 |---|---|
 | `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. Give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
 | `--oci-tls-cert PATH`, `--oci-tls-key PATH` | both or neither (one without the other is refused at start, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for `--oci-listen` (for each of them, when it is given more than once; any IP subjectAltName, if the address is `0.0.0.0` or `::`); a certificate without one, one that is expired or not yet valid, a key file any user can read (the "other" mode bits; a group may), or an unreadable file, is refused at start. The files are read once: a new certificate takes a restart, so renew it before it expires |
-| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
+| `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
 
