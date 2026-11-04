@@ -256,7 +256,7 @@ impl Backend for MemoryBackend {
         }
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,

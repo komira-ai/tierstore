@@ -6,12 +6,13 @@
 //! [`config_combined`](super::config_combined)). The start runs, in this order: the flags'
 //! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
 //! (which writes probe keys under `_tiering/selftest/` and deletes them), the proxy (which writes
-//! its marker `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
+//! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
 //! last the addresses. Only the flags' checks and the lock file come before a write. A refusal
 //! of the cache directory, its file system, its budget or an address comes after the self-test
-//! and the proxy's marker, so it leaves the marker (an empty object, with no lease) in the hot
-//! tier; the exit status is the one the same refusal has in the other starts.
+//! and the proxy's registration, so it leaves the registration (a JSON object, see `Registration`) in the hot
+//! tier, and the heartbeat, which starts with the proxy, may already have rewritten it with a
+//! positive count; the exit status is the one the same refusal has in the other starts.
 //!
 //! Left out, because the upstream of the cache is this node's own proxy: the HEAD of a probe key
 //! and the write self-test of the upstream, which a build node makes (the tiers have just been
@@ -44,7 +45,7 @@ use super::drain::late_of;
 use super::listen::{joined, local_addrs};
 use super::local_cache::{Disk, Every, SCRUB_TICK, SystemDisk};
 use super::oci::OciListener;
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
@@ -96,13 +97,18 @@ pub(super) async fn serve_combined(
     let halts: [Arc<Notify>; 4] = std::array::from_fn(|_| Arc::new(Notify::new()));
     let [halt, maintain_halt, lock_halt, scrub_halt] = halts.clone();
     let serving = async move {
-        let drained = server.serve_all(listeners).await;
-        // The proxy beats until its drain is over: its in-flight requests are finished or cut.
-        beating.stop_heartbeat().await;
+        // The proxy beats until its drain is over: the in-flight requests of both fronts are
+        // finished or cut.
+        let ended = serve_fronts(
+            server.serve_all(listeners),
+            serve_oci(oci, oci_stopped),
+            beating.stop_heartbeat(),
+        )
+        .await;
         for halting in &halts {
             halting.notify_one();
         }
-        drained
+        ended
     };
     let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
     let interval = cli.reconcile_interval;
@@ -121,14 +127,8 @@ pub(super) async fn serve_combined(
         Every::new(SCRUB_TICK),
         scrub_halt,
     );
-    let (drained, (), (), (), (), oci_cut) = tokio::join!(
-        serving,
-        reconciling,
-        maintaining,
-        holding,
-        scrubbing,
-        serve_oci(oci, oci_stopped)
-    );
+    let ((drained, oci_cut), (), (), (), ()) =
+        tokio::join!(serving, reconciling, maintaining, holding, scrubbing);
     watcher.abort();
     eprint!("{}", cut_note(drained));
     eprint!("{}", oci_cut_note(oci_cut));

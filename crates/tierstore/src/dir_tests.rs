@@ -638,7 +638,7 @@ async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
     let tag = backend.put_reservation("k", body("r")).await.unwrap();
     chmod(&dir.path().join("k"), 0o644);
     assert!(!backend.head("k").await.unwrap().reservation);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("r"), false, tag));
 }
 
@@ -769,7 +769,7 @@ async fn a_read_with_the_mark_gives_the_tag_of_the_file_it_read_when_the_key_goe
     let read_a = super::read_marked(opened_a, None).await.unwrap();
     assert_eq!(read_a, (body("alpha"), false, tag_a.clone()));
     assert_ne!(tag_a, tag_b);
-    let now = backend.get_marked("k", None).await.unwrap();
+    let now = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(now, (body("alpha"), false, tag_a));
 }
 
@@ -790,13 +790,13 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
     let absent = backend.put_stream_if_match("none", None, pieces(&["a"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
-    let kept = backend.get_marked("k", None).await.unwrap();
+    let kept = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(kept, (body("old"), true, old.clone()));
 
     let new = backend.put_stream_if_match("k", None, pieces(&["n", "ew"]), &old);
     let new = new.await.unwrap();
     assert_eq!(backend.head("k").await.unwrap().tag, new);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("new"), false, new.clone()));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
 

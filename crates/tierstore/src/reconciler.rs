@@ -896,7 +896,7 @@ impl Reconciler {
         while offset < hot.size {
             let len = (hot.size - offset).min(COMPARE_RANGE);
             let range = ByteRange::new(offset, len);
-            let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+            let (mine, _, tag) = match self.hot.get_tagged(key, Some(range)).await {
                 Ok(read) => read,
                 Err(Error::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(error),
@@ -904,7 +904,7 @@ impl Reconciler {
             if tag != hot.tag || mine.len() as u64 != len {
                 return Ok(Some(false));
             }
-            let (theirs, marked, tag) = match self.cold.get_marked(key, Some(range)).await {
+            let (theirs, marked, tag) = match self.cold.get_tagged(key, Some(range)).await {
                 Ok(read) => read,
                 Err(Error::NotFound(_)) => return Ok(Some(false)),
                 Err(error) => return Err(error),
