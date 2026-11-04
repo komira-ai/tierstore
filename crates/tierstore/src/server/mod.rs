@@ -263,6 +263,8 @@ mod metrics_race_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
+mod one_call_get_tests;
+#[cfg(test)]
 mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;

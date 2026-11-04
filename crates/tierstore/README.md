@@ -103,11 +103,10 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 
 What the counts mean:
 
-- An S3 GET reaches the proxy as a head (for the size and the conditions) and then a get. A GET
-  that is answered at the head shows only under `op="head"`: a key that exists nowhere, a
-  conditional that answers 304 or 412, a range that cannot be satisfied. So `op="head"` is a
-  lookup rate: it mixes the client's HEADs with the heads that start every GET. `op="get"`
-  counts only the reads that go on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call),
+  counted under `op="get"` whatever its outcome: a key that exists nowhere, a conditional that
+  answers 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`,
+  and none is counted at `op="head"`. So `op="head"` counts the client's HEADs alone.
 - A hit or a miss is counted when the tier answers, an error when it fails with anything but
   "not found"; an error is neither a hit nor a miss, so a tier that is down does not lower its
   hit rate and shows in `read_errors_total`.
