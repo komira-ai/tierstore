@@ -690,7 +690,7 @@ impl Backend for DirBackend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         read_tagged(self.stored(key).await?, range).await
     }
 
