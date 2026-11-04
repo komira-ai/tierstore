@@ -362,7 +362,7 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     .unwrap();
     let mut front = from_file.front();
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
-    front.access_key_file = key_file(&dir, "key", "AKID\nsecret-0123456789\n", 0o600);
+    front.access_key_file = key_file(&dir, "key", "AKID\nsecret-0123456789-abcdefghij\n", 0o600);
     front.read_only_key_file = Vec::new();
     front.presign_key_file = Vec::new();
     front.gc_key_file = Vec::new();

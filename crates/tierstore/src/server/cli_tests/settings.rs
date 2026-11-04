@@ -506,6 +506,13 @@ fn a_secret_under_the_minimum_refuses_the_start_for_every_kind_of_key() {
     let mut by_grant = cli(&dir);
     by_grant.grant_key_file = vec![grant];
     assert!(build(&by_grant).is_ok());
+    by_grant.access_key_file = key_file(
+        &dir,
+        "long-access",
+        "AKID\naccess-secret-0123456789-abcdefghijklmnopqrstuvwxyz\n",
+        0o600,
+    );
+    assert!(build(&by_grant).is_ok());
     by_grant.min_secret_bytes = 40;
     let why = build(&by_grant).err().expect("refused");
     assert_eq!(why.to_string(), refusal("--grant-key-file", "GR1", 34, 40));
