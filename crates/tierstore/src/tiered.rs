@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, MonotonicClock,
+    OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -33,9 +33,14 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod heartbeat;
+#[cfg(test)]
+mod heartbeat_tests;
 mod put;
 mod read;
 mod relay;
+
+use heartbeat::Heartbeat;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -61,12 +66,28 @@ pub struct ProxyConfig {
     pub usage_stale_after: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
+    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]). Nothing
+    /// that another machine wrote is compared with it.
+    pub mono: Arc<dyn Clock>,
+    /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
+    /// called, and the longest a call of the heartbeat may take.
+    pub heartbeat: Duration,
+    /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
+    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
+    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
+    /// removal of registrations uses its own `registration_retention`.
+    pub departure: Duration,
+    /// The time that must be left before `live_until` for a call that destroys to start; the
+    /// longest such a call may take.
+    pub deadline_margin: Duration,
 }
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
+    /// heartbeat every 10 seconds, a departure time of 60 seconds and a margin of 10 seconds, on
+    /// a [`MonotonicClock`] that reads zero now.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -78,6 +99,10 @@ impl ProxyConfig {
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
             clock,
+            mono: Arc::new(MonotonicClock::new()),
+            heartbeat: Duration::from_secs(10),
+            departure: Duration::from_secs(60),
+            deadline_margin: Duration::from_secs(10),
         }
     }
 }
@@ -142,7 +167,7 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
 ///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
+///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
 ///   made for it. The hot tag is the one the create-only write itself returns
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
@@ -267,6 +292,7 @@ struct Inner {
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
     counters: Counters,
+    heartbeat: Heartbeat,
 }
 
 impl Proxy {
@@ -294,10 +320,8 @@ impl Proxy {
             .filter_map(|object| seq_of(&prefix, &object.key))
             .max();
         let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
-        match hot.put(&proxy_key(id), Bytes::new()).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => {}
-            Err(error) => return Err(error),
-        }
+        let heartbeat = Heartbeat::new(&config);
+        heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
         let inner = Inner {
             hot,
@@ -307,6 +331,7 @@ impl Proxy {
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
             counters: Counters::default(),
+            heartbeat,
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -510,7 +535,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
-        match self.cold.get_marked(key, range).await {
+        match self.cold.get_tagged(key, range).await {
             Ok((_, true, _)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(Error::NotFound(key.to_owned()))

@@ -22,7 +22,7 @@ pub enum Op {
     PutIfMatch,
     /// [`Backend::put_reservation`] and [`Backend::put_reservation_if_match`].
     PutReservation,
-    /// [`Backend::get`], [`Backend::get_marked`], [`Backend::get_stream`] and
+    /// [`Backend::get`], [`Backend::get_tagged`], [`Backend::get_stream`] and
     /// [`Backend::open_read`].
     Get,
     /// [`Backend::head`].
@@ -327,7 +327,7 @@ impl Backend for FaultyBackend {
 
     /// A read with the mark is a call of kind [`Op::Get`], as a read without it is, and is given
     /// by the wrapped backend's own call.
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -335,7 +335,7 @@ impl Backend for FaultyBackend {
         let asked = range.map(|range| (range.offset(), range.size()));
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;
-        self.inner.get_marked(key, range).await
+        self.inner.get_tagged(key, range).await
     }
 
     /// A streamed read is a call of kind [`Op::Get`], as a read of the bytes whole is, and is

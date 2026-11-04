@@ -12,6 +12,7 @@ use crate::journal::{
     seq_of, store_checkpoint, to_body, write_object,
 };
 use crate::lease::Lease;
+use crate::registrations::remove_if_departed;
 use crate::state::Candidate;
 use crate::state::{Books, Stream};
 use crate::{
@@ -54,20 +55,28 @@ pub struct ReconcilerConfig {
     /// The time, for the retention and the usage object. It must agree with the times the hot
     /// tier gives its objects to within the retention. The lease does not use it.
     pub clock: Arc<dyn Clock>,
-    /// The clock of the lease: when a lease object was first seen unchanged, and until when
-    /// the holder is valid. It is read only on this process, and is never compared with
-    /// another machine's, so it must not step back or follow the clock of the machine
+    /// The monotonic clock of this process. It times the lease (when a lease object was first
+    /// seen unchanged, and until when the holder is valid) and the time since a registration was
+    /// first seen as it is. It is read only on this process, and nothing that another machine
+    /// wrote is compared with it, so it must not step back or follow the clock of the machine
     /// ([`MonotonicClock`]).
     pub mono: Arc<dyn Clock>,
     /// What the renewal timer waits on between two renewals.
     pub sleeper: Arc<dyn Sleeper>,
+    /// How long a registration of a proxy that heartbeats must have gone unchanged before the
+    /// reconciler removes it, if the proxy left no journal object. It is at least the departure
+    /// time of the proxies (see `ProxyConfig::departure`), so a registration does not go while
+    /// the proxy's `live_until` may still be ahead. Zero removes none: a proxy of a release
+    /// without the heartbeat that reopens such a registration never rewrites it.
+    pub registration_retention: Duration,
 }
 
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
     /// retention of an hour, listings of 100 journal objects, a renewal and a margin of a third
-    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime.
+    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime, and no
+    /// removal of registrations (a registration retention of zero).
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -84,6 +93,7 @@ impl ReconcilerConfig {
             clock,
             mono: Arc::new(MonotonicClock::new()),
             sleeper: Arc::new(TokioSleeper),
+            registration_retention: Duration::ZERO,
         }
     }
 }
@@ -411,6 +421,7 @@ impl Reconciler {
             self.persist(id, &mut report).await;
             self.prune(id, &mut report).await;
         }
+        self.remove_departed_registrations(&mut report).await;
         self.publish(&mut report).await;
         report
     }
@@ -424,6 +435,9 @@ impl Reconciler {
                 return;
             }
         };
+        self.books
+            .registrations
+            .observe(self.config.mono.now(), &listed);
         let ids = listed
             .iter()
             .filter_map(|object| object.key.strip_prefix(PROXIES_PREFIX));
@@ -437,6 +451,24 @@ impl Reconciler {
                     self.books.streams.insert(id.to_owned(), stream);
                 }
                 Err(error) => report.failed.push(error),
+            }
+        }
+    }
+
+    /// Removes the registrations of proxies that heartbeat and have left: unchanged for
+    /// [`ReconcilerConfig::registration_retention`] by the monotonic clock, with no journal object;
+    /// none if that is zero.
+    /// Each is asked about once in that time, not at every pass.
+    async fn remove_departed_registrations(&mut self, report: &mut PassReport) {
+        let now = self.config.mono.now();
+        let wait = self.config.registration_retention;
+        if wait.is_zero() {
+            return;
+        }
+        for id in self.books.registrations.due(now, wait) {
+            let version = self.books.registrations.ask(&id, now).unwrap_or_default();
+            if let Err(error) = remove_if_departed(self.hot.as_ref(), &id, version).await {
+                report.failed.push(error);
             }
         }
     }
@@ -846,7 +878,7 @@ impl Reconciler {
         while offset < hot.size {
             let len = (hot.size - offset).min(COMPARE_RANGE);
             let range = ByteRange::new(offset, len);
-            let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+            let (mine, _, tag) = match self.hot.get_tagged(key, Some(range)).await {
                 Ok(read) => read,
                 Err(Error::NotFound(_)) => return Ok(None),
                 Err(error) => return Err(error),
@@ -854,7 +886,7 @@ impl Reconciler {
             if tag != hot.tag || mine.len() as u64 != len {
                 return Ok(Some(false));
             }
-            let (theirs, marked, tag) = match self.cold.get_marked(key, Some(range)).await {
+            let (theirs, marked, tag) = match self.cold.get_tagged(key, Some(range)).await {
                 Ok(read) => read,
                 Err(Error::NotFound(_)) => return Ok(Some(false)),
                 Err(error) => return Err(error),

@@ -642,3 +642,48 @@ async fn a_renewal_waiting_for_the_lock_does_not_stop_the_work_that_holds_it() {
     assert!(run.await.unwrap());
     assert_eq!(count(&hot).await, "1");
 }
+
+/// Asserts that a pass whose work ends while a renewal's write is done and not yet answered
+/// waits for the answer, so the holder keeps the tag of its own write: after the call the
+/// holder still holds the lease, the object has the second body, and the next check finds the
+/// lease held. The write is parked after the hot tier did it; the work ends meanwhile, and the
+/// call stays pending until the answer is let go. Catches a renewal that is dropped with the
+/// work, which leaves the holder with the tag before its write, so its next check takes its own
+/// replacement for a loss.
+#[tokio::test]
+async fn work_that_ends_during_a_renewal_waits_for_its_answer_and_the_holder_keeps_the_lease() {
+    let stamps = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(stamps));
+    let gated = Arc::new(GateBackend::new(hot.clone()));
+    let mono = Arc::new(Mono::new());
+    let holder = Lease::new(gated.clone(), mono, "p", TTL, RENEW, MARGIN);
+    assert!(holder.ensure().await);
+    let (sleeper, mut waits, go) = StepSleeper::new();
+    let gate = gated.gate(Op::PutIfMatch, LEASE_KEY, Phase::Post);
+    let (finish, rx) = work();
+
+    let mut run = pin!(holder.renewing(&sleeper, async { rx.await.is_ok() }));
+    tokio::select! {
+        _ = &mut run => panic!("the work ended before the test sent"),
+        first = waits.recv() => assert_eq!(first, Some(ms(RENEW))),
+    }
+    go.send(()).unwrap();
+    tokio::select! {
+        _ = &mut run => panic!("the work ended before the test sent"),
+        () = gate.parked() => {}
+    }
+    assert_eq!(count(&hot).await, "2");
+
+    finish.send(()).unwrap();
+    for _ in 0..8 {
+        tokio::select! {
+            _ = &mut run => panic!("the call ended before the renewal was answered"),
+            () = tokio::task::yield_now() => {}
+        }
+    }
+
+    assert!(gate.release());
+    assert!(run.await);
+    assert!(holder.still_held().await.unwrap());
+    assert_eq!(count(&hot).await, "2");
+}
