@@ -33,7 +33,7 @@ impl Idle {
             self.delay = self.min;
             return None;
         }
-        if report.pinned > 0 {
+        if report.pinned > 0 || report.evicting {
             return Some(self.min);
         }
         let wait = self.delay;

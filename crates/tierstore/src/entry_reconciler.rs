@@ -41,7 +41,16 @@
 //!      reaped to `(op, PENDING)` and, for a put, the open multipart uploads of the key are aborted
 //!      on both tiers.
 //!    - An entry of an operation or state this release does not know is left alone.
-//! 5. Sweeps the hot tier for strays, now and every [`EntryReconcilerConfig::stray_interval`]: a
+//! 5. Keeps the usage figure and evicts, as the modules `usage` and `evict` say: reads the figure
+//!    of the leader before it at takeover, lists the hot tier a few pages a step (at takeover and
+//!    every [`EntryReconcilerConfig::usage_scan_interval`]), publishes the figure to
+//!    `_tiering/usage` every [`EntryReconcilerConfig::usage_interval`], and above the high water of
+//!    the budget evicts the oldest objects that the cold tier holds and that no entry names, down
+//!    to the low water. The eviction of a key is done under an `(EVICT, SEALED)` entry made
+//!    create-only, after a compare of the bytes (skipped when this leader copied the key and both
+//!    content tags are unchanged); a key with any entry is never evicted. A hot object that has no
+//!    cold copy is adopted by a pending put entry instead.
+//! 6. Sweeps the hot tier for strays, now and every [`EntryReconcilerConfig::stray_interval`]: a
 //!    hot object older than [`EntryReconcilerConfig::stray_grace`] with no cold object and no entry
 //!    gets a `(PUT, PENDING)` entry, which the next step copies.
 //!
@@ -61,7 +70,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::future::{Either, select};
@@ -79,10 +88,14 @@ use crate::{Error, ReconcilerConfig, Sleeper, TokioSleeper};
 
 mod backoff;
 mod copy_back;
+mod evict;
 mod sweep;
+mod usage;
 mod work;
 
 use backoff::{Idle, retry_delay};
+use evict::Tags;
+use usage::{Books, Tally};
 use work::Verdict;
 
 /// The settings of an [`EntryReconciler`]: those of the [`Reconciler`](crate::Reconciler) it shares
@@ -119,6 +132,20 @@ pub struct EntryReconcilerConfig {
     pub copy_back_max: usize,
     /// The most cold lookups per second of the stray sweep.
     pub stray_rate: u32,
+    /// How often the figure of the usage is published to `_tiering/usage`. The proxies judge the
+    /// usage stale when the object has not changed for their own limit, so this is well under it.
+    pub usage_interval: Duration,
+    /// How often the hot tier is listed to measure its usage and to find the objects to evict,
+    /// after the listing at takeover.
+    pub usage_scan_interval: Duration,
+    /// The most pages of that listing read in one step, so that the work on the entries and the
+    /// publication of the usage go on while it runs.
+    pub scan_pages: usize,
+    /// The most objects of one listing kept as candidates of the eviction, the oldest.
+    pub candidate_limit: usize,
+    /// The most keys whose tags of the copies this leader made are remembered, for the eviction
+    /// to skip the compare.
+    pub tag_record_limit: usize,
     /// What the loop waits on between steps, and between the lookups of the sweep. The renewal of
     /// the lease waits on `base.sleeper`.
     pub waiter: Arc<dyn Sleeper>,
@@ -127,7 +154,9 @@ pub struct EntryReconcilerConfig {
 impl EntryReconcilerConfig {
     /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
     /// a retry delay of 1 to 60 seconds, comparisons in ranges of 1 MiB, a stray grace of 10
-    /// minutes, a sweep every 24 hours at up to 100 lookups a second, copy-backs kept for 10 minutes and at
+    /// minutes, a sweep every 24 hours at up to 100 lookups a second, the usage published every 10
+    /// seconds and measured by a listing every 24 hours, 100 pages of a listing a step, 10000
+    /// candidates of the eviction, 100000 remembered tags, copy-backs kept for 10 minutes and at
     /// most 1000 of them, and a [`TokioSleeper`].
     #[must_use]
     pub fn new(base: ReconcilerConfig) -> Self {
@@ -144,6 +173,11 @@ impl EntryReconcilerConfig {
             copy_back_ttl: Duration::from_secs(600),
             copy_back_max: 1000,
             stray_rate: 100,
+            usage_interval: Duration::from_secs(10),
+            usage_scan_interval: Duration::from_secs(24 * 3600),
+            scan_pages: 100,
+            candidate_limit: 10_000,
+            tag_record_limit: 100_000,
             waiter: Arc::new(TokioSleeper),
         }
     }
@@ -166,15 +200,23 @@ pub struct StepReport {
     pub mismatched: Vec<String>,
     /// The stray objects that got an entry.
     pub strays_adopted: usize,
+    /// The hot objects evicted.
+    pub evicted: usize,
+    /// Whether the hot tier is still above the low water of its budget after an eviction that ran
+    /// out of candidates or stopped at a failure: the loop does not wait longer than `idle_min`.
+    pub evicting: bool,
+    /// Whether the listing of the hot tier has pages left: the loop steps again at once.
+    pub scanning: bool,
     /// The calls that failed, in the order they did.
     pub failed: Vec<Error>,
 }
 
 impl StepReport {
-    /// Whether the step changed anything: the loop does not wait after one that did.
+    /// Whether the step changed anything, or read pages of the listing and has more: the loop does
+    /// not wait after one that did.
     #[must_use]
     pub fn progress(&self) -> bool {
-        self.changed > 0 || self.strays_adopted > 0
+        self.changed > 0 || self.strays_adopted > 0 || self.scanning
     }
 }
 
@@ -201,6 +243,12 @@ pub struct EntryReconciler {
     copy_backs: BTreeMap<String, (String, u64)>,
     /// The keys whose copy-back this step drops without a copy (too old, or over the maximum).
     copy_back_drops: BTreeSet<String>,
+    /// The usage figure and the listing that gives it.
+    books: Books,
+    /// What the pool tells the step about the usage.
+    tally: Tally,
+    /// The tags of the copies this leader made, for the eviction.
+    tags: Mutex<Tags>,
 }
 
 impl EntryReconciler {
@@ -235,6 +283,9 @@ impl EntryReconciler {
             strays_adopted: 0,
             copy_backs: BTreeMap::new(),
             copy_back_drops: BTreeSet::new(),
+            books: Books::default(),
+            tally: Tally::default(),
+            tags: Mutex::default(),
         }
     }
 
@@ -250,14 +301,17 @@ impl EntryReconciler {
         self.forget();
     }
 
-    /// Forgets the retries, the registrations seen and the sweep (a new leader sweeps at once): the
-    /// lease is not held.
+    /// Forgets the retries, the registrations seen, the sweep (a new leader sweeps at once), the
+    /// usage and the tags: the lease is not held.
     fn forget(&mut self) {
         self.retries.clear();
         self.registrations = Registrations::default();
         self.sweep_at = None;
         self.copy_backs.clear();
         self.copy_back_drops.clear();
+        self.books = Books::default();
+        self.tally.clear();
+        self.tags().clear();
     }
 
     /// Does one step, if the format is active and the lease is held.
@@ -311,6 +365,9 @@ impl EntryReconciler {
         if self.sweep_due(now) {
             self.sweep(now, &mut report).await;
         }
+        self.tend_usage(now, &mut report).await;
+        self.evict(&mut report).await;
+        self.publish_usage(now, &mut report).await;
         report
     }
 

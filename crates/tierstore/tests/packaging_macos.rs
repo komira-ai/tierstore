@@ -5,6 +5,12 @@
 //! and the plist, the file, the declaration (`updater.d/tierstore.toml`) and the hook name the
 //! same job, program, account and port, so that none of them can drift from the others.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -140,6 +146,20 @@ fn config() -> toml::Table {
     read("tierstore.toml").parse().expect("TOML")
 }
 
+/// The addresses of the one `s3` interface of the file: it has no other.
+fn interface_addresses(file: &toml::Table) -> Vec<String> {
+    let entries = file["interface"].as_array().expect("[[interface]]");
+    assert_eq!(entries.len(), 1, "one interface");
+    assert_eq!(entries[0]["type"].as_str(), Some("s3"));
+    let addresses = entries[0]["params"]["addresses"]
+        .as_array()
+        .expect("addresses");
+    addresses
+        .iter()
+        .map(|address| address.as_str().expect("an address").to_owned())
+        .collect()
+}
+
 fn table<'a>(table: &'a toml::Table, key: &str) -> &'a toml::Table {
     table[key].as_table().unwrap_or_else(|| panic!("[{key}]"))
 }
@@ -181,7 +201,7 @@ fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
 /// of the drain, each once and nothing else (a start refuses any other flag beside a file; the
 /// test below runs the binary on it), and that no key of the file holds a secret (each names a
 /// file); and that the file is a build node that serves on loopback only: `[local_cache]` and `[cold_store]` and no
-/// `[hot_store]`, `listen` exactly `127.0.0.1:9300`, and `slot` the same port. It would catch a
+/// `[hot_store]`, one `s3` interface at exactly `127.0.0.1:9300`, and `slot` the same port. It would catch a
 /// Mac that serves the network, or that runs a storage node instead of a cache.
 #[test]
 fn the_plist_runs_a_local_cache_on_loopback_from_its_file() {
@@ -198,7 +218,7 @@ fn the_plist_runs_a_local_cache_on_loopback_from_its_file() {
     assert!(file.contains_key("cold_store"));
     assert!(!file.contains_key("hot_store"), "not a storage node");
     let server = table(&file, "server");
-    assert_eq!(server["listen"].as_str(), Some("127.0.0.1:9300"));
+    assert_eq!(interface_addresses(&file), ["127.0.0.1:9300"]);
     assert_eq!(server["slot"].as_integer(), Some(9300));
     for (name, section) in [
         ("server", server),
@@ -234,7 +254,11 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
     let mut text = read("tierstore.toml");
     for name in ["access.key", "daemons.key", "upstream-read.key"] {
         let key = scratch.path().join(name);
-        std::fs::write(&key, format!("ID{}\nsecret-{name}\n", name.len())).unwrap();
+        std::fs::write(
+            &key,
+            format!("ID{}\nsecret-{name}-0123456789\n", name.len()),
+        )
+        .unwrap();
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         let shipped = format!("{LAUNCHD_LINKS_DIR}/etc/{name}");
         assert!(text.contains(&shipped), "{shipped}");
@@ -287,8 +311,7 @@ fn the_plist_the_declaration_the_file_and_the_hook_name_one_job() {
     let port = declaration().port;
     let file = config();
     let server = table(&file, "server");
-    let listen = server["listen"].as_str().unwrap();
-    assert_eq!(listen, format!("127.0.0.1:{port}"));
+    assert_eq!(interface_addresses(&file), [format!("127.0.0.1:{port}")]);
     assert_eq!(server["slot"].as_integer(), Some(i64::from(port)));
 }
 

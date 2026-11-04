@@ -23,7 +23,7 @@ use crate::{Backend, Clock, DirBackend, Error as BackendError, MemoryBackend, Sy
 use std::time::Duration;
 
 const KEY_ID: &str = "AKIDCACHE";
-const SECRET: &str = "cache-secret";
+const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
 const QUICK: PerRun = PerRun {
@@ -62,8 +62,11 @@ impl Node {
     fn text(&self, hot_extra: &str) -> String {
         format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "n1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -295,6 +298,11 @@ async fn a_combined_node_that_cannot_start_exits_with_the_status_of_the_reason()
     assert!(why.to_string().contains("st_nlink"), "{why}");
     assert_eq!(exit_status(&why), 3);
 
+    // Each start has a node of its own: a start that failed after it opened its proxy leaves the
+    // heartbeat of the dropped proxy to end on its own, and it must not beat over the
+    // registration of the next start.
+    let node = Node::new("tscombined-small");
+    let settings = node.settings("");
     let small = Arc::new(FakeDisk::new());
     small.set_space(1_165_083, 1_165_083);
     let disk: Arc<dyn Disk> = small;
@@ -302,6 +310,8 @@ async fn a_combined_node_that_cannot_start_exits_with_the_status_of_the_reason()
     assert!(why.to_string().contains("local_cache.budget"), "{why}");
     assert_eq!(exit_status(&why), 2);
 
+    let node = Node::new("tscombined-enough");
+    let settings = node.settings("");
     let enough = Arc::new(FakeDisk::new());
     enough.set_space(1_165_084, 1_165_084);
     let disk: Arc<dyn Disk> = enough;

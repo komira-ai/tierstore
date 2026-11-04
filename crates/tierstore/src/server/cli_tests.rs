@@ -11,15 +11,14 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use crate::selftest_tests::{Flaw, Flawed};
+use crate::server::config_testing::MINIMAL;
+use crate::server::local_cache::LocalTierFailure;
 use crate::server::{AccessKey, Drained};
-use crate::{Backend, Check, SelfTestError, SelfTestFailure};
 
-use super::super::cli_probe::{probe_run_id, probe_tiers};
 use super::super::cli_serve::cut_note;
 use super::{
-    Cli, InvalidFlags, S3Flags, SkippedCheck, build, exit_status, open_tier, parse_duration,
-    parse_skip, read_key, share, tier,
+    Args, Cli, InvalidFlags, S3Client, S3Flags, build, exit_status, open_tier, parse_duration,
+    probe_run_id, read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]
@@ -27,37 +26,16 @@ mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
 
-/// The JSON form of a key file with the id `JSONID` and the secret `json-secret`.
-const JSON_KEY: &str = r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret"}"#;
+/// The JSON form of a key file with the id `JSONID` and the secret `json-secret-0123456789`.
+const JSON_KEY: &str =
+    r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret-0123456789"}"#;
 
-/// The flags every start needs, with `overrides` in place of the flags they name or added.
-fn flags(key_file: &str, overrides: &[(&str, &str)]) -> Vec<String> {
-    let owned = |(flag, value): (&str, &str)| (flag.to_owned(), value.to_owned());
-    let mut pairs: Vec<(String, String)> = [
-        ("--listen", "127.0.0.1:0"),
-        ("--proxy-id", "p1"),
-        ("--hot", "memory"),
-        ("--cold", "memory"),
-        ("--hot-bytes", "1000"),
-        ("--bucket", "tier-bucket"),
-        ("--access-key-file", key_file),
-    ]
-    .into_iter()
-    .map(owned)
-    .collect();
-    for (flag, value) in overrides {
-        let taken = pairs.iter_mut().find(|(name, _)| name == flag);
-        match taken {
-            Some(slot) => slot.1 = (*value).to_owned(),
-            None => pairs.push(owned((*flag, *value))),
-        }
-    }
-    let mut args = vec!["tierstore".to_owned()];
-    for (flag, value) in pairs {
-        args.push(flag);
-        args.push(value);
-    }
-    args
+/// The file of a start that serves `127.0.0.1:0` over two memory tiers, with `key_file` as the
+/// full key.
+fn text_with_key(key_file: &str) -> String {
+    let given = format!("access_key_file = \"{key_file}\"");
+    assert!(MINIMAL.contains("access_key_file = \"key\""));
+    MINIMAL.replacen("access_key_file = \"key\"", &given, 1)
 }
 
 /// A key file in `dir`, called `name`, with this text and mode.
@@ -68,10 +46,10 @@ fn key_file(dir: &TestDir, name: &str, text: &str, mode: u32) -> PathBuf {
     path
 }
 
-/// The flags of a start with a good key file in `dir`.
+/// The settings of a start with a good key file in `dir`.
 fn cli(dir: &TestDir) -> Cli {
-    let path = key_file(dir, "key", "AKID\nsecret\n", 0o600);
-    Cli::try_parse_from(flags(path.to_str().unwrap(), &[])).unwrap()
+    let path = key_file(dir, "key", "AKID\nsecret-0123456789\n", 0o600);
+    Cli::from_config_text(&text_with_key(path.to_str().unwrap())).unwrap()
 }
 
 /// Asserts that a duration is a whole number with a unit of `ms`, `s`, `m` or `h`, and that a
@@ -108,11 +86,11 @@ fn a_duration_is_a_number_and_a_unit() {
     }
 }
 
-/// Asserts that the flags that have defaults have them: the water marks at 80, 70 and 95
+/// Asserts that the keys that have defaults have them: the water marks at 80, 70 and 95
 /// percent, a drain of 10 seconds and 15 minutes, a journal linger of 20 milliseconds, and so on.
 #[test]
-fn the_flags_have_their_defaults() {
-    let cli = Cli::try_parse_from(flags("key", &[])).unwrap();
+fn the_keys_have_their_defaults() {
+    let cli = Cli::from_config_text(MINIMAL).unwrap();
     assert_eq!(cli.listen, vec!["127.0.0.1:0".parse().unwrap()]);
     assert!(cli.oci_listen.is_empty());
     assert_eq!(cli.proxy_id, "p1");
@@ -153,134 +131,10 @@ fn the_flags_have_their_defaults() {
     assert!(cli.grant_key_file.is_empty());
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
     assert_eq!(cli.grant_max_lifetime, None);
-    assert!(
-        cli.skip_backend_check.is_empty(),
-        "no check is skipped by default"
-    );
-    assert_eq!(cli.backend_check_wait, Duration::from_secs(300));
-}
-
-/// Asserts that `--read-only-key-file` can be given any number of times, and that the files are
-/// kept in the order of the flags.
-#[test]
-fn the_read_only_key_flag_is_repeatable() {
-    let mut args = flags("key", &[]);
-    let repeated = [
-        "--read-only-key-file",
-        "first",
-        "--read-only-key-file",
-        "second",
-    ];
-    args.extend(repeated.map(str::to_owned));
-    let cli = Cli::try_parse_from(args).unwrap();
-    let files = [PathBuf::from("first"), PathBuf::from("second")];
-    assert_eq!(cli.read_only_key_file, files);
-}
-
-/// Asserts that every flag that has a default can be given, and is read.
-#[test]
-fn the_flags_can_all_be_given() {
-    let given = [
-        ("--region", "eu-west-1"),
-        ("--high-water", "90"),
-        ("--low-water", "50"),
-        ("--critical", "100"),
-        ("--drain-lb-wait", "2s"),
-        ("--drain-deadline", "3m"),
-        ("--journal-linger", "5ms"),
-        ("--journal-retention", "2h"),
-        ("--copy-parallel", "4"),
-        ("--lease-ttl", "20s"),
-        ("--usage-stale-after", "45s"),
-        ("--reconcile-interval", "1s"),
-        ("--max-request-bytes", "10"),
-        ("--max-concurrent-puts", "3"),
-        ("--put-permit-wait", "4s"),
-        ("--put-min-bytes-per-sec", "5"),
-        ("--put-rate-grace", "2s"),
-        ("--body-idle-timeout", "7s"),
-        ("--s3-request-timeout", "90s"),
-        ("--backend-check-wait", "2m"),
-        ("--hot-endpoint", "http://127.0.0.1:9000"),
-        ("--hot-region", "eu-west-1"),
-        ("--hot-credentials-file", "hot-key"),
-        ("--cold-endpoint", "http://127.0.0.1:9001"),
-        ("--cold-region", "eu-west-2"),
-        ("--cold-credentials-file", "cold-key"),
-    ];
-    let cli = Cli::try_parse_from(flags("key", &given)).unwrap();
-    assert_eq!(cli.region, "eu-west-1");
-    let marks = (cli.high_water, cli.low_water, cli.critical);
-    assert_eq!(marks, (90, 50, 100));
-    assert_eq!(cli.drain_lb_wait, Duration::from_secs(2));
-    assert_eq!(cli.drain_deadline, Duration::from_secs(180));
-    assert_eq!(cli.journal_linger, Duration::from_millis(5));
-    assert_eq!(cli.journal_retention, Duration::from_secs(7200));
-    assert_eq!(cli.copy_parallel, 4);
-    assert_eq!(cli.lease_ttl, Duration::from_secs(20));
-    assert_eq!(cli.usage_stale_after, Duration::from_secs(45));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(1));
-    assert_eq!(cli.max_request_bytes, 10);
-    assert_eq!(cli.max_concurrent_puts, 3);
-    assert_eq!(cli.put_permit_wait, Duration::from_secs(4));
-    assert_eq!(cli.put_min_bytes_per_sec, 5);
-    assert_eq!(cli.put_rate_grace, Duration::from_secs(2));
-    assert_eq!(cli.body_idle_timeout, Duration::from_secs(7));
-    assert_eq!(cli.s3_request_timeout, Duration::from_secs(90));
-    assert_eq!(cli.backend_check_wait, Duration::from_secs(120));
-    let hot = cli.hot_s3();
-    assert_eq!(hot.endpoint, Some("http://127.0.0.1:9000"));
-    assert_eq!(hot.region, Some("eu-west-1"));
-    assert_eq!(hot.credentials, Some(Path::new("hot-key")));
-    let cold = cli.cold_s3();
-    assert_eq!(cold.endpoint, Some("http://127.0.0.1:9001"));
-    assert_eq!(cold.region, Some("eu-west-2"));
-    assert_eq!(cold.credentials, Some(Path::new("cold-key")));
-}
-
-/// Asserts that flags that are not valid are refused when they are read: one that is not known,
-/// a water mark of zero or over 100, a size or a count of zero, a duration that is not one, an
-/// address that is not one, and a flag that is missing.
-#[test]
-fn flags_that_are_not_valid_are_refused() {
-    let parse = |overrides: &[(&str, &str)]| Cli::try_parse_from(flags("key", overrides));
-    assert!(parse(&[]).is_ok());
-    let bad = [
-        ("--no-such-flag", "1"),
-        ("--high-water", "0"),
-        ("--low-water", "101"),
-        ("--critical", "x"),
-        ("--hot-bytes", "0"),
-        ("--max-request-bytes", "0"),
-        ("--copy-parallel", "0"),
-        ("--drain-lb-wait", "soon"),
-        ("--listen", "nowhere"),
-    ];
-    for (flag, value) in bad {
-        assert!(parse(&[(flag, value)]).is_err(), "{flag} {value}");
-    }
-    let mut args = flags("key", &[]);
-    let at = args.iter().position(|arg| arg == "--bucket").unwrap();
-    args.remove(at + 1);
-    args.remove(at);
-    assert!(Cli::try_parse_from(args).is_err());
-}
-
-/// Asserts that `--slot` is a port: absent it is none, and given it is the number, 1 to 65535;
-/// zero, a number past a port, a sign, a word and an empty value are refused at the parse (the
-/// exit status 2 of a flag that is not valid) with a message that names `--slot`.
-#[test]
-fn the_slot_flag_is_a_port_from_1_to_65535() {
-    let parse = |value: &str| Cli::try_parse_from(flags("key", &[("--slot", value)]));
-    assert_eq!(Cli::try_parse_from(flags("key", &[])).unwrap().slot, None);
-    for (text, port) in [("1", 1), ("9301", 9301), ("65535", 65535)] {
-        assert_eq!(parse(text).unwrap().slot, Some(port), "{text}");
-    }
-    for text in ["0", "65536", "+", "nine", "93x1", ""] {
-        let why = parse(text).expect_err(text).to_string();
-        assert!(why.contains("--slot"), "{text}: {why}");
-    }
-    assert!(parse("-1").is_err());
+    assert!(cli.skip_backend_check.is_empty());
+    assert_eq!(cli.backend_check_wait, None);
+    assert_eq!(cli.hot_conditional_delete, None);
+    assert_eq!(cli.cold_conditional_delete, None);
 }
 
 /// Asserts that the reconciler of a process is named apart from its proxy, so that the entry of
@@ -298,7 +152,7 @@ fn the_reconciler_has_a_name_of_its_own() {
     assert_ne!(built.reconciler.holder, built.proxy.proxy_id);
 }
 
-/// Asserts that a slot given as a flag reaches the settings of the server, where `/metricz`
+/// Asserts that a slot given in the file reaches the settings of the server, where `/metricz`
 /// reads it, and that a start without one leaves them without.
 #[test]
 fn the_slot_reaches_the_server_settings() {
@@ -309,49 +163,24 @@ fn the_slot_reaches_the_server_settings() {
     assert_eq!(build(&cli).expect("built").server.slot, Some(9301));
 }
 
-/// Asserts that the help names every flag, and that the version names the package version.
+/// Asserts that the help names every flag of a run and none that went, and that the version names
+/// the package version.
 #[test]
-fn the_help_names_every_flag_and_the_version_the_package() {
-    let help = Cli::command().render_long_help().to_string();
-    let names = [
+fn the_help_names_the_flags_of_a_run_and_the_version_the_package() {
+    let help = Args::command().render_long_help().to_string();
+    for name in [
         "--config",
-        "--print-config",
-        "--listen",
-        "--proxy-id",
-        "--slot",
-        "--hot",
-        "--cold",
-        "--hot-bytes",
-        "--high-water",
-        "--low-water",
-        "--critical",
-        "--bucket",
-        "--region",
-        "--access-key-file",
-        "--read-only-key-file",
+        "--check-config",
+        "--capabilities",
         "--drain-lb-wait",
         "--drain-deadline",
-        "--journal-linger",
-        "--journal-retention",
-        "--copy-parallel",
-        "--lease-ttl",
-        "--reconcile-interval",
-        "--max-request-bytes",
-        "--body-idle-timeout",
-        "--s3-request-timeout",
-        "--hot-endpoint",
-        "--hot-region",
-        "--hot-credentials-file",
-        "--cold-endpoint",
-        "--cold-region",
-        "--cold-credentials-file",
-        "--skip-backend-check",
-        "--backend-check-wait",
-    ];
-    for name in names {
+    ] {
         assert!(help.contains(name), "{name}");
     }
-    let version = Cli::try_parse_from(["tierstore", "--version"]);
+    for gone in ["--listen", "--hot", "--print-config", "--oci-listen"] {
+        assert!(!help.contains(gone), "{gone}");
+    }
+    let version = Args::try_parse_from(["tierstore", "--version"]);
     let shown = version.unwrap_err().to_string();
     assert!(
         shown.contains(crate::server::build_info::RELEASE_VERSION),
@@ -372,7 +201,7 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     .unwrap();
     let mut front = from_file.front();
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
-    front.access_key_file = key_file(&dir, "key", "AKID\nsecret\n", 0o600);
+    front.access_key_file = key_file(&dir, "key", "AKID\nsecret-0123456789-abcdefghij\n", 0o600);
     front.read_only_key_file = Vec::new();
     front.presign_key_file = Vec::new();
     front.gc_key_file = Vec::new();

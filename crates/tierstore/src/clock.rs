@@ -19,6 +19,10 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this is the clock of the machine, the one place that reads it"
+    )]
     fn now(&self) -> u64 {
         let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH);
         since_epoch
@@ -38,6 +42,10 @@ pub struct MonotonicClock {
 impl MonotonicClock {
     /// A clock that reads zero now.
     #[must_use]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this is the clock module: the one place that reads the machine's monotonic clock"
+    )]
     pub fn new() -> Self {
         Self {
             start: Instant::now(),

@@ -43,10 +43,13 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a
-/// `[local_cache]` key or a `[[policy]]` key.
+/// `[local_cache]` key, a `[[policy]]` key or a key of an `[[interface]]` (its `params` are in
+/// [`KEYS`] by their last part).
 fn known_key(key: &str) -> bool {
-    matches!(key, "prefix" | "cache")
-        || LOCAL_CACHE_KEYS.contains(&key)
+    matches!(
+        key,
+        "prefix" | "cache" | "type" | "params" | "port" | "addresses"
+    ) || LOCAL_CACHE_KEYS.contains(&key)
         || KEYS
             .iter()
             .flat_map(|(_, keys)| keys.iter())
@@ -101,6 +104,10 @@ pub(super) fn syntax(text: &str, error: &toml::de::Error) -> ConfigError {
     ConfigError::Syntax { line, column, what }
 }
 
+/// The one key whose name holds the word `secret` and whose value is a number of bytes, not a
+/// secret.
+const MIN_SECRET_KEY: &str = "server.min_secret_bytes";
+
 /// Refuses the first key of `table` (and of the tables inside it) that looks like a secret.
 pub(super) fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
     for (key, value) in table {
@@ -109,7 +116,7 @@ pub(super) fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigE
         } else {
             format!("{path}.{key}")
         };
-        if looks_secret(key) {
+        if here != MIN_SECRET_KEY && looks_secret(key) {
             return Err(ConfigError::InlineSecret { key: here });
         }
         match value {

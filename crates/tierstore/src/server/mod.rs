@@ -97,9 +97,10 @@
 //! A credential that may write one object under a prefix, and expires, is a presigned PUT URL: see [`presign`], and
 //! [`ServerConfig::presign_keys`] for the keys that sign them (`--presign-key-file` in the binary).
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
-//! GC key: see [`gc`], and [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
+//! GC key, which is a scoped key with a list, a delete and an abort right on its prefix: see [`gc`], and
+//! [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
-//! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
+//! A key that reads, lists, creates and deletes under the prefixes of the lists in its key file, and replaces and
 //! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
 //! binary).
 //! A client that holds no key and must read one object for a short time presents a presigned GET
@@ -150,13 +151,13 @@
 //!
 //! `GET /usagez`, for alerting and not for a load balancer, is 200 with the age of the usage
 //! object that the reconciler publishes (`_tiering/usage`), and 503 with the reason once that
-//! object is older than [`ServerConfig::usage_stale_after`]. The puts ignore a stale usage, as if
-//! the hot tier were not full, so a stopped reconciler would otherwise show nowhere. A usage
-//! object that is missing is judged by the time the server has run, so that a server that starts
-//! before the first pass of the reconciler is 200 for that long. `/readyz` does not look at the
-//! usage (one stopped reconciler would make every node unready), and the puts are not refused.
-//! Without [`ServerConfig::proxy`] it is 200 and says the usage is not watched. A bucket cannot
-//! be called `usagez` either.
+//! object has stood unchanged for longer than [`ServerConfig::usage_stale_after`] by the clock of
+//! this process. The puts ignore a stale usage, as if the hot tier were not full, so a stopped
+//! reconciler would otherwise show nowhere. A usage object that is missing is judged by the time
+//! the server has run, so that a server that starts before the first pass of the reconciler is
+//! 200 for that long. `/readyz` does not look at the usage (one stopped reconciler would make
+//! every node unready), and the puts are not refused. Without [`ServerConfig::proxy`] it is 200
+//! and says the usage is not watched. A bucket cannot be called `usagez` either.
 //!
 //! `GET /metricz` is 200 with the counters of every source the process has, one block after the
 //! other, in the Prometheus text format: the proxy's reads ([`Proxy::metrics`]: hits, misses,
@@ -198,18 +199,20 @@ pub mod build_info;
 mod cache_cli;
 pub mod cli;
 mod cli_heartbeat;
-mod cli_probe;
 mod cli_reconcile;
 mod cli_serve;
 mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
-mod config_oci;
+mod config_interface;
 mod config_policy;
-mod config_print;
 mod config_syntax;
+mod config_tier;
+mod config_tuning;
 mod config_units;
+mod counted;
+mod deprecated;
 mod door;
 mod drain;
 mod front;
@@ -251,6 +254,8 @@ mod cli_heartbeat_tests;
 mod combined_cli_tests;
 #[cfg(test)]
 mod completion_tests;
+#[cfg(test)]
+mod conditional_delete_tests;
 #[cfg(test)]
 mod config_cache_tests;
 #[cfg(test)]
@@ -299,6 +304,8 @@ mod request_tests;
 mod reserved_tests;
 #[cfg(test)]
 mod role_tests;
+#[cfg(test)]
+mod scoped_rights_tests;
 #[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
@@ -351,6 +358,7 @@ pub use local_cache::LocalCache;
 pub use presign::{Grant, PresignKey, PresignRequest, presign_get, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 
+use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
 use drain::SETTLED;
@@ -450,9 +458,9 @@ pub struct ServerConfig {
     /// binary sets it from `write_through` in `[local_cache]`, the setting that also lets the
     /// cache send the writes on.
     pub cache_writes: bool,
-    /// The age of the usage object past which `/usagez` says 503. A server that has run this
-    /// long without finding any usage object is judged the same way. Longer than the lease and
-    /// the pass interval of the reconciler, so that a takeover of the lease does not show.
+    /// How long the usage object may stand unchanged (by this process's clock) before `/usagez`
+    /// says 503; a server that has run this long without finding one is judged the same way.
+    /// Longer than the lease and the reconciler's pass interval, so a takeover does not show.
     pub usage_stale_after: Duration,
     /// The counters of the OCI read front, which `GET /metricz` shows; none by default, and then
     /// `/metricz` has no block of it. The binary sets them when it runs the front.
@@ -574,42 +582,6 @@ pub struct Server {
     next_request: AtomicU64,
     /// One permit for each streamed body that may be taken at once.
     puts: Arc<Semaphore>,
-}
-
-/// A request in flight, counted until it is dropped.
-struct Flight<'a>(&'a Server);
-
-impl<'a> Flight<'a> {
-    fn enter(server: &'a Server) -> Self {
-        server.inflight.fetch_add(1, Ordering::SeqCst);
-        server.drain.idle.notify_waiters();
-        Self(server)
-    }
-}
-
-impl Drop for Flight<'_> {
-    fn drop(&mut self) {
-        self.0.inflight.fetch_sub(1, Ordering::SeqCst);
-        self.0.drain.idle.notify_waiters();
-    }
-}
-
-/// A connection that is open, counted until it is dropped.
-struct Connected(Arc<Server>);
-
-impl Connected {
-    fn enter(server: &Arc<Server>) -> Self {
-        server.open.fetch_add(1, Ordering::SeqCst);
-        server.drain.idle.notify_waiters();
-        Self(Arc::clone(server))
-    }
-}
-
-impl Drop for Connected {
-    fn drop(&mut self) {
-        self.0.open.fetch_sub(1, Ordering::SeqCst);
-        self.0.drain.idle.notify_waiters();
-    }
 }
 
 impl Server {
@@ -826,6 +798,10 @@ impl Server {
     /// [`Server::handle`] for a request that came on a connection with this `wire`: a streamed
     /// answer holds the wire until its body is over, so that the drain does not close the
     /// connection in the middle of it.
+    #[expect(
+        clippy::expect_used,
+        reason = "a request id is hex digits, which a header value holds"
+    )]
     async fn handle_on<B>(
         &self,
         request: Request<B>,
@@ -869,13 +845,13 @@ impl Server {
     /// Logs what the store said about a request it failed: the client got a fixed text.
     fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
         let (method, path) = (&parts.method, parts.uri.path());
-        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
+        tracing::warn!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
     fn log_stalled(&self, parts: &Parts, id: &str, why: &str) {
         let (method, path) = (&parts.method, parts.uri.path());
-        eprintln!("tierstore: request {id} ({method} {path}): {why} Closed.");
+        tracing::warn!("tierstore: request {id} ({method} {path}): {why} Closed.");
     }
 
     async fn respond<B>(&self, parts: &Parts, body: B) -> Result<Answer, S3Error>
@@ -909,9 +885,6 @@ impl Server {
         }
         let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
         let check = Check::new(&signed.payload, &parts.headers, data)?;
-        if let Role::Gc(prefix) = &signed.role {
-            gc::permit(prefix, parts, &target, &query)?;
-        }
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }

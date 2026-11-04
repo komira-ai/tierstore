@@ -1,7 +1,7 @@
 //! The entry reconciler: its gate on the format, the step of each state of an entry, the loop's
-//! waits. The races between a delete and the reconciler, and the stray sweep, are in the two
-//! modules below; every race is driven one store call at a time through a gate, and no test
-//! reads a clock or waits on one.
+//! waits. The races between a delete and the reconciler, the stray sweep, and the usage and the
+//! eviction are in the three modules below; every race is driven one store call at a time through
+//! a gate, and no test reads a clock or waits on one.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -23,10 +23,14 @@ use crate::{
 
 #[path = "entry_reconciler_tests/copy_back.rs"]
 mod copy_back;
+#[path = "entry_reconciler_tests/evict.rs"]
+mod evict;
 #[path = "entry_reconciler_tests/races.rs"]
 mod races;
 #[path = "entry_reconciler_tests/sweep.rs"]
 mod sweep;
+#[path = "entry_reconciler_tests/usage.rs"]
+mod usage;
 
 /// A wait that never ends, for the renewal timer of the lease: no test sees a renewal.
 struct Pending;

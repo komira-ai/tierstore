@@ -3,12 +3,15 @@
 
 use super::config::{from_text, settings_from_text};
 use super::config_combined::CombinedSettings;
-use super::config_testing::DEFAULTS;
+use super::config_testing::{DEFAULTS, oci_interface};
 
 /// The tables of a storage node: two directory tiers, and no cache.
 const NODE: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9400"] }
+
 [server]
-listen          = "192.0.2.10:9400"
 proxy_id        = "tierstore-1"
 bucket          = "tierstore"
 access_key_file = "/etc/tierstore/access.key"
@@ -60,7 +63,6 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
     assert_eq!(cache.config.policies, [("cas/b/".to_owned(), true)]);
     assert_eq!(cache.config.high_water, 90);
     assert!(cache.config.write_through);
-    assert!(cache.config.tiered_upstream);
     assert!(cache.scrub_rate.is_some());
 
     let given = text().replacen(
@@ -70,7 +72,6 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
     );
     let given = combined(&given);
     assert!(given.cache.config.write_through);
-    assert!(given.cache.config.tiered_upstream);
 }
 
 /// Asserts each refusal of the file of a node with a cache, by the exact message (the key and what
@@ -84,10 +85,7 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
 fn a_combined_file_is_refused_when_it_cannot_be_run() {
     let in_cache =
         |extra: &str| NODE.replacen("[hot_store]\n", &format!("[hot_store]\n{extra}\n"), 1) + CACHE;
-    let oci = |files: &str| {
-        let table = format!("\n[oci]\nlisten = \"127.0.0.1:5000\"\n{files}\n");
-        format!("{NODE}{CACHE}{table}")
-    };
+    let oci = |files: &str| format!("{NODE}{CACHE}{}", oci_interface("127.0.0.1:5000", files));
     let cache_path =
         |path: &str| text().replacen("\"/var/lib/tierstore-cache\"", &format!("\"{path}\""), 1);
     let cases = [
@@ -145,27 +143,27 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         ),
         (
             oci(
-                "tls_cert_file = \"/var/lib/tierstore-cache/oci.crt\"\ntls_key_file = \"/etc/oci.key\"",
+                ", tls_cert_file = \"/var/lib/tierstore-cache/oci.crt\", tls_key_file = \"/etc/oci.key\"",
             ),
-            "local_cache.path: must not hold oci.tls_cert_file: it is not a place for the cache's files",
+            "local_cache.path: must not hold oci interface params.tls_cert_file: it is not a place for the cache's files",
         ),
         (
             oci(
-                "tls_cert_file = \"/etc/oci.crt\"\ntls_key_file = \"/var/lib/tierstore-cache/oci.key\"",
+                ", tls_cert_file = \"/etc/oci.crt\", tls_key_file = \"/var/lib/tierstore-cache/oci.key\"",
             ),
-            "local_cache.path: must not hold oci.tls_key_file: it is not a place for the cache's files",
+            "local_cache.path: must not hold oci interface params.tls_key_file: it is not a place for the cache's files",
         ),
         (
             in_cache("lock_file = \"instance.lock\""),
             "hot_store.lock_file: \"instance.lock\" must be an absolute path",
         ),
         (
-            oci("tls_cert_file = \".stage/oci.crt\"\ntls_key_file = \"/etc/oci.key\""),
-            "oci.tls_cert_file: must be an absolute path in a file with a local cache",
+            oci(", tls_cert_file = \".stage/oci.crt\", tls_key_file = \"/etc/oci.key\""),
+            "oci interface params.tls_cert_file: must be an absolute path in a file with a local cache",
         ),
         (
-            oci("tls_cert_file = \"/etc/oci.crt\"\ntls_key_file = \".stage/oci.key\""),
-            "oci.tls_key_file: must be an absolute path in a file with a local cache",
+            oci(", tls_cert_file = \"/etc/oci.crt\", tls_key_file = \".stage/oci.key\""),
+            "oci interface params.tls_key_file: must be an absolute path in a file with a local cache",
         ),
         (
             NODE.replacen(
@@ -177,7 +175,7 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         ),
         (
             NODE.replacen("[hot_store]\n", "[hot_store]\nskip_checks = [\"a=b\"]\n", 1) + CACHE,
-            "hot_store.skip_checks: only [cold_store] has it: the check it skips runs there",
+            "hot_store.skip_checks: only [cold_store] has it",
         ),
         (
             NODE.replacen("[cold_store]\n", "[cold_store]\nlease_ttl = \"10s\"\n", 1) + CACHE,
@@ -193,7 +191,7 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         ),
         (
             oci(""),
-            "oci.prefix: no [[policy]] covers the blobs under \"oci/blobs/sha256/\", so every pull would go to the upstream; give a [[policy]] with prefix = \"oci/\" and cache = true",
+            "oci interface params.prefix: no [[policy]] covers the blobs under \"oci/blobs/sha256/\", so every pull would go to the upstream; give a [[policy]] with prefix = \"oci/\" and cache = true",
         ),
     ];
     for (file, expected) in cases {
@@ -229,14 +227,14 @@ fn the_cache_path_is_compared_by_component_and_only_against_directory_tiers() {
     }
 }
 
-/// Asserts that the file of a node with a cache has no flag form, and says so, and that it is
-/// not the file of a storage node or of a build node.
+/// Asserts that the settings of a storage node cannot hold the file of a node with a cache, and
+/// say so, and that it is not the file of a storage node or of a build node.
 #[test]
-fn a_combined_file_has_no_flag_form() {
+fn a_combined_file_is_not_the_settings_of_a_storage_node() {
     let why = from_text(&text(), DEFAULTS).unwrap_err().to_string();
     assert_eq!(
         why,
-        "local_cache: is in a file with [hot_store] too, which has no flag form"
+        "local_cache: is in a file with [hot_store] too, which these settings of a storage node cannot hold"
     );
     let settings = settings_from_text(&text(), DEFAULTS).unwrap();
     assert!(settings.into_storage().is_none());

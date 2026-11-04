@@ -58,7 +58,6 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="44" y="518" width="490" height="42" rx="5" class="box"/>
 <text x="56" y="536" class="b">_tiering/format</text>
 <text x="56" y="552" class="t-m">rollout only: the write-pause and activation marker</text>
-<text x="44" y="582" class="t-m">plus _tiering/selftest/&lt;run&gt;/ probes at start-up (never client data)</text>
 <rect x="600" y="226" width="330" height="200" rx="5" class="box-p"/>
 <text x="614" y="250" class="b" font-size="15">COLD tier</text>
 <text x="690" y="250" class="t-n">durable</text>

@@ -13,7 +13,6 @@ use tokio::sync::Notify;
 use crate::{Backend, Proxy, Reconciler, TokioSleeper};
 
 use super::cli::{Cli, Error, OciSetup, build};
-use super::cli_probe::probe_tiers;
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::listen::{bind_all, local_addrs};
@@ -30,9 +29,9 @@ pub struct Addresses {
     /// The S3 front, `/healthz`, `/readyz`, `/usagez` and `/metricz`: the first address of
     /// [`s3_all`](Self::s3_all).
     pub s3: SocketAddr,
-    /// Every address the S3 front is bound to, in the order of the `--listen` flags.
+    /// Every address the S3 front is bound to, in the order of the addresses of the `s3` interfaces.
     pub s3_all: Vec<SocketAddr>,
-    /// The OCI read front, if `--oci-listen` was given: the first address of
+    /// The OCI read front, if an `oci` interface was given: the first address of
     /// [`oci_all`](Self::oci_all).
     pub oci: Option<SocketAddr>,
     /// Every address the OCI front is bound to; empty when there is none.
@@ -50,7 +49,7 @@ impl Addresses {
     pub(super) fn of(s3_all: Vec<SocketAddr>, oci: Option<&OciListener>) -> std::io::Result<Self> {
         let oci_all = oci.map(OciListener::local_addrs).transpose()?;
         let oci_all = oci_all.unwrap_or_default();
-        let none = || std::io::Error::other("--listen is needed");
+        let none = || std::io::Error::other("an s3 interface is needed");
         Ok(Self {
             s3: s3_all.first().copied().ok_or_else(none)?,
             s3_all,
@@ -71,14 +70,15 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
 ///
-/// The tiers are tested first (see [`self_test`](crate::self_test)): a tier that fails is an error before the
-/// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over.
+/// The tiers are not tested or probed. The proxy is opened over them, which reads and writes the
+/// hot tier's own state, so a hot tier that cannot be reached is an error here; the cold tier is
+/// first asked by the first request that needs it. `ready` is called with the address the server
+/// is bound to, before the first request is taken. Returns when the drain is over. What it says on the
+/// way is `tracing` events: a caller that installs no subscriber sees none of it.
 ///
 /// # Errors
-/// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
-/// that fails the self-test (a [`SelfTestError`](crate::SelfTestError)), a proxy that cannot be opened, or an address
-/// that cannot be bound.
+/// A flag that is not valid with the others, a key file or a tier that cannot be used, a proxy
+/// that cannot be opened, or an address that cannot be bound.
 pub async fn run(
     cli: &Cli,
     stop: impl Future<Output = ()> + Send + 'static,
@@ -103,8 +103,6 @@ pub async fn run_serving(
 ) -> Result<Drained, Error> {
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
-    let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
-    probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
@@ -144,9 +142,9 @@ pub async fn run_serving(
     };
     let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);
     watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -198,7 +196,10 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
+    let front = OciFront::new(backend, setup.prefix, setup.metrics)
+        .with_auth(setup.auth)
+        .with_stage_read(setup.stage_read);
+    let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
 }

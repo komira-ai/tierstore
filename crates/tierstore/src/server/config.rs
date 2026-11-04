@@ -1,33 +1,33 @@
 //! The configuration file of the `tierstore` binary: `--config <path>`, a TOML file that holds
-//! what the flags that describe the data path hold, in named tables.
+//! what describes the data path, in named tables. It is the only way to say it: the binary takes
+//! no flag for it (see [`REMOVED`] for the refusal of one that used to).
 //!
-//! The file is read into the same [`Cli`] the flags make, so a server started from a file runs
-//! the code of one started from the flags and cannot differ from it. Defaults are the flags'
-//! defaults (the tests check that a file that gives the least a start needs and the flags that
-//! give the least make equal settings).
+//! The file is read into the settings of a start ([`Cli`], or those of a build node), with the
+//! defaults the keys document.
 //!
 //! There are three shapes, told apart by the tables the file has:
 //!
-//! - a storage node: `[hot_store]` and `[cold_store]`, as the flags are;
+//! - a storage node: `[hot_store]` and `[cold_store]`;
 //! - a build node: `[local_cache]` and `[cold_store]` and no `[hot_store]`, a read cache in
 //!   front of one upstream (see [`config_cache`](super::config_cache) and
-//!   [`local_cache`](super::local_cache)). It has no flag form;
+//!   [`local_cache`](super::local_cache));
 //! - a storage node with a cache: all three tables, a disk cache in front of the node's own
-//!   proxy (see [`config_combined`](super::config_combined)). It has no flag form either.
+//!   proxy (see [`config_combined`](super::config_combined)).
 //!
 //! The tables:
 //!
-//! - `[server]`: the address, the id, the bucket and region, the key files, the limits on
-//!   requests and bodies, and the start-up self-test's wait.
+//! - `[[interface]]`: the fronts, one entry each: `type = "s3"` or `type = "oci"`, and `params`
+//!   (see [`config_interface`](super::config_interface)). At least one `s3` entry is needed. A
+//!   build node serves the registry from its cache.
+//!   The keys of the release before, `server.listen` and the `[oci]` table, are still read and
+//!   make an `s3` and an `oci` interface (see [`config_interface`](super::config_interface)).
+//! - `[server]`: the id, the bucket and region, the key files, the limits on requests and
+//!   bodies.
 //! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
 //!   the reconciler and its lease.
-//! - `[cold_store]`: the cold tier, and the start-up check it may skip.
+//! - `[cold_store]`: the cold tier.
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
-//! - `[oci]`: the read-only OCI front, left out when there is none: `listen` (needed in the
-//!   table), the certificate and key files, the key prefix and the connection limits. They
-//!   follow the rules of the `--oci-*` flags. Both shapes take it: a build node serves the
-//!   registry from its cache.
 //! - `[[policy]]`: the per-prefix settings. With `[local_cache]` `cache = true` keeps the keys
 //!   under the prefix in the cache; without it a policy is read and checked and has no effect,
 //!   and `cache = true` is refused.
@@ -35,47 +35,38 @@
 //! Any other table or key is refused, and so is a key that holds a secret: keys and credentials
 //! are paths of files (a key ending in `_file` or `_files`).
 //!
-//! Per-run knobs are flags only: `--config` and the two parts of the drain (see [`PER_RUN`]).
-//! [`KEYS`] says which key each other flag has; the tests walk the flags of [`Cli`] against it,
-//! so a flag added without a key fails them.
+//! Per-run knobs are flags only: `--config`, `--check-config` and the two parts of the drain.
 
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_skip,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-use super::config_oci::{OciTable, oci};
+use super::config_interface::{InterfaceTable, Interfaces, OciTable, interfaces, with_legacy};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
+pub(super) use super::config_tier::{TierParts, tier};
+use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::{FrontSettings, S3Tls};
-use super::listen::{Addrs, has_duplicate};
+use super::keys::DEFAULT_MIN_SECRET_BYTES;
+use super::listen::Addrs;
 use super::lock::check_lock_path;
 
-/// The flags that stay flags: the file is for the data path, and these are per run.
-pub(super) const PER_RUN: &[&str] = &[
-    "config",
-    "print-config",
-    "check-config",
-    "capabilities",
-    "drain-lb-wait",
-    "drain-deadline",
-];
-
-/// The key of each flag that the file holds: the flag's name without `--`, then the keys that
-/// stand for it, the first of them the one an error message names in its place. A tier flag
-/// (`--hot`) has a key for each part of its spec.
+/// The key of each flag that the file holds, or held before the flags went: the flag's name
+/// without `--`, then the keys that stand for it, the first of them the one an error message
+/// names in its place. A tier flag (`--hot`) has a key for each part of its spec. `--listen`,
+/// `--oci-listen` and `--print-config` have no entry: see [`removed`].
 pub(super) const KEYS: &[(&str, &[&str])] = &[
-    ("listen", &["server.listen"]),
     ("proxy-id", &["server.proxy_id"]),
     ("slot", &["server.slot"]),
     (
@@ -129,15 +120,23 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("put-min-bytes-per-sec", &["server.put_min_bytes_per_sec"]),
     ("put-rate-grace", &["server.put_rate_grace"]),
     ("body-idle-timeout", &["server.body_idle_timeout"]),
+    ("hot-conditional-delete", &["hot_store.conditional_delete"]),
+    (
+        "cold-conditional-delete",
+        &["cold_store.conditional_delete"],
+    ),
+    ("min-secret-bytes", &["server.min_secret_bytes"]),
     ("skip-backend-check", &["cold_store.skip_checks"]),
     ("backend-check-wait", &["server.backend_check_wait"]),
-    ("oci-listen", &["oci.listen"]),
-    // The names end in `_file`, as every key that holds a path to a secret does.
-    ("oci-tls-cert", &["oci.tls_cert_file"]),
-    ("oci-tls-key", &["oci.tls_key_file"]),
-    ("oci-prefix", &["oci.prefix"]),
-    ("oci-max-connections", &["oci.max_connections"]),
-    ("oci-connection-lifetime", &["oci.connection_lifetime"]),
+    // The params of an `oci` interface; the names end in `_file`, as every key that holds a path to a
+    // secret does.
+    ("oci-tls-cert", &["params.tls_cert_file"]),
+    ("oci-tls-key", &["params.tls_key_file"]),
+    ("oci-prefix", &["params.prefix"]),
+    ("oci-max-connections", &["params.max_connections"]),
+    ("oci-connection-lifetime", &["params.connection_lifetime"]),
+    ("oci-require-auth", &["params.require_auth"]),
+    ("oci-stage-read", &["params.stage_read"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -146,7 +145,7 @@ pub(super) const DEFAULT_DRAIN_LB_WAIT: Duration = Duration::from_secs(10);
 /// The default of `--drain-deadline`.
 pub(super) const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
-/// Why a start from the file `--config` names, or `--print-config`, is refused. Every one of
+/// Why a start from the file `--config` names is refused. Every one of
 /// them but an unreadable file is a start that a restart cannot mend; all exit with status 2.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -186,24 +185,17 @@ pub enum ConfigError {
         /// What is wrong with it.
         why: String,
     },
-    /// Flags that describe the data path were given with the file that holds them.
+    /// A flag that the file replaced: the message says which key holds what the flag held.
+    #[error("{0}")]
+    Removed(String),
+    /// A start without `--config`.
     #[error(
-        "--config cannot be given with {}: the file holds what they hold (only --drain-lb-wait and --drain-deadline go with it)",
-        .flags.join(", ")
+        "--config is needed: the settings are in a file (docs/configuration.md), and tierstore takes no flag for them"
     )]
-    Conflict {
-        /// The flags, with their `--`.
-        flags: Vec<String>,
-    },
-    /// `--print-config` writes the file for flags; it has no use with a file.
-    #[error("--print-config writes the file for the flags given; do not give it with --config")]
-    PrintWithConfig,
+    NoConfig,
     /// `--check-config` checks the file `--config` names; there is nothing to check without it.
     #[error("--check-config checks the file that --config names; give --config")]
     CheckWithoutConfig,
-    /// The settings could not be written as TOML.
-    #[error("--print-config: {0}")]
-    Print(#[from] toml::ser::Error),
     /// A refusal inside the file `path`.
     #[error("config file {}: {source}", .path.display())]
     In {
@@ -224,7 +216,7 @@ pub(super) struct PerRun {
 }
 
 /// What a tier is made of.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum Kind {
     /// Objects kept in the process only.
@@ -237,31 +229,39 @@ pub(super) enum Kind {
 }
 
 /// The whole file.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct File {
     pub server: ServerTable,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub hot_store: Option<TierTable>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cold_store: Option<TierTable>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The fronts: `[[interface]]`.
+    #[serde(default)]
+    pub interface: Vec<InterfaceTable>,
+    /// The registry front as the release before wrote it; an `oci` interface (read-only, see
+    /// [`with_legacy`]).
+    #[serde(default)]
     pub oci: Option<OciTable>,
     /// The cache of a build node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub local_cache: Option<LocalCacheTable>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub policy: Vec<Policy>,
 }
 
-/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys.
-#[derive(Debug, Deserialize, Serialize)]
+/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys. A key that
+/// is left out has its default.
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
-    /// One address, or a list of them.
-    pub listen: Addrs,
+    /// The address of the S3 front as the release before wrote it: an `s3` interface (see
+    /// [`with_legacy`]).
+    #[serde(default)]
+    pub listen: Option<Addrs>,
     pub proxy_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub slot: Option<u16>,
     pub bucket: String,
     pub region: Option<String>,
@@ -279,9 +279,9 @@ pub(super) struct ServerTable {
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
     pub presign_max_expires: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub grant_key_files: Vec<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
@@ -289,63 +289,94 @@ pub(super) struct ServerTable {
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
     pub body_idle_timeout: Option<Dur>,
+    pub min_secret_bytes: Option<u32>,
     pub s3_request_timeout: Option<Dur>,
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
+    #[serde(default)]
     pub backend_check_wait: Option<Dur>,
+    pub s3_connect_timeout: Option<Dur>,
+    pub s3_min_bytes_per_sec: Option<u64>,
+    pub s3_pool_idle_timeout: Option<Dur>,
+    pub s3_read_retries: Option<u32>,
+    pub s3_read_retry_wait: Option<Dur>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
 /// two has (the others are refused in the other).
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct TierTable {
     pub kind: Kind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub bucket: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub endpoint: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub region: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub credentials_file: Option<PathBuf>,
+    /// Whether a conditional delete is sent as a DELETE with `If-Match`; the default is the one
+    /// of the kind (`true` for `memory` and `dir`, `false` for `s3`), and `false` is refused for
+    /// the two that delete in one atomic step.
+    #[serde(default)]
+    pub conditional_delete: Option<bool>,
     // Only `[hot_store]` has these.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub budget: Option<Size>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub high_water: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub low_water: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub critical: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub copy_parallel: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub lease_ttl: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reconcile_interval: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub lock_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub usage_stale_after: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub journal_linger: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub journal_retention: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub journal_batch_entries: Option<u32>,
+    #[serde(default)]
+    pub usage_refresh: Option<Dur>,
+    #[serde(default)]
+    pub journal_page_size: Option<u32>,
+    #[serde(default)]
+    pub copy_rounds: Option<u32>,
+    #[serde(default)]
+    pub compare_range: Option<Size>,
+    #[serde(default)]
+    pub delete_rounds: Option<u32>,
+    #[serde(default)]
+    pub listing_heads: Option<u32>,
+    #[serde(default)]
+    pub upload_listing_calls: Option<u32>,
     pub heartbeat: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub departure: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub deadline_margin: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
+    /// still loads.
+    #[serde(default)]
     pub skip_checks: Option<Vec<String>>,
     /// Only the `[cold_store]` of a build node: the upstream, as a list of one in place of
     /// `endpoint`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub endpoints: Option<Vec<String>>,
 }
 
@@ -392,71 +423,43 @@ pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
     value.map_or(default, |dur| dur.0)
 }
 
-/// What a tier table says about the tier: the spec of `--hot` or `--cold`, and the endpoint,
-/// region and credentials file of its S3 flags.
-#[derive(Debug)]
-pub(super) struct TierParts {
-    pub spec: String,
-    pub endpoint: Option<String>,
-    pub region: Option<String>,
-    pub credentials_file: Option<PathBuf>,
+/// The settings of the OCI front, as the `oci` interfaces make them: the values the front checks
+/// at start.
+#[derive(Clone, Debug)]
+pub(super) struct OciFlags {
+    /// The addresses; none when there is no front.
+    pub listen: Vec<SocketAddr>,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
+    pub prefix: Option<String>,
+    pub max_connections: Option<u32>,
+    pub connection_lifetime: Option<Duration>,
+    /// Whether the front asks its clients for an access key of the server.
+    pub require_auth: bool,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    pub stage_read: Option<u64>,
 }
 
-/// The tier `table` names, if its keys fit its kind.
-pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigError> {
-    let s3_only = [
-        ("endpoint", table.endpoint.is_some()),
-        ("region", table.region.is_some()),
-        ("credentials_file", table.credentials_file.is_some()),
-    ];
-    let bucket = ("bucket", table.bucket.is_some());
-    let path = ("path", table.path.is_some());
-    let spec = match (table.kind, &table.path, &table.bucket) {
-        (Kind::Memory, ..) => {
-            let keys = [path, bucket, s3_only[0], s3_only[1], s3_only[2]];
-            refuse(name, "not for kind \"memory\"", &keys)?;
-            "memory".to_owned()
+impl OciFlags {
+    /// No front.
+    pub(super) fn none() -> Self {
+        Self {
+            listen: Vec::new(),
+            tls_cert: None,
+            tls_key: None,
+            prefix: None,
+            max_connections: None,
+            connection_lifetime: None,
+            require_auth: false,
+            stage_read: None,
         }
-        (Kind::Dir, path_value, _) => {
-            let keys = [bucket, s3_only[0], s3_only[1], s3_only[2]];
-            refuse(name, "not for kind \"dir\"", &keys)?;
-            format!(
-                "dir:{}",
-                require(name, "path", path_value.as_ref())?.display()
-            )
-        }
-        (Kind::S3, _, bucket_value) => {
-            refuse(name, "not for kind \"s3\"", &[path])?;
-            let bucket = require(name, "bucket", bucket_value.as_ref())?;
-            require(name, "endpoint", table.endpoint.as_ref())?;
-            require(name, "credentials_file", table.credentials_file.as_ref())?;
-            format!("s3:{bucket}")
-        }
-    };
-    Ok(TierParts {
-        spec,
-        endpoint: table.endpoint.clone(),
-        region: table.region.clone(),
-        credentials_file: table.credentials_file.clone(),
-    })
-}
-
-/// The addresses of the `listen` key `key`: at least one, and none twice. The message names the
-/// key and not an address.
-pub(super) fn addresses(key: &str, listen: Addrs) -> Result<Vec<SocketAddr>, ConfigError> {
-    if listen.0.is_empty() {
-        return Err(invalid(key, "it needs at least one address"));
     }
-    if has_duplicate(&listen.0) {
-        return Err(invalid(key, "the same address is listed twice"));
-    }
-    Ok(listen.0)
 }
 
 /// What a file makes: the settings of one of the three shapes.
 #[derive(Debug)]
 pub(super) enum Settings {
-    /// A storage node: the settings the flags make.
+    /// A storage node: the settings of a file with both tiers.
     Storage(Box<Cli>),
     /// A build node: a read cache, which has no flags.
     Cache(Box<CacheSettings>),
@@ -478,6 +481,17 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
         ("journal_retention", cold.journal_retention.is_some()),
+        (
+            "journal_batch_entries",
+            cold.journal_batch_entries.is_some(),
+        ),
+        ("usage_refresh", cold.usage_refresh.is_some()),
+        ("journal_page_size", cold.journal_page_size.is_some()),
+        ("copy_rounds", cold.copy_rounds.is_some()),
+        ("compare_range", cold.compare_range.is_some()),
+        ("delete_rounds", cold.delete_rounds.is_some()),
+        ("listing_heads", cold.listing_heads.is_some()),
+        ("upload_listing_calls", cold.upload_listing_calls.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
@@ -519,26 +533,29 @@ impl Settings {
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
 fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     let File {
-        server,
+        mut server,
         hot_store,
         cold_store,
+        interface,
         oci,
         local_cache,
         policy,
     } = file;
+    let listed = with_legacy(interface, server.listen.take(), oci)?;
+    let fronts = interfaces(&listed)?;
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
-            let cli = storage(server, (hot, cold), oci, per_run)?;
+            let cli = storage(server, (hot, cold), fronts, per_run)?;
             Ok(Settings::Storage(Box::new(cli)))
         }
         (None, Some(cold), Some(cache)) => {
-            let cache = CacheSettings::new(server, (cache, cold), oci, &policy, per_run)?;
+            let cache = CacheSettings::new(server, (cache, cold), fronts, &policy, per_run)?;
             Ok(Settings::Cache(Box::new(cache)))
         }
         (Some(hot), Some(cold), Some(cache)) => {
             let tiers = (hot, cold);
-            let node = combined(server, tiers, cache, oci, &policy, per_run)?;
+            let node = combined(server, tiers, cache, fronts, &policy, per_run)?;
             Ok(Settings::Combined(Box::new(node)))
         }
         _ => {
@@ -552,7 +569,7 @@ fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
 pub(super) fn storage(
     server: ServerTable,
     tiers: (TierTable, TierTable),
-    oci_table: Option<OciTable>,
+    fronts: Interfaces,
     per_run: PerRun,
 ) -> Result<Cli, ConfigError> {
     let (hot, cold) = tiers;
@@ -565,22 +582,7 @@ pub(super) fn storage(
         &[("endpoints", cold.endpoints.is_some())],
     )?;
     let skipping = [("skip_checks", hot.skip_checks.is_some())];
-    refuse(
-        "hot_store",
-        "only [cold_store] has it: the check it skips runs there",
-        &skipping,
-    )?;
-    let mut skip_backend_check: Vec<SkippedCheck> = Vec::new();
-    for text in cold.skip_checks.iter().flatten() {
-        match parse_skip(text) {
-            Ok(skipped) => skip_backend_check.push(skipped),
-            // Not the reason of the flag: it holds the text, free text that is never repeated.
-            Err(_) => {
-                let why = "each is CHECK=REASON; only multipart-conditional can be skipped, and it needs a reason";
-                return Err(invalid("cold_store.skip_checks", why));
-            }
-        }
-    }
+    refuse("hot_store", "only [cold_store] has it", &skipping)?;
     let hot_parts = tier("hot_store", &hot)?;
     let cold_parts = tier("cold_store", &cold)?;
     let budget = require("hot_store", "budget", hot.budget)?.0;
@@ -593,19 +595,16 @@ pub(super) fn storage(
     let critical = percent("critical", hot.critical, 95)?;
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
+    let hot_tuning = hot_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
-    let oci = oci(oci_table)?;
-    let shared = front_of(server, per_run)?;
+    let oci = fronts.oci;
+    let shared = front_of(server, fronts.s3, per_run)?;
     let front = shared.front;
     Ok(Cli {
-        config: None,
-        print_config: false,
-        check_config: false,
-        capabilities: false,
         listen: front.listen,
         proxy_id: front.proxy_id,
         slot: front.slot,
@@ -617,7 +616,11 @@ pub(super) fn storage(
         cold_endpoint: cold_parts.endpoint,
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
+        hot_conditional_delete: hot_parts.conditional_delete,
+        cold_conditional_delete: cold_parts.conditional_delete,
         s3_request_timeout: shared.s3_request_timeout,
+        s3_client: shared.s3_client,
+        hot_tuning,
         hot_bytes: hot_budget,
         high_water,
         low_water,
@@ -649,7 +652,8 @@ pub(super) fn storage(
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
-        skip_backend_check,
+        min_secret_bytes: front.min_secret_bytes,
+        skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
         oci_tls_cert: oci.tls_cert,
@@ -657,6 +661,8 @@ pub(super) fn storage(
         oci_prefix: oci.prefix,
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
+        oci_require_auth: oci.require_auth,
+        oci_stage_read: oci.stage_read,
     })
 }
 
@@ -665,7 +671,8 @@ pub(super) fn storage(
 pub(super) struct Shared {
     pub front: FrontSettings,
     pub s3_request_timeout: Duration,
-    pub backend_check_wait: Duration,
+    pub s3_client: S3Client,
+    pub backend_check_wait: Option<Duration>,
 }
 
 /// The `server.slot` key: a port, so not zero (a number past 65535 does not parse as one).
@@ -677,7 +684,12 @@ fn slot_of(slot: Option<u16>) -> Result<Option<u16>, ConfigError> {
 }
 
 /// The settings `[server]` makes: a key that is left out has the default of its flag.
-pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, ConfigError> {
+pub(super) fn front_of(
+    server: ServerTable,
+    listen: Vec<SocketAddr>,
+    per_run: PerRun,
+) -> Result<Shared, ConfigError> {
+    let s3_client = s3_client(&server)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -699,7 +711,7 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         u32::MAX,
     )?;
     let front = FrontSettings {
-        listen: addresses("server.listen", server.listen)?,
+        listen,
         proxy_id: server.proxy_id,
         slot: slot_of(server.slot)?,
         bucket: server.bucket,
@@ -724,13 +736,15 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
             .unwrap_or(DEFAULT_PUT_MIN_BYTES_PER_SEC),
         put_rate_grace: duration(server.put_rate_grace, Duration::from_secs(30)),
         body_idle_timeout: duration(server.body_idle_timeout, Duration::from_secs(30)),
+        min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,
     };
     Ok(Shared {
         front,
         s3_request_timeout: duration(server.s3_request_timeout, Duration::from_secs(60)),
-        backend_check_wait: duration(server.backend_check_wait, Duration::from_secs(300)),
+        s3_client,
+        backend_check_wait: server.backend_check_wait.map(|wait| wait.0),
     })
 }
 
@@ -745,8 +759,7 @@ pub(super) fn settings_from_text(text: &str, per_run: PerRun) -> Result<Settings
     settings(file, per_run)
 }
 
-/// The settings of a storage-node file, which are the settings of flags: the flags' form
-/// (`--print-config` checks that what it prints loads this way).
+/// The settings of a storage-node file.
 ///
 /// # Errors
 /// A [`ConfigError`]: text that is not a file of this format, or is a build node's.
@@ -754,14 +767,61 @@ pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError>
     match settings_from_text(text, per_run)? {
         Settings::Storage(cli) => Ok(*cli),
         Settings::Cache(_) => {
-            let why = "is the file of a build node, which has no flag form";
+            let why =
+                "is the file of a build node, which these settings of a storage node cannot hold";
             Err(invalid("local_cache", why))
         }
         Settings::Combined(_) => {
-            let why = "is in a file with [hot_store] too, which has no flag form";
+            let why = "is in a file with [hot_store] too, which these settings of a storage node cannot hold";
             Err(invalid("local_cache", why))
         }
     }
+}
+
+impl Cli {
+    /// The settings of a storage node's configuration file, given as its text, with the knobs of
+    /// the run at their defaults. Nothing is read of the files it names.
+    ///
+    /// # Errors
+    /// The refusal of a file that is not one of this format, or is the file of a build node.
+    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
+        let per_run = PerRun {
+            drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
+            drain_deadline: DEFAULT_DRAIN_DEADLINE,
+        };
+        from_text(text, per_run)
+    }
+}
+
+/// What a flag that is no longer one is refused with: the key of the file that holds what it
+/// held, or none if `flag` (without `--`) was never one of the data path's.
+pub(super) fn removed(flag: &str) -> Option<String> {
+    let instead = match flag {
+        "listen" => {
+            "declare an [[interface]] with type = \"s3\" and params port or addresses".to_owned()
+        }
+        "oci-listen" => {
+            "declare an [[interface]] with type = \"oci\" and params port or addresses".to_owned()
+        }
+        "print-config" => {
+            return Some(
+                "--print-config was removed: there are no flags to print a file for; write the file (docs/configuration.md)"
+                    .to_owned(),
+            );
+        }
+        other => {
+            let (_, keys) = KEYS.iter().find(|(name, _)| *name == other)?;
+            let of = if other.starts_with("oci-") {
+                " of an oci interface"
+            } else {
+                ""
+            };
+            format!("set {}{of}", keys.join(", "))
+        }
+    };
+    Some(format!(
+        "--{flag} was removed: the file given with --config holds it; {instead}"
+    ))
 }
 
 /// The settings of the file at `path`, with the knobs of this run.

@@ -35,16 +35,6 @@
 //!   listing follows the continuation tokens. It does the multipart calls too: the chunks of
 //!   a part are sent to the store as they arrive, never collected, and a completion is
 //!   create-only.
-//! - [`self_test`] asks a backend the questions its guarantees rest on (a create-only put that
-//!   refuses a key that exists, a replace on the right content tag only, a ranged read that
-//!   gives the range, a head, a listing that pages, and on the cold tier a create-only
-//!   completion) under a probe key in `_tiering/selftest/`, and names the first one it answers
-//!   wrongly (a [`SelfTestError::Violation`]; a store it could not ask is
-//!   [`SelfTestError::Unreachable`], and one that is full is not in doubt). The `tierstore`
-//!   binary runs it on both tiers and refuses to start if one answers wrongly.
-//!   [`settle_conditional_delete`] then asks a tier once how it does [`Backend::delete_if_match`]
-//!   (an S3 tier: `If-Match` on the DELETE where the store enforces it, else a read of the tag
-//!   and a delete) and never fails the start.
 //! - [`Proxy`] is a store over a hot and a cold backend that is itself a [`Backend`]. Any
 //!   number of proxies (one per node, each with its own id) work over the same two backends,
 //!   and none needs state for correctness. A get reads the hot tier, else the cold tier, and
@@ -63,8 +53,9 @@
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. The puts and deletes
-//!   made on entries (format active) ask for both; no other request path does.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. The deletes made on
+//!   entries (format active) send their calls through [`Bounded`]; the puts made on entries check
+//!   the [`Deadline`] themselves; no other request path does either.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
@@ -105,8 +96,8 @@
 //! (`cargo build -p tierstore --features server`), over memory, directory or S3 tiers; the
 //! feature turns `s3` on.
 //!
-//! The same feature adds a read-only OCI distribution front, over HTTPS or over plain HTTP on
-//! loopback (`--oci-listen`, `server::oci`), which serves the objects under a key prefix by
+//! The same feature adds an OCI distribution front (read-only unless it asks for keys), over HTTPS or over plain HTTP on
+//! loopback (an `oci` interface, `server::oci`), which serves the objects under a key prefix by
 //! their SHA-256 digest, so that a container engine pulls an image from the tiers.
 
 #![forbid(unsafe_code)]
@@ -161,9 +152,6 @@ mod registrations_tests;
 mod reservation;
 #[cfg(feature = "s3")]
 pub mod s3;
-mod selftest;
-#[cfg(test)]
-mod selftest_tests;
 #[cfg(feature = "server")]
 pub mod server;
 mod sleeper;
@@ -194,9 +182,5 @@ pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
-pub use selftest::{
-    Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
-    settle_conditional_delete, sweep_probes,
-};
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
 pub use tiered::{DeleteWait, Proxy, ProxyConfig};

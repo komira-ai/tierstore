@@ -12,40 +12,65 @@ pub(super) enum RouteKind {
     Ping,
     Manifest,
     Blob,
+    /// `/v2/<name>/tags/list`.
+    Tags,
+    /// The paths of uploads: where one begins, and one that has begun.
+    Upload,
     Other,
 }
 
 /// The label of each route, in the order of [`RouteKind`].
-const ROUTES: [&str; 4] = ["ping", "manifest", "blob", "other"];
+const ROUTES: [&str; 6] = ["ping", "manifest", "blob", "tags", "upload", "other"];
 
 /// How a request ended, by the status it was answered with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
     /// 200.
     Ok,
+    /// 201: a blob or a manifest was stored.
+    Created,
+    /// 202: an upload began, or took a chunk.
+    Accepted,
+    /// 204: an upload was cancelled.
+    NoContent,
     /// 206.
     Partial,
     /// 404.
     NotFound,
-    /// 400.
+    /// 400, 411 or 413: a request the front refused as malformed (a bad name or digest, bytes that
+    /// are not their digest, a manifest that is invalid or names a blob that is not there, a
+    /// body without a length where the store needs one, a manifest over the limit).
     Invalid,
     /// 405.
     NotAllowed,
-    /// 416.
+    /// 416: a range of a blob that holds no byte of it, or a chunk of an upload that does not start
+    /// where the upload is.
     Unsatisfiable,
+    /// 401: no key of the server, or a wrong secret.
+    Unauthorized,
+    /// 403: a key of the server that lacks the right the call needs.
+    Denied,
     /// 5xx: a store that failed, an object that is not what its name says.
     Failed,
+    /// 409: a tag that another push moved first.
+    Conflict,
 }
 
 /// The label of each outcome, in the order of [`Outcome`].
-const OUTCOMES: [&str; 7] = [
+const OUTCOMES: [&str; 13] = [
     "ok",
+    "created",
+    "accepted",
+    "no_content",
     "partial",
     "not_found",
     "invalid",
     "not_allowed",
     "range_not_satisfiable",
+    "unauthorized",
+    "denied",
     "failed",
+    "conflict",
 ];
 
 /// What the front has done since it started: requests by route and outcome, the bytes of blobs

@@ -11,11 +11,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use clap::Parser;
 use objstore_s3::{ObjectKey, ObjectStore};
 use rustls::pki_types::ServerName;
 use tierstore::server::Drained;
-use tierstore::server::cli::{Addresses, Cli, run_serving};
+use tierstore::server::cli::{Addresses, run_serving};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::oneshot;
@@ -41,11 +40,11 @@ struct Running {
 }
 
 impl Running {
-    /// Starts the server over `flags`, with `--drain-lb-wait` set to `lb_wait`.
+    /// Starts the server over the arguments `flags`, with `--drain-lb-wait` set to `lb_wait`.
     async fn start(mut flags: Vec<String>, lb_wait: &str) -> Self {
         let at = flags.iter().position(|flag| flag == "--drain-lb-wait");
         flags[at.expect("the flag") + 1] = lb_wait.to_owned();
-        let cli = Cli::try_parse_from(flags).expect("flags");
+        let cli = crate::binary::cli_of(&flags);
         let (stop, stopped) = oneshot::channel::<()>();
         let (told, bound) = oneshot::channel::<Addresses>();
         let run = tokio::task::spawn_local(async move {

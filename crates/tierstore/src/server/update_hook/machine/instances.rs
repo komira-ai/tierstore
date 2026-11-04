@@ -34,6 +34,10 @@ impl LoopbackInstances {
     /// A connect that takes longer than `connect_timeout` fails, and so does a request whose
     /// write and answer together take longer than `read_timeout`.
     #[must_use]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the default clock of the probe is the machine's"
+    )]
     pub fn new(connect_timeout: Duration, read_timeout: Duration) -> LoopbackInstances {
         LoopbackInstances {
             connect_timeout,

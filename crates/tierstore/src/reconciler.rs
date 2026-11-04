@@ -1,6 +1,7 @@
 //! The reconciler: copies what the proxies journal to the cold tier, and frees the hot tier.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,8 +23,8 @@ use crate::{
 
 mod drain;
 
-/// How many times a copy reads the cold tier's object again after it changed under the copy.
-const COPY_ROUNDS: u32 = 3;
+/// The default of [`ReconcilerConfig::compare_range`]: 1 MiB.
+pub(crate) const COMPARE_RANGE: NonZeroU64 = NonZeroU64::MIN.saturating_add((1 << 20) - 1);
 
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
@@ -55,6 +56,10 @@ pub struct ReconcilerConfig {
     pub retention: Duration,
     /// The most journal objects asked for in one listing.
     pub page_size: usize,
+    /// How many times a copy reads the cold tier's object again after it changed under the copy.
+    pub copy_rounds: u32,
+    /// The most bytes of the hot object that one read of a comparison holds.
+    pub compare_range: NonZeroU64,
     /// How long the format object must have said `drain` (by the monotonic clock of the
     /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
     /// (`ProxyConfig::format_refresh`), so that a proxy whose format reads succeed has read the
@@ -83,10 +88,11 @@ pub struct ReconcilerConfig {
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
-    /// retention of an hour, listings of 100 journal objects, a renewal and a margin of a third
-    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime,
-    /// a drain settle time of 15 seconds, and no removal of registrations (a registration
-    /// retention of zero).
+    /// retention of an hour, listings of 100 journal objects, 3 looks at a cold object that changes
+    /// under a copy, comparisons in reads of 1 MiB, a renewal and a margin of a third
+    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime, and no
+    /// removal of registrations (a registration retention of zero), and a drain settle time of 15
+    /// seconds.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -100,6 +106,8 @@ impl ReconcilerConfig {
             lease_margin: None,
             retention: Duration::from_secs(3600),
             page_size: 100,
+            copy_rounds: 3,
+            compare_range: COMPARE_RANGE,
             drain_settle: Duration::from_secs(15),
             clock,
             mono: Arc::new(MonotonicClock::new()),
@@ -595,13 +603,13 @@ impl Reconciler {
     }
 
     /// Settles one key with the cold tier (see the type), looking again if the cold tier's object
-    /// changes under a replacement, up to [`COPY_ROUNDS`] looks.
+    /// changes under a replacement, up to [`ReconcilerConfig::copy_rounds`] looks.
     async fn copy_key(
         &self,
         key: &str,
         want: &Wanted<'_>,
     ) -> Result<Option<(String, String)>, Error> {
-        for _ in 0..COPY_ROUNDS {
+        for _ in 0..self.config.copy_rounds {
             if let Round::Done(tag) = self.copy_round(key, want).await? {
                 return Ok(tag.map(|tag| (key.to_owned(), tag)));
             }
@@ -887,7 +895,7 @@ impl Reconciler {
 
     /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave,
     /// in the object `cold` (what a HEAD of the cold tier gave). Both tiers are read in ranges of
-    /// at most [`COMPARE_RANGE`] bytes, each read with its content tag and mark in one call, so
+    /// at most [`ReconcilerConfig::compare_range`] bytes, each read with its content tag and mark in one call, so
     /// that every byte compared is of the object whose tag a HEAD gave: a range of another object
     /// (a key replaced between the HEAD and the read, and put back before the next look) has
     /// another tag, a range of a reservation is marked, and either ends the comparison with
@@ -897,7 +905,7 @@ impl Reconciler {
     async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
         let mut offset = 0u64;
         while offset < hot.size {
-            let len = (hot.size - offset).min(COMPARE_RANGE);
+            let len = (hot.size - offset).min(self.config.compare_range.get());
             let range = ByteRange::new(offset, len);
             let (mine, _, tag) = match self.hot.get_tagged(key, Some(range)).await {
                 Ok(read) => read,
@@ -971,6 +979,3 @@ impl Reconciler {
         }
     }
 }
-
-/// The most bytes of the hot object that one read of a comparison holds.
-const COMPARE_RANGE: u64 = 1 << 20;

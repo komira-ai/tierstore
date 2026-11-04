@@ -5,7 +5,7 @@
 //! and `[::]:P`. They can only be two sockets, and the IPv6 one must say `IPV6_V6ONLY`, or the
 //! system lets it take the IPv4 packets too and the second bind is refused.
 //!
-//! [`Addrs`] is what the `listen` keys of the file are read into (one address, or a list), and
+//! [`Addrs`] is what the `addresses` params of the interfaces are read into (one address, or a list), and
 //! [`bind_all`] and [`Listeners`] are the sockets of a front: one server, one drain and one limit
 //! on connections serve them all.
 
@@ -17,24 +17,14 @@ use std::task::{Context, Poll};
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{AddressFamily, SocketType, bind as bind_socket, listen, socket, sockopt};
 use serde::de::{self, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::{Incoming, door};
 
-/// The value of a `listen` key of the file: one address, or a list of them. It is written as a
-/// string when it is one address, so a file that has one reads and prints as it always did.
+/// The value of an `addresses` param of an interface: one address, or a list of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Addrs(pub Vec<SocketAddr>);
-
-impl Serialize for Addrs {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0.as_slice() {
-            [only] => only.serialize(serializer),
-            several => several.serialize(serializer),
-        }
-    }
-}
 
 impl<'de> Deserialize<'de> for Addrs {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -68,14 +58,6 @@ impl<'de> Deserialize<'de> for Addrs {
 fn address<E: de::Error>(text: &str) -> Result<SocketAddr, E> {
     text.parse()
         .map_err(|_| E::custom("invalid socket address syntax"))
-}
-
-/// Whether the same address is in `addrs` twice.
-pub(super) fn has_duplicate(addrs: &[SocketAddr]) -> bool {
-    addrs
-        .iter()
-        .enumerate()
-        .any(|(at, addr)| addrs[..at].contains(addr))
 }
 
 /// The length of the queue of connections the system keeps for a socket that is not yet

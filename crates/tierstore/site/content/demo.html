@@ -7,15 +7,27 @@
 <p>The key file is the two-line form: the access key id, then the secret. A tier may be a directory, which needs no second store.</p>
 <div class="code transcript"><pre><span class="p">$</span> printf 'AKIDEXAMPLE\nthe secret\n' &gt; access.key
 <span class="p">$</span> chmod 0600 access.key
-<span class="p">$</span> tierstore --listen 127.0.0.1:9000 --proxy-id tierstore-1 --bucket tierstore \
-    --access-key-file access.key \
-    --hot dir:./hot --cold dir:./cold --hot-bytes 1073741824
-<span class="o">tierstore: testing the hot tier dir:./hot
-tierstore: tested the hot tier dir:./hot in &lt;N&gt; ms
-tierstore: testing the cold tier dir:./cold
-tierstore: tested the cold tier dir:./cold in &lt;N&gt; ms
-tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
-<p class="source-note">The flags are those of the example unit and <code>--help</code>. The first four lines are written to stderr by <code>probe_tiers</code> and the last to stdout by the binary (<code>crates/tierstore/src/server/cli_probe.rs</code> and <code>cli.rs</code>). Before it binds the address, the process asks each tier the questions its guarantees rest on; see <a href="/docs/operations/#the-start-up-self-test">the start-up self-test</a>.</p>
+<span class="p">$</span> cat tierstore.toml
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9000"] }
+
+[server]
+proxy_id        = "tierstore-1"
+bucket          = "tierstore"
+access_key_file = "access.key"
+
+[hot_store]
+kind   = "dir"
+path   = "hot"
+budget = "1GiB"
+
+[cold_store]
+kind = "dir"
+path = "cold"
+<span class="p">$</span> tierstore --config tierstore.toml
+<span class="o">tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
+<p class="source-note">The file is the one of <a href="/docs/configuration/">the configuration</a>; the process takes no flag for it. The line is written to stdout by the binary (<code>crates/tierstore/src/server/cli.rs</code>). The process does not test or probe its tiers; see <a href="/docs/operations/#what-tierstore-requires-of-a-store">what tierstore requires of a store</a>.</p>
 
 <h2 id="probes">2. The probes</h2>
 <div class="code transcript"><pre><span class="p">$</span> curl -s http://127.0.0.1:9000/healthz
@@ -35,15 +47,9 @@ tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
 <span class="o">draining</span></pre></div>
 <p class="source-note">Both requests are made inside the <code>--drain-lb-wait</code> window (give the flag a few seconds to try this). The status and the body are those of <code>/readyz</code> in <code>server/mod.rs</code>; the exit status 0 is documented in <code>server/cli.rs</code> and <code>packaging/README.md</code>, "Stopping it".</p>
 
-<h2 id="print-config">4. From flags to a file <span class="tag tag-ok">v0.0.39 and later</span></h2>
-<div class="notice notice-warn"><p><strong>This step needs v0.0.39 or later.</strong> <code>--print-config</code> and <code>--config</code> are not in v0.0.38 or earlier. Steps 1 to 3 use flags only and work with any release.</p></div>
-<p><code>--print-config</code>, given the flags of a start, prints the TOML file that is equivalent and exits 0 without starting anything. It names key files by path and never prints what is in them.</p>
-<div class="code transcript"><pre><span class="p">$</span> tierstore --print-config --listen 127.0.0.1:9000 --proxy-id tierstore-1 --bucket tierstore \
-    --access-key-file access.key --hot dir:./hot --cold dir:./cold --hot-bytes 1073741824
-<span class="o"># The configuration file equivalent to the flags that `tierstore --print-config` was given.
-# Start the server with `tierstore --config &lt;this file&gt;` and without the flags it replaces;
-# only --drain-lb-wait and --drain-deadline stay flags. The key files are named by path.
-
-(the file follows: the tables [server], [hot_store] and [cold_store], as on the configuration page)</span></pre></div>
-<p class="source-note">The three comment lines are the header constant of <code>server/config_print.rs</code>; the last line is this page's summary of the rest, not program output. A test loads the printed file back and checks it makes the settings the flags made.</p>
+<h2 id="flags-gone">4. The flags that went</h2>
+<p>The process takes only <code>--config</code> for its data path. A flag that an earlier build took for it is refused at the start, with exit status 2 and the key of the file that replaces it:</p>
+<div class="code transcript"><pre><span class="p">$</span> tierstore --listen 127.0.0.1:9000 --config tierstore.toml
+<span class="o">tierstore: --listen was removed: the file given with --config holds it; declare an [[interface]] with type = "s3" and params port or addresses</span></pre></div>
+<p class="source-note">The message is built by <code>removed</code> in <code>crates/tierstore/src/server/config.rs</code>.</p>
 <p>Next: <a href="/docs/configuration/">the configuration</a> and <a href="/docs/operations/">operations</a>.</p>
