@@ -234,6 +234,7 @@ impl EntryReconciler {
         match deleted {
             Ok(()) => {
                 self.tags().forget(key);
+                self.tally.evicted(key, hot.size, hot.modified);
                 Ok(Evicted::Removed(hot.size))
             }
             Err(Error::NotFound(_)) => Ok(Evicted::Gone),
