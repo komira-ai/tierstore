@@ -173,7 +173,7 @@ fn keys<T>(listed: Vec<T>, key: impl Fn(T) -> String) -> Vec<String> {
 
 /// Asserts that the previous release, over a directory in which this branch wrote objects under
 /// `_entries/` (a create-only put and a replacement by the tag, which make the subdirectory
-/// `_entries/` and the lock file in it), lists the directory without an error and lists only the
+/// `.entries/` and the lock file in it), lists the directory without an error and lists only the
 /// plain object, lists the prefix `_entries/` as empty, reads and puts plain keys as before, and
 /// does not find an entry key; and that this branch then lists the entries and the object the
 /// previous release put.
@@ -193,7 +193,7 @@ async fn the_previous_release_lists_a_directory_that_has_an_entries_subdirectory
     now.put_if_match("_entries/second", body(4, 41), &tag)
         .await
         .unwrap();
-    assert!(dir.path().join("_entries").is_dir());
+    assert!(dir.path().join(".entries").is_dir());
 
     let seen = keys(before.list("").await.unwrap(), |object| object.key);
     assert_eq!(seen, ["plain"]);
@@ -215,4 +215,52 @@ async fn the_previous_release_lists_a_directory_that_has_an_entries_subdirectory
         ["_entries/first", "_entries/second", "later", "plain"]
     );
     assert_eq!(now.get("later", None).await.unwrap(), body(5, 9));
+}
+
+/// Asserts that an ordinary object at the bare key `_entries` (outside the reserved prefix) and
+/// objects under `_entries/` coexist over one directory shared by both releases, whichever wrote
+/// first: the previous release writes `_entries` and this branch then writes entry keys beside it
+/// (reading the previous object back unchanged); and in a second directory this branch writes the
+/// entry keys first and the previous release then puts `_entries` and reads it back. Each release
+/// lists the plain object, and this branch also lists the entries.
+#[tokio::test]
+async fn an_object_at_the_key_entries_and_entry_objects_coexist_across_releases() {
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-bare-entries-old");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+    before.put("_entries", body(1, 30)).await.unwrap();
+    now.put("_entries/a", body(2, 40)).await.unwrap();
+    let tag = now.put_tagged("_entries/b", body(3, 40)).await.unwrap();
+    now.put_if_match("_entries/b", body(4, 41), &tag)
+        .await
+        .unwrap();
+    assert_eq!(now.get("_entries", None).await.unwrap(), body(1, 30));
+    assert_eq!(before.get("_entries", None).await.unwrap(), body(1, 30));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries", "_entries/a", "_entries/b"]
+    );
+    assert_eq!(
+        keys(before.list("").await.unwrap(), |object| object.key),
+        ["_entries"]
+    );
+
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-bare-entries-new");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+    now.put("_entries/a", body(5, 40)).await.unwrap();
+    before.put("_entries", body(6, 30)).await.unwrap();
+    assert_eq!(before.get("_entries", None).await.unwrap(), body(6, 30));
+    assert_eq!(now.get("_entries", None).await.unwrap(), body(6, 30));
+    assert_eq!(now.get("_entries/a", None).await.unwrap(), body(5, 40));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries", "_entries/a"]
+    );
+    assert_eq!(
+        keys(before.list("").await.unwrap(), |object| object.key),
+        ["_entries"]
+    );
 }

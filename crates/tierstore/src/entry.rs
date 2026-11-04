@@ -5,9 +5,9 @@
 //! read at (`If-Match`), and removed by the actor whose work it was (or by the reconciler, when
 //! the entry is sealed). That makes every change of an entry one atomic store call, and a call
 //! that lost a race fails instead of overwriting. This module is the entry's body, its
-//! transitions and the store calls that carry them out. Only the entry reconciler
-//! ([`EntryReconciler`](crate::EntryReconciler)) uses it so far: no request path reads or writes an
-//! entry.
+//! transitions and the store calls that carry them out. The puts of a proxy whose format is
+//! active use it (`tiered/entry_put.rs`), and so does the entry reconciler
+//! ([`EntryReconciler`](crate::EntryReconciler)); no read or delete of a request path does.
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by
@@ -37,6 +37,19 @@
 //! two, so the body can be newer than the tag. That is safe: the tag is the older one, and a
 //! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
 //! Nobody acts on a body without going through such a call.
+//!
+//! The one exception is a store without a delete on the tag: there [`Entries::release`] falls back to
+//! a plain delete, which does not check the tag, so a stale [`Seen`] could remove a newer entry.
+//! It does so only for a sealed entry, which no step changes (the reconciler seals before it
+//! releases, and abandons the release when its seal is [`Outcome::Lost`]). A held entry is changed
+//! under its holder (a delete amends a held put with [`Step::AmendCopy`], the reconciler reaps a
+//! held entry), so there release returns the store's `Unsupported` and deletes nothing.
+//!
+//! # Nonce
+//!
+//! The nonce is `<actor id>.<counter>`, the counter being per [`Entries`]. It is unique only if an
+//! actor id is never used with a counter that starts again: an actor that makes a new [`Entries`]
+//! takes a fresh id, or shares the counter of the old one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -294,8 +307,11 @@ fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
 
 /// The store calls on the entries of one actor: a proxy or a reconciler, named by `me`.
 ///
-/// `me` is unique to the process (a proxy id carries its boot), which is what makes the nonces it
-/// writes unique among all writers.
+/// `me` must be unique to the process: the nonces it writes are `me` and a counter that starts at
+/// zero in each [`Entries`], so two instances with one `me` can write the same nonce. A reconciler
+/// passes an id that carries its boot. [`Proxy::open`](crate::Proxy::open) passes the configured
+/// proxy id, which a restarted proxy keeps, so after a restart its nonces can repeat those of its
+/// earlier life; that is a known limit of this release.
 pub struct Entries {
     hot: Arc<dyn Backend>,
     me: String,
@@ -451,8 +467,10 @@ impl Entries {
 
     /// Removes the entry as `seen` has it, if this actor may (it is sealed, or a put or a delete it
     /// holds) and it still has the tag of `seen`. A store that does not do a delete on the tag
-    /// gets a plain delete, which is safe here because nobody changes an entry that is sealed or
-    /// held by its owner.
+    /// gets a plain delete, which does not check the tag, only for a sealed entry, which no step
+    /// changes. For a held entry, which a delete may amend ([`Step::AmendCopy`]) or the reconciler
+    /// reap, it gets nothing deleted and the `Unsupported` error: seal first, and give up the
+    /// release when the seal is [`Outcome::Lost`].
     ///
     /// # Errors
     /// The backend's error for a failed delete (see the module for the ambiguous ones).
@@ -462,7 +480,9 @@ impl Entries {
         }
         let path = entry_key(&seen.entry.key);
         let deleted = match self.hot.delete_if_match(&path, &seen.tag).await {
-            Err(Error::Unsupported(_)) => self.hot.delete(&path).await,
+            Err(Error::Unsupported(_)) if seen.entry.st == EntryState::Sealed => {
+                self.hot.delete(&path).await
+            }
             answer => answer,
         };
         match deleted {
