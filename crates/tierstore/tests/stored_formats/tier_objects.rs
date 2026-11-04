@@ -127,14 +127,19 @@ async fn a_proxy_reads_a_usage_with_a_field_added_later() {
     read_usage(USAGE_NEWER).await;
 }
 
-/// Asserts that opening a proxy writes the marker of the fixture, an empty object, under
-/// `_tiering/proxies/<proxy_id>`, and that opening over a marker that is there leaves it as it
-/// is.
+/// Asserts that opening a proxy writes a registration with a body under
+/// `_tiering/proxies/<proxy_id>`: a JSON object with `proto` 1, a `boot` and `hb` 0 (a proxy that
+/// has not beaten); and that opening over the empty marker of the fixture, which every release
+/// before wrote, leaves it as it is.
 #[tokio::test(start_paused = true)]
-async fn opening_a_proxy_writes_the_empty_marker_of_the_fixture() {
+async fn opening_a_proxy_writes_a_registration_with_a_body_and_leaves_the_empty_marker() {
     let tiers = Tiers::new();
     tiers.proxy("p1", 1000).await.unwrap();
-    assert_eq!(tiers.stored("_tiering/proxies/p1").await, PROXY_MARKER);
+    let stored = tiers.stored("_tiering/proxies/p1").await;
+    let found: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(found["proto"], 1);
+    assert_eq!(found["hb"], 0);
+    assert!(found["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
 
     tiers.seed("_tiering/proxies/p2", PROXY_MARKER).await;
     tiers.proxy("p2", 1000).await.unwrap();

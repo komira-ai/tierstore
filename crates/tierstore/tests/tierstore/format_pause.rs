@@ -59,27 +59,33 @@ async fn every_write_is_answered_503_while_the_format_says_drain_and_reads_still
     assert_absent(&*rig.hot_mem, "n").await;
 }
 
-/// Asserts which phases pause a put: `drain` and `drained` do, an `active` format with its epoch
-/// and a phase this release does not know do not.
+/// Asserts which phases pause a put: `drain` and `drained` do, a phase this release does not know
+/// does not, and an `active` format with its epoch does not either but makes the put on an entry,
+/// which a proxy that has not beaten is not live for (the answer is `Unavailable` with another
+/// text than the pause's).
 #[tokio::test(start_paused = true)]
 async fn drained_pauses_writes_and_active_and_unknown_phases_do_not() {
     let cases = [
-        (r#"{"phase":"drain"}"#, true),
-        (r#"{"phase":"drained"}"#, true),
-        (r#"{"epoch":2,"phase":"active"}"#, false),
-        (r#"{"phase":"someday","extra":[1]}"#, false),
+        (r#"{"phase":"drain"}"#, Err(paused())),
+        (r#"{"phase":"drained"}"#, Err(paused())),
+        (r#"{"phase":"someday","extra":[1]}"#, Ok(())),
     ];
-    for (json, is_paused) in cases {
+    for (json, want) in cases {
         let rig = Rig::new();
         let proxy = eager_proxy(&rig).await;
         set_format(&rig, json).await;
         let put = proxy.put("k", body("v")).await;
-        assert_eq!(
-            put,
-            if is_paused { Err(paused()) } else { Ok(()) },
-            "{json}"
-        );
+        assert_eq!(put, want, "{json}");
     }
+    let rig = Rig::new();
+    let proxy = eager_proxy(&rig).await;
+    set_format(&rig, r#"{"epoch":2,"phase":"active"}"#).await;
+    let put = proxy.put("k", body("v")).await;
+    let Err(Error::Unavailable(text)) = put else {
+        panic!("{put:?}");
+    };
+    assert!(text.contains("not live"), "{text}");
+    assert_ne!(Error::Unavailable(text), paused());
 }
 
 /// Asserts that deleting the format object (what an operator's cancel does) lets puts and deletes
