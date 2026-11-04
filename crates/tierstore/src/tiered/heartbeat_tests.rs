@@ -482,6 +482,7 @@ async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_
         .await;
     });
     gate.parked().await;
+    memory.delete(FORMAT_KEY).await.unwrap();
     memory
         .put(FORMAT_KEY, bytes::Bytes::from_static(DRAINED))
         .await
