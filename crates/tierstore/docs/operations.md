@@ -2,13 +2,13 @@
 
 ## Starting
 
-Start the unit by hand (see [install](install.md)). Before it opens the proxy or binds the address, the process runs the start-up self-test (below). When it is ready it prints one line on stdout:
+Start the unit by hand (see [install](install.md)). The process does not test or probe its tiers (see [What tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)): it opens the proxy and binds the address. Opening the proxy reads and writes the hot tier's own state, so a hot tier that cannot be reached fails the start (exit 1, `opening the proxy: ...`); the cold tier is first asked by the first request that needs it. When it is ready it prints one line on stdout:
 
 ```text
 tierstore <version> listen=192.0.2.10:9000
 ```
 
-With the OCI front on, the line gets ` oci-listen=<address> (https)` or ` (http)` after the listen address. With more than one address of a kind the value is every address, in the order given, separated by commas with no space: `listen=0.0.0.0:9000,[::]:9000`. The self-test's progress and every other message go to stderr, and so to the journal.
+With the OCI front on, the line gets ` oci-listen=<address> (https)` or ` (http)` after the listen address. With more than one address of a kind the value is every address, in the order given, separated by commas with no space: `listen=0.0.0.0:9000,[::]:9000`. Every other message goes to stderr, and so to the journal.
 
 ## Probes
 
@@ -58,24 +58,12 @@ Another reconciler takes the lease over when it has seen the lease object unchan
 
 An eviction deletes on the content tag the copy found (`If-Match` where the store enforces it), so an object that was put again with other bytes after the copy is kept. A reconciler that took over from another has no tag for the objects the other copied: it first checks that the cold tier holds a real object of the key with the same size and the same bytes as the hot object. The bytes are compared (both objects read in ranges of at most 1 MiB, each read with its content tag, which must be the one the delete uses, so a key replaced and put back around the read is not deleted), and not the tags across tiers, since tiers of different kinds tag the same bytes differently. If it does not, the hot object stays, since it may be the only copy, and it remains a candidate that the next step asks about again. A tag names content: an object put again with the same bytes has the same tag.
 
-## Reservations
-
-A reservation is an object under a key in the cold tier that holds the key without being an object of yours: 56 bytes, marked by the user metadata `tierstore-reservation` (on a `dir` tier, by the owner-execute bit of the file). It exists so that the cold tier, which every proxy shares, decides which of two concurrent puts of a key wins. This release only reads around reservations; **nothing in it writes one**, so a cold tier written only by this release holds none.
-
-What this release does with one that is there:
-
-- A read, a head and a listing do not show it: a get or head is `NotFound` (counted as a miss of the cold tier), a listing leaves it out (a cold object of 56 bytes that the hot listing does not show costs one HEAD at every listing: a listing gives no version of an object, so no answer is kept), and a build node's cache treats it as absent.
-- A delete removes it only if the hot tier holds the key; a bare one belongs to a put in flight and is left.
-
-A raw listing of the cold bucket (`aws s3 ls`) shows reservations as 56-byte objects. Do not delete one by hand while a put runs.
-
-**Upgrade order.** The release that writes reservations must not run beside a release that does not read them: an older reader serves the 56 bytes as the object, and an older listing shows them. Upgrade every proxy, reconciler and build node to a release that reads reservations (this one) before any node runs a release that writes them. The auto-release cannot enforce it, and nothing at run time does; going back to a release before this one after a writer has run is not supported.
 
 ## What a full disk does
 
 A `dir` hot tier whose disk is out of space, or an `s3` hot tier that answers 507, is a full hot tier: the put that met it goes to the cold tier where nothing of its body was taken yet, and the tier is taken to be full for a moment. A put that had already streamed some of its body into the hot tier fails, and the client's retry goes to the cold tier. Reads use both tiers throughout. The hot tier is used again once the usage falls. An object written straight to the cold tier has its entry like any other, and the reconciler finds it in the cold tier and has nothing to copy.
 
-If the cold tier is a full disk, puts that reach it fail. A tier that is full at start still starts; the start-up checks that need a write are skipped, with a line that says so. Size `hot_store.budget` below the real capacity of the SSD: the budget is what the process compares with, not what the file system has.
+If the cold tier is a full disk, puts that reach it fail. A tier that is full at start still starts. Size `hot_store.budget` below the real capacity of the SSD: the budget is what the process compares with, not what the file system has.
 
 ## Drain and restart
 
@@ -160,15 +148,33 @@ To go back before step 5, `tierstore format-epoch --cancel --apply` and roll the
 
 **The old objects.** The `_journal/<proxy id>/` objects and the `_tiering/checkpoint/` objects of the releases before stay in the hot bucket, untouched, so that a rollback to the bridge release still finds them; they only take space. The release after this one is to delete them. Do not delete them by hand before then.
 
-## The start-up self-test
+## What tierstore requires of a store
 
-Before it serves, the process asks each tier, under a probe key in `_tiering/selftest/` that is new for each start and deleted afterwards, the questions its guarantees rest on: a create-only put refuses a key that exists, an `If-Match` put replaces only on the right content tag, a range read gives the range, a head has `Last-Modified`, a listing honors `start-after`, and on the cold tier a multipart completion is create-only. A tier that answers one wrongly exits the process with status 3, naming the tier, the check and the answer. A tier that cannot be reached is asked again, with pauses from one second doubling to thirty, for `server.backend_check_wait` (5m), and then the start exits 1.
+tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or later: it does not write probe keys, and it does not check that a store behaves as described here. A store that does not meet these requirements is not detected; the guarantees below are the ones that are lost, silently. (Opening the proxy at start reads and writes the hot tier's own state, the node's registration and its journal, so a hot tier that cannot be reached fails the start: that is the proxy's work, not a test of the store.)
 
-After the checks an S3 tier is asked one more question, which is not a check and never fails the start: does the store enforce `If-Match` on a DELETE? The probe writes a key under the same prefix, sends a DELETE with a wrong tag, reads the key, sends a DELETE with the right tag, reads it again, and deletes it. The tier writes one line to stderr, `tierstore: <tier>: conditional delete: if-match` when the store refused the wrong tag and took the right one, and `tierstore: <tier>: conditional delete: head-then-delete` when the store answered and did otherwise, for a store that takes the header and deletes anyway (some S3-compatible stores do) or one that refuses it. When a request of the probe failed, so that the store was not asked (a 503, a timeout, a dropped connection), the line is `tierstore: <tier>: conditional delete: head-then-delete (could not ask: <error>)`: the tier works the same way as in the line above, but the store may enforce the header, and a restart asks again. A conditional delete is then one DELETE with `If-Match` in the first case, and in the second a HEAD, a comparison of the content tags and a plain DELETE, so another writer's replacement of the key between the two requests would be deleted. A directory or in-memory tier compares and removes in one step and writes no line. The proxy and the reconciler make conditional deletes: an eviction deletes the hot copy, and a reconciler removes a cold object, on the content tag it found. A guarantee that rests on conditional deletes holds only once every process over the tiers runs a version that makes them; during a rolling upgrade a process of an older version deletes without a tag.
+The hot store must provide:
 
-The same prefix can hold probe keys that a start which was killed left behind. A start deletes the ones older than an hour, at most 100 keys each time, and no new delete starts after 10 seconds; a request already sent can take up to `server.s3_request_timeout`. When it has run it writes one line to stderr: `tierstore: <tier>: swept N stale probe keys in T ms`, with `(more left)` when a limit stopped it; the rest is deleted at a later start. If the sweep cannot read the time of the store or list the keys, it writes a `could not …` note instead of that line. A storage node does this after the checks and before it binds its address, so it can wait about those 10 seconds for each tier, plus the request in flight. A build node with `write_through` does it after it has printed its ready line, beside the server, so the sweep never delays readiness.
+- an atomic conditional PUT: create-only (`If-None-Match: *`, which creates the object or fails with 412 when the key exists) and `If-Match` (which replaces the object only if its `ETag` is the one given, and fails with 412 otherwise). The lease, the checkpoint and the registration of the proxies are written this way, so a store that ignores either header lets two processes both believe they hold the lease or that a put is the first;
+- strong read-after-write consistency for GET, HEAD and LIST: a read, a head or a listing that follows a successful write sees it, and one that follows a delete does not see the object.
 
-`cold_store.skip_checks multipart-conditional=<reason>` leaves out the last check, for a store you have shown to be safe another way; the reason is written to stderr at every start. No other check can be skipped.
+The cold store must provide the same create-only PUT (`If-None-Match: *`), on a single PUT and on the completion of a multipart upload, and an atomic `If-Match` PUT, also on the completion of a multipart upload (a body over 16 MiB is sent as one), which the reconciler uses to replace a reservation with its object. A store that overwrites on a create-only write loses the one-winner rule of a put, and one that ignores `If-Match` can let the reconciler overwrite a replacement of the key.
+
+Known to meet these requirements: Amazon S3, MinIO (for the conditional PUT; use a release that has it) and tierstore's own `dir` store, which meets them among the calls of one process only: its conditional writes are atomic inside one process, so a `dir` hot tier that two processes use at once (a live update, a second process over the same node) is not covered by the store: `hot_store.lock_file` (see above) is what keeps two such processes from reconciling and holding the lease together, and an S3 hot tier does not need it. The `memory` store of a process meets them too, but its objects are lost when the process stops.
+
+tierstore does not verify any of this. Run a store you have not seen meet them through your own tests before it holds data. A cold store that cannot be reached is not an error of the start: the first request that needs it fails as an ordinary request does (503 `ServiceUnavailable` for the client, and a retry by the reconciler), and the process goes on.
+
+### Conditional delete
+
+The proxy and the reconciler delete an object only if it still has the content tag they read (`Backend::delete_if_match`). How that is sent to an `s3:<bucket>` tier is the tier's `conditional_delete` setting (`hot_store.conditional_delete`, `cold_store.conditional_delete`), which tierstore trusts and does not ask the store about:
+
+- `true`: a DELETE with `If-Match: "<tag>"`. A store that enforces the header refuses a wrong tag with 412 and removes the object only on the right one. Set it for a store that enforces `If-Match` on a DELETE, such as Amazon S3. A store that takes the header and deletes anyway (some S3-compatible stores do) must not have it set: the fence is then no fence.
+- `false`: a HEAD, a comparison of the content tags and a plain DELETE. It is right on every store and leaves a window in which another writer's replacement of the key between the two requests is deleted.
+
+The default for an S3 tier is `false`: tierstore does not detect Amazon S3 from its endpoint (an S3-compatible store is reached at any address), so the default is the one that is right on every store, and `conditional_delete = true` is for the operator to set. A `memory` tier and a `dir` tier compare the tag and remove the object in one atomic step: their setting is `true`, and `false` is refused when the file is loaded. A guarantee that rests on conditional deletes holds only once every process over the tiers runs a version that makes them; during a rolling upgrade a process of an older version deletes without a tag. The key is new in this release, and the release before refuses a file that has it (it refuses every key it does not know, status 2): leave `conditional_delete` out of a file until no process that may be started from it runs the release before. A file without the key loads in both releases (`crates/compat/tests/config.rs`).
+
+### What earlier releases did at start
+
+Releases before this one ran a self-test of each tier at start, under probe keys in `_tiering/selftest/`, and exited 3 for a tier that answered it wrongly and 1 for one that could not be reached. This release does neither. `cold_store.skip_checks` and `server.backend_check_wait` are still accepted, ignored, and each given is one line on stderr saying so (see [configuration](configuration.md#deprecated-settings)). Probe keys that an earlier release left under `_tiering/selftest/` (a start that was killed) are not deleted by this one; they are small and harmless, and may be deleted by hand.
 
 ## A build node
 
@@ -180,7 +186,7 @@ Memory is bounded for the fills: at most `local_cache.max_concurrent_fills` chun
 
 Eviction keeps the cache under `local_cache.budget`: above `high_water` percent of it, or when the free space of the file system is under `free_floor` percent, a pass (every 10 seconds) removes the least recently used objects down to `low_water` percent and until the free space is back at the floor. The free-space floor only triggers a pass; it does not stop a fill. An object that another tree has linked is skipped, counted and stays charged to the budget. A fill is skipped when the object is larger than the budget or would take the cache above `critical`.
 
-At start the process makes the directory, removes what a fill left half done, reads the kept objects back (sizes only; an object whose sidecar does not say what the file holds is deleted), and asks the file system four questions with a probe object. A file system that answers one wrongly exits the process with status 3, naming the check. It then asks the upstream for a key that is not there: 404 or any object is an answer, and anything else exits 1. On SIGTERM it drains as a storage node does.
+At start the process makes the directory, removes what a fill left half done, reads the kept objects back (sizes only; an object whose sidecar does not say what the file holds is deleted), and asks the file system four questions with a probe object. A file system that answers one wrongly exits the process with status 3, naming the check. The upstream is not asked anything at start. On SIGTERM it drains as a storage node does.
 
 ### The cache lock and read-only mode
 
@@ -200,7 +206,7 @@ A file with `[hot_store]`, `[cold_store]` and `[local_cache]` (see [configuratio
 
 Writes pass through the cache to the proxy, so its entries stay right: a create-only put goes to the proxy, which answers `AlreadyExists` for a key either tier has, and under a `cache = true` prefix the object is also kept; a presigned put goes to the proxy as a hot-only put, so the one-winner rule holds; a delete drops the cache's entry, deletes through the proxy (both tiers and the journal) and drops the entry again; a multipart upload passes to the proxy and is not kept (the first read fills it). The cache's versions of an object are compared by size, because an object's tag is the tag of the tier that answers and moves when the proxy copies it between tiers.
 
-The start tests both tiers as a storage node does, opens the proxy, then opens the cache directory: its own lock, the file-system probe if this process holds the lock, and the budget against the file system less `free_floor`. It does not run the cache's write self-test of an upstream (its upstream is the proxy). The cache has its own lock, `<path>/.lock`, beside the reconciler's `lock_file`; a process started beside a draining one serves at once from the proxy, its cache is `ready read-only` until the holder exits (see [the cache lock](operations.md#the-cache-lock-and-read-only-mode)), and its reconciler waits for the lock file or the lease. Put the cache path in a directory of its own, not inside either tier's directory, and, with a `dir` hot tier, on another file system: the cache then does not duplicate the hot tier's blocks on one disk, and its `free_floor` eviction does not react to the hot tier filling it. The loader checks the paths by component, with `.` and `..` resolved by text and not through links; the cache path and the directory of a `dir` tier must be absolute.
+The start opens the proxy, then opens the cache directory: its own lock, the file-system probe if this process holds the lock, and the budget against the file system less `free_floor`. The cache has its own lock, `<path>/.lock`, beside the reconciler's `lock_file`; a process started beside a draining one serves at once from the proxy, its cache is `ready read-only` until the holder exits (see [the cache lock](operations.md#the-cache-lock-and-read-only-mode)), and its reconciler waits for the lock file or the lease. Put the cache path in a directory of its own, not inside either tier's directory, and, with a `dir` hot tier, on another file system: the cache then does not duplicate the hot tier's blocks on one disk, and its `free_floor` eviction does not react to the hot tier filling it. The loader checks the paths by component, with `.` and `..` resolved by text and not through links; the cache path and the directory of a `dir` tier must be absolute.
 
 The delete and one-winner guarantees of a delete or a put that races a copy-back depend on the fixes to the proxy and the reconciler that make a delete conditional on what it found. They hold once every process over the tiers runs a version that has those fixes; while processes of different versions share the tiers, they do not.
 
@@ -215,3 +221,4 @@ A job that holds no key reads its objects with presigned GET URLs. The service t
 ## Not in a release yet
 
 - **Waiting for a put slot** A put over `server.max_concurrent_puts` waits up to `server.put_permit_wait` (15 s) for a slot before it is answered 503 `SlowDown`.
+- **Taking over the listening sockets of a running instance** (library only: no flag or key of the binary starts it yet, so nothing changes for an operator). `tierstore::server::cli::run_handing` starts a node that first asks a running one, over a Unix socket in a directory only the node's user may write, for its S3 and OCI listening sockets. A running node hands them over, stops taking connections, finishes the requests in flight and exits, and the new node answers the same socket in its turn. No port is added, no packet is redirected and no root is needed. If nothing answers on the socket the node binds its own sockets, as it does today. If the running node listens on other addresses than the new settings name, or another new node is already taking over, the new node does not start.

@@ -14,7 +14,7 @@ mod cache_over_proxy;
 #[cfg(feature = "server")]
 mod cache_upstreams;
 mod capacity;
-mod churn;
+mod cold_reads;
 mod cold_stream;
 mod conformance;
 mod explorer;
@@ -27,17 +27,16 @@ mod list_uploads_reserved;
 mod multipart;
 mod open_read;
 mod recheck;
-mod reservation;
-mod reservation_reads;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]
 mod s3_conditional_delete;
 #[cfg(feature = "s3")]
-mod s3_reservation;
-#[cfg(feature = "s3")]
 mod s3_streamed;
+#[cfg(feature = "s3")]
+mod s3_tagged;
 mod streamed;
 mod streaming;
 mod support;
+mod tagged_read;
 mod tiered;

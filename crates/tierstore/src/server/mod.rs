@@ -199,7 +199,6 @@ pub mod build_info;
 mod cache_cli;
 pub mod cli;
 mod cli_heartbeat;
-mod cli_probe;
 mod cli_reconcile;
 mod cli_serve;
 mod combined_cli;
@@ -209,14 +208,17 @@ mod config_combined;
 mod config_interface;
 mod config_policy;
 mod config_syntax;
+mod config_tier;
 mod config_tuning;
 mod config_units;
 mod counted;
+mod deprecated;
 mod door;
 mod drain;
 mod first_beat;
 mod front;
 pub mod gc;
+pub mod handoff;
 mod handover;
 mod idle;
 mod keys;
@@ -256,6 +258,8 @@ mod cli_heartbeat_tests;
 mod combined_cli_tests;
 #[cfg(test)]
 mod completion_tests;
+#[cfg(test)]
+mod conditional_delete_tests;
 #[cfg(test)]
 mod config_cache_tests;
 #[cfg(test)]

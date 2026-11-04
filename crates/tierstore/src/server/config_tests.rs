@@ -42,7 +42,8 @@ fn a_storage_node_file_makes_the_settings_it_says() {
     assert_eq!(cli.cold, "s3:tierstore-cold");
     assert_eq!(cli.hot_bytes, 500 << 30);
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (85, 60, 97));
-    assert_eq!(cli.skip_backend_check.len(), 1);
+    assert_eq!(cli.hot_conditional_delete, Some(true));
+    assert_eq!(cli.cold_conditional_delete, Some(true));
     assert_eq!(cli.read_only_key_file.len(), 2);
     assert_eq!(cli.max_request_bytes, 134_217_728);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(25));
@@ -94,7 +95,9 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!(cli.put_rate_grace, Duration::from_secs(30));
     assert_eq!(cli.body_idle_timeout, Duration::from_secs(30));
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(60));
-    assert_eq!(cli.backend_check_wait, Duration::from_secs(300));
+    assert_eq!(cli.backend_check_wait, None);
+    assert_eq!(cli.hot_conditional_delete, None);
+    assert_eq!(cli.cold_conditional_delete, None);
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
     assert_eq!(cli.grant_max_lifetime, None);
     assert!(cli.grant_key_file.is_empty());
@@ -298,13 +301,6 @@ fn a_fault_in_the_file_is_reported_without_the_value() {
             golden_with("kind               = \"s3\"", "kind = \"SENTINEL\""),
             "kind",
         ),
-        (
-            golden_with(
-                "skip_checks      = [\"multipart-conditional=store-ignores-if-none-match-on-completion\"]",
-                "skip_checks = [\"SENTINEL\"]",
-            ),
-            "skip_checks",
-        ),
     ];
     for (text, want) in cases {
         let why = refusal(&text);
@@ -447,14 +443,6 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
     }
     let hot = minimal_with("budget = 1000", "budget = 1000\nskip_checks = []");
     assert!(refusal(&hot).contains("hot_store.skip_checks"));
-    for bad in ["nonsense", "multipart-conditional=", "create-only=because"] {
-        let text = minimal_with(
-            "[cold_store]\nkind = \"memory\"",
-            &format!("[cold_store]\nkind = \"memory\"\nskip_checks = [\"{bad}\"]"),
-        );
-        let why = refusal(&text);
-        assert!(why.contains("cold_store.skip_checks"), "{bad}: {why}");
-    }
 }
 
 /// Asserts that the values the flags bound are bound in the file too: a water mark outside 1 to

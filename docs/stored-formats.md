@@ -6,7 +6,7 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 
 | What | Where | Format |
 |---|---|---|
-| Journal object (written by the releases before the entries, neither read nor written by this release; removed by the release after it) | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE`, `PUTRESERVED` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` |
+| Journal object (written by the releases before the entries, neither read nor written by this release; removed by the release after it) | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` |
 | Key entry (reserved by every release since the bridge release; written by the puts and cold reads of a proxy whose format is active and by the entry reconciler, see "The format object") | `_entries/<sha256 hex of the key>` in the hot tier | JSON: `v`, `key`, `op` (`PUT`, `DEL`, `CB` or `EVICT`), `st` (`HELD`, `PENDING` or `SEALED`), `owner` (or `null`), `nonce`, `created_ms` |
 | Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | JSON: `proto` (1 in the release with the heartbeat, 2 in the release that works the entries), `boot`, `hb`, which the proxy rewrites every heartbeat; an empty object (the registration of a release before the heartbeat) reads as none, and a reader that lists the names never reads the body |
 | Checkpoint (written by the releases before the entries, neither read nor written by this release; removed by the release after it) | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
@@ -14,13 +14,14 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
 | Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
 | OCI upload session and chunks | `<prefix>uploads/<id>/begin` (empty) and `<prefix>uploads/<id>/c<20-digit offset>` in the store behind the OCI front | the session is an empty object; each chunk is the bytes of one `PATCH`; both are deleted when the upload ends or is cancelled |
+| OCI tag version | `<prefix>tags/<name>/<tag>/<inv>`, `<name>` with `/` written `~`, `<inv>` the 20 digits of `18446744073709551615` less the number of earlier versions | the 71 bytes `sha256:<64 hex>` of the manifest the tag pointed at; a tag is its newest version (the smallest key); a version is never overwritten |
 | Cache sidecar | `obj/<aa>/<bb>/<hex>.meta` in the local cache directory | JSON: `key`, `size`, `sha256`, `tag`, `modified` |
 | Update hook record, two slots (Linux) | `state.json` in the hook's state directory | pretty JSON: `schema`, `serving`, `previous`, `mode`, `markers`, `boot_id`, `guard_placed` |
 | Update hook record, single instance (macOS) | `state.json` in the hook's state directory | pretty JSON: `schema`, `kind`, `updating`, `markers`, `from`, `to`, `version` |
 
 ### The journal objects of the earlier releases
 
-A release before the entries kept, for each proxy, journal objects and a checkpoint, and a reconciler that read them. This release has neither: no code of it reads or writes `_journal/` or `_tiering/checkpoint/`, and both prefixes stay reserved, so no client names a key under them. The objects that earlier releases left stay in the hot tier until the release after this one removes them, so that a rollback to the bridge release (the one that drains them) still finds them. The format of their entries (the operations `PUT`, `DELETE`, `PUTRESERVED` and `PUTMIRROR`, and the tags `cold_tag` and `hot_tag`) is that of the bridge release and is not repeated here.
+A release before the entries kept, for each proxy, journal objects and a checkpoint, and a reconciler that read them. This release has neither: no code of it reads or writes `_journal/` or `_tiering/checkpoint/`, and both prefixes stay reserved, so no client names a key under them. The objects that earlier releases left stay in the hot tier until the release after this one removes them, so that a rollback to the bridge release (the one that drains them) still finds them. The format of their entries (the operations `PUT`, `DELETE` and `PUTMIRROR`, and the tags `cold_tag` and `hot_tag`) is that of the bridge release and is not repeated here.
 
 ### Key entries
 
@@ -38,7 +39,7 @@ A format changes only additively: a new optional field, a new operation word tha
 
 A cache sidecar or a usage object with a field this release does not know is read as if it were not there. The single-instance hook record ignores a key it does not know. The two-slot hook record does not: it refuses a key it does not know, so a key added to it raises its `schema`, which an older hook reads as newer than it understands and leaves alone. A test holds that: a record of schema 2 with a new key reads as newer, not as corrupt.
 
-The upload records of the OCI front are new objects under new keys, and the blobs and manifests a push stores are the objects the front already read, under the keys it already used. The previous release does not list or read `uploads/`, so it ignores an open upload; `crates/compat/tests/oci.rs` pulls a pushed blob and manifest through the previous release's front with an upload left open in the same directory, and pulls the previous release's objects through this release's front.
+The upload records of the OCI front are new objects under new keys, and the blobs and manifests a push stores are the objects the front already read, under the keys it already used. The previous release does not list or read `uploads/`, so it ignores an open upload; `crates/compat/tests/oci.rs` pulls a pushed blob and manifest through the previous release's front with an upload left open in the same directory, and pulls the previous release's objects through this release's front. The tag versions of the OCI front are new objects under a new key prefix, `tags/`, which the previous release does not list or read, and each is written once and never replaced; `crates/compat/tests/oci.rs` moves a tag through this release's front and pulls both manifests by digest through the previous release's front (which serves no tag and answers a pull by tag 404), and has this release tag a manifest the previous release stored.
 
 ## The fixtures
 

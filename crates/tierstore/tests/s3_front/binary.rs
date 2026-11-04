@@ -4,6 +4,8 @@
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -590,37 +592,154 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that a start whose cold tier is an S3 store that cannot be reached exits with status
-/// 1 (not 3, which is a store that answered wrongly: the unit restarts a status 1) before it
-/// serves anything: nothing on stdout (no start line), and a last line that says the tier is
-/// unreachable, names the cold tier as the file gave it and says which check could not be run;
-/// the hot tier, a memory tier, was tested before it and said so.
+/// A loopback listener that takes every connection and closes it at once, so that a client of it
+/// meets a transport failure and not a refusal, and that counts the connections it took. It stays
+/// bound until it is dropped, so its port is never another process's meanwhile.
+struct Closer {
+    endpoint: String,
+    accepted: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Closer {
+    fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (count, ended) = (Arc::clone(&accepted), Arc::clone(&stop));
+        let thread = std::thread::spawn(move || {
+            for connection in listener.incoming() {
+                if ended.load(Ordering::SeqCst) {
+                    return;
+                }
+                if connection.is_ok() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        });
+        Self {
+            endpoint: format!("http://{addr}"),
+            accepted,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// The connections taken so far.
+    fn accepted(&self) -> usize {
+        self.accepted.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for Closer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // A connection wakes the thread that waits in `accept`, which then sees the flag.
+        let at = self.endpoint.trim_start_matches("http://").to_owned();
+        let _ = std::net::TcpStream::connect(at);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Asserts that a start does not ask its cold tier anything: the cold tier is an S3 store at a
+/// loopback listener that counts the connections it takes, the address is taken so that the start
+/// ends after the settings are built, and the start fails at the address (status 1, nothing on
+/// stdout) and not at the tier: no line says a tier was tested or is unreachable, and the cold
+/// store was never connected to. The two keys of the removed start-up self-test are accepted and
+/// each is one warning, word for word.
 #[test]
-fn a_tier_that_cannot_be_reached_by_the_self_test_is_a_start_that_exits_1() {
-    let files = Files::new("bin-selftest-refused");
+fn a_start_does_not_ask_its_tiers_and_the_keys_of_the_removed_self_test_warn() {
+    let files = Files::new("bin-no-self-test");
     let secret = files.secret("cold-key", "ID\nsecret\n");
     let key = secret.display().to_string();
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = taken.local_addr().unwrap().to_string();
+    let cold = Closer::start();
     let tables = Tables {
+        listen: vec![address.clone()],
         server: "backend_check_wait = \"2s\"".to_owned(),
         cold: format!(
-            "kind = \"s3\"\nbucket = \"cold-bucket\"\nendpoint = \"http://127.0.0.1:1\"\ncredentials_file = {key:?}"
+            "kind = \"s3\"\nbucket = \"cold-bucket\"\nendpoint = {:?}\ncredentials_file = {key:?}\nskip_checks = [\"multipart-conditional=because\"]",
+            cold.endpoint
+        ),
+        ..Tables::default()
+    };
+    let (code, out, err) = run(&files.flags_of(&tables, &[]));
+    assert_eq!((code, out.as_str()), (1, ""));
+    let ignored =
+        " is deprecated and ignored: tierstore no longer tests its stores at start-up; remove it";
+    let warned: Vec<&str> = err
+        .lines()
+        .filter(|line| line.contains("deprecated"))
+        .collect();
+    let skip = format!("tierstore: cold_store.skip_checks{ignored}");
+    let wait = format!("tierstore: server.backend_check_wait{ignored}");
+    assert_eq!(warned, [skip, wait], "{err}");
+    let last = err.lines().last().unwrap();
+    assert!(
+        last.starts_with(&format!("tierstore: binding {address}")),
+        "{err}"
+    );
+    assert!(!err.contains("unreachable"), "{err}");
+    assert!(!err.contains("tested the"), "{err}");
+    assert_eq!(cold.accepted(), 0);
+}
+
+/// Asserts what a start still asks of the hot tier: opening the proxy reads and writes the hot
+/// tier's own state (the node's registration and its journal), so a hot tier that cannot be
+/// reached (a loopback listener that closes every connection) fails the start with status 1 (the
+/// unit tries again), nothing on stdout, and a last line that begins
+/// `tierstore: opening the proxy: `. No line says a tier was tested.
+#[test]
+fn a_hot_tier_that_cannot_be_reached_fails_the_start_at_the_proxy_with_status_1() {
+    let files = Files::new("bin-hot-unreachable");
+    let secret = files.secret("hot-key", "ID\nsecret\n");
+    let key = secret.display().to_string();
+    let hot = Closer::start();
+    let tables = Tables {
+        hot: format!(
+            "kind = \"s3\"\nbucket = \"hot-bucket\"\nendpoint = {:?}\ncredentials_file = {key:?}\nbudget = 1048576",
+            hot.endpoint
         ),
         ..Tables::default()
     };
     let flags = files.flags_of(&tables, &[]);
     let (code, out, err) = run(&flags);
     assert_eq!((code, out.as_str()), (1, ""));
-    // The key is read: a wait of 2 s allows the first pause (1 s) and not the second (2 s).
-    assert_eq!(err.matches("trying again in 1s").count(), 1, "{err}");
-    assert!(!err.contains("trying again in 2s"), "{err}");
-    assert!(
-        err.contains("tierstore: tested the hot tier memory in "),
-        "{err}"
-    );
     let last = err.lines().last().unwrap();
-    let want = "tierstore: tier unreachable: cold tier s3:cold-bucket: ";
-    assert!(last.starts_with(want), "{err}");
-    assert!(last.contains("create-only"), "{err}");
+    assert!(last.starts_with("tierstore: opening the proxy: "), "{err}");
+    assert!(!err.contains("tested the"), "{err}");
+    assert!(hot.accepted() >= 1);
+}
+
+/// Asserts that `conditional_delete = false` for a `memory` or a `dir` tier is a refusal that a
+/// restart cannot mend, status 2, with nothing on stdout, and that the message names the key, in
+/// full, for either tier.
+#[test]
+fn conditional_delete_false_for_a_memory_or_dir_tier_is_status_2() {
+    let files = Files::new("bin-delete-off");
+    let tier = files.key.with_file_name("cold");
+    let dir = format!("kind = \"dir\"\npath = {:?}", tier.display().to_string());
+    let hot = Tables {
+        hot: "kind = \"memory\"\nbudget = 1000\nconditional_delete = false".to_owned(),
+        ..Tables::default()
+    };
+    let cold = Tables {
+        cold: format!("{dir}\nconditional_delete = false"),
+        ..Tables::default()
+    };
+    for (tables, key) in [(hot, "hot_store"), (cold, "cold_store")] {
+        let (code, out, err) = run(&files.flags_of(&tables, &[]));
+        assert_eq!((code, out.as_str()), (2, ""), "{key}: {err}");
+        let want = format!(
+            "{key}.conditional_delete: false is only for kind \"s3\": a memory or dir tier deletes conditionally in one atomic step"
+        );
+        assert!(err.contains(&want), "{err}");
+    }
 }
 
 /// Asserts that a tier that its keys do not describe is refused: an S3 tier with no endpoint, and

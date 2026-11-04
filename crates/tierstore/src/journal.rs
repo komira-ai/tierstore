@@ -92,9 +92,6 @@ pub enum JournalOp {
     Put,
     /// An object was deleted from both tiers; the cold tier is to be told again.
     Delete,
-    /// An object was written to the hot tier by a put that holds a reservation of the key in the
-    /// cold tier ([`JournalEntry::cold_tag`] names it), and is to replace that reservation.
-    PutReserved,
     /// An object was copied from the cold tier into the hot tier by a read
     /// ([`JournalEntry::cold_tag`] is the tag the cold object had, [`JournalEntry::hot_tag`] the
     /// tag the hot tier gave the copy).

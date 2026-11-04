@@ -147,7 +147,7 @@ To start it at boot, add the section in a drop-in (`systemctl edit tierstore`, w
 
 ## Restarts and the unit's exit rules
 
-The unit restarts a failed start after 30 seconds. It does not restart exit status 2 (a command line or file the process refused, which a restart cannot mend) or 3 (a tier answered the start-up self-test wrongly). After 5 failed starts in an hour systemd stops trying; `systemctl reset-failed tierstore` and a new start try again. [Troubleshooting](troubleshooting.md) lists the exit statuses.
+The unit restarts a failed start after 30 seconds. It does not restart exit status 2 (a command line or file the process refused, which a restart cannot mend) or 3 (the file system of a cache directory answered the start-up check of the cache wrongly). After 5 failed starts in an hour systemd stops trying; `systemctl reset-failed tierstore` and a new start try again. [Troubleshooting](troubleshooting.md) lists the exit statuses.
 
 `TimeoutStopSec=` in the unit is above the sum of `--drain-lb-wait`, `--drain-deadline` and the reconciler's lease wait, so systemd does not kill a drain in progress. If you raise `--drain-deadline`, raise it too.
 

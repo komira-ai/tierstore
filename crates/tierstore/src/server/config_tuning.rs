@@ -46,8 +46,6 @@ pub struct HotTuning {
     pub usage_refresh: Duration,
     /// `hot_store.compare_range`: the most bytes of an object one read of a comparison holds.
     pub compare_range: NonZeroU64,
-    /// `hot_store.listing_heads`: how many cold objects of a listing are asked about at once.
-    pub listing_heads: usize,
     /// `hot_store.upload_listing_calls`: the most calls to the cold tier one listing of uploads
     /// makes.
     pub upload_listing_calls: u32,
@@ -58,7 +56,6 @@ impl Default for HotTuning {
         Self {
             usage_refresh: Duration::from_secs(1),
             compare_range: COMPARE_RANGE,
-            listing_heads: 16,
             upload_listing_calls: 100,
         }
     }
@@ -139,7 +136,6 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
 /// The proxy and reconciler settings `[hot_store]` gives, or the defaults of those it leaves out.
 pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
     let old = HotTuning::default();
-    let heads = hot.listing_heads.unwrap_or(old.listing_heads as u32);
     Ok(HotTuning {
         usage_refresh: span(
             ("hot_store", "usage_refresh"),
@@ -156,7 +152,6 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
             1 << 30,
         )?)
         .unwrap_or(old.compare_range),
-        listing_heads: within("hot_store", "listing_heads", heads, 1, 1024)? as usize,
         upload_listing_calls: count(
             "upload_listing_calls",
             hot.upload_listing_calls,
@@ -242,12 +237,10 @@ cache  = true
         let hot = cli.hot_tuning;
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
         assert_eq!(hot.compare_range.get(), 1 << 20);
-        assert_eq!(hot.listing_heads, 16);
         assert_eq!(hot.upload_listing_calls, 100);
         assert_eq!(hot, HotTuning::default());
         let built = built(&mut cli);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
-        assert_eq!(built.proxy.listing_heads, 16);
         assert_eq!(built.proxy.upload_listing_calls, 100);
         assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
     }
@@ -263,7 +256,7 @@ cache  = true
         let text = text.replacen(
             "budget = 1000",
             "budget = 1000\nusage_refresh = \"250ms\"\ncompare_range = \"64KiB\"\n\
-             listing_heads = 4\nupload_listing_calls = 7",
+             upload_listing_calls = 7",
             1,
         );
         let mut cli = from_text(&text, DEFAULTS).unwrap();
@@ -275,7 +268,6 @@ cache  = true
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(7));
         let built = built(&mut cli);
         assert_eq!(built.proxy.usage_refresh, Duration::from_millis(250));
-        assert_eq!(built.proxy.listing_heads, 4);
         assert_eq!(built.proxy.upload_listing_calls, 7);
         assert_eq!(built.reconciler.compare_range.get(), 64 << 10);
     }
@@ -341,14 +333,6 @@ cache  = true
                 "hot_store.compare_range: 2147483648 is not between 4096 and 1073741824",
             ),
             (
-                "listing_heads = 0",
-                "hot_store.listing_heads: 0 is not between 1 and 1024",
-            ),
-            (
-                "listing_heads = 1025",
-                "hot_store.listing_heads: 1025 is not between 1 and 1024",
-            ),
-            (
                 "upload_listing_calls = 0",
                 "hot_store.upload_listing_calls: 0 is not between 1 and 100000",
             ),
@@ -360,6 +344,14 @@ cache  = true
         for (line, want) in hot {
             assert_eq!(refusal(&with_hot(line)), want);
         }
+    }
+
+    /// `copy_rounds` and `listing_heads`, which only the reservation code used, are still accepted
+    /// (a file that sets them, of any value, loads) and change nothing.
+    #[test]
+    fn the_retired_keys_are_accepted_and_change_nothing() {
+        let cli = from_text(&with_hot("copy_rounds = 0\nlisting_heads = 5000"), DEFAULTS).unwrap();
+        assert_eq!(cli.hot_tuning, HotTuning::default());
     }
 
     /// The edges of the ranges are taken.
@@ -379,7 +371,7 @@ cache  = true
         assert_eq!(cli.s3_client.tuning.read_retries, 8);
         let edge = with_hot(
             "usage_refresh = \"1h\"\ncompare_range = \"1GiB\"\n\
-             listing_heads = 1024\nupload_listing_calls = 100000",
+             upload_listing_calls = 100000",
         );
         assert_eq!(
             from_text(&edge, DEFAULTS)

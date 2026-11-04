@@ -12,7 +12,7 @@ use bytes::Bytes;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use objstore_s3::{ByteRange, Capabilities, ObjectKey, ObjectStore};
 use tierstore_testkit::dir::TestDir;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::oneshot;
 
 use super::Drained;
 use super::cache_cli::{run_cache, serve_cache, size_of_file_system, unjudged_warning};
@@ -24,10 +24,9 @@ use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
 use super::local_cache::{Disk, SystemDisk};
-use crate::selftest_tests::{Flaw, Flawed, Watched};
 use crate::{
     Backend, ByteRange as TierRange, Error as BackendError, FaultyBackend, Listed, MemoryBackend,
-    Meta,
+    Meta, Op,
 };
 
 const KEY_ID: &str = "AKIDCACHE";
@@ -241,9 +240,9 @@ async fn run_cache_opens_the_upstream_the_file_names() {
 
 /// Asserts the refusals of a start, each with the exit status of its reason: a request timeout of
 /// zero, a bucket that is a probe path, an address that is taken and a key file for the upstream
-/// that is not there (1 each), an upstream that does not answer (1, a restart may mend it), a
-/// cache directory that cannot be opened (1), and a file system that fails the check of the
-/// layout (3).
+/// that is not there (1 each), a cache directory that cannot be opened (1), and a file system
+/// that fails the check of the layout (3). An upstream that does not answer is no refusal of the
+/// start: it is the error of the first request that meets it.
 #[tokio::test]
 async fn a_build_node_that_cannot_start_exits_with_the_status_of_the_reason() {
     let node = Node::new("tscache-cli-refused");
@@ -271,15 +270,7 @@ async fn a_build_node_that_cannot_start_exits_with_the_status_of_the_reason() {
         assert_eq!(exit_status(&why), 1);
     }
 
-    let down = Arc::new(FaultyBackend::new(upstream.clone()));
-    down.set_down(true);
     let settings = node.settings("", "");
-    let why = serving(&settings, down, disk.clone(), nothing)
-        .await
-        .unwrap_err();
-    assert!(why.to_string().contains("did not answer a HEAD"), "{why}");
-    assert_eq!(exit_status(&why), 1);
-
     let in_the_way = node.dir.path().join("in-the-way");
     std::fs::write(&in_the_way, b"a file").unwrap();
     let text = node.text("", "").replace(
@@ -424,7 +415,7 @@ async fn a_file_system_whose_size_is_unknown_is_not_judged_and_the_node_starts()
 
 /// What a read-only key sees of a store: the reads are answered and every write is refused as a
 /// 403 is, with an error that is no precondition's.
-struct ReadOnly(MemoryBackend);
+struct ReadOnly(Arc<MemoryBackend>);
 
 fn forbidden() -> BackendError {
     BackendError::Other("403 AccessDenied".to_owned())
@@ -466,52 +457,58 @@ impl Backend for ReadOnly {
     }
 }
 
-/// Asserts that a start with `write_through` asks the upstream the write questions of the
-/// self-test and refuses an upstream that answers one wrongly with exit status 3, before the
-/// address is bound: a key that may not write (the create-only check), a store that overwrites on
-/// a create-only put (the same check), and one that overwrites on the completion of an upload (the
-/// multipart-conditional check, so the start asks the multipart question too). The same read-only
-/// upstream starts a node without `write_through`, which never asks.
+/// Asserts that a build node over an upstream with a call counter makes no call of it while it
+/// starts and stops, whether or not it writes through: nothing is probed, not by a self-test
+/// (which wrote under `_tiering/`) and not by a HEAD of a probe key. An upstream that refuses
+/// every write, as a read-only key does, starts a write-through node too, since nothing asks it to
+/// write; and the upstream holds no key afterwards.
 #[tokio::test]
-async fn a_write_through_start_tests_the_upstream_for_writes_and_refuses_a_wrong_answer_with_3() {
-    let node = Node::new("tscache-cli-wthru-refused");
+async fn a_start_makes_no_call_of_the_upstream_and_leaves_it_no_key() {
+    let node = Node::new("tscache-cli-no-probe");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let nothing = |_addr: SocketAddr| async {};
-    let writing = node.settings("", "write_through = true");
-    let reading = node.settings("", "");
-
-    let read_only: Arc<dyn Backend> = Arc::new(ReadOnly(MemoryBackend::new()));
-    let overwriting: Arc<dyn Backend> = Arc::new(Flawed::new(Flaw::OverwritesOnCreate));
-    let completing: Arc<dyn Backend> = Arc::new(Flawed::new(Flaw::CompletionOverwrites));
-    let flaws = [
-        (read_only.clone(), "create-only"),
-        (overwriting, "create-only"),
-        (completing, "multipart-conditional"),
-    ];
-    for (upstream, check) in flaws {
-        let why = serving(&writing, upstream, disk.clone(), nothing)
+    for local in ["", "write_through = true"] {
+        let settings = node.settings("", local);
+        let memory = Arc::new(MemoryBackend::new());
+        let read_only: Arc<dyn Backend> = Arc::new(ReadOnly(memory.clone()));
+        let counted = Arc::new(FaultyBackend::new(read_only));
+        let upstream: Arc<dyn Backend> = counted.clone();
+        let drained = serving(&settings, upstream, disk.clone(), nothing)
             .await
-            .unwrap_err();
-        let said = format!("failed the {check} check");
-        assert!(why.to_string().contains(&said), "{check}: {why}");
-        assert_eq!(exit_status(&why), 3, "{check}");
+            .unwrap();
+        assert_eq!(drained, Drained { abandoned: 0 });
+        for op in ALL_OPS {
+            assert_eq!(counted.calls(op), 0, "{local:?}: {op:?}");
+        }
+        assert!(memory.list("").await.unwrap().is_empty(), "{local:?}");
     }
-
-    let drained = serving(&reading, read_only, disk, nothing).await.unwrap();
-    assert_eq!(drained, Drained { abandoned: 0 });
 }
 
-/// Asserts that a node with `write_through` over an upstream that answers the self-test takes a
-/// create-only put through its front, which is made at the upstream, and a repeat of it is
-/// refused with a precondition error; that the probe keys of the self-test are gone from the
-/// upstream when the node has started; and that the same node without `write_through` refuses the
-/// put and the upstream gets none.
+/// Every call of a backend that a [`FaultyBackend`] counts.
+const ALL_OPS: [Op; 12] = [
+    Op::Put,
+    Op::PutIfMatch,
+    Op::Get,
+    Op::Head,
+    Op::Delete,
+    Op::DeleteIfMatch,
+    Op::List,
+    Op::CreateUpload,
+    Op::UploadPart,
+    Op::CompleteUpload,
+    Op::AbortUpload,
+    Op::ListUploads,
+];
+
+/// Asserts that a node with `write_through` takes a create-only put through its front, which is
+/// made at the upstream, and a repeat of it is refused with a precondition error; and that the
+/// same node without `write_through` refuses the put and the upstream gets none.
 #[tokio::test]
 async fn a_write_through_node_takes_a_put_and_a_read_cache_refuses_it() {
     let node = Node::new("tscache-cli-wthru-serve");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     for writes in [true, false] {
-        let flat = Arc::new(Flawed::new(Flaw::None));
+        let flat = Arc::new(MemoryBackend::new());
         let upstream: Arc<dyn Backend> = flat.clone();
         let local = if writes { "write_through = true" } else { "" };
         let settings = node.settings("", local);
@@ -529,57 +526,10 @@ async fn a_write_through_node_takes_a_put_and_a_read_cache_refuses_it() {
             .await
             .unwrap();
         assert_eq!(drained, Drained { abandoned: 0 });
-        let stored = flat.inner.get("cas/made", None).await;
+        let stored = flat.get("cas/made", None).await;
         assert_eq!(stored.ok(), writes.then(|| Bytes::from_static(b"made")));
-        assert!(flat.inner.list("_tiering/").await.unwrap().is_empty());
+        assert!(flat.list("_tiering/").await.unwrap().is_empty());
     }
-}
-
-/// Asserts that a write-through start reports itself ready before it deletes the probe key that
-/// an earlier start left, and that it deletes it once it is: the upstream holds one stale probe
-/// key, and an event log that the ready callback and the delete of the stale key both write to has
-/// the ready first. The checks of the self-test (their own keys) still run before the ready, which
-/// the test above holds to by refusing a wrong answer before the address is bound.
-#[tokio::test]
-async fn a_write_through_start_is_ready_before_it_sweeps_old_probe_keys() {
-    let node = Node::new("tscache-cli-wthru-sweep");
-    let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
-    let (_, memory) = crate::selftest_tests::two_hours_on(1).await;
-    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let swept = Arc::new(Notify::new());
-    let (noting, told) = (Arc::clone(&log), Arc::clone(&swept));
-    let upstream = Arc::new(Watched::new(memory, move |key| {
-        if key.contains("/old-") {
-            noting.lock().unwrap().push("swept");
-            told.notify_one();
-        }
-    }));
-    let settings = node.settings("", "write_through = true");
-    let (stop, stopped) = oneshot::channel::<()>();
-    let (bound, addr) = oneshot::channel::<SocketAddr>();
-    let readying = Arc::clone(&log);
-    let running = serve_cache(
-        &settings,
-        upstream.clone(),
-        disk,
-        async move {
-            let _ = stopped.await;
-        },
-        move |address| {
-            readying.lock().unwrap().push("ready");
-            let _ = bound.send(address.s3);
-        },
-    );
-    let driving = async {
-        if addr.await.is_ok() {
-            swept.notified().await;
-        }
-        let _ = stop.send(());
-    };
-    let (drained, ()) = tokio::join!(running, driving);
-    assert_eq!(drained.unwrap(), Drained { abandoned: 0 });
-    assert_eq!(*log.lock().unwrap(), ["ready", "swept"]);
-    assert!(upstream.inner.list("_tiering/").await.unwrap().is_empty());
 }
 
 /// Asserts what `--check-config` finds in the settings of a build node: a file that is whole

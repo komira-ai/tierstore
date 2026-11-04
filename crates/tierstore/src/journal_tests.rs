@@ -29,7 +29,6 @@ fn a_journal_object_round_trips_and_leaves_out_absent_tags() {
     let entries = [
         entry(JournalOp::Put, "a"),
         entry(JournalOp::Delete, "d"),
-        entry(JournalOp::PutReserved, "b"),
         mirror,
     ];
     let body = encode_journal(&entries);

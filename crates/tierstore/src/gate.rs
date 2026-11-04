@@ -241,23 +241,6 @@ impl Backend for GateBackend {
         self.through(Op::PutIfMatch, key, call).await
     }
 
-    /// A reservation is a call of kind [`Op::PutReservation`].
-    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let call = self.inner.put_reservation(key, body);
-        self.through(Op::PutReservation, key, call).await
-    }
-
-    /// As `put_reservation`, a call of kind [`Op::PutReservation`].
-    async fn put_reservation_if_match(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, Error> {
-        let call = self.inner.put_reservation_if_match(key, body, etag);
-        self.through(Op::PutReservation, key, call).await
-    }
-
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.through(Op::Get, key, self.inner.get(key, range)).await
     }
@@ -267,7 +250,7 @@ impl Backend for GateBackend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         let call = self.inner.get_tagged(key, range);
         self.through(Op::Get, key, call).await
     }
@@ -307,11 +290,6 @@ impl Backend for GateBackend {
     ) -> Result<Vec<Listed>, Error> {
         let call = self.inner.list_page(prefix, start_after, max_keys);
         self.through(Op::List, prefix, call).await
-    }
-
-    /// Asked of the wrapped backend as it is: it makes no call a gate holds.
-    async fn settle_conditional_delete(&self, key: &str) -> Option<String> {
-        self.inner.settle_conditional_delete(key).await
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {

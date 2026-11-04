@@ -40,7 +40,6 @@ put_rate_grace        = "45s"
 body_idle_timeout     = "20s"
 min_secret_bytes      = 24
 s3_request_timeout    = "2m"
-backend_check_wait    = "90s"
 
 [hot_store]
 kind               = "s3"
@@ -48,6 +47,7 @@ bucket             = "tierstore-hot"
 endpoint           = "http://192.0.2.10:9200"
 region             = "us-east-1"
 credentials_file   = "/etc/tierstore/hot.credentials"
+conditional_delete = true
 budget             = "500GiB"
 high_water         = 85
 low_water          = 60
@@ -66,7 +66,7 @@ bucket           = "tierstore-cold"
 endpoint         = "http://127.0.0.1:30900"
 region           = "us-west-2"
 credentials_file = "/etc/tierstore/cold.credentials"
-skip_checks      = ["multipart-conditional=store-ignores-if-none-match-on-completion"]
+conditional_delete = true
 "#;
 
 /// The least a file can say: two tiers that are in memory.

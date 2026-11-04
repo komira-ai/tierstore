@@ -462,13 +462,10 @@ arbiter of two writers. A full upstream (507) is 503 `SlowDown` with `Retry-Afte
 does not answer is 503. A delete drops the cache's copy and then deletes at the upstream, and a fill
 that was reading the object does not keep it; the completion of an upload drops the cache's copy of
 the key. Listings leave out the keys under `_journal/`, `_tiering/` and `_entries/`, always. The upstream key
-must now be one that writes: with `write_through` the start runs the self-test of the storage node
-against the upstream, under `_tiering/selftest/` (a create-only put that refuses a key that exists,
-a replace on a tag, ranged reads, paging, and a multipart completion that refuses a key that
-exists), and a store that answers one wrongly, a key that may not write included, is exit status 3
-before the address is bound; one that cannot be reached is status 1. The upstream must therefore be
-a store that takes writes under `_tiering/` (an S3 bucket, not the front of a storage node). The
-upstream's key is also the cache's: only the front's roles keep one client from another's objects.
+must now be one that writes: with `write_through` the start does not test the upstream (tierstore
+verifies nothing of the stores it is given; see "What tierstore requires of a store" below), so a
+key that may not write shows as the failure of the first write, and an upstream that cannot be
+reached as the error of the first request. The upstream's key is also the cache's: only the front's roles keep one client from another's objects.
 The start line then says `mode=write-through-cache`.
 
 What a put keeps. The body of a create-only put under a `cache = true` policy is copied into
@@ -635,7 +632,7 @@ put 403.
 | `local_cache.max_concurrent_keeps` | the most create-only puts that are copied into the cache at once (1 to 64, default 8), apart from the fills; a put that finds them all running succeeds and is not kept |
 | `local_cache.keep_wait` | the longest a put waits, once the upstream has the object, for its copy to be put in the cache (default `5s`, above 0). Past it the put is answered 200 and the copy is finished in the background; counted in `tierstore_cache_keeps_expired_total`. Safe because the upstream already holds the object: a read of it that misses costs only the trip, so read-your-write on the node is best effort past this wait |
 | `local_cache.keep_deadline` | the longest a copy takes in all, from the upstream's acknowledgement (default `60s`, above 0 and not below `keep_wait`); a copy that is not done by then (a hung disk or upstream) is abandoned: its stage file is removed, its slot and room are given back, and it is counted as `deadline` |
-| `local_cache.write_through` | `false` by default: a read cache that refuses every write with 403 before the role of the key is looked at. `true`: the node takes the writes its keys may do and sends each to the upstream, which must be written with a key that may write; the start runs the upstream's self-test (create-only and multipart-conditional included) and exits with status 3 if the upstream answers one wrongly |
+| `local_cache.write_through` | `false` by default: a read cache that refuses every write with 403 before the role of the key is looked at. `true`: the node takes the writes its keys may do and sends each to the upstream, which must be written with a key that may write; the upstream is not tested at start |
 | `local_cache.whole_fill_limit` | the most an object may be for a ranged read of it to fill the whole of it: a number or a size such as `"512MiB"`, from 1 byte to the `budget` (default 64 MiB); a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | `true`, the default; `false` is refused (leave `[local_cache]` out to run without a cache) |
 | `local_cache.scrub_min_round` | the least time between the starts of two rounds of the scrub (default `"1h"`; at least `"1s"`, or `"0s"`: a round starts as soon as the last is done): a small cache is not read again and again at the rate |
@@ -648,8 +645,8 @@ is as for a storage node, without `backend_check_wait`. A `[[policy]]` with `cac
 The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are a storage node with
 a cache in front of its own proxy: the S3 and OCI fronts read through the
 cache, the cache reads from and writes to the proxy, `write_through` is true (left out or given;
-`false` is refused), and the start does not run the upstream's self-test (the upstream is the
-proxy, whose tiers the start tests), so the table's `write_through` row below does not apply to it.
+`false` is refused), and the upstream is the proxy, so the table's `write_through` row below does
+not apply to it.
 The cache path may not be a tier's directory, inside it or around it. The start line says
 `mode=storage-cache`. The node's tables are a storage node's, and the cache's those of this section.
 
@@ -659,10 +656,7 @@ the file system under the cache four questions with a probe object: a second lin
 exists is refused (`create-only`), a name made by a link shows the whole file (`atomic-visibility`),
 the bytes read back are the bytes written (`raw-bytes`), and the link count reports the second
 name (`st_nlink`). A file system that answers one wrongly is not served over: the process says which
-check and exits with status 3, as for a tier that fails its self-test. It then asks the upstream a
-HEAD of a key that is not there: 404 or any object is an answer, and anything else (it is down, it
-refuses the key) exits with status 1. The write checks of the storage-node self-test are not run
-against the upstream, whose key is read-only. On SIGTERM the process drains as a storage node does.
+check and exits with status 3. The upstream is not asked anything at start. On SIGTERM the process drains as a storage node does.
 
 `GET /metricz` is not signed, and a bucket cannot be called `metricz`. It answers in the Prometheus
 text format, `tierstore_cache_<name>`, with: `hits_total`, `misses_total`, `bytes_served_local_total`,
@@ -913,7 +907,8 @@ What it serves, and nothing else (any other path is 404 and any method but GET a
 | request | answer |
 |---|---|
 | `/v2/` | 200, `{}`, `Docker-Distribution-API-Version: registry/2.0` |
-| `/v2/<name>/manifests/sha256:<hex>` | the manifest (at most 4 MiB), with `Content-Type` from its `mediaType`, `Content-Length`, `Docker-Content-Digest` and an `ETag` of the digest. A tag is 404 `MANIFEST_UNKNOWN`: tags are not served |
+| `/v2/<name>/manifests/sha256:<hex>` | the manifest (at most 4 MiB), with `Content-Type` from its `mediaType`, `Content-Length`, `Docker-Content-Digest` and an `ETag` of the digest. A tag in place of the digest is read first and the manifest it points at is served; a tag nobody pushed is 404 `MANIFEST_UNKNOWN` |
+| `/v2/<name>/tags/list` | `{"name","tags"}`, the tags of the name in ascending order, paged with `n` and `last` (a `Link` header names the next page); a name with no tag is an empty list |
 | `/v2/<name>/blobs/sha256:<hex>` | the blob, streamed, `application/octet-stream`, with `Accept-Ranges: bytes`; one `Range` is 206 with `Content-Range`, one past the end 416 |
 
 The `Content-Type` of a manifest is its `mediaType` when that is the OCI image manifest or index or
@@ -986,8 +981,14 @@ install -D -m 0644 farm-ca.crt /etc/containers/certs.d/192.0.2.10/ca.crt
 podman pull 192.0.2.10/library/app@sha256:<manifest digest>
 ```
 
-The reference is by digest: a tag is refused. The repository name (`library/app`) is any name that
-fits the grammar and means nothing to the store. A registry on another port than 443 is written
+The reference is a digest or a tag: a tag is a mutable pointer, pushed with `PUT` of a manifest under it. A tag is moved by writing a new
+small object, `<prefix>tags/<name>/<tag>/<20 digits>` (the `/` of a name written `~`), whose digits count down so that the newest version lists
+first; no stored object is overwritten, and the tag is the newest version. Of two overlapping pushes of one tag with different digests one is
+201 and the other 409 `TAG_CONFLICT` (the loser pushes again); pushes of the same digest are both 201. A pull by tag lists the versions of that tag and
+reads one 71-byte object before the manifest, and `tags/list` reads every version of the name; old versions are kept (nothing deletes them yet),
+one 71-byte object per move. The store must list consistently with the writes before the listing (S3 and MinIO do); on a `dir:` tier the whole
+key, `oci/tags/<name>/<tag>/` and 20 digits, is one file name of at most 255 bytes. The repository name (`library/app`) is any name that
+fits the grammar. Blobs and manifests are shared by digest whatever the name; tags are scoped to the name. A registry on another port than 443 is written
 `192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
 
 A client that allows only `https` registries on port 443 (or the port in the reference), and
@@ -998,8 +999,8 @@ that client's own settings.
 
 `GET /metricz` on the S3 listener (unsigned, like `/healthz`; a bucket cannot be called `metricz`)
 shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcome}` (routes `ping`,
-`manifest`, `blob`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
-`range_not_satisfiable`, `unauthorized`, `denied`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
+`manifest`, `blob`, `tags`, `upload`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
+`range_not_satisfiable`, `unauthorized`, `denied`, `failed`, `conflict`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
 responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
 which serves nothing else. Without an `oci` interface the path says the front is not enabled.
 
@@ -1037,34 +1038,32 @@ path that went, a file that does not load; or two keys with one access key id) i
 restart cannot mend it. Other combinations of settings and key files refused after parsing exit 1, and are tried again
 every 30 seconds.
 
-## The start-up self-test
+## What tierstore requires of a store
 
-Before it binds its address the process asks each tier the questions its guarantees rest on: a
-create-only put of a key that exists must be refused, a replace on a wrong ETag must be refused
-and one on the right ETag must work, a ranged read must give exactly the range, a HEAD must give
-the size and the ETag of what was written, a listing after a key must page right, and on the cold
-tier the completion of a multipart upload over a key that exists must be refused. (Only the
-create-only completion is probed, not the refusal of a bad part list.) It uses keys under
-`_tiering/selftest/`, which clients never see; they are deleted afterwards, and keys a killed
-start left more than an hour ago (by the store's clock, not the machine's) are swept; only keys
-under that prefix are ever deleted. A tier that answers one of them wrongly exits 3
-with the tier, the check and the answer on stderr, and is not restarted
-(`RestartPreventExitStatus=2 3`): fix or replace the store. That includes answers that are a
-configuration error, such as 403 `AccessDenied` or `NoSuchBucket`, which are not retried either.
-A tier that cannot be reached (down, a timeout, 408, 429, any 5xx but 501 and 507) is asked again,
-after pauses from one second doubling to thirty, for `server.backend_check_wait` (five minutes by
-default, for each tier; `0s` asks once), so that a store that is slow to come up after a reboot
-does not fail the start. Then the start exits 1 and the unit tries it again after 30 seconds, up to
-its start limit (5 starts in an hour, so about half an hour of real failures, then systemd gives up
-until `systemctl reset-failed tierstore`). An
-error that persists on a conditional step (a create-only put, `If-Match`, the completion of a
-multipart upload) while the store is up, a 500 for instance, may be a gap in the store and not an
-outage; the message says so.
-A tier that is full (a full hot tier is a designed state) starts: the checks that need a write are
-skipped, with a line on stderr that says so. For a full cold tier the line is a warning that writes
-to the cold tier will fail.
+tierstore is a proxy over a hot store and a cold store. It does not test either store, at start or
+later, and writes no probe key: it does not verify what is said here.
 
-`cold_store.skip_checks multipart-conditional=<reason>` leaves out the multipart check, for a store
-that lacks a conditional completion; the reason is written to stderr at every start. No other check
-can be skipped (exit 2). Without that check a multipart upload to the cold tier may replace an
-object that exists.
+- The hot store must provide an atomic conditional PUT, create-only (`If-None-Match: *`) and
+  `If-Match`, and strong read-after-write consistency for GET, HEAD and LIST. The lease, the
+  checkpoint and the registration of the proxies are written with those conditional puts.
+- The cold store must provide the same create-only PUT, on a single PUT and on the completion of a
+  multipart upload, and an atomic `If-Match` PUT (the completion of a multipart upload included),
+  which the reconciler uses to replace a reservation with its object.
+- Known to meet them: Amazon S3, MinIO (for the conditional PUT) and tierstore's `dir` store,
+  among the calls of one process only (two processes over one `dir` hot tier are held apart by
+  `hot_store.lock_file`, not by the store).
+- A cold store that cannot be reached at start does not fail the start; the first request that
+  needs it fails as an ordinary request does. Opening the proxy reads and writes the hot tier's own
+  state, so a hot tier that cannot be reached fails the start (exit 1, `opening the proxy: ...`).
+  That, an address in use or a key file refused exits 1 and is tried again after 30 seconds, up to
+  the start limit (5 starts in an hour, then systemd gives up until
+  `systemctl reset-failed tierstore`). Exit 3 (`RestartPreventExitStatus=2 3`) is now only the file
+  system of a cache directory answering the cache's start-up check wrongly.
+- `conditional_delete` (`hot_store.conditional_delete`, `cold_store.conditional_delete`) says whether a
+  conditional delete of an `s3` tier is sent with `If-Match` (`true`, for a store that enforces it
+  on a DELETE, as Amazon S3 does) or as a read of the tag before a plain DELETE (`false`, the
+  default, right on every store with a window between the two requests).
+
+`cold_store.skip_checks` and `server.backend_check_wait`, which belonged to the self-test earlier
+releases ran, are accepted and ignored, each with one warning on stderr. Probe keys under
+`_tiering/selftest/` that an earlier release left are not deleted by this one.

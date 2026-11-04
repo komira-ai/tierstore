@@ -11,16 +11,14 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use crate::selftest_tests::{Flaw, Flawed};
 use crate::server::config_testing::MINIMAL;
+use crate::server::local_cache::LocalTierFailure;
 use crate::server::{AccessKey, Drained};
-use crate::{Backend, Check, SelfTestError, SelfTestFailure};
 
-use super::super::cli_probe::{probe_run_id, probe_tiers};
 use super::super::cli_serve::cut_note;
 use super::{
-    Args, Cli, InvalidFlags, S3Client, S3Flags, SkippedCheck, build, exit_status, open_tier,
-    parse_duration, parse_skip, read_key, share, tier,
+    Args, Cli, InvalidFlags, S3Client, S3Flags, build, exit_status, open_tier, parse_duration,
+    probe_run_id, read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]
@@ -130,11 +128,10 @@ fn the_keys_have_their_defaults() {
     assert!(cli.grant_key_file.is_empty());
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
     assert_eq!(cli.grant_max_lifetime, None);
-    assert!(
-        cli.skip_backend_check.is_empty(),
-        "no check is skipped by default"
-    );
-    assert_eq!(cli.backend_check_wait, Duration::from_secs(300));
+    assert!(cli.skip_backend_check.is_empty());
+    assert_eq!(cli.backend_check_wait, None);
+    assert_eq!(cli.hot_conditional_delete, None);
+    assert_eq!(cli.cold_conditional_delete, None);
 }
 
 /// Asserts that the reconciler of a process is named apart from its proxy, so that the entry of

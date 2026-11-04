@@ -5,9 +5,9 @@
 | Status | Meaning | The unit |
 |---|---|---|
 | 0 | a clean drain, or `--check-config` or `--help` done | stays stopped |
-| 1 | a start that failed: a tier that could not be reached, an address in use, a key file refused after parsing, and the flags that depend on each other (see "Messages at start") | restarts after 30 seconds |
-| 2 | a flag the parser refused (or a flag of the data path that went, which the message answers with its key), a start without `--config`, a file that does not load, a limit of the OCI front (its prefix, its certificate and key, see "OCI front"), a local cache budget the file system cannot hold (see "Build-node cache"), or two keys with one id | does not restart: a restart cannot mend it |
-| 3 | a tier answered the start-up self-test wrongly, or the cache directory, once opened, could not be probed or its file system failed the cache check | does not restart: the same store would answer the same way |
+| 1 | a start that failed: an address in use, a key file refused after parsing, the settings that depend on each other (see "Messages at start"), and a hot tier that cannot be reached when the proxy is opened (`opening the proxy: ...`). A cold store that cannot be reached is not one: tierstore does not test its stores | restarts after 30 seconds |
+| 2 | a flag the parser refused (or a flag of the data path that went, which the message answers with its key), a start without `--config`, a file that does not load (`conditional_delete = false` for a `memory` or `dir` tier among it), a limit of the OCI front (its prefix, its certificate and key, see "OCI front"), a local cache budget the file system cannot hold (see "Build-node cache"), or two keys with one id | does not restart: a restart cannot mend it |
+| 3 | the cache directory, once opened, could not be probed or its file system failed the cache check (a build node, or a node with `[local_cache]`) | does not restart: the same file system would answer the same way |
 
 Messages go to stderr, prefixed `tierstore: `, and so to the journal: `journalctl -u tierstore`. None carries a secret.
 
@@ -60,12 +60,11 @@ Move the setting into the file as a path; give the file one of the three shapes:
 The tiers:
 
 ```message
-tier unreachable: <tier>: <error>
 opening the proxy: <why>
 binding <address>: <why>
 ```
 
-`tier unreachable` is a store that did not answer for `server.backend_check_wait`: check the endpoint, the network and the store. The process asks again with growing pauses before it gives up, so a store that is slow to come up after a reboot does not fail a start. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
+tierstore does not test its stores at start. Opening the proxy reads and writes the hot tier's own state (its registration and its journal), so a hot tier that is down fails the start here with `opening the proxy: <why>`: check the endpoint, the network and the store; the unit tries again every 30 seconds. A cold store that is down does not fail a start: the first request that needs it fails (a client sees 503 `ServiceUnavailable`, see "Errors a client sees"). A store that does not meet what tierstore requires of it (see [operations](operations.md#what-tierstore-requires-of-a-store)) is not detected at all. `binding` is an address in use, or one that is not on this host. A server given several S3 or registry listen addresses (see [configuration](configuration.md)) starts only if it can bind every one: the message names the first that failed, and nothing is served.
 
 An address given twice exits 2 before anything is bound; the message names the entries and the address:
 
@@ -75,7 +74,7 @@ An address given twice exits 2 before anything is bound; the message names the e
 <key>: it needs at least one address
 ```
 
-A tier that answers a self-test question wrongly exits 3 and names the tier, the check and what it answered: the store overwrites on a create-only put, ignores `If-Match`, answers a range with the whole object, or completes a multipart upload over an existing object. Use a store that does these properly. `cold_store.skip_checks multipart-conditional=<reason>` is for the last only.
+`cold_store.skip_checks` and `server.backend_check_wait` are accepted and ignored, each with one warning line on stderr (see [configuration](configuration.md#deprecated-settings)): they belonged to the self-test that earlier releases ran, which is gone.
 
 ### OCI front
 

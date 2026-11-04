@@ -307,15 +307,6 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     let streamed = gated.put_stream_if_match("o", Some(3), chunks("abe"), &tag);
     held(gated, Op::PutIfMatch, streamed).await;
 
-    let reserved = held(
-        gated,
-        Op::PutReservation,
-        gated.put_reservation("r", bytes("r1")),
-    )
-    .await;
-    let kept = gated.put_reservation_if_match("r", bytes("r2"), &reserved);
-    held(gated, Op::PutReservation, kept).await;
-
     assert_eq!(
         held(gated, Op::Get, gated.get("o", None)).await,
         bytes("abe")
@@ -409,9 +400,6 @@ impl Backend for Overrides {
         };
         Ok(vec![page])
     }
-    async fn settle_conditional_delete(&self, _: &str) -> Option<String> {
-        Some("settled".to_owned())
-    }
 }
 
 /// The wrapper says what the wrapped backend says about the length of a streamed body.
@@ -422,18 +410,13 @@ async fn needs_length_is_the_wrapped_backends() {
 }
 
 /// A page is the wrapped backend's own page (the provided one would cut the whole listing, which
-/// is empty here), and the settling of the conditional delete is the wrapped backend's answer
-/// (the provided one is `None`).
+/// is empty here).
 #[tokio::test]
-async fn list_page_and_settle_are_the_wrapped_backends_own_answers() {
+async fn list_page_is_the_wrapped_backends_own_answer() {
     let gated = GateBackend::new(Arc::new(Overrides));
     let page = gated.list_page("p/", None, 10).await.unwrap();
     assert_eq!(page.len(), 1);
     assert_eq!(page[0].key, "from-list-page");
-    assert_eq!(
-        gated.settle_conditional_delete("probe").await.as_deref(),
-        Some("settled")
-    );
 }
 
 /// A page is held at a gate of the list kind, ahead of the wrapped backend, and is then the

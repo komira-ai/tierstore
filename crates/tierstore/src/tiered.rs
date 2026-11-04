@@ -57,8 +57,6 @@ pub struct ProxyConfig {
     /// publication, so an object that no longer changes means the leader has stopped; no time that
     /// another machine wrote is read.
     pub usage_stale_after: Duration,
-    /// How many cold objects of a listing that may be reservations are asked about at once.
-    pub listing_heads: usize,
     /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
     /// filter of reserved keys cut short.
     pub upload_listing_calls: u32,
@@ -93,8 +91,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
-    /// critical share of 0.95, a usage object that is read every second and ignored after 30 seconds, 16 cold
-    /// objects of a listing asked about at once, at most 100 calls to the cold tier for one listing
+    /// critical share of 0.95, a usage object that is read every second and ignored after 30 seconds, at most 100 calls to the cold tier for one listing
     /// of uploads, a format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
     /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
     /// 3 looks at an entry, and the [`DeleteWait`] of [`DeleteWait::new`].
@@ -106,7 +103,6 @@ impl ProxyConfig {
             critical: 0.95,
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
-            listing_heads: 16,
             upload_listing_calls: 100,
             format_refresh: Duration::from_secs(5),
             clock,
@@ -191,11 +187,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   [`Backend::get_stream`] reads the cold object once and gives its body to the caller as it
 ///   arrives, never held whole. A ranged read that misses the hot tier asks the cold tier for that
 ///   range alone and asks for no copy-back: the memory of a read is its range, whatever the size of
-///   the object. A failed ask does not fail the read. A *reservation* in the cold tier (a marked
-///   56-byte object, see [`Backend::put_reservation`]) is not an object: a read of it is not found,
-///   and no copy-back is asked for.
-/// - **Head** reads the hot tier, else the cold tier, and asks for no copy-back; a reservation is
-///   not found.
+///   the object. A failed ask does not fail the read.
+/// - **Head** reads the hot tier, else the cold tier, and asks for no copy-back.
 /// - **Put** is refused if the key exists in either tier, is written to the hot tier create-only,
 ///   and is acknowledged when its entry says so (`entry_put.rs`): the entry is created
 ///   `(PUT, HELD)` before the object is written, so that no other put, delete or copy of the key
@@ -218,13 +211,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   answered 503 at the request deadline.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
-///   `_tiering/` and `_entries/` (whichever tier holds them), and without reservations: a cold
-///   object of the size of one that the hot listing does not show is asked about with a HEAD
-///   (sixteen at a time; an object a HEAD finds real is shown, and no answer is kept from one
-///   listing to the next, since a listing gives no version of an object to know it by). A HEAD that
-///   fails fails the listing. [`Backend::list_page`] pages through the merged listing: the last key
-///   of a page is the continuation token, and `max_keys` is kept to (a page of the cold tier that
-///   the filter cut short is made up from the next). A get, a head, a put, a delete and every
+///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
+///   the merged listing: the last key of a page is the continuation token, and `max_keys` is kept
+///   to (a page of a tier that the filter of the reserved prefixes cut short is made up from the
+///   next). A get, a head, a put, a delete and every
 ///   multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The S3
 ///   front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
@@ -412,21 +402,15 @@ impl Inner {
         self.classify(hot_bytes)
     }
 
-    /// A get of the cold tier, counted as a hit, a miss or an error of it. A reservation is not an
-    /// object: the read of one is a miss. The read gives the mark and the content tag with the
-    /// bytes, all of one object; an error that is neither "not found" nor "unavailable" (a range
-    /// past the end of the 56 bytes of a reservation is one) is told from a failure by one HEAD.
+    /// A get of the cold tier, counted as a hit, a miss or an error of it. The read gives the
+    /// content tag with the bytes, both of one object.
     async fn cold_get(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
         match self.cold.get_tagged(key, range).await {
-            Ok((_, true, _)) => {
-                self.counters.miss(Tier::Cold, Read::Get);
-                Err(Error::NotFound(key.to_owned()))
-            }
-            Ok((body, false, tag)) => {
+            Ok((body, tag)) => {
                 self.counters.hit(Tier::Cold, Read::Get);
                 self.counters.bytes_read(Tier::Cold, body.len());
                 Ok((body, tag))
@@ -435,20 +419,10 @@ impl Inner {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(error)
             }
-            Err(error @ Error::Unavailable(_)) => {
+            Err(error) => {
                 self.counters.error(Tier::Cold, Read::Get);
                 Err(error)
             }
-            Err(error) => match self.cold.head(key).await {
-                Ok(meta) if meta.reservation => {
-                    self.counters.miss(Tier::Cold, Read::Get);
-                    Err(Error::NotFound(key.to_owned()))
-                }
-                _ => {
-                    self.counters.error(Tier::Cold, Read::Get);
-                    Err(error)
-                }
-            },
         }
     }
 
@@ -507,10 +481,6 @@ impl Inner {
             }
         }
         match self.cold.head(key).await {
-            Ok(meta) if meta.reservation => {
-                self.counters.miss(Tier::Cold, Read::Head);
-                Err(Error::NotFound(key.to_owned()))
-            }
             Ok(meta) => {
                 self.counters.hit(Tier::Cold, Read::Head);
                 Ok(meta)
