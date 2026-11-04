@@ -108,6 +108,7 @@ use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabili
 use super::cache_cli::serve_cache_until_signalled;
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{Settings, keys_for_flags};
+use super::config_oci::UpstreamTable;
 use super::config_print::render;
 use super::drain::late_of;
 #[cfg(test)]
@@ -118,8 +119,8 @@ use super::launch::{Launch, Refused, resolve};
 use super::listen::{bind_all, joined, local_addrs};
 use super::local_cache::LocalTierFailure;
 use super::lock::{self, LockFile, check_lock_path};
-use super::oci::{OciFront, OciListener, OciMode};
-use super::oci_setup::{OciSetup, oci_setup, oci_setup_of};
+use super::oci::{OciListener, OciMode};
+use super::oci_setup::{OciSetup, bind_oci, oci_setup, oci_setup_of};
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
@@ -472,6 +473,10 @@ pub struct Cli {
     /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
     #[arg(long, requires = "oci_listen")]
     pub oci_require_auth: bool,
+    /// The registry the OCI front pulls a missing object from: the file's `[oci.upstream]`, which
+    /// has no flag.
+    #[arg(skip)]
+    pub(super) oci_upstream: Option<UpstreamTable>,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -1065,24 +1070,6 @@ pub(super) fn cut_note(drained: Drained) -> String {
     }
 }
 
-/// Binds the OCI front over `backend` as `setup` says: none when there is no setup. The backend
-/// is whatever the node reads from: the proxy of a storage node, the cache of a build node.
-///
-/// # Errors
-/// An address that cannot be bound.
-pub(super) async fn bind_oci(
-    setup: Option<OciSetup>,
-    backend: Arc<dyn Backend>,
-) -> Result<Option<OciListener>, Error> {
-    let Some(setup) = setup else {
-        return Ok(None);
-    };
-    let front = OciFront::new(backend, setup.prefix, setup.metrics).with_auth(setup.auth);
-    let front = Arc::new(front);
-    let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
-    Ok(Some(bound?))
-}
-
 /// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns.
 pub(super) fn signals() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -1278,3 +1265,7 @@ mod oci_tests;
 #[cfg(test)]
 #[path = "grant_cli_tests.rs"]
 mod grant_tests;
+
+#[cfg(test)]
+#[path = "oci_upstream_cli_tests.rs"]
+mod oci_upstream_tests;

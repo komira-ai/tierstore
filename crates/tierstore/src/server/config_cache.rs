@@ -369,6 +369,11 @@ impl CacheSettings {
         let upstream = tier("cold_store", &upstream_table(cold)?)?;
         let part = CachePart::new(table, policy)?;
         let oci = oci_of(oci_table)?;
+        if oci.upstream.is_some() {
+            let why =
+                "a pull is stored, and a build node takes no writes: use a storage node's file";
+            return Err(invalid("oci.upstream", why));
+        }
         let shared = front_of(server, per_run)?;
         check_oci_is_kept(&oci, policy)?;
         Ok(Self {

@@ -233,7 +233,7 @@ The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may h
 
 ## `[oci]`
 
-The OCI registry front: read-only, unless `require_auth` is true (then it also takes pushes). The table is the front: leave it out for a server with none. `listen` is needed in it and the other keys are refused without it.
+The OCI registry front: read-only, unless `require_auth` is true (then it also takes pushes), or `[oci.upstream]` is given (then it also stores what it pulls). The table is the front: leave it out for a server with none. `listen` is needed in it and the other keys are refused without it.
 
 ```toml fragment
 [oci]
@@ -263,6 +263,34 @@ listen = ["0.0.0.0:5000", "[::]:5000"]
 ```
 
 The front reads objects at `<prefix>blobs/sha256/<hex>` and serves GET and HEAD of `/v2/`, of manifests by digest and of blobs by digest. It is anonymous unless `oci.require_auth` is true: anyone who can connect can read any digest under the prefix, so the network decides who may. With `oci.require_auth` a request without a valid login is answered 401 with `WWW-Authenticate: Basic realm="tierstore"`; the full key, a read-only key and a scoped key with a read prefix over `<prefix>blobs/sha256/` may pull, and the full key and a scoped key with a write prefix over it may push (a key that may not push is answered 403). Without `oci.require_auth` the front is read-only and every push is answered 405. A push is a blob upload, monolithic (`POST /v2/<name>/blobs/uploads/?digest=<digest>`) or chunked (`POST` to begin, `PATCH` for each chunk, `PUT ...?digest=<digest>` to end, `DELETE` to cancel), or `PUT /v2/<name>/manifests/<reference>`. A blob is checked against its digest in one pass as it is stored, with no limit on its size and no copy of it in memory, and nothing is stored if it does not match; a chunk that does not start where the upload is (its `Content-Range`, if it has one) is answered 416. The chunks of an upload are stored as objects under `<prefix>uploads/<id>/` until the upload ends or is cancelled, and are read back once when it ends, so a blob pushed in chunks is written twice; an upload that is neither ended nor cancelled keeps them, and nothing collects them. A manifest must name only blobs that are stored (400 `MANIFEST_BLOB_UNKNOWN` otherwise) and is stored by its digest; a tag in the place of the digest is then pointed at that manifest, as one small object `<prefix>tags/<name>/<tag>` (the `/` of a name written `~`) holding the digest: a tag that does not exist is created with a create-only write and one that does is replaced with an `If-Match` write on the content tag read just before, so of two pushes of one tag that overlap exactly one is taken and the other is answered 409 `TAG_CONFLICT` (its manifest is stored by digest all the same; the client pushes the tag again). A tag is pulled as `GET` or `HEAD` of `/v2/<name>/manifests/<tag>`, and `GET /v2/<name>/tags/list` lists the tags of a name, paged with `n` and `last`; a name with no tag lists empty. Tags are not deleted. Basic was chosen over the token flow because the front then needs no token service, signing key or clock: `podman login` and `docker login` send the id and secret with each request, which is why TLS is needed off loopback. The certificate and key are read once; a new certificate takes a restart.
+
+## `[oci.upstream]`
+
+On main, not in v0.0.41. A registry the OCI front pulls from when its store has no such manifest or blob (a pull-through cache). It is a table inside `[oci]`, so it needs `oci.listen`, and it has no flag. A storage node's file takes it, with or without `[local_cache]`; a build node's file is refused with it, because a pull is stored and a build node takes no writes.
+
+**This makes tierstore an outbound client.** Without the table the process only accepts connections for the registry front. With it, a request for an object the store lacks makes the process open a connection of its own to the upstream's address, and the host it runs on must be allowed to reach it. Nothing else of tierstore dials out for the front. A connection is made for each request and carries a plain `GET`: nothing is pooled and no state is kept between pulls.
+
+| Key | Type, default | What |
+| --- | --- | --- |
+| `oci.upstream.url` | string, needed | `https://host[:port]` or `http://host[:port]`, with no user name, path or query |
+| `oci.upstream.username` | string | the user name to log in with; with `password_file`, or neither |
+| `oci.upstream.password_file` | path | the file that holds the password or token of `username`: owned by the user the server runs as, mode 0600 (any group or other permission bit is refused), not a link; its text without the line end is the password. The password is never in the configuration file |
+| `oci.upstream.ca_file` | path | PEM certificates the upstream's certificate may be issued by, besides the system's; read once at the start |
+| `oci.upstream.timeout` | duration, `30s` | how long the upstream has to answer a request, and to send the next piece of a body; the time a whole body takes is not bounded |
+| `oci.upstream.max_redirects` | count, 4 | the most redirects one request follows |
+
+For example, a registry at `registry.example` that wants a login is `url = "https://registry.example"` with `username` and `password_file`, as keys of an `[oci.upstream]` table after `[oci]`.
+
+How it behaves:
+
+- A manifest by digest, a manifest by tag and a blob are pulled, as `GET /v2/<name>/manifests/<reference>` and `GET /v2/<name>/blobs/<digest>` of the upstream, with the `<name>` of the request. The store is still one namespace: an object that is in it is served for any name, and the upstream is asked only for what the store lacks. `tags/list` is the store's own and is not pulled.
+- A manifest is read whole (at most 4 MiB), must be a manifest, and is stored by the digest its bytes hash to; one asked for by digest that does not hash to it is refused. A tag is then pointed at the manifest. A blob is streamed into the store and hashed in the same pass, with no limit on its size and no copy of it in memory, and nothing is stored if it does not hash to its digest.
+- The client's request waits while the object is pulled and stored, and is then answered from the store as any other (a `Range` too; a `HEAD` of a blob that is not there pulls it). A later request never reaches the upstream. A client that goes away does not stop a blob being stored. Two requests for one missing object at once each pull it.
+- A tag that is in the store is never asked of the upstream again: it keeps pointing at the manifest it first pointed at, however the upstream moves it. A tag that moves is a push's to move.
+- The login follows the upstream's challenge. `Basic` is answered with the user name and password. `Bearer` is answered with a token fetched from the challenge's realm, logged in with the same user name and password (or anonymously, if there is none), and used for that pull only. A password is sent only over HTTPS or to a loopback address: the start refuses a login that would go in the clear, and a token realm that is neither is asked with no password. Redirects are followed and carry no login.
+- The client is told 404 when the upstream has no such object, and 502 with the code `UNAVAILABLE` for any other failure of the upstream (it cannot be reached, refuses the login, answers late, sends bytes that are not the object, or cuts a body); what the upstream said is on stderr and not in the answer. A store that cannot take what was pulled answers as it does for any write it cannot make.
+
+The start refuses a table whose password file others can read, that is missing or empty, whose `ca_file` holds no certificate, or whose address cannot work; `--check-config` reads the password file and the `ca_file` as the start does.
 
 ## `[[policy]]`
 

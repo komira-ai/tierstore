@@ -36,7 +36,7 @@ use crate::{Backend, Clock, Proxy, Reconciler, SystemClock};
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
 use super::cli::{
-    Addresses, Error, bind_oci, build, cut_note, open_gate, probe_run_id, probe_tiers, reconcile,
+    Addresses, Error, build, cut_note, open_gate, probe_run_id, probe_tiers, reconcile,
     reconcile_gated, signals,
 };
 use super::config_combined::CombinedSettings;
@@ -44,6 +44,7 @@ use super::drain::late_of;
 use super::listen::{joined, local_addrs};
 use super::local_cache::{Disk, Every, SCRUB_TICK, SystemDisk};
 use super::oci::OciListener;
+use super::oci_setup::bind_oci;
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
 

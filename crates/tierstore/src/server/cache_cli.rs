@@ -56,7 +56,7 @@ use crate::{
 };
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{Addresses, Error, S3Flags, bind_oci, bind_s3, open_tier, probe_run_id, signals};
+use super::cli::{Addresses, Error, S3Flags, bind_s3, open_tier, probe_run_id, signals};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
@@ -65,7 +65,7 @@ use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
 use super::oci::OciListener;
-use super::oci_setup::oci_setup_of;
+use super::oci_setup::{bind_oci, oci_setup_of};
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
 

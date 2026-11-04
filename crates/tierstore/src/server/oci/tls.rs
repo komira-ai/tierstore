@@ -51,6 +51,9 @@ pub enum OciError {
     /// The certificate and key do not make a TLS configuration.
     #[error("--oci-tls-cert and --oci-tls-key: {0}")]
     Config(String),
+    /// `[oci.upstream]` cannot be used: what is wrong with it.
+    #[error("oci.upstream: {0}")]
+    Upstream(String),
     /// The address cannot be bound.
     #[error("binding {addr}: {source}")]
     Bind {

@@ -53,7 +53,7 @@ use super::cli::{
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-pub(super) use super::config_oci::{OciFlags, oci};
+pub(super) use super::config_oci::{OciFlags, OciTable, oci};
 use super::config_policy::{Policy, check_policies};
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
@@ -432,29 +432,6 @@ pub(super) struct TierTable {
     /// `endpoint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<String>>,
-}
-
-/// `[oci]`: the read-only OCI front. The table is the front: `listen` is needed in it, and the
-/// other keys are refused without it, as the `--oci-*` flags are.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OciTable {
-    /// One address, or a list of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<Addrs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_cert_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_key_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_lifetime: Option<Dur>,
-    /// Whether clients must present an access key of the server (`--oci-require-auth`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_auth: Option<bool>,
 }
 
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
@@ -879,6 +856,7 @@ pub(super) fn storage(
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
         oci_require_auth: oci.require_auth,
+        oci_upstream: oci.upstream,
     })
 }
 

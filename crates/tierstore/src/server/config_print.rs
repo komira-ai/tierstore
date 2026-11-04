@@ -126,6 +126,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime.map(Dur),
         require_auth: cli.oci_require_auth.then_some(true),
+        upstream: cli.oci_upstream.clone(),
     });
     let file = File {
         server,

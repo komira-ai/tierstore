@@ -72,6 +72,15 @@
 //! `push` (blob uploads, monolithic and chunked, and `PUT` of a manifest, each blob checked against
 //! its digest in one pass as it is stored).
 //!
+//! # Pull-through
+//!
+//! A front made with [`OciFront::with_upstream`] (the `[oci.upstream]` table of the file) does not
+//! answer 404 for a manifest or a blob its store lacks: it pulls the object from the upstream
+//! registry, stores it, and answers from the store. The process is then an outbound client of that
+//! registry, which `upstream` is the code of. The rules of what is pulled, checked and stored, and
+//! of the answers when the upstream fails (404 if it has no such object, 502 `UNAVAILABLE` for any
+//! other failure), are in `pull`. Without an upstream the front pulls nothing and a miss is 404.
+//!
 //! # Errors
 //!
 //! The bodies are the distribution error document, `{"errors":[{"code","message","detail"}]}`:
@@ -91,10 +100,12 @@ mod listener;
 mod manifest;
 mod metrics;
 mod names;
+mod pull;
 mod push;
 mod range;
 mod tags;
 mod tls;
+mod upstream;
 
 #[cfg(test)]
 mod auth_tests;
@@ -102,6 +113,8 @@ mod auth_tests;
 mod body_tests;
 #[cfg(test)]
 mod drain_tests;
+#[cfg(test)]
+pub(crate) mod fake_upstream;
 #[cfg(test)]
 mod front_tests;
 #[cfg(test)]
@@ -142,6 +155,7 @@ pub(crate) use listener::OciDrain;
 pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
+pub use upstream::{Reply, Upstream, UpstreamError, UpstreamSettings};
 
 use auth::{Need, Refused};
 use body::BlobRead;
@@ -212,6 +226,8 @@ pub struct OciFront {
     metrics: Arc<OciMetrics>,
     /// The keys clients must present; none serves anonymously.
     auth: Option<OciAuth>,
+    /// The registry a manifest or blob the store lacks is pulled from; none pulls nothing.
+    upstream: Option<Upstream>,
 }
 
 impl OciFront {
@@ -223,7 +239,16 @@ impl OciFront {
             prefix,
             metrics,
             auth: None,
+            upstream: None,
         }
+    }
+
+    /// The front, pulling a manifest or a blob its store lacks from `upstream` (see the module
+    /// `pull`); with none it pulls nothing, as [`new`](Self::new) makes it.
+    #[must_use]
+    pub fn with_upstream(mut self, upstream: Option<Upstream>) -> Self {
+        self.upstream = upstream;
+        self
     }
 
     /// The front, asking each client for a key of `auth` (see the `Access` section of the module
@@ -364,19 +389,37 @@ impl OciFront {
         }
         let digest = match Digest::parse(reference) {
             Some(digest) => digest,
-            None if names::is_tag(reference) => match self.tagged(name, reference).await {
-                Ok(digest) => digest,
-                Err(failure) => {
-                    let detail = json!({ "tag": echoed(reference) });
-                    return store_failed(&failure, reference, UNKNOWN, detail);
+            None if names::is_tag(reference) => {
+                let found = self.tagged(name, reference).await;
+                match (found, &self.upstream) {
+                    (Ok(digest), _) => digest,
+                    (Err(Error::NotFound(_)), Some(upstream)) => {
+                        match self.pull_tag(upstream, name, reference).await {
+                            Ok(digest) => digest,
+                            Err(answer) => return answer,
+                        }
+                    }
+                    (Err(failure), _) => {
+                        let detail = json!({ "tag": echoed(reference) });
+                        return store_failed(&failure, reference, UNKNOWN, detail);
+                    }
                 }
-            },
+            }
             None => return invalid_digest(reference),
         };
         let key = self.prefix.key(&digest);
         // The size is asked first: the digest of any object under the prefix can be named here,
         // and a layer of gigabytes must not be read whole to find out it is not a manifest.
-        let size = match self.backend.head(&key).await {
+        let held = match (self.backend.head(&key).await, &self.upstream) {
+            (Err(Error::NotFound(_)), Some(upstream)) => {
+                if let Err(answer) = self.pull_manifest(upstream, name, &digest).await {
+                    return answer;
+                }
+                self.backend.head(&key).await
+            }
+            (held, _) => held,
+        };
+        let size = match held {
             Ok(meta) => meta.size,
             Err(failure) => {
                 return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));
@@ -448,7 +491,16 @@ impl OciFront {
             return invalid_digest(digest);
         };
         let key = self.prefix.key(&digest);
-        let size = match self.backend.head(&key).await {
+        let held = match (self.backend.head(&key).await, &self.upstream) {
+            (Err(Error::NotFound(_)), Some(upstream)) => {
+                if let Err(answer) = self.pull_blob(upstream, name, &digest).await {
+                    return answer;
+                }
+                self.backend.head(&key).await
+            }
+            (held, _) => held,
+        };
+        let size = match held {
             Ok(meta) => meta.size,
             Err(failure) => {
                 return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));

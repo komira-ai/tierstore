@@ -40,6 +40,7 @@ server = [
     "dep:rustix",
     "dep:roxmltree",
     "dep:rustls",
+    "dep:rustls-native-certs",
     "dep:tokio-rustls",
     "dep:x509-parser",
     "dep:toml",
@@ -114,7 +115,7 @@ hmac = { workspace = true, optional = true }
 # The request bodies the S3 front reads and the answers it sends (`server`).
 http-body-util = { workspace = true, optional = true }
 # The HTTP/1.1 server under the S3 front (`server`).
-hyper = { workspace = true, features = ["http1", "server"], optional = true }
+hyper = { workspace = true, features = ["client", "http1", "server"], optional = true }
 hyper-util = { workspace = true, features = ["tokio"], optional = true }
 # The MD5 a client may send as the `Content-MD5` of a body (`server`).
 md-5 = { workspace = true, optional = true }
@@ -131,8 +132,12 @@ rustix = { workspace = true, features = ["fs", "net", "process"], optional = tru
 # The body of a CompleteMultipartUpload request (`server`).
 roxmltree = { workspace = true, optional = true }
 # The TLS of the OCI read front (`server`): the certificate and key are read at start, and the
-# acceptor is made with the ring provider the rest of the workspace uses.
+# acceptor is made with the ring provider the rest of the workspace uses; the same provider makes
+# the client side of the pull-through from an upstream registry.
 rustls = { workspace = true, optional = true }
+# The system's trusted CA certificates, which the pull-through from an https upstream registry
+# trusts beside the `oci.upstream.ca_file` (`server`).
+rustls-native-certs = { workspace = true, optional = true }
 # The journal objects, the checkpoints and the usage object are JSON.
 serde.workspace = true
 serde_json.workspace = true
