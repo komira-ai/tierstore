@@ -674,6 +674,7 @@ async fn a_head_is_sent_as_a_head_with_the_login_and_redirects_of_a_get() {
     let registry = Registry::start(
         move |seen| match (seen.path.as_str(), &seen.authorization) {
             ("/v2/a/manifests/old", _) => Fake::redirect(302, "/v2/a/manifests/new"),
+            ("/v2/a/manifests/new", _) => Fake::status(200),
             ("/v2/a/manifests/gone", _) => Fake::status(404),
             ("/v2/a/manifests/down", _) => Fake::status(503),
             (_, None) => Fake::challenge("Basic realm=\"r\""),

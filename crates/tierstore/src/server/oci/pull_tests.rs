@@ -228,7 +228,8 @@ async fn a_missing_tag_is_pulled_and_points_at_the_manifest_it_was_stored_as() {
     assert_eq!(by_tag.body, MANIFEST.as_bytes());
     let by_digest = rig.get(&format!("/v2/other/name/manifests/{digest}")).await;
     assert_eq!(by_digest.body, MANIFEST.as_bytes());
-    assert_eq!(rig.registry.seen().len(), 1);
+    // The second pull of the tag is re-checked with a HEAD; the pull by digest asks nothing.
+    assert_eq!(methods(&rig), ["GET", "HEAD"]);
 }
 
 /// Asserts a blob the store lacks is streamed from the upstream into the store and served with its
