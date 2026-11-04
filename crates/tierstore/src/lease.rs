@@ -1,8 +1,9 @@
 //! The lease that makes one reconciler the runner.
 
 use std::collections::hash_map::RandomState;
-use std::convert::Infallible;
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
