@@ -58,12 +58,12 @@ async fn a_pass_renews_the_lease_only_when_less_than_the_margin_is_left() {
 
     rig.clock.set(10_000);
     assert!(one.pass().await.held);
-    assert_eq!(rig.hot.calls(Op::PutIfMatch), 0);
+    assert_eq!(rig.hot.calls_on(Op::PutIfMatch, "_tiering/lease"), 0);
     assert_lease(&text(&*rig.hot_mem, "_tiering/lease").await, "r1", "1");
 
     rig.clock.set(10_001);
     assert!(one.pass().await.held);
-    assert_eq!(rig.hot.calls(Op::PutIfMatch), 1);
+    assert_eq!(rig.hot.calls_on(Op::PutIfMatch, "_tiering/lease"), 1);
     assert_lease(&text(&*rig.hot_mem, "_tiering/lease").await, "r1", "2");
 }
 

@@ -125,6 +125,8 @@ async fn a_pass_longer_than_the_lease_copies_beside_the_new_holder_and_stores_no
     let mut two = rig.reconciler("r2", 1 << 20);
     let takeover = async {
         entered.notified().await;
+        // r2 looks at the lease of r1 at time zero, and finds it unchanged 30 seconds later.
+        assert!(!two.pass().await.held);
         rig.clock.set(30_000);
         let report = two.pass().await;
         release.notify_one();
@@ -186,6 +188,7 @@ async fn a_stale_pass_does_not_move_the_stored_checkpoint_back() {
         for name in ["k3", "k4"] {
             proxy.put(name, body(name)).await.unwrap();
         }
+        assert!(!two.pass().await.held);
         rig.clock.set(30_000);
         let report = two.pass().await;
         assert!(report.held, "{report:?}");

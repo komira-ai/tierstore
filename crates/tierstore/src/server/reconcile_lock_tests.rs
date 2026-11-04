@@ -351,7 +351,8 @@ async fn hand_over_after_a_spoiled_release(how: Spoiled) {
     let current_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let next_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let reconciler = |seen: &Arc<FaultyBackend>, holder: &str| {
-        let settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
+        let mut settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
+        settings.mono = clock.clone();
         Reconciler::new(seen.clone(), cold.clone(), settings)
     };
     let dir = TestDir::under(std::env::temp_dir(), &format!("tierstore-gate-{how:?}"));
