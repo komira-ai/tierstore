@@ -261,34 +261,23 @@ fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_
 /// the front anonymously as before.
 #[test]
 fn an_oci_interface_with_require_auth_starts_on_this_branch_and_is_refused_by_the_release_before() {
-    use std::io::Write;
+    let node = Node::new("compat-config-oci-auth");
+    let ok = status(ExitCode::SUCCESS);
+    let locked = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], require_auth = true }",
+    );
+    let (now, before) = both(&locked);
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
 
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-auth-config");
-    let access = private(&dir, "access.key", LONG_ENOUGH);
-    let locked = file(&dir, &access, "");
-    let mut text = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&locked)
-        .unwrap();
-    text.write_all(
-        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], require_auth = true }\n",
-    )
-    .unwrap();
-    assert!(succeeded(tierstore::server::cli::main(checking(&locked))));
-    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
-        &locked
-    ))));
-
-    let open = file(&dir, &access, "");
-    let mut text = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&open)
-        .unwrap();
-    text.write_all(
-        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }\n",
-    )
-    .unwrap();
-    assert!(succeeded(tierstore::server::cli::main(checking(&open))));
+    let open = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }",
+    );
+    assert_eq!(status(tierstore::server::cli::main(check_args(&open))), ok);
 }
 
 /// Asserts the one key `stage_read` of an `oci` interface: a file with it set starts on this
@@ -297,32 +286,21 @@ fn an_oci_interface_with_require_auth_starts_on_this_branch_and_is_refused_by_th
 /// the default size of a read.
 #[test]
 fn an_oci_interface_with_stage_read_starts_on_this_branch_and_is_refused_by_the_release_before() {
-    use std::io::Write;
+    let node = Node::new("compat-config-oci-stage");
+    let ok = status(ExitCode::SUCCESS);
+    let sized = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], stage_read = 4096 }",
+    );
+    let (now, before) = both(&sized);
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
 
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-stage-config");
-    let access = private(&dir, "access.key", LONG_ENOUGH);
-    let sized = file(&dir, &access, "");
-    let mut text = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&sized)
-        .unwrap();
-    text.write_all(
-        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], stage_read = 4096 }\n",
-    )
-    .unwrap();
-    assert!(succeeded(tierstore::server::cli::main(checking(&sized))));
-    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
-        &sized
-    ))));
-
-    let plain = file(&dir, &access, "");
-    let mut text = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&plain)
-        .unwrap();
-    text.write_all(
-        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }\n",
-    )
-    .unwrap();
-    assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
+    let plain = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }",
+    );
+    assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
