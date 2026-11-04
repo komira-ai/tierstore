@@ -10,9 +10,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use tokio::sync::Notify;
 
+use super::EntryTuning;
 use super::Rounds;
 use crate::Backend;
-use crate::journal::{FORMAT_KEY, LEASE_KEY};
+use crate::journal::{FORMAT_KEY, LEASE_KEY, USAGE_KEY, Usage};
 use crate::server::cli_reconcile::reconcile;
 use crate::{
     Created, Entries, Error, FaultyBackend, MemoryBackend, Op, Outcome, ReconcilerConfig, Step,
@@ -47,6 +48,36 @@ impl Rig {
     fn rounds(&self) -> Rounds {
         let config = ReconcilerConfig::new("node/reconciler", BUDGET, self.clock.clone());
         Rounds::new(self.hot.clone(), self.cold.clone(), config, DEPARTURE)
+    }
+
+    /// As [`Rig::rounds`], made the way the serving paths make them: with `tuning`.
+    fn tuned_rounds(&self, tuning: &EntryTuning) -> Rounds {
+        let config = ReconcilerConfig::new("node/reconciler", BUDGET, self.clock.clone());
+        Rounds::tuned(
+            self.hot.clone(),
+            self.cold.clone(),
+            config,
+            DEPARTURE,
+            tuning,
+        )
+    }
+
+    /// The times in the usage object after each of five rounds that are 12 seconds apart.
+    async fn usage_times(&self, mut rounds: Rounds) -> Vec<u64> {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let round = rounds.round().await;
+            assert!(round.failed.is_empty(), "{:?}", round.failed);
+            self.clock.advance(Duration::from_secs(12));
+            if let Ok(body) = self.hot_mem.get(USAGE_KEY, None).await {
+                let usage: Usage = serde_json::from_slice(&body).unwrap();
+                times.push(usage.time);
+            }
+        }
+        rounds.stop().await;
+        times.sort_unstable();
+        times.dedup();
+        times
     }
 
     /// A put that landed on its entry, as a proxy leaves it.
@@ -185,4 +216,28 @@ async fn the_loop_works_the_entries_until_halted_and_gives_the_lease_up() {
     };
     tokio::join!(working, watching);
     assert!(!rig.lease_held().await);
+}
+
+/// Asserts that `Rounds::tuned` hands its `EntryTuning` to the running entry reconciler: with the
+/// default `usage_interval` (10 seconds) the usage object is rewritten by rounds 12 seconds apart,
+/// and with one of an hour it is published once and left as it was.
+#[tokio::test(start_paused = true)]
+async fn the_tuning_a_round_is_made_with_reaches_the_running_reconciler() {
+    let slow = EntryTuning {
+        usage_interval: Duration::from_secs(3600),
+        ..EntryTuning::default()
+    };
+    let rig = Rig::new();
+    rig.set_format(ACTIVE).await;
+    rig.landed_put("k").await;
+    let by_default = rig
+        .usage_times(rig.tuned_rounds(&EntryTuning::default()))
+        .await;
+    assert!(by_default.len() > 1, "{by_default:?}");
+
+    let rig = Rig::new();
+    rig.set_format(ACTIVE).await;
+    rig.landed_put("k").await;
+    let tuned = rig.usage_times(rig.tuned_rounds(&slow)).await;
+    assert_eq!(tuned.len(), 1, "{tuned:?}");
 }
