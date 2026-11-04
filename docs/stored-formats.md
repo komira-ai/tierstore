@@ -11,6 +11,7 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
 | Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
+| OCI upload session and chunks | `<prefix>uploads/<id>/begin` (empty) and `<prefix>uploads/<id>/c<20-digit offset>` in the store behind the OCI front | the session is an empty object; each chunk is the bytes of one `PATCH`; both are deleted when the upload ends or is cancelled |
 | Cache sidecar | `obj/<aa>/<bb>/<hex>.meta` in the local cache directory | JSON: `key`, `size`, `sha256`, `tag`, `modified` |
 | Update hook record, two slots (Linux) | `state.json` in the hook's state directory | pretty JSON: `schema`, `serving`, `previous`, `mode`, `markers`, `boot_id`, `guard_placed` |
 | Update hook record, single instance (macOS) | `state.json` in the hook's state directory | pretty JSON: `schema`, `kind`, `updating`, `markers`, `from`, `to`, `version` |
@@ -29,6 +30,8 @@ Both tags are absent in the entries of releases before these operations, and `ho
 A format changes only additively: a new optional field, a new operation word that a reader may skip, a new object under a new key. A field is never renamed, removed or given another meaning, and a field a reader needs is never added without a default. A reader ignores what it does not know and never refuses a file for it, with one exception: the two-slot hook record, below.
 
 A journal object with an operation this release does not know is read, and the entry is skipped. A cache sidecar, a checkpoint or a usage object with a field this release does not know is read as if it were not there. The single-instance hook record ignores a key it does not know. The two-slot hook record does not: it refuses a key it does not know, so a key added to it raises its `schema`, which an older hook reads as newer than it understands and leaves alone. A test holds that: a record of schema 2 with a new key reads as newer, not as corrupt.
+
+The upload records of the OCI front are new objects under new keys, and the blobs and manifests a push stores are the objects the front already read, under the keys it already used. The previous release does not list or read `uploads/`, so it ignores an open upload; `crates/compat/tests/oci.rs` pulls a pushed blob and manifest through the previous release's front with an upload left open in the same directory, and pulls the previous release's objects through this release's front.
 
 ## The fixtures
 
