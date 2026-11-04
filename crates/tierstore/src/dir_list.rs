@@ -14,14 +14,15 @@ use super::{TAG_LEN, io_error, modified_of};
 
 /// The objects whose key starts with `prefix`, in key order: those of the root, with the files of
 /// the previous release for the keys under `_entries/`, and those of the subdirectory, read only
-/// if `prefix` can match one of them. A key in both is listed once, from the subdirectory.
+/// if `prefix` can match one of them. A key in both is listed once, from the root, whose file is
+/// the key's (see the module `dir_entries`).
 pub(super) async fn list(root: &Path, prefix: &str) -> Result<Vec<Listed>, Error> {
     let mut found = Vec::new();
+    scan(root, "", prefix, &mut found).await?;
     if entries::PREFIX.starts_with(prefix) || prefix.starts_with(entries::PREFIX) {
         let dir = root.join(entries::DIR);
         scan(&dir, entries::PREFIX, prefix, &mut found).await?;
     }
-    scan(root, "", prefix, &mut found).await?;
     found.sort_by(|a, b| a.key.cmp(&b.key));
     found.dedup_by(|later, first| later.key == first.key);
     Ok(found)
