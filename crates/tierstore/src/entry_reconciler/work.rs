@@ -131,6 +131,7 @@ impl EntryReconciler {
         ignore_missing(self.cold.delete(key).await)?;
         self.require_lease()?;
         ignore_missing(self.hot.delete(key).await)?;
+        self.tally.caught_up(key);
         self.release(sealed).await
     }
 
@@ -150,15 +151,23 @@ impl EntryReconciler {
     async fn replicate(&self, key: &str) -> Result<Replicated, Error> {
         let hot = match self.hot.head(key).await {
             Ok(hot) => hot,
-            Err(Error::NotFound(_)) => return Ok(Replicated::Same),
+            Err(Error::NotFound(_)) => {
+                self.tally.caught_up(key);
+                return Ok(Replicated::Same);
+            }
             Err(error) => return Err(error),
         };
-        self.tally.copied(hot.size, hot.modified);
-        match self.cold.head(key).await {
+        self.tally.copied(key, hot.size, hot.modified);
+        let replicated = match self.cold.head(key).await {
             Ok(cold) => self.compare(key, &hot, &cold).await,
             Err(Error::NotFound(_)) => self.publish(key, &hot).await,
             Err(error) => Err(error),
+        };
+        match &replicated {
+            Ok(_) => self.tally.caught_up(key),
+            Err(_) => self.tally.lags(key, hot.size),
         }
+        replicated
     }
 
     /// Streams the hot object to the cold tier, create-only. An object that appeared there since

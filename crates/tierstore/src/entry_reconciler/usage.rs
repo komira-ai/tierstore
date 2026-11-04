@@ -9,12 +9,22 @@
 //! the listing runs). Another listing starts every
 //! [`EntryReconcilerConfig::usage_scan_interval`](super::EntryReconcilerConfig). Between listings
 //! the figure moves by what this leader does: the bytes of an object it copies that landed after
-//! the listing started are added, and the bytes of an object it evicts are taken off. A delete
-//! that a client finishes by itself is not seen, so the figure may be too high until the next
-//! listing; that can only make the hot tier look fuller than it is.
+//! the listing started are added, and the bytes of an object it evicts are taken off. While a
+//! listing runs, an object whose key the listing has yet to reach is left to the listing, which
+//! reads it. What tells an object that landed after a listing from one that the listing read is
+//! its write time, taken as landed when it is at or after the start of the listing: an object
+//! written in the same millisecond as the start that the listing did read is counted twice, and
+//! an object copied after the listing passed its key and written before the start is not counted.
+//! A delete that a client finishes by itself is not seen, so the figure may be too high until the
+//! next listing; the doubled count too can only make the hot tier look fuller than it is.
+//!
+//! The bytes that the cold tier does not hold yet (`copy_lag`) are those of the keys whose copy
+//! failed, or that the leader gave an entry because the cold tier had no copy, until the copy is
+//! made or the hot object is gone.
 
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{EntryReconciler, StepReport};
 use crate::Error;
@@ -57,24 +67,69 @@ pub(super) struct Books {
 #[derive(Default)]
 pub(super) struct Tally {
     /// The wall-clock time the last listing started at (zero before the first): an object written
-    /// after it is not in that listing.
+    /// before it is in that listing.
     listed_from: AtomicU64,
     /// The bytes of the objects copied since that landed after it.
     landed: AtomicU64,
+    /// How far the listing in progress has read, if one is: none when no listing runs, and then
+    /// `Some(None)` before its first page.
+    reached: Mutex<Option<Option<String>>>,
+    /// The keys whose hot object the cold tier does not hold yet, with the bytes of each.
+    lagging: Mutex<BTreeMap<String, u64>>,
 }
 
 impl Tally {
-    /// Notes that an object of `size` bytes, last written at `modified`, is being copied.
-    pub(super) fn copied(&self, size: u64, modified: u64) {
-        if modified > self.listed_from.load(Ordering::SeqCst) {
+    /// Notes that the object `key` of `size` bytes, last written at `modified`, is being copied.
+    pub(super) fn copied(&self, key: &str, size: u64, modified: u64) {
+        let ahead = self
+            .reached()
+            .as_ref()
+            .is_some_and(|after| after.as_deref().is_none_or(|after| key > after));
+        if !ahead && modified >= self.listed_from.load(Ordering::SeqCst) {
             self.landed.fetch_add(size, Ordering::SeqCst);
         }
+    }
+
+    /// Notes how far the listing in progress has read: `Some(None)` for none of it, none for
+    /// no listing.
+    pub(super) fn reach(&self, to: Option<Option<String>>) {
+        *self.reached() = to;
+    }
+
+    /// Notes that the cold tier does not hold the hot object `key` of `size` bytes yet.
+    pub(super) fn lags(&self, key: &str, size: u64) {
+        self.lagging().insert(key.to_owned(), size);
+    }
+
+    /// Notes that the cold tier holds the object `key`, or that the hot tier has none.
+    pub(super) fn caught_up(&self, key: &str) {
+        self.lagging().remove(key);
+    }
+
+    /// The bytes that the cold tier does not hold yet.
+    pub(super) fn lag(&self) -> u64 {
+        let lagging = self.lagging();
+        lagging
+            .values()
+            .fold(0, |sum, size| sum.saturating_add(*size))
     }
 
     /// Forgets everything: a new leader starts over.
     pub(super) fn clear(&self) {
         self.listed_from.store(0, Ordering::SeqCst);
         self.landed.store(0, Ordering::SeqCst);
+        self.reach(None);
+        self.lagging().clear();
+    }
+
+    fn reached(&self) -> MutexGuard<'_, Option<Option<String>>> {
+        // No method panics while holding the lock, so a poisoned state is still whole.
+        self.reached.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lagging(&self) -> MutexGuard<'_, BTreeMap<String, u64>> {
+        // No method panics while holding the lock, so a poisoned state is still whole.
+        self.lagging.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -124,6 +179,7 @@ impl EntryReconciler {
         self.fold_landed();
         let from = self.config.base.clock.now();
         self.tally.listed_from.store(from, Ordering::SeqCst);
+        self.tally.reach(Some(None));
         Scan {
             after: None,
             bytes: 0,
@@ -170,6 +226,7 @@ impl EntryReconciler {
                 return false;
             }
             scan.after = page.last().map(|object| object.key.clone());
+            self.tally.reach(Some(scan.after.clone()));
         }
         self.books.scan = Some(scan);
         true
@@ -177,6 +234,7 @@ impl EntryReconciler {
 
     /// Takes the result of the listing that has read its last page.
     fn end_scan(&mut self, scan: Scan, now: u64) {
+        self.tally.reach(None);
         let landed = self.tally.landed.swap(0, Ordering::SeqCst);
         self.books.bytes = Some(scan.bytes.saturating_add(landed));
         self.books.candidates = scan.oldest.into_sorted_vec().into();
@@ -195,7 +253,7 @@ impl EntryReconciler {
         }
         let usage = Usage {
             hot_bytes,
-            copy_lag: 0,
+            copy_lag: self.tally.lag(),
             time: self.config.base.clock.now(),
         };
         match write_object(self.hot.as_ref(), USAGE_KEY, to_body(&usage)).await {

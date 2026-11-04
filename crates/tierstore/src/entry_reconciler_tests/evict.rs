@@ -670,9 +670,10 @@ async fn the_usage_is_published_again_when_the_interval_has_run_out() {
 }
 
 /// Asserts that between listings the figure moves by what the leader does: an object copied that
-/// was written after the listing started adds its bytes, one that was written at the time the
-/// listing started or before does not (the listing has it), and one that was copied before the
-/// first listing is not counted twice.
+/// was written at or after the start of the last listing adds its bytes (an object written in the
+/// same millisecond as the start counts as landed, since the write time cannot say otherwise), one
+/// that was written before the start does not (the listing has it), and one that was copied before
+/// the first listing is not counted twice.
 #[tokio::test]
 async fn between_listings_the_figure_adds_the_objects_copied_that_landed_after_the_listing() {
     let rig = Rig::new();
@@ -693,7 +694,92 @@ async fn between_listings_the_figure_adds_the_objects_copied_that_landed_after_t
     land(&rig, "p1", "new").await;
     rig.mono.advance(Duration::from_secs(10));
     r.step().await;
-    assert_eq!(published(&rig).await.hot_bytes, 30);
+    assert_eq!(published(&rig).await.hot_bytes, 40);
+}
+
+/// Asserts that an object copied while a listing is in progress is counted once: one whose key the
+/// listing has yet to reach is left to the listing (which reads it), and one whose key the listing
+/// has passed, written after the page was read, is added. Five objects are listed and a sixth, with
+/// a key before every page, lands behind the listing, so the figure is sixty.
+#[tokio::test]
+async fn an_object_copied_during_a_listing_is_counted_once() {
+    let rig = Rig::new();
+    rig.activate().await;
+    for key in ["k0", "k1", "k2", "k3"] {
+        rig.hot.put(key, bytes("0123456789")).await.unwrap();
+    }
+    let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
+        config.base.page_size = 2;
+        config.scan_pages = 1;
+    });
+    assert!(r.step().await.scanning);
+    rig.clock.advance(1);
+    for key in ["0early", "zz"] {
+        rig.hot.put(key, bytes("0123456789")).await.unwrap();
+        land(&rig, "p1", key).await;
+    }
+    assert!(r.step().await.scanning);
+    let mut last = r.step().await;
+    while last.scanning {
+        last = r.step().await;
+    }
+    assert_eq!(published(&rig).await.hot_bytes, 60);
+}
+
+/// Asserts that `copy_lag` is the bytes the cold tier does not hold yet: a copy whose cold write
+/// fails shows its thirty bytes in the publication, and the publication after the copy is made
+/// shows none.
+#[tokio::test]
+async fn the_published_copy_lag_counts_a_copy_that_failed_until_it_is_made() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("a", thirty("a")).await.unwrap();
+    land(&rig, "p1", "a").await;
+    let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let error = Error::Unavailable("put".to_owned());
+    cold.fail_next_on(Op::Put, "a", error.clone());
+    let mut r = rig.over(rig.hot.clone(), cold, "r1", small);
+    assert_eq!(r.step().await.failed, [error]);
+    assert_eq!(published(&rig).await.copy_lag, 30);
+    rig.mono.advance(Duration::from_secs(10));
+    assert!(r.step().await.failed.is_empty());
+    assert!(rig.cold_has("a").await);
+    assert_eq!(published(&rig).await.copy_lag, 0);
+}
+
+/// Asserts that a hot object the eviction adopts because the cold tier has no copy counts in
+/// `copy_lag` until the next step copies it.
+#[tokio::test]
+async fn the_published_copy_lag_counts_an_adopted_object_until_it_is_copied() {
+    let rig = Rig::new();
+    rig.activate().await;
+    crowded(&rig, &["b", "c"]).await;
+    let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", small);
+    assert_eq!(r.step().await.strays_adopted, 1);
+    assert_eq!(published(&rig).await.copy_lag, 30);
+    rig.mono.advance(Duration::from_secs(10));
+    r.step().await;
+    assert!(rig.cold_has("a").await);
+    assert_eq!(published(&rig).await.copy_lag, 0);
+}
+
+/// Asserts that the lag a failed copy left is dropped when the hot object is gone before the copy
+/// is made: nothing is held back for an object that no longer exists.
+#[tokio::test]
+async fn the_copy_lag_of_a_key_is_dropped_when_its_hot_object_is_gone() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("a", thirty("a")).await.unwrap();
+    land(&rig, "p1", "a").await;
+    let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    cold.fail_next_on(Op::Put, "a", Error::Unavailable("put".to_owned()));
+    let mut r = rig.over(rig.hot.clone(), cold, "r1", small);
+    r.step().await;
+    assert_eq!(published(&rig).await.copy_lag, 30);
+    rig.hot.delete("a").await.unwrap();
+    rig.mono.advance(Duration::from_secs(10));
+    r.step().await;
+    assert_eq!(published(&rig).await.copy_lag, 0);
 }
 
 /// Asserts that a failed listing of the hot tier is a failure and not progress, that the listing
