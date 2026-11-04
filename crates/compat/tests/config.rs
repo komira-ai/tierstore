@@ -13,6 +13,9 @@ use tierstore_testkit::dir::TestDir;
 /// A grant key as the release before wants it: an id and a secret of at least 32 bytes.
 const GRANT_KEY: &str = "AKIDGRANT\n0123456789abcdef0123456789abcdef0123456789abcdef\n";
 
+/// A key as both releases take it: the secret has 16 bytes, the least this branch asks by default.
+const LONG_ENOUGH: &str = "AKID\n0123456789abcdef\n";
+
 fn private(dir: &TestDir, name: &str, text: &str) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, text).unwrap();
@@ -50,7 +53,7 @@ fn succeeded(code: ExitCode) -> bool {
 #[test]
 fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_branch() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-grant-config");
-    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
     let grant = private(&dir, "grant.key", GRANT_KEY);
     let extra = format!("grant_key_files = [\"{grant}\"]\ngrant_max_lifetime = \"5m\"\n");
     let old = file(&dir, &access, &extra);
@@ -77,12 +80,32 @@ fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_bra
 #[test]
 fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branch() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-plain-config");
-    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
     let plain = file(&dir, &access, "");
     assert!(succeeded(tierstore_prev::server::cli::main(checking(
         &plain
     ))));
     assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
+}
+
+/// Asserts the change of the default minimum on a file of the release before: a file whose key has
+/// a secret of 6 bytes, which the release before starts, is refused on this branch with the
+/// minimum at its default, which is the one deliberate break; with `min_secret_bytes = 0` in the
+/// file it starts on this branch again. A file this branch prints at the default minimum has no
+/// `min_secret_bytes` key, and starts on both. A file with `min_secret_bytes = 6` is only for this
+/// branch (the release before does not know the key), and starts on it.
+#[test]
+fn a_short_secret_of_the_release_before_is_refused_here_until_the_minimum_is_lowered() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-short-secret");
+    let short = private(&dir, "short.key", "AKID\nsecret\n");
+    let old = file(&dir, &short, "");
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(&old))));
+    assert!(!succeeded(tierstore::server::cli::main(checking(&old))));
+
+    let lowered = file(&dir, &short, "min_secret_bytes = 0\n");
+    assert!(succeeded(tierstore::server::cli::main(checking(&lowered))));
+    let six = file(&dir, &short, "min_secret_bytes = 6\n");
+    assert!(succeeded(tierstore::server::cli::main(checking(&six))));
 }
 
 /// A self-signed certificate that names `tierstore.test`, and its key, written under `dir`; the
@@ -102,7 +125,7 @@ fn certificate(dir: &TestDir) -> (String, String) {
 #[test]
 fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-tls-config");
-    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let access = private(&dir, "access.key", "AKID\na-long-enough-secret\n");
     let (cert, key) = certificate(&dir);
 
     let without = file(&dir, &access, "");

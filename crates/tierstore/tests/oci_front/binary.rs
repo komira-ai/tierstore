@@ -24,7 +24,7 @@ use crate::pki::{Leaf, ca, ip, leaf};
 use crate::rig::hex_of;
 
 const KEY_ID: &str = "AKIDOCI";
-const SECRET: &str = "oci-secret";
+const SECRET: &str = "oci-secret-0123456789";
 
 pub struct Files {
     _dir: TestDir,

@@ -12,7 +12,7 @@ use crate::Clock;
 use super::ServerConfig;
 use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
-use super::keys::{ensure_distinct, read_credentials, read_only_keys};
+use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
 use super::listen::{has_duplicate, joined};
 use super::oci::{self, OciError};
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
@@ -108,6 +108,7 @@ pub(super) struct FrontSettings {
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
     pub body_idle_timeout: Duration,
+    pub min_secret_bytes: u32,
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
     pub tls: S3Tls,
@@ -136,6 +137,7 @@ impl Cli {
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
             body_idle_timeout: self.body_idle_timeout,
+            min_secret_bytes: self.min_secret_bytes,
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
             tls: self.tls.clone(),
@@ -198,6 +200,25 @@ pub(super) fn server_config(
     scoped_distinct(&others, &scoped).map_err(InvalidFlags)?;
     others.extend(scoped_ids(&scoped));
     presign_distinct(&others, &presign).map_err(InvalidFlags)?;
+    let secrets = std::iter::once(("--access-key-file", key_id.as_str(), secret.as_str()))
+        .chain(
+            read_only
+                .iter()
+                .map(|k| ("--read-only-key-file", k.id.as_str(), k.secret.as_str())),
+        )
+        .chain(
+            presign
+                .iter()
+                .map(|k| ("--presign-key-file", k.id(), k.secret())),
+        )
+        .chain(gc.iter().map(|k| ("--gc-key-file", k.id(), k.secret())))
+        .chain(
+            scoped
+                .iter()
+                .map(|k| ("--scoped-key-file", k.id(), k.secret())),
+        );
+    ensure_secrets_long_enough(front.min_secret_bytes, secrets)
+        .map_err(|short| InvalidFlags(short.to_string()))?;
     let mut server = ServerConfig::new(&front.bucket, &key_id, &secret, clock);
     match front.tls.files()? {
         Some((cert, key)) => {

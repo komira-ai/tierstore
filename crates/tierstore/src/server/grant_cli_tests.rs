@@ -65,7 +65,7 @@ fn flags(key: &str, more: &[&str]) -> Vec<String> {
 fn the_flags_of_the_removed_read_grant_start_a_server_and_each_warns_once() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-flags");
     let key = dir.path().join("key");
-    std::fs::write(&key, "AKID\nsecret\n").unwrap();
+    std::fs::write(&key, "AKID\nsecret-0123456789abcdef\n").unwrap();
     std::fs::set_permissions(&key, Permissions::from_mode(0o600)).unwrap();
     let key = key.to_str().unwrap();
     let missing = dir.path().join("no-such-grant.key");

@@ -807,6 +807,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--put-min-bytes-per-sec` | `server.put_min_bytes_per_sec` | the least average rate of a body (0 turns it off) |
 | `--put-rate-grace` | `server.put_rate_grace` | the time waiting for the client before that rate is held |
 | `--body-idle-timeout` | `server.body_idle_timeout` | how long a body or an answer may go without a byte |
+| `--min-secret-bytes` | `server.min_secret_bytes` | the fewest bytes of the secret of any access key (default 16) |
 | `--skip-backend-check` | `cold_store.skip_checks` | a list of `CHECK=REASON` texts: the start-up check that is left out, with its reason (only `multipart-conditional`; it runs on the cold tier) |
 | `--backend-check-wait` | `server.backend_check_wait` | how long the start-up self-test asks again of a tier that does not answer |
 | `--oci-listen` | `oci.listen` | where the registry front listens; the front is off without the `[oci]` table. The flag may be given again, and the key may be a list of addresses |

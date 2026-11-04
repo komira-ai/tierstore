@@ -27,8 +27,9 @@ mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
 
-/// The JSON form of a key file with the id `JSONID` and the secret `json-secret`.
-const JSON_KEY: &str = r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret"}"#;
+/// The JSON form of a key file with the id `JSONID` and the secret `json-secret-0123456789`.
+const JSON_KEY: &str =
+    r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret-0123456789"}"#;
 
 /// The flags every start needs, with `overrides` in place of the flags they name or added.
 fn flags(key_file: &str, overrides: &[(&str, &str)]) -> Vec<String> {
@@ -70,7 +71,7 @@ fn key_file(dir: &TestDir, name: &str, text: &str, mode: u32) -> PathBuf {
 
 /// The flags of a start with a good key file in `dir`.
 fn cli(dir: &TestDir) -> Cli {
-    let path = key_file(dir, "key", "AKID\nsecret\n", 0o600);
+    let path = key_file(dir, "key", "AKID\nsecret-0123456789\n", 0o600);
     Cli::try_parse_from(flags(path.to_str().unwrap(), &[])).unwrap()
 }
 
@@ -357,7 +358,7 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     .unwrap();
     let mut front = from_file.front();
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
-    front.access_key_file = key_file(&dir, "key", "AKID\nsecret\n", 0o600);
+    front.access_key_file = key_file(&dir, "key", "AKID\nsecret-0123456789-abcdefghij\n", 0o600);
     front.read_only_key_file = Vec::new();
     front.presign_key_file = Vec::new();
     front.gc_key_file = Vec::new();

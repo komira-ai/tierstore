@@ -358,7 +358,8 @@ fn a_start_that_cannot_go_on_says_why() {
 #[tokio::test]
 async fn it_serves_a_read_only_key_from_a_json_file_beside_the_full_key() {
     let files = Files::new("bin-read-only");
-    let json = r#"{"access_key_id": "AKIDREADER", "secret_access_key": "reader-secret"}"#;
+    let json =
+        r#"{"access_key_id": "AKIDREADER", "secret_access_key": "reader-secret-0123456789"}"#;
     let reader_file = files.secret("reader.json", json);
     let reader_flag = reader_file.display().to_string();
     let flags = files.flags(&[
@@ -369,7 +370,7 @@ async fn it_serves_a_read_only_key_from_a_json_file_beside_the_full_key() {
     ]);
     let mut running = start(&flags);
     let full = running.store();
-    let reader = running.store_as("AKIDREADER", "reader-secret");
+    let reader = running.store_as("AKIDREADER", "reader-secret-0123456789");
     let k = ObjectKey::new("cas/ro").unwrap();
     let body = Bytes::from_static(b"read by the daemons");
     full.put_new(&k, body, None).await.unwrap();
@@ -410,12 +411,12 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
     assert_eq!(code, 1);
     assert!(err.contains("--read-only-key-file"), "{err}");
     assert!(!err.contains("topsecret"), "{err}");
-    let open = files.secret("open", "READER\nreader-secret\n");
+    let open = files.secret("open", "READER\nreader-secret-0123456789\n");
     std::fs::set_permissions(&open, Permissions::from_mode(0o644)).unwrap();
     let (code, _, err) = run(&flag(open.as_path()));
     assert_eq!(code, 1);
     assert!(err.contains("others can read it"), "{err}");
-    assert!(!err.contains("reader-secret"), "{err}");
+    assert!(!err.contains("reader-secret-0123456789"), "{err}");
 }
 
 /// Asserts that the binary serves over two S3 tiers, each a bucket of a store of its own that it
