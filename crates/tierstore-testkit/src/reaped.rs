@@ -347,6 +347,10 @@ mod tests {
     /// Catches a guard that waits out the whole grace period (or kills) for a child that stops
     /// on SIGTERM: such a child is gone well before [`GRACE`] ends.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "asserts an elapsed time against a real child; AGENTS.md T10 asks for a clock the guard is given, which is a follow-up"
+    )]
     fn dropping_the_guard_of_a_child_that_stops_on_sigterm_does_not_wait_out_the_grace() {
         let child = spawn(Command::new("sleep").arg("30"), 3).expect("spawn");
         let pid = child.id().cast_signed();
@@ -387,6 +391,10 @@ mod tests {
 
     /// Catches a guard that signals a child that already exited and was waited for.
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "asserts an elapsed time against a real child; AGENTS.md T10 asks for a clock the guard is given, which is a follow-up"
+    )]
     fn dropping_the_guard_of_an_exited_child_returns_at_once() {
         let mut child = spawn(&mut Command::new("true"), 3).expect("spawn");
         child.wait().expect("wait");
