@@ -76,12 +76,12 @@ async fn a_large_object_goes_in_parts_of_the_part_size_and_reads_back() {
     assert_eq!(
         order,
         [
-            "POST /kbf-fake/cas/large",
-            "PUT /kbf-fake/cas/large",
-            "PUT /kbf-fake/cas/large",
-            "PUT /kbf-fake/cas/large",
-            "POST /kbf-fake/cas/large",
-            "GET /kbf-fake/cas/large",
+            "POST /tierstore-fake/cas/large",
+            "PUT /tierstore-fake/cas/large",
+            "PUT /tierstore-fake/cas/large",
+            "PUT /tierstore-fake/cas/large",
+            "POST /tierstore-fake/cas/large",
+            "GET /tierstore-fake/cas/large",
         ]
     );
     assert!(requests[1].contains("partNumber=1"), "{requests:?}");
@@ -204,7 +204,7 @@ async fn a_conditional_completion_over_an_existing_key_is_refused_and_aborted() 
     assert!(
         condition
             .iter()
-            .any(|r| r.starts_with("POST /kbf-fake/cas/taken?uploadId=")),
+            .any(|r| r.starts_with("POST /tierstore-fake/cas/taken?uploadId=")),
         "{condition:?}"
     );
 }
@@ -352,7 +352,7 @@ async fn missing_objects_ranges_past_the_end_and_taken_keys_are_told_apart() {
 async fn the_fake_refuses_what_s3_refuses() {
     let s3 = FakeS3::start().await;
     let client = reqwest::Client::new();
-    let url = |path: &str| format!("{}/kbf-fake/cas/k{path}", s3.endpoint());
+    let url = |path: &str| format!("{}/tierstore-fake/cas/k{path}", s3.endpoint());
     let complete = |id: &str, body: String| {
         client
             .post(url(&format!("?uploadId={id}")))
@@ -429,7 +429,10 @@ async fn a_store_without_conditional_writes_replaces_a_key() {
     assert_eq!(s3.object_len(&k), Some(len));
     let requests = s3.requests();
     assert_eq!(s3.stats().completed, 1, "{requests:?}");
-    let unknown = format!("{}/kbf-fake/cas/replaced?uploadId=never", s3.endpoint());
+    let unknown = format!(
+        "{}/tierstore-fake/cas/replaced?uploadId=never",
+        s3.endpoint()
+    );
     let refused = reqwest::Client::new().delete(unknown).send().await.unwrap();
     assert_eq!(refused.status(), 404);
     assert!(refused.text().await.unwrap().contains("NoSuchUpload"));
@@ -443,13 +446,13 @@ async fn the_fake_lists_uploads_of_a_bucket_and_not_of_a_key() {
     let s3 = FakeS3::start().await;
     let client = reqwest::Client::new();
     let bucket = client
-        .get(format!("{}/kbf-fake?uploads", s3.endpoint()))
+        .get(format!("{}/tierstore-fake?uploads", s3.endpoint()))
         .send()
         .await
         .unwrap();
     assert_eq!(bucket.status(), 200);
     let key = client
-        .get(format!("{}/kbf-fake/cas/k?uploads", s3.endpoint()))
+        .get(format!("{}/tierstore-fake/cas/k?uploads", s3.endpoint()))
         .send()
         .await
         .unwrap();
