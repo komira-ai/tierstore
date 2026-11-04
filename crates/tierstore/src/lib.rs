@@ -58,13 +58,23 @@
 //!   when the upload is completed (create-only: a key that exists in either tier is refused),
 //!   and journals nothing, as a put to the cold tier of a full hot tier does not; a read copies
 //!   the object into the hot tier.
+//! - A proxy can heartbeat ([`Proxy::start_heartbeat`], [`Proxy::stop_heartbeat`]): it rewrites its
+//!   registration `_tiering/proxies/<proxy_id>` every [`ProxyConfig::heartbeat`], and each beat the
+//!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
+//!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
+//!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
+//!   destroys starts only if its [`Deadline`] is at least the margin away. No request path asks
+//!   for either yet.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
 //!   oldest copied objects from the hot tier when it is over its high-water mark, deletes old
 //!   journal objects, and publishes the hot tier's usage and the copy lag. It never lists
 //!   the data prefixes of either tier: it lists `_tiering/proxies/` and the journal prefix of
-//!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage.
+//!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage. It also
+//!   removes the registration of a proxy that heartbeated, left no journal object and has not
+//!   changed for [`ReconcilerConfig::registration_retention`] by its own monotonic clock; by
+//!   default that is zero and nothing is removed.
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
@@ -72,8 +82,12 @@
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
-//! The keys under `_journal/` and `_tiering/` belong to the proxy and the reconciler: a
-//! client put or delete there is refused, and a listing leaves them out.
+//! The keys under `_journal/` and `_tiering/` belong to the proxy and the
+//! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
+//! a listing of either tier leaves them out. The S3 front refuses each supported call on them itself,
+//! before the operation's own processing (a request it refuses as unsupported, such as one with a
+//! `versionId`, is answered so first); the local cache refuses them as well, since its upstream
+//! may be a plain bucket.
 //!
 //! Every proxy, reconciler and cache takes its settings as constructor parameters.
 //!
@@ -91,6 +105,9 @@
 #![forbid(unsafe_code)]
 
 mod backend;
+mod bounded;
+#[cfg(test)]
+mod bounded_tests;
 #[cfg(test)]
 mod build_commit;
 #[cfg(test)]
@@ -99,6 +116,9 @@ mod cache;
 mod clock;
 #[cfg(test)]
 mod clock_tests;
+mod deadline;
+#[cfg(test)]
+mod deadline_tests;
 mod dir;
 mod entry;
 #[cfg(test)]
@@ -121,6 +141,12 @@ mod metrics;
 #[cfg(test)]
 mod metrics_names_tests;
 mod reconciler;
+mod registration;
+#[cfg(test)]
+mod registration_tests;
+mod registrations;
+#[cfg(test)]
+mod registrations_tests;
 mod reservation;
 #[cfg(feature = "s3")]
 pub mod s3;
@@ -135,9 +161,14 @@ mod sleeper_tests;
 mod state;
 mod tiered;
 
-pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter};
+pub use backend::{
+    Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter,
+    Window,
+};
+pub use bounded::Bounded;
 pub use cache::CachedStore;
 pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
+pub use deadline::Deadline;
 pub use dir::DirBackend;
 pub use entry::{
     Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,

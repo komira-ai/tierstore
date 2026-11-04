@@ -1,7 +1,7 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
 
 use std::io::{ErrorKind, SeekFrom};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,21 +17,26 @@ use tokio::sync::Mutex;
 
 use crate::backend::upload_page;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter, Window,
 };
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
 
-/// The mode of the file of an object that is not a reservation: read and write for everyone, less
-/// the umask, which no umask turns into one with the owner-execute bit.
-const PLAIN_MODE: u32 = 0o666;
+/// The mode of the file of an object that is not a reservation: read and write for its owner alone,
+/// so that no other local account reads what a scoped or read-only key is meant to reach.
+const PLAIN_MODE: u32 = 0o600;
 
 /// The owner-execute bit, which marks the file of a reservation.
 const MARK_BIT: u32 = 0o100;
 
 /// The mode of the file of a reservation: that of an object, with the mark.
-const MARKED_MODE: u32 = 0o744;
+const MARKED_MODE: u32 = 0o700;
+
+/// The mode of every directory this backend makes (the tier root, the uploads directory and the
+/// directory of an upload): open to its owner alone.
+const DIR_MODE: u32 = 0o700;
 
 /// The longest file name, in bytes, that a key may be encoded to.
 const NAME_LIMIT: usize = 255;
@@ -115,7 +120,7 @@ impl SyncDir for FsyncDir {
 /// - A streamed read ([`Backend::get_stream`]) opens the file once and reads the range in chunks of
 ///   at most 64 KiB as they are asked for, so that a reader holds one chunk and not the object;
 ///   a replacement or a delete of the name meanwhile leaves it on the file it opened. A read with
-///   the mark ([`Backend::get_marked`]) takes the bytes and the mark from the same open file.
+///   the mark ([`Backend::get_tagged`]) takes the bytes and the mark from the same open file.
 /// - A streamed replacement ([`Backend::put_stream_if_match`]) writes the chunks to a temporary
 ///   file as they arrive, outside the lock, and then, under the lock and the tag check of
 ///   [`Backend::put_if_match`], moves the file over the object and syncs the directory. A body
@@ -494,7 +499,10 @@ impl DirBackend {
             return Err(Error::Other(text.to_owned()));
         }
         let uploads = root.join(UPLOADS);
-        let made = std::fs::create_dir_all(&uploads);
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(DIR_MODE)
+            .create(&uploads);
         made.map_err(io_error(&uploads))?;
         let since = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
@@ -686,14 +694,26 @@ impl Backend for DirBackend {
     async fn put_stream(
         &self,
         key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.put_stream_tagged(key, len, body).await.map(drop)
+    }
+
+    /// As [`Backend::put_stream`], and gives the tag of the file it published: the SHA-256 of the
+    /// bytes written.
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
         _len: Option<u64>,
         mut body: PartBody<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let path = self.path(key)?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
-        write_object_stream(&temp, &mut body).await?;
-        self.publish(&temp, &path, key).await
+        let tag = write_object_stream(&temp, &mut body).await?;
+        self.publish(&temp, &path, key).await?;
+        Ok(hex::encode(tag))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
@@ -732,9 +752,9 @@ impl Backend for DirBackend {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        Ok(self.get_marked(key, range).await?.0)
+        Ok(self.get_tagged(key, range).await?.0)
     }
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -750,6 +770,30 @@ impl Backend for DirBackend {
         let (offset, len) = window(stored.size, range)?;
         stored.seek_body(offset).await?;
         Ok(chunks(stored, len))
+    }
+
+    /// Opens the file once: the meta and the chunks are those of that file, as for
+    /// [`Backend::get_stream`], whose bounded chunks the body has.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        let mut stored = self.stored(key).await?;
+        let meta = Meta {
+            size: stored.size,
+            tag: hex::encode(stored.tag),
+            modified: stored.modified,
+            reservation: stored.marked,
+        };
+        let window = Window::of(span, meta.size);
+        let (offset, len) = match window {
+            Window::Whole => (0, meta.size),
+            Window::Part(range) => (range.offset(), range.size()),
+            Window::Unsatisfiable => (0, 0),
+        };
+        stored.seek_body(offset).await?;
+        Ok(Opened {
+            meta,
+            window,
+            body: chunks(stored, len),
+        })
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
@@ -817,8 +861,8 @@ impl Backend for DirBackend {
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
-        let made = fs::create_dir(&dir).await;
-        let named = fs::write(dir.join(KEY_FILE), key).await;
+        let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;
+        let named = create_file(&dir.join(KEY_FILE), PLAIN_MODE, key.as_bytes()).await;
         made.and(named).map_err(io_error(&dir))?;
         Ok(id)
     }

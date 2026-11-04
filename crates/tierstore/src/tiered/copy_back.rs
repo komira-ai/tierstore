@@ -21,20 +21,34 @@ impl Inner {
     /// (a failed journal entry here, the reconciler later). A write that gave no tag leaves no
     /// tag to delete by, and deletes nothing.
     ///
-    /// `tag` is the tag the cold tier's read gave with the bytes (`Backend::get_marked`), so it
+    /// `tag` is the tag the cold tier's read gave with the bytes (`Backend::get_tagged`), so it
     /// is the tag of the object the bytes were read from, and not of one that was in the key
     /// before or after the read, even one that has the same tag again after a change and a change
     /// back. No HEAD of the cold tier is made. If the key has changed since the read, the mirror names a tag that
     /// the cold tier no longer has, and the reconciler removes the copy.
     pub(super) async fn copy_back(self: &Arc<Self>, key: &str, body: &Bytes, tag: String) {
-        match self.hot.put_tagged(key, body.clone()).await {
+        let put = self.hot.put_tagged(key, body.clone()).await;
+        self.copied(key, body.len() as u64, tag, put);
+    }
+
+    /// Settles the copy of the `size` bytes of the object `key` that the hot tier's create-only
+    /// write `put` was: counts it, and journals it as [`Inner::copy_back`] says. The write is
+    /// that of a read of the cold tier whose body was held ([`Inner::copy_back`]) or streamed
+    /// ([`relay`](super::relay)): an abandoned stream is a write that failed, and counted so.
+    pub(super) fn copied(
+        self: &Arc<Self>,
+        key: &str,
+        size: u64,
+        tag: String,
+        put: Result<String, Error>,
+    ) {
+        match put {
             Ok(hot_tag) => {
                 // Counted when the hot tier has the object, before the journal entry below,
                 // which can fail.
-                self.counters.promoted(body.len());
+                self.counters.promoted(size as usize);
                 let inner = Arc::clone(self);
                 let key = key.to_owned();
-                let size = body.len() as u64;
                 drop(tokio::spawn(async move {
                     // The entry carries the hot tier's own tag of the copy, which the write above
                     // gave, apart from the cold tag: the two tiers need not tag the same bytes
