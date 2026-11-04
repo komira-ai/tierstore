@@ -11,11 +11,14 @@
 //! reads that subdirectory as well as the root.
 //!
 //! The previous release did not know the prefix: it kept the key `_entries/<name>` as the file
-//! `_entries~<name>` of the root, as it kept any key. Those files stay the keys they were. A head,
-//! a get or a read of such a key finds the file of the subdirectory first and the file of the root
-//! if there is none; a listing has the key once, from the subdirectory if both have it; a delete
-//! removes both; a replacement by the tag writes the subdirectory and then removes the file of the
-//! root; a create-only put finds the key taken. No write makes a file in the root for such a key.
+//! `_entries~<name>` of the root, as it kept any key. A key that has such a file keeps it for its
+//! whole life: a head, a get or a read finds that file, a replacement by the tag writes it in
+//! place, a delete removes it, a create-only put finds the key taken, and a listing has the key
+//! once, from the root. The previous release therefore reads the body this release wrote, and
+//! finds the key not found after this release deletes it. Only a key with no such file is a file
+//! of the subdirectory, and no write makes a file in the root for a key under the prefix. Nothing
+//! is moved, so a read cannot miss a key between two places. A delete removes the file of the
+//! subdirectory as well, if there is one.
 //!
 //! The lock is an exclusive `flock(2)` on the file `.lock` in the subdirectory. It is held by
 //! each create-only put, each replacement by the content tag and each delete of such a key, from

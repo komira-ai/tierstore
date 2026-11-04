@@ -95,15 +95,16 @@ async fn a_reconciler_resumes_from_a_checkpoint_with_a_field_added_later() {
 }
 
 /// Reads `usage` as a proxy with a hot tier of 63 bytes at time 80 and checks what the usage
-/// fixture says: the usage is 30 milliseconds old, and a new object goes straight to the cold
-/// tier because the hot tier is full.
+/// fixture says: the proxy has not seen it change yet (its age is zero on the proxy's own clock,
+/// whatever time the fixture carries), and a new object goes straight to the cold tier because
+/// the hot tier is full.
 async fn read_usage(usage: &[u8]) {
     let tiers = Tiers::new();
     tiers.seed("_tiering/usage", usage).await;
     tiers.clock.set(80);
-    let proxy = tiers.proxy("p1", 63).await.unwrap();
+    let proxy = tiers.proxy_on_clock("p1", 63).await.unwrap();
 
-    assert_eq!(proxy.usage_age().await, Some(Duration::from_millis(30)));
+    assert_eq!(proxy.usage_age().await, Some(Duration::ZERO));
     proxy.put("k", "direct".into()).await.unwrap();
     assert_eq!(tiers.cold_keys().await, ["k"]);
     let in_hot = tiers.hot_keys("k").await;
@@ -111,7 +112,7 @@ async fn read_usage(usage: &[u8]) {
 }
 
 /// Asserts that a proxy that finds the usage of the fixture (63 bytes in a hot tier of 63,
-/// published at time 50) reads it: it says the usage is 30 milliseconds old at time 80, and
+/// published at time 50) reads it: it says the usage has not changed for no time yet, and
 /// writes a new object straight to the cold tier because the hot tier is full. Catches a usage
 /// field that is read as another, or ignored.
 #[tokio::test(start_paused = true)]

@@ -266,12 +266,12 @@ async fn an_object_at_the_key_entries_and_entry_objects_coexist_across_releases(
 }
 
 /// Asserts that an object the previous release put under a key that starts with `_entries/`, a
-/// file of the root that this branch now keeps in `.entries/`, is still that key here. The previous
-/// release puts `_entries/old` and `_entries/gone`; this branch heads and gets `_entries/old` (the
-/// size, the tag and the bytes the previous release gives it), lists it once among the plain keys,
-/// replaces it by its tag (the previous release then finds no file of the root and the new body
-/// is in the subdirectory), refuses a create-only put of the same key, and deletes it and the
-/// other key, so that neither release finds them.
+/// file of the root, stays that file for its whole life. The previous release puts `_entries/old`
+/// and `_entries/gone`; this branch heads and gets `_entries/old` (the size, the tag and the bytes
+/// the previous release gives it), lists it once among the plain keys, refuses a create-only put of
+/// the same key, replaces it by its tag (the previous release then reads the replacement body
+/// from the same file, and the subdirectory has no file for the key), and deletes it and the
+/// other key (the previous release then finds both not found), so that neither release lists them.
 #[tokio::test]
 async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_release_put() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-old-entry");
@@ -306,11 +306,9 @@ async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_
         .await
         .unwrap();
     assert_eq!(now.get("_entries/old", None).await.unwrap(), body(5, 42));
-    assert!(dir.path().join(".entries").join("old").is_file());
-    assert_eq!(
-        before.head("_entries/old").await,
-        Err(PrevError::NotFound("_entries/old".to_owned()))
-    );
+    assert!(!dir.path().join(".entries").join("old").exists());
+    assert_eq!(before.get("_entries/old", None).await.unwrap(), body(5, 42));
+    assert_eq!(before.head("_entries/old").await.unwrap().tag, tag);
     assert_eq!(
         keys(now.list("_entries/").await.unwrap(), |object| object.key),
         ["_entries/gone", "_entries/old"]
@@ -318,6 +316,10 @@ async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_
 
     now.delete_if_match("_entries/old", &tag).await.unwrap();
     now.delete("_entries/gone").await.unwrap();
+    for key in ["_entries/old", "_entries/gone"] {
+        let missing = before.head(key).await;
+        assert_eq!(missing, Err(PrevError::NotFound(key.to_owned())));
+    }
     assert!(now.list("_entries/").await.unwrap().is_empty());
     assert!(before.list("_entries/").await.unwrap().is_empty());
     assert_eq!(

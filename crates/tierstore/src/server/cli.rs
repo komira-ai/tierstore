@@ -342,10 +342,11 @@ pub struct Cli {
     /// second. Without it the reconciler works as soon as the process starts.
     #[arg(long, value_name = "PATH")]
     pub lock_file: Option<PathBuf>,
-    /// How old the usage the reconciler publishes may be before `/usagez` says 503 with the
-    /// reason (`/readyz` does not look at it): a number and `ms`, `s`, `m` or `h`, longer than
-    /// `--lease-ttl`, so that a reconciler that takes over the lease does not show. A usage that
-    /// is older than 30 seconds is ignored by the puts as if the hot tier were not full, so a
+    /// How long the usage the reconciler publishes may stand unchanged, by the clock of this
+    /// process, before `/usagez` says 503 with the reason (`/readyz` does not look at it): a
+    /// number and `ms`, `s`, `m` or `h`, longer than `--lease-ttl`, so that a reconciler that
+    /// takes over the lease does not show. A usage that has not changed for 30 seconds is
+    /// ignored by the puts as if the hot tier were not full, so a
     /// reconciler that has stopped would otherwise show nowhere; the puts are not refused. A
     /// process that has run this long without any usage is judged the same way.
     #[arg(long, default_value = "2m", value_parser = parse_duration)]

@@ -178,9 +178,10 @@ async fn a_root_file_of_the_previous_release_is_still_that_entry_key() {
 }
 
 /// Asserts that a key present both as a file of the previous release and as a file of the
-/// subdirectory reads from the subdirectory and is listed once, with the size of that one.
+/// subdirectory reads from the file of the root, which is the key's, and is listed once, with the
+/// size of that one.
 #[tokio::test]
-async fn a_key_in_both_places_is_read_and_listed_from_the_subdirectory() {
+async fn a_key_in_both_places_is_read_and_listed_from_the_root_file() {
     let (dir, backend) = backend();
     old_release(&dir, "_entries/x", "older");
     backend.put("_entries/y", body("other")).await.unwrap();
@@ -192,12 +193,12 @@ async fn a_key_in_both_places_is_read_and_listed_from_the_subdirectory() {
 
     assert_eq!(
         backend.get("_entries/x", None).await.unwrap(),
-        body("newer!")
+        body("older")
     );
     assert_eq!(keys(&backend, "").await, ["_entries/x", "_entries/y"]);
     let listed = backend.list("_entries/x").await.unwrap();
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].size, 6);
+    assert_eq!(listed[0].size, 5);
 }
 
 /// Asserts that a create-only put of a key the previous release put as a file of the root is
@@ -228,43 +229,47 @@ async fn a_create_only_put_of_a_key_the_previous_release_made_is_refused() {
 }
 
 /// Asserts that a replacement by the tag of a key the previous release put as a file of the root
-/// writes the file of the subdirectory and removes the file of the root, for a replacement, a
-/// streamed replacement and a reservation; that a stale tag changes nothing; and that the key is
-/// listed once with the new body.
+/// writes that file in place, for a replacement, a streamed replacement and a reservation, so that
+/// no file is made in the subdirectory for the key; that a stale tag changes nothing; and that the
+/// key is listed once with the new body.
 #[tokio::test]
-async fn a_replacement_of_a_key_the_previous_release_made_moves_it_to_the_subdirectory() {
+async fn a_replacement_of_a_key_the_previous_release_made_stays_in_the_root_file() {
     let (dir, backend) = backend();
     let inside = dir.path().join(DIR);
     let key = "_entries/old";
     let tag = old_release(&dir, key, "shipped");
+    let root_file = dir.path().join("_entries~old");
+    let in_file = |text: &str| {
+        let bytes = std::fs::read(&root_file).unwrap();
+        assert_eq!(bytes[super::TAG_LEN..], *text.as_bytes());
+    };
 
     let stale = backend.put_if_match(key, body("n"), "stale").await;
     assert_eq!(stale, Err(Error::PreconditionFailed(key.to_owned())));
-    assert_eq!(names(dir.path()), [".entries", ".uploads", "_entries~old"]);
+    in_file("shipped");
 
     let second = backend.put_if_match(key, body("two"), &tag).await.unwrap();
-    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
-    assert_eq!(names(&inside), [".lock", "old"]);
+    in_file("two");
     assert_eq!(backend.get(key, None).await.unwrap(), body("two"));
     assert_eq!(keys(&backend, "").await, [key]);
 
-    old_release(&dir, key, "shipped again");
     let streamed = backend.put_stream_if_match(key, None, part("three"), &second);
     let third = streamed.await.unwrap();
-    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+    in_file("three");
     assert_eq!(backend.get(key, None).await.unwrap(), body("three"));
 
-    old_release(&dir, key, "and again");
     let marked = backend.put_reservation_if_match(key, body("four"), &third);
     marked.await.unwrap();
+    in_file("four");
     assert!(backend.head(key).await.unwrap().reservation);
-    assert_eq!(names(dir.path()), [".entries", ".uploads"]);
+    assert_eq!(names(dir.path()), [".entries", ".uploads", "_entries~old"]);
+    assert_eq!(names(&inside), [".lock"]);
 }
 
 /// Asserts that a delete of a key removes the file of the previous release and the file of the
 /// subdirectory, one or both; that a conditional delete by the tag of the file read removes both
-/// and by a stale one removes neither; and that a conditional delete by the tag of the file of the
-/// root, while the subdirectory has the key too, is refused as stale.
+/// and by a stale one removes neither; and that a conditional delete, while both files exist, goes
+/// by the tag of the file of the root, which is the key's, and not by that of the subdirectory.
 #[tokio::test]
 async fn a_delete_of_an_entry_key_removes_the_file_of_the_previous_release_too() {
     let (dir, backend) = backend();
@@ -291,9 +296,9 @@ async fn a_delete_of_an_entry_key_removes_the_file_of_the_previous_release_too()
     std::fs::remove_file(dir.path().join("_entries~old")).unwrap();
     let new = backend.put_tagged(key, body("n")).await.unwrap();
     old_release(&dir, key, "shipped");
-    let refused = backend.delete_if_match(key, &old).await;
+    let refused = backend.delete_if_match(key, &new).await;
     assert_eq!(refused, Err(Error::PreconditionFailed(key.to_owned())));
-    backend.delete_if_match(key, &new).await.unwrap();
+    backend.delete_if_match(key, &old).await.unwrap();
     assert_eq!(names(&inside), [".lock"]);
     assert_eq!(names(dir.path()), [".entries", ".uploads"]);
 
@@ -352,18 +357,22 @@ async fn only_the_name_a_key_is_written_to_is_that_entry_key_in_the_root() {
 }
 
 /// Asserts the keys of the previous release that this branch cannot write: a key under `_entries/`
-/// with an empty rest, which the previous release accepted, is still listed, read and deleted but
-/// refused for a replacement; and a key too long to be a file name is refused by a read, for
-/// a key under `_entries/` and for any other.
+/// with an empty rest, which the previous release accepted, is still listed, read, replaced in
+/// place and deleted; and a key too long to be a file name is refused by a read, for a key under
+/// `_entries/` and for any other.
 #[tokio::test]
-async fn keys_that_make_no_file_name_are_read_only_where_the_previous_release_made_them() {
+async fn keys_that_make_no_file_name_are_replaced_in_place_where_the_previous_release_made_them() {
     let (dir, backend) = backend();
     let tag = old_release(&dir, "_entries/", "bare");
 
     assert_eq!(keys(&backend, "").await, ["_entries/"]);
     assert_eq!(backend.head("_entries/").await.unwrap().tag, tag);
-    let refused = backend.put_if_match("_entries/", body("n"), &tag).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    backend
+        .put_if_match("_entries/", body("n"), &tag)
+        .await
+        .unwrap();
+    assert_eq!(backend.get("_entries/", None).await.unwrap(), body("n"));
+    assert_eq!(keys(&backend, "").await, ["_entries/"]);
     backend.delete("_entries/").await.unwrap();
     assert!(keys(&backend, "").await.is_empty());
 
@@ -683,40 +692,4 @@ async fn keys_that_look_like_the_entries_subdirectory_are_ordinary_objects() {
     );
     assert!(dir.path().join(DIR).is_dir());
     assert_eq!(names(&dir.path().join(DIR)), ["%2Elock", ".lock", "y"]);
-}
-
-/// Asserts that a delete, and a conditional delete by the tag, of a key whose file of the previous
-/// release cannot be removed (it is a directory here) fail and leave the object of the
-/// subdirectory in place, so that the key does not read back as the stale old body.
-#[tokio::test]
-async fn a_failed_delete_of_the_previous_releases_file_keeps_the_current_object() {
-    let (dir, backend) = backend();
-    let key = "_entries/a";
-    let tag = backend.put_tagged(key, body("v2")).await.unwrap();
-    let stuck = dir.path().join("_entries~a");
-    std::fs::create_dir(&stuck).unwrap();
-    std::fs::write(stuck.join("inside"), b"x").unwrap();
-
-    assert!(matches!(backend.delete(key).await, Err(Error::Other(_))));
-    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
-    let refused = backend.delete_if_match(key, &tag).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
-    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
-}
-
-/// Asserts that a read of a key the previous release put as a file of the root never reports it
-/// missing while a replacement by the tag moves it to the subdirectory.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_read_during_the_move_of_a_previous_release_key_finds_the_key() {
-    let (dir, backend) = backend();
-    let backend = Arc::new(backend);
-    for number in 0..100 {
-        let key = format!("_entries/k{number}");
-        let tag = old_release(&dir, &key, "shipped");
-        let reader = Arc::clone(&backend);
-        let name = key.clone();
-        let read = tokio::spawn(async move { reader.get(&name, None).await });
-        backend.put_if_match(&key, body("two"), &tag).await.unwrap();
-        assert!(read.await.unwrap().is_ok(), "{key} read as missing");
-    }
 }
