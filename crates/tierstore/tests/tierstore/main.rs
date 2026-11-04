@@ -25,6 +25,7 @@ mod one_winner;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;
+mod reconciler_mirror_entries;
 mod reconciler_races;
 mod reconciler_reservations;
 mod reconciler_takeover;
