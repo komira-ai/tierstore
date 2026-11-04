@@ -17,9 +17,9 @@ publish.workspace = true
 bytes.workspace = true
 futures.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }
-tierstore = { workspace = true, features = ["s3"] }
+tierstore = { workspace = true, features = ["s3", "server"] }
 # The previous release, pinned in the root `[workspace.dependencies]`.
-tierstore_prev = { workspace = true, features = ["s3"] }
+tierstore_prev = { workspace = true, features = ["s3", "server"] }
 tierstore-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
