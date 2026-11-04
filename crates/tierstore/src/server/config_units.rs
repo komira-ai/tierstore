@@ -5,7 +5,7 @@ use std::fmt;
 use std::time::Duration;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer};
 
 use super::cli::parse_duration;
 
@@ -39,38 +39,10 @@ impl Visitor<'_> for DurVisitor {
     }
 }
 
-impl Serialize for Dur {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format_duration(self.0))
-    }
-}
-
-/// The duration as the largest of `h`, `m`, `s` and `ms` that holds it in whole numbers, such
-/// that [`parse_duration`] reads the text back to the same duration.
-pub(super) fn format_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        return "0s".to_owned();
-    }
-    let units = [(3_600_000, "h"), (60_000, "m"), (1000, "s")];
-    for (size, unit) in units {
-        if millis.is_multiple_of(size) {
-            return format!("{}{unit}", millis / size);
-        }
-    }
-    format!("{millis}ms")
-}
-
 /// A number of bytes in the file: an integer, or a string of a number and `B`, `KiB`, `MiB`,
 /// `GiB` or `TiB`, such as `500GiB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Size(pub u64);
-
-impl Serialize for Size {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(self.0)
-    }
-}
 
 impl<'de> Deserialize<'de> for Size {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

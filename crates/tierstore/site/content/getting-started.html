@@ -18,9 +18,12 @@
     <div class="code"><pre><span class="p">$</span> printf 'AKIDEXAMPLE\nexample-secret-change-me\n' &gt; access.key
 <span class="p">$</span> chmod 0600 access.key
 <span class="p">$</span> mkdir hot cold</pre></div>
-    <p>Write <code>tierstore.toml</code> in the same directory:</p>
-    <div class="code"><pre>[server]
-listen          = "127.0.0.1:9000"
+    <p>Write <code>tierstore.toml</code> in the same directory. Each <code>[[interface]]</code> is something the process serves: here the S3 API on loopback port 9000.</p>
+    <div class="code"><pre>[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9000"] }
+
+[server]
 proxy_id        = "tierstore-1"
 bucket          = "tierstore"
 access_key_file = "access.key"
@@ -58,9 +61,12 @@ path = "cold"</pre></div>
 <p>Every configuration is one process started with <code>--config &lt;file&gt;</code>. The file has the tables of the role the process plays; <a href="/docs/configuration/">the configuration reference</a> lists every key and its default.</p>
 
 <h3 id="storage-node">Storage node</h3>
-<p>A hot tier on SSD in front of a cold tier on spinning disks, with a read-only key for daemons that only read. Either tier may instead be <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>. An <code>[oci]</code> table with a <code>listen</code> address adds the read-only OCI registry front.</p>
-<div class="code"><pre>[server]
-listen              = "192.0.2.10:9000"
+<p>A hot tier on SSD in front of a cold tier on spinning disks, with a read-only key for daemons that only read. Either tier may instead be <code>kind = "s3"</code> with a <code>bucket</code>, an <code>endpoint</code> and a <code>credentials_file</code>. An <code>[[interface]]</code> of type <code>oci</code> adds the read-only OCI registry front.</p>
+<div class="code"><pre>[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9000"] }
+
+[server]
 proxy_id            = "tierstore-1"
 bucket              = "tierstore"
 access_key_file     = "/etc/tierstore/access.key"
@@ -77,8 +83,11 @@ path = "/srv/tierstore/cold"</pre></div>
 
 <h3 id="build-node">Build node</h3>
 <p>A read cache on local disk in front of one upstream, with no hot tier. The upstream is <code>[cold_store]</code>, read with a read-only key, and <code>[[policy]]</code> says which key prefixes are kept.</p>
-<div class="code"><pre>[server]
-listen          = "127.0.0.1:9400"
+<div class="code"><pre>[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9400"] }
+
+[server]
 proxy_id        = "tierstore-cache-1"
 bucket          = "tierstore"
 access_key_file = "/etc/tierstore-cache/access.key"

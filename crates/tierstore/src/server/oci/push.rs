@@ -1,6 +1,6 @@
 //! Pushing to the OCI front: blob uploads, monolithic and chunked, and manifests.
 //!
-//! A front serves these only when it asks for keys (`--oci-require-auth`, see `auth`): an
+//! A front serves these only when it asks for keys (`params.require_auth`, see `auth`): an
 //! anonymous front is read-only. The calls, and what each does with the store:
 //!
 //! - `POST /v2/<name>/blobs/uploads/?digest=<digest>`: a monolithic upload. The body is the
@@ -74,7 +74,7 @@ const UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
 /// The code of an upload that is not open.
 const UNKNOWN_UPLOAD: &str = "BLOB_UPLOAD_UNKNOWN";
 
-/// The default of `--oci-stage-read`: the most bytes of a stored chunk that the end of an upload
+/// The default of `params.stage_read`: the most bytes of a stored chunk that the end of an upload
 /// reads in one call, so that a chunk of any size is held a piece at a time whatever the backend
 /// does with a read of a whole object.
 pub(crate) const DEFAULT_STAGE_READ: u64 = 1 << 20;

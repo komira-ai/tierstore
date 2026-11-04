@@ -14,7 +14,9 @@
 //!   lets a proxy whose format reads succeed read `drain` again; a proxy whose reads fail keeps its
 //!   last answer, so `drained` does not show that every proxy has seen the pause. It does not wait
 //!   for a write that a proxy admitted earlier and is still running. Writes stay paused.
-//! - `active`: a phase of a later release. This release does not pause writes for it.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts and the
+//!   completions of multipart uploads on the entries of their keys, and only while its heartbeat is
+//!   acknowledged; deletes still use the journal. It never pauses writes for it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -50,6 +52,17 @@ impl Format {
     /// Whether a proxy that reads this answers writes with 503.
     pub(crate) fn pauses_writes(&self) -> bool {
         matches!(self.phase, FormatPhase::Drain | FormatPhase::Drained)
+    }
+}
+
+/// The first epoch whose writes are made on entries.
+pub(crate) const ENTRIES_EPOCH: u64 = 2;
+
+impl Format {
+    /// Whether a proxy that reads this makes its writes on entries: the phase is `active` and the
+    /// epoch is [`ENTRIES_EPOCH`] or later.
+    pub(crate) fn runs_entries(&self) -> bool {
+        self.phase == FormatPhase::Active && self.epoch.is_some_and(|epoch| epoch >= ENTRIES_EPOCH)
     }
 }
 

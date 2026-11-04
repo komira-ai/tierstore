@@ -156,7 +156,7 @@ fn s3_client(at: &str) -> S3Store {
         endpoint: format!("http://{at}"),
         region: "us-east-1".to_owned(),
         bucket: "tier-bucket".to_owned(),
-        credentials: Credentials::new("AKIDCACHE", "cache-secret"),
+        credentials: Credentials::new("AKIDCACHE", "cache-secret-0123456789"),
         capabilities: Capabilities {
             conditional_put: true,
             object_lock: false,

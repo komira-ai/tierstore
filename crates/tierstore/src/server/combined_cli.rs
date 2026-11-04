@@ -3,12 +3,12 @@
 //! cache, and the reconciler beside them.
 //!
 //! The settings come from a file with `[hot_store]`, `[cold_store]` and `[local_cache]` (see
-//! [`config_combined`](super::config_combined)). The start runs, in this order: the flags'
-//! checks, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
+//! [`config_combined`](super::config_combined)). The start runs, in this order: the
+//! checks of the settings, the lock file of the hot tier (the reconciler's [`Gate`]), the self-test of both tiers
 //! (which writes probe keys under `_tiering/selftest/` and deletes them), the proxy (which writes
 //! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
-//! last the addresses. Only the flags' checks and the lock file come before a write. A refusal
+//! last the addresses. Only the checks of the settings and the lock file come before a write. A refusal
 //! of the cache directory, its file system, its budget or an address comes after the self-test
 //! and the proxy's registration, so it leaves the registration (a JSON object, see `Registration`) in the hot
 //! tier, and the heartbeat, which starts with the proxy, may already have rewritten it with a
@@ -34,19 +34,16 @@ use tokio::sync::Notify;
 
 use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
 
+use super::Drained;
 use super::build_info::{COMMIT, VERSION};
-use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
+use super::cache_cli::{Fronts, open, serve_front};
 use super::cli::{Addresses, Error, build, signals};
 use super::cli_probe::{probe_run_id, probe_tiers};
 use super::cli_reconcile::{reconcile, reconcile_gated};
-use super::cli_serve::{bind_oci, cut_note, open_gate};
+use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
-use super::drain::late_of;
-use super::listen::{joined, local_addrs};
-use super::local_cache::{Disk, Every, SCRUB_TICK, SystemDisk};
-use super::oci::OciListener;
-use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
-use super::{Drained, Server};
+use super::listen::joined;
+use super::local_cache::{Disk, SystemDisk};
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
 /// then drains. `ready` is called with the addresses the fronts are bound to, before the first
@@ -80,60 +77,29 @@ pub(super) async fn serve_combined(
     let upstream: Arc<dyn Backend> = proxy;
     let run = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
     let cache = open(&settings.cache.config, &upstream, &disk, &run).await?;
-    built.server.cache = Some(cache.clone());
     built.server.cache_writes = true;
     // Both fronts read, and write, through the cache.
-    let backend: Arc<dyn Backend> = Arc::new(cache.clone());
-    let server = Server::new(Arc::clone(&backend), built.server);
-    let listeners = bind_cache_s3(&cli.listen)?;
-    let oci = bind_oci(built.oci, backend).await?;
-    ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
-    let oci_drain = oci.as_ref().map(OciListener::drain);
-    let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
-    let lb_wait = cli.drain_lb_wait;
-    let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, lb_wait);
-    // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
-    // is not waiting just now.
-    let halts: [Arc<Notify>; 4] = std::array::from_fn(|_| Arc::new(Notify::new()));
-    let [halt, maintain_halt, lock_halt, scrub_halt] = halts.clone();
-    let serving = async move {
-        // The proxy beats until its drain is over: the in-flight requests of both fronts are
-        // finished or cut.
-        let ended = serve_fronts(
-            server.serve_all(listeners),
-            serve_oci(oci, oci_stopped),
-            beating.stop_heartbeat(),
-        )
-        .await;
-        for halting in &halts {
-            halting.notify_one();
-        }
-        ended
-    };
+    let beside_halt = Arc::new(Notify::new());
     let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
     let interval = cli.reconcile_interval;
+    let halt = Arc::clone(&beside_halt);
     let reconciling = async move {
         match gate {
             Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
             None => reconcile(reconciler, interval, halt).await,
         }
     };
-    let maintaining = cache.maintain(PASS_INTERVAL, maintain_halt);
-    let holding = cache.hold(LOCK_INTERVAL, lock_halt);
-    let min_round = settings.cache.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
-    let scrubbing = cache.scrub(
-        settings.cache.scrub_rate,
-        min_round,
-        Every::new(SCRUB_TICK),
-        scrub_halt,
-    );
-    let ((drained, oci_cut), (), (), (), ()) =
-        tokio::join!(serving, reconciling, maintaining, holding, scrubbing);
-    watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
-    Ok(drained)
+    let fronts = Fronts {
+        listen: &cli.listen,
+        lb_wait: cli.drain_lb_wait,
+        scrub_rate: settings.cache.scrub_rate,
+        scrub_min_round: settings.cache.scrub_min_round,
+        sweep: None,
+        beside_halt,
+        beating: Some(beating),
+    };
+    let (server, oci) = (built.server, built.oci);
+    serve_front(cache, server, oci, fronts, stop, ready, reconciling).await
 }
 
 /// Runs the node until SIGTERM or SIGINT.

@@ -1,4 +1,4 @@
-//! The binary's flags start the front: `run_serving` in this process, and the `tierstore`
+//! The binary's file starts the front: `run_serving` in this process, and the `tierstore`
 //! process itself.
 
 use std::fs::Permissions;
@@ -8,7 +8,6 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use bytes::Bytes;
-use clap::Parser;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use objstore_s3::{Capabilities, ObjectKey, ObjectStore};
 use rustix::process::{Pid, Signal, kill_process};
@@ -24,10 +23,11 @@ use crate::pki::{Leaf, ca, ip, leaf};
 use crate::rig::hex_of;
 
 const KEY_ID: &str = "AKIDOCI";
-const SECRET: &str = "oci-secret";
+const SECRET: &str = "oci-secret-0123456789";
 
 pub struct Files {
     _dir: TestDir,
+    dir: std::path::PathBuf,
     key: String,
     leaf: Leaf,
     pub ca_pem: String,
@@ -44,53 +44,89 @@ pub fn files(name: &str) -> Files {
         key: key.display().to_string(),
         leaf,
         ca_pem: ca.pem,
+        dir: dir.path().to_owned(),
         _dir: dir,
     }
 }
 
 impl Files {
-    pub fn flags(&self, oci: bool) -> Vec<String> {
-        let mut flags: Vec<String> = [
+    /// The certificate and key params of an `oci` interface that name this rig's leaf.
+    fn tls(&self) -> String {
+        let cert = self.leaf.cert.to_str().expect("a path");
+        let key = self.leaf.key.to_str().expect("a path");
+        format!(", tls_cert_file = {cert:?}, tls_key_file = {key:?}")
+    }
+
+    /// Writes the file of a start whose `oci` interface listens at `listen` with `params` after its
+    /// address (`None`: no `oci` interface) as `name`, and gives the arguments of that start: the
+    /// name of the program, which the callers that run the binary leave out, then the file and a
+    /// short drain.
+    fn start_with(&self, name: &str, oci: Option<(&str, &str)>) -> Vec<String> {
+        let oci = oci.map_or_else(String::new, |(listen, params)| {
+            format!(
+                "\n[[interface]]\ntype = \"oci\"\nparams = {{ addresses = [{listen:?}]{params} }}\n"
+            )
+        });
+        let text = format!(
+            "[[interface]]\ntype = \"s3\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n{oci}\n\
+             [server]\nproxy_id = \"oci\"\nbucket = \"tier-bucket\"\naccess_key_file = {:?}\n\n\
+             [hot_store]\nkind = \"memory\"\nbudget = 1048576\n\n[cold_store]\nkind = \"memory\"\n",
+            self.key
+        );
+        let file = self.dir.join(name);
+        std::fs::write(&file, text).expect("the file");
+        [
             "tierstore",
-            "--listen",
-            "127.0.0.1:0",
-            "--proxy-id",
-            "oci",
-            "--hot",
-            "memory",
-            "--cold",
-            "memory",
-            "--hot-bytes",
-            "1048576",
-            "--bucket",
-            "tier-bucket",
-            "--access-key-file",
-            self.key.as_str(),
+            "--config",
+            &file.display().to_string(),
             "--drain-lb-wait",
             "50ms",
         ]
         .map(str::to_owned)
-        .to_vec();
-        if oci {
-            let more = [
-                "--oci-listen",
-                "127.0.0.1:0",
-                "--oci-tls-cert",
-                self.leaf.cert.to_str().expect("a path"),
-                "--oci-tls-key",
-                self.leaf.key.to_str().expect("a path"),
-            ];
-            flags.extend(more.map(str::to_owned));
-        }
-        flags
+        .to_vec()
     }
 
-    /// The flags of a start with the OCI front on plain HTTP at `listen`: no certificate, no key.
-    pub fn plain(&self, listen: &str) -> Vec<String> {
-        let mut flags = self.flags(false);
-        flags.extend(["--oci-listen", listen].map(str::to_owned));
-        flags
+    /// The arguments of a start, with the OCI front on (HTTPS, with this rig's certificate and
+    /// key) if `oci`.
+    pub fn flags(&self, oci: bool) -> Vec<String> {
+        let front = oci.then(|| ("127.0.0.1:0", self.tls()));
+        self.start_with(
+            "tierstore.toml",
+            front.as_ref().map(|(at, tls)| (*at, tls.as_str())),
+        )
     }
+
+    /// The arguments of a start with the OCI front on plain HTTP at `listen`: no certificate, no key.
+    pub fn plain(&self, listen: &str) -> Vec<String> {
+        self.start_with("plain.toml", Some((listen, "")))
+    }
+
+    /// The arguments of a start whose `oci` interface is at `listen` with `params` after the address.
+    pub fn with_params(&self, listen: &str, params: &str) -> Vec<String> {
+        self.start_with("params.toml", Some((listen, params)))
+    }
+}
+
+/// The settings that the arguments of a start stand for (the program name, then `--config <file>`
+/// and `--drain-lb-wait <wait>`, in seconds or milliseconds).
+pub fn cli_of(flags: &[String]) -> Cli {
+    let value = |flag: &str| {
+        let at = flags.iter().position(|word| word == flag).expect("a flag");
+        flags[at + 1].as_str()
+    };
+    let text = std::fs::read_to_string(value("--config")).expect("the file");
+    let mut cli = Cli::from_config_text(&text).expect("a file");
+    let wait = value("--drain-lb-wait");
+    cli.drain_lb_wait = match wait.strip_suffix("ms") {
+        Some(millis) => Duration::from_millis(millis.parse().expect("milliseconds")),
+        None => Duration::from_secs(
+            wait.strip_suffix('s')
+                .expect("seconds")
+                .parse()
+                .expect("seconds"),
+        ),
+    };
+    cli
 }
 
 pub fn store(addr: SocketAddr) -> S3Store {
@@ -110,13 +146,13 @@ pub fn store(addr: SocketAddr) -> S3Store {
     S3Store::new(config).expect("a client")
 }
 
-/// Runs the server over `flags`, calls `work` with the addresses it is bound to, then stops it.
+/// Runs the server over the arguments `flags`, calls `work` with the addresses it is bound to, then stops it.
 async fn serving<F, Fut>(flags: Vec<String>, work: F) -> Drained
 where
     F: FnOnce(Addresses) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    let cli = Cli::try_parse_from(flags).expect("flags");
+    let cli = cli_of(&flags);
     let (stop, stopped) = oneshot::channel::<()>();
     let (told, bound) = oneshot::channel::<Addresses>();
     let running = run_serving(
@@ -238,16 +274,16 @@ async fn the_process_announces_the_front_and_refuses_a_bad_certificate() {
         .expect("joined");
     assert_eq!(status.expect("waited").code(), Some(0));
 
-    let mut flags = files.flags(true);
-    let at = flags
-        .iter()
-        .position(|f| f == "--oci-tls-cert")
-        .expect("a flag");
-    flags[at + 1] = files.key.clone();
+    let params = format!(
+        ", tls_cert_file = {:?}, tls_key_file = {:?}",
+        files.key,
+        files.leaf.key.to_str().expect("a path")
+    );
+    let flags = files.with_params("127.0.0.1:0", &params);
     let out = Command::new(bin).args(&flags[1..]).output().expect("ran");
     assert_eq!(out.status.code(), Some(2));
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--oci-tls-cert"), "{stderr}");
+    assert!(stderr.contains("params.tls_cert_file"), "{stderr}");
 }
 
 /// Asserts that a start whose OCI address is taken fails with the address in the message, and
@@ -256,13 +292,8 @@ async fn the_process_announces_the_front_and_refuses_a_bad_certificate() {
 async fn an_oci_address_in_use_fails_the_start() {
     let files = files("oci-binary-taken");
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bound");
-    let mut flags = files.flags(true);
-    let at = flags
-        .iter()
-        .position(|f| f == "--oci-listen")
-        .expect("a flag");
-    flags[at + 1] = taken.local_addr().expect("an address").to_string();
-    let cli = Cli::try_parse_from(flags).expect("flags");
+    let busy = taken.local_addr().expect("an address").to_string();
+    let cli = cli_of(&files.with_params(&busy, &files.tls()));
     let started = run_serving(&cli, std::future::pending(), |_| {}).await;
     let why = started.expect_err("a failed start").to_string();
     assert!(why.starts_with("binding 127.0.0.1:"), "{why}");
@@ -422,24 +453,24 @@ async fn a_plain_front_off_loopback_starts_and_warns_once() {
     }
 }
 
-/// Asserts that a certificate without a key, and a key without a certificate, are refused at
-/// start with status 2.
+/// Asserts that a certificate without a key, and a key without a certificate, are refused when
+/// the file is read, with status 2 and the exact message that names the param that is missing.
 #[tokio::test]
 async fn a_certificate_without_a_key_is_refused_at_start() {
     let files = files("oci-binary-half-pair");
     let cert = files.leaf.cert.to_str().expect("a path");
     let key = files.leaf.key.to_str().expect("a path");
-    for (flag, path, partner) in [
-        ("--oci-tls-cert", cert, "--oci-tls-key"),
-        ("--oci-tls-key", key, "--oci-tls-cert"),
+    for (param, path, missing, partner) in [
+        ("tls_cert_file", cert, "tls_key_file", "tls_cert_file"),
+        ("tls_key_file", key, "tls_cert_file", "tls_key_file"),
     ] {
-        let mut flags = files.plain("127.0.0.1:0");
-        flags.extend([flag, path].map(str::to_owned));
+        let flags = files.with_params("127.0.0.1:0", &format!(", {param} = {path:?}"));
         let (status, stderr) = refused(&flags);
-        assert_eq!(status, Some(2), "{flag}: {stderr}");
-        assert!(
-            stderr.contains("required arguments were not provided") && stderr.contains(partner),
-            "{flag}: {stderr}"
+        assert_eq!(status, Some(2), "{param}: {stderr}");
+        let want = format!(
+            "tierstore: config file {}: interface[1].params.{missing}: it is needed with {partner}: give both, or neither\n",
+            flags[2]
         );
+        assert_eq!(stderr, want);
     }
 }
