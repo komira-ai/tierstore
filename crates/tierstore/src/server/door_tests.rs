@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use super::{GRACE, LOOK};
 use crate::server::pipes::{Kernel, Serving, drained, head, read_answer, status_of, until};
 use crate::server::testing::BUCKET;
-use crate::server::{ACCEPT_PAUSE, Drained, ListenTuning, ServerConfig};
+use crate::server::{ACCEPT_PAUSE, Drained, ServerConfig};
 
 /// A probe that asks the server to close the connection after its answer.
 const HEALTHZ: &str = "GET /healthz HTTP/1.1\r\nhost: tier.test\r\nconnection: close\r\n\r\n";
@@ -654,7 +654,10 @@ TcpExt: 0 0 0
         let rig = Rig::with(1 << 20, short_settle).await;
         rig.server.begin_drain();
         rig.server.drain.settle();
-        let mut door = Closing::begin(Listeners::new(sockets), ListenTuning::default());
+        let mut door = Closing::begin(
+            Listeners::new(sockets),
+            crate::server::ListenTuning::default(),
+        );
         let mut taken = Vec::new();
         while let Some(accepted) = door.next().await {
             let (stream, _) = accepted.as_ref().expect("an accept");

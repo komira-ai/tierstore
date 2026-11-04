@@ -612,6 +612,7 @@ fn s3_tier(
 }
 
 /// The tier a flag names, of the kinds that need no flags besides the tier's own.
+#[cfg(test)]
 fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
     tier_tuned(flag, spec, &S3Client::default())
 }
