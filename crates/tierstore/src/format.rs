@@ -18,8 +18,10 @@
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts, the
 //!   completions of multipart uploads and its deletes on the entries of their keys, and only while
 //!   its heartbeat is acknowledged; it never pauses writes for it. A delete that finds the entry of
-//!   its key held or sealed by another operation waits for the entry to be released before it
-//!   changes either tier.
+//!   its key held or sealed by another operation, and that it can neither amend nor claim, waits
+//!   for the entry to be released before it changes either tier. A delete that amends a put the
+//!   reconciler holds for a copy, or claims a handed-over delete, is the exception: it deletes both
+//!   tiers, hands the entry over and waits for the release before it is acknowledged.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};

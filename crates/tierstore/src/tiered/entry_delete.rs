@@ -134,8 +134,7 @@ impl Inner {
     }
 
     /// Takes the entry of `key` for a delete, or says why the delete is refused.
-    async fn take_delete(&self, key: &str) -> Result<Held, Error> {
-        let mut waited = Duration::ZERO;
+    async fn take_delete(&self, key: &str, waited: &mut Duration) -> Result<Held, Error> {
         for _ in 0..self.config.entry_rounds {
             if let Created::Taken(seen) = self.entries.create(key, Take::Del).await? {
                 return Ok(Held { seen, step: None });
@@ -148,7 +147,7 @@ impl Inner {
                     return Err(retry(key, "the entry is in a state a delete cannot take"));
                 }
                 let reason = "an operation on the key is in flight and not released yet";
-                self.wait_while(key, &mut waited, in_flight, reason).await?;
+                self.wait_while(key, waited, in_flight, reason).await?;
                 continue;
             };
             if let Outcome::Done(seen) = self.entries.advance(&found, step).await? {
@@ -196,7 +195,7 @@ impl Inner {
 
     /// The end of a delete: a fresh one removes its entry (and hands it over if it cannot), one
     /// that amended or claimed hands it over, and one that must wait for the release does.
-    async fn end_delete(&self, key: &str, held: &Held) -> Result<(), Error> {
+    async fn end_delete(&self, key: &str, held: &Held, waited: &mut Duration) -> Result<(), Error> {
         let Some(step) = held.step else {
             let released = self.bounded(key, self.entries.release(&held.seen)).await;
             if released.is_err() {
@@ -206,18 +205,17 @@ impl Inner {
         };
         self.hand_over(key, &held.seen).await;
         if step.waits() {
-            return self.wait_for_release(key).await;
+            return self.wait_for_release(key, waited).await;
         }
         self.acknowledge(key)
     }
 
     /// Waits until the entry of `key` is gone or is another operation's, as [`DeleteWait`] says,
     /// and then acknowledges if the proxy is still live.
-    async fn wait_for_release(&self, key: &str) -> Result<(), Error> {
-        let mut waited = Duration::ZERO;
+    async fn wait_for_release(&self, key: &str, waited: &mut Duration) -> Result<(), Error> {
         let ours = |entry: &Entry| entry.op == EntryOp::Del;
         let reason = "both tiers are deleted, but the entry is not released yet";
-        self.wait_while(key, &mut waited, ours, reason).await?;
+        self.wait_while(key, waited, ours, reason).await?;
         self.acknowledge(key)
     }
 
@@ -264,12 +262,13 @@ impl Inner {
     /// A delete of `key` on its entry.
     pub(super) async fn delete_on_entry(&self, key: &str) -> Result<(), Error> {
         self.require_live(key)?;
-        let held = self.take_delete(key).await?;
+        let mut waited = Duration::ZERO;
+        let held = self.take_delete(key, &mut waited).await?;
         if let Err(error) = self.delete_data(key).await {
             self.hand_over(key, &held.seen).await;
             return Err(error);
         }
-        self.end_delete(key, &held).await
+        self.end_delete(key, &held, &mut waited).await
     }
 }
 

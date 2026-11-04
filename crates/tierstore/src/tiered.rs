@@ -276,8 +276,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
 /// key, not in the journal above (`entry_put.rs`), and a read of a cold object asks for a copy-back
 /// on an entry (`copy_back.rs`). So is a delete (see `entry_delete.rs`): the cold tier's object is
-/// deleted at once, and a delete that meets a copy in flight waits for the reconciler to release
-/// the entry ([`DeleteWait`]).
+/// deleted at once, and a delete that meets a copy in flight deletes both tiers, hands the entry
+/// over and waits for the reconciler to release it before it is acknowledged ([`DeleteWait`]).
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
