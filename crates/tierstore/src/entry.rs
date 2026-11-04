@@ -5,8 +5,8 @@
 //! read at (`If-Match`), and removed by the actor whose work it was (or by the reconciler, when
 //! the entry is sealed). That makes every change of an entry one atomic store call, and a call
 //! that lost a race fails instead of overwriting. This module is the entry's body, its
-//! transitions and the store calls that carry them out. Nothing else of the crate uses it yet: no
-//! request path reads or writes an entry.
+//! transitions and the store calls that carry them out. So far only the puts of a proxy whose
+//! format is active use it (`tiered/entry_put.rs`); no read, delete or reconciler step does.
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by

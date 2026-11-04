@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, MonotonicClock,
-    OpenUpload, PartBody, UploadsAfter,
+    Backend, ByteRange, Clock, Entries, Error, JournalEntry, JournalOp, Listed, Meta,
+    MonotonicClock, OpenUpload, PartBody, UploadsAfter,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -33,10 +33,15 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
-mod pause;
+mod entry_put;
+#[cfg(test)]
+mod entry_put_race_tests;
+#[cfg(test)]
+mod entry_put_tests;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
+mod pause;
 mod put;
 
 use heartbeat::Heartbeat;
@@ -75,13 +80,16 @@ pub struct ProxyConfig {
     /// called, and the longest a call of the heartbeat may take.
     pub heartbeat: Duration,
     /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
-    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
-    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
-    /// removal of registrations uses its own `registration_retention`.
+    /// is the send time of the last acknowledged beat plus this less the margin. Only the
+    /// puts made on entries read it ([`Proxy::is_live`]); the reconciler's removal of
+    /// registrations uses its own `registration_retention`.
     pub departure: Duration,
     /// The time that must be left before `live_until` for a call that destroys to start; the
     /// longest such a call may take.
     pub deadline_margin: Duration,
+    /// How many times a put on entries looks again at the entry of its key when it was gone
+    /// between the put's create and its read: past it the put is answered `Unavailable`.
+    pub entry_rounds: u32,
 }
 
 impl ProxyConfig {
@@ -89,7 +97,8 @@ impl ProxyConfig {
     /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
     /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
-    /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now.
+    /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
+    /// 3 looks at an entry.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -106,6 +115,7 @@ impl ProxyConfig {
             heartbeat: Duration::from_secs(10),
             departure: Duration::from_secs(60),
             deadline_margin: Duration::from_secs(10),
+            entry_rounds: 3,
         }
     }
 }
@@ -243,6 +253,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// starts lists its own journal prefix and its checkpoint, and goes on after the highest
 /// number it finds.
 ///
+/// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
+/// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
+/// key, not in the journal above: see `entry_put.rs`.
+///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
 /// older than [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
@@ -288,6 +302,8 @@ struct Inner {
     capacity: Mutex<Capacity>,
     /// What was last read of the format object.
     pause: Mutex<pause::Pause>,
+    /// The calls on the entries of keys, as this proxy.
+    entries: Entries,
     counters: Counters,
     heartbeat: Heartbeat,
 }
@@ -320,6 +336,7 @@ impl Proxy {
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
+        let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,
             cold,
@@ -328,6 +345,7 @@ impl Proxy {
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
             pause: Mutex::default(),
+            entries,
             counters: Counters::default(),
             heartbeat,
         };

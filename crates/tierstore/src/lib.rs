@@ -78,7 +78,7 @@
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
+//!   body is an [`Entry`]. So far only the puts of a [`Proxy`] whose format is active call them.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
