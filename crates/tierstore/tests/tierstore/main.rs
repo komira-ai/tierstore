@@ -3,6 +3,8 @@
 
 mod backends;
 mod cache;
+#[cfg(feature = "server")]
+mod cache_over_proxy;
 mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
@@ -16,6 +18,7 @@ mod lease;
 mod lease_takeover;
 mod list_uploads;
 mod list_uploads_reserved;
+mod marked_reads;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
@@ -24,6 +27,7 @@ mod reconciler;
 mod reconciler_faults;
 mod reconciler_races;
 mod reconciler_reservations;
+mod reconciler_takeover;
 mod reservation;
 mod reservation_reads;
 #[cfg(feature = "s3")]

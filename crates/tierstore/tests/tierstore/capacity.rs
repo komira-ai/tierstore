@@ -1,4 +1,4 @@
-//! The hot tier's capacity as the proxy sees it: back-pressure, a full hot tier, and the
+//! The hot tier's capacity as the proxy sees it: the critical mark, a full hot tier, and the
 //! usage the reconciler publishes.
 
 use std::time::Duration;
@@ -10,25 +10,26 @@ use crate::support::{
     Rig, assert_absent, body, journal_entry_keys, journal_key, journal_keys, read, set_usage,
 };
 
-/// Asserts that a put is delayed by the back-pressure while the published usage is at or above
-/// the critical share of the budget and under the budget, and is not delayed under it.
+/// Asserts that a put made while the published usage is at or above the critical share of the
+/// budget and under the budget takes exactly as much of the paused clock as a put made under the
+/// share (the journal's linger and nothing more), and the object is in the hot tier. (Before,
+/// such a put slept a fixed back-pressure on top.)
 #[tokio::test(start_paused = true)]
-async fn a_put_above_the_critical_mark_is_delayed_by_the_back_pressure() {
+async fn a_put_above_the_critical_mark_goes_to_the_hot_tier_without_waiting() {
     let rig = Rig::new();
     let mut config = rig.config("p1", 1000);
     config.critical = 0.5;
-    config.back_pressure = Duration::from_millis(200);
     let proxy = rig.open(config).await.unwrap();
 
     set_usage(&rig, 100, 0).await;
     let start = Instant::now();
     proxy.put("a", body("1")).await.unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100));
+    let under = start.elapsed();
 
     set_usage(&rig, 600, 0).await;
     let start = Instant::now();
     proxy.put("b", body("2")).await.unwrap();
-    assert!(start.elapsed() >= Duration::from_millis(200));
+    assert_eq!(start.elapsed(), under);
     assert_eq!(read(&*rig.hot_mem, "b").await, body("2"));
 }
 
@@ -179,10 +180,10 @@ async fn a_get_does_not_copy_back_above_the_critical_mark() {
 }
 
 /// Asserts that a ranged get of an object only the cold tier holds asks the cold tier for the
-/// range alone while the usage is above the critical mark (no copy is made, so a whole read
-/// would only be thrown away), and for the whole object once the usage is under it.
+/// range alone, above the critical mark and under it, and copies nothing back: the memory of the
+/// read is its range, whatever the size of the object.
 #[tokio::test(start_paused = true)]
-async fn a_ranged_get_above_the_critical_mark_reads_only_the_range_from_the_cold_tier() {
+async fn a_ranged_get_reads_only_the_range_from_the_cold_tier_at_any_usage() {
     let rig = Rig::new();
     let mut config = rig.config("p1", 1000);
     config.critical = 0.5;
@@ -197,8 +198,8 @@ async fn a_ranged_get_above_the_critical_mark_reads_only_the_range_from_the_cold
 
     set_usage(&rig, 100, 0).await;
     assert_eq!(proxy.get("k", Some(part)).await.unwrap(), body("234"));
-    assert_eq!(rig.cold.get_ranges(), vec![Some((2, 3)), None]);
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("0123456789"));
+    assert_eq!(rig.cold.get_ranges(), vec![Some((2, 3)), Some((2, 3))]);
+    assert_absent(&*rig.hot_mem, "k").await;
 }
 
 /// Asserts that a read whose copy back into the hot tier fails (the hot tier is full, or

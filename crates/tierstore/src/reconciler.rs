@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
+use crate::backend::ByteRange;
 use crate::journal::{
-    PROXIES_PREFIX, USAGE_KEY, Usage, checkpoint_key, decode_journal, journal_key, journal_prefix,
-    load_checkpoint, seq_of, to_body, write_object,
+    PROXIES_PREFIX, USAGE_KEY, Usage, decode_journal, journal_key, journal_prefix, load_checkpoint,
+    seq_of, store_checkpoint, to_body, write_object,
 };
 use crate::lease::Lease;
 use crate::state::Candidate;
@@ -69,7 +70,12 @@ impl ReconcilerConfig {
 /// What one [`Reconciler::pass`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct PassReport {
-    /// Whether this reconciler held the lease. If not, nothing else was done.
+    /// Whether this reconciler held the lease at the start of the pass. If not, nothing else was
+    /// done. If the check made after the copies and evictions finds the lease gone, nothing is
+    /// stored after that check (no checkpoint, no pruning, no usage), and that is not in
+    /// `failed`; `copied` and `evicted` still count the work done before the check. A takeover
+    /// after the check is not seen. The next pass tries to take or renew the lease again, and
+    /// takes it at once if it was deleted.
     pub held: bool,
     /// The objects copied to the cold tier, or found there already.
     pub copied: usize,
@@ -150,8 +156,10 @@ enum Eviction {
     Removed,
     /// The hot tier no longer had it.
     Gone,
-    /// The hot tier holds another object under the key now, which was left.
-    Replaced,
+    /// The object was left: the hot tier holds another object under the key now, or the cold tier
+    /// does not hold a real object of the hot object's content (nothing, a reservation, or
+    /// another object), so the hot object may be the only copy. It stays a candidate.
+    Kept,
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -234,12 +242,18 @@ fn millis(duration: Duration) -> u64 {
 ///    put again since is skipped. The delete is conditional on the content tag the copy found
 ///    (`If-Match`, [`Backend::delete_if_match`]), so an object that was put again after the
 ///    copy, with other bytes, is kept; for an entry applied by an earlier reconciler the tag is
-///    read from the hot tier just before the delete.
-/// 3. **Checkpoint.** For each proxy, `_tiering/checkpoint/<proxy_id>` is written (an `If-Match`
-///    put, after the first): every journal object up to a number is applied, and every entry
-///    before a position is done with (the eviction folds its progress into the checkpoint,
-///    so a restart does not count an eviction twice). After a crash the reconciler resumes
-///    from the checkpoints; whatever it had done since is done again, which is harmless.
+///    read from the hot tier just before the delete, and only if the cold tier holds a real
+///    object of that content then (not nothing, not a reservation, not another object: the hot
+///    object may be the only copy, and stays, and is asked about again by the next pass).
+/// 3. **Checkpoint.** The lease is checked once more first (a HEAD, no renewal): a pass that
+///    finds it lost stores nothing more, and forgets what it read. Then, for each proxy,
+///    `_tiering/checkpoint/<proxy_id>` is read back, joined with what this pass has (the
+///    larger of each number), and written (an `If-Match` put, after the first) only if that is
+///    more than what is stored, so a stored checkpoint never moves backwards: every journal
+///    object up to a number is applied, and every entry before a position is done with (the
+///    eviction folds its progress into the checkpoint, so a restart does not count an eviction
+///    twice). After a crash the reconciler resumes from the checkpoints; whatever it had done
+///    since is done again, which is harmless.
 /// 4. **Prune.** A journal object is deleted when the stored checkpoint has applied it and
 ///    moved past its entries, and it was written at least [`ReconcilerConfig::retention`]
 ///    ago. A journal object that holds an object the hot tier may still hold is kept: the
@@ -259,10 +273,16 @@ fn millis(duration: Duration) -> u64 {
 ///   deletes on, and is deleted from the hot tier unless its own journal entry shows in the
 ///   read that precedes the eviction. It is in the cold tier by then in the common case (the
 ///   copy found it), so only the hot copy goes.
-/// - A pass that takes longer than the lease ttl loses the lease, and goes on to the end:
-///   it may store an older checkpoint over the one of the reconciler that took over. Keep a
-///   pass shorter than the ttl (set `parallel` and the ttl accordingly), and do not cancel a
-///   pass.
+/// - A pass that takes longer than the lease ttl loses the lease. It still copies, and may still
+///   evict, beside the reconciler that took over (there is no fencing token; copies are
+///   create-only), but once it finds the lease gone, before the checkpoint, it stores no
+///   checkpoint, prunes nothing and publishes no usage. A checkpoint is never stored lower. The
+///   check is a HEAD, not a fence: a pass that takes the lease over between the check and the
+///   stores can still prune or publish usage, and the checkpoint it stores is joined with the
+///   stored one. Keep a pass shorter than the ttl (set `parallel` and the ttl accordingly), and
+///   do not cancel a pass.
+/// - A checkpoint object that does not decode fails the pass of its proxy each time, until the
+///   object is deleted (the proxy then starts over from journal object 1).
 /// - A delete entry of a key that a reserved put or a mirror last put (by what the reconciler read
 ///   in the last retention) is not applied to the cold tier: the proxy removed the cold object
 ///   itself. One that is applied after more than the retention since that put is applied as a
@@ -337,6 +357,17 @@ impl Reconciler {
         let now = self.config.clock.now();
         self.books.forget_reserved_before(now.saturating_sub(kept));
         self.evict(&ids, &mut report).await;
+        match self.lease.still_held().await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.books = Books::default();
+                return report;
+            }
+            Err(error) => {
+                report.failed.push(error);
+                return report;
+            }
+        }
         for id in &ids {
             self.persist(id, &mut report).await;
             self.prune(id, &mut report).await;
@@ -664,6 +695,24 @@ impl Reconciler {
         }
         self.books.trim_stale();
         let low = (budget * self.config.low_water) as u64;
+        let mut kept = Vec::new();
+        self.evict_down(low, report, &mut kept).await;
+        // A candidate that was left stays a candidate (oldest first, as before), so that a later
+        // pass asks again once the cold tier holds the object.
+        for (proxy, candidate) in kept.into_iter().rev() {
+            self.books.requeue(&proxy, candidate);
+        }
+    }
+
+    /// Evicts candidates, oldest first, until the hot tier holds no more than `low` bytes, there
+    /// is no candidate left, or a call failed. The candidates that were left are put in `kept`,
+    /// with the name of their proxy.
+    async fn evict_down(
+        &mut self,
+        low: u64,
+        report: &mut PassReport,
+        kept: &mut Vec<(String, Candidate)>,
+    ) {
         while self.books.usage() > low {
             let Some((proxy, victim)) = self.books.next_victim() else {
                 return;
@@ -675,7 +724,7 @@ impl Reconciler {
                         report.evicted += 1;
                     }
                     Ok(Eviction::Gone) => self.books.forget(&victim.key),
-                    Ok(Eviction::Replaced) => {}
+                    Ok(Eviction::Kept) => kept.push((proxy.clone(), victim)),
                     Err(error) => {
                         report.failed.push(error);
                         return;
@@ -686,34 +735,109 @@ impl Reconciler {
         }
     }
 
-    /// Deletes one candidate from the hot tier, on the content tag the copy found, or on the tag the
-    /// hot tier gives now if the entry was applied by an earlier reconciler.
+    /// Deletes one candidate from the hot tier, on the content tag the copy found. An entry that an
+    /// earlier reconciler applied has none: the tag is read from the hot tier, and the cold tier is
+    /// asked first whether it holds a real object of that content (not nothing, not a reservation,
+    /// not another object), since nothing here has seen the copy.
     async fn evict_one(&self, victim: &Candidate) -> Result<Eviction, Error> {
         let tag = match &victim.tag {
             Some(tag) => tag.clone(),
-            None => match self.hot.head(&victim.key).await {
-                Ok(meta) => meta.tag,
-                Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
-                Err(error) => return Err(error),
-            },
+            None => {
+                let hot = match self.hot.head(&victim.key).await {
+                    Ok(meta) => meta,
+                    Err(Error::NotFound(_)) => return Ok(Eviction::Gone),
+                    Err(error) => return Err(error),
+                };
+                match self.cold_holds_copy(&victim.key, &hot).await? {
+                    Some(true) => hot.tag,
+                    Some(false) => return Ok(Eviction::Kept),
+                    None => return Ok(Eviction::Gone),
+                }
+            }
         };
         match self.hot.delete_if_match(&victim.key, &tag).await {
             Ok(()) => Ok(Eviction::Removed),
             Err(Error::NotFound(_)) => Ok(Eviction::Gone),
-            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Replaced),
+            Err(Error::PreconditionFailed(_)) => Ok(Eviction::Kept),
             Err(error) => Err(error),
         }
     }
 
-    /// Stores the checkpoint of a proxy if it moved.
+    /// Whether the cold tier holds a real object under `key` of the content of `hot`: not a
+    /// reservation, not nothing, and not another object. The tags are not compared (two tiers of
+    /// different kinds tag the same bytes differently): the sizes are, and if they agree the bytes.
+    /// `None` if the hot object is gone by the time it is read.
+    async fn cold_holds_copy(&self, key: &str, hot: &Meta) -> Result<Option<bool>, Error> {
+        match self.cold.head(key).await {
+            Ok(cold) if !cold.reservation && cold.size == hot.size => {
+                match self.same_bytes(key, hot, &cold).await? {
+                    Some(true) => self.still_the_object(key, &cold).await.map(Some),
+                    other => Ok(other),
+                }
+            }
+            Ok(_) => Ok(Some(false)),
+            Err(Error::NotFound(_)) => Ok(Some(false)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier still holds, under `key`, the real object of `seen` (what the HEAD
+    /// before the comparison gave): the same content tag and not a reservation. The comparison
+    /// reads bind each range to that tag, so this look only finds an object that was removed or
+    /// replaced after the last range was read.
+    async fn still_the_object(&self, key: &str, seen: &Meta) -> Result<bool, Error> {
+        match self.cold.head(key).await {
+            Ok(now) => Ok(!now.reservation && now.tag == seen.tag),
+            Err(Error::NotFound(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave,
+    /// in the object `cold` (what a HEAD of the cold tier gave). Both tiers are read in ranges of
+    /// at most [`COMPARE_RANGE`] bytes, each read with its content tag and mark in one call, so
+    /// that every byte compared is of the object whose tag a HEAD gave: a range of another object
+    /// (a key replaced between the HEAD and the read, and put back before the next look) has
+    /// another tag, a range of a reservation is marked, and either ends the comparison with
+    /// `Some(false)`, as does a range that is not the length asked for; a read ends at the first
+    /// difference. Neither tier is held whole. An object that is not there to be read is not an
+    /// error: the cold one is not held (`Some(false)`), and the hot one is gone (`None`).
+    async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
+        let mut offset = 0u64;
+        while offset < hot.size {
+            let len = (hot.size - offset).min(COMPARE_RANGE);
+            let range = ByteRange::new(offset, len);
+            let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            };
+            if tag != hot.tag || mine.len() as u64 != len {
+                return Ok(Some(false));
+            }
+            let (theirs, marked, tag) = match self.cold.get_marked(key, Some(range)).await {
+                Ok(read) => read,
+                Err(Error::NotFound(_)) => return Ok(Some(false)),
+                Err(error) => return Err(error),
+            };
+            if marked || tag != cold.tag || theirs != mine {
+                return Ok(Some(false));
+            }
+            offset += len;
+        }
+        Ok(Some(true))
+    }
+
+    /// Stores the checkpoint of a proxy if it moved past the stored one. What is stored after
+    /// the call (the join of the two) is what the prune follows.
     async fn persist(&mut self, id: &str, report: &mut PassReport) {
         let wanted = self.books.stream(id).snapshot();
-        if wanted == self.books.stream(id).persisted {
+        let persisted = self.books.stream(id).persisted.clone();
+        if persisted.joined(&wanted) == persisted {
             return;
         }
-        let key = checkpoint_key(id);
-        match write_object(self.hot.as_ref(), &key, to_body(&wanted)).await {
-            Ok(()) => self.books.stream(id).persisted = wanted,
+        match store_checkpoint(self.hot.as_ref(), id, &wanted).await {
+            Ok(stored) => self.books.stream(id).persisted = stored,
             Err(error) => report.failed.push(error),
         }
     }
@@ -755,3 +879,6 @@ impl Reconciler {
         }
     }
 }
+
+/// The most bytes of the hot object that one read of a comparison holds.
+const COMPARE_RANGE: u64 = 1 << 20;

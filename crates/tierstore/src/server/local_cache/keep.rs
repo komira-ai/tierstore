@@ -25,6 +25,10 @@
 //! without the trip, which was best effort already. The eviction pass a kept object may call for
 //! runs on a task of its own, after the keep, and the put never waits for it.
 //!
+//! A cache opened with [`open_observed`](super::LocalCache::open_observed) calls its observer
+//! after each keep that has put its object in the index, so a caller that reads what it wrote
+//! waits for that event, whether the put waited for the keep or not.
+//!
 //! The copy is best effort. A put that finds every keep running, no room in the budget, a stage
 //! directory that cannot be written, a disk that falls behind the body, a HEAD that fails, or a
 //! key that a fill is running for, is answered as if the cache kept nothing: the stage file is
@@ -316,14 +320,36 @@ pub(super) fn tee<'a>(key: &'a str, body: PartBody<'a>, keeping: &'a mut Keeping
 }
 
 impl Inner {
-    /// A create-only put of a body that arrives as chunks.
+    /// Sends a body to the upstream as a create-only put: for `hot_only`, the put that a backend
+    /// with two tiers writes to its first tier only (see
+    /// [`put_stream_hot_only`](crate::Backend::put_stream_hot_only)).
+    async fn send_put(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<(), Error> {
+        if hot_only {
+            self.upstream.put_stream_hot_only(key, len, body).await
+        } else {
+            self.upstream.put_stream(key, len, body).await
+        }
+    }
+
+    /// A create-only put of a body that arrives as chunks; `hot_only` as for
+    /// [`send_put`](Inner::send_put).
     pub(super) async fn put_through(
         self: &Arc<Self>,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
+        hot_only: bool,
     ) -> Result<(), Error> {
         self.writable(key)?;
+        // One HEAD before the body is read, for an upstream of two tiers as for any other: a key
+        // that only the first tier holds is refused by the proxy's own put only after the whole
+        // body has been written to that tier, so the HEAD is what spares the bandwidth and room.
         match self.upstream.head(key).await {
             Ok(_) => {
                 bump(&self.counters.write_exists);
@@ -343,9 +369,9 @@ impl Inner {
         let sent = match &mut keeping {
             Some(keeping) => {
                 let teed = tee(key, body, keeping);
-                self.upstream.put_stream(key, len, teed).await
+                self.send_put(key, len, teed, hot_only).await
             }
-            None => self.upstream.put_stream(key, len, body).await,
+            None => self.send_put(key, len, body, hot_only).await,
         };
         match sent {
             Ok(()) => {}
@@ -553,6 +579,9 @@ impl Inner {
             return Err(SkippedKeep::Deleted);
         }
         drop(stage);
+        if let Some(observer) = &self.observer {
+            observer();
+        }
         // The pass is not the put's to wait for. A pass that is running makes another return
         // at once (see `evict_pass`), so passes started here cannot run twice at the same time.
         let inner = Arc::clone(self);

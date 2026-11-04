@@ -78,6 +78,14 @@ pub fn asset_stem(name: &str, commit: &str, platform: Platform) -> String {
 /// # Errors
 /// `name` does not fit a ustar header.
 pub fn tarball(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    tarball_to(Vec::new(), name, bytes)
+}
+
+/// [`tarball`], written to `sink`, which is given back.
+///
+/// # Errors
+/// `name` does not fit a ustar header, or `sink` cannot be written.
+fn tarball_to<W: Write>(sink: W, name: &str, bytes: &[u8]) -> Result<W, String> {
     let mut header = tar::Header::new_ustar();
     header
         .set_path(name)
@@ -91,12 +99,17 @@ pub fn tarball(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
     header.set_cksum();
     let gzip = flate2::GzBuilder::new()
         .mtime(MTIME)
-        .write(Vec::new(), Compression::best());
+        .write(sink, Compression::best());
     let mut tar = tar::Builder::new(gzip);
-    // Writing to memory cannot fail.
-    tar.append(&header, bytes).expect("tar into memory");
-    let gzip = tar.into_inner().expect("tar into memory");
-    Ok(gzip.finish().expect("gzip into memory"))
+    tar.append(&header, bytes).map_err(sink_failed)?;
+    tar.into_inner()
+        .and_then(flate2::write::GzEncoder::finish)
+        .map_err(sink_failed)
+}
+
+/// The error of a tarball whose sink could not be written.
+fn sink_failed(e: std::io::Error) -> String {
+    format!("cannot write the tarball: {e}")
 }
 
 /// What is wrong with `tgz` as the tarball of the binary `name` holding `bytes`: one
@@ -109,9 +122,8 @@ pub fn check_tarball(tgz: &[u8], name: &str, bytes: &[u8]) -> Vec<String> {
     let mut problems = Vec::new();
     let mut entries = 0;
     let mut archive = tar::Archive::new(&tar[..]);
-    // Only an archive already read from has no entries to list.
-    let all = archive.entries().expect("a fresh archive");
-    for entry in all {
+    // Only an archive already read from has no entries to list, and this one is fresh.
+    for entry in archive.entries().into_iter().flatten() {
         let mut entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
