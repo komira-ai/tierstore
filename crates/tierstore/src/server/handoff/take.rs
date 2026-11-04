@@ -4,7 +4,6 @@ use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::os::fd::OwnedFd;
 use std::path::Path;
-use std::time::Duration;
 
 use rustix::io::{FdFlags, fcntl_setfd};
 use tokio::net::{TcpListener, UnixStream};
