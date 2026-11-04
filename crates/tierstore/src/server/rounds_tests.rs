@@ -68,7 +68,7 @@ impl Rig {
         for _ in 0..5 {
             let round = rounds.round().await;
             assert!(round.failed.is_empty(), "{:?}", round.failed);
-            self.clock.advance(Duration::from_secs(12));
+            self.clock.advance(12_000);
             if let Ok(body) = self.hot_mem.get(USAGE_KEY, None).await {
                 let usage: Usage = serde_json::from_slice(&body).unwrap();
                 times.push(usage.time);
