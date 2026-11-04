@@ -238,7 +238,8 @@ fn the_verb_reads_the_entries_of_a_directory_tier() {
         (status(0), "0 open entries\n", "")
     );
     let backend = DirBackend::open(dir.path()).unwrap();
-    let put = backend.put(&entry_key("k"), Bytes::from_static(b"not json"));
+    let name = entry_key("k");
+    let put = backend.put(&name, Bytes::from_static(b"not json"));
     tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap()
