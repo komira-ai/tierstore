@@ -1,13 +1,19 @@
 //! The lease that makes one reconciler the runner.
 
 use std::collections::hash_map::RandomState;
+use std::future::Future;
 use std::hash::{BuildHasher, Hasher};
+use std::pin::pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
+use futures::future::{Either, select};
+use tokio::sync::Mutex;
 
 use crate::journal::LEASE_KEY;
-use crate::{Backend, Clock, Error};
+use crate::{Backend, Clock, Error, Sleeper};
 
 /// 128 random bits as hex, from the keys the standard library seeds each `RandomState` with
 /// from the operating system's randomness, so that no crate is needed for it. It only has to
@@ -25,60 +31,148 @@ pub(crate) fn new_nonce() -> String {
 /// nonce of this lease and the count of bodies written so far, one to a line.
 ///
 /// It is taken by a create-only put, and renewed by a put that replaces the object only if it
-/// still has the content tag the last write gave (`If-Match`), which also moves the object's
-/// time of last write on. A lease whose object was last written `ttl` ago or longer is
-/// expired, and another holder may take it over, again with `If-Match`, so of two that try
-/// at once one fails. A holder whose renewal fails (it lost the lease, or the hot tier did
-/// not answer) stops holding it at once, and does not use it again before it takes it anew.
-/// A holder that stops deletes the lease object only if it still has the content tag the
-/// holder wrote.
+/// still has the content tag the last write gave (`If-Match`). No time is read from the hot
+/// tier and none is compared across machines; every time here is a reading of the monotonic
+/// clock of this process (`mono`):
+///
+/// - **Takeover.** A contender that finds the lease object taken writes down the content tag
+///   it saw and when it first saw it. It may replace the object, again with `If-Match`, so of
+///   two that try at once one fails, once the same tag has stood for `ttl` on its own clock.
+///   A renewal gives the object a new tag, so a lease that is renewed is never taken. A
+///   contender that has just started therefore waits up to `ttl` before it takes a lease its
+///   holder has left, as long as a holder that stopped without giving it up.
+/// - **Validity.** A holder is valid until `valid_until`, the time before it sent its last
+///   successful write, plus `ttl`, less `margin`. [`Lease::margin_ok`] says whether at least
+///   `margin` of that is left, which is the room a call that must end inside the lease needs.
+/// - **Renewal.** [`Lease::renewing`] renews on a timer of its own, every `renew`, whatever
+///   the holder is doing: a pass that is busy with one long copy does not delay it.
+///
+/// A holder whose renewal fails (it lost the lease, or the hot tier did not answer) stops
+/// holding it at once, and does not use it again before it takes it anew. A holder that stops
+/// deletes the lease object only if it still has the content tag the holder wrote.
 ///
 /// The lease keeps two reconcilers from doing the same work. The copies are create-only and
 /// every other step can be done twice, but a holder only learns that it lost the lease when
-/// it renews it, once for each pass, so a pass longer than `ttl` can run beside another
-/// holder's. A holder also checks the lease again, without renewing it, before it stores its
-/// checkpoint ([`Lease::still_held`]); copies and evictions are not fenced.
+/// it renews it, so a pass can run beside another holder's for up to `renew` (and for as long
+/// as the hot tier does not answer the renewals).
+#[derive(Clone)]
 pub(crate) struct Lease {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
     hot: Arc<dyn Backend>,
-    clock: Arc<dyn Clock>,
+    mono: Arc<dyn Clock>,
     holder: String,
     ttl: u64,
+    /// How long the timer of [`Lease::renewing`] waits between two renewals.
+    period: u64,
+    margin: u64,
     /// Random at `new`, in every body: another process of the same holder name counts its
     /// bodies from the same start, and without the nonce would write the same bodies and so
     /// the same content tags.
     nonce: String,
+    /// The time on `mono` until which the lease is held, or 0 when it is not held. Read
+    /// without the lock, by the pass that works while the timer renews.
+    valid_until: AtomicU64,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
     /// Counts the bodies written, so that every body of this lease differs from the one
     /// before. With the nonce, no holder is mistaken for another by the content tag.
     generation: u64,
     /// The content tag of the lease object as this holder last wrote it, while it holds it.
     etag: Option<String>,
+    /// The tag of the lease object of another holder, and when this contender first saw it.
+    seen: Option<Seen>,
+}
+
+struct Seen {
+    tag: String,
+    since: u64,
 }
 
 impl Lease {
-    /// A lease for `holder`, expired when its object is `ttl_millis` old.
+    /// A lease for `holder`, taken over when the same object has stood for `ttl_millis` on the
+    /// clock `mono`, renewed every `renew_millis` (at least a millisecond), and valid for
+    /// `ttl_millis` less `margin_millis` after the start of its last renewal.
     pub(crate) fn new(
         hot: Arc<dyn Backend>,
-        clock: Arc<dyn Clock>,
+        mono: Arc<dyn Clock>,
         holder: &str,
         ttl_millis: u64,
+        renew_millis: u64,
+        margin_millis: u64,
     ) -> Self {
         Self {
-            hot,
-            clock,
-            holder: holder.to_owned(),
-            ttl: ttl_millis,
-            nonce: new_nonce(),
-            generation: 0,
-            etag: None,
+            shared: Arc::new(Shared {
+                hot,
+                mono,
+                holder: holder.to_owned(),
+                ttl: ttl_millis,
+                period: renew_millis.max(1),
+                margin: margin_millis,
+                nonce: new_nonce(),
+                valid_until: AtomicU64::new(0),
+                state: Mutex::new(State::default()),
+            }),
         }
     }
 
-    /// Holds the lease after this call: renews it if it is held, else takes it if it is free
-    /// or expired.
-    pub(crate) async fn ensure(&mut self) -> bool {
-        match self.etag.clone() {
-            Some(etag) => self.renew(&etag).await,
-            None => self.acquire().await,
+    /// Holds the lease after this call: if it is held with at least the margin left, nothing
+    /// is written (the timer renews it); else it renews it if it is held, or takes it if it
+    /// is free or has stood unchanged for the ttl.
+    pub(crate) async fn ensure(&self) -> bool {
+        if self.margin_ok() {
+            return true;
+        }
+        let mut state = self.shared.state.lock().await;
+        let sent = self.shared.mono.now();
+        let held = match state.etag.clone() {
+            Some(etag) => self.shared.renew(&mut state, &etag).await,
+            None => self.shared.acquire(&mut state).await,
+        };
+        self.shared.settle(held, sent);
+        held
+    }
+
+    /// Whether the lease is held and at least the margin is left of the time it is valid.
+    pub(crate) fn margin_ok(&self) -> bool {
+        let until = self.shared.valid_until.load(Ordering::SeqCst);
+        let now = self.shared.mono.now();
+        until != 0 && now < until && until - now >= self.shared.margin
+    }
+
+    /// Runs `work`, and while it runs renews the lease every `renew` on a timer of its own, as
+    /// long as the lease is held; it never takes a lease: a holder that lost it stops renewing,
+    /// and the pass finds out at its next check. The timer waits first, so nothing is written
+    /// when `work` ends sooner than one period. It is the wait of `sleeper`, not a delay of
+    /// `work`, that decides when a renewal is made, so a step that takes longer than the ttl
+    /// does not keep the lease from being renewed.
+    pub(crate) async fn renewing<T>(
+        &self,
+        sleeper: &dyn Sleeper,
+        work: impl Future<Output = T>,
+    ) -> T {
+        let mut work = pin!(work);
+        loop {
+            let wait = sleeper.sleep(Duration::from_millis(self.shared.period));
+            match select(work.as_mut(), wait).await {
+                Either::Left((done, _)) => return done,
+                Either::Right(((), _)) => self.renew_held().await,
+            }
+        }
+    }
+
+    /// Renews the lease if it is held.
+    async fn renew_held(&self) {
+        let mut state = self.shared.state.lock().await;
+        if let Some(etag) = state.etag.clone() {
+            let sent = self.shared.mono.now();
+            let held = self.shared.renew(&mut state, &etag).await;
+            self.shared.settle(held, sent);
         }
     }
 
@@ -88,14 +182,16 @@ impl Lease {
     ///
     /// # Errors
     /// What the HEAD gives other than not found.
-    pub(crate) async fn still_held(&mut self) -> Result<bool, Error> {
-        let Some(etag) = self.etag.clone() else {
+    pub(crate) async fn still_held(&self) -> Result<bool, Error> {
+        let mut state = self.shared.state.lock().await;
+        let Some(etag) = state.etag.clone() else {
             return Ok(false);
         };
-        match self.hot.head(LEASE_KEY).await {
+        match self.shared.hot.head(LEASE_KEY).await {
             Ok(meta) if meta.tag == etag => Ok(true),
             Ok(_) | Err(Error::NotFound(_)) => {
-                self.etag = None;
+                state.etag = None;
+                self.shared.valid_until.store(0, Ordering::SeqCst);
                 Ok(false)
             }
             Err(error) => Err(error),
@@ -104,37 +200,56 @@ impl Lease {
 
     /// Gives the lease up, if it is held and the lease object is still the one this holder
     /// wrote: a holder that lost the lease without knowing leaves the new holder's alone.
-    pub(crate) async fn release(&mut self) {
-        if let Some(etag) = self.etag.take() {
-            let ours = match self.hot.head(LEASE_KEY).await {
+    pub(crate) async fn release(&self) {
+        let mut state = self.shared.state.lock().await;
+        self.shared.valid_until.store(0, Ordering::SeqCst);
+        if let Some(etag) = state.etag.take() {
+            let ours = match self.shared.hot.head(LEASE_KEY).await {
                 Ok(meta) => meta.tag == etag,
                 Err(_) => false,
             };
             if ours {
-                let _ = self.hot.delete(LEASE_KEY).await;
+                let _ = self.shared.hot.delete(LEASE_KEY).await;
             }
         }
     }
+}
 
-    fn body(&mut self) -> Bytes {
-        self.generation += 1;
+impl Shared {
+    /// Records the result of a write that was sent at `sent`.
+    fn settle(&self, held: bool, sent: u64) {
+        let until = if held {
+            sent.saturating_add(self.ttl)
+                .saturating_sub(self.margin)
+                .max(1)
+        } else {
+            0
+        };
+        self.valid_until.store(until, Ordering::SeqCst);
+    }
+
+    fn body(&self, state: &mut State) -> Bytes {
+        state.generation += 1;
         Bytes::from(format!(
             "{}\n{}\n{}",
-            self.holder, self.nonce, self.generation
+            self.holder, self.nonce, state.generation
         ))
     }
 
-    async fn renew(&mut self, etag: &str) -> bool {
-        let body = self.body();
-        self.etag = self.hot.put_if_match(LEASE_KEY, body, etag).await.ok();
-        self.etag.is_some()
+    async fn renew(&self, state: &mut State, etag: &str) -> bool {
+        let body = self.body(state);
+        state.etag = self.hot.put_if_match(LEASE_KEY, body, etag).await.ok();
+        if state.etag.is_some() {
+            state.seen = None;
+        }
+        state.etag.is_some()
     }
 
-    async fn acquire(&mut self) -> bool {
-        let body = self.body();
+    async fn acquire(&self, state: &mut State) -> bool {
+        let body = self.body(state);
         match self.hot.put(LEASE_KEY, body).await {
-            Ok(()) => self.learn_tag().await,
-            Err(Error::AlreadyExists(_)) => self.take_over().await,
+            Ok(()) => self.learn_tag(state).await,
+            Err(Error::AlreadyExists(_)) => self.take_over(state).await,
             Err(_) => false,
         }
     }
@@ -142,19 +257,33 @@ impl Lease {
     /// Reads the content tag of the lease object this holder just created. `Backend::put`
     /// returns no tag, so if the object was replaced since, this holder adopts the other holder's
     /// tag. The nonce does not close that; a create-only put that returns the tag would.
-    async fn learn_tag(&mut self) -> bool {
-        self.etag = self.hot.head(LEASE_KEY).await.ok().map(|meta| meta.tag);
-        self.etag.is_some()
+    async fn learn_tag(&self, state: &mut State) -> bool {
+        state.etag = self.hot.head(LEASE_KEY).await.ok().map(|meta| meta.tag);
+        state.seen = None;
+        state.etag.is_some()
     }
 
-    /// Takes the lease over if its object has expired, by replacing the object that was seen.
-    async fn take_over(&mut self) -> bool {
+    /// Takes the lease over if the object has stood with one content tag for the ttl on the
+    /// clock of this process, by replacing the object that was seen. The first look at a tag
+    /// only writes it down.
+    async fn take_over(&self, state: &mut State) -> bool {
+        let looked = self.mono.now();
         let Ok(meta) = self.hot.head(LEASE_KEY).await else {
             return false;
         };
-        if meta.modified.saturating_add(self.ttl) > self.clock.now() {
+        let since = match &state.seen {
+            Some(seen) if seen.tag == meta.tag => seen.since,
+            _ => {
+                state.seen = Some(Seen {
+                    tag: meta.tag.clone(),
+                    since: looked,
+                });
+                looked
+            }
+        };
+        if looked.saturating_sub(since) < self.ttl {
             return false;
         }
-        self.renew(&meta.tag).await
+        self.renew(state, &meta.tag).await
     }
 }

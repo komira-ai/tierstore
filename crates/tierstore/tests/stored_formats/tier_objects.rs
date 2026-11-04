@@ -127,19 +127,19 @@ async fn a_proxy_reads_a_usage_with_a_field_added_later() {
     read_usage(USAGE_NEWER).await;
 }
 
-/// Asserts that opening a proxy writes a registration with a body under
-/// `_tiering/proxies/<proxy_id>`: a JSON object with `proto` 1, a `boot` and `hb` 0 (a proxy that
-/// has not beaten); and that opening over the empty marker of the fixture, which every release
-/// before wrote, leaves it as it is.
+/// Asserts that opening a proxy writes a registration under `_tiering/proxies/<proxy_id>` that is
+/// JSON with `proto` 1, a `boot` and `hb` 0 (a proxy that does not beat yet), and that opening over
+/// the empty marker of the fixture, which a release before the heartbeat wrote, leaves it as it
+/// is.
 #[tokio::test(start_paused = true)]
-async fn opening_a_proxy_writes_a_registration_with_a_body_and_leaves_the_empty_marker() {
+async fn opening_a_proxy_writes_a_registration_and_leaves_an_empty_marker_as_it_is() {
     let tiers = Tiers::new();
     tiers.proxy("p1", 1000).await.unwrap();
-    let stored = tiers.stored("_tiering/proxies/p1").await;
-    let found: serde_json::Value = serde_json::from_slice(&stored).unwrap();
-    assert_eq!(found["proto"], 1);
-    assert_eq!(found["hb"], 0);
-    assert!(found["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
+    let body = tiers.stored("_tiering/proxies/p1").await;
+    let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(seen["proto"], 1);
+    assert_eq!(seen["hb"], 0);
+    assert!(seen["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
 
     tiers.seed("_tiering/proxies/p2", PROXY_MARKER).await;
     tiers.proxy("p2", 1000).await.unwrap();
@@ -162,21 +162,24 @@ async fn the_lease_body_is_the_holder_a_nonce_and_a_count_as_the_fixture_is() {
     assert!(lines[1].len() == 32 && lines[1].bytes().all(|b| b.is_ascii_hexdigit()));
     assert_eq!(first.replace(lines[1], nonce), LEASE);
 
+    // Less than the margin of the lease is left, so the pass renews it.
+    tiers.clock.set(10_001);
     assert!(reconciler.pass().await.held);
     let second = String::from_utf8(tiers.stored("_tiering/lease").await).unwrap();
     assert_eq!(second.replace(lines[1], nonce), LEASE.replace("\n1", "\n2"));
 }
 
 /// Asserts that a lease object of the fixture, held by `r1`, keeps another reconciler out until
-/// its object is as old as the ttl (30 seconds) and is taken over then, which writes the new
-/// holder's name on the first line. Catches a lease that is no longer judged by the time its
-/// object was written.
+/// the same tag has stood for the ttl (30 seconds) on the other's own clock, counted from its first
+/// look at the object, and is taken over then, which writes the new holder's name on the first
+/// line. Catches a lease that is no longer judged by how long its object has stood unchanged.
 #[tokio::test(start_paused = true)]
 async fn a_lease_object_of_the_fixture_is_held_until_it_expires() {
     let tiers = Tiers::new();
     tiers.seed("_tiering/lease", LEASE.as_bytes()).await;
     let mut other = tiers.reconciler("r2", 1000);
 
+    assert_eq!(other.pass().await, PassReport::default());
     tiers.clock.set(29_999);
     assert_eq!(other.pass().await, PassReport::default());
     tiers.clock.set(30_000);
