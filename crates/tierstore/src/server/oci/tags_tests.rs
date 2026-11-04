@@ -575,8 +575,8 @@ async fn a_tag_object_longer_than_a_digest_is_not_served() {
 
 /// Asserts that an object in a tag's directory whose name does not end in the 20 digits of a
 /// version (too short, not digits, or too big for a `u64`) is 500 `UNKNOWN` for a pull and for a
-/// push, and that the last version (suffix 0) is 500 for a push of another digest and 201 for a
-/// push of the digest it holds.
+/// push, and that the last version (suffix 0) is 500 for a push of any digest, the one it holds
+/// too, as there is no version after it to write.
 #[tokio::test]
 async fn a_name_that_is_no_version_is_refused_and_the_last_version_cannot_be_moved() {
     let rig = Rig::new();
