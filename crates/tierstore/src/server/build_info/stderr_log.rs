@@ -4,7 +4,7 @@
 //! The server says what it does with `tracing::info!`, `warn!` and `error!`, and this subscriber,
 //! which the binary installs before anything else runs, turns each event into the line an operator
 //! reads in the journal. The conversion is partial: the start line, mode changes, sweep results
-//! and drain counts in `cli.rs`, `cache_cli.rs` and `server/mod.rs` are still written with
+//! and drain counts in `cli.rs`, `cli_probe.rs`, `cli_serve.rs`, `cache_cli.rs` and `server/mod.rs` are still written with
 //! `eprintln!`, and the levels below are what they take when they move. Only events of the
 //! `tierstore` crate are written; events of other crates (the S3 client and its runtime, the
 //! object-store backends) are dropped, so the operator sees the same lines as before. A line is the event's message and
@@ -48,14 +48,14 @@ pub(super) fn try_install() -> Result<(), SetGlobalDefaultError> {
 }
 
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.
-pub(super) struct LineLog<W> {
+pub(crate) struct LineLog<W> {
     out: Mutex<W>,
     max: Level,
 }
 
 impl<W: Write> LineLog<W> {
     /// A subscriber over `out` that shows events at `max` and more severe ones.
-    pub(super) fn new(out: W, max: Level) -> Self {
+    pub(crate) fn new(out: W, max: Level) -> Self {
         Self {
             out: Mutex::new(out),
             max,

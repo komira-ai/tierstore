@@ -177,19 +177,19 @@ impl Backend for Churn {
         self.mem.get(key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
         if self.only.as_deref().is_some_and(|only| only != key) {
-            return self.mem.get_marked(key, range).await;
+            return self.mem.get_tagged(key, range).await;
         }
         let before = self.before_marked_read.lock().unwrap().take();
         if let Some(change) = before {
             self.apply(key, change).await;
         }
-        let read = self.mem.get_marked(key, range).await;
+        let read = self.mem.get_tagged(key, range).await;
         let change = self.after_read.lock().unwrap().take();
         if let Some(change) = change {
             self.apply(key, change).await;
@@ -331,12 +331,12 @@ impl Backend for Flaky {
         self.mem.get(key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        self.mem.get_marked(key, range).await
+        self.mem.get_tagged(key, range).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

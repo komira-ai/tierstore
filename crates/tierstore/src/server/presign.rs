@@ -1,18 +1,37 @@
-//! Presigned PUT URLs: SigV4 query-string authentication, for one create-only write.
+//! Presigned URLs: SigV4 query-string authentication, for one create-only write (`PUT`) or for
+//! reads (`GET`, `HEAD`).
 //!
 //! A client that holds a URL made by [`presign_put`] (or by any SigV4 presigner, such as the
 //! ones of the AWS SDKs) writes one object with a plain `PUT` of the URL: no credential and no
-//! library on its side. The server checks the URL exactly as the AWS documentation has it:
+//! library on its side. A URL made by [`presign_get`] (or by an SDK presigner) reads one object
+//! the same way; see "Presigned GET" below. The server checks the URL exactly as the AWS documentation has it:
 //! `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-Expires`, `X-Amz-SignedHeaders`
 //! and `X-Amz-Signature` in the query; a canonical request of the method, the path, the query
 //! sorted and encoded without `X-Amz-Signature`, the signed headers (`host` at least) and the
 //! literal payload `UNSIGNED-PAYLOAD`.
 //!
+//! # Presigned GET
+//!
+//! A key with read rights signs a URL for a read: the full key, a read-only key, or a scoped
+//! key (no new key is needed: it is the key the client signs headers with). The URL is good for
+//! a `GET` or a `HEAD` (whichever method it was signed for) of one object, with any `Range`
+//! header (the header is not signed), and for nothing else: any other method, a call on the
+//! bucket or the service, a multipart call, and a query parameter beyond the six of SigV4 and
+//! `x-id` are `403 AccessDenied`. The URL has the rights of its key and no more: a URL of the
+//! full or a read-only key may read any object a client may read, and a URL of a scoped key only
+//! an object under one of the key's read prefixes. A GC key signs no URL. A URL is good for at
+//! most [`ServerConfig::presign_max_expires`] (15 minutes by default) from its `X-Amz-Date`, and
+//! is refused from the second `X-Amz-Date + X-Amz-Expires` on. Every request is checked on its
+//! own (each part of a parallel download is a request), so a URL serves any number of requests
+//! until it expires. It is a bearer credential: whoever holds the URL can use it until then, so
+//! use TLS where that matters.
+//!
 //! # Presigning keys
 //!
-//! Only a presigning key may sign a URL (`--presign-key-file`, one file per key, mode 0600).
-//! The full and the read-only keys are refused for a URL, and a presigning key is refused for a
-//! request signed in the header: it can never be used for anything but a presigned `PUT`. The
+//! Only a presigning key may sign a URL for a `PUT` (`--presign-key-file`, one file per key,
+//! mode 0600). The full, read-only and scoped keys sign URLs for reads only (a URL of theirs for
+//! any other method is refused), and a presigning key is refused for a request signed in the
+//! header: it can never be used for anything but a presigned `PUT`. The
 //! file holds the key and its ceiling, all of it required (a key without a ceiling is refused at
 //! start):
 //!
@@ -66,7 +85,7 @@ use hyper::http::request::Parts;
 use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX, is_reserved};
+use crate::journal::{RESERVED_PREFIXES, is_reserved};
 
 use super::ServerConfig;
 use super::auth::{
@@ -96,6 +115,11 @@ const FLAG: &str = "--presign-key-file";
 pub(crate) const PRESIGN_ONLY: Refusal = Refusal {
     code: "AccessDenied",
     message: "Access Denied: this access key signs presigned PUT URLs only.",
+};
+
+pub(crate) const READ_URL_ONLY: Refusal = Refusal {
+    code: "AccessDenied",
+    message: "Access Denied: a presigned URL of this key is good for GET or HEAD of one object only.",
 };
 
 pub(crate) const PUT_ONLY: Refusal = Refusal {
@@ -180,8 +204,11 @@ pub fn validate_prefix(prefix: &str) -> Result<(), PresignError> {
         return Err(PresignError::Name("starts with /"));
     }
     check_name(prefix)?;
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    if is_reserved(prefix) || reserved.iter().any(|name| name.starts_with(prefix)) {
+    if is_reserved(prefix)
+        || RESERVED_PREFIXES
+            .iter()
+            .any(|name| name.starts_with(prefix))
+    {
         return Err(PresignError::Name("reserved"));
     }
     Ok(())
@@ -395,8 +422,9 @@ fn one<'a>(pairs: &'a [(String, String)], name: &str) -> Result<&'a str, Refusal
 /// Checks a request with no `Authorization` header as a presigned URL.
 ///
 /// # Errors
-/// The [`Refusal`] that says what is wrong with it. A URL whose key is not a presigning key of
-/// the server (the full key included) is an unknown key.
+/// The [`Refusal`] that says what is wrong with it. A URL whose key is not a presigning key, the
+/// full key, a read-only key or a scoped key of the server is an unknown key; a URL of the last
+/// three for a method but `GET` or `HEAD` is [`READ_URL_ONLY`].
 pub(super) fn verify_query(config: &ServerConfig, parts: &Parts) -> Result<Signed, Refusal> {
     let pairs = query_pairs(parts.uri.query()).ok_or(MALFORMED)?;
     if !pairs.iter().any(|(name, _)| name == "X-Amz-Algorithm") {
@@ -420,8 +448,9 @@ pub(super) fn verify_query(config: &ServerConfig, parts: &Parts) -> Result<Signe
         .map_err(|_| MALFORMED)?;
     let signed: Vec<&str> = one(&pairs, "X-Amz-SignedHeaders")?.split(';').collect();
     let signature = one(&pairs, "X-Amz-Signature")?;
-    let key = config.presign_key(id).filter(|_| region == config.region);
-    let key = key.ok_or(UNKNOWN_KEY)?;
+    let in_region = region == config.region;
+    let signer = Signer::of(config, id).filter(|_| in_region);
+    let signer = signer.ok_or(UNKNOWN_KEY)?;
     if !signed.contains(&"host") {
         return Err(WEAK);
     }
@@ -433,15 +462,14 @@ pub(super) fn verify_query(config: &ServerConfig, parts: &Parts) -> Result<Signe
     if started > now.saturating_add(SKEW_MILLIS) {
         return Err(SKEWED);
     }
-    let longest = key
-        .grant
+    let longest = signer
         .max_expires_secs
         .min(config.presign_max_expires.as_secs());
     if expires == 0 || expires > longest {
         return Err(TOO_LONG);
     }
     let request = canonical(parts, &signed, UNSIGNED, true).ok_or(MALFORMED)?;
-    let signing = signing_key(&key.key.secret, date, region);
+    let signing = signing_key(signer.secret, date, region);
     let mut mac = keyed(&signing);
     mac.update(string_to_sign_for(stamp, (date, region), &request).as_bytes());
     let tag = hex::decode(signature).ok();
@@ -451,11 +479,70 @@ pub(super) fn verify_query(config: &ServerConfig, parts: &Parts) -> Result<Signe
     if now >= started.saturating_add(expires.saturating_mul(1000)) {
         return Err(EXPIRED);
     }
+    if signer.grant.is_none() && !matches!(parts.method, Method::GET | Method::HEAD) {
+        return Err(READ_URL_ONLY);
+    }
     Ok(Signed {
         payload: UNSIGNED.to_owned(),
-        role: Role::PresignPut,
-        presign: Some(key.grant.clone()),
+        role: signer.role,
+        presign: signer.grant.cloned(),
     })
+}
+
+/// The key that signed a URL, and what its URL may do.
+struct Signer<'a> {
+    secret: &'a str,
+    role: Role,
+    /// The ceiling of a presigning key; none for a key that signs reads.
+    grant: Option<&'a Grant>,
+    max_expires_secs: u64,
+}
+
+impl<'a> Signer<'a> {
+    /// The key with this id: a presigning key, or the full, a read-only or a scoped key. A GC
+    /// key, which never reads a body, signs no URL.
+    fn of(config: &'a ServerConfig, id: &str) -> Option<Self> {
+        if let Some(key) = config.presign_key(id) {
+            return Some(Self {
+                secret: &key.key.secret,
+                role: Role::PresignPut,
+                grant: Some(&key.grant),
+                max_expires_secs: key.grant.max_expires_secs,
+            });
+        }
+        let (secret, role) = config.key(id)?;
+        matches!(role, Role::Full | Role::ReadOnly | Role::Scoped(_)).then_some(Self {
+            secret,
+            role,
+            grant: None,
+            max_expires_secs: MAX_EXPIRES_SECS,
+        })
+    }
+}
+
+/// The parameters of the query of a presigned read: the six of SigV4, and `x-id`, which the AWS
+/// SDKs add.
+const READ_QUERY: [&str; 7] = [
+    "X-Amz-Algorithm",
+    "X-Amz-Credential",
+    "X-Amz-Date",
+    "X-Amz-Expires",
+    "X-Amz-SignedHeaders",
+    "X-Amz-Signature",
+    "x-id",
+];
+
+/// Whether the call is one a URL of a key that reads allows: a `GET` or `HEAD` (the method has
+/// been checked) of one object, with no query parameter but those of SigV4 and `x-id`.
+///
+/// # Errors
+/// [`READ_URL_ONLY`] for a call on the bucket or the service, or one with another parameter (a
+/// listing of parts, a part, `uploads`).
+pub(super) fn permit_read(target: &Target, query: &Query) -> Result<(), Refusal> {
+    if !matches!(target, Target::Object(_)) || !query.only(&READ_QUERY) {
+        return Err(READ_URL_ONLY);
+    }
+    Ok(())
 }
 
 /// What a presigned URL is made for.
@@ -476,6 +563,19 @@ pub struct PresignRequest<'a> {
     pub now: u64,
 }
 
+/// A presigned URL for a `GET` of one object, signed with `key` by the standard SigV4 algorithm
+/// for query-string authentication, so that the same URL is good against tierstore, MinIO or S3.
+/// The key is the full key, a read-only key or a scoped key of the server; the URL has the rights
+/// of that key, and the server refuses it for an expiry beyond `--presign-max-expires`. The URL
+/// carries the signature in its query and must be handled as a secret until it expires.
+///
+/// # Errors
+/// [`PresignError`] for a key that is not a valid name, an expiry out of range, or an endpoint
+/// that is not `http(s)://authority`.
+pub fn presign_get(key: &AccessKey, request: &PresignRequest<'_>) -> Result<String, PresignError> {
+    presign_checked("GET", key, request)
+}
+
 /// A presigned URL for a `PUT` of one object, signed with `key` by the standard SigV4 algorithm
 /// for query-string authentication, so that the same URL is good against tierstore, MinIO or S3.
 /// The URL carries the signature in its query and must be handled as a secret until it expires.
@@ -484,6 +584,15 @@ pub struct PresignRequest<'a> {
 /// [`PresignError`] for a key that is not a valid name, an expiry out of range, or an endpoint
 /// that is not `http(s)://authority`.
 pub fn presign_put(key: &AccessKey, request: &PresignRequest<'_>) -> Result<String, PresignError> {
+    presign_checked("PUT", key, request)
+}
+
+/// The URL for `method`, after the checks of the key of the object and of the expiry.
+fn presign_checked(
+    method: &str,
+    key: &AccessKey,
+    request: &PresignRequest<'_>,
+) -> Result<String, PresignError> {
     check_name(request.key)?;
     if request.key.is_empty() {
         return Err(PresignError::Name("empty"));
@@ -491,7 +600,7 @@ pub fn presign_put(key: &AccessKey, request: &PresignRequest<'_>) -> Result<Stri
     if !(1..=MAX_EXPIRES_SECS).contains(&request.expires_secs) {
         return Err(PresignError::Expires);
     }
-    presign_url("PUT", key, request, &[])
+    presign_url(method, key, request, &[])
 }
 
 /// A presigned URL for the method `method` with the query parameters `extra` signed too, whatever

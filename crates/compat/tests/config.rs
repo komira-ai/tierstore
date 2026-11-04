@@ -1,0 +1,109 @@
+//! A configuration file written for the release before, started on this branch: the release before
+//! is the real `tierstore` library of its commit (`tierstore_prev`), and each side is asked what
+//! the binary's `--check-config` asks (the settings that a start makes from the file, with the
+//! key files it names read, and nothing opened). It prints nothing and exits 0 if the file starts.
+
+use std::ffi::OsString;
+use std::fs::Permissions;
+use std::os::unix::fs::PermissionsExt;
+use std::process::ExitCode;
+
+use tierstore_testkit::dir::TestDir;
+
+/// A grant key as the release before wants it: an id and a secret of at least 32 bytes.
+const GRANT_KEY: &str = "AKIDGRANT\n0123456789abcdef0123456789abcdef0123456789abcdef\n";
+
+/// A key as both releases take it: the secret has 16 bytes, the least this branch asks by default.
+const LONG_ENOUGH: &str = "AKID\n0123456789abcdef\n";
+
+fn private(dir: &TestDir, name: &str, text: &str) -> String {
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+    path.display().to_string()
+}
+
+/// The file of a storage node with two tiers in memory, with `extra` in its `[server]` table.
+fn file(dir: &TestDir, access: &str, extra: &str) -> String {
+    let text = format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"p1\"\nbucket = \"tier-bucket\"\n\
+         access_key_file = \"{access}\"\n{extra}\n\
+         [hot_store]\nkind = \"memory\"\nbudget = 1000\n\n[cold_store]\nkind = \"memory\"\n"
+    );
+    let path = dir.path().join("tierstore.toml");
+    std::fs::write(&path, text).unwrap();
+    path.display().to_string()
+}
+
+fn checking(config: &str) -> Vec<OsString> {
+    ["tierstore", "--config", config, "--check-config"]
+        .map(OsString::from)
+        .to_vec()
+}
+
+fn succeeded(code: ExitCode) -> bool {
+    format!("{code:?}") == format!("{:?}", ExitCode::SUCCESS)
+}
+
+/// Asserts that a file with a grant key file and a grant lifetime, which the release before starts
+/// (so it is a file of that release), starts on this branch too: the two keys of the removed read
+/// grant are still accepted, and ignored, so that an old unit starts. The grant key file is also
+/// missing in a second file, which this branch starts because it does not read it, and the release
+/// before refuses because it does.
+#[test]
+fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_branch() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-grant-config");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
+    let grant = private(&dir, "grant.key", GRANT_KEY);
+    let extra = format!("grant_key_files = [\"{grant}\"]\ngrant_max_lifetime = \"5m\"\n");
+    let old = file(&dir, &access, &extra);
+    assert!(
+        succeeded(tierstore_prev::server::cli::main(checking(&old))),
+        "the release before starts its own file"
+    );
+    assert!(
+        succeeded(tierstore::server::cli::main(checking(&old))),
+        "this branch starts the file of the release before"
+    );
+
+    let gone = dir.path().join("no-such-grant.key").display().to_string();
+    let extra = format!("grant_key_files = [\"{gone}\"]\n");
+    let missing = file(&dir, &access, &extra);
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &missing
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&missing))));
+}
+
+/// Asserts the other direction: a file with no key of the read grant, which is what this branch
+/// writes (`--print-config` leaves them out), starts on the release before and on this branch.
+#[test]
+fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branch() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-plain-config");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
+    let plain = file(&dir, &access, "");
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(
+        &plain
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
+}
+
+/// Asserts the change of the default minimum on a file of the release before: a file whose key has
+/// a secret of 6 bytes, which the release before starts, is refused on this branch with the
+/// minimum at its default, which is the one deliberate break; with `min_secret_bytes = 0` in the
+/// file it starts on this branch again. A file this branch prints at the default minimum has no
+/// `min_secret_bytes` key, and starts on both. A file with `min_secret_bytes = 6` is only for this
+/// branch (the release before does not know the key), and starts on it.
+#[test]
+fn a_short_secret_of_the_release_before_is_refused_here_until_the_minimum_is_lowered() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-short-secret");
+    let short = private(&dir, "short.key", "AKID\nsecret\n");
+    let old = file(&dir, &short, "");
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(&old))));
+    assert!(!succeeded(tierstore::server::cli::main(checking(&old))));
+
+    let lowered = file(&dir, &short, "min_secret_bytes = 0\n");
+    assert!(succeeded(tierstore::server::cli::main(checking(&lowered))));
+    let six = file(&dir, &short, "min_secret_bytes = 6\n");
+    assert!(succeeded(tierstore::server::cli::main(checking(&six))));
+}

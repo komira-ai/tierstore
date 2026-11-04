@@ -229,64 +229,6 @@ fn scoped_key_files_are_built_into_the_server_and_their_ids_must_differ() {
     }
 }
 
-/// Asserts that `--grant-key-file` puts the keys of its files on the server, in the order of the
-/// flags; that a bad file is refused with a message that names the flag (not as invalid flags);
-/// and that a grant key whose id is the full key's, a read-only key's, a scoped key's or another
-/// grant key's is invalid flags (status 2).
-#[test]
-fn grant_key_files_are_built_into_the_server_and_their_ids_must_differ() {
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-grant-flag");
-    const GRANT_SECRET: &str = "grant-secret-0123456789-abcdefghij";
-    let text = |id: &str| {
-        format!("{{\"access_key_id\": \"{id}\", \"secret_access_key\": \"{GRANT_SECRET}\"}}")
-    };
-    let one = key_file(&dir, "one", &text("GR1"), 0o600);
-    let two = key_file(&dir, "two", &text("GR2"), 0o600);
-    let mut ok = cli(&dir);
-    ok.grant_key_file = vec![one.clone(), two];
-    ok.grant_max_lifetime = Duration::from_secs(300);
-    let built = build(&ok).expect("built");
-    assert_eq!(built.server.grant_max_lifetime, Duration::from_secs(300));
-    let keys = &built.server.grant_keys;
-    let ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
-    assert_eq!(ids, ["GR1", "GR2"]);
-
-    let empty = key_file(&dir, "empty", "", 0o600);
-    let mut bad = cli(&dir);
-    bad.grant_key_file = vec![empty];
-    let why = build(&bad).err().expect("refused");
-    assert!(why.to_string().starts_with("--grant-key-file "), "{why}");
-    assert!(why.downcast_ref::<InvalidFlags>().is_none(), "{why}");
-
-    let full = key_file(&dir, "full", &text("AKID"), 0o600);
-    let reader = key_file(&dir, "reader", "GR1\nread-secret\n", 0o600);
-    let scoped = key_file(
-        &dir,
-        "scoped",
-        r#"{"access_key_id": "GR1", "secret_access_key": "g", "read_prefixes": ["cas/"], "write_prefixes": [], "delete_prefixes": []}"#,
-        0o600,
-    );
-    for (grants, setup) in [
-        (vec![full], 0),
-        (vec![one.clone()], 1),
-        (vec![one.clone()], 2),
-        (vec![one.clone(), one], 0),
-    ] {
-        let mut cli = cli(&dir);
-        cli.grant_key_file = grants;
-        match setup {
-            1 => cli.read_only_key_file = vec![reader.clone()],
-            2 => cli.scoped_key_file = vec![scoped.clone()],
-            _ => {}
-        }
-        let why = build(&cli).err().expect("refused");
-        assert!(why.downcast_ref::<InvalidFlags>().is_some(), "{why}");
-        let text = why.to_string();
-        assert!(text.contains("used twice"), "{text}");
-        assert!(!text.contains(GRANT_SECRET), "{text}");
-    }
-}
-
 /// Asserts that a memory tier and a directory tier open, the directory being made, and that any
 /// other kind, and a directory that has no name or cannot be made, is refused with the flag's
 /// name and the kind it was given.
@@ -500,20 +442,4 @@ fn a_secret_under_the_minimum_refuses_the_start_for_every_kind_of_key() {
     let mut ok = cli(&dir);
     ok.access_key_file = at_minimum;
     assert!(build(&ok).is_ok());
-
-    let grant_secret = "grant-secret-0123456789-abcdefghij";
-    let grant = key_file(&dir, "grant", &json("GR1", grant_secret, ""), 0o600);
-    let mut by_grant = cli(&dir);
-    by_grant.grant_key_file = vec![grant];
-    assert!(build(&by_grant).is_ok());
-    by_grant.access_key_file = key_file(
-        &dir,
-        "long-access",
-        "AKID\naccess-secret-0123456789-abcdefghijklmnopqrstuvwxyz\n",
-        0o600,
-    );
-    assert!(build(&by_grant).is_ok());
-    by_grant.min_secret_bytes = 40;
-    let why = build(&by_grant).err().expect("refused");
-    assert_eq!(why.to_string(), refusal("--grant-key-file", "GR1", 34, 40));
 }

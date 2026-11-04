@@ -7,7 +7,8 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | What | Where | Format |
 |---|---|---|
 | Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE`, `PUTRESERVED` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` (see below) |
-| Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | empty object |
+| Key entry (not yet written by any release path) | `_entries/<sha256 hex of the key>` in the hot tier | JSON: `v`, `key`, `op` (`PUT`, `DEL`, `CB` or `EVICT`), `st` (`HELD`, `PENDING` or `SEALED`), `owner` (or `null`), `nonce`, `created_ms` |
+| Proxy registration | `_tiering/proxies/<proxy_id>` in the hot tier | JSON: `proto`, `boot`, `hb` (the marker of a release before the heartbeat is an empty object, which is still read) |
 | Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
 | Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
@@ -23,6 +24,10 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 - `PUTMIRROR`: an object a read copied from the cold tier into the hot tier. `cold_tag` is the tag the cold object had and `hot_tag` is the tag the hot tier gave the copy. It is never copied to the cold tier.
 
 Both tags are absent in the entries of releases before these operations, and `hot_tag` is absent in the mirrors of releases before that field. An entry with an operation this release does not know reads as `Unknown` and is skipped.
+
+### Key entries
+
+An entry says who is working on a key and what is to be done next. A reader ignores fields it does not know and reads an `op` or `st` it does not know as `Unknown`, which no transition accepts. `created_ms` is for metrics only. `nonce` is written afresh by every write, so that an actor that did not get an answer to a write reads the entry back and tells whether the write was its own.
 
 ## The rule
 

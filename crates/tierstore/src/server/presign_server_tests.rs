@@ -346,8 +346,8 @@ async fn a_presigning_key_never_reads_lists_deletes_or_uploads_in_parts() {
 }
 
 /// Asserts that a request signed in the header with the presigning key is refused, whatever it
-/// asks for, and that the full key and a read-only key cannot sign a URL: the key of a URL is
-/// never one with other rights.
+/// asks for, and that the full key and a read-only key cannot sign a URL for a PUT: a URL of a key
+/// that reads is good for a GET or HEAD only.
 #[tokio::test(start_paused = true)]
 async fn the_presigning_key_signs_urls_only_and_other_keys_do_not() {
     let f = fixture().await;
@@ -375,7 +375,7 @@ async fn the_presigning_key_signs_urls_only_and_other_keys_do_not() {
         let reply = f.put(&url, b"x").await;
         assert_eq!(
             refused(&reply),
-            (403, "InvalidAccessKeyId".to_owned()),
+            (403, "AccessDenied".to_owned()),
             "{}",
             who.id
         );
