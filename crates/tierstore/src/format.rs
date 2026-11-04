@@ -12,8 +12,9 @@
 //! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
 //!   `drain` for the settle time, and every journal it knows is applied to its end. Writes stay
 //!   paused.
-//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
-//!   entries of their keys; it never pauses writes for it.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts and the
+//!   completions of multipart uploads on the entries of their keys, and only while its heartbeat is
+//!   acknowledged; deletes still use the journal. It never pauses writes for it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
