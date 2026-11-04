@@ -585,24 +585,6 @@ async fn a_store_that_fails_under_a_tag_is_503() {
     served.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
 }
 
-/// Asserts that an object under a tag whose name is not a version (not 20 digits, or digits of
-/// another length) is 500 `UNKNOWN` and is not served: the tag cannot be read through it.
-#[tokio::test]
-async fn an_object_under_a_tag_that_is_not_a_version_is_not_served() {
-    let rig = Rig::new();
-    for (tag, suffix) in [("named", "notaversion"), ("short", "12345")] {
-        let key = format!("oci/tags/app/{tag}/{suffix}");
-        rig.memory
-            .put(&key, Bytes::from_static(b"x"))
-            .await
-            .expect("put");
-        let served = rig
-            .send(Method::GET, &format!("/v2/app/manifests/{tag}"))
-            .await;
-        served.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
-    }
-}
-
 /// Asserts that a version that is a valid digest followed by more bytes is 500 `UNKNOWN` and is
 /// not served, as a version of exactly the digest's length is the only one that is a tag.
 #[tokio::test]

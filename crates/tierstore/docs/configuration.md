@@ -68,7 +68,6 @@ kind             = "s3"
 bucket           = "tierstore-cold"
 endpoint         = "http://s3-cold.example:9000"
 credentials_file = "/etc/tierstore/cold.credentials"
-skip_checks      = []
 ```
 
 Start it with the file and nothing else but the flags of the run:
@@ -116,7 +115,7 @@ How the cache behaves is in [operations](operations.md#a-build-node). The file i
 
 ## A file for a storage node with a cache
 
-One process that owns the data and keeps a disk cache in front of its own proxy: the file has `[hot_store]`, `[cold_store]` and `[local_cache]`. The S3 front and the OCI front read from the cache; the cache reads from, and writes to, the proxy, which is a storage node's (both tiers, the journal, the reconciler). The tiers are tested at the start as a storage node's are; the cache's own self-test of an upstream is not run, because its upstream is the proxy:
+One process that owns the data and keeps a disk cache in front of its own proxy: the file has `[hot_store]`, `[cold_store]` and `[local_cache]`. The S3 front and the OCI front read from the cache; the cache reads from, and writes to, the proxy, which is a storage node's (both tiers, the journal, the reconciler). The tiers are not tested at the start, as a storage node's are not either:
 
 ```toml
 [[interface]]
@@ -221,7 +220,6 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.body_idle_timeout` | duration, `30s` | how long a body or an answer may go without a byte; more than zero |
 | `server.min_secret_bytes` | bytes, 16 | the fewest bytes of the secret of any access key (full, read-only, presigning, GC, scoped); a key file with a shorter secret refuses the start |
 | `server.s3_request_timeout` | duration, `60s` | the limit on a request to an `s3` tier (both tiers); more than zero. Set it longer than the longest multipart completion your store takes |
-| `server.backend_check_wait` | duration, `5m` | how long the start-up self-test asks again of a tier that does not answer; `0s` asks once |
 | `server.s3_connect_timeout` | duration, `5s` (1ms to 10m) | how long a connection to an `s3` tier (both tiers, or the upstream of a cache) may take to be opened |
 | `server.s3_min_bytes_per_sec` | bytes a second, 1048576 | the slowest rate at which the body of a write to an `s3` tier is taken to go: a write may take `s3_request_timeout` plus its length at this rate; 0 gives every request `s3_request_timeout` however large its body |
 | `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
@@ -242,7 +240,8 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | `cold_store.endpoint` | `http://host[:port]`, required for `s3` | the cold tier's store |
 | `cold_store.region` | string, `us-east-1` | the signing region of the cold tier's store |
 | `cold_store.credentials_file` | path, required for `s3` | the key file of the cold tier's store |
-| `cold_store.skip_checks` | list of `CHECK=REASON`, none | the start-up check that is left out, with its reason. Only `multipart-conditional` can be skipped, and it needs a reason; it runs on the cold tier |
+| `hot_store.conditional_delete` | boolean; `false` for `s3`, `true` for `memory` and `dir` | whether a conditional delete of the hot tier is sent as a DELETE with `If-Match` (`true`) or as a read of the tag before a plain DELETE (`false`). Set it `true` for a store that enforces `If-Match` on a DELETE, such as Amazon S3. `false` is refused for `memory` and `dir`, which delete conditionally in one atomic step. tierstore does not ask the store; see [operations](operations.md#conditional-delete) |
+| `cold_store.conditional_delete` | boolean; as for the hot tier | the same, for the cold tier |
 
 Only `[hot_store]` has these, since only a process with a hot tier has them:
 
@@ -267,9 +266,9 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.delete_rounds` | count, 3 (1 to 100) | how many times a delete looks at the cold object again after it changed under the delete |
 | `hot_store.listing_heads` | count, 16 (1 to 1024) | how many cold objects of a listing, which may be reservations, are asked about at once |
 | `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
-| `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. Only the puts on journal entries (active format) depend on it: they are refused while the proxy is not live |
-| `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. Only the puts on journal entries (active format) read it: they are refused while it is false. The journal path of a put, a delete and a read does not, and nothing else is refused or destroyed by it yet. The removal of registrations does not use it: that uses `registration_retention` |
-| `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. Only the puts on journal entries (active format) check that time, and only the heartbeat uses `Bounded` |
+| `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
+| `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. The removal of registrations does not use it: that uses `registration_retention` |
+| `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The deletes made on entries send their calls through `Bounded`; the puts made on entries check that time themselves and cut their own cleanup call at it |
 | `hot_store.registration_retention` | duration, `0s` | how long the registration of a proxy that heartbeated must stay unchanged before the reconciler removes it, when the proxy left no journal object. A registration with no heartbeat (the empty one of an older release) is never removed. `0s`, the default, removes none: a proxy of a release without the heartbeat that reopens a registration this release wrote never rewrites it, and the removal would take it for a departed owner's, so set a time only once no such proxy runs |
 
 The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, and a `registration_retention` that is neither zero nor at least `departure`, naming the values.
@@ -291,7 +290,7 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 | `local_cache.max_concurrent_keeps` | count, 8 (1 to 64) | The most create-only puts copied into the cache at once, apart from the fills; a put that finds them all running succeeds and is not kept. A process that does not hold the lock of the cache directory (see [operations](operations.md#the-cache-lock-and-read-only-mode)) keeps no put at all |
 | `local_cache.keep_wait` | duration, `5s` (above 0) | The longest a put waits, once the upstream has the object, for its copy to land in the cache; past it the put is answered and the copy finishes in the background |
 | `local_cache.keep_deadline` | duration, `60s` (above 0, not below `keep_wait`) | The longest a copy takes in all, from the upstream's acknowledgement; a copy not done by then is abandoned and its stage file removed |
-| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the start runs the self-test of a storage node against the upstream and exits 3 if it answers one wrongly. In a file with `[hot_store]` too it is `true` whether left out or given, `false` is refused, and no self-test of the upstream is run (the upstream is the node's own proxy, whose tiers are tested) |
+| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the upstream is not tested at start. In a file with `[hot_store]` too it is `true` whether left out or given, and `false` is refused |
 | `local_cache.whole_fill_limit` | size, 64 MiB (1 byte to `budget`) | The most an object may be for a ranged read of it to fill the whole of it; a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | boolean, `true` | `false` is refused: leave `[local_cache]` out to run without a cache |
 | `local_cache.scrub_rate` | rate, `"16MiB/s"` | a size and `/s`, such as `"50MiB/s"`: the rate at which the scrub re-reads cached objects and hashes them again; `"off"` or `"0B/s"` turns the scrub off (not in a release yet, see [limits](limits.md)) |
@@ -355,7 +354,7 @@ These describe one run, not the data path, and have no key:
 | `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
 | `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (a lingering close, see [operations](operations.md#drain-and-restart)) |
 
-`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down or answers the self-test wrongly; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
+`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a hot tier that is down (the proxy's open fails, `opening the proxy`) or a store that does not do what tierstore requires of it (nothing checks); the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
 
 `--help` and `--version` are the usual: `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp.
 
@@ -380,3 +379,12 @@ A unit that gave flags is moved by writing the file and changing `ExecStart=` to
 ## Not in a release yet
 
 - **Several upstream endpoints.** A cache node listing more than one upstream, with failover between them.
+
+## Deprecated settings
+
+Two settings belonged to the start-up self-test that earlier releases ran. tierstore no longer tests its stores (see [what tierstore requires of a store](operations.md#what-tierstore-requires-of-a-store)), so they do nothing. They are still accepted, so that a file written for an earlier release starts, and each one given is one line on stderr at the start: `tierstore: cold_store.skip_checks is deprecated and ignored: tierstore no longer tests its stores at start-up; remove it`, and the same for `server.backend_check_wait`. Their values are not used: `skip_checks` takes any list of texts, and `backend_check_wait` is still parsed as a duration, as it always was, so a value that is not one is still refused.
+
+| Key | What |
+|---|---|
+| `server.backend_check_wait` | a duration; ignored |
+| `cold_store.skip_checks` | a list of texts; ignored. A build-node file still refuses both keys |

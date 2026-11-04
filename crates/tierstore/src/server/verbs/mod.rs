@@ -82,6 +82,7 @@ impl Hot {
             endpoint: self.hot_endpoint.as_deref(),
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            conditional_delete: None,
         };
         // The verbs take no configuration file, so the S3 client has its defaults.
         open_tier(
