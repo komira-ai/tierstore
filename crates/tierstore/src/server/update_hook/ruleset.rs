@@ -7,9 +7,9 @@
 //! is a separate table, so a swap of the redirect never flushes it.
 
 /// The redirect table: public port to the serving slot.
-pub const FORWARD_TABLE: &str = "kbf_forward_tierstore";
+pub const FORWARD_TABLE: &str = "tierstore_forward";
 /// The guard table: keeps a direct connection to a private port out.
-pub const GUARD_TABLE: &str = "kbf_guard_tierstore";
+pub const GUARD_TABLE: &str = "tierstore_guard";
 
 /// The marker in a listing before the port a rule redirects to.
 const REDIRECT_TO: &str = "redirect to :";

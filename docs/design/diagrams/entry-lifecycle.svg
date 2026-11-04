@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 898" width="960" height="898" role="img" aria-label="Sequence diagram of the life of one write: Client, Node, Hot tier, Cold tier, Leader. A: the put takes the entry, lands the object in hot and moves the entry to PENDING, which is the acknowledgement. B: the leader finds the entry by LIST, replicates the object to cold create-only, seals the entry with a compare-and-swap and deletes it. C: eviction later, under its own sealed entry.">
+<title>The life of one write: its entry, from put to release</title>
+<defs><marker id="entry-lifecycle-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="entry-lifecycle-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="898" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">The life of one write: its entry, from put to release</text>
+<rect x="15" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="70" y="65" class="b" text-anchor="middle">Client</text>
+<rect x="160" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="215" y="65" class="b" text-anchor="middle">Node</text>
+<rect x="375" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="430" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="595" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="650" y="65" class="b" text-anchor="middle">Cold tier</text>
+<rect x="815" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="870" y="65" class="b" text-anchor="middle">Leader</text>
+<line x1="70" y1="76" x2="70" y2="832" class="ln-d"/>
+<line x1="215" y1="76" x2="215" y2="832" class="ln-d"/>
+<line x1="430" y1="76" x2="430" y2="832" class="ln-d"/>
+<line x1="650" y1="76" x2="650" y2="832" class="ln-d"/>
+<line x1="870" y1="76" x2="870" y2="832" class="ln-d"/>
+<line x1="20" y1="104" x2="940" y2="104" class="ln-d"/>
+<text x="20" y="128" class="b lbl">A  The put (the put sequence, in short)</text>
+<text x="142.5" y="156" class="t-m lbl" text-anchor="middle">1  PUT key</text>
+<line x1="70" y1="168" x2="215" y2="168" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="322.5" y="194" class="t-m lbl" text-anchor="middle">2  create entry (PUT, HELD, node); hot HEAD; cold HEAD</text>
+<line x1="215" y1="206" x2="430" y2="206" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="322.5" y="232" class="t-m lbl" text-anchor="middle">3  hot create key, create-only</text>
+<line x1="215" y1="244" x2="430" y2="244" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="322.5" y="270" class="t-m lbl" text-anchor="middle">4  CAS entry: (PUT, HELD) to (PUT, PENDING)</text>
+<line x1="215" y1="282" x2="430" y2="282" class="ln-o" marker-end="url(#entry-lifecycle-ao)"/>
+<text x="142.5" y="308" class="t-m lbl" text-anchor="middle">5  200: ACK POINT</text>
+<line x1="215" y1="320" x2="70" y2="320" class="ln-o" marker-end="url(#entry-lifecycle-ao)"/>
+<line x1="20" y1="338" x2="940" y2="338" class="ln-d"/>
+<text x="20" y="362" class="b lbl">B  The leader copies it to cold (the one process holding the _tiering/lease object)</text>
+<text x="650.0" y="390" class="t-m lbl" text-anchor="middle">6  LIST _entries/ (one scan finds every key with work)</text>
+<text x="650.0" y="406" class="t-m lbl" text-anchor="middle">GET the entry: (PUT, PENDING)</text>
+<line x1="870" y1="418" x2="430" y2="418" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="650.0" y="444" class="t-m lbl" text-anchor="middle">7  CAS entry to (PUT, HELD, leader) before it copies</text>
+<text x="650.0" y="460" class="t-m lbl" text-anchor="middle">fails if a DELETE amended it: then no copy starts</text>
+<line x1="870" y1="472" x2="430" y2="472" class="ln-o" marker-end="url(#entry-lifecycle-ao)"/>
+<text x="650.0" y="498" class="t-m lbl" text-anchor="middle">8  hot HEAD key; cold HEAD key (absent)</text>
+<line x1="870" y1="510" x2="430" y2="510" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="760.0" y="536" class="t-m lbl" text-anchor="middle">9  hot GET streamed to cold create-only put</text>
+<text x="760.0" y="552" class="t-m lbl" text-anchor="middle">(cold already has it: compare the bytes; a mismatch is</text>
+<text x="760.0" y="568" class="t-m lbl" text-anchor="middle">logged, hot kept)</text>
+<line x1="870" y1="580" x2="650" y2="580" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="650.0" y="606" class="t-m lbl" text-anchor="middle">10  CAS entry to (PUT, SEALED): fails if a DELETE amended the HELD entry</text>
+<text x="650.0" y="622" class="t-m lbl" text-anchor="middle">meanwhile (that DELETE waits); the leader re-reads and rolls the delete forward</text>
+<line x1="870" y1="634" x2="430" y2="634" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<text x="650.0" y="660" class="t-m lbl" text-anchor="middle">11  delete the entry: released</text>
+<line x1="870" y1="672" x2="430" y2="672" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<rect x="30" y="686" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="706" class="t-m">Cold now holds the object; hot holds the object and no entry. Other nodes never copy or evict. Copy to cold strictly before any delete of the hot</text>
+<text x="40" y="722" class="t-m">copy.</text>
+<line x1="20" y1="752" x2="940" y2="752" class="ln-d"/>
+<text x="20" y="776" class="b lbl">C  Later, above high water: eviction takes the key sealed (see the eviction sequence)</text>
+<text x="650.0" y="804" class="t-m lbl" text-anchor="middle">12  create entry (EVICT, SEALED); re-check both tags; hot DELETE key; delete entry</text>
+<line x1="870" y1="816" x2="430" y2="816" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
+<rect x="30" y="830" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="850" class="t-m">Copy-back works the same way: a cold-served GET leaves a (CB, PENDING) entry; the leader seals it, then streams the current cold object into hot</text>
+<text x="40" y="866" class="t-m">create-only under the seal, then deletes the entry. A DELETE can amend a CB entry only while it is PENDING, never after the seal.</text>
+</svg>

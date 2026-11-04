@@ -42,7 +42,7 @@ fn prepare_starts_the_idle_slot_beside_the_running_one() {
     assert_eq!(
         fake.changes(),
         [
-            "nft.apply kbf_guard_tierstore",
+            "nft.apply tierstore_guard",
             "state.save",
             "slots.point 9302",
             "units.start tierstore@9302.service"
@@ -134,7 +134,7 @@ fn a_declared_restart_wins_over_the_capabilities() {
     assert_eq!(
         changes[..3],
         [
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_forward",
             "units.stop tierstore@9301.service",
             "units.start tierstore@9302.service"
         ]
@@ -176,7 +176,7 @@ fn the_conntrack_bounds_defer_the_update() {
         assert_eq!(done.report.reason, Some(Reason::HostNotReady));
         assert_eq!(done.report.retry_after_secs, Some(300));
         // The guard is loaded first and the same text replaces the one that was there.
-        assert_eq!(fake.changes(), ["nft.apply kbf_guard_tierstore"], "{why}");
+        assert_eq!(fake.changes(), ["nft.apply tierstore_guard"], "{why}");
         assert_eq!(fake.snapshot(), before);
     };
     let passes = |ct: Conntrack, why: &str| {
@@ -216,7 +216,7 @@ fn a_guard_that_cannot_be_loaded_defers_the_update() {
     );
     // The rejected load is a call, but it is one transaction that left nothing, and nothing
     // else was done: no record, link, unit or removal.
-    assert_eq!(fake.changes(), ["nft.apply kbf_guard_tierstore"]);
+    assert_eq!(fake.changes(), ["nft.apply tierstore_guard"]);
     assert_eq!(fake.snapshot(), before);
 }
 
@@ -316,10 +316,7 @@ fn a_deferral_removes_the_guard_it_placed() {
     assert_eq!(done.outcome, Outcome::Deferred);
     assert_eq!(
         fake.changes(),
-        [
-            "nft.apply kbf_guard_tierstore",
-            "nft.delete kbf_guard_tierstore"
-        ]
+        ["nft.apply tierstore_guard", "nft.delete tierstore_guard"]
     );
     assert!(!fake.snapshot().guard);
     assert_eq!(fake.snapshot(), before);
@@ -376,5 +373,5 @@ fn a_re_run_remembers_that_the_update_placed_the_guard() {
 fn nothing_is_applied_before_the_guard() {
     let fake = Fake::new();
     fake.advance(&[Step::Prepare]);
-    assert_eq!(fake.changes()[0], "nft.apply kbf_guard_tierstore");
+    assert_eq!(fake.changes()[0], "nft.apply tierstore_guard");
 }

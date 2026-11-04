@@ -47,12 +47,12 @@ What waiting costs, as the code does it:
   `--drain-deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
-- The client of kbf (`kbf-task`) retries the 503, and a connection that broke while it was still
-  sending the body of a refused PUT, with jittered waits (see its crate docs). It does not retry
-  429, 500, 502 or 504, deliberately.
+- A client should retry the 503, and a connection that broke while it was still
+  sending the body of a refused PUT, with jittered waits. A client should not retry
+  429, 500, 502 or 504, which do not mean a full put queue.
 - The 503 is sent before the body is read, so the front may close the connection under a client
   that is still sending a large body. A client that sees the reset instead of the 503 has to treat
-  it as one; `kbf-task` does.
+  it as one.
 
 ## A build node: a read cache
 
@@ -206,9 +206,9 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
 - the frontend's pack store: `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`,
   `delete_prefixes: []` (add the writer prefix to the delete list to let the frontend remove its
   self-test object and the object of a failed write);
-- build history, `--history-objects 's3://<bucket>/kbf-history?endpoint=...&conditional-put=true'`
+- an append-only history store, `--history-objects 's3://<bucket>/history?endpoint=...&conditional-put=true'`
   (without the last parameter a retried chunk gets `412` for good): `read_prefixes`
-  and `write_prefixes` of `["kbf-history/"]`, `delete_prefixes: []`.
+  and `write_prefixes` of `["history/"]`, `delete_prefixes: []`.
 
 See "Scoped keys" in `packaging/README.md` for the table of calls.
 
