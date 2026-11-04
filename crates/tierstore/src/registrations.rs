@@ -70,6 +70,18 @@ impl Registrations {
         due.map(|(id, _)| id.clone()).collect()
     }
 
+    /// Whether the owner `id` of an entry has departed at `now` (the leader's monotonic clock): its
+    /// registration is not listed, or it has stood unchanged for `wait`. A registration changed
+    /// since the leader first saw it starts the count again, and a leader that has seen none
+    /// yet counts from its first listing, so a departure is noticed up to `wait` late and never
+    /// early.
+    pub(crate) fn departed(&self, id: &str, now: u64, wait: Duration) -> bool {
+        let wait = millis(wait);
+        self.seen
+            .get(id)
+            .is_none_or(|seen| now.saturating_sub(seen.first) >= wait)
+    }
+
     /// Notes that the store was asked about `id` at `now`, so that it is not asked again before
     /// the wait has passed, or the registration has changed. Gives the version (size and time of
     /// the last write) the leader has been counting from, or none for an id it does not know.
