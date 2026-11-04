@@ -11,7 +11,7 @@ use hyper::body::Body as _;
 
 use crate::{Error, ReadBody};
 
-use super::reply::{AnswerBody, S3Error, answer, header_text, streamed_answer};
+use super::reply::{AnswerBody, S3Error, answer, header_text, header_value, streamed_answer};
 
 /// Asserts that printable ASCII is kept, including the space, and everything else becomes `?`.
 #[test]
@@ -19,6 +19,14 @@ fn a_header_value_keeps_printable_ascii_and_nothing_else() {
     let date = "Fri, 15 Jan 2027 08:00:00 GMT";
     assert_eq!(header_text(date), date);
     assert_eq!(header_text("é\u{7f}\n~"), "???~");
+}
+
+/// Asserts that a text that is a header value is kept, and one that is not (a line break) is
+/// answered as `?` instead of the header being dropped.
+#[test]
+fn a_text_that_cannot_be_a_header_value_is_answered_as_a_question_mark() {
+    assert_eq!(header_value("a b"), "a b");
+    assert_eq!(header_value("a\nb"), "?");
 }
 
 /// Asserts that an answer carries its status, its headers with the values made fit for a header,

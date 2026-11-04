@@ -180,10 +180,10 @@ async fn a_get_does_not_copy_back_above_the_critical_mark() {
 }
 
 /// Asserts that a ranged get of an object only the cold tier holds asks the cold tier for the
-/// range alone while the usage is above the critical mark (no copy is made, so a whole read
-/// would only be thrown away), and for the whole object once the usage is under it.
+/// range alone, above the critical mark and under it, and copies nothing back: the memory of the
+/// read is its range, whatever the size of the object.
 #[tokio::test(start_paused = true)]
-async fn a_ranged_get_above_the_critical_mark_reads_only_the_range_from_the_cold_tier() {
+async fn a_ranged_get_reads_only_the_range_from_the_cold_tier_at_any_usage() {
     let rig = Rig::new();
     let mut config = rig.config("p1", 1000);
     config.critical = 0.5;
@@ -198,8 +198,8 @@ async fn a_ranged_get_above_the_critical_mark_reads_only_the_range_from_the_cold
 
     set_usage(&rig, 100, 0).await;
     assert_eq!(proxy.get("k", Some(part)).await.unwrap(), body("234"));
-    assert_eq!(rig.cold.get_ranges(), vec![Some((2, 3)), None]);
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("0123456789"));
+    assert_eq!(rig.cold.get_ranges(), vec![Some((2, 3)), Some((2, 3))]);
+    assert_absent(&*rig.hot_mem, "k").await;
 }
 
 /// Asserts that a read whose copy back into the hot tier fails (the hot tier is full, or

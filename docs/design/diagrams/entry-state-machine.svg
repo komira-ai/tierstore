@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 746" width="960" height="746" role="img" aria-label="State diagram of the per-key entry. Absent goes to PUT HELD, DEL HELD, CB PENDING, PUT PENDING or EVICT SEALED. HELD goes to PENDING when its owner acknowledges or hands over, or when the leader reaps a departed owner. A DELETE amends PENDING put and copy-back entries, and a put entry the leader holds for a copy, into DEL HELD, and waits for the release in the second case. The leader seals PENDING entries and deletes SEALED ones.">
+<title>The entry of one key: states and transitions</title>
+<defs><marker id="entry-state-machine-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="entry-state-machine-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="746" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">The entry of one key: states and transitions</text>
+<rect x="30" y="270" width="120" height="56" rx="5" class="box-b"/>
+<text x="90.0" y="296.0" class="b" text-anchor="middle">no entry</text>
+<text x="90.0" y="312.0" class="t-m" text-anchor="middle">(absent)</text>
+<rect x="230" y="100" width="150" height="56" rx="5" class="box"/>
+<text x="305.0" y="126.0" class="b" text-anchor="middle">(PUT, HELD)</text>
+<text x="305.0" y="142.0" class="t-m" text-anchor="middle">a put or a copy runs</text>
+<rect x="230" y="440" width="150" height="56" rx="5" class="box"/>
+<text x="305.0" y="466.0" class="b" text-anchor="middle">(DEL, HELD)</text>
+<text x="305.0" y="482.0" class="t-m" text-anchor="middle">owner is deleting</text>
+<rect x="500" y="100" width="150" height="56" rx="5" class="box-o"/>
+<text x="575.0" y="126.0" class="b" text-anchor="middle">(PUT, PENDING)</text>
+<text x="575.0" y="142.0" class="t-m" text-anchor="middle">landed: leader's turn</text>
+<rect x="500" y="236" width="150" height="56" rx="5" class="box-o"/>
+<text x="575.0" y="262.0" class="b" text-anchor="middle">(CB, PENDING)</text>
+<text x="575.0" y="278.0" class="t-m" text-anchor="middle">copy-back wanted</text>
+<rect x="500" y="440" width="150" height="56" rx="5" class="box-o"/>
+<text x="575.0" y="466.0" class="b" text-anchor="middle">(DEL, PENDING)</text>
+<text x="575.0" y="482.0" class="t-m" text-anchor="middle">handed over</text>
+<rect x="790" y="270" width="140" height="56" rx="5" class="box-b"/>
+<text x="860.0" y="296.0" class="b" text-anchor="middle">(op, SEALED)</text>
+<text x="860.0" y="312.0" class="t-m" text-anchor="middle">leader only</text>
+<line x1="150" y1="282" x2="230" y2="140" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="168" y="208" class="t-m lbl">E1 PUT</text>
+<line x1="150" y1="316" x2="230" y2="452" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="150" y="404" class="t-m lbl">E1' DELETE</text>
+<line x1="150" y1="298" x2="500" y2="262" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="410" y="262" class="t-m lbl" text-anchor="middle">E1'' GET, best effort</text>
+<line x1="380" y1="118" x2="500" y2="118" class="ln-o" marker-end="url(#entry-state-machine-ao)"/>
+<text x="440" y="110" class="t-m lbl" text-anchor="middle">E2 ACK</text>
+<line x1="380" y1="142" x2="500" y2="142" class="ln-od" marker-end="url(#entry-state-machine-ao)"/>
+<text x="440" y="160" class="t-m lbl" text-anchor="middle">E7 reap</text>
+<line x1="380" y1="458" x2="500" y2="458" class="ln-o" marker-end="url(#entry-state-machine-ao)"/>
+<text x="440" y="450" class="t-m lbl" text-anchor="middle">E5</text>
+<line x1="380" y1="482" x2="500" y2="482" class="ln-od" marker-end="url(#entry-state-machine-ao)"/>
+<text x="440" y="500" class="t-m lbl" text-anchor="middle">E7 reap</text>
+<line x1="530" y1="156" x2="355" y2="440" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="500" y="200" class="t-m lbl" text-anchor="end">E3 DELETE amends</text>
+<line x1="270" y1="156" x2="270" y2="440" class="ln-o" marker-end="url(#entry-state-machine-ao)"/>
+<text x="276" y="392" class="t-m lbl">E3' amend, waits</text>
+<path d="M600,100 L600,76 L340,76 L340,100" class="ln-o" marker-end="url(#entry-state-machine-ao)"/>
+<text x="470" y="70" class="t-m lbl" text-anchor="middle">E6a leader CAS to HELD, before it copies</text>
+<line x1="510" y1="292" x2="372" y2="440" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="438" y="372" class="t-m lbl">E3</text>
+<path d="M575,496 L575,540 L305,540 L305,500" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="440" y="556" class="t-m lbl" text-anchor="middle">E4 a retried DELETE claims it</text>
+<line x1="650" y1="130" x2="790" y2="285" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="700" y="196" class="t-m lbl">E6 (a put: from HELD)</text>
+<line x1="650" y1="264" x2="790" y2="290" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="720" y="268" class="t-m lbl">E6</text>
+<line x1="650" y1="462" x2="790" y2="314" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="730" y="412" class="t-m lbl">E6 seals</text>
+<path d="M150,308 Q470,338 790,312" class="ln-d" marker-end="url(#entry-state-machine-ak)"/>
+<text x="640" y="346" class="t-m lbl" text-anchor="middle">E1''' eviction creates EVICT sealed</text>
+<path d="M860,326 L860,610 L90,610 L90,330" class="ln-o" marker-end="url(#entry-state-machine-ao)"/>
+<text x="480" y="628" class="t-m lbl" text-anchor="middle">E8' the leader deletes the entry: released</text>
+<path d="M305,100 L305,62 L90,62 L90,266" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="200" y="56" class="t-m lbl" text-anchor="middle">E8 owner frees it: refused or failed before landing</text>
+<path d="M260,496 L260,580 L55,580 L55,328" class="ln" marker-end="url(#entry-state-machine-ak)"/>
+<text x="150" y="574" class="t-m lbl" text-anchor="middle">E8 a fresh delete frees it</text>
+<text x="30" y="660" class="t-m">E1'''' (not drawn): the leader creates (PUT, PENDING) for a hot object with no entry and no cold copy (a stray). Every body carries a fresh nonce, so</text>
+<text x="30" y="676" class="t-m">a tag never repeats. Created create-only; changed only by compare-and-swap (If-Match); deleted by its exclusive holder. HELD: only the owner (the</text>
+<text x="30" y="692" class="t-m">leader only if the owner departed); the leader is the owner of a put it copies (E6a, then E6 from HELD after the copy). PENDING: the leader seals it;</text>
+<text x="30" y="708" class="t-m">a client DELETE may amend or claim it. A DELETE that amends the leader's HELD entry (E3') or claims a handed-over delete (E4) waits for the release;</text>
+<text x="30" y="724" class="t-m">one that amends PENDING does not. SEALED: the leader only. A SEALED entry found by a new leader is resumed by redoing its idempotent step.</text>
+</svg>
