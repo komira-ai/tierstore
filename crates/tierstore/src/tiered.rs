@@ -263,7 +263,7 @@ struct Inner {
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
     /// What was last read of the format object.
-    pause: Mutex<pause::Pause>,
+    pause: AsyncMutex<pause::Pause>,
     counters: Counters,
 }
 
@@ -304,7 +304,7 @@ impl Proxy {
             open: Mutex::new(None),
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
-            pause: Mutex::default(),
+            pause: AsyncMutex::default(),
             counters: Counters::default(),
         };
         Ok(Self {

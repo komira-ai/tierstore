@@ -10,8 +10,9 @@
 //!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler
 //!   applies the journals until each one is applied to its end.
 //! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
-//!   `drain` for the settle time, and every journal it knows is applied to its end. Writes stay
-//!   paused.
+//!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
+//!   lets every proxy read `drain` again; it does not wait for a write that a proxy admitted
+//!   earlier and is still running. Writes stay paused.
 //! - `active`: a phase of a later release. This release does not pause writes for it.
 
 use bytes::Bytes;

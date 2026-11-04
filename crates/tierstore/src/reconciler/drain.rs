@@ -15,11 +15,14 @@ impl Reconciler {
     }
 
     /// Writes `drained` over `drain` if the format says `drain` and has said so for
-    /// [`ReconcilerConfig::drain_settle`](super::ReconcilerConfig::drain_settle) (so that every
-    /// proxy has read it and stopped writing journals), and the pass had no failure: every journal
+    /// [`ReconcilerConfig::drain_settle`](super::ReconcilerConfig::drain_settle) (long enough for
+    /// every proxy to read it again, which is all the wait gives: a write that a proxy admitted
+    /// before it read `drain` and that is still running is not waited for), and the pass had no
+    /// failure: every journal
     /// object listed was read and applied, and each checkpoint stored, since a step that fails
     /// is in `report.failed`. The object is read again with its tag just before the write, and the
-    /// write is over that tag, so an operator who cancelled in between keeps the cancel.
+    /// write is over that tag, so an operator who cancelled in between keeps the cancel, and a
+    /// cancel seen by that second read starts the settle time again.
     pub(super) async fn settle_drain(&mut self, report: &mut PassReport) {
         if !report.failed.is_empty() {
             return;
@@ -38,7 +41,7 @@ impl Reconciler {
         }
         let (format, tag) = match read_format_tagged(self.hot.as_ref()).await {
             Ok(Some(found)) if found.0.phase == FormatPhase::Drain => found,
-            Ok(_) => return,
+            Ok(_) => return self.forget_drain(),
             Err(error) => {
                 report.failed.push(error);
                 return;
