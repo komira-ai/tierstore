@@ -3,7 +3,8 @@
 use std::io::{ErrorKind, SeekFrom};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -23,6 +24,10 @@ use crate::{
 
 #[path = "dir_entries.rs"]
 mod entries;
+#[path = "dir_sync.rs"]
+mod sync;
+
+use sync::{FsyncDir, SyncDir};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
@@ -55,24 +60,6 @@ const KEY_FILE: &str = "key";
 
 /// The number of the backends opened in this process, which tells their temporary files apart.
 static OPENED: AtomicU64 = AtomicU64::new(0);
-
-/// Makes the changes to the entries of a directory durable. It is a seam so that a test can see
-/// when the backend syncs a directory, relative to the change and to the acknowledgement.
-#[async_trait]
-trait SyncDir: Send + Sync {
-    /// Returns once the entries of `dir` are on the disk.
-    async fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
-}
-
-/// Syncs a directory with `fsync` on it.
-struct FsyncDir;
-
-#[async_trait]
-impl SyncDir for FsyncDir {
-    async fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
-        File::open(dir).await?.sync_all().await
-    }
-}
 
 /// A bucket kept in a directory.
 ///
@@ -159,7 +146,10 @@ pub struct DirBackend {
     /// that two overlapping uploads of one part number do not remove each other's file.
     placing: Mutex<()>,
     /// Syncs a directory after a call changed its entries.
-    syncer: Box<dyn SyncDir>,
+    syncer: Arc<dyn SyncDir>,
+    /// Set once a sync of the root has succeeded after the subdirectory of `_entries/` was known
+    /// to exist, so that the later entry writes do not sync the root again.
+    root_synced: AtomicBool,
 }
 
 /// The file name of a key.
@@ -535,11 +525,11 @@ impl DirBackend {
     /// # Errors
     /// [`Error::Other`] if `root` is empty or the directory cannot be made.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Error> {
-        Self::open_with(root.into(), Box::new(FsyncDir))
+        Self::open_with(root.into(), Arc::new(FsyncDir))
     }
 
     /// A bucket in the directory `root` that syncs directories with `syncer`.
-    fn open_with(root: PathBuf, syncer: Box<dyn SyncDir>) -> Result<Self, Error> {
+    fn open_with(root: PathBuf, syncer: Arc<dyn SyncDir>) -> Result<Self, Error> {
         if root.as_os_str().is_empty() {
             let text = "the directory of a tier has no name";
             return Err(Error::Other(text.to_owned()));
@@ -557,6 +547,7 @@ impl DirBackend {
             replacing: Mutex::new(()),
             placing: Mutex::new(()),
             syncer,
+            root_synced: AtomicBool::new(false),
         })
     }
 
@@ -582,14 +573,20 @@ impl DirBackend {
 
     /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
     /// hold (none for any other key), making the subdirectory if it is not there. It is taken
-    /// before the `replacing` lock, always, so that no two calls wait for each other.
+    /// before the `replacing` lock, always, so that no two calls wait for each other. The root is
+    /// synced, with the lock held, until one sync of it has succeeded: whichever call made the
+    /// subdirectory, and whether an earlier sync failed, no entry write returns before the
+    /// subdirectory is durable.
     async fn entry_lock(&self, key: &str) -> Result<Option<entries::EntryLock>, Error> {
         if entries::rest(key).is_none() {
             return Ok(None);
         }
-        let (lock, created) = entries::take(self.root.join(entries::DIR)).await?;
-        if created {
+        let syncer = Arc::clone(&self.syncer);
+        let reached = move || syncer.lock_reached();
+        let lock = entries::take(self.root.join(entries::DIR), reached).await?;
+        if !self.root_synced.load(Ordering::SeqCst) {
             self.sync(&self.root).await?;
+            self.root_synced.store(true, Ordering::SeqCst);
         }
         Ok(Some(lock))
     }
@@ -667,6 +664,9 @@ impl DirBackend {
     /// not left visible and a retry of the create-only put can succeed; if the name cannot be
     /// removed the error says that it may exist without being durable.
     async fn publish(&self, temp: &Path, path: &Path, key: &str) -> Result<(), Error> {
+        // Gone on every way out, the failure to take the lock and a call dropped while it waits
+        // included.
+        let _scratch = Scratch(temp.to_owned());
         let _entry = self.entry_lock(key).await?;
         let dir = path.parent().unwrap_or(&self.root);
         let linked = fs::hard_link(temp, path).await;

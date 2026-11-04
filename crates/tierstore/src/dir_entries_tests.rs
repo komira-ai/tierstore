@@ -6,13 +6,17 @@
 use std::fs::{File, Permissions, TryLockError};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use tierstore_testkit::dir::TestDir;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::{Backend, DirBackend, Error, PartBody};
 
+use super::SyncDir;
 use super::entries::{self, DIR};
 
 fn backend() -> (TestDir, DirBackend) {
@@ -225,13 +229,19 @@ async fn streamed_and_multipart_puts_of_entry_keys_land_in_the_subdirectory() {
 }
 
 /// Asserts that a write of an entry fails, and does not panic, where the name `_entries` is a
-/// regular file, so the lock file cannot be opened.
+/// regular file, so the lock file cannot be opened, and that it leaves no temporary file behind,
+/// whether it is a put, a reservation or a streamed put.
 #[tokio::test]
 async fn an_entry_write_fails_where_a_file_is_named_entries() {
     let (dir, backend) = backend();
     std::fs::write(dir.path().join(DIR), b"in the way").unwrap();
     let blocked = backend.put("_entries/e", body("x")).await;
     assert!(matches!(blocked, Err(Error::Other(_))));
+    let reserved = backend.put_reservation("_entries/e", body("x")).await;
+    assert!(matches!(reserved, Err(Error::Other(_))));
+    let streamed = backend.put_stream("_entries/e", None, part("x")).await;
+    assert!(matches!(streamed, Err(Error::Other(_))));
+    assert_eq!(names(dir.path()), [".uploads", "_entries"]);
 }
 
 /// Asserts that a delete of an entry fails where the root is gone, so the subdirectory cannot be
@@ -244,15 +254,14 @@ async fn an_entry_delete_fails_where_the_root_is_gone() {
     assert!(matches!(lost, Err(Error::Other(_))));
 }
 
-/// Asserts that the lock of the subdirectory is exclusive between open files, which is what holds
-/// between processes: while one is held a second open of the lock file cannot take it, and once it
-/// is dropped it can; and that the call that made the subdirectory says so, and no later one.
+/// Asserts that the lock is exclusive between open files and released on drop: a second open of
+/// the lock file gets WouldBlock while it is held and can take it after the drop, and a second
+/// `take` of the subdirectory succeeds once it is released.
 #[tokio::test]
 async fn the_lock_is_exclusive_between_open_files_and_released_on_drop() {
     let (dir, _backend) = backend();
     let inside = dir.path().join(DIR);
-    let (held, made) = entries::take(inside.clone()).await.unwrap();
-    assert!(made);
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
 
     let other = File::options()
         .write(true)
@@ -263,26 +272,56 @@ async fn the_lock_is_exclusive_between_open_files_and_released_on_drop() {
     other.try_lock().unwrap();
     drop(other);
 
-    let (again, made) = entries::take(inside).await.unwrap();
-    assert!(!made);
-    drop(again);
+    drop(entries::take(inside, || {}).await.unwrap());
+}
+
+/// Reports each wait for the lock on a channel, and syncs directories for real.
+struct Reached(UnboundedSender<()>);
+
+#[async_trait]
+impl SyncDir for Reached {
+    async fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        tokio::fs::File::open(dir).await?.sync_all().await
+    }
+
+    fn lock_reached(&self) {
+        let _ = self.0.send(());
+    }
+}
+
+/// A backend over `dir` that reports on the channel when a write of an entry reaches the lock.
+fn reporting(dir: &TestDir) -> (DirBackend, UnboundedReceiver<()>) {
+    let (sender, receiver) = unbounded_channel();
+    let backend = DirBackend::open_with(dir.path().to_owned(), Arc::new(Reached(sender)));
+    (backend.unwrap(), receiver)
+}
+
+/// Waits until a write has reached the lock, which another open file holds. A write that never
+/// reaches it (the lock bypassed) ends the call, drops the backend and so the channel, and the
+/// wait gets `None` instead of an event.
+async fn reached(receiver: &mut UnboundedReceiver<()>) {
+    assert_eq!(
+        receiver.recv().await,
+        Some(()),
+        "the write skipped the lock"
+    );
 }
 
 /// Asserts that a replacement of an entry waits for the lock held by another process, and so
 /// cannot make again an entry that process deleted under the lock: the replacement is asked while
-/// the lock is held, the entry is deleted behind the lock, the lock is released, and the
-/// replacement fails with not-found and leaves no file.
+/// the lock is held, and has reached the wait for it; the entry is deleted behind the lock, the
+/// lock is released, and the replacement fails with not-found and leaves no file.
 #[tokio::test]
 async fn a_replacement_of_an_entry_cannot_recreate_what_another_process_deleted() {
     let (dir, backend) = backend();
-    let other = DirBackend::open(dir.path()).unwrap();
+    let (other, mut receiver) = reporting(&dir);
     let key = "_entries/e";
     let tag = backend.put_tagged(key, body("one")).await.unwrap();
     let inside = dir.path().join(DIR);
 
-    let (held, _) = entries::take(inside.clone()).await.unwrap();
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
     let asked = tokio::spawn(async move { other.put_if_match(key, body("two"), &tag).await });
-    tokio::task::yield_now().await;
+    reached(&mut receiver).await;
     std::fs::remove_file(inside.join("e")).unwrap();
     drop(held);
 
@@ -291,15 +330,17 @@ async fn a_replacement_of_an_entry_cannot_recreate_what_another_process_deleted(
 }
 
 /// Asserts that a create-only put of an entry waits for the lock held by another process: a put
-/// asked while the lock is held lands after the lock is released, and not before.
+/// asked while the lock is held has reached the wait for it and has made nothing, and lands after
+/// the lock is released.
 #[tokio::test]
 async fn a_create_only_put_of_an_entry_waits_for_the_lock() {
-    let (dir, backend) = backend();
+    let (dir, _backend) = backend();
+    let (writer, mut receiver) = reporting(&dir);
     let inside = dir.path().join(DIR);
-    let (held, _) = entries::take(inside.clone()).await.unwrap();
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
 
-    let asked = tokio::spawn(async move { backend.put("_entries/e", body("one")).await });
-    tokio::task::yield_now().await;
+    let asked = tokio::spawn(async move { writer.put("_entries/e", body("one")).await });
+    reached(&mut receiver).await;
     assert_eq!(names(&inside), [".lock"]);
     drop(held);
 
@@ -307,17 +348,18 @@ async fn a_create_only_put_of_an_entry_waits_for_the_lock() {
     assert_eq!(names(&inside), [".lock", "e"]);
 }
 
-/// Asserts that a delete of an entry waits for the lock held by another process: the file is there
-/// while the lock is held and gone after it is released.
+/// Asserts that a delete of an entry waits for the lock held by another process: the delete has
+/// reached the wait for it, the file is still there, and it is gone after the lock is released.
 #[tokio::test]
 async fn a_delete_of_an_entry_waits_for_the_lock() {
     let (dir, backend) = backend();
     backend.put("_entries/e", body("one")).await.unwrap();
+    let (writer, mut receiver) = reporting(&dir);
     let inside = dir.path().join(DIR);
-    let (held, _) = entries::take(inside.clone()).await.unwrap();
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
 
-    let asked = tokio::spawn(async move { backend.delete("_entries/e").await });
-    tokio::task::yield_now().await;
+    let asked = tokio::spawn(async move { writer.delete("_entries/e").await });
+    reached(&mut receiver).await;
     assert_eq!(names(&inside), [".lock", "e"]);
     drop(held);
 
@@ -330,7 +372,7 @@ async fn a_delete_of_an_entry_waits_for_the_lock() {
 #[tokio::test]
 async fn keys_outside_the_entries_prefix_take_no_lock() {
     let (dir, backend) = backend();
-    let (held, _) = entries::take(dir.path().join(DIR)).await.unwrap();
+    let held = entries::take(dir.path().join(DIR), || {}).await.unwrap();
 
     let tag = backend.put_tagged("plain", body("one")).await.unwrap();
     backend

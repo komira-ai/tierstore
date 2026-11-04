@@ -87,7 +87,7 @@ fn switched(
         fails: Arc::clone(&switch),
         lock: lock.then(|| dir.path().to_owned()),
     };
-    let backend = DirBackend::open_with(dir.path().to_owned(), Box::new(recorder)).unwrap();
+    let backend = DirBackend::open_with(dir.path().to_owned(), Arc::new(recorder)).unwrap();
     (dir, backend, seen, switch)
 }
 
@@ -338,9 +338,9 @@ fn synced(seen: &Log) -> Vec<PathBuf> {
 
 /// Asserts that a call that changes a key under `_entries/` syncs the subdirectory that holds its
 /// file and not the root, whether it is a put, a replacement, a conditional delete or a delete,
-/// and that the root is synced too, once, by the put that made the subdirectory.
+/// and that the root is synced too, once, by the first write of an entry through this backend.
 #[tokio::test]
-async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_only_when_it_made_it() {
+async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_once() {
     let (dir, backend, seen) = recorded(None, false);
     let inside = dir.path().join("_entries");
 
@@ -357,13 +357,51 @@ async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_only_when_it_m
     assert_eq!(synced(&seen), expected);
 }
 
-/// Asserts that a put that makes the subdirectory of `_entries/` fails, and leaves no object, when
-/// the sync of the root that makes the new subdirectory durable fails.
+/// Asserts that a put that makes the subdirectory of `_entries/` fails, and leaves no object and
+/// no temporary file, when the sync of the root that makes the new subdirectory durable fails.
 #[tokio::test]
 async fn an_entry_put_fails_when_the_sync_of_the_new_subdirectory_fails() {
-    let (_dir, backend, _seen) = recorded(None, true);
+    let (dir, backend, _seen) = recorded(None, true);
     let refused = backend.put("_entries/a", body("one")).await;
     assert!(matches!(refused, Err(Error::Other(_))));
     let listed = backend.list("_entries/").await.unwrap();
     assert!(listed.is_empty());
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, [".uploads", "_entries"]);
+}
+
+/// Asserts that after a failed sync of the root, which leaves the subdirectory made, the retry of
+/// the put syncs the root again before it is acknowledged, and a later write does not.
+#[tokio::test]
+async fn a_retry_after_a_failed_root_sync_syncs_the_root_again() {
+    let (dir, backend, seen, switch) = switched(None, true, false);
+    let inside = dir.path().join("_entries");
+    let refused = backend.put("_entries/a", body("one")).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    switch.store(false, Ordering::SeqCst);
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    backend.put("_entries/b", body("two")).await.unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root.clone(), root, inside.clone(), inside]);
+}
+
+/// Asserts that a backend that did not make the subdirectory (another process did) still syncs
+/// the root before it acknowledges its first entry write, and only that one.
+#[tokio::test]
+async fn a_writer_that_did_not_make_the_subdirectory_syncs_the_root_first() {
+    let (dir, backend, seen) = recorded(None, false);
+    let inside = dir.path().join("_entries");
+    std::fs::create_dir(&inside).unwrap();
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    backend.put("_entries/b", body("two")).await.unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root, inside.clone(), inside]);
 }
