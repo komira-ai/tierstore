@@ -3,6 +3,12 @@
 //! the binary's `--check-config` asks (the settings that a start makes from the file, with the
 //! key files it names read, and nothing opened). It prints nothing and exits 0 if the file starts.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::ffi::OsString;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;

@@ -21,12 +21,9 @@ use std::process::Command;
 /// The most lines a Rust file has (AGENTS.md R12).
 const LIMIT: usize = 1000;
 
-/// The files over the limit that the split of `server/cli.rs` and `server/config.rs` removes,
-/// with the length each had when this test was added.
-const SPLIT_PENDING: &[(&str, usize)] = &[
-    ("crates/tierstore/src/server/cli.rs", 1377),
-    ("crates/tierstore/src/server/config.rs", 1077),
-];
+/// The files over the limit that a split is still to remove, with the length each had when it was
+/// listed. The splits of `server/cli.rs` and `server/config.rs` are done, so none is listed.
+const SPLIT_PENDING: &[(&str, usize)] = &[];
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

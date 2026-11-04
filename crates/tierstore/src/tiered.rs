@@ -1,6 +1,6 @@
 //! The proxy: a store over a hot and a cold backend.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -36,12 +36,14 @@ mod copy_back;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
+mod merge;
 mod pause;
 mod put;
 mod read;
 mod relay;
 
 use heartbeat::Heartbeat;
+use merge::merge;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -804,16 +806,6 @@ async fn data_page(
     }
     found.truncate(max_keys);
     Ok(found)
-}
-
-/// The objects of both listings, each key once (the hot tier's entry where both have it), in
-/// key order, at most `max_keys` of them.
-fn merge(in_hot: Vec<Listed>, in_cold: Vec<Listed>, max_keys: usize) -> Vec<Listed> {
-    let mut merged: BTreeMap<String, Listed> = BTreeMap::new();
-    for object in in_hot.into_iter().chain(in_cold) {
-        merged.entry(object.key.clone()).or_insert(object);
-    }
-    merged.into_values().take(max_keys).collect()
 }
 
 #[async_trait]

@@ -33,3 +33,19 @@ pub(super) fn decode(name: &str) -> Option<String> {
     }
     String::from_utf8(bytes).ok()
 }
+
+/// Whether the byte can be in the id of an upload, which names a directory.
+pub(super) fn is_id_byte(byte: u8) -> bool {
+    matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'-')
+}
+
+/// The name of the file of a part of an upload: its number and its content tag.
+pub(super) fn part_name(number: u32, tag: &str) -> String {
+    format!("{number:05}-{tag}")
+}
+
+/// The number and the content tag a file name of a part has, if it is one.
+pub(super) fn parse_part(name: &str) -> Option<(u32, &str)> {
+    let (number, tag) = name.split_once('-')?;
+    Some((number.parse().ok()?, tag))
+}
