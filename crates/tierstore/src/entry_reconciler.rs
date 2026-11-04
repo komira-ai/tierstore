@@ -111,9 +111,9 @@ pub struct EntryReconcilerConfig {
     /// How long the registration of an owner must have stood unchanged, by the monotonic clock of
     /// this process, for the owner to count as departed. At least six times the proxies' heartbeat.
     pub departure: Duration,
-    /// The shortest wait of the loop.
+    /// The shortest wait of the loop; starts from `base.idle_min`.
     pub idle_min: Duration,
-    /// The longest wait of the loop when nothing is to be done.
+    /// The longest wait of the loop when nothing is to be done; starts from `base.idle_max`.
     pub idle_max: Duration,
     /// The delay after an item first fails.
     pub retry_min: Duration,
@@ -162,11 +162,12 @@ impl EntryReconcilerConfig {
     #[must_use]
     pub fn new(base: ReconcilerConfig) -> Self {
         let compare_range = base.compare_range.get();
+        let (idle_min, idle_max) = (base.idle_min, base.idle_max);
         Self {
             base,
             departure: Duration::from_secs(60),
-            idle_min: Duration::from_secs(1),
-            idle_max: Duration::from_secs(10),
+            idle_min,
+            idle_max,
             retry_min: Duration::from_secs(1),
             retry_max: Duration::from_secs(60),
             compare_range,
@@ -295,6 +296,12 @@ impl EntryReconciler {
     #[must_use]
     pub fn strays_adopted(&self) -> u64 {
         self.strays_adopted
+    }
+
+    /// The longest a stop of the server waits for [`stop`](Self::stop) (`base.stop_wait`).
+    #[must_use]
+    pub fn stop_wait(&self) -> Duration {
+        self.config.base.stop_wait
     }
 
     /// Gives the lease up, if it is held, and forgets what was seen.

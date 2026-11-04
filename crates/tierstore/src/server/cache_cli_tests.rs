@@ -23,7 +23,7 @@ use super::config_cache::CacheSettings;
 use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
-use super::local_cache::{Disk, SystemDisk};
+use super::local_cache::{CacheConfig, Disk, SystemDisk};
 use crate::{
     Backend, ByteRange as TierRange, Error as BackendError, FaultyBackend, Listed, MemoryBackend,
     Meta, Op,
@@ -813,5 +813,47 @@ async fn a_taken_loopback_port_stops_the_start_of_a_build_node() {
     assert!(
         std::net::TcpListener::bind(configured).is_ok(),
         "still held"
+    );
+}
+
+/// Asserts the times of the loops beside a cache's server: a cache at the defaults has the passes
+/// every 10 s, the lock every second, the scrub reading its rate each second and rounds counted
+/// in seconds; and a cache with other intervals has them, with the scrub's bytes a tick the rate
+/// for the tick's length (a rate of 100 B/s and a tick of 2.5 s are 250 B), the rounds counted
+/// in ticks, and no scrub staying none.
+#[test]
+fn the_loops_have_the_times_of_the_settings() {
+    use super::cache_cli::Loops;
+    let config = CacheConfig::new("/c", 1000, Vec::new());
+    let hour = Duration::from_secs(3600);
+    let secs = Duration::from_secs;
+    let loops = Loops::of(&config, Some(100), hour);
+    let expected = Loops {
+        pass: secs(10),
+        lock: secs(1),
+        tick: secs(1),
+        per_tick: Some(100),
+        min_round: 3600,
+    };
+    assert_eq!(loops, expected);
+    let mut config = config;
+    config.pass_interval = secs(30);
+    config.lock_interval = Duration::from_millis(250);
+    config.scrub_tick = Duration::from_millis(2500);
+    let loops = Loops::of(&config, Some(100), hour);
+    assert_eq!(loops.pass, secs(30));
+    assert_eq!(loops.lock, Duration::from_millis(250));
+    assert_eq!(loops.tick, Duration::from_millis(2500));
+    assert_eq!(loops.per_tick, Some(250));
+    assert_eq!(loops.min_round, 1440);
+    assert_eq!(Loops::of(&config, None, Duration::ZERO).per_tick, None);
+    assert_eq!(Loops::of(&config, None, Duration::ZERO).min_round, 0);
+    // A tick of no length is read as a millisecond, and a rate that overflows is the most.
+    config.scrub_tick = Duration::ZERO;
+    assert_eq!(Loops::of(&config, Some(1_000), hour).per_tick, Some(1));
+    config.scrub_tick = Duration::from_secs(u64::MAX);
+    assert_eq!(
+        Loops::of(&config, Some(u64::MAX), hour).per_tick,
+        Some(u64::MAX)
     );
 }

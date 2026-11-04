@@ -11,9 +11,6 @@ use tokio::sync::Notify;
 use super::lock::{self, LockFile};
 use super::rounds::Rounds;
 
-/// How long [`reconcile`] waits for the lease to be given up once it is halted.
-const STOP_WAIT: Duration = Duration::from_secs(5);
-
 /// Runs a round of `rounds` now and then after the wait that each round asks for, until `halt` is
 /// notified. A round that changed something is followed by the next at once. Then it gives the
 /// lease up. The calls that failed in a round are reported on stderr.
@@ -24,7 +21,7 @@ const STOP_WAIT: Duration = Duration::from_secs(5);
 /// the round had not finished.
 pub(crate) async fn reconcile(mut rounds: Rounds, halt: Arc<Notify>) {
     let _ = run_rounds(&mut rounds, &halt, None).await;
-    let _ = tokio::time::timeout(STOP_WAIT, rounds.stop()).await;
+    rounds.stop().await;
 }
 
 /// What ended a run of rounds.
@@ -134,7 +131,7 @@ pub(crate) async fn reconcile_gated(mut rounds: Rounds, halt: Arc<Notify>, mut g
         }
         // The lease first, then the lock: a process waiting for the lock must not get it while
         // the lease is still held, or its first round finds the lease taken and does nothing.
-        let _ = tokio::time::timeout(STOP_WAIT, rounds.stop()).await;
+        rounds.stop().await;
         drop(file);
         if ended == Ended::Halted {
             return;

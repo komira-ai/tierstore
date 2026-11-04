@@ -39,6 +39,14 @@ pub struct ReconcilerConfig {
     pub lease_margin: Option<Duration>,
     /// The most objects asked for in one listing of the entries or of the hot tier.
     pub page_size: usize,
+    /// The wait after a step that did nothing, the first time; the
+    /// [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
+    pub idle_min: Duration,
+    /// The longest wait after steps that did nothing; the wait doubles from `idle_min` to it. The
+    /// [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
+    pub idle_max: Duration,
+    /// The longest a stop waits for the lease to be given up ([`EntryReconciler::stop_wait`](crate::EntryReconciler::stop_wait)).
+    pub stop_wait: Duration,
     /// The most bytes of one object that a comparison of the hot and the cold copy reads at once;
     /// the [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
     pub compare_range: NonZeroU64,
@@ -58,8 +66,9 @@ pub struct ReconcilerConfig {
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, listings
-    /// of 100 objects, comparisons in reads of 1 MiB, a renewal and a margin of a third of the lease ttl, a [`MonotonicClock`]
-    /// for the lease and the timer of the runtime.
+    /// of 100 objects, an idle wait of 1 to 10 seconds, a stop that waits 5 seconds for the lease,
+    /// comparisons in reads of 1 MiB, a renewal and a margin of a third of the lease ttl, a
+    /// [`MonotonicClock`] for the lease and the timer of the runtime.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -72,6 +81,9 @@ impl ReconcilerConfig {
             lease_renew: None,
             lease_margin: None,
             page_size: 100,
+            idle_min: Duration::from_secs(1),
+            idle_max: Duration::from_secs(10),
+            stop_wait: Duration::from_secs(5),
             compare_range: COMPARE_RANGE,
             clock,
             mono: Arc::new(MonotonicClock::new()),

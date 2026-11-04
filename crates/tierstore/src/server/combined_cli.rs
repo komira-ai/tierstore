@@ -65,7 +65,7 @@ pub(super) async fn serve_combined(
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
-    wait_first_beat(&proxy, heartbeat).await;
+    wait_first_beat(&proxy, heartbeat, cli.reconcile_tuning.first_beat_poll).await;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;

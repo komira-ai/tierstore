@@ -102,6 +102,7 @@ pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_servin
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_interface::UpstreamTable;
+use super::config_reconcile::ReconcileTuning;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
@@ -308,6 +309,9 @@ pub struct Cli {
     pub copy_parallel: u32,
     /// How long the reconciler's lease lasts without a renewal.
     pub lease_ttl: Duration,
+    /// The idle wait, lease timing, listing page and process waits of the reconciler's loop that
+    /// `[hot_store]` sets.
+    pub reconcile_tuning: ReconcileTuning,
     /// The heartbeat of the proxy: `hot_store.heartbeat`, `hot_store.departure` and
     /// `hot_store.deadline_margin`.
     pub heartbeat: HeartbeatFlags,
@@ -665,6 +669,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.high_water = share(cli.high_water);
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
+    cli.reconcile_tuning.apply(&mut reconciler);
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy);
