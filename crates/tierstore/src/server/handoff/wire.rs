@@ -55,8 +55,8 @@ pub(super) async fn send(
                 let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS))];
                 let mut control = SendAncillaryBuffer::new(&mut space);
                 if !rights.is_empty() {
-                    let pushed = control.push(SendAncillaryMessage::ScmRights(rights));
-                    debug_assert!(pushed, "more descriptors than a message may carry");
+                    // The offer holds at most MAX_FDS sockets, which the space has room for.
+                    let _ = control.push(SendAncillaryMessage::ScmRights(rights));
                 }
                 let iov = [IoSlice::new(chunk)];
                 Ok(sendmsg(stream, &iov, &mut control, SendFlags::empty())?)

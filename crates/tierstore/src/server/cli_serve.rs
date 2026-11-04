@@ -280,22 +280,13 @@ fn offer_of(
     Ok(Offer::bind(&handoff.socket, sockets)?)
 }
 
-/// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first. An
-/// offer that cannot answer any more is said, and the instance goes on until `stop`.
+/// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first.
 async fn stopped_by(stop: impl Future<Output = ()> + Send + 'static, offer: Option<Offer>) {
-    let Some(offer) = offer else {
-        return stop.await;
-    };
-    tokio::pin!(stop);
-    tokio::select! {
-        () = &mut stop => {}
-        handed = offer.serve() => {
-            if let Err(why) = handed {
-                eprintln!(
-                    "tierstore: the hand-off socket cannot be served, so no successor can take over: {why}"
-                );
-                stop.await;
-            }
-        }
+    match offer {
+        Some(offer) => tokio::select! {
+            () = stop => {}
+            () = offer.serve() => {}
+        },
+        None => stop.await,
     }
 }

@@ -105,7 +105,7 @@ async fn the_sockets_arrive_in_order_and_are_the_same_sockets() {
         .await
         .unwrap()
         .unwrap();
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
     assert!(!path.exists(), "the instance gives up the control socket");
     let addrs = |listeners: &[TcpListener]| -> Vec<_> {
         listeners.iter().map(|l| l.local_addr().unwrap()).collect()
@@ -135,7 +135,7 @@ async fn a_port_of_zero_in_the_settings_covers_any_port_of_the_host() {
         .unwrap();
     assert!(matches!(wrong, HandoffError::Mismatch { .. }), "{wrong}");
     let taken = taking(&handoff(path), &[any], &[]).await.unwrap().unwrap();
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
     assert_eq!(taken.s3[0].local_addr().unwrap(), addr);
 }
 
@@ -172,7 +172,7 @@ async fn settings_that_name_other_addresses_take_nothing() {
     );
     let taken = taking(&handoff(path), &[a], &[b]).await.unwrap();
     assert!(taken.is_some());
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
 }
 
 /// Asserts that a taker finding another taker at it is refused with the instance's reason, as an
@@ -194,13 +194,22 @@ async fn a_second_taker_is_refused_with_the_reason() {
     serving.abort();
 }
 
+/// An answer of a fake instance: its lines, how many sockets it sends, the lines it ends with
+/// after an `ack` (if it reads one), and the message the taker's error is to carry.
+type Case = (
+    Vec<&'static str>,
+    usize,
+    Option<Vec<&'static str>>,
+    &'static str,
+);
+
 /// Asserts that each answer that is not the protocol is refused with its own message: a frame
 /// that is not an offer, a number of lines that is not the number of sockets, a socket line
 /// that is not `<front> <address>`, a front that is not one, and an end that is not `done`.
 #[tokio::test]
 async fn an_answer_that_is_not_the_protocol_is_refused() {
     let (extra, _) = listening();
-    let cases: Vec<(Vec<&str>, usize, Option<Vec<&str>>, &str)> = vec![
+    let cases: Vec<Case> = vec![
         (vec!["hello"], 0, None, "a frame that is not an offer"),
         (
             vec!["offer", "s3 127.0.0.1:1"],

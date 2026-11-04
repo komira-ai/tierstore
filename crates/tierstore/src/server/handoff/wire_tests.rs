@@ -78,3 +78,34 @@ async fn a_frame_that_is_not_text_is_refused() {
     assert_eq!(error.kind(), ErrorKind::InvalidData);
     assert_eq!(error.to_string(), "a frame that is not text");
 }
+
+/// Asserts that ancillary data that is not descriptors is ignored: a frame that arrives with the
+/// sender's credentials (which the receiver asked the kernel for) is read as the frame it is,
+/// with no descriptor.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn ancillary_data_that_is_not_descriptors_is_ignored() {
+    use std::io::IoSlice;
+    use std::mem::MaybeUninit;
+
+    use rustix::net::sockopt::set_socket_passcred;
+    use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, UCred, sendmsg};
+    use rustix::process::{getgid, getpid, getuid};
+
+    let (near, far) = UnixStream::pair().unwrap();
+    set_socket_passcred(&far, true).unwrap();
+    let credentials = UCred {
+        pid: getpid(),
+        uid: getuid(),
+        gid: getgid(),
+    };
+    let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmCredentials(1))];
+    let mut control = SendAncillaryBuffer::new(&mut space);
+    assert!(control.push(SendAncillaryMessage::ScmCredentials(credentials)));
+    near.writable().await.unwrap();
+    let iov = [IoSlice::new(b"hello\n\n")];
+    sendmsg(&near, &iov, &mut control, SendFlags::empty()).unwrap();
+    let frame = recv(&far).await.unwrap();
+    assert_eq!(frame.lines, vec!["hello".to_owned()]);
+    assert!(frame.fds.is_empty());
+}

@@ -12,6 +12,8 @@ use futures::stream::FuturesUnordered;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
+use crate::server::pause_after;
+
 use super::wire::{self, MAX_FDS};
 use super::{Front, HandoffError, line};
 
@@ -81,21 +83,24 @@ impl Offer {
 
     /// Answers takers until one has taken the sockets: then the control socket is gone, and this
     /// returns, and the caller begins its drain. A taker that does not complete (it answers
-    /// `nak`, or its connection ends) leaves the instance as it was, ready for the next.
-    ///
-    /// # Errors
-    /// The control socket cannot accept.
-    pub(crate) async fn serve(self) -> std::io::Result<()> {
+    /// `nak`, or its connection ends) leaves the instance as it was, ready for the next. An
+    /// accept that fails is said and followed by a pause, as the fronts' accept loops do.
+    pub(crate) async fn serve(self) {
         let mut sessions = FuturesUnordered::new();
         loop {
             tokio::select! {
                 accepted = self.listener.accept() => {
-                    let (stream, _) = accepted?;
-                    sessions.push(self.session(stream));
+                    let failed = accepted.is_err();
+                    let said = accepted.map_err(|why| {
+                        tracing::warn!("tierstore: the hand-off socket cannot accept: {why}");
+                    });
+                    let accepted = said.ok().into_iter();
+                    accepted.for_each(|(stream, _)| sessions.push(self.session(stream)));
+                    pause_after(failed).await;
                 }
                 Some(handed) = sessions.next() => {
                     if handed {
-                        return Ok(());
+                        return;
                     }
                 }
             }

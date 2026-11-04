@@ -43,7 +43,7 @@ async fn an_offer_names_its_sockets_and_an_ack_ends_it() {
     assert!(!serving.is_finished());
     let done = ask(&taking, &["ack"]).await;
     assert_eq!(texts(&done.lines), vec!["done"]);
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
     assert!(!path.exists());
 }
 
@@ -70,7 +70,7 @@ async fn a_second_taker_is_refused_while_the_first_is_at_it() {
     assert!(refused.fds.is_empty());
     let done = ask(&first, &["ack"]).await;
     assert_eq!(texts(&done.lines), vec!["done"]);
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
 }
 
 /// Asserts that a request that is not `take 1` is refused, in the exact words, and gets no
@@ -138,7 +138,7 @@ async fn only_an_instance_that_did_not_hand_over_removes_its_socket() {
     let taker = connect(&path).await;
     ask(&taker, &["take 1"]).await;
     ask(&taker, &["ack"]).await;
-    serving.await.unwrap().unwrap();
+    serving.await.unwrap();
     let successor = Offer::bind(&path, Vec::new()).unwrap();
     assert!(path.exists());
     drop(successor);

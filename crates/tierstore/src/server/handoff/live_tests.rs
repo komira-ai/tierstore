@@ -43,7 +43,7 @@ fn instance(rig: &Rig, listeners: Vec<TcpListener>, path: &Path) -> JoinHandle<D
     let offer = Offer::bind(path, sockets).expect("a control socket");
     let (serving, handing) = (Arc::clone(&rig.server), Arc::clone(&rig.server));
     drop(tokio::spawn(async move {
-        offer.serve().await.expect("served");
+        offer.serve().await;
         handing.begin_drain();
     }));
     tokio::spawn(async move { serving.serve_all(listeners).await })
