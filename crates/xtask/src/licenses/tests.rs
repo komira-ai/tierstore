@@ -275,6 +275,49 @@ fn a_crate_that_ships_no_licence_file_is_listed_with_its_declared_licence_and_sa
 }
 
 #[test]
+fn the_declared_license_file_is_included_once_wherever_it_is_in_the_crate() {
+    // Catches: a licence text the manifest points at (outside the usual names, or in a
+    // subdirectory) left out of the notice, one the usual names already match listed twice,
+    // and a declared file that is not there taken for a text.
+    let dir = scratch("license-file");
+    let named = |name: &str, license_file: &str, files: &[(&str, &str)]| {
+        let mut p = pkg(name, "1.0.0", false, &krate(&dir, name, files));
+        p["license_file"] = json!(license_file);
+        p
+    };
+    let nested = named("nested", "legal/TERMS.txt", &[]);
+    std::fs::create_dir(dir.join("nested/legal")).expect("dir");
+    std::fs::write(dir.join("nested/legal/TERMS.txt"), "terms of nested").expect("terms");
+    let usual = named("usual", "LICENSE", &[("LICENSE", "usual text")]);
+    let gone = named("gone", "legal/ABSENT.txt", &[]);
+    let ids = ["nested 1.0.0", "usual 1.0.0", "gone 1.0.0"];
+    let meta = metadata(
+        vec![
+            pkg("app", "0.1.0", true, "/nowhere/Cargo.toml"),
+            nested,
+            usual,
+            gone,
+        ],
+        vec![
+            node("app 0.1.0", ids.map(|id| dep(id, &[NORMAL])).to_vec()),
+            node("nested 1.0.0", vec![]),
+            node("usual 1.0.0", vec![]),
+            node("gone 1.0.0", vec![]),
+        ],
+    );
+    let text = notice(&meta, "app").expect("notice");
+    assert!(
+        text.contains("\n--- legal/TERMS.txt ---\nterms of nested\n"),
+        "{text}"
+    );
+    assert_eq!(text.matches("--- LICENSE ---").count(), 1, "{text}");
+    assert!(
+        text.contains("\ngone 1.0.0\nlicence: MIT\n\nThis crate ships no licence file"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_procedural_macro_and_what_only_it_needs_are_not_listed() {
     // Catches: a compiler-side crate (asn1-rs-impl in this repository's tree) named as linked,
     // with its own dependencies; a crate the macro and a linked crate both need stays listed,
@@ -459,10 +502,17 @@ fn malformed_metadata_is_refused_with_what_is_missing() {
 fn a_crate_directory_that_cannot_be_read_is_an_error_naming_it() {
     // Catches: a crate whose sources are not where the metadata says (a registry that was
     // not fetched) skipped, so its licence is missing from the notice without a word.
+    let dir = scratch("unreadable");
+    let absent = dir.join("never-fetched");
     let meta = metadata(
         vec![
             pkg("app", "0.1.0", true, "/nowhere/Cargo.toml"),
-            pkg("x", "1.0.0", false, "/nowhere/x/Cargo.toml"),
+            pkg(
+                "x",
+                "1.0.0",
+                false,
+                &absent.join("Cargo.toml").display().to_string(),
+            ),
         ],
         vec![
             node("app 0.1.0", vec![dep("x 1.0.0", &[NORMAL])]),
@@ -470,8 +520,9 @@ fn a_crate_directory_that_cannot_be_read_is_an_error_naming_it() {
         ],
     );
     let error = notice(&meta, "app").expect_err("unreadable");
+    let what = format!("read {}/", absent.display());
     assert!(
-        matches!(&error, Error::Spawn { what, .. } if what == "read /nowhere/x/"),
+        matches!(&error, Error::Spawn { what: got, .. } if *got == what),
         "{error:?}"
     );
 }

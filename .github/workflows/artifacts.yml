@@ -151,7 +151,7 @@ jobs:
         run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # The notice of the third-party crates the binary links (their licence texts), from the
       # resolution of this build: the same crate, feature and target as the build above. It
-      # goes into the tarball beside the binary; a crate without a licence file fails here.
+      # goes into the tarball beside the binary; a crate that declares no licence fails here.
       - name: Resolve the crates of this build
         run: cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform "$TARGET" > "$RUNNER_TEMP/metadata.json"
       - name: Third-party licence notice
@@ -229,7 +229,7 @@ jobs:
         run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # The notice of the third-party crates the binary links (their licence texts), from the
       # resolution of this build: the same crate, feature and target as the build above. It
-      # goes into the tarball beside the binary; a crate without a licence file fails here.
+      # goes into the tarball beside the binary; a crate that declares no licence fails here.
       - name: Resolve the crates of this build
         run: cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform "$TARGET" > "$RUNNER_TEMP/metadata.json"
       - name: Third-party licence notice
@@ -319,7 +319,7 @@ jobs:
         run: cmp Cargo.lock "$RUNNER_TEMP/Cargo.lock.release"
       # The notice of the third-party crates the binary links (their licence texts), from the
       # resolution of this build: the same crate, feature and target as the build above. It
-      # goes into the tarball beside the binary; a crate without a licence file fails here.
+      # goes into the tarball beside the binary; a crate that declares no licence fails here.
       - name: Resolve the crates of this build
         run: cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform "$TARGET" > "$RUNNER_TEMP/metadata.json"
       - name: Third-party licence notice

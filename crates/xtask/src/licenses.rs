@@ -9,7 +9,9 @@
 //! procedural macros, which run in the compiler, nor what only they need), once per
 //! name and version, in name and version order: its licence expression as its manifest gives it,
 //! its repository, and the text of each of its licence files (a file of the crate's directory
-//! whose name starts with `LICENSE`, `LICENCE`, `COPYING`, `NOTICE` or `UNLICENSE`, in any case).
+//! whose name starts with `LICENSE`, `LICENCE`, `COPYING`, `NOTICE` or `UNLICENSE`, in any case,
+//! and the file the manifest names as its `license_file`, when it is there). Files in
+//! subdirectories are not searched.
 //! A crate that ships no licence file is listed with its declared licence and a line saying so.
 //! A crate that declares no licence (no `license` and no `license_file`) is refused, with every
 //! other such crate named, and nothing is written. `package --licenses` puts the file into the
@@ -127,6 +129,12 @@ fn section(p: &Value, problems: &mut Vec<String>) -> Result<String, Error> {
         .filter(|e| e.path().is_file() && is_licence_file(&e.file_name().to_string_lossy()))
         .map(|e| e.path())
         .collect();
+    if let Some(named) = p["license_file"].as_str() {
+        let path = dir.join(named);
+        if path.is_file() && !files.contains(&path) {
+            files.push(path);
+        }
+    }
     files.sort();
     let declared = p["license"].as_str().or_else(|| p["license_file"].as_str());
     if declared.is_none() {
@@ -148,7 +156,7 @@ fn section(p: &Value, problems: &mut Vec<String>) -> Result<String, Error> {
         let bytes = package::read(&file)?;
         text.push_str(&format!(
             "\n--- {} ---\n{}\n",
-            file.file_name().unwrap_or_default().to_string_lossy(),
+            file.strip_prefix(&dir).unwrap_or(&file).display(),
             String::from_utf8_lossy(&bytes).trim_end()
         ));
     }
