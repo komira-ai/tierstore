@@ -3,7 +3,7 @@
 use std::collections::hash_map::RandomState;
 use std::convert::Infallible;
 use std::future::Future;
-use std::hash::{BuildHasher, Hasher};
+
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 
 use crate::journal::LEASE_KEY;
 use crate::{Backend, Clock, Error, Sleeper};
+use std::hash::BuildHasher;
+use std::hash::Hasher;
 
 /// 128 random bits as hex, from the keys the standard library seeds each `RandomState` with
 /// from the operating system's randomness, so that no crate is needed for it. It only has to
@@ -193,6 +195,7 @@ impl Lease {
     ///
     /// # Errors
     /// What the HEAD gives other than not found.
+    #[cfg(test)]
     pub(crate) async fn still_held(&self) -> Result<bool, Error> {
         let mut state = self.shared.state.lock().await;
         let Some(etag) = state.etag.clone() else {

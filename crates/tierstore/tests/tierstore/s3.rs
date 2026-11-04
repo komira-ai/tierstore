@@ -3,25 +3,27 @@
 //! page, names the client cannot sign, a store that cannot be reached, the proxy and the
 //! reconciler working over S3 backends).
 
-use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::stream;
 use objstore_s3::s3::fake::{Failure, FakeS3, part_etag};
 use tierstore::s3::{Capabilities, Credentials, S3Config};
 use tierstore::{
-    Backend, ByteRange, Check, Clock, Error, PartBody, Proxy, ProxyConfig, Reconciler,
-    ReconcilerConfig, S3Backend, SelfTestError, SelfTestOptions, SweepBudget, SystemClock,
-    TestClock, self_test, sweep_probes,
+    Backend, ByteRange, Check, Error, PartBody, ProxyConfig, S3Backend, SelfTestError,
+    SelfTestOptions, SweepBudget, SystemClock, TestClock, self_test, sweep_probes,
 };
 
 use crate::conformance;
 use crate::list_uploads::contract as uploads_contract;
 use crate::multipart::{contract, large};
 use crate::support::{body, keys, page};
+use futures::StreamExt;
+use std::io::Read;
+use std::io::Write;
+use tierstore::Clock;
 
 pub fn config(endpoint: &str) -> S3Config {
     S3Config {
@@ -592,41 +594,6 @@ async fn a_store_that_cannot_be_reached_is_unavailable() {
     }
 }
 
-/// Asserts that a proxy over two S3 backends acknowledges a put and reads it back, that a
-/// reconciler over the same two takes the lease, copies the object to the cold backend and
-/// renews the lease, that a second reconciler does nothing while the first holds the lease,
-/// and that it takes the lease once the first has stopped.
-#[tokio::test]
-async fn a_proxy_and_a_reconciler_work_over_two_s3_backends() {
-    let (_hot_s3, hot) = backend().await;
-    let (_cold_s3, cold) = backend().await;
-    let hot: Arc<dyn Backend> = Arc::new(hot);
-    let cold: Arc<dyn Backend> = Arc::new(cold);
-    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let mut settings = ProxyConfig::new("p1", 1000, clock.clone());
-    settings.linger = Duration::from_millis(1);
-    settings.usage_refresh = Duration::ZERO;
-    let open = Proxy::open(hot.clone(), cold.clone(), settings);
-    let proxy = open.await.unwrap();
-    proxy.put("a", body("hello")).await.unwrap();
-    assert_eq!(proxy.get("a", None).await.unwrap(), body("hello"));
-
-    let settings = ReconcilerConfig::new("r1", 1000, clock.clone());
-    let mut one = Reconciler::new(hot.clone(), cold.clone(), settings);
-    let settings = ReconcilerConfig::new("r2", 1000, clock);
-    let mut two = Reconciler::new(hot, cold.clone(), settings);
-    let report = one.pass().await;
-    assert!(report.held);
-    assert_eq!(report.copied, 1);
-    assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(cold.get("a", None).await.unwrap(), body("hello"));
-
-    assert!(!two.pass().await.held);
-    assert!(one.pass().await.held);
-    one.stop().await;
-    assert!(two.pass().await.held);
-}
-
 /// Asserts that the S3 backend does the calls of a multipart upload as the trait says, held to
 /// the same checks as the in-memory and the directory backend: parts of a length that is told
 /// and of one that is not, replaced by number, with the tag the service gives them; a
@@ -881,7 +848,7 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     let memory = || -> Arc<dyn Backend> { Arc::new(tierstore::MemoryBackend::new()) };
     let open = |hot: Arc<dyn Backend>, cold: Arc<dyn Backend>| async move {
         let clock = Arc::new(SystemClock);
-        Proxy::open(hot, cold, ProxyConfig::new("p1", 1000, clock))
+        crate::support::open_live(hot, cold, ProxyConfig::new("p1", 1000, clock))
             .await
             .unwrap()
     };

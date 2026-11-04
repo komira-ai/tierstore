@@ -10,7 +10,8 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use super::{MAX_MANIFEST_BYTES, OciFront, OciMetrics, OciPrefix};
-use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, TestClock};
+use crate::Backend;
+use crate::{Error, FaultyBackend, MemoryBackend, Op, ProxyConfig, TestClock};
 
 const MANIFEST: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
 
@@ -47,8 +48,7 @@ impl Rig {
         let memory = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
         let cold = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
         let mut config = ProxyConfig::new("p1", 1 << 20, clock);
-        config.linger = std::time::Duration::from_millis(1);
-        let proxy = Proxy::open(memory.clone(), cold.clone(), config).await;
+        let proxy = crate::server::testing::live_proxy(memory.clone(), cold.clone(), config).await;
         let proxy = proxy.expect("a proxy");
         let faulty = Arc::new(FaultyBackend::new(memory.clone()));
         let metrics = Arc::new(OciMetrics::default());

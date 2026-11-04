@@ -125,13 +125,21 @@ Write each key file owned by `tierstore` with mode 0600 or 0400. [Keys and roles
 
 ## Edit the unit
 
-The values in the example unit are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the listen address, the proxy id, the bucket names, the tiers and `--hot-bytes`. Keep the proxy id across restarts and give each process over the same tiers one of its own. [Configuration](configuration.md) lists every flag.
+The values in the example unit are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the listen address, the proxy id, the bucket names, the tiers and `--hot-bytes`. Give each process over the same tiers a proxy id of its own. [Configuration](configuration.md) lists every flag.
 
 The unit has no `[Install]` section, so installing it starts nothing and `systemctl enable` has nothing to link; it is also skipped while `/etc/tierstore/access.key` does not exist. Start it by hand once the files are in place:
 
 ```sh
 systemctl start tierstore
 ```
+
+A storage node over a new `dir` or `s3` hot tier serves reads and answers writes 503 until the store is activated, which is done once, with the same tier flags the unit has:
+
+```sh
+tierstore format-epoch --hot s3:tierstore-hot --hot-endpoint http://s3-hot.example:9000 --hot-credentials-file /etc/tierstore/hot.credentials --activate --apply
+```
+
+Within seconds every process over the tier takes writes. [Operations](operations.md#rolling-out-the-entry-protocol) says what this does on a store that an earlier release wrote.
 
 To start it at boot, add the section in a drop-in (`systemctl edit tierstore`, with `[Install]` and `WantedBy=multi-user.target`) and run `systemctl enable tierstore`.
 

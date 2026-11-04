@@ -4,11 +4,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use sha2::{Digest as _, Sha256};
 use tierstore::server::oci::OciError;
 use tierstore::server::oci::{OciFront, OciLimits, OciListener, OciMetrics, OciPrefix, acceptor};
-use tierstore::{Backend, MemoryBackend, Proxy, ProxyConfig, SystemClock};
+use tierstore::{Backend, Error, MemoryBackend, Proxy, ProxyConfig, Sleeper, SystemClock};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -18,6 +19,33 @@ use crate::client::{Conn, Reply, connector};
 use crate::pki::{ca, ip, leaf};
 
 pub const PREFIX: &str = "oci/";
+
+/// A wait that never ends: the heartbeat of a proxy then makes no call after its first beat.
+struct Never;
+
+#[async_trait]
+impl Sleeper for Never {
+    async fn sleep(&self, _duration: Duration) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Starts a proxy over `hot` and `cold` and makes it live, with the format of `hot` active at
+/// epoch 2: what a put or a delete on an entry needs.
+async fn live_proxy(
+    hot: Arc<dyn Backend>,
+    cold: Arc<dyn Backend>,
+    config: ProxyConfig,
+) -> Result<Proxy, Error> {
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    let _ = hot.put("_tiering/format", active).await;
+    let proxy = Proxy::open(hot, cold, config).await?;
+    assert!(proxy.start_heartbeat(Arc::new(Never)));
+    while !proxy.is_live() {
+        tokio::task::yield_now().await;
+    }
+    Ok(proxy)
+}
 
 pub fn hex_of(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -74,9 +102,8 @@ impl Rig {
         let hot = Arc::new(MemoryBackend::new());
         let cold = Arc::new(MemoryBackend::new());
         let mut config = ProxyConfig::new("oci-rig", 1 << 30, Arc::new(SystemClock));
-        config.linger = Duration::from_millis(1);
         config.usage_refresh = Duration::ZERO;
-        let opened = Proxy::open(hot, cold.clone(), config).await;
+        let opened = live_proxy(hot, cold.clone(), config).await;
         let proxy = Arc::new(opened.expect("a proxy"));
         let metrics = Arc::new(OciMetrics::default());
         let prefix = OciPrefix::new(PREFIX).expect("a prefix");

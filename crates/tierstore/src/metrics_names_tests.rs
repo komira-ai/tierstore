@@ -3,24 +3,21 @@
 use std::collections::BTreeSet;
 
 use crate::metrics::{
-    BYTES_READ_TOTAL, BYTES_SERVED_TOTAL, Counters, HITS_TOTAL, MISSES_TOTAL, PROMOTED_BYTES_TOTAL,
-    PROMOTIONS_SKIPPED_TOTAL, PROMOTIONS_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped,
-    Tier,
+    BYTES_READ_TOTAL, BYTES_SERVED_TOTAL, Counters, HITS_TOTAL, MISSES_TOTAL,
+    PROMOTIONS_SKIPPED_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped, Tier,
 };
 
-const FAMILIES: [&str; 9] = [
+const FAMILIES: [&str; 7] = [
     HITS_TOTAL,
     MISSES_TOTAL,
     READ_ERRORS_TOTAL,
     READS_TOTAL,
     BYTES_SERVED_TOTAL,
     BYTES_READ_TOTAL,
-    PROMOTIONS_TOTAL,
-    PROMOTED_BYTES_TOTAL,
     PROMOTIONS_SKIPPED_TOTAL,
 ];
 
-/// Asserts that the nine family names differ, start with `tierstore_` and end with `_total`.
+/// Asserts that the seven family names differ, start with `tierstore_` and end with `_total`.
 #[test]
 fn the_family_names_are_distinct_and_start_with_the_prefix() {
     let distinct: BTreeSet<&str> = FAMILIES.into_iter().collect();
@@ -37,12 +34,7 @@ fn the_family_names_are_distinct_and_start_with_the_prefix() {
 fn the_rendered_text_is_the_text_built_from_the_names() {
     let tiers = [(Tier::Hot, "hot"), (Tier::Cold, "cold")];
     let reads = [(Read::Get, "get"), (Read::Head, "head")];
-    let skips = [
-        (Skipped::Critical, "critical"),
-        (Skipped::Full, "full"),
-        (Skipped::Raced, "raced"),
-        (Skipped::Failed, "failed"),
-    ];
+    let skips = [(Skipped::Critical, "critical")];
     let counters = Counters::default();
     let mut expected = String::new();
     let mut cell = 0_u64;
@@ -75,10 +67,6 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         expected.push_str(&format!("{BYTES_SERVED_TOTAL}{labels} {served}\n"));
         expected.push_str(&format!("{BYTES_READ_TOTAL}{labels} {read}\n"));
     }
-    counters.promoted(7);
-    counters.promoted(5);
-    expected.push_str(&format!("{PROMOTIONS_TOTAL} 2\n"));
-    expected.push_str(&format!("{PROMOTED_BYTES_TOTAL} 12\n"));
     for (index, (why, label)) in skips.into_iter().enumerate() {
         for _ in 0..=index {
             counters.skipped(why);

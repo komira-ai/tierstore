@@ -15,7 +15,7 @@
 # Edit before use, as for tierstore.service: the bucket, the endpoints (http://host[:port], no
 # path) and --hot-bytes. Keep the listen addresses, the proxy id and --slot as they are: the hook
 # probes the slot on 127.0.0.1:%i, reads the slot label of the build gauge, and the proxy id gives
-# each slot its own journal in the hot tier. Both slots run this one file, so they settle for the
+# each slot its own registration in the hot tier and its own entries. Both slots run this one file, so they settle for the
 # same --drain-lb-wait.
 #
 # The key files are those of tierstore.service, owned by the account of User=, mode 0600; the flags

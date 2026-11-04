@@ -431,6 +431,18 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
 async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_one() {
     let hot = FakeS3::start().await;
     let cold = FakeS3::start().await;
+    // A hot tier that keeps its format between starts is activated by the operator
+    // (`tierstore format-epoch --activate`): the object is put in it before the node starts.
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    let capabilities = Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    };
+    let format = ObjectKey::new("_tiering/format").unwrap();
+    hot.store(capabilities)
+        .put_new(&format, active, None)
+        .await
+        .unwrap();
     hot.require_credentials("HOTKEY", "hot-secret");
     cold.require_credentials("COLDKEY", "cold-secret");
     let files = Files::new("bin-s3-tiers");

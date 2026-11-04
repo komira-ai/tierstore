@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tierstore::{
-    Backend, ByteRange, Clock, Error, FaultyBackend, JournalEntry, JournalOp, MemoryBackend, Op,
-    SelfTestOptions, SystemClock, TestClock, decode_journal, encode_journal,
+    ByteRange, Error, FaultyBackend, MemoryBackend, Op, SelfTestOptions, SystemClock, TestClock,
     settle_conditional_delete,
 };
 
 use crate::conformance;
 use crate::support::{body, chunks, keys};
+use tierstore::Backend;
+use tierstore::Clock;
 
 /// Asserts that a second put of a key is refused with `AlreadyExists` and leaves the first
 /// object's bytes in place, on two separate backends (the hot and the cold tier are two).
@@ -209,41 +210,6 @@ async fn a_put_if_match_moves_the_time_of_last_write_only_when_it_replaces() {
     let swap = backend.put_if_match("k", body("two"), &tag);
     swap.await.unwrap();
     assert_eq!(backend.head("k").await.unwrap().modified, 9);
-}
-
-/// Asserts that a journal encodes as a JSON list of entries with the operation in capitals,
-/// that it decodes to the entries it was made of, and that bytes that are not such a list
-/// are an error.
-#[test]
-fn a_journal_object_is_a_json_list_of_entries() {
-    let put = JournalEntry {
-        op: JournalOp::Put,
-        key: "k".to_owned(),
-        size: 5,
-        time: 7,
-        cold_tag: None,
-        hot_tag: None,
-    };
-    let delete = JournalEntry {
-        op: JournalOp::Delete,
-        key: "j".to_owned(),
-        size: 0,
-        time: 8,
-        cold_tag: None,
-        hot_tag: None,
-    };
-    let entries = vec![put, delete];
-    let encoded = encode_journal(&entries);
-    let want = concat!(
-        r#"[{"op":"PUT","key":"k","size":5,"time":7},"#,
-        r#"{"op":"DELETE","key":"j","size":0,"time":8}]"#
-    );
-    assert_eq!(encoded, want.as_bytes());
-    assert_eq!(decode_journal(&encoded), Ok(entries));
-
-    let corrupt = decode_journal(b"not json").unwrap_err();
-    assert!(matches!(corrupt, Error::Other(_)));
-    assert!(corrupt.to_string().contains("corrupt journal object"));
 }
 
 fn says(error: &Error, message: &str) {

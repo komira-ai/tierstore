@@ -17,6 +17,7 @@ use super::cli_probe::probe_tiers;
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::listen::{bind_all, local_addrs};
+use super::memory_format::start_format;
 use super::oci::{OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
@@ -106,6 +107,7 @@ pub async fn run_serving(
     let gate = open_gate(cli)?;
     let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
     probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
+    start_format(cli, hot).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let opened = Proxy::open(hot, cold, built.proxy).await;
@@ -133,11 +135,10 @@ pub async fn run_serving(
     };
     let oci_serving = serve_oci(oci, oci_stopped);
     let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
-    let interval = cli.reconcile_interval;
     let reconciling = async move {
         match gate {
-            Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
-            None => reconcile(reconciler, interval, halt).await,
+            Some(gate) => reconcile_gated(reconciler, halt, gate).await,
+            None => reconcile(reconciler, halt).await,
         }
     };
     let (drained, (), oci_cut) = tokio::join!(serving, reconciling, oci_serving);

@@ -1,4 +1,4 @@
-//! The deletes of a proxy whose format is active (`WriteMode::Entries`): a delete is made on the
+//! The deletes of a proxy whose format is active (the format says `active`): a delete is made on the
 //! journal entry of its key, and the cold tier's object is deleted at once, whatever the entry
 //! says.
 //!

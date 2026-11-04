@@ -23,12 +23,12 @@ client --S3--> tierstore --> hot tier  (dir: on SSD)
                          \-> cold tier (dir: on HDD, or an S3 bucket)
 ```
 
-A write goes to the hot tier and is acknowledged once a journal entry for it is durable there. The reconciler later copies it to the cold tier. A read is served from the hot tier, else from the cold tier, and what it found in the cold tier is copied back into the hot tier. So the hot tier is also a cache of what was used lately. When the hot tier is full, new objects are written straight to the cold tier.
+A write goes to the hot tier and is acknowledged once the entry of its key (a small object in the hot tier, `_entries/<digest of the key>`) says it landed. The reconciler later copies it to the cold tier. A read is served from the hot tier, else from the cold tier, and a read that found an object only in the cold tier asks the reconciler, on that entry, to copy it back into the hot tier. So the hot tier is also a cache of what was used lately. Writes are taken only once the store has been activated (see [operations](operations.md#rolling-out-the-entry-protocol)); reads never wait for it. When the hot tier is full, new objects are written straight to the cold tier.
 
 ## What it guarantees and what it does not
 
 - A put is create-only: a key that exists in either tier is refused with 412 `PreconditionFailed`. Objects are immutable.
-- A put is acknowledged only after its journal entry is durable in the hot tier. Losing the hot tier loses objects that were not yet copied to the cold tier.
+- A put is acknowledged only after its entry says it landed in the hot tier. Losing the hot tier loses objects that were not yet copied to the cold tier.
 - It asks each tier the questions these guarantees rest on before it starts (see "The start-up self-test" in [operations](operations.md)) and refuses to start on a store that answers one wrongly.
 - It does not scrub a storage node's objects: nothing re-reads stored bytes to find rot. See [limits](limits.md).
 

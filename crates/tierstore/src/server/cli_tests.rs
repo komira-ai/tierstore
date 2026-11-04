@@ -2,24 +2,17 @@
 //! skipped checks and checks before a start are in the two modules below.
 
 use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use crate::selftest_tests::{Flaw, Flawed};
-use crate::server::{AccessKey, Drained};
-use crate::{Backend, Check, SelfTestError, SelfTestFailure};
-
-use super::super::cli_probe::{probe_run_id, probe_tiers};
-use super::super::cli_serve::cut_note;
-use super::{
-    Cli, InvalidFlags, S3Flags, SkippedCheck, build, exit_status, open_tier, parse_duration,
-    parse_skip, read_key, share, tier,
-};
+use super::{Cli, build, parse_duration, tier};
+use clap::CommandFactory;
+use clap::Parser;
+use std::os::unix::fs::PermissionsExt;
 
 #[path = "cli_tests/settings.rs"]
 mod settings;
@@ -108,7 +101,7 @@ fn a_duration_is_a_number_and_a_unit() {
 }
 
 /// Asserts that the flags that have defaults have them: the water marks at 80, 70 and 95
-/// percent, a drain of 10 seconds and 15 minutes, a journal linger of 20 milliseconds, and so on.
+/// percent, a drain of 10 seconds and 15 minutes, 16 parallel copies, and so on.
 #[test]
 fn the_flags_have_their_defaults() {
     let cli = Cli::try_parse_from(flags("key", &[])).unwrap();
@@ -123,12 +116,9 @@ fn the_flags_have_their_defaults() {
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
     assert_eq!(cli.drain_lb_wait, Duration::from_secs(10));
     assert_eq!(cli.drain_deadline, Duration::from_secs(900));
-    assert_eq!(cli.journal_linger, Duration::from_millis(20));
-    assert_eq!(cli.journal_retention, Duration::from_secs(24 * 3600));
     assert_eq!(cli.copy_parallel, 16);
     assert_eq!(cli.lease_ttl, Duration::from_secs(30));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(5));
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));
@@ -186,12 +176,9 @@ fn the_flags_can_all_be_given() {
         ("--critical", "100"),
         ("--drain-lb-wait", "2s"),
         ("--drain-deadline", "3m"),
-        ("--journal-linger", "5ms"),
-        ("--journal-retention", "2h"),
         ("--copy-parallel", "4"),
         ("--lease-ttl", "20s"),
         ("--usage-stale-after", "45s"),
-        ("--reconcile-interval", "1s"),
         ("--max-request-bytes", "10"),
         ("--max-concurrent-puts", "3"),
         ("--put-permit-wait", "4s"),
@@ -213,12 +200,9 @@ fn the_flags_can_all_be_given() {
     assert_eq!(marks, (90, 50, 100));
     assert_eq!(cli.drain_lb_wait, Duration::from_secs(2));
     assert_eq!(cli.drain_deadline, Duration::from_secs(180));
-    assert_eq!(cli.journal_linger, Duration::from_millis(5));
-    assert_eq!(cli.journal_retention, Duration::from_secs(7200));
     assert_eq!(cli.copy_parallel, 4);
     assert_eq!(cli.lease_ttl, Duration::from_secs(20));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(45));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(1));
     assert_eq!(cli.max_request_bytes, 10);
     assert_eq!(cli.max_concurrent_puts, 3);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(4));
@@ -330,11 +314,8 @@ fn the_help_names_every_flag_and_the_version_the_package() {
         "--read-only-key-file",
         "--drain-lb-wait",
         "--drain-deadline",
-        "--journal-linger",
-        "--journal-retention",
         "--copy-parallel",
         "--lease-ttl",
-        "--reconcile-interval",
         "--max-request-bytes",
         "--body-idle-timeout",
         "--s3-request-timeout",

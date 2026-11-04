@@ -1,20 +1,22 @@
 //! The format object of the store, `_tiering/format`: what every proxy and the reconciler read to
-//! know whether writes are paused for a change of the format of what is stored.
+//! know whether writes are paused for a change of the format of what is stored, and whether
+//! writes are made on entries.
 //!
 //! The body is a JSON object `{"phase": "drain"}`, `{"phase": "drained"}` or
 //! `{"epoch": 2, "phase": "active"}`; a reader ignores fields it does not know and takes a phase it
-//! does not know to be no pause. No object means the format of every release before this one, and
-//! no pause.
+//! does not know to be no pause. No object means the format of every release before the bridge
+//! release, and no pause; a proxy of this release makes no write on it (see `active`).
 //!
 //! - `drain`: asked for by the operator. A proxy answers every write with
-//!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler
-//!   applies the journals until each one is applied to its end.
-//! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
-//!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
-//!   lets every proxy read `drain` again; it does not wait for a write that a proxy admitted
-//!   earlier and is still running. Writes stay paused.
+//!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler of the
+//!   bridge release applied the journals until each one was applied to its end.
+//! - `drained`: written by the reconciler of the bridge release (and no one else) when it holds the
+//!   lease, has seen `drain` for the settle time, and every journal it knows is applied to its end.
+//!   Writes stay paused. This release's reconciler never writes it.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
-//!   entries of their keys; it never pauses writes for it.
+//!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
+//!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
+//!   answered with [`Error::Unavailable`] and a text that says writes wait for the active format.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};

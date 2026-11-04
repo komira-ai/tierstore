@@ -4,13 +4,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
 use super::super::config_units::{format_duration, parse_size};
 use super::{ConfigError, KEYS, PER_RUN, PerRun, from_text, keys_for_flags, load};
 use crate::server::cli::{Cli, parse_duration};
 use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, MINIMAL_FLAGS, golden_flags};
+use clap::CommandFactory;
+use clap::Parser;
 
 /// The message of the refusal of this file text.
 fn refusal(text: &str) -> String {
@@ -393,15 +394,11 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "low_water = 1",
         "critical = 1",
         "copy_parallel = 1",
-        "reconcile_interval = \"1s\"",
         "lock_file = \"/var/lib/tierstore/instance.lock\"",
         "usage_stale_after = \"1s\"",
-        "journal_linger = \"1s\"",
-        "journal_retention = \"1s\"",
         "heartbeat = \"1s\"",
         "departure = \"1s\"",
         "deadline_margin = \"1s\"",
-        "registration_retention = \"1s\"",
     ];
     for line in every {
         let text = minimal_with(

@@ -18,7 +18,6 @@ Flags that depend on each other. These are checked after the flags and the file 
 ```message
 --low-water must be below --high-water
 --high-water must not be above --critical
---reconcile-interval must be shorter than --lease-ttl
 --usage-stale-after must be longer than --lease-ttl
 --body-idle-timeout must be longer than zero
 --s3-request-timeout must be longer than zero
@@ -90,7 +89,7 @@ A tier that answers a self-test question wrongly exits 3 and names the tier, the
 | 413 `EntityTooLarge` | a body longer than `--max-request-bytes` (or the presigning key's ceiling) |
 | 400 `RequestTimeout` | a body that stalled for `--body-idle-timeout` or came slower than `--put-min-bytes-per-sec`; nothing is stored |
 | 503 `SlowDown` | more than `--max-concurrent-puts` bodies at once for longer than `--put-permit-wait`, or a put that met a full tier; retry |
-| 503 `ServiceUnavailable` | a tier could not be reached; in v0.0.41 and before also a request on a connection that was open when the drain's settle ended. On main a drain answers no request 503 (see "A connection ends during a restart") |
+| 503 `ServiceUnavailable` | a write while the format object does not say `active` at epoch 2 (the text names `tierstore format-epoch --activate`; a store is activated once, see [operations](operations.md#rolling-out-the-entry-protocol)), or while it says `drain` or `drained` (writes are paused); a put or delete that met a put, delete or copy of the same key in flight (retry); a delete that waited for the reconciler's release of the key and did not get it before the request deadline; a tier could not be reached; in v0.0.41 and before also a request on a connection that was open when the drain's settle ended. On main a drain answers no request 503 (see "A connection ends during a restart") |
 | 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or `encoding-type=url` on a listing; set the SDK's checksum calculation to "when required" |
 
 ## The hot tier keeps filling

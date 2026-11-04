@@ -6,19 +6,16 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, stream};
-use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell};
+use futures::stream;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
-use crate::journal::{
-    USAGE_KEY, Usage, encode_journal, is_reserved, journal_key, journal_prefix, load_checkpoint,
-    proxy_key, seq_of,
-};
+use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, JournalEntry, JournalOp, Listed, Meta,
-    MonotonicClock, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
+    PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -27,10 +24,6 @@ const UPLOAD_LISTING_CALLS: u32 = 100;
 
 /// How many cold objects of a listing that may be reservations are asked about at once.
 const LISTING_HEADS: usize = 16;
-
-/// How many times a delete looks at the cold tier's object again after it changed under the
-/// delete.
-const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
 #[cfg(test)]
@@ -47,17 +40,17 @@ mod heartbeat_tests;
 mod pause;
 mod put;
 mod read;
-mod relay;
 
 pub use entry_delete::DeleteWait;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use heartbeat::Heartbeat;
-use pause::WriteMode;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
 pub struct ProxyConfig {
-    /// Names the proxy's journal and its checkpoint. It is not empty and has no `/`. Every
-    /// running proxy has an id of its own, and a proxy that restarts keeps its id.
+    /// Names the proxy's registration and the owner of the entries it holds. It is not empty and
+    /// has no `/`. Every running proxy has an id of its own.
     pub proxy_id: String,
     /// The bytes the hot tier is meant to hold, which the usage the reconciler publishes is
     /// compared with.
@@ -66,10 +59,6 @@ pub struct ProxyConfig {
     /// found in the cold tier into the hot tier. A put is not changed by it: it still goes to
     /// the hot tier, at once, until the usage reaches the budget.
     pub critical: f64,
-    /// The most entries one journal object holds. A batch that reaches it is written at once.
-    pub batch_entries: usize,
-    /// How long a batch waits for more entries before it is written.
-    pub linger: Duration,
     /// How long the usage object that was read is used before it is read again, and how long
     /// the hot tier is taken to be full after it said so.
     pub usage_refresh: Duration,
@@ -92,8 +81,8 @@ pub struct ProxyConfig {
     pub heartbeat: Duration,
     /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
     /// is the send time of the last acknowledged beat plus this less the margin. Only the
-    /// puts and deletes made on entries read it ([`Proxy::is_live`]); the reconciler's removal of
-    /// registrations uses its own `registration_retention`.
+    /// puts and deletes made on entries read it ([`Proxy::is_live`]); the reconciler counts the
+    /// owner of an entry as departed by its own `EntryReconcilerConfig::departure`.
     pub departure: Duration,
     /// The time that must be left before `live_until` for a call that destroys to start; the
     /// longest such a call may take.
@@ -107,8 +96,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
-    /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
+    /// critical share of 0.95, a usage object that is read every second and ignored after 30 seconds, a
     /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
     /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
     /// 3 looks at an entry, and the [`DeleteWait`] of [`DeleteWait::new`].
@@ -118,8 +106,6 @@ impl ProxyConfig {
             proxy_id: proxy_id.to_owned(),
             hot_budget,
             critical: 0.95,
-            batch_entries: 64,
-            linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
             format_refresh: Duration::from_secs(5),
@@ -164,16 +150,6 @@ struct UsageSeen {
     since: u64,
 }
 
-/// One journal object being filled, and the outcome of writing it.
-#[derive(Default)]
-struct Batch {
-    entries: Mutex<Vec<JournalEntry>>,
-    /// Notified when the batch reaches its size, to cut the linger short.
-    full: Notify,
-    /// Set once, by whichever caller waiting on the batch writes it.
-    outcome: OnceCell<Result<(), Error>>,
-}
-
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     // No method panics while holding the lock, so a poisoned state is still whole.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -195,136 +171,93 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///
 /// The proxy needs no state for correctness: any number of proxies, each with an id of its
 /// own, work over the same two backends, and one that restarts finds what it needs in them.
-/// Objects are immutable. "Flushed" means that the cold tier holds the object, and a
-/// [`Reconciler`](crate::Reconciler) does the flushing from the journals the proxies write.
+/// Objects are immutable. "Flushed" means that the cold tier holds the object, and the
+/// [`EntryReconciler`](crate::EntryReconciler) does the flushing from the entries the proxies
+/// make.
 ///
-/// - **Get** reads the hot tier, else the cold tier. An object it read from the cold tier is
-///   copied back into the hot tier, create-only (it is fine if another read got there
-///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
-///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
-///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
-///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
-///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
-///   made for it. The hot tag is the one the create-only write itself returns
-///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
-///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
-///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A read through [`Backend::open_read`] or
-///   [`Backend::get_stream`] of the whole object reads the cold object once and gives its body to
-///   the caller as it arrives, never held whole; the same chunks are queued for a streamed
-///   create-only write into the hot tier (`put_stream_tagged`, which gives the hot tag of the
-///   object it made), in a task of its own. The caller is never made to wait for that write: if it
-///   falls more than 16 MiB behind, fails, or the caller drops the body before the last byte (a
-///   client that went away), the write is abandoned and leaves no object, and a body of another
-///   length than the cold meta's is not copied. A read that is not given its body (a 304, a 412)
-///   copies nothing. A ranged read that misses the hot tier asks the cold tier for that range
-///   alone and copies nothing back: the memory of a read is its range, whatever the size of the
-///   object, and a cache that reads a long object in chunks does not make the proxy read it whole
-///   once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
-///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
-///   copied back.
-///   Once the format is active the read copies nothing itself and reads no entry: it asks for the
-///   copy-back with a create-only `(CB, PENDING)` entry of the key in a task of its own (nothing
-///   happens if an entry exists), and the entry reconciler copies the cold object under the entry.
-/// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
+/// **Entries.** Every write is made on the journal entry of its key, `_entries/<sha256 of the
+/// key>` in the hot tier (the module `entry`), and only while the format object
+/// (`_tiering/format`) says `{"epoch": 2, "phase": "active"}`. Until it does, and while it says
+/// `drain` or `drained`, a put, a delete, and the create, part upload and completion of a
+/// multipart upload are answered with [`Error::Unavailable`] (a 503 at the S3 front), and reads
+/// are served. The format is read at most every [`ProxyConfig::format_refresh`], and at each
+/// heartbeat.
+///
+/// - **Get** reads the hot tier, else the cold tier, and reads no entry. An object it read from
+///   the cold tier is not copied by the read: when the hot tier is below the critical mark the
+///   read asks for the copy with a create-only `(CB, PENDING)` entry of the key, in a task of its
+///   own (nothing happens if an entry of the key exists), and the entry reconciler copies the
+///   cold object into the hot tier under the entry. A read through [`Backend::open_read`] or
+///   [`Backend::get_stream`] reads the cold object once and gives its body to the caller as it
+///   arrives, never held whole. A ranged read that misses the hot tier asks the cold tier for that
+///   range alone and asks for no copy-back: the memory of a read is its range, whatever the size of
+///   the object. A failed ask does not fail the read. A *reservation* in the cold tier (a marked
+///   56-byte object, see [`Backend::put_reservation`]) is not an object: a read of it is not found,
+///   and no copy-back is asked for.
+/// - **Head** reads the hot tier, else the cold tier, and asks for no copy-back; a reservation is
 ///   not found.
-/// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
-///   may have been evicted from the hot tier) or in the hot tier. The cold tier is asked
-///   first (a HEAD); then the object is written to the hot tier, create-only; then the cold
-///   tier is asked again, and if it now holds the key (a copy to the cold tier and a delete from
-///   the hot tier came between the first ask and the create) the object just created is removed
-///   from the hot tier and the put is refused, since the reconciler copies an object to the cold
-///   tier before it deletes it from the hot tier, so a create that wins the hot tier after that
-///   delete always finds the cold copy; then an entry
-///   is appended to the journal; then the put is acknowledged. **The acknowledgement waits
-///   for the journal object that holds the entry to be written to the hot tier**: an object
-///   that is acknowledged and not journaled would be in no one's list of objects to copy to
-///   the cold tier, and so could be lost with the hot tier. A put whose journal append fails
-///   is not acknowledged, and the object it wrote to the hot tier is removed, best effort:
-///   left there it would never be copied, and would make a retry of the put fail with
-///   [`Error::AlreadyExists`].
+/// - **Put** is refused if the key exists in either tier, is written to the hot tier create-only,
+///   and is acknowledged when its entry says so (`entry_put.rs`): the entry is created
+///   `(PUT, HELD)` before the object is written, so that no other put, delete or copy of the key
+///   goes on beside it, and becomes `(PUT, PENDING)` after, which hands the key to the reconciler.
+///   A put whose entry cannot be made or kept is refused with [`Error::Unavailable`] and a client
+///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
+///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the
-///   last chunk, and the journal entry is appended after that. A body that ends with an error
-///   (a checksum that does not match, a connection that was cut) leaves no object in either
-///   tier and no journal entry. The checks of a put (the key exists in either tier, reserved
-///   keys) are made before the first chunk is taken. If the hot tier answers [`Error::Full`]
-///   after it took some of the body, the bytes cannot be offered to the cold tier, so the put
-///   fails with [`Error::Full`] (the tier is latched full, and the client's retry goes to the
-///   cold tier); if it took none, the cold tier gets the whole body as for a held put.
-/// - **Delete** removes the object from the cold tier first, by its content tag (looking again if
-///   it changed, three times at most), then from the hot tier, then appends a delete entry. A
-///   reservation in the cold tier is removed only if the hot tier holds the key; a bare one is a
-///   put that has not written its object yet, and is left (the delete finds no object, so it
-///   comes before that put).
+///   last chunk, and the entry becomes pending after that. A body that ends with an error (a
+///   checksum that does not match, a connection that was cut) leaves no object in either tier and
+///   no entry. If the hot tier answers [`Error::Full`] after it took some of the body, the bytes
+///   cannot be offered to the cold tier, so the put fails with [`Error::Full`] (the tier is latched
+///   full, and the client's retry goes to the cold tier); if it took none, the cold tier gets the
+///   whole body as for a held put.
+/// - **Delete** (`entry_delete.rs`) deletes the object from the cold tier at once and amends,
+///   claims or creates the entry of the key; a delete that meets a copy in flight (an entry the
+///   reconciler holds or has sealed) waits for the reconciler's release ([`DeleteWait`]) and is
+///   answered 503 at the request deadline.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
-///   hold the key), in key order, without the keys under the reserved prefixes
-///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
-///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
-///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
-///   version of an object to know it by). A HEAD that fails fails the listing.
-///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
-///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
-///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
-///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
-///   local cache of a build node refuse those keys as well, each for itself.
+///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
+///   `_tiering/` and `_entries/` (whichever tier holds them), and without reservations: a cold
+///   object of the size of one that the hot listing does not show is asked about with a HEAD
+///   (sixteen at a time; an object a HEAD finds real is shown, and no answer is kept from one
+///   listing to the next, since a listing gives no version of an object to know it by). A HEAD that
+///   fails fails the listing. [`Backend::list_page`] pages through the merged listing: the last key
+///   of a page is the continuation token, and `max_keys` is kept to (a page of the cold tier that
+///   the filter cut short is made up from the next). A get, a head, a put, a delete and every
+///   multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The S3
+///   front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
-///   proxy where the cold tier keeps them). The completion is a create-only put to the cold
-///   tier, and so is refused with [`Error::AlreadyExists`] where either tier holds the key. It
-///   journals nothing, as a put that goes to the cold tier of a full hot tier journals nothing:
-///   the object is in the cold tier, so a get, a head, a listing and a delete find it, and the
-///   reconciler has nothing to copy. It is in the hot tier only after a get copies it back.
-///   The cold tier must do multipart uploads (the provided methods of [`Backend`] do not).
-///   [`Backend::list_uploads`] lists the cold tier's open uploads, which are the only ones: the
-///   proxy keeps no state of an upload.
-///
-/// The journal is written in batches of at most [`ProxyConfig::batch_entries`] entries, each
-/// batch after [`ProxyConfig::linger`] at most, as `_journal/<proxy_id>/<seq>`, create-only,
-/// one object at a time. The numbers of a proxy go up by one from the first; a proxy that
-/// starts lists its own journal prefix and its checkpoint, and goes on after the highest
-/// number it finds.
-///
-/// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
-/// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
-/// key, not in the journal above (`entry_put.rs`), and a read of a cold object asks for a copy-back
-/// on an entry (`copy_back.rs`). So is a delete (see `entry_delete.rs`): the cold tier's object is
-/// deleted at once, and a delete that meets a copy in flight waits for the reconciler to release
-/// the entry ([`DeleteWait`]).
+///   proxy where the cold tier keeps them). The completion is a put on the entry of the key whose
+///   object is made in the cold tier by the cold tier's own create-only completion, and so is
+///   refused with [`Error::AlreadyExists`] where either tier holds the key. It is in the hot tier
+///   only after a get asks for the copy-back. The cold tier must do multipart uploads (the
+///   provided methods of [`Backend`] do not). [`Backend::list_uploads`] lists the cold tier's open
+///   uploads, which are the only ones: the proxy keeps no state of an upload.
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
 /// unchanged for [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
 /// leaves puts unrestrained: [`Proxy::usage_age`] is how a caller sees it, and the server's
-/// `/usagez` reports it). Above
-/// [`ProxyConfig::critical`] of the budget a put is written to the hot tier as it is under it
-/// (it does not wait), and a read of a cold object is not copied back.
-/// At the budget, or when the hot tier answers a put (of the object, or of the journal object
-/// that holds its entry) with [`Error::Full`], puts go straight to the cold tier, create-only
-/// and unjournaled, and never fail for lack of room in the hot tier; reads still use both
-/// tiers, and the hot tier is used again once the usage falls (or a
+/// `/usagez` reports it). Above [`ProxyConfig::critical`] of the budget a put is written to the
+/// hot tier as it is under it (it does not wait), and a read of a cold object asks for no
+/// copy-back. At the budget, or when the hot tier answers a put with [`Error::Full`], puts go
+/// straight to the cold tier, create-only, and never fail for lack of room in the hot tier; reads
+/// still use both tiers, and the hot tier is used again once the usage falls (or a
 /// [`ProxyConfig::usage_refresh`] after it said it was full).
 ///
 /// **Known limits.**
 ///
-/// - A put that is dropped (its caller gave up) after the object reached the hot tier and
-///   before its journal object was written leaves the object in the hot tier with no entry:
-///   it is never copied or evicted, and a retry of the put is refused as existing. Bound the
-///   calls inside the backends rather than dropping a put.
-/// - The checks and the write of a put are not atomic. Two puts of the same key at once, one to
-///   the hot tier and one (the hot tier being full for it, or having just said so) to the cold
-///   tier, may both succeed, whether through one proxy or two; a presigned PUT of the S3 front
-///   never takes that path ([`Backend::put_stream_hot_only`] answers [`Error::Full`] instead), so the
-///   hot tier's create-only write alone decides it. For the other keys the race remains: the
-///   reconciler then counts the cold tier's object as the copy of the hot tier's, and the object
-///   of the cold tier is the one that stays.
-/// - Before the format is active, a get that copies an object back into the hot tier while it is
-///   deleted may put it back there, with a put entry after the delete entry; reads are served that
-///   copy until the reconciler's next pass, which finds the cold tier without the object and drops
-///   the mirror. On entries a copy-back lands only under a seal that a delete cannot amend.
+/// - The checks and the write of a put are serialised by the entry of the key, but an actor that
+///   stalls between a check and its write (a frozen process, a store call that answers after its
+///   deadline) can still act on a key that another actor has taken since. The design document
+///   states these residuals (R1 to R4) and the tests pin them.
+/// - Two puts of the same key at once, one to the hot tier and one (the hot tier being full for
+///   it, or having just said so) to the cold tier, are serialised by the entry: the second finds
+///   the entry held and is refused with [`Error::Unavailable`], or finds the key and is refused
+///   with [`Error::AlreadyExists`].
 pub struct Proxy {
     inner: Arc<Inner>,
 }
@@ -333,11 +266,6 @@ struct Inner {
     hot: Arc<dyn Backend>,
     cold: Arc<dyn Backend>,
     config: ProxyConfig,
-    /// The batch that takes the next entry, if there is one.
-    open: Mutex<Option<Arc<Batch>>>,
-    /// The number of the next journal object. It is held while an object is written, so that
-    /// the objects are written one at a time, and a number is used again if its write failed.
-    next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
     /// What was last read of the format object.
     pause: Arc<Mutex<pause::Pause>>,
@@ -353,12 +281,12 @@ struct Inner {
 impl Proxy {
     /// Starts a proxy over `hot` and `cold`.
     ///
-    /// It lists the journal objects of its own id in the hot tier, reads its checkpoint, and
-    /// tells the reconciler that it has a journal.
+    /// It writes its registration, which tells the reconciler that it exists and which it
+    /// rewrites at each heartbeat.
     ///
     /// # Errors
-    /// [`Error::Other`] if the proxy id is empty or has a `/`, or the checkpoint is not
-    /// readable; the error of the hot tier if it fails one of those calls.
+    /// [`Error::Other`] if the proxy id is empty or has a `/`; the error of the hot tier if it
+    /// fails the write of the registration.
     pub async fn open(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
@@ -368,23 +296,13 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
-        let prefix = journal_prefix(id);
-        let listed = hot.list(&prefix).await?;
-        let newest = listed
-            .iter()
-            .filter_map(|object| seq_of(&prefix, &object.key))
-            .max();
-        let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
-        let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,
             cold,
             config,
-            open: Mutex::new(None),
-            next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
@@ -421,114 +339,6 @@ impl Proxy {
 }
 
 impl Inner {
-    fn entry(&self, op: JournalOp, key: &str, size: u64, cold_tag: Option<String>) -> JournalEntry {
-        JournalEntry {
-            op,
-            key: key.to_owned(),
-            size,
-            time: self.config.clock.now(),
-            cold_tag,
-            hot_tag: None,
-        }
-    }
-
-    /// Adds an entry to the open batch, which becomes the batch that is written when it is
-    /// full.
-    fn join(&self, entry: JournalEntry) -> Arc<Batch> {
-        let mut open = locked(&self.open);
-        let batch = Arc::clone(open.get_or_insert_with(Arc::default));
-        let count = {
-            let mut entries = locked(&batch.entries);
-            entries.push(entry);
-            entries.len()
-        };
-        if count >= self.config.batch_entries {
-            *open = None;
-            batch.full.notify_one();
-        }
-        batch
-    }
-
-    /// Writes the batch as the next journal object: after its linger, or at once if it is
-    /// full. A number that is taken (by a write that failed after it reached the hot tier)
-    /// is skipped.
-    async fn write_batch(&self, batch: &Arc<Batch>) -> Result<(), Error> {
-        let wait = tokio::time::timeout(self.config.linger, batch.full.notified());
-        let _ = wait.await;
-        {
-            let mut open = locked(&self.open);
-            let _ = open.take_if(|current| Arc::ptr_eq(current, batch));
-        }
-        let entries = locked(&batch.entries).clone();
-        let body = encode_journal(&entries);
-        let mut next = self.next_seq.lock().await;
-        loop {
-            let key = journal_key(&self.config.proxy_id, *next);
-            match self.hot.put(&key, body.clone()).await {
-                Ok(()) => {
-                    *next += 1;
-                    return Ok(());
-                }
-                Err(Error::AlreadyExists(_)) => *next += 1,
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    /// Appends an entry to the journal: waits until the journal object that holds it is
-    /// written to the hot tier. Callers that wait on one batch share its outcome, and if the
-    /// one that writes it is dropped, another takes over.
-    async fn append(&self, entry: JournalEntry) -> Result<(), Error> {
-        let batch = self.join(entry);
-        let outcome = batch.outcome.get_or_init(|| self.write_batch(&batch));
-        outcome.await.clone()
-    }
-
-    /// Journals a put of an object that the hot tier holds (`op` says of what kind, and
-    /// `cold_tag` names the cold object the entry is about, if one is), and takes the object out
-    /// of the hot tier if that fails.
-    async fn journal_put(
-        &self,
-        op: JournalOp,
-        key: &str,
-        size: u64,
-        cold_tag: Option<String>,
-    ) -> Result<(), Error> {
-        self.journal_entry(self.entry(op, key, size, cold_tag))
-            .await
-    }
-
-    /// Appends the entry of a put of an object that the hot tier holds, and takes the object out
-    /// of the hot tier if that fails.
-    async fn journal_entry(&self, entry: JournalEntry) -> Result<(), Error> {
-        let key = entry.key.clone();
-        let appended = self.append(entry).await;
-        if appended.is_err() {
-            let _ = self.hot.delete(&key).await;
-        }
-        appended
-    }
-
-    /// Journals a copy-back as a mirror: `cold_tag` is the tag of the cold object read, `hot_tag`
-    /// the tag the hot tier's create-only write gave the copy. If the append fails, takes the copy
-    /// out of the hot tier by `hot_tag` (`If-Match`): an object that another writer put under the
-    /// key since has another tag and is left.
-    async fn journal_mirror(
-        &self,
-        key: &str,
-        size: u64,
-        cold_tag: String,
-        hot_tag: String,
-    ) -> Result<(), Error> {
-        let mut entry = self.entry(JournalOp::PutMirror, key, size, Some(cold_tag));
-        entry.hot_tag = Some(hot_tag.clone());
-        let appended = self.append(entry).await;
-        if appended.is_err() {
-            let _ = self.hot.delete_if_match(key, &hot_tag).await;
-        }
-        appended
-    }
-
     fn latch_full(&self) {
         let until = Instant::now() + self.config.usage_refresh;
         locked(&self.capacity).full_until = Some(until);
@@ -667,16 +477,12 @@ impl Inner {
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
-        // The tag the cold tier's read gives is the tag of the very bytes read, so the copy is
-        // journaled under it whatever the key holds by then.
         let critical = self.level().await >= Level::Critical;
-        let (body, tag) = self.cold_get(key, None).await?;
+        let (body, _) = self.cold_get(key, None).await?;
         if critical {
             self.counters.skipped(Skipped::Critical);
         } else if self.entries_active().await {
             self.ask_copy_back(key);
-        } else {
-            self.copy_back(key, &body, tag).await;
         }
         self.counters.served(Tier::Cold, body.len());
         Ok(body)
@@ -715,49 +521,11 @@ impl Inner {
         }
     }
 
-    /// Deletes the object: the cold tier's object first, by its content tag, then the hot tier's,
-    /// then a delete entry is appended (the books forget the key). A reservation is removed only
-    /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
-    /// a put in flight, and the delete, which finds no object, is one that comes before it.
+    /// Deletes the object on the entry of its key (see `entry_delete.rs`): refused with
+    /// [`Error::Unavailable`] while writes are paused or the format is not active.
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        if self.admit_write_mode(key).await? == WriteMode::Entries {
-            return self.delete_on_entry(key).await;
-        }
-        self.remove_from_cold(key).await?;
-        self.hot.delete(key).await?;
-        self.append(self.entry(JournalOp::Delete, key, 0, None))
-            .await
-    }
-
-    /// Removes the cold tier's object under `key` as `delete_object` says, looking again if the
-    /// object changes between the look and the delete, [`DELETE_ROUNDS`] looks at most.
-    async fn remove_from_cold(&self, key: &str) -> Result<(), Error> {
-        for _ in 0..DELETE_ROUNDS {
-            let found = match self.cold.head(key).await {
-                Ok(found) => found,
-                Err(Error::NotFound(_)) => return Ok(()),
-                Err(error) => return Err(error),
-            };
-            if found.reservation && !self.hot_holds(key).await? {
-                return Ok(());
-            }
-            match self.cold.delete_if_match(key, &found.tag).await {
-                Ok(()) | Err(Error::NotFound(_)) => return Ok(()),
-                Err(Error::PreconditionFailed(_)) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        let text = format!("the cold copy of {key} kept changing under its delete");
-        Err(Error::Unavailable(text))
-    }
-
-    /// Whether the hot tier holds an object under `key`.
-    async fn hot_holds(&self, key: &str) -> Result<bool, Error> {
-        match self.hot.head(key).await {
-            Ok(_) => Ok(true),
-            Err(Error::NotFound(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
+        self.admit_write(key).await?;
+        self.delete_on_entry(key).await
     }
 
     /// The object of a cold listing if it is one: a reservation (a marked object of

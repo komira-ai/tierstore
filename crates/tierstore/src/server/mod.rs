@@ -42,8 +42,8 @@
 //! completion; a request refused as unsupported (see above) is answered so first.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
-//! when the client goes away before the answer, so that no object is left without the journal
-//! entry that has it copied. (A put whose body the client had not finished sending is not
+//! when the client goes away before the answer, so that no object is left without the entry that
+//! has it copied. (A put whose body the client had not finished sending is not
 //! carried on: its body is cut, and nothing is stored.)
 //!
 //! # Streamed puts
@@ -52,10 +52,10 @@
 //! against its hashes as the pieces pass, and handed through a queue of a few pieces to the
 //! backend's streamed put ([`Backend::put_stream`](crate::Backend::put_stream)), so that the
 //! memory of a put does not grow with the length of the object, and a slow backend slows the
-//! client down instead of filling memory. The object becomes visible, and its journal entry is
-//! written, only after the last piece was read and every hash came out right: a hash that does
-//! not match at the last byte, a body over the limit, a stalled body and a connection cut half
-//! way each leave no object and no journal entry. A put with `If-Match`, or an `If-None-Match`
+//! client down instead of filling memory. The object becomes visible, and its entry
+//! is made pending, only after the last piece was read and every hash came out right: a hash that
+//! does not match at the last byte, a body over the limit, a stalled body and a connection cut
+//! half way each leave no object and no entry. A put with `If-Match`, or an `If-None-Match`
 //! other than `*`, is refused without being stored. [`ServerConfig::max_request_bytes`] is
 //! the most bytes a body may have, not a bound on memory.
 //!
@@ -221,9 +221,11 @@ mod linger;
 mod listen;
 pub mod local_cache;
 mod lock;
+mod memory_format;
 pub mod oci;
 mod ops;
 pub mod presign;
+mod removed_flags;
 mod reply;
 mod request;
 mod rounds;
@@ -270,8 +272,6 @@ mod gc_tests;
 mod idle_tests;
 #[cfg(test)]
 mod lock_tests;
-#[cfg(test)]
-mod metrics_race_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
@@ -448,7 +448,7 @@ pub struct ServerConfig {
     pub cache_writes: bool,
     /// How long the usage object may stand unchanged (by this process's clock) before `/usagez`
     /// says 503; a server that has run this long without finding one is judged the same way.
-    /// Longer than the lease and the reconciler's pass interval, so a takeover does not show.
+    /// Longer than the lease, so a takeover does not show.
     pub usage_stale_after: Duration,
     /// The counters of the OCI read front, which `GET /metricz` shows; none by default, and then
     /// `/metricz` has no block of it. The binary sets them when it runs the front.

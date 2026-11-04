@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
+use crate::{Backend, Proxy, SystemClock, TokioSleeper};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
@@ -43,10 +43,12 @@ use super::config_combined::CombinedSettings;
 use super::drain::late_of;
 use super::listen::{joined, local_addrs};
 use super::local_cache::{Disk, Every, SCRUB_TICK, SystemDisk};
+use super::memory_format::start_format;
 use super::oci::OciListener;
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
+use crate::Clock;
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
 /// then drains. `ready` is called with the addresses the fronts are bound to, before the first
@@ -71,6 +73,7 @@ pub(super) async fn serve_combined(
         cli.backend_check_wait,
     )
     .await?;
+    start_format(cli, built.hot.as_ref()).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let opened = Proxy::open(hot, cold, built.proxy).await;
@@ -107,11 +110,10 @@ pub(super) async fn serve_combined(
         drained
     };
     let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
-    let interval = cli.reconcile_interval;
     let reconciling = async move {
         match gate {
-            Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
-            None => reconcile(reconciler, interval, halt).await,
+            Some(gate) => reconcile_gated(reconciler, halt, gate).await,
+            None => reconcile(reconciler, halt).await,
         }
     };
     let maintaining = cache.maintain(PASS_INTERVAL, maintain_halt);

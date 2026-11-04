@@ -3,12 +3,10 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
-
-use super::relay::{Tee, relay};
 use super::{Inner, Level};
 use crate::metrics::{Read, Skipped, Tier};
-use crate::{Error, Opened, Span, Window};
+use crate::{Error, Opened, ReadBody, Span, Window};
+use futures::StreamExt;
 
 impl Inner {
     /// Opens the read of `span` of the object `key` (all of it without one).
@@ -19,13 +17,13 @@ impl Inner {
     /// body is read.
     ///
     /// A miss goes to the cold tier. A read of a span is the cold tier's own stream of that span
-    /// and copies nothing back. A read of the whole object is one read of the cold tier, whose
-    /// body is given to the caller as it arrives and, unless the hot tier is at its critical mark,
-    /// fed at the same time to a streamed create-only write into the hot tier (see
-    /// [`relay`](super::relay)): the cold object is read once, nothing is held whole, and the
-    /// copy neither delays nor fails the read. A cold object that is a reservation is not an
-    /// object: a miss. Bytes of the cold read are counted when it opens, from the meta, and a
-    /// body that fails later counts an error as well.
+    /// and asks for no copy-back. A read of the whole object is one read of the cold tier, whose
+    /// body is given to the caller as it arrives and, unless the hot tier is at its critical mark
+    /// (or the format is not active), followed by an ask for the copy-back on the entry of the key
+    /// (see `copy_back.rs`): the cold object is read once, nothing is held whole, and the ask
+    /// neither delays nor fails the read. A cold object that is a reservation is not an object: a
+    /// miss. Bytes of the cold read are counted when it opens, from the meta, and a body that
+    /// fails later counts an error as well.
     pub(super) async fn open_object(
         self: &Arc<Self>,
         key: &str,
@@ -50,7 +48,7 @@ impl Inner {
             self.counters.skipped(Skipped::Critical);
         }
         if span.is_some() {
-            // A read of a part asks the cold tier for that part alone and copies nothing back: a
+            // A read of a part asks the cold tier for that part alone and asks for no copy-back: a
             // whole read per chunk of a long blob would be quadratic, and the memory of a read is
             // its range.
             let Opened { meta, window, body } = self.cold_open(key, span).await?;
@@ -58,39 +56,37 @@ impl Inner {
             self.counters.hit(Tier::Cold, Read::Get);
             self.counters.bytes_read(Tier::Cold, served);
             self.counters.served(Tier::Cold, served);
-            // A body that fails is counted, as the relayed body of a whole read is.
-            let inner = Arc::clone(self);
-            let body = body
-                .inspect(move |piece| {
-                    if piece.is_err() {
-                        inner.counters.error(Tier::Cold, Read::Get);
-                    }
-                })
-                .boxed();
-            return Ok(Opened { meta, window, body });
+            return Ok(Opened {
+                meta,
+                window,
+                body: self.counting_errors(body),
+            });
         }
         let Opened { meta, body, .. } = self.cold_open(key, None).await?;
         self.counters.hit(Tier::Cold, Read::Get);
         self.counters.bytes_read(Tier::Cold, meta.size as usize);
         self.counters.served(Tier::Cold, meta.size as usize);
-        // The tag is that of the very bytes read, so the copy is journaled under it whatever the
-        // key holds by then.
-        let tee = if critical {
-            None
-        } else if self.entries_active().await {
-            // Format active: the copy is the reconciler's, under the entry; the read is the one
-            // read of the cold object, and no entry is read.
+        if !critical && self.entries_active().await {
+            // The copy is the reconciler's, under the entry; the read is the one read of the cold
+            // object, and no entry is read.
             self.ask_copy_back(key);
-            None
-        } else {
-            Some(Tee::new(self, key, meta.size, meta.tag.clone()))
-        };
-        let body = relay(self, body, tee);
+        }
         Ok(Opened {
             meta,
             window: Window::Whole,
-            body,
+            body: self.counting_errors(body),
         })
+    }
+
+    /// The body of a cold read, which counts an error of the cold tier each time it ends with one.
+    fn counting_errors(self: &Arc<Self>, body: ReadBody) -> ReadBody {
+        let inner = Arc::clone(self);
+        body.inspect(move |piece| {
+            if piece.is_err() {
+                inner.counters.error(Tier::Cold, Read::Get);
+            }
+        })
+        .boxed()
     }
 
     /// The cold tier's open read of `span`, with the counting of a miss or an error that an

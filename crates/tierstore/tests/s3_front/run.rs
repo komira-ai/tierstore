@@ -13,7 +13,7 @@ use tierstore::server::Drained;
 use tierstore::server::cli::{Cli, run};
 use tokio::sync::oneshot;
 
-use crate::files::{BIN_KEY_ID, BIN_SECRET, Files, with};
+use crate::files::{BIN_KEY_ID, BIN_SECRET, Files, activate_dir, with};
 
 fn store(addr: SocketAddr) -> S3Store {
     let config = S3Config {
@@ -81,6 +81,7 @@ async fn directory_tiers_keep_their_objects_across_a_restart() {
     let cold = format!("dir:{}", root.join("cold").display());
     let flags = files.flags(&["--drain-lb-wait", "50ms"]);
     let flags = with(&with(&flags, "--hot", &hot), "--cold", &cold);
+    activate_dir(&root.join("hot")).await;
     let first = serving(flags.clone(), |store| async move {
         let body = Bytes::from_static(b"kept on disk");
         store.put_new(&kept_key(), body, None).await.unwrap();

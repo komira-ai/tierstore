@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use clap::Parser;
+
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
@@ -17,17 +17,41 @@ use super::cli::Cli;
 use super::cli_reconcile::{Gate, reconcile_gated};
 use super::cli_serve::open_gate;
 use super::lock::try_take;
+use super::rounds::Rounds;
+use crate::Backend;
 use crate::{
-    Backend, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,
+    Created, Entries, FaultyBackend, MemoryBackend, Op, Outcome, ReconcilerConfig, Step, Take,
     TestClock,
 };
+use clap::Parser;
 
 const MEBIBYTE: u64 = 1 << 20;
+
+/// The departure time of the proxies of a node, which the reconciler counts owners by.
+const DEPARTURE: Duration = Duration::from_secs(60);
+
+/// Makes the hot tier of a node active and lands a put of `k` in it, on its entry, as a proxy
+/// leaves it: the object is in the hot tier and the entry is `(PUT, PENDING)`.
+async fn land_k(hot: &Arc<MemoryBackend>, clock: &Arc<TestClock>) {
+    hot.put(
+        "_tiering/format",
+        Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#),
+    )
+    .await
+    .unwrap();
+    hot.put("k", Bytes::from_static(b"v")).await.unwrap();
+    let client = Entries::new(hot.clone(), "p1", clock.clone());
+    let Created::Taken(held) = client.create("k", Take::Put).await.unwrap() else {
+        panic!("the entry exists");
+    };
+    let landed = client.advance(&held, Step::LandPut).await.unwrap();
+    assert!(matches!(landed, Outcome::Done(_)));
+}
 
 /// The key of the reconciler's lease in the hot tier.
 const LEASE: &str = "_tiering/lease";
 
-/// The tiers of a storage node after a proxy wrote one object: the hot tier, the hot tier as the
+/// The tiers of a storage node after a proxy landed one object: the hot tier, the hot tier as the
 /// reconciler sees it (counting its calls), and the memory of the cold tier.
 struct Tiers {
     hot: Arc<MemoryBackend>,
@@ -36,21 +60,17 @@ struct Tiers {
 }
 
 impl Tiers {
-    /// The tiers, and a reconciler over them.
-    async fn new() -> (Self, Reconciler) {
+    /// The tiers, and the rounds of a reconciler over them.
+    async fn new() -> (Self, Rounds) {
         let clock = Arc::new(TestClock::new());
         let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
         let seen = Arc::new(FaultyBackend::new(hot.clone()));
         let cold_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
         let cold = Arc::new(FaultyBackend::new(cold_mem.clone()));
-        let mut config = ProxyConfig::new("p1", MEBIBYTE, clock.clone());
-        config.linger = Duration::from_millis(1);
-        let opened = Proxy::open(hot.clone(), cold.clone(), config).await;
-        let proxy = opened.unwrap();
-        proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
+        land_k(&hot, &clock).await;
         let mut settings = ReconcilerConfig::new("p1", MEBIBYTE, clock.clone());
         settings.mono = clock;
-        let reconciler = Reconciler::new(seen.clone(), cold, settings);
+        let reconciler = Rounds::new(seen.clone(), cold, settings, DEPARTURE);
         let tiers = Self {
             hot,
             seen,
@@ -94,8 +114,7 @@ async fn a_reconciler_under_a_held_lock_file_does_nothing_until_it_takes_the_loc
     let holder = try_take(&path).unwrap().unwrap();
     let gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
     let halt = Arc::new(Notify::new());
-    let every = Duration::from_secs(5);
-    let working = reconcile_gated(reconciler, every, Arc::clone(&halt), gate);
+    let working = reconcile_gated(reconciler, Arc::clone(&halt), gate);
     let watching = async {
         for _ in 0..12 {
             tokio::time::advance(Duration::from_secs(1)).await;
@@ -133,7 +152,7 @@ async fn a_reconciler_stops_when_its_lock_file_is_replaced_and_works_again_under
     let gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
     let halt = Arc::new(Notify::new());
     let every = Duration::from_secs(5);
-    let working = reconcile_gated(reconciler, every, Arc::clone(&halt), gate);
+    let working = reconcile_gated(reconciler, Arc::clone(&halt), gate);
     let watching = async {
         tiers.lease(true, Duration::ZERO).await;
         std::fs::remove_file(&path).unwrap();
@@ -180,8 +199,7 @@ async fn a_reconciler_halted_while_it_waits_for_the_lock_ends_and_touches_nothin
     let holder = try_take(&path).unwrap().unwrap();
     let gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
     let halt = Arc::new(Notify::new());
-    let every = Duration::from_secs(5);
-    let working = reconcile_gated(reconciler, every, Arc::clone(&halt), gate);
+    let working = reconcile_gated(reconciler, Arc::clone(&halt), gate);
     let watching = async {
         for _ in 0..3 {
             tokio::time::advance(Duration::from_secs(1)).await;
@@ -252,18 +270,13 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
     let cold = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::with_clock(
         clock.clone(),
     ))));
-    let mut config = ProxyConfig::new("tierstore-9301", MEBIBYTE, clock.clone());
-    config.linger = Duration::from_millis(1);
-    let proxy = Proxy::open(hot.clone(), cold.clone(), config)
-        .await
-        .unwrap();
-    proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
+    land_k(&hot, &clock).await;
     let current_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let next_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let reconciler = |seen: &Arc<FaultyBackend>, holder: &str| {
         let mut settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
         settings.mono = clock.clone();
-        Reconciler::new(seen.clone(), cold.clone(), settings)
+        Rounds::new(seen.clone(), cold.clone(), settings, DEPARTURE)
     };
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-gate-hand-over");
     let path = dir.path().join("instance.lock");
@@ -271,16 +284,13 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
     let next_gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
     let current_halt = Arc::new(Notify::new());
     let next_halt = Arc::new(Notify::new());
-    let every = Duration::from_secs(5);
     let current = reconcile_gated(
         reconciler(&current_hot, "tierstore-9301"),
-        every,
         Arc::clone(&current_halt),
         current_gate,
     );
     let next = reconcile_gated(
         reconciler(&next_hot, "tierstore-9302"),
-        every,
         Arc::clone(&next_halt),
         next_gate,
     );
@@ -344,18 +354,13 @@ async fn hand_over_after_a_spoiled_release(how: Spoiled) {
     let cold = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::with_clock(
         clock.clone(),
     ))));
-    let mut config = ProxyConfig::new("tierstore-9301", MEBIBYTE, clock.clone());
-    config.linger = Duration::from_millis(1);
-    let proxy = Proxy::open(hot.clone(), cold.clone(), config)
-        .await
-        .unwrap();
-    proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
+    land_k(&hot, &clock).await;
     let current_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let next_hot = Arc::new(FaultyBackend::new(hot.clone()));
     let reconciler = |seen: &Arc<FaultyBackend>, holder: &str| {
         let mut settings = ReconcilerConfig::new(holder, MEBIBYTE, clock.clone());
         settings.mono = clock.clone();
-        Reconciler::new(seen.clone(), cold.clone(), settings)
+        Rounds::new(seen.clone(), cold.clone(), settings, DEPARTURE)
     };
     let dir = TestDir::under(std::env::temp_dir(), &format!("tierstore-gate-{how:?}"));
     let path = dir.path().join("instance.lock");
@@ -363,16 +368,13 @@ async fn hand_over_after_a_spoiled_release(how: Spoiled) {
     let next_gate = Gate::open(&path, Duration::from_secs(1)).unwrap();
     let current_halt = Arc::new(Notify::new());
     let next_halt = Arc::new(Notify::new());
-    let every = Duration::from_secs(5);
     let current = reconcile_gated(
         reconciler(&current_hot, "tierstore-9301"),
-        every,
         Arc::clone(&current_halt),
         current_gate,
     );
     let next = reconcile_gated(
         reconciler(&next_hot, "tierstore-9302"),
-        every,
         Arc::clone(&next_halt),
         next_gate,
     );

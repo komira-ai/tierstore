@@ -93,13 +93,14 @@ mod sweep;
 mod usage;
 mod work;
 
-use backoff::{Idle, retry_delay};
+pub(crate) use backoff::Idle;
+use backoff::retry_delay;
 use evict::Tags;
 use usage::{Books, Tally};
 use work::Verdict;
 
-/// The settings of an [`EntryReconciler`]: those of the [`Reconciler`](crate::Reconciler) it shares
-/// the lease with, and its own.
+/// The settings of an [`EntryReconciler`]: the lease, the pool and the water marks of
+/// [`ReconcilerConfig`], and its own.
 #[derive(Clone)]
 pub struct EntryReconcilerConfig {
     /// The holder of the lease and the owner of the entries it holds (`holder`), the pool of

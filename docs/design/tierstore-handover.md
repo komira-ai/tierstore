@@ -24,8 +24,8 @@ lock and v-next takes it by itself and enables writes. Nothing commands that: th
 `crates/tierstore/src/server/handover.rs` is not a process hand-over: it hands a put's body from the request to the
 backend's task (`hand_over`, `carry`, `received`). Two shapes run from one binary (`Settings::Storage`,
 `Settings::Cache`; `server/config.rs`; `serve_until_signalled` in `server/cli.rs`, `serve_cache_until_signalled` in
-`server/cache_cli.rs`): a **build node** (a `LocalCache` over a directory, no journal or lease, hazard: the shared
-directory, section 5) and a **storage node** (stateless proxy plus a reconciler under a lease, hazard: lease and journal,
+`server/cache_cli.rs`): a **build node** (a `LocalCache` over a directory, no entries or lease, hazard: the shared
+directory, section 5) and a **storage node** (stateless proxy plus a reconciler under a lease, hazard: lease and entries,
 section 6).
 
 **What tierstore registers at runtime** (liveness only, the updater protocol, 2): name `tierstore`, the version, health
@@ -212,17 +212,16 @@ is a failed read and a miss. The five writes to the shared directory today and h
 
 It also starts no fills, keeps, eviction or scrub (`scrub_rate` is accepted and ignored today, `serve_cache`).
 
-## 6. Journal, lease and proxy id (storage node)
+## 6. Entries, lease and proxy id (storage node)
 
-The reconciler takes the lease, in `Reconciler::pass` through `Lease::ensure` (`lease.rs`), on `_tiering/lease` in the hot
-tier: create-only, renewed (at the start of a pass if less than a third of `lease_ttl` of it is left, and on a timer of its
-own while the pass works) or taken over by `put_if_match` once the same tag has stood for `lease_ttl` on the taker's own
-monotonic clock. The proxy writes `_journal/<proxy_id>/<seq>`
-create-only and skips a taken number (`Inner::write_batch`, `tiered.rs`).
+The reconciler takes the lease, in `EntryReconciler::step` through `Lease::ensure` (`lease.rs`), on `_tiering/lease` in the hot
+tier: create-only, renewed (at the start of a step if less than a third of `lease_ttl` of it is left, and on a timer of its
+own while the step works) or taken over by `put_if_match` once the same tag has stood for `lease_ttl` on the taker's own
+monotonic clock. The proxy makes its writes on the entry `_entries/<sha256 of the key>`
+(`tiered/entry_put.rs`, `tiered/entry_delete.rs`), which names the proxy id as its owner while the write is in flight.
 
-- **Any number of proxies work over the same tiers** (`lib.rs`; `Proxy::open` goes on after the highest number it finds),
-  but **one proxy id for both is wrong**: two writers on one journal interleave, and the reconciler treats it as one
-  stream (oldest first by journal order within a proxy). The unit already says to give each process its own id; the slot
+- **Any number of proxies work over the same tiers** (`lib.rs`), but **one proxy id for both is wrong**: an entry
+  names its owner by the proxy id, so a second writer under the same id would take the entries of the first as its own. The unit already says to give each process its own id; the slot
   template gives `tierstore-9301` and `tierstore-9302`, stable across updates.
 - **One lease holder name is safe**: `ReconcilerConfig::holder` is the proxy id and the body is
   `holder\n<nonce>\n<generation>` (`Lease::body`), the nonce 128 random bits as hex drawn in `Lease::new` and the
@@ -387,8 +386,8 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
     before `cutover` and its return), refused or reset in its handshake, counted and printed; no request whose connect
     succeeded fails, whatever it reads. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
     connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
-    requests. v-next's reconciler holds the lease, named for its slot; the journals decode, are those of the two
-    slots' proxy ids and hold each acknowledged key once; once both slots have stopped, no lease is left.
+    requests. v-next's reconciler holds the lease, named for its slot; the entries decode and each acknowledged key is in a tier;
+    once both slots have stopped, no lease is left.
   - The hook killed by its `nft` right after `cutover` applied the swap, before `swapped`: `restore` puts the rule back
     on v-current, `rollback` follows, then a whole hand-over; zero failures throughout.
   - Without P1 and P2 (servers built with the test-only feature `test-drain-off`), run (a) fails: kept-alive S3
@@ -409,7 +408,7 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   serve hits and misses (also an object v-current evicted and refilled: served, nothing deleted); compare the whole tree
   (names, sizes, modes, mtimes) before and after; one case per row of the table in section 5; the fill and eviction
   families stay 0 and the build and mode gauges differ between instances.
-- **T4 lease and journal.** Two proxies with slot ids over one hot tier write separate journals; v-next's reconciler
+- **T4 lease and entries.** Two proxies with slot ids over one hot tier have registrations of their own; v-next's reconciler
   makes no `ensure` call before it holds the lock file (a counted event), then takes the lease v-current released; two
   starts never write the same lease body.
 - **T5 drain.** P1 on a paused clock over in-memory pipes (the pattern of `drain_tests.rs`): every answer after the drain

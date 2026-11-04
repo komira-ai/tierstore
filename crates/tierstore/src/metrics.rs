@@ -1,8 +1,8 @@
 //! What a [`Proxy`](crate::Proxy) counts of its reads, in the Prometheus text format.
 //!
 //! The counters go up and never down while the proxy runs. Their labels have a few fixed
-//! values each (the tier, the kind of read, the reason a copy was not made), never a key, a
-//! bucket or a client.
+//! values each (the tier, the kind of read, the reason a copy-back was not asked for), never a
+//! key, a bucket or a client.
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,8 +14,6 @@ pub(crate) const READ_ERRORS_TOTAL: &str = "tierstore_read_errors_total";
 pub(crate) const READS_TOTAL: &str = "tierstore_reads_total";
 pub(crate) const BYTES_SERVED_TOTAL: &str = "tierstore_bytes_served_total";
 pub(crate) const BYTES_READ_TOTAL: &str = "tierstore_bytes_read_total";
-pub(crate) const PROMOTIONS_TOTAL: &str = "tierstore_promotions_total";
-pub(crate) const PROMOTED_BYTES_TOTAL: &str = "tierstore_promoted_bytes_total";
 pub(crate) const PROMOTIONS_SKIPPED_TOTAL: &str = "tierstore_promotions_skipped_total";
 
 /// The tier that answered, or was asked.
@@ -38,22 +36,16 @@ pub(crate) enum Read {
 /// The label of each [`Read`], in the order of the enum.
 const READS: [&str; 2] = ["get", "head"];
 
-/// Why a get that found an object in the cold tier did not copy it into the hot tier.
+/// Why a get that found an object in the cold tier did not ask for its copy into the hot tier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Skipped {
     /// The hot tier is at or above its critical mark by the usage the reconciler published, or
-    /// is taken to be full because it answered an earlier copy with "full" a moment ago.
+    /// is taken to be full because it answered an earlier put with "full" a moment ago.
     Critical,
-    /// The hot tier answered the copy with "full".
-    Full,
-    /// The hot tier already held the object: another read copied it first.
-    Raced,
-    /// The copy failed for another reason.
-    Failed,
 }
 
 /// The label of each [`Skipped`], in the order of the enum.
-const SKIPPED: [&str; 4] = ["critical", "full", "raced", "failed"];
+const SKIPPED: [&str; 1] = ["critical"];
 
 /// The counters of one proxy.
 #[derive(Debug, Default)]
@@ -69,11 +61,7 @@ pub(crate) struct Counters {
     /// Bytes of object data gets read from a tier: the whole object of a cold read, whatever
     /// range was asked.
     read: [AtomicU64; TIERS.len()],
-    /// Objects copied from the cold tier into the hot tier by a get.
-    promotions: AtomicU64,
-    /// Bytes of those objects.
-    promoted_bytes: AtomicU64,
-    /// Copies that were not made, by reason.
+    /// Copy-backs that were not asked for, by reason.
     skipped: [AtomicU64; SKIPPED.len()],
 }
 
@@ -115,13 +103,7 @@ impl Counters {
         add(&self.read[tier as usize], bytes);
     }
 
-    /// An object of `bytes` bytes was copied into the hot tier.
-    pub(crate) fn promoted(&self, bytes: usize) {
-        bump(&self.promotions);
-        add(&self.promoted_bytes, bytes);
-    }
-
-    /// A copy into the hot tier was not made, for `why`.
+    /// A copy-back was not asked for, for `why`.
     pub(crate) fn skipped(&self, why: Skipped) {
         bump(&self.skipped[why as usize]);
     }
@@ -156,13 +138,6 @@ impl Counters {
             );
             sample(&mut text, BYTES_READ_TOTAL, &labels, read(&self.read[tier]));
         }
-        sample(&mut text, PROMOTIONS_TOTAL, &[], read(&self.promotions));
-        sample(
-            &mut text,
-            PROMOTED_BYTES_TOTAL,
-            &[],
-            read(&self.promoted_bytes),
-        );
         for (why, counter) in SKIPPED.into_iter().zip(&self.skipped) {
             let labels = [("reason", why)];
             sample(&mut text, PROMOTIONS_SKIPPED_TOTAL, &labels, read(counter));

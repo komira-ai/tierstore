@@ -2,12 +2,12 @@
 
 use std::fs::Permissions;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use objstore_s3::{ByteRange, ObjectKey, ObjectStore};
+use objstore_s3::{ByteRange, ObjectKey};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 
@@ -20,6 +20,7 @@ use super::config_combined::CombinedSettings;
 use super::local_cache::testing::{FakeDisk, Quirk};
 use super::local_cache::{Disk, LocalCache, Mode, SystemDisk};
 use crate::{Backend, Clock, DirBackend, Error as BackendError, MemoryBackend, SystemClock};
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 const KEY_ID: &str = "AKIDCACHE";
@@ -250,7 +251,7 @@ async fn a_combined_node_with_a_lock_file_serves() {
 }
 
 /// Asserts the refusals of a start, each with the exit status of its reason: flags that cannot go
-/// together (the reconcile interval not below the lease), a tier that cannot be opened (1, and the
+/// together (a usage staleness not above the lease), a tier that cannot be opened (1, and the
 /// cache directory is not made), a cache directory that cannot be opened (1), a file system that
 /// fails the check of the layout (3), and a budget over the file system (2); and that a budget
 /// exactly the room there is starts.
@@ -260,9 +261,9 @@ async fn a_combined_node_that_cannot_start_exits_with_the_status_of_the_reason()
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
 
     let node = Node::new("tscombined-refused");
-    let late = node.settings("reconcile_interval = \"60s\"");
+    let late = node.settings("usage_stale_after = \"10s\"");
     let why = serving(&late, disk.clone(), nothing).await.unwrap_err();
-    assert!(why.to_string().contains("--reconcile-interval"), "{why}");
+    assert!(why.to_string().contains("--usage-stale-after"), "{why}");
     assert!(!node.cache_dir().exists());
 
     let node = Node::new("tscombined-tier");

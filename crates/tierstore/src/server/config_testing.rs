@@ -2,11 +2,11 @@
 //! `config_print_tests.rs` and `launch_tests.rs` share.
 
 use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
 
 use tierstore_testkit::dir::TestDir;
 
 use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
+use std::os::unix::fs::PermissionsExt;
 
 /// The knobs of a run that gives none of them.
 pub(crate) const DEFAULTS: PerRun = PerRun {
@@ -49,15 +49,11 @@ low_water          = 60
 critical           = 97
 copy_parallel      = 8
 lease_ttl          = "40s"
-reconcile_interval = "4s"
 lock_file          = "/var/lib/tierstore/instance.lock"
 usage_stale_after  = "3m"
-journal_linger     = "50ms"
-journal_retention  = "12h"
 heartbeat          = "5s"
 departure          = "45s"
 deadline_margin    = "8s"
-registration_retention = "20m"
 
 [cold_store]
 kind             = "s3"
@@ -109,15 +105,11 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--critical=97",
         "--copy-parallel=8",
         "--lease-ttl=40s",
-        "--reconcile-interval=4s",
         "--lock-file=/var/lib/tierstore/instance.lock",
         "--usage-stale-after=3m",
-        "--journal-linger=50ms",
-        "--journal-retention=12h",
         "--heartbeat=5s",
         "--departure=45s",
         "--deadline-margin=8s",
-        "--registration-retention=20m",
         "--cold=s3:tierstore-cold",
         "--cold-endpoint=http://127.0.0.1:30900",
         "--cold-region=us-west-2",

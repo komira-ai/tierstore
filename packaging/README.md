@@ -276,7 +276,7 @@ and is longer than it:
 | ListObjectsV2 | with a `prefix` inside the key's; a list with no prefix or another is 403, not filtered |
 | ListMultipartUploads | with a `prefix` inside the key's, the open uploads under it; no prefix or another is 403, not filtered |
 | HeadObject | yes |
-| DeleteObject | yes: from both tiers, journaled as for any delete |
+| DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
 | put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
@@ -327,7 +327,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | PutObject | `write_prefixes` | create-only: no `If-Match`, and `If-None-Match` absent or `*`; a key that exists is `412 PreconditionFailed` |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
 | AbortMultipartUpload | `write_prefixes` | of an upload of such a key (a delete prefix does not allow an abort) |
-| DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
+| DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
@@ -448,10 +448,7 @@ low_water         = 70
 critical          = 95
 copy_parallel     = 16
 lease_ttl         = "30s"
-reconcile_interval = "5s"
 usage_stale_after = "2m"
-journal_linger    = "20ms"
-journal_retention = "24h"
 
 [cold_store]
 kind             = "s3"
@@ -470,7 +467,7 @@ The water marks are percents, as in the flags (1 to 100).
 
 A file with `[local_cache]` and `[cold_store]` and no `[hot_store]` runs a read cache in front of
 one upstream: typically an S3 endpoint that is the tierstore of a storage node, read with a
-read-only key. It has no journal, no lease and no reconciler; the only things that run beside the
+read-only key. It has no entries, no lease and no reconciler; the only things that run beside the
 front are the fills that a miss starts and the eviction pass. It is not a tier that is written to:
 every call but GET and HEAD (a put, a part, the start or completion of an upload, a delete, a copy,
 CreateBucket) is refused 403 `AccessDenied` with a message that says this is a read cache, before
@@ -750,14 +747,14 @@ path, as every key file is, so the names end in `_file`.
 Every flag that describes the data path has the key or keys below, and no other has one. A flag
 that takes a list (`--read-only-key-file`, given once for each key) is a list in the file. A tier
 flag is a `kind` and the key its kind needs: `--hot dir:<path>` is `kind = "dir"` and `path`,
-`--hot s3:<bucket>` is `kind = "s3"` and `bucket`. The keys of the reconciler, the journal and the
+`--hot s3:<bucket>` is `kind = "s3"` and `bucket`. The keys of the reconciler and the
 lease are in `[hot_store]`, since only a process with a hot tier has them. The crate's tests walk
 the flags of the binary against this table, so a flag added without a key fails them.
 
 | flag | key | what |
 |---|---|---|
 | `--listen` | `server.listen` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses, served by one server (see Filling in the flags) |
-| `--proxy-id` | `server.proxy_id` | names the journal and the lease of this process |
+| `--proxy-id` | `server.proxy_id` | names the registration of this process and the entries it holds |
 | `--slot` | `server.slot` | on main, not in v0.0.41: the private port of a hand-over slot (1 to 65535), the `slot` label of `tierstore_build_info`; the slot unit passes `--slot %i` |
 | `--hot` | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | the hot tier: `kind` is `memory`, `dir` (with `path`) or `s3` (with `bucket`, `endpoint` and `credentials_file`); in a flag, `memory`, `dir:<path>` or `s3:<bucket>` |
 | `--cold` | `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | the cold tier, in the same three kinds |
@@ -782,17 +779,13 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--presign-max-expires` | `server.presign_max_expires` | the longest expiry of any presigned URL, a PUT or a GET (see Presigned GET URLs) |
 | `--grant-key-file` | `server.grant_key_files` | deprecated and ignored (the read grant was removed): accepted so that an old unit or file starts; the server logs a warning and does not read the files |
 | `--grant-max-lifetime` | `server.grant_max_lifetime` | deprecated and ignored, like `--grant-key-file` |
-| `--journal-linger` | `hot_store.journal_linger` | how long a batch of journal entries waits for more |
-| `--journal-retention` | `hot_store.journal_retention` | how long an applied journal object is kept |
 | `--copy-parallel` | `hot_store.copy_parallel` | the most objects the reconciler copies at once |
 | `--lease-ttl` | `hot_store.lease_ttl` | how long the reconciler's lease lasts without a renewal |
-| `--reconcile-interval` | `hot_store.reconcile_interval` | how often the reconciler works |
 | `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
 | `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
-| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; the puts and deletes made on entries read `Proxy::is_live`, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
+| `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; the puts and deletes made on entries read `Proxy::is_live`, and the reconciler counts the owner of an entry as departed after it (`60s`; at least six times `--heartbeat`) |
 | `--deadline-margin` | `hot_store.deadline_margin` | the time taken off `--departure` for `Proxy::is_live`, and the time that must be left before a `Bounded` call that destroys starts; the puts and deletes made on entries use both (`10s`; at most a quarter of `--departure`) |
-| `--registration-retention` | `hot_store.registration_retention` | how long the registration of a proxy that heartbeated and left must stay unchanged before the reconciler removes it (`0s`, which removes none; otherwise at least `--departure`. Set a time only once no proxy of a release without the heartbeat runs) |
 | `--max-request-bytes` | `server.max_request_bytes` | the longest body of a request |
 | `--max-concurrent-puts` | `server.max_concurrent_puts` | the most put bodies and parts taken at once |
 | `--put-permit-wait` | `server.put_permit_wait` | how long a put that arrives with all of those taken waits for one to end (15s by default; 0 answers 503 at once). No byte of its body is read while it waits. If none ends in that time it is answered 503 `SlowDown` with `Retry-After: 1`. A waiter holds a connection and no permit or body memory, is not bounded except by the connections, counts as in flight in a drain (so a drain may take up to this much longer, never past `--drain-deadline`), and does not notice its client leaving until its body is first read |
@@ -899,7 +892,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 | flag | what |
 |---|---|
 | `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. On main, not in v0.0.41: give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server and one drain serve them all (connections to the S3 front are not capped; only `--oci-max-connections` caps those of the registry front), an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
-| `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
+| `--proxy-id` | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
 | `--access-key-file`, `--read-only-key-file` | the full key, and (given once for each) the read-only keys; see above |
 | `--presign-key-file`, `--presign-max-expires` | a presigning key with its ceiling (given once for each key), and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |

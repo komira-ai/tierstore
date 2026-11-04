@@ -52,10 +52,7 @@ low_water          = 70
 critical           = 95
 copy_parallel      = 16
 lease_ttl          = "30s"
-reconcile_interval = "5s"
 usage_stale_after  = "2m"
-journal_linger     = "20ms"
-journal_retention  = "24h"
 
 [cold_store]
 kind             = "s3"
@@ -151,7 +148,7 @@ The keys of each table are those of the storage node and of the build node. What
 | Key | Flag | Type, default | What |
 |---|---|---|---|
 | `server.listen` | `--listen` | address or list of addresses, required | where the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz` are served. On main, not in v0.0.41: when the file has a `[local_cache]` table (a build node, or a storage node with a cache), the server also binds 127.0.0.1 on the port of each listen address, once for each distinct port, so that processes on the node reach it at `http://127.0.0.1:<port>`; the start is refused, naming loopback and the port, if that cannot be bound. Nothing is added for a port that already has `127.0.0.1` or the IPv4 wildcard `0.0.0.0` on it (the wildcard covers loopback, and a second bind would be refused), and an IPv6 address adds IPv4 loopback only, never `::1`. Without `[local_cache]` exactly the listed addresses are bound. A list (the flag given again for each address) is served on every address by one server, with one drain, and a start that cannot bind every address is refused. To listen on the wildcard of both families give `0.0.0.0:<port>` and `[::]:<port>`: an IPv6 address is bound for IPv6 only, so the two do not clash. An address given twice is refused, naming the key |
-| `server.proxy_id` | `--proxy-id` | string, required | names this process's journal and lease in the hot tier; keep it across restarts and give each process over the same tiers its own |
+| `server.proxy_id` | `--proxy-id` | string, required | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers its own |
 | `server.slot` | `--slot` | port, 1 to 65535, none | on main, not in v0.0.41. The private port this instance runs as, which the hand-over's slot units pass as `--slot %i` (the unit `tierstore@<port>` listens on `<port>` too). It is the `slot` label of `tierstore_build_info` on `/metricz`, which the update hook's probe through the public port reads to know which instance answered. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. A start with `--slot 0` or a value that is not a port is refused (exit 2), and so is `slot = 0` in the file |
 | `server.bucket` | `--bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
 | `server.region` | `--region` | string, `us-east-1` | the region in the credential scope of a request's signature (not the tiers' regions) |
@@ -196,19 +193,15 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.high_water` | `--high-water` | percent, 80 | above this share of the budget, eviction begins |
 | `hot_store.low_water` | `--low-water` | percent, 70 | eviction goes on down to this share |
 | `hot_store.critical` | `--critical` | percent, 95 | above this share a read of a cold object is not copied back (a put is not slowed; it goes to the cold tier only when the hot tier is full) |
-| `hot_store.journal_linger` | `--journal-linger` | duration, `20ms` | how long a batch of journal entries waits for more |
-| `hot_store.journal_retention` | `--journal-retention` | duration, `24h` | how long an applied journal object is kept |
 | `hot_store.copy_parallel` | `--copy-parallel` | count, 16 | the most objects the reconciler copies at once |
 | `hot_store.lease_ttl` | `--lease-ttl` | duration, `30s` | how long the lease object must stand unchanged, on another reconciler's own monotonic clock, before it takes the lease over; the holder renews every third of it |
-| `hot_store.reconcile_interval` | `--reconcile-interval` | duration, `5s` | how often the reconciler works; shorter than the lease |
 | `hot_store.lock_file` | `--lock-file` | absolute path, none | on main, not in v0.0.41. the lock file of the node: the reconciler works only while this process holds an exclusive lock on it. A process that finds the lock held serves reads and writes through its own proxy and tries the lock again every second; the system frees it when the holder exits or crashes. If the file is replaced, the holder stops its reconciler and waits for the lock on the new file. Give every process of one node the same path, on a local file system, in a directory that nothing removes (`/var/lib/tierstore/`, not a directory under `/run`). The start refuses a path that is not absolute, one that names no file, and one that cannot be opened or is on a network file system. Without it the reconciler works as soon as the process starts |
 | `hot_store.usage_stale_after` | `--usage-stale-after` | duration, `2m` | how old the published usage may be before `/usagez` says 503; longer than the lease |
 | `hot_store.heartbeat` | `--heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
 | `hot_store.departure` | `--departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. The removal of registrations does not use it: that uses `registration_retention` |
 | `hot_store.deadline_margin` | `--deadline-margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |
-| `hot_store.registration_retention` | `--registration-retention` | duration, `0s` | how long the registration of a proxy that heartbeated must stay unchanged before the reconciler removes it, when the proxy left no journal object. A registration with no heartbeat (the empty one of an older release) is never removed. `0s`, the default, removes none: a proxy of a release without the heartbeat that reopens a registration this release wrote never rewrites it, and the removal would take it for a departed owner's, so set a time only once no such proxy runs |
 
-The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, and a `registration_retention` that is neither zero nor at least `departure`, naming the values.
+The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
 
 ## `[local_cache]`
 
@@ -287,6 +280,10 @@ These describe one run, not the data path, and have no key:
 `--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down or answers the self-test wrongly; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
 
 `--help` and `--version` are the usual; on main `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp. A start that gives `--config` and any other flag but `--drain-lb-wait`, `--drain-deadline` and `--check-config` is refused with exit status 2.
+
+## Settings that were removed
+
+The entry protocol has no per-node journal and no reconciler interval, so four settings are gone: `--journal-linger` (hot_store.journal_linger), `--journal-retention` (hot_store.journal_retention), `--reconcile-interval` (hot_store.reconcile_interval) and `--registration-retention` (hot_store.registration_retention). A unit that still passes one of the flags starts: the flag and its value are dropped before the flags are parsed, and stderr says once for each flag given, `tierstore: --<flag> is ignored: <why>`. They are not in `--help`. A file that still has one of the keys is read as a file with a key this release does not know: the key is ignored and the loader warns of it. The reconciler now waits one second after a round that did nothing, doubling to ten seconds, and not at all after a round that changed something.
 
 ## What the loader refuses
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use clap::Parser;
+
 use tierstore_testkit::dir::TestDir;
 
 use super::super::testing::{
@@ -18,6 +18,7 @@ use crate::faulty::{FaultyBackend, Op};
 use crate::format::{Format, FormatPhase};
 use crate::journal::FORMAT_KEY;
 use crate::{Backend, DirBackend, Error, RecordingSleeper, Sleeper, TestClock};
+use clap::Parser;
 
 fn cli(flags: &[&str]) -> Cli {
     let base = ["tierstore format-epoch", "--hot", "memory"];
@@ -516,16 +517,28 @@ async fn cancel_refuses_when_the_format_changed_under_it() {
 }
 
 /// Asserts that `--activate` refuses unless the format says `drained` (the messages exactly), for
-/// an absent object, a drain, and an active format of another epoch.
+/// an absent object of a store that has a journal object, a drain, and an active format of another
+/// epoch.
 #[tokio::test]
 async fn activate_refuses_unless_the_format_is_drained() {
     let (hot, clock) = tier();
     let sleeper = RecordingSleeper::new();
+    hot.put(
+        "_journal/p1/00000000000000000001",
+        Bytes::from_static(b"[]"),
+    )
+    .await
+    .unwrap();
     let (absent, _) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
     assert_eq!(
         absent,
-        Err("refusing to activate: the format is absent, not drained".to_owned())
+        Err(
+            "refusing to activate: there is no format object and the store has 1 journal \
+             objects of a release before the entries; drain it with the bridge release first"
+                .to_owned()
+        )
     );
+    assert_eq!(stored_format(&*hot).await, None);
     set_format(&*hot, &drain_format()).await;
     let (drain, _) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
     assert_eq!(
@@ -539,6 +552,39 @@ async fn activate_refuses_unless_the_format_is_drained() {
         other,
         Err("refusing to activate: the format is active, not drained".to_owned())
     );
+}
+
+/// Asserts that `--activate` of a store with no format object and no journal object (a new store)
+/// writes nothing without `--apply`, creates the active format at epoch 2 with it, and refuses
+/// as changed when a format object appeared between the look and the create.
+#[tokio::test]
+async fn activate_creates_the_format_of_a_store_with_no_journal() {
+    let (hot, clock) = tier();
+    let sleeper = RecordingSleeper::new();
+    let (dry, out) = acted(&*hot, &clock, &sleeper, &["--activate"]).await;
+    assert_eq!(dry, Ok(()));
+    assert!(out.starts_with("dry run: would write the format"), "{out}");
+    assert_eq!(stored_format(&*hot).await, None);
+
+    let faulty = Arc::new(FaultyBackend::new(hot.clone()));
+    faulty.fail_next_with(Op::Put, Error::AlreadyExists(FORMAT_KEY.to_owned()));
+    let (lost, _) = acted(&*faulty, &clock, &sleeper, &["--activate", "--apply"]).await;
+    assert_eq!(
+        lost,
+        Err(
+            "the format object changed while it was being written; run --check and try again"
+                .to_owned()
+        )
+    );
+    assert_eq!(stored_format(&*hot).await, None);
+
+    let (done, out) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
+    assert_eq!(done, Ok(()));
+    assert_eq!(
+        out.lines().next(),
+        Some("wrote the format: active, epoch 2")
+    );
+    assert_eq!(stored_format(&*hot).await, Some(active_format(2)));
 }
 
 /// Asserts that `--activate` of a store that is active at epoch 2 says so and writes nothing.

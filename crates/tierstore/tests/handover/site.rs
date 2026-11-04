@@ -19,6 +19,8 @@ use std::net::SocketAddr;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
+use tierstore::Backend as _;
+use tierstore::DirBackend;
 use tierstore::server::build_info::VERSION;
 use tierstore::server::update_hook::{FORWARD_TABLE, HANDOVER_CAPABILITY, redirect_target};
 use tierstore_testkit::dir::TestDir;
@@ -164,6 +166,27 @@ fn storage_args(base: &Path, port: u16, hot: &Path, cold: &Path, key: &Path) -> 
     .into()
 }
 
+/// Writes the active format into the directory tier `hot`, as `tierstore format-epoch --activate`
+/// does for a new store, so that a storage node over it takes writes. Run on a thread of its own,
+/// so that it is the same inside a runtime or outside one.
+fn activate(hot: &Path) {
+    let wrote = std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .expect("a runtime");
+                runtime.block_on(async {
+                    let tier = DirBackend::open(hot).expect("the hot tier");
+                    let active = bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+                    tier.put("_tiering/format", active).await
+                })
+            })
+            .join()
+    });
+    wrote.expect("the thread ended").expect("the format object");
+}
+
 impl Site {
     /// Lays the host of `plan` down: no process runs yet, the record says no update is in
     /// flight and `A` serves, and `A`'s link names the first release.
@@ -206,6 +229,7 @@ impl Site {
                 })
             }
             Node::Storage => {
+                activate(&hot);
                 let (base, hot, cold, key) = (base.clone(), hot.clone(), cold.clone(), key.clone());
                 Box::new(move |port| storage_args(&base, port, &hot, &cold, &key))
             }

@@ -4,14 +4,46 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use bytes::Bytes;
 use objstore_s3::Capabilities;
 use objstore_s3::s3::{Credentials, S3Config, S3Store};
 use tierstore::server::{Drained, Server, ServerConfig};
-use tierstore::{Clock, FaultyBackend, MemoryBackend, Proxy, ProxyConfig, SystemClock, TestClock};
+use tierstore::{
+    Backend, Clock, Error, FaultyBackend, MemoryBackend, Proxy, ProxyConfig, Sleeper, SystemClock,
+    TestClock,
+};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use crate::signer::{FIXED_STAMP, Request, sign};
+
+/// A wait that never ends: the heartbeat of a proxy then makes no call after its first beat.
+struct Never;
+
+#[async_trait]
+impl Sleeper for Never {
+    async fn sleep(&self, _duration: Duration) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Starts a proxy over `hot` and `cold` and makes it live, with the format of `hot` active at
+/// epoch 2: what a put or a delete on an entry needs.
+async fn live_proxy(
+    hot: Arc<dyn Backend>,
+    cold: Arc<dyn Backend>,
+    config: ProxyConfig,
+) -> Result<Proxy, Error> {
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    let _ = hot.put("_tiering/format", active).await;
+    let proxy = Proxy::open(hot, cold, config).await?;
+    assert!(proxy.start_heartbeat(Arc::new(Never)));
+    while !proxy.is_live() {
+        tokio::task::yield_now().await;
+    }
+    Ok(proxy)
+}
 
 pub const KEY_ID: &str = "AKIDTIERSTORE";
 
@@ -54,9 +86,8 @@ impl Harness {
         let hot = Arc::new(FaultyBackend::new(hot_mem.clone()));
         let cold = Arc::new(FaultyBackend::new(cold_mem.clone()));
         let mut proxy_config = ProxyConfig::new("p1", 1 << 30, Arc::new(SystemClock));
-        proxy_config.linger = Duration::from_millis(1);
         proxy_config.usage_refresh = Duration::ZERO;
-        let opened = Proxy::open(hot.clone(), cold.clone(), proxy_config).await;
+        let opened = live_proxy(hot.clone(), cold.clone(), proxy_config).await;
         let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
         config.drain_lb_wait = Duration::from_millis(100);
         config.drain_deadline = Duration::from_secs(10);

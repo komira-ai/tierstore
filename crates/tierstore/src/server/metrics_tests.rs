@@ -5,9 +5,10 @@ use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, StatusCode};
 
-use crate::{Backend, ByteRange, Error, Op};
+use crate::{ByteRange, Error, Op};
 
 use super::testing::{Reply, Rig};
+use crate::Backend;
 
 pub(super) const BUDGET: u64 = 1 << 20;
 
@@ -33,12 +34,7 @@ const SERIES: [&str; 27] = [
     "tierstore_bytes_served_total{tier=\"cold\"}",
     "tierstore_bytes_read_total{tier=\"hot\"}",
     "tierstore_bytes_read_total{tier=\"cold\"}",
-    "tierstore_promotions_total",
-    "tierstore_promoted_bytes_total",
     "tierstore_promotions_skipped_total{reason=\"critical\"}",
-    "tierstore_promotions_skipped_total{reason=\"full\"}",
-    "tierstore_promotions_skipped_total{reason=\"raced\"}",
-    "tierstore_promotions_skipped_total{reason=\"failed\"}",
     "tierstore_drain_late_requests_total",
 ];
 
@@ -86,19 +82,9 @@ pub(super) const HOT_SERVED: &str = "tierstore_bytes_served_total{tier=\"hot\"}"
 pub(super) const COLD_SERVED: &str = "tierstore_bytes_served_total{tier=\"cold\"}";
 pub(super) const HOT_BYTES: &str = "tierstore_bytes_read_total{tier=\"hot\"}";
 pub(super) const COLD_BYTES: &str = "tierstore_bytes_read_total{tier=\"cold\"}";
-pub(super) const PROMOTIONS: &str = "tierstore_promotions_total";
-pub(super) const PROMOTED_BYTES: &str = "tierstore_promoted_bytes_total";
 
-pub(super) fn skipped(reason: &str) -> String {
+fn skipped(reason: &str) -> String {
     format!("tierstore_promotions_skipped_total{{reason=\"{reason}\"}}")
-}
-
-/// Lets the runtime's other tasks run until `series` is at least `n`: the copy of a cold read ends
-/// beside its response, so its promotion or skip is counted a little after the body was sent.
-async fn reached(rig: &Rig, series: &str, n: u64) {
-    while value(rig, series).await < n {
-        tokio::task::yield_now().await;
-    }
 }
 
 /// A rig with the object `key` in the cold tier only.
@@ -238,12 +224,11 @@ async fn metricz_renders_every_block_the_server_has() {
 }
 
 /// Asserts that a GET of an object only in the cold tier counts a hot miss, a cold read, a cold
-/// hit, the bytes read from the cold tier and served, and one promotion with its bytes, and that
-/// a second GET counts a hot hit and its bytes and no more cold reads. It would catch a cold
-/// read that is not counted, bytes counted on the wrong tier, and a promotion that is not
-/// seen.
+/// hit and the bytes read from the cold tier and served, and that a second GET counts the same
+/// again, since the read copies nothing into the hot tier (the copy is the reconciler's, on an
+/// entry). It would catch a cold read that is not counted, and bytes counted on the wrong tier.
 #[tokio::test]
-async fn a_get_of_a_cold_object_counts_the_cold_read_and_the_promotion() {
+async fn a_get_of_a_cold_object_counts_the_cold_read() {
     let rig = cold_only("obj", b"twelve bytes").await;
     let first = rig.get("obj", None).await;
     assert_eq!(first.status, StatusCode::OK);
@@ -256,26 +241,23 @@ async fn a_get_of_a_cold_object_counts_the_cold_read_and_the_promotion() {
     assert_eq!(value(&rig, COLD_BYTES).await, 12);
     assert_eq!(value(&rig, COLD_SERVED).await, 12);
     assert_eq!(value(&rig, HOT_SERVED).await, 0);
-    reached(&rig, PROMOTIONS, 1).await;
-    assert_eq!(value(&rig, PROMOTIONS).await, 1);
-    assert_eq!(value(&rig, PROMOTED_BYTES).await, 12);
     // The front opens the read with one call per tier: no head is made.
     assert_eq!(value(&rig, HOT_MISS_HEAD).await, 0);
     assert_eq!(value(&rig, COLD_READS_HEAD).await, 0);
 
     let second = rig.get("obj", None).await;
     assert_eq!(second.body, "twelve bytes");
-    assert_eq!(value(&rig, HOT_HIT_GET).await, 1);
+    assert_eq!(value(&rig, HOT_MISS_GET).await, 2);
+    assert_eq!(value(&rig, HOT_HIT_GET).await, 0);
     assert_eq!(value(&rig, HOT_HIT_HEAD).await, 0);
-    assert_eq!(value(&rig, HOT_SERVED).await, 12);
-    assert_eq!(value(&rig, COLD_READS_GET).await, 1);
+    assert_eq!(value(&rig, HOT_SERVED).await, 0);
+    assert_eq!(value(&rig, COLD_READS_GET).await, 2);
     assert_eq!(value(&rig, COLD_READS_HEAD).await, 0);
-    assert_eq!(value(&rig, PROMOTIONS).await, 1);
-    assert_eq!(value(&rig, COLD_SERVED).await, 12);
+    assert_eq!(value(&rig, COLD_SERVED).await, 24);
 }
 
 /// Asserts that a GET of an object in the hot tier counts a hot hit and its bytes and no cold
-/// read, miss or promotion. It would catch a hit counted against the cold tier.
+/// read or miss. It would catch a hit counted against the cold tier.
 #[tokio::test]
 async fn a_get_of_a_hot_object_counts_only_a_hot_hit() {
     let rig = Rig::new(BUDGET).await;
@@ -290,12 +272,11 @@ async fn a_get_of_a_hot_object_counts_only_a_hot_hit() {
     assert_eq!(value(&rig, COLD_READS_GET).await, 0);
     assert_eq!(value(&rig, COLD_READS_HEAD).await, 0);
     assert_eq!(value(&rig, COLD_SERVED).await, 0);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that a GET of a key neither tier holds counts a miss on each tier (on the get, the
 /// one call the front makes) and one cold read, counts nothing on the head, and serves and
-/// promotes nothing. It would catch a missing key that is not counted as a miss.
+/// serves nothing. It would catch a missing key that is not counted as a miss.
 #[tokio::test]
 async fn a_get_of_a_missing_key_counts_a_miss_on_each_tier() {
     let rig = Rig::new(BUDGET).await;
@@ -309,11 +290,10 @@ async fn a_get_of_a_missing_key_counts_a_miss_on_each_tier() {
     assert_eq!(value(&rig, COLD_HIT_GET).await, 0);
     assert_eq!(value(&rig, HOT_SERVED).await, 0);
     assert_eq!(value(&rig, COLD_SERVED).await, 0);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that a ranged GET of a cold object serves the bytes of the range, reads only the range
-/// from the cold tier and promotes nothing, so a second ranged GET is served by the cold tier
+/// from the cold tier and asks for no copy-back, so a second ranged GET is served by the cold tier
 /// again. It would catch cold bytes counted as the whole object, and a ranged read that copies
 /// the object back.
 #[tokio::test]
@@ -324,16 +304,14 @@ async fn a_ranged_get_of_a_cold_object_serves_and_reads_only_the_range() {
     assert_eq!(reply.body, "234");
     assert_eq!(value(&rig, COLD_SERVED).await, 3);
     assert_eq!(value(&rig, COLD_BYTES).await, 3);
-    assert_eq!(value(&rig, PROMOTED_BYTES).await, 0);
     let again = rig.get("obj", Some("bytes=5-9")).await;
     assert_eq!(again.body, "56789");
     assert_eq!(value(&rig, HOT_SERVED).await, 0);
     assert_eq!(value(&rig, COLD_SERVED).await, 8);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that a HEAD of a cold object counts a hot miss, a cold read and a cold hit on the
-/// head, serves no bytes and copies nothing back. It would catch a head that promotes.
+/// head, serves no bytes and copies nothing back. It would catch a head that asks for a copy-back.
 #[tokio::test]
 async fn a_head_of_a_cold_object_counts_the_read_and_copies_nothing() {
     let rig = cold_only("obj", b"abc").await;
@@ -343,18 +321,16 @@ async fn a_head_of_a_cold_object_counts_the_read_and_copies_nothing() {
     assert_eq!(value(&rig, COLD_HIT_HEAD).await, 1);
     assert_eq!(value(&rig, COLD_READS_GET).await, 0);
     assert_eq!(value(&rig, COLD_SERVED).await, 0);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
     assert_eq!(rig.call("HEAD", "obj", b"").await.status, StatusCode::OK);
     assert_eq!(value(&rig, HOT_HIT_HEAD).await, 0);
     assert_eq!(value(&rig, COLD_HIT_HEAD).await, 2);
 }
 
-/// Asserts that a cold read whose copy into the hot tier is not made counts the reason: the hot
-/// tier at its critical mark, a hot tier that answers "full", one that already holds the object,
-/// one that fails. The read itself is answered in each case. It would catch a reason counted as
-/// another, a skipped copy counted as a promotion, and a copy failure that fails the read.
+/// Asserts that a cold read for which no copy-back is asked, because the hot tier is at its
+/// critical mark, counts the reason, and that the read itself is answered. It would catch a
+/// reason that is not counted.
 #[tokio::test]
-async fn a_cold_read_that_is_not_copied_back_counts_why() {
+async fn a_cold_read_with_no_copy_back_asked_counts_why() {
     let rig = cold_only("a", b"aaaa").await;
     // 96 percent of the budget: above the critical mark (95), below the budget, which is `Full`.
     let hot_bytes = BUDGET / 100 * 96;
@@ -368,29 +344,6 @@ async fn a_cold_read_that_is_not_copied_back_counts_why() {
         .unwrap();
     assert_eq!(rig.get("a", None).await.body, "aaaa");
     assert_eq!(value(&rig, &skipped("critical")).await, 1);
-
-    let rig = cold_only("a", b"aaaa").await;
-    rig.hot.fail_next_with(Op::Put, Error::Full("a".to_owned()));
-    assert_eq!(rig.get("a", None).await.body, "aaaa");
-    reached(&rig, &skipped("full"), 1).await;
-    assert_eq!(value(&rig, &skipped("full")).await, 1);
-
-    let rig = cold_only("a", b"aaaa").await;
-    let exists = Error::AlreadyExists("a".to_owned());
-    rig.hot.fail_next_with(Op::Put, exists);
-    assert_eq!(rig.get("a", None).await.body, "aaaa");
-    reached(&rig, &skipped("raced"), 1).await;
-    assert_eq!(value(&rig, &skipped("raced")).await, 1);
-
-    let rig = cold_only("a", b"aaaa").await;
-    rig.hot.fail_next(Op::Put, 1);
-    assert_eq!(rig.get("a", None).await.body, "aaaa");
-    reached(&rig, &skipped("failed"), 1).await;
-    assert_eq!(value(&rig, &skipped("failed")).await, 1);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
-    for reason in ["critical", "full", "raced"] {
-        assert_eq!(value(&rig, &skipped(reason)).await, 0, "{reason}");
-    }
 }
 
 /// Asserts that a read that fails with something other than "not found" counts neither a hit
@@ -447,7 +400,6 @@ async fn a_failed_read_is_not_counted_as_a_hit_or_a_miss() {
     assert!(past.is_err());
     assert_eq!(value(&rig, COLD_SERVED).await, 0);
     assert_eq!(value(&rig, COLD_BYTES).await, 0);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that an object deleted between the head and the get (the get finds neither tier)
@@ -544,7 +496,7 @@ async fn no_series_is_emitted_twice() {
 /// Asserts that a ranged GET of a cold object while the hot tier is above its critical mark
 /// reads only the range from the cold tier (bytes read equal bytes served), copies nothing and
 /// counts a `critical` skip. It would catch bytes read counted as the whole object where the
-/// proxy asked for the part, and a promotion that did not happen.
+/// proxy asked for the part.
 #[tokio::test]
 async fn a_ranged_get_of_a_cold_object_with_the_hot_tier_critical_reads_the_part() {
     let rig = cold_only("obj", b"0123456789").await;
@@ -562,6 +514,5 @@ async fn a_ranged_get_of_a_cold_object_with_the_hot_tier_critical_reads_the_part
     assert_eq!(value(&rig, COLD_BYTES).await, 3);
     assert_eq!(value(&rig, COLD_SERVED).await, 3);
     assert_eq!(value(&rig, COLD_HIT_GET).await, 1);
-    assert_eq!(value(&rig, PROMOTIONS).await, 0);
     assert_eq!(value(&rig, &skipped("critical")).await, 1);
 }

@@ -67,6 +67,12 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--beats",
     "--poll",
     "--key",
+    // The flags of the releases before the entries, which this release accepts and ignores with a
+    // warning (`removed_flags.rs`); a page names them to say so.
+    "--journal-linger",
+    "--journal-retention",
+    "--reconcile-interval",
+    "--registration-retention",
 ];
 
 /// Flags of the binary the pages need not name.

@@ -19,8 +19,8 @@
 //!
 //! - `[server]`: the address, the id, the bucket and region, the key files, the limits on
 //!   requests and bodies, and the start-up self-test's wait.
-//! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
-//!   the reconciler and its lease.
+//! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the
+//!   reconciler and its lease, and the heartbeat of the proxy.
 //! - `[cold_store]`: the cold tier, and the start-up check it may skip.
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
@@ -106,18 +106,11 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("presign-max-expires", &["server.presign_max_expires"]),
     ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
-    ("journal-linger", &["hot_store.journal_linger"]),
-    ("journal-retention", &["hot_store.journal_retention"]),
     ("copy-parallel", &["hot_store.copy_parallel"]),
     ("lease-ttl", &["hot_store.lease_ttl"]),
-    ("reconcile-interval", &["hot_store.reconcile_interval"]),
     ("heartbeat", &["hot_store.heartbeat"]),
     ("departure", &["hot_store.departure"]),
     ("deadline-margin", &["hot_store.deadline_margin"]),
-    (
-        "registration-retention",
-        &["hot_store.registration_retention"],
-    ),
     ("lock-file", &["hot_store.lock_file"]),
     ("usage-stale-after", &["hot_store.usage_stale_after"]),
     ("max-request-bytes", &["server.max_request_bytes"]),
@@ -316,23 +309,15 @@ pub(super) struct TierTable {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reconcile_interval: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage_stale_after: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub journal_linger: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub journal_retention: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heartbeat: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub departure: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_margin: Option<Dur>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_checks: Option<Vec<String>>,
@@ -549,18 +534,11 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("critical", cold.critical.is_some()),
         ("copy_parallel", cold.copy_parallel.is_some()),
         ("lease_ttl", cold.lease_ttl.is_some()),
-        ("reconcile_interval", cold.reconcile_interval.is_some()),
         ("lock_file", cold.lock_file.is_some()),
         ("usage_stale_after", cold.usage_stale_after.is_some()),
-        ("journal_linger", cold.journal_linger.is_some()),
-        ("journal_retention", cold.journal_retention.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
-        (
-            "registration_retention",
-            cold.registration_retention.is_some(),
-        ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -710,11 +688,8 @@ pub(super) fn storage(
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
-        journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
-        journal_retention: duration(hot.journal_retention, Duration::from_secs(24 * 3600)),
         copy_parallel,
         lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
-        reconcile_interval: duration(hot.reconcile_interval, Duration::from_secs(5)),
         lock_file,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),

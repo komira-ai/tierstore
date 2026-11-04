@@ -1,7 +1,7 @@
 //! The flags and the start-up of the `tierstore` binary.
 //!
 //! One process runs three things over the same pair of tiers: a [`Proxy`](crate::Proxy) with the given id,
-//! the S3 front of that proxy ([`Server`](super::Server)), and a [`Reconciler`](crate::Reconciler), which works only while it
+//! the S3 front of that proxy ([`Server`](super::Server)), and an [`EntryReconciler`](crate::EntryReconciler), which works only while it
 //! holds the lease in the hot tier, so that any number of these processes may run over the same
 //! tiers. With `--lock-file` it works only while the process also holds an exclusive lock on
 //! that file (see [`Gate`](super::cli_reconcile::Gate)): a second process over the same node, started beside the first,
@@ -117,6 +117,7 @@ use super::listen::{has_duplicate, joined};
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
+use super::removed_flags::drop_removed;
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -182,8 +183,8 @@ pub struct Cli {
     /// them all. An address that is given twice is refused.
     #[arg(long, value_name = "ADDR", required = true)]
     pub listen: Vec<SocketAddr>,
-    /// The id of this proxy, which names its journal in the hot tier and its lease. Keep it
-    /// across restarts, and give each process over the same tiers one of its own.
+    /// The id of this proxy, which names its registration in the hot tier and the entries it
+    /// holds. Give each process over the same tiers one of its own.
     #[arg(long)]
     pub proxy_id: String,
     /// The slot port this instance runs as, 1 to 65535: the private port of one of the two slots
@@ -318,21 +319,12 @@ pub struct Cli {
     /// connections it closes, once the settle is over.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub drain_deadline: Duration,
-    /// How long a batch of journal entries waits for more before it is written.
-    #[arg(long, default_value = "20ms", value_parser = parse_duration)]
-    pub journal_linger: Duration,
-    /// How long an applied journal object is kept before it is deleted.
-    #[arg(long, default_value = "24h", value_parser = parse_duration)]
-    pub journal_retention: Duration,
     /// The most objects the reconciler copies to the cold tier at once.
     #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u32).range(1..))]
     pub copy_parallel: u32,
     /// How long the reconciler's lease lasts without a renewal.
     #[arg(long, default_value = "30s", value_parser = parse_duration)]
     pub lease_ttl: Duration,
-    /// How often the reconciler works: shorter than `--lease-ttl`.
-    #[arg(long, default_value = "5s", value_parser = parse_duration)]
-    pub reconcile_interval: Duration,
     #[command(flatten)]
     pub heartbeat: HeartbeatFlags,
     /// The lock file of this node: an absolute path on a local file system, in a directory that
@@ -408,7 +400,7 @@ pub struct Cli {
     /// `multipart-conditional=REASON`, where REASON says why the store cannot pass it (for
     /// example `multipart-conditional=store-ignores-if-none-match-on-completion`). It is the
     /// only check that can be left out: the others test the guarantees the proxy, the lease and
-    /// the journal stand on, and any other name is refused as a usage error. The reason is
+    /// the entries stand on, and any other name is refused as a usage error. The reason is
     /// written to stderr at every start. Without the check, a multipart upload may replace an
     /// object that exists: leave it out only for a store you have shown to be safe another way.
     /// None is skipped by default.
@@ -664,9 +656,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.high_water > cli.critical {
         return Err("--high-water must not be above --critical".into());
     }
-    if cli.reconcile_interval >= cli.lease_ttl {
-        return Err("--reconcile-interval must be shorter than --lease-ttl".into());
-    }
     if cli.usage_stale_after <= cli.lease_ttl {
         return Err("--usage-stale-after must be longer than --lease-ttl".into());
     }
@@ -685,15 +674,13 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.critical = share(cli.critical);
-    proxy.linger = cli.journal_linger;
     let mut reconciler =
         ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
     reconciler.high_water = share(cli.high_water);
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
-    reconciler.retention = cli.journal_retention;
-    cli.heartbeat.apply(&mut proxy, &mut reconciler);
+    cli.heartbeat.apply(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
@@ -864,6 +851,10 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
     // Before the flags are parsed: it needs none of the flags a start requires.
     if args.iter().skip(1).any(|arg| arg == "--capabilities") {
         return capabilities(&args);
+    }
+    let (args, removed) = drop_removed(args);
+    for warning in removed {
+        eprintln!("{warning}");
     }
     let launch = match resolve(args) {
         Ok(launch) => launch,

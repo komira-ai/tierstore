@@ -16,7 +16,7 @@ use tierstore::{
 use tierstore_testkit::dir::TestDir;
 
 use crate::conformance::{joined, reservation};
-use crate::support::{Rig, assert_absent, body, copied, read, set_usage};
+use crate::support::{Rig, assert_absent, body, copy_back_asked, read, set_usage};
 
 /// The bytes the objects of these tests hold.
 const TEN: &str = "0123456789";
@@ -147,8 +147,8 @@ fn calls(rig: &Rig) -> [u64; 4] {
 }
 
 /// The calls made since `before`, as `calls` counts them. A read that misses the hot tier makes
-/// one more get of it than the open read: the one of the usage, which decides whether the object
-/// is copied back (and, the first time, the one of the format object, which says how).
+/// one more get of it than the open read: the one of the usage, which decides whether a copy-back
+/// is asked for.
 fn since(rig: &Rig, before: [u64; 4]) -> [u64; 4] {
     let now = calls(rig);
     [0, 1, 2, 3].map(|at| now[at] - before[at])
@@ -300,11 +300,11 @@ async fn a_missing_key_is_not_found_after_one_call_to_each_tier() {
 }
 
 /// Asserts that a miss in the hot tier is read from the cold tier in one call, with the cold
-/// object's meta, and copied back whole into the hot tier, so that the next read is one call to
-/// the hot tier and none to the cold one; and that a range of the cold object is the cold tier's
-/// own read of that range, which copies nothing.
+/// object's meta, and that the read asks for the copy-back on the entry of the key and copies
+/// nothing itself; and that a range of the cold object is the cold tier's own read of that range,
+/// which asks for nothing.
 #[tokio::test(start_paused = true)]
-async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
+async fn a_hot_miss_falls_to_the_cold_tier_and_asks_for_the_copy_back() {
     let rig = Rig::new();
     rig.cold_mem.put("k", body(TEN)).await.unwrap();
     rig.cold_mem.put("r", body(TEN)).await.unwrap();
@@ -313,19 +313,13 @@ async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
 
     let before = calls(&rig);
     let opened = proxy.open_read("k", None).await.unwrap();
-    // The hot tier's gets: the miss, the usage, and the format object, which the first cold hit
-    // of a proxy reads to learn whether the copy-back is made on an entry.
-    assert_eq!(since(&rig, before), [3, 0, 1, 0]);
+    // The hot tier's gets: the miss and the usage. The format object was read at the first beat.
+    assert_eq!(since(&rig, before), [2, 0, 1, 0]);
     assert_eq!(opened.meta, head);
     assert_eq!(opened.window, Window::Whole);
     assert_eq!(joined(opened).await, body(TEN));
-    copied(&rig, "k").await;
-    assert_eq!(read(&*rig.hot_mem, "k").await, body(TEN));
-
-    let before = calls(&rig);
-    let again = proxy.open_read("k", None).await.unwrap();
-    assert_eq!(since(&rig, before), [1, 0, 0, 0]);
-    assert_eq!(joined(again).await, body(TEN));
+    copy_back_asked(&rig, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
 
     let opened = proxy.open_read("r", Some(Span::Suffix(3))).await.unwrap();
     assert_eq!(opened.window, Window::Part(ByteRange::new(7, 3)));

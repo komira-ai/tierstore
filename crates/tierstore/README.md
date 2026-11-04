@@ -4,12 +4,13 @@ A generic hot/cold object store over S3-compatible backends. Its normal dependen
 other crate of this workspace unless the `s3` feature is on.
 
 - The library: the `Backend` trait (create-only put, `If-Match` put, ranged get, head, delete, list,
-  multipart), an in-memory and a directory backend, `Proxy` (a journal per proxy, a get that copies a
-  cold hit back, a full hot tier sending puts to the cold tier), `Reconciler` (copies puts to the
-  cold tier, applies deletes, evicts what the cold tier holds, publishes usage) and `CachedStore`.
+  multipart), an in-memory and a directory backend, `Proxy` (every write on the entry of its key, a
+  get that asks for a cold hit to be copied back, a full hot tier sending puts to the cold tier),
+  `EntryReconciler` (copies puts to the cold tier, finishes deletes, does the copy-backs, evicts what
+  the cold tier holds, publishes usage) and `CachedStore`.
 - Feature `s3`: `S3Backend`, a bucket of an S3-compatible store as a `Backend`.
 - Feature `server` (turns `s3` on): `server`, the S3 API front of a proxy, and the `tierstore`
-  binary that runs a proxy, that front and a reconciler in one process.
+  binary that runs a proxy, that front and an entry reconciler in one process.
   `packaging/README.md` has the flags, the keys and the unit.
 
 An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
@@ -61,7 +62,7 @@ cache in front of one upstream (`src/server/local_cache/`, the file's tables in
 `src/server/config_cache.rs`): GET and HEAD of the keys a `[[policy]]` with `cache = true` holds are
 served from a directory of raw files (`<path>/obj/<aa>/<bb>/<hex>`), filled from the upstream on a
 miss, hashed as they are filled and evicted oldest-use first under a byte budget and a free-space
-floor; every other call is refused 403. It has no journal and no lease. The keys of the table and
+floor; every other call is refused 403. It has no entries and no lease. The keys of the table and
 the rules are in "A build node" in `packaging/README.md`; `GET /metricz` shows its
 counters.
 
@@ -97,9 +98,7 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 | `tierstore_reads_total` | `tier`, `op` | reads that reached the tier: hits, misses and errors. For `tier="cold"` these are the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | `tier` | bytes of object data that gets answered, by the tier that gave them (the range, if one was asked) |
 | `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, the whole object for a get without a range and the range alone for a ranged get |
-| `tierstore_promotions_total` | none | objects a get copied from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | none | bytes of those objects: the whole object (only a get without a range copies one) |
-| `tierstore_promotions_skipped_total` | `reason` = `critical`, `full`, `raced`, `failed` | copies not made, by reason |
+| `tierstore_promotions_skipped_total` | `reason` = `critical` | cold hits for which no copy-back was asked, by reason |
 
 What the counts mean:
 
@@ -114,18 +113,14 @@ What the counts mean:
   disconnects while they are sent still has them counted.
 - `critical` is a skip because the hot tier is at or above its critical mark by the usage the
   reconciler published (the budget included), and also while the proxy takes the hot tier to be
-  full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier
-  answering this copy with "full". `raced` is another read having copied the object first: two
-  concurrent cold gets of one object read it twice and promote it once, the second counting
-  `raced`. `failed` is any other error of the copy.
-- `promotions_total` counts a copy when the hot tier has taken it, before its entry is appended
-  to the journal, which can fail; the reconciler then never learns of the copy and the object
-  can be deleted from the hot tier without a trace in these counters.
-- A get that is dropped while it copies has counted its cold hit and bytes, and neither a
-  promotion nor a skip, so promotions plus skips can be less than cold hits.
+  full because it answered an earlier put with "full" a moment ago. A read of a cold object that
+  is not skipped asks for its copy-back on the entry of its key and copies nothing itself: the
+  copy is the reconciler's, so the proxy counts no promotion. The releases before this one counted
+  promotions, promoted bytes and the skips `full`, `raced` and `failed`; those series are gone,
+  since the proxy no longer makes the copy.
 - A ranged get while the hot tier is at or above its critical mark reads only the range from the
-  cold tier: `bytes_read` is the range, nothing is promoted, and a `critical` skip is counted.
-- A head promotes nothing.
+  cold tier: `bytes_read` is the range, no copy-back is asked, and a `critical` skip is counted.
+- A head asks for no copy-back.
 
 PromQL, over the reads that fetch data (`op="get"`):
 
@@ -143,8 +138,6 @@ sum(rate(tierstore_hits_total{tier="cold",op="get"}[5m]))
 sum(rate(tierstore_reads_total{tier="cold",op="get"}[5m]))
 # errors per second of a tier
 sum by (tier) (rate(tierstore_read_errors_total[5m]))
-# promotions per cold hit
-sum(rate(tierstore_promotions_total[5m])) / sum(rate(tierstore_hits_total{tier="cold",op="get"}[5m]))
 # bytes read from the cold tier per byte answered from it
 rate(tierstore_bytes_read_total{tier="cold"}[5m]) / rate(tierstore_bytes_served_total{tier="cold"}[5m])
 ```

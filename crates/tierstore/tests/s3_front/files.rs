@@ -4,12 +4,22 @@ use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+use bytes::Bytes;
+use tierstore::{Backend as _, DirBackend};
 use tierstore_testkit::dir::TestDir;
 
 /// The access key in the key file.
 pub const BIN_KEY_ID: &str = "AKIDBIN";
 
 pub const BIN_SECRET: &str = "bin-secret";
+
+/// Writes the active format into the directory tier at `hot`, as `tierstore format-epoch --activate`
+/// does for a new store, so that a node started over it takes writes.
+pub async fn activate_dir(hot: &std::path::Path) {
+    let tier = DirBackend::open(hot).unwrap();
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    tier.put("_tiering/format", active).await.unwrap();
+}
 
 /// A scratch directory with a key file in it, and the flags of a start that uses it.
 pub struct Files {

@@ -1,4 +1,4 @@
-//! The puts of a proxy whose format is active (`WriteMode::Entries`): every put, held or
+//! The puts of a proxy whose format is active (the format says `active`): every put, held or
 //! streamed, presigned or the completion of a multipart upload, is made on the journal entry of its
 //! key. The entry decides which of several puts of one key wins, and it is what the reconciler
 //! finds to copy the object to the cold tier.

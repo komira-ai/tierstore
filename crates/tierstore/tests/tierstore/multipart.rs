@@ -8,16 +8,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::StreamExt;
+
 use futures::stream;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tierstore::{
     Backend, ByteRange, CachedStore, DirBackend, Error, Listed, MemoryBackend, Meta, Op, PartBody,
-    Proxy, ProxyConfig, TestClock,
+    ProxyConfig, TestClock,
 };
 use tierstore_testkit::dir::TestDir;
 
-use crate::support::{Rig, assert_absent, body, journal_keys, keys, read, text};
+use crate::support::{Rig, assert_absent, body, keys, read, text};
+use futures::StreamExt;
+use sha2::Digest;
 
 /// The kinds of call of a multipart upload.
 const MULTIPART_OPS: [Op; 4] = [
@@ -265,8 +267,8 @@ async fn an_upload_of_the_directory_backend_survives_a_restart() {
 
 /// Asserts that a multipart upload through the proxy goes to the cold tier only: the parts and
 /// the completion are calls of the cold tier and none of the hot tier, the object is made in the
-/// cold tier and nothing is journaled, a head, a listing and a read find it, the read copies it
-/// into the hot tier, and a delete removes it.
+/// cold tier, a head, a listing and a read find it, the read copies nothing into the hot tier, and
+/// a delete removes it.
 #[tokio::test]
 async fn a_multipart_upload_through_the_proxy_goes_to_the_cold_tier_only() {
     let rig = Rig::new();
@@ -276,16 +278,16 @@ async fn a_multipart_upload_through_the_proxy_goes_to_the_cold_tier_only() {
     let two = part(&proxy, "big", &id, 2, &["world"]).await.unwrap();
     assert_eq!(rig.cold.calls(Op::UploadPart), 2);
     assert_eq!(rig.hot.calls(Op::UploadPart), 0);
-    let journal = journal_keys(rig.hot_mem.as_ref(), "p1").await;
+
     let parts = [(1, one), (2, two)];
     let tag = complete(&proxy, "big", &id, &parts).await.unwrap();
-    assert_eq!(journal_keys(rig.hot_mem.as_ref(), "p1").await, journal);
+
     assert_eq!(text(rig.cold_mem.as_ref(), "big").await, "hello world");
     assert_absent(rig.hot_mem.as_ref(), "big").await;
     assert_eq!(proxy.head("big").await.unwrap().tag, tag);
     assert_eq!(keys(&proxy).await, ["big"]);
     assert_eq!(read(&proxy, "big").await, "hello world");
-    assert_eq!(text(rig.hot_mem.as_ref(), "big").await, "hello world");
+    assert_absent(rig.hot_mem.as_ref(), "big").await;
     proxy.delete("big").await.unwrap();
     assert_absent(&proxy, "big").await;
     assert_absent(rig.cold_mem.as_ref(), "big").await;
@@ -482,7 +484,9 @@ async fn a_backend_without_multipart_calls_answers_unsupported() {
     let clock = Arc::new(TestClock::new());
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let config = ProxyConfig::new("p1", 1 << 20, clock);
-    let proxy = Proxy::open(hot, Arc::new(Plain), config).await.unwrap();
+    let proxy = crate::support::open_live(hot, Arc::new(Plain), config)
+        .await
+        .unwrap();
     let created = proxy.create_upload("k").await;
     let completed = complete(&proxy, "k", "u", &[]).await;
     assert_unsupported(&created.unwrap_err(), "create_upload");

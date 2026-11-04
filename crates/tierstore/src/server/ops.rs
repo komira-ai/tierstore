@@ -389,8 +389,8 @@ impl Server {
     /// the request, if it has one.
     ///
     /// The backend's call runs on a task of its own, so that a client that goes away after
-    /// the whole body was handed over leaves the put to be carried to its end, with the
-    /// journal entry; a client that goes away before that ends the stream with an error, and
+    /// the whole body was handed over leaves the put to be carried to its end, with its
+    /// entry; a client that goes away before that ends the stream with an error, and
     /// nothing is stored.
     async fn put_streamed<B>(
         &self,

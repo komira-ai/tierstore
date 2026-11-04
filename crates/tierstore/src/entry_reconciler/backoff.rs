@@ -8,7 +8,7 @@ use super::StepReport;
 /// How long the loop waits after a step: none while it makes progress, the floor while a held
 /// entry waits for its owner, and otherwise a wait that doubles from the floor to the ceiling
 /// and starts again from the floor when progress is made.
-pub(super) struct Idle {
+pub(crate) struct Idle {
     min: Duration,
     max: Duration,
     delay: Duration,
@@ -16,7 +16,7 @@ pub(super) struct Idle {
 
 impl Idle {
     /// A loop that waits `min` first and at most `max`.
-    pub(super) fn new(min: Duration, max: Duration) -> Self {
+    pub(crate) fn new(min: Duration, max: Duration) -> Self {
         Self {
             min,
             max,
@@ -25,7 +25,7 @@ impl Idle {
     }
 
     /// The wait after a step that came to `report`, or `None` to step again at once.
-    pub(super) fn after(&mut self, report: &StepReport) -> Option<Duration> {
+    pub(crate) fn after(&mut self, report: &StepReport) -> Option<Duration> {
         if !(report.active && report.held) {
             return Some(self.min);
         }
