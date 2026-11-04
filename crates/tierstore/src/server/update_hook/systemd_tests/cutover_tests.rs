@@ -75,7 +75,7 @@ fn a_release_that_never_answers_fails_cutover_with_not_ready_and_can_be_rolled_b
     let p = params(NEW, Some(OLD));
     fake.drive(&p, &[Prepare]);
     fake.mute(NEW);
-    let done = fake.run(Cutover, &p);
+    let done = fake.run_as_hostkeeper(Cutover, &p);
     assert_failed(&done, Reason::NotReady);
     assert!(done.report.reversible);
     assert_eq!(Clock::now_ms(&fake), u64::from(READY_ATTEMPTS) * 1000);

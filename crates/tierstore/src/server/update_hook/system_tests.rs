@@ -50,8 +50,10 @@ impl ByProgram {
 impl Runner for ByProgram {
     fn run(&self, call: &Call) -> Result<Output, RunError> {
         self.calls.borrow_mut().push(call.clone());
+        // Any `systemctl` answers `show` as one, whichever path the configuration names.
+        let systemctl = call.program.ends_with("/systemctl");
         let (code, stdout) = match (call.program.as_str(), call.args.first().map(String::as_str)) {
-            ("/usr/bin/systemctl", Some("show")) => (0, "inactive\n"),
+            (_, Some("show")) if systemctl => (0, "inactive\n"),
             ("/bin/launchctl", Some("print")) => (113, ""),
             _ => (0, ""),
         };
