@@ -41,7 +41,11 @@ fn server() -> ServerConfig {
 }
 
 fn auth() -> OciAuth {
-    OciAuth::from_server(&server(), &OciPrefix::new("oci/").expect("a prefix"))
+    bound(&server(), "oci/")
+}
+
+fn bound(server: &ServerConfig, prefix: &str) -> OciAuth {
+    OciAuth::from_server(server).bound(&OciPrefix::new(prefix).expect("a prefix"))
 }
 
 fn login(id: &str, secret: &str) -> HeaderMap {
@@ -148,7 +152,7 @@ fn a_scoped_prefix_must_cover_the_fronts_objects() {
         let mut server = ServerConfig::new("b", "F", "s", Arc::new(TestClock::new()));
         let key = ScopedKey::new("K", "k-secret", &prefixes(read, write)).expect("a key");
         server.scoped_keys.push(key);
-        let auth = OciAuth::from_server(&server, &OciPrefix::new(front).expect("a prefix"));
+        let auth = bound(&server, front);
         let headers = login("K", "k-secret");
         (
             auth.check(&headers, Need::Pull).is_ok(),
@@ -308,4 +312,37 @@ async fn a_front_without_keys_asks_for_none() {
         rig.status(Method::PUT, &blob, &none).await.0,
         StatusCode::METHOD_NOT_ALLOWED
     );
+}
+
+/// Asserts that the keys of a server, made once, take their rights from the prefix of the front
+/// they are attached to: a scoped key that reads `public/` pulls from a front over `public/` and is
+/// refused by one over `private/`, and keys not attached to any front have no right.
+#[tokio::test]
+async fn keys_take_their_rights_from_the_front_they_are_attached_to() {
+    let mut server = ServerConfig::new("b", "F", "s", Arc::new(TestClock::new()));
+    let read = Prefixes {
+        read: &["public/"],
+        ..Prefixes::default()
+    };
+    let key = ScopedKey::new("PUBLIC", "public-secret", &read).expect("a key");
+    server.scoped_keys.push(key);
+    let content = b"layer bytes";
+    let hex = hex::encode(Sha256::digest(content));
+    let path = format!("/v2/app/blobs/sha256:{hex}");
+    let headers = login("PUBLIC", "public-secret");
+    let front = |prefix: &'static str| {
+        let memory = Arc::new(MemoryBackend::new());
+        let metrics = Arc::new(OciMetrics::default());
+        let prefix = OciPrefix::new(prefix).expect("a prefix");
+        let front = OciFront::new(memory, prefix, metrics);
+        front.with_auth(Some(OciAuth::from_server(&server)))
+    };
+    let public = front("public/").handle(&Method::GET, &path, &headers).await;
+    assert_eq!(public.status(), StatusCode::NOT_FOUND);
+    let private = front("private/")
+        .handle(&Method::GET, &path, &headers)
+        .await;
+    assert_eq!(private.status(), StatusCode::FORBIDDEN);
+    let unattached = OciAuth::from_server(&server);
+    assert_eq!(unattached.check(&headers, Need::Any), Err(Refused::Denied));
 }

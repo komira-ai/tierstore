@@ -42,6 +42,7 @@ use base64::engine::general_purpose::STANDARD;
 use hyper::header::AUTHORIZATION;
 use hyper::{HeaderMap, Method};
 use ring::hmac;
+use std::sync::Arc;
 
 use super::OciPrefix;
 use crate::server::ServerConfig;
@@ -86,58 +87,81 @@ pub(super) enum Refused {
     Denied,
 }
 
+/// What a key is, before the front it is attached to says which objects it serves.
+enum Grant {
+    /// The full key.
+    Everything,
+    /// A read-only key.
+    Pulling,
+    /// A GC key or a scoped key: the prefixes decide.
+    Scoped(Arc<Scopes>),
+}
+
 struct Entry {
     id: String,
     secret: String,
+    grant: Grant,
     rights: Rights,
 }
 
-/// The keys of the server that may log in at the OCI front, and what each may do there.
+/// The keys of the server that may log in at the OCI front. What each may do there is worked out
+/// from the prefix of the front they are attached to ([`OciFront::with_auth`](super::OciFront)),
+/// never from another: until attached, no key has a right.
 pub struct OciAuth {
     keys: Vec<Entry>,
 }
 
 impl OciAuth {
-    /// The keys of `server`, with the rights each has over the objects under `prefix`.
+    /// The keys of `server`, to be attached to a front with
+    /// [`OciFront::with_auth`](super::OciFront::with_auth).
     #[must_use]
-    pub fn from_server(server: &ServerConfig, prefix: &OciPrefix) -> Self {
-        let base = format!("{}blobs/sha256/", prefix.as_str());
-        let pulling = Rights {
-            pull: true,
-            push: false,
-        };
-        let everything = Rights {
-            pull: true,
-            push: true,
-        };
-        let by_scopes = |id: &str, secret: &str, scopes: &Scopes| Entry {
+    pub fn from_server(server: &ServerConfig) -> Self {
+        let entry = |id: &str, secret: &str, grant| Entry {
             id: id.to_owned(),
             secret: secret.to_owned(),
+            grant,
             rights: Rights {
-                pull: scopes.reads_under(&base),
-                push: scopes.writes_under(&base),
+                pull: false,
+                push: false,
             },
-        };
-        let entry = |key: &str, secret: &str, rights| Entry {
-            id: key.to_owned(),
-            secret: secret.to_owned(),
-            rights,
         };
         let mut keys = vec![entry(
             &server.access_key_id,
             &server.secret_access_key,
-            everything,
+            Grant::Everything,
         )];
         for key in &server.read_only_keys {
-            keys.push(entry(&key.id, &key.secret, pulling));
+            keys.push(entry(&key.id, &key.secret, Grant::Pulling));
         }
         for key in &server.gc_keys {
-            keys.push(by_scopes(key.id(), key.secret(), &key.scopes()));
+            keys.push(entry(key.id(), key.secret(), Grant::Scoped(key.scopes())));
         }
         for key in &server.scoped_keys {
-            keys.push(by_scopes(key.id(), key.secret(), &key.scopes()));
+            keys.push(entry(key.id(), key.secret(), Grant::Scoped(key.scopes())));
         }
         Self { keys }
+    }
+
+    /// The keys with the rights each has over the objects under `prefix`, which are the front's.
+    pub(super) fn bound(mut self, prefix: &OciPrefix) -> Self {
+        let base = format!("{}blobs/sha256/", prefix.as_str());
+        for entry in &mut self.keys {
+            entry.rights = match &entry.grant {
+                Grant::Everything => Rights {
+                    pull: true,
+                    push: true,
+                },
+                Grant::Pulling => Rights {
+                    pull: true,
+                    push: false,
+                },
+                Grant::Scoped(scopes) => Rights {
+                    pull: scopes.reads_under(&base),
+                    push: scopes.writes_under(&base),
+                },
+            };
+        }
+        self
     }
 
     /// Whether the call whose headers are `headers` may be made, given what it `need`s.

@@ -59,11 +59,11 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::config::{
-    ConfigError, Dur, OciFlags, OciTable, PerRun, ServerTable, Size, TierParts, TierTable,
-    duration, front_of, invalid, oci as oci_of, parse_size, refuse, refuse_hot_keys, require, tier,
-    within,
+    ConfigError, OciFlags, OciTable, PerRun, ServerTable, TierParts, TierTable, duration, front_of,
+    invalid, oci as oci_of, refuse, refuse_hot_keys, require, tier, within,
 };
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 use super::oci_setup::DEFAULT_OCI_PREFIX;

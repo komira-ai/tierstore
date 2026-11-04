@@ -186,9 +186,9 @@ test('every output line of the demo is a string the program prints', () => {
   for (const body of ['"ok"', '"ready"', '"draining"']) assert.ok(mod.includes(body), `${body} is not in server/mod.rs: update content/demo.html`);
   assert.ok(mod.includes('no usage yet, {secs}s since start'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
   assert.ok(mod.includes('usage published {secs}s ago'), 'the /usagez body changed: update content/demo.html and docs/operations.md');
-  const cli = binarySource().get('server/cli.rs') as string;
+  const cli = binarySource().get('server/cli_probe.rs') as string;
   for (const line of ['tierstore: testing the {name}', 'tierstore: tested the {name} in {took} ms']) {
-    assert.ok(cli.includes(line), `"${line}" is not in server/cli.rs: update content/demo.html`);
+    assert.ok(cli.includes(line), `"${line}" is not in server/cli_probe.rs: update content/demo.html`);
   }
   // (The start line is built by format!("tierstore {VERSION} listen=... in code; staleClaims checks that.)
   const demo = page('demo');

@@ -53,7 +53,7 @@ fn server() -> ServerConfig {
 pub(super) fn front_over(backend: Arc<dyn Backend>) -> (OciFront, Arc<OciMetrics>) {
     let metrics = Arc::new(OciMetrics::default());
     let prefix = OciPrefix::new("oci/").expect("a prefix");
-    let auth = OciAuth::from_server(&server(), &prefix);
+    let auth = OciAuth::from_server(&server());
     let front = OciFront::new(backend, prefix, Arc::clone(&metrics)).with_auth(Some(auth));
     (front, metrics)
 }

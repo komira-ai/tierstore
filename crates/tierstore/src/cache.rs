@@ -114,7 +114,7 @@ impl Cache {
 /// afterwards. Everything but `get`, `delete`, `put_if_match`, `put_stream_if_match` and
 /// `put_reservation_if_match` goes to the backend as it is, the calls of multipart uploads and
 /// `put_reservation` included (a completion and a create-only reservation make an object, which no
-/// read has cached). A read with the mark (`get_marked`) is never answered from the cache, which
+/// read has cached). A read with the mark (`get_tagged`) is never answered from the cache, which
 /// holds bytes and not their mark: it goes to the backend, whose one read gives both, so the
 /// bytes of an older object are not given with the mark of a newer one.
 pub struct CachedStore {
@@ -186,6 +186,15 @@ impl Backend for CachedStore {
         self.inner.put_stream(key, len, body).await
     }
 
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        self.inner.put_stream_tagged(key, len, body).await
+    }
+
     async fn put_stream_hot_only(
         &self,
         key: &str,
@@ -244,12 +253,12 @@ impl Backend for CachedStore {
         Ok(bytes)
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        self.inner.get_marked(key, range).await
+        self.inner.get_tagged(key, range).await
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
