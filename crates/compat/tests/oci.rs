@@ -41,7 +41,7 @@ fn now_front(dir: &TestDir) -> OciFront {
     let backend: Arc<dyn Backend> = Arc::new(DirBackend::open(dir.path()).unwrap());
     let prefix = OciPrefix::new("oci/").unwrap();
     let server = ServerConfig::new("bucket", "FULL", "full-secret", Arc::new(SystemClock));
-    let auth = OciAuth::from_server(&server, &prefix);
+    let auth = OciAuth::from_server(&server);
     OciFront::new(backend, prefix, Arc::new(OciMetrics::default())).with_auth(Some(auth))
 }
 
