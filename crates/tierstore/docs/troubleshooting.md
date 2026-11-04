@@ -7,7 +7,7 @@
 | 0 | a clean drain, or `--print-config` or `--help` done | stays stopped |
 | 1 | a start that failed: a tier that could not be reached, an address in use, a key file refused after parsing, and the flags that depend on each other (see "Messages at start") | restarts after 30 seconds |
 | 2 | a flag the parser refused, a file that does not load, a limit of the OCI front (its prefix, its certificate and key, see "OCI front"), a local cache budget the file system cannot hold (see "Build-node cache"), or two keys with one id | does not restart: a restart cannot mend it |
-| 3 | a tier answered the start-up self-test wrongly, or the local cache directory is unusable or its file system failed the cache check (a missing or unwritable directory too) | does not restart: the same store would answer the same way |
+| 3 | a tier answered the start-up self-test wrongly, or the cache directory, once opened, could not be probed or its file system failed the cache check | does not restart: the same store would answer the same way |
 
 Messages go to stderr, prefixed `tierstore: `, and so to the journal: `journalctl -u tierstore`. None carries a secret.
 
@@ -84,15 +84,15 @@ A tier that answers a self-test question wrongly exits 3 and names the tier, the
 The flags of the OCI front (`--oci-prefix`, `--oci-tls-cert`, `--oci-tls-key`, `--oci-listen`) are checked at start. A refusal of the prefix, of a certificate or key that is not usable, or of the pair of flags exits 2 and the unit does not restart; a certificate or key file that cannot be read, and an address that cannot be bound, exit 1 and restart every 30 seconds:
 
 ```message
---oci-prefix "<prefix>": it must end in /
---oci-prefix "<prefix>": it must be segments of letters, digits, . _ and -, separated by single /
---oci-prefix "<prefix>": it overlaps a prefix the store keeps for itself
+--oci-prefix <quoted-prefix>: it must end in /
+--oci-prefix <quoted-prefix>: it must be segments of letters, digits, . _ and -, separated by single /
+--oci-prefix <quoted-prefix>: it overlaps a prefix the store keeps for itself
 --oci-tls-cert and --oci-tls-key go together: give both, or neither
 <flag> <path>: <why>
 --oci-tls-cert and --oci-tls-key: <why>
 ```
 
-Give a prefix such as `oci/`, and give both TLS flags or neither. `<flag> <path>: <why>` names the file: it is not PEM, holds no certificate, is a key any user can read (use mode 0640 or 0600), or is a certificate that is not valid now or does not name the address: `the certificate has no IP subjectAltName for <ip> (it names [...])`. Clients dial the front by IP address, so issue a certificate with an IP subjectAltName for each `--oci-listen` address (for `0.0.0.0` or `::`, any IP name serves). The last form, which names both flags, is a certificate and a key that do not make one TLS configuration, as when the key is not the certificate's: give the key that belongs to the certificate.
+`<quoted-prefix>` is the prefix as given, in double quotes. Give a prefix such as `oci/`, and give both TLS flags or neither. `<flag> <path>: <why>` names the file: it is not PEM, holds no certificate, is a key any user can read (use mode 0640 or 0600), or is a certificate that is not valid now or does not name the address: `the certificate has no IP subjectAltName for <ip> (it names [...])`. Clients dial the front by IP address, so issue a certificate with an IP subjectAltName for each `--oci-listen` address (for `0.0.0.0` or `::`, any IP name serves). The last form, which names both flags, is a certificate and a key that do not make one TLS configuration, as when the key is not the certificate's: give the key that belongs to the certificate.
 
 Once the front runs, a client whose TLS handshake fails is logged and dropped, and the front goes on:
 
@@ -113,14 +113,16 @@ local_cache.budget: <N> bytes is more than the <M> bytes of the file system at <
 
 This exits 2 and the unit does not restart. Lower `local_cache.budget`, lower `local_cache.free_floor`, or give the cache a larger file system. A file system that does not report its size is not judged: the start prints a warning that the budget is not checked and goes on.
 
-The cache directory is then probed with a few files of its own:
+A cache directory that cannot be created or locked (missing and cannot be made, not writable by the user the server runs as, or on a read-only mount) fails earlier with `opening the local cache at <path>: <why>` and exits 1, so the unit restarts every 30 seconds: create it and `chown` it to that user, or mount it read-write.
+
+The opened cache directory is then probed with a few files of its own:
 
 ```message
 refusing to start: the local cache at <path>: <why>
 refusing to start: the file system of the local cache at <path> failed the <check> check
 ```
 
-Both exit 3 and the unit does not restart. The first is a directory that cannot be used: it is missing and cannot be made, not writable by the user the server runs as, or on a read-only mount; `<why>` is the system's answer. Create it and `chown` it to that user, or mount it read-write. The second names a question that the file system answered wrongly, one of `create-only`, `atomic-visibility` or `raw-bytes`: a file system that overwrites on a create-only write, shows a file before it is whole, or does not return the bytes written. Put the cache on a local file system that does these properly (not a network or overlay mount that does not).
+Both exit 3 and the unit does not restart. The first is a probe that could not be made in the opened directory; `<why>` is the system's answer. The second names a question that the file system answered wrongly, one of `create-only`, `atomic-visibility`, `raw-bytes` or `st_nlink`: a file system that overwrites on a create-only write, shows a file before it is whole, does not return the bytes written, or does not report a link count of 2 for a file with a second hard link. Put the cache on a local file system that does these properly (not a network or overlay mount that does not).
 
 ## Errors a client sees
 
