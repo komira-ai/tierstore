@@ -104,3 +104,21 @@ async fn the_format_is_read_with_its_tag_and_a_bad_read_is_an_error() {
         assert!(text.starts_with("corrupt format object: "), "{text}");
     }
 }
+
+/// Asserts that only the phase `active` with an epoch of 2 or more makes a proxy put on entries:
+/// not a missing object's absent epoch, not `active` with no epoch or epoch 1, not another phase
+/// with epoch 2, and that a later epoch does.
+#[test]
+fn only_active_with_epoch_2_or_more_runs_entries() {
+    let cases = [
+        (r#"{"phase":"active"}"#, false),
+        (r#"{"epoch":1,"phase":"active"}"#, false),
+        (r#"{"epoch":2,"phase":"drain"}"#, false),
+        (r#"{"epoch":2,"phase":"someday"}"#, false),
+        (r#"{"epoch":2,"phase":"active"}"#, true),
+        (r#"{"epoch":3,"phase":"active"}"#, true),
+    ];
+    for (json, runs) in cases {
+        assert_eq!(decoded(json).runs_entries(), runs, "{json}");
+    }
+}
