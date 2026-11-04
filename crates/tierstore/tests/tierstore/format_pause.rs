@@ -148,10 +148,11 @@ async fn an_unreadable_format_keeps_what_the_proxy_read_last() {
 
 /// Asserts that two callers never read the format object at once, so that a read that was
 /// answered before the object turned to `drain` cannot be stored after a read that saw `drain`.
-/// A write is held with its read of an `active` format on the way back; the object turns to
-/// `drain`, the refresh passes, and a second write arrives. It must wait for the first (the hot
-/// tier has seen one read of the object, not two) and, once the first is let go and is admitted
-/// on what it read, read the object itself and be answered 503. Defects it catches: a refresh
+/// A write is held with its read of an `active` format of epoch 1 on the way back; the object
+/// turns to `drain`, the refresh passes, and a second write arrives. It must wait for the first
+/// (the hot tier has seen one read of the object, not two) and, once the first is let go and is
+/// answered on what it read (the wait for epoch 2), read the object itself and be answered with
+/// the pause. Defects it catches: a refresh
 /// that does not serialize the readers (a second read while the first is out, and the older
 /// result stored over the newer).
 #[tokio::test(start_paused = true)]
@@ -194,8 +195,9 @@ async fn a_second_writer_waits_for_the_read_of_the_format_that_is_out() {
     );
 
     release.notify_one();
-    assert_eq!(first.await.unwrap(), Ok(()));
+    assert_eq!(first.await.unwrap(), Err(waiting()));
     assert_eq!(second.await.unwrap(), Err(paused()));
     assert_eq!(held.gets(), 2);
+    assert_absent(&*rig.hot_mem, "a").await;
     assert_absent(&*rig.hot_mem, "b").await;
 }
