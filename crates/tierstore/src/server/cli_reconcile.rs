@@ -1,5 +1,6 @@
-//! The reconciler's loop of a storage node: passes every interval until a halt, and the lock file
-//! ([`Gate`]) a process holds while it works.
+//! The reconciler's loop of a storage node: rounds every interval until a halt (a round is a pass
+//! over the journals or a step over the entries, see [`Rounds`]), and the lock file ([`Gate`]) a
+//! process holds while it works.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,23 +8,24 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::Reconciler;
-
 use super::lock::{self, LockFile};
+use super::rounds::Rounds;
 
 /// How long [`reconcile`] waits for the lease to be given up once it is halted.
 const STOP_WAIT: Duration = Duration::from_secs(5);
 
-/// Runs a pass of `reconciler` now and then every `interval`, until `halt` is notified. Then
-/// it gives the lease up. The calls that failed in a pass are reported on stderr.
+/// Runs a round of `rounds` now and then every `interval`, until `halt` is notified. A round that
+/// changed something on the entries is followed by the next at once. Then it gives the lease up.
+/// The calls that failed in a round are reported on stderr.
 ///
 /// A halt cuts the pass that is running, so that the process leaves within the drain deadline
 /// whatever the pass is doing. Nothing goes on from a pass that is cut: the copies are
 /// create-only and the checkpoints conditional, so the next reconciler does again what the pass
 /// had not finished.
-pub(crate) async fn reconcile(mut reconciler: Reconciler, interval: Duration, halt: Arc<Notify>) {
-    let _ = run_passes(&mut reconciler, interval, &halt, None).await;
-    let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
+pub(crate) async fn reconcile(rounds: impl Into<Rounds>, interval: Duration, halt: Arc<Notify>) {
+    let mut rounds = rounds.into();
+    let _ = run_passes(&mut rounds, interval, &halt, None).await;
+    let _ = tokio::time::timeout(STOP_WAIT, rounds.stop()).await;
 }
 
 /// What ended a run of passes.
@@ -38,7 +40,7 @@ enum Ended {
 /// Runs passes as [`reconcile`] does, until the halt or, if there is a `lock`, until the lock
 /// file is not the one at its path any more (looked at before each pass).
 async fn run_passes(
-    reconciler: &mut Reconciler,
+    rounds: &mut Rounds,
     interval: Duration,
     halt: &Notify,
     lock: Option<&LockFile>,
@@ -47,14 +49,18 @@ async fn run_passes(
         if lock.is_some_and(|file| !file.is_current()) {
             return Ended::Lost;
         }
-        tokio::select! {
+        let progress = tokio::select! {
             biased;
             () = halt.notified() => return Ended::Halted,
-            report = reconciler.pass() => {
-                for error in &report.failed {
+            round = rounds.round() => {
+                for error in &round.failed {
                     eprintln!("tierstore: reconciler: {error}");
                 }
+                round.progress
             }
+        };
+        if progress {
+            continue;
         }
         tokio::select! {
             () = halt.notified() => return Ended::Halted,
@@ -115,11 +121,12 @@ async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<Lo
 /// when it is halted as when the file was replaced, so the process that takes the lock next finds
 /// the lease free at its first pass.
 pub(crate) async fn reconcile_gated(
-    mut reconciler: Reconciler,
+    rounds: impl Into<Rounds>,
     interval: Duration,
     halt: Arc<Notify>,
     mut gate: Gate,
 ) {
+    let mut rounds = rounds.into();
     loop {
         let file = match gate.taken.take() {
             Some(file) => file,
@@ -130,7 +137,7 @@ pub(crate) async fn reconcile_gated(
                 None => return,
             },
         };
-        let ended = run_passes(&mut reconciler, interval, &halt, Some(&file)).await;
+        let ended = run_passes(&mut rounds, interval, &halt, Some(&file)).await;
         if ended == Ended::Lost {
             eprintln!(
                 "tierstore: lock file {}: the file was replaced; the reconciler stops until the \
@@ -140,7 +147,7 @@ pub(crate) async fn reconcile_gated(
         }
         // The lease first, then the lock: a process waiting for the lock must not get it while
         // the lease is still held, or its first pass finds the lease taken and does nothing.
-        let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
+        let _ = tokio::time::timeout(STOP_WAIT, rounds.stop()).await;
         drop(file);
         if ended == Ended::Halted {
             return;

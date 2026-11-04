@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
 use crate::faulty::{FaultyBackend, Op};
-use crate::journal::proxy_key;
-use crate::registration::Registration;
+use crate::journal::{FORMAT_KEY, proxy_key};
+use crate::registration::{PROTO, Registration};
 use crate::{
     Backend, Error, GateBackend, MemoryBackend, Mono, Phase, Proxy, ProxyConfig, Sleeper, TestClock,
 };
@@ -99,7 +99,7 @@ async fn registration(memory: &MemoryBackend) -> Option<Registration> {
 async fn open_writes_a_registration_of_a_process_that_does_not_beat_and_is_not_live() {
     let rig = rig().await;
     let written = registration(&rig.memory).await.unwrap();
-    assert_eq!((written.proto, written.hb), (1, 0));
+    assert_eq!((written.proto, written.hb), (PROTO, 0));
     assert!(!written.boot.is_empty());
     assert!(!rig.proxy.is_live());
 }
@@ -373,5 +373,39 @@ async fn overlapping_stop_calls_both_wait_for_the_beat_in_progress() {
 
     assert_eq!(returned.load(Ordering::SeqCst), 2);
     assert_eq!(registration(&memory).await.unwrap().hb, 1);
+    proxy.stop_heartbeat().await;
+}
+
+/// Asserts that each beat reads the format object and keeps what it says without any request: the
+/// proxy read "no format" at its first look and would not read again for an hour, and the beat
+/// after the object was written takes up the epoch; a beat whose read fails changes nothing; the
+/// beat that finds the object gone takes the epoch away.
+#[tokio::test]
+async fn a_beat_takes_up_the_format_without_a_request() {
+    let memory = Arc::new(MemoryBackend::new());
+    let hot = Arc::new(FaultyBackend::new(memory.clone()));
+    let cold = Arc::new(MemoryBackend::new());
+    let mut settings = config(&Arc::new(Mono::new()));
+    settings.format_refresh = Duration::from_secs(3600);
+    let proxy = Proxy::open(hot.clone(), cold, settings).await.unwrap();
+    assert!(!proxy.inner.entries_active().await);
+    let active = bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    memory.put(FORMAT_KEY, active).await.unwrap();
+    assert!(!proxy.inner.entries_active().await);
+
+    let sleeper = Stepped::new();
+    assert!(proxy.start_heartbeat(sleeper.clone()));
+    sleeper.beat_done().await;
+    assert!(proxy.inner.entries_active().await);
+
+    memory.delete(FORMAT_KEY).await.unwrap();
+    hot.fail_next_on(Op::Get, FORMAT_KEY, Error::Unavailable("down".to_owned()));
+    sleeper.next();
+    sleeper.beat_done().await;
+    assert!(proxy.inner.entries_active().await);
+
+    sleeper.next();
+    sleeper.beat_done().await;
+    assert!(!proxy.inner.entries_active().await);
     proxy.stop_heartbeat().await;
 }

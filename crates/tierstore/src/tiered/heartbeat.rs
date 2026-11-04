@@ -8,6 +8,11 @@
 //! (they start only if the margin is left, acknowledge only while it is live, and remove an
 //! entry only within the margin); [`Proxy::is_live`] is how a caller sees it.
 //!
+//! After each beat the task reads the format object (`_tiering/format`) too, within the heartbeat
+//! period, and keeps what it says as a write does (see `pause`): a proxy takes up the epoch of the
+//! entry protocol within one beat of its being written, and one that starts after it, at its first
+//! beat, whether or not a request comes. A read that fails changes nothing.
+//!
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just
 //! stops changing, and the reconciler removes it once it has stayed unchanged for
@@ -21,6 +26,7 @@ use bytes::Bytes;
 use futures::future::{Either, select};
 use tokio::sync::watch;
 
+use super::pause::{self, Pause};
 use super::{Inner, Proxy, locked};
 use crate::deadline::millis;
 use crate::lease::new_nonce;
@@ -101,6 +107,12 @@ struct Beater {
     /// The content tag of the registration as this process last wrote it. None before the first
     /// beat and after a beat that failed: the next beat reads the object again.
     etag: Option<String>,
+    /// The hot tier as it is, for the look at the format object after each beat.
+    plain: Arc<dyn Backend>,
+    /// What the proxy keeps of the format object, which that look renews.
+    seen: Arc<Mutex<Pause>>,
+    /// The longest that look may take: the heartbeat period, as for a beat.
+    limit: Duration,
 }
 
 impl Beater {
@@ -125,6 +137,12 @@ impl Beater {
         Ok(())
     }
 
+    /// Reads the format object and keeps what it says, so that the proxy takes up the epoch at its
+    /// next beat, and a proxy that starts after the epoch was written takes it up at its first.
+    async fn look_at_format(&self) {
+        pause::refresh(&self.seen, self.plain.as_ref(), self.limit).await;
+    }
+
     /// Writes `body` over the registration that is there, whoever wrote it, or creates it.
     async fn adopt(&self, body: Bytes) -> Result<String, Error> {
         match self.hot.head(&self.key).await {
@@ -147,6 +165,7 @@ async fn run(
         // A beat that fails is tried again after the period, and says nothing else: `live_until`
         // does not move, which is what the failure means.
         let _ = beater.beat().await;
+        beater.look_at_format().await;
         let stopped = Box::pin(stop.changed());
         let waited = Box::pin(sleeper.sleep(period));
         if matches!(select(stopped, waited).await, Either::Left(_)) {
@@ -178,6 +197,9 @@ impl Proxy {
             span: millis(config.departure).saturating_sub(millis(config.deadline_margin)),
             count: 0,
             etag: None,
+            plain: Arc::clone(&inner.hot),
+            seen: Arc::clone(&inner.pause),
+            limit: config.heartbeat,
         };
         let (stop, stopped) = watch::channel(false);
         let (over, ended) = watch::channel(());

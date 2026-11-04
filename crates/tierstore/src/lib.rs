@@ -85,7 +85,8 @@
 //!   finishes the deletes handed over to it, copies the cold object of each copy-back a read asked
 //!   for into the hot tier, reaps the entries of owners that departed, and adopts
 //!   hot objects that have no entry and no cold object. It does nothing until `_tiering/format`
-//!   says `active`, and no binary starts it yet.
+//!   says `active`; the server binary starts it, in place of the journal [`Reconciler`], at the first
+//!   round that reads the epoch of the entries.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

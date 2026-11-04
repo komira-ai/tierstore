@@ -138,7 +138,7 @@ async fn opening_a_proxy_writes_a_registration_with_a_body_and_leaves_the_empty_
     tiers.proxy("p1", 1000).await.unwrap();
     let stored = tiers.stored("_tiering/proxies/p1").await;
     let found: serde_json::Value = serde_json::from_slice(&stored).unwrap();
-    assert_eq!(found["proto"], 1);
+    assert_eq!(found["proto"], 2);
     assert_eq!(found["hb"], 0);
     assert!(found["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
 

@@ -226,6 +226,7 @@ mod ops;
 pub mod presign;
 mod reply;
 mod request;
+mod rounds;
 pub mod scoped;
 mod stop_watcher;
 mod time;

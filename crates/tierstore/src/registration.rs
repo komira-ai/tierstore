@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::journal::to_body;
 
-/// The `proto` of the registrations this release writes.
-pub(crate) const PROTO: u32 = 1;
+/// The `proto` of the registrations this release writes: 2, the protocol of one journal entry for
+/// each key (the registrations of the release before, which heartbeats but writes journals, say 1;
+/// `tierstore format-epoch --activate` refuses while one of them is live).
+pub(crate) const PROTO: u32 = 2;
 
 /// What a registration says.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

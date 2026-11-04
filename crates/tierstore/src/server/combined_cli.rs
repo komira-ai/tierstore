@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, Proxy, Reconciler, SystemClock, TokioSleeper};
+use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{LOCK_INTERVAL, PASS_INTERVAL, bind_cache_s3, open};
@@ -44,6 +44,7 @@ use super::drain::late_of;
 use super::listen::{joined, local_addrs};
 use super::local_cache::{Disk, Every, SCRUB_TICK, SystemDisk};
 use super::oci::OciListener;
+use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
@@ -71,6 +72,7 @@ pub(super) async fn serve_combined(
     )
     .await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
+    let departure = built.proxy.departure;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
@@ -104,7 +106,7 @@ pub(super) async fn serve_combined(
         }
         drained
     };
-    let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
+    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
     let interval = cli.reconcile_interval;
     let reconciling = async move {
         match gate {

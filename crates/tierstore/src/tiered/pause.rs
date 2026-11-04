@@ -4,11 +4,14 @@
 //! The same read says which way a write is made: through the journal, or, once the format says
 //! `{"epoch": 2, "phase": "active"}`, on the entry of its key.
 
+use std::sync::Mutex;
+use std::time::Duration;
+
 use tokio::time::Instant;
 
 use super::{Inner, locked, refuse_reserved};
-use crate::Error;
 use crate::format::{Format, read_format};
+use crate::{Backend, Error};
 
 /// What the proxy last read of the format object.
 #[derive(Default)]
@@ -19,6 +22,27 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
+}
+
+impl Pause {
+    /// Keeps what `format` (none if there is no object) says.
+    fn keep(&mut self, format: Option<&Format>) {
+        self.paused = format.is_some_and(Format::pauses_writes);
+        self.entries = format.is_some_and(Format::runs_entries);
+    }
+}
+
+/// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write
+/// does, so that the proxy sees a change of the format at its next heartbeat even if no write or
+/// read comes. A read that fails or runs out of time changes nothing: what was kept stays, and the
+/// next write reads the object itself.
+pub(super) async fn refresh(pause: &Mutex<Pause>, hot: &dyn Backend, limit: Duration) {
+    let at = Instant::now();
+    if let Ok(Ok(format)) = tokio::time::timeout(limit, read_format(hot)).await {
+        let mut seen = locked(pause);
+        seen.read = Some(at);
+        seen.keep(format.as_ref());
+    }
 }
 
 /// The way a write is made.
@@ -72,8 +96,7 @@ impl Inner {
         let mut seen = locked(&self.pause);
         seen.read = Some(now);
         if let Ok(format) = found {
-            seen.paused = format.as_ref().is_some_and(Format::pauses_writes);
-            seen.entries = format.as_ref().is_some_and(Format::runs_entries);
+            seen.keep(format.as_ref());
         }
         (seen.paused, seen.entries)
     }
