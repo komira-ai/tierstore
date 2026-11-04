@@ -405,3 +405,29 @@ async fn a_writer_that_did_not_make_the_subdirectory_syncs_the_root_first() {
     let root = dir.path().to_owned();
     assert_eq!(synced(&seen), [root, inside.clone(), inside]);
 }
+
+/// Asserts that a replacement of a key the previous release made as a file of the root writes that
+/// file in place and syncs the root it is in (after the sync of the root that the first entry
+/// write of a backend makes), with the new body in the file, and makes no file in the subdirectory.
+#[tokio::test]
+async fn a_replacement_of_a_root_file_syncs_the_root_holding_the_new_body() {
+    let (dir, backend, seen) = recorded(Some("_entries~old"), false);
+    let tag = super::sha256(b"shipped");
+    let mut file = tag.to_vec();
+    file.extend_from_slice(b"shipped");
+    std::fs::write(dir.path().join("_entries~old"), file).unwrap();
+
+    let tag = hex::encode(tag);
+    backend
+        .put_if_match("_entries/old", body("newer"), &tag)
+        .await
+        .unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root.clone(), root]);
+    let seen = seen.lock().unwrap();
+    let watched = seen[1].watched.as_ref().unwrap();
+    assert_eq!(watched.len(), TAG_LEN + 5);
+    assert!(watched.ends_with(b"newer"));
+    assert!(!seen[1].names.contains(&"old".to_owned()));
+}

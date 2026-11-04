@@ -14,7 +14,8 @@ use tokio::sync::oneshot;
 
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
-use super::{NAME_LIMIT, classify, create_new, decode, encode, failed, part_name};
+use super::names::decode;
+use super::{NAME_LIMIT, classify, create_new, encode, failed, part_name};
 
 fn backend() -> (TestDir, DirBackend) {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-dir");
