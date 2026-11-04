@@ -102,3 +102,11 @@ fn the_keys_of_a_table_are_the_fields_of_its_struct() {
     // A type that is not a struct has no fields.
     assert!(fields_of::<u8>().is_empty());
 }
+
+/// Asserts that a warning names the key and never shows its value: a key of a name no rule knows
+/// for a secret, given a value, is only named.
+#[test]
+fn a_warning_never_shows_the_value_of_the_key() {
+    let text = MINIMAL.replacen("[server]", "[server]\npasskey = \"SENTINEL\"", 1);
+    assert_eq!(warnings(&text), [warning("server.passkey")]);
+}

@@ -231,16 +231,12 @@ fn a_secret_by_another_name_is_refused_without_its_value() {
 }
 
 /// Asserts that no message about a fault in the file repeats the line or the value of the key:
-/// a key that is unknown (and so a secret by a name no rule knows), a line that is not TOML, a
+/// a line that is not TOML, a
 /// value of the wrong type, a size, a duration, a kind and a skipped check that are not valid. Each
 /// still says which key (and, but for a skipped check, where).
 #[test]
 fn a_fault_in_the_file_is_reported_without_the_value() {
     let cases = [
-        (
-            golden_with("[server]", "[server]\npasskey = \"SENTINEL\""),
-            "passkey",
-        ),
         (
             golden_with("[server]", "[server]\nbroken = SENTINEL"),
             "line ",
