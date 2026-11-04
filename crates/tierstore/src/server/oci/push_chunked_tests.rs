@@ -6,8 +6,8 @@ use std::time::Duration;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode};
 
-use super::push_tests::{Rig, digest_of, front_over, full, lengthy, login, unsized_body};
-use crate::server::testing::{Scripted, Step};
+use super::push_tests::{Rig, digest_of, front_over, full, lengthy, login, scripted, unsized_body};
+use crate::server::testing::Step;
 use crate::{Backend, Error, MemoryBackend, Op};
 
 /// The path that ends the upload `id` with `digest`.
@@ -277,9 +277,7 @@ async fn a_cut_chunk_stores_nothing_and_the_upload_goes_on() {
     let id = rig.begin().await;
     let session = Rig::session(&id);
     let steps = vec![Step::Data(b"ab"), Step::Fail];
-    let cut = rig
-        .ask(Method::PATCH, &session, &[], Scripted::new(steps))
-        .await;
+    let cut = rig.ask(Method::PATCH, &session, &[], scripted(steps)).await;
     cut.assert_error(StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID");
     assert_eq!(rig.staged().await.len(), 1);
     let again = rig.ask(Method::PATCH, &session, &[], full(b"ab")).await;
@@ -294,9 +292,7 @@ async fn a_chunk_that_stalls_stores_nothing() {
     let id = rig.begin().await;
     let steps = vec![Step::Data(b"ab"), Step::Wait(Duration::from_secs(3600))];
     let session = Rig::session(&id);
-    let stalled = rig
-        .ask(Method::PATCH, &session, &[], Scripted::new(steps))
-        .await;
+    let stalled = rig.ask(Method::PATCH, &session, &[], scripted(steps)).await;
     stalled.assert_error(StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID");
     assert_eq!(rig.staged().await.len(), 1);
 }

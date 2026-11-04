@@ -23,6 +23,17 @@ pub type OciBody = UnsyncBoxBody<Bytes, BodyError>;
 /// The most bytes read from the store at once for a blob.
 pub(super) const CHUNK_BYTES: u64 = 4 << 20;
 
+/// A request body, boxed: the code that reads one is one function, and not one for each kind of
+/// body (the connection's, and the bodies of the tests).
+pub(super) fn request<B>(body: B) -> OciBody
+where
+    B: hyper::body::Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<BodyError>,
+{
+    body.map_err(|error| -> BodyError { error.into() })
+        .boxed_unsync()
+}
+
 /// A body of `bytes`.
 pub(super) fn full(bytes: Bytes) -> OciBody {
     Full::new(bytes)

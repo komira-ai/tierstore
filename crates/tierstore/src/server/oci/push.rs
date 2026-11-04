@@ -42,7 +42,8 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{self, StreamExt as _};
-use hyper::body::Body;
+use http_body_util::BodyExt as _;
+use hyper::body::Body as _;
 use hyper::header::{CONTENT_LENGTH, CONTENT_RANGE, HeaderName, HeaderValue, LOCATION, RANGE};
 use hyper::{HeaderMap, Response, StatusCode};
 use ring::rand::{SecureRandom, SystemRandom};
@@ -57,8 +58,7 @@ use super::{
     invalid_name, manifest, store_failed,
 };
 use crate::server::ops::detached;
-use crate::server::reply::S3Error;
-use crate::server::request::{BoxError, Reader, query_pairs};
+use crate::server::request::query_pairs;
 use crate::{Backend, Error, Listed, PartBody};
 
 type Answer = (Outcome, Response<OciBody>);
@@ -105,21 +105,67 @@ impl Tally {
     }
 }
 
+/// Why a request body could not be read to its end, for the answer to send.
+pub(super) struct Unread {
+    status: StatusCode,
+    message: String,
+}
+
+impl Unread {
+    fn new(status: StatusCode, message: String) -> Self {
+        Self { status, message }
+    }
+}
+
+/// A request body, read a piece at a time. A wait for the next piece that takes longer than
+/// `idle` ends the read, and so does a body that fails; the time the whole body takes is not
+/// bounded, so a client that is slow and steady is read.
+pub(super) struct Pieces {
+    body: OciBody,
+    idle: Duration,
+}
+
+impl Pieces {
+    pub(super) fn new(body: OciBody, idle: Duration) -> Self {
+        Self { body, idle }
+    }
+
+    /// The next piece, or `None` at the end of the body; a frame of trailers carries no byte and
+    /// is passed over.
+    pub(super) async fn next(&mut self) -> Result<Option<Bytes>, Unread> {
+        loop {
+            let waiting = tokio::time::timeout(self.idle, self.body.frame());
+            let Ok(frame) = waiting.await else {
+                let idle = self.idle;
+                let message = format!("No byte of the request body arrived within {idle:?}.");
+                return Err(Unread::new(StatusCode::BAD_REQUEST, message));
+            };
+            match frame {
+                None => return Ok(None),
+                Some(Err(_)) => {
+                    let message = "The request body could not be read in full.".to_owned();
+                    return Err(Unread::new(StatusCode::BAD_REQUEST, message));
+                }
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        return Ok(Some(data));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The pieces of a request body as a stream for the backend to store from. A body that fails ends
 /// the stream with an error, after the pieces that were fine, and the reason is in `tally`.
-pub(super) fn pieces<B>(reader: Reader<B>, tally: Arc<Tally>) -> PartBody<'static>
-where
-    B: Body + Send + 'static,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
-{
+pub(super) fn pieces(reader: Pieces, tally: Arc<Tally>) -> PartBody<'static> {
     stream::unfold((Some(reader), tally), |(reader, tally)| async move {
         let mut reader = reader?;
         match reader.next().await {
             Ok(Some(piece)) => Some((Ok(piece), (Some(reader), tally))),
             Ok(None) => None,
             Err(why) => {
-                tally.refuse(Refusal::Body(why.message().to_owned()));
+                tally.refuse(Refusal::Body(why.message));
                 let failed = Error::Other("the request body failed".to_owned());
                 // The error ends the stream: nothing is read after it.
                 Some((Err(failed), (None, tally)))
@@ -290,7 +336,7 @@ fn in_order(headers: &HeaderMap, size: u64, len: Option<u64>) -> bool {
     let Some((first, last)) = value.to_str().ok().and_then(chunk_range) else {
         return false;
     };
-    first == size && len.is_none_or(|bytes| bytes > 0 && bytes - 1 == last - first)
+    first == size && len.is_none_or(|bytes| bytes.checked_sub(1) == Some(last - first))
 }
 
 /// Deletes `keys`, in order; a key that cannot be deleted is left, and said on stderr.
@@ -303,16 +349,15 @@ async fn discard(backend: &dyn Backend, keys: &[String]) {
 }
 
 /// The bytes of the body of a manifest, at most [`MAX_MANIFEST_BYTES`].
-async fn manifest_bytes<B>(body: B, idle: Duration) -> Result<Bytes, S3Error>
-where
-    B: Body + Send + 'static,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
-{
+async fn manifest_bytes(body: OciBody, idle: Duration) -> Result<Bytes, Unread> {
     let limit = usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX);
-    let mut reader = Reader::new(body, limit, idle);
+    let mut pieces = Pieces::new(body, idle);
     let mut whole = BytesMut::new();
-    while let Some(piece) = reader.next().await? {
+    while let Some(piece) = pieces.next().await? {
+        if piece.len() > limit - whole.len() {
+            let message = format!("The request body is over the limit of {limit} bytes.");
+            return Err(Unread::new(StatusCode::PAYLOAD_TOO_LARGE, message));
+        }
         whole.extend_from_slice(&piece);
     }
     Ok(whole.freeze())
@@ -364,18 +409,13 @@ impl OciFront {
 
     /// `POST /v2/<name>/blobs/uploads/`: a monolithic upload with a `digest` in the query, else
     /// the beginning of one.
-    pub(super) async fn start_upload<B>(
+    pub(super) async fn start_upload(
         &self,
         name: &str,
         query: Option<&str>,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Answer {
         if !names::valid_name(name) {
             return invalid_name(name);
         }
@@ -397,19 +437,14 @@ impl OciFront {
     }
 
     /// `PATCH <location>`: stores a chunk.
-    pub(super) async fn append<B>(
+    pub(super) async fn append(
         &self,
         name: &str,
         id: &str,
         headers: &HeaderMap,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Answer {
         if !names::valid_name(name) {
             return invalid_name(name);
         }
@@ -429,7 +464,7 @@ impl OciFront {
         let stored = if len == Some(0) {
             Ok(())
         } else {
-            let reader = Reader::new(body, usize::MAX, idle);
+            let reader = Pieces::new(body, idle);
             let source = pieces(reader, Arc::clone(&tally));
             let stream = counted(source, None, Arc::clone(&tally));
             let key = format!("{}c{size:020}", self.upload_dir(id));
@@ -448,20 +483,15 @@ impl OciFront {
     }
 
     /// `PUT <location>?digest=<digest>`: the end of an upload.
-    pub(super) async fn finish_upload<B>(
+    pub(super) async fn finish_upload(
         &self,
         name: &str,
         id: &str,
         query: Option<&str>,
         headers: &HeaderMap,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Answer {
         if !names::valid_name(name) {
             return invalid_name(name);
         }
@@ -488,27 +518,22 @@ impl OciFront {
     /// Makes the blob `digest` from the chunks `staged` (the upload `session`, if it is one, has
     /// them) followed by the body, and then deletes the chunks and the session's object. See the
     /// module docs for the one pass.
-    async fn finish<B>(
+    async fn finish(
         &self,
         name: &str,
         staged: Vec<Listed>,
         session: Option<&str>,
         digest: Digest,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Answer {
         let held: u64 = staged.iter().map(|chunk| chunk.size).sum();
         let len = body.size_hint().exact().map(|bytes| bytes + held);
         if len.is_none() && self.backend.needs_length() {
             return length_required();
         }
         let tally = Arc::new(Tally::default());
-        let reader = Reader::new(body, usize::MAX, idle);
+        let reader = Pieces::new(body, idle);
         let keys: Vec<String> = staged.into_iter().map(|chunk| chunk.key).collect();
         let mut doomed = keys.clone();
         doomed.extend(session.map(|id| format!("{}begin", self.upload_dir(id))));
@@ -555,18 +580,13 @@ impl OciFront {
     }
 
     /// `PUT /v2/<name>/manifests/<reference>`: stores a manifest or an index by its digest.
-    pub(super) async fn put_manifest<B>(
+    pub(super) async fn put_manifest(
         &self,
         name: &str,
         reference: &str,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Answer {
         if !names::valid_name(name) {
             return invalid_name(name);
         }
@@ -578,8 +598,7 @@ impl OciFront {
         let bytes = match manifest_bytes(body, idle).await {
             Ok(bytes) => bytes,
             Err(why) => {
-                let (status, _) = why.kind();
-                let response = error(status, "MANIFEST_INVALID", why.message(), Value::Null);
+                let response = error(why.status, "MANIFEST_INVALID", &why.message, Value::Null);
                 return (Outcome::Invalid, response);
             }
         };

@@ -435,6 +435,7 @@ impl Serving {
                     .map_or("/", |target| target.as_str());
                 let (method, headers) = (&parts.method, &parts.headers);
                 let idle = limits.write_idle;
+                let body = super::body::request(body);
                 let mut answer = front.handle_with(method, target, headers, body, idle).await;
                 if drain.closes_answers() {
                     let close = HeaderValue::from_static("close");

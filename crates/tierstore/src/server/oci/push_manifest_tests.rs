@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::MAX_MANIFEST_BYTES;
 use super::manifest::references;
-use super::push_tests::{Rig, digest_of, full};
-use crate::server::testing::{Scripted, Step};
+use super::push_tests::{Rig, digest_of, full, scripted};
+use crate::server::testing::Step;
 use crate::{Backend, Op};
 
 /// An image manifest naming `config` and `layers`.
@@ -193,7 +193,7 @@ async fn a_manifest_over_the_limit_or_cut_is_refused() {
             Method::PUT,
             "/v2/app/manifests/latest",
             &[],
-            Scripted::new(steps),
+            scripted(steps),
         )
         .await;
     cut.assert_error(StatusCode::BAD_REQUEST, "MANIFEST_INVALID");

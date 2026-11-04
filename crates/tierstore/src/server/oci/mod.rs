@@ -119,7 +119,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use hyper::body::Body;
 use hyper::header::{
     ACCEPT_RANGES, ALLOW, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, HeaderName,
     HeaderValue, RANGE, WWW_AUTHENTICATE,
@@ -138,7 +137,6 @@ pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 
-use crate::server::request::BoxError;
 use auth::{Need, Refused};
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};
@@ -243,27 +241,21 @@ impl OciFront {
         path: &str,
         headers: &HeaderMap,
     ) -> Response<OciBody> {
-        let nothing = http_body_util::Empty::<Bytes>::new();
-        self.handle_with(method, path, headers, nothing, Duration::ZERO)
+        self.handle_with(method, path, headers, body::empty(), Duration::ZERO)
             .await
     }
 
     /// Answers a request for `target` (the path, and the query after a `?`) whose body is
     /// `body`. A push reads the body as it arrives, waiting at most `idle` for each piece of it.
     /// A request that is not a push does not read it.
-    pub async fn handle_with<B>(
+    pub async fn handle_with(
         &self,
         method: &Method,
         target: &str,
         headers: &HeaderMap,
-        body: B,
+        body: OciBody,
         idle: Duration,
-    ) -> Response<OciBody>
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    ) -> Response<OciBody> {
         let (path, query) = match target.split_once('?') {
             Some((path, query)) => (path, Some(query)),
             None => (target, None),
@@ -304,12 +296,7 @@ impl OciFront {
     /// The answer to a call whose key, if the front asks for one, may make it: a read is
     /// answered as it always was, a push only by a front that asks for keys (an anonymous front
     /// is read-only), and anything else is 405.
-    async fn answer<B>(&self, route: Route<'_>, call: Call<'_, B>) -> (Outcome, Response<OciBody>)
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+    async fn answer(&self, route: Route<'_>, call: Call<'_>) -> (Outcome, Response<OciBody>) {
         let Call {
             method,
             query,
@@ -503,11 +490,11 @@ impl OciFront {
 }
 
 /// What a call carries besides its route.
-struct Call<'a, B> {
+struct Call<'a> {
     method: &'a Method,
     query: Option<&'a str>,
     headers: &'a HeaderMap,
-    body: B,
+    body: OciBody,
     idle: Duration,
 }
 

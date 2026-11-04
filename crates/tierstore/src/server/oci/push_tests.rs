@@ -12,16 +12,16 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 use http_body_util::{BodyExt as _, Full, StreamBody};
-use hyper::body::{Body, Frame};
+use hyper::body::Frame;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::{Method, StatusCode};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
+use super::body::{self, OciBody};
 use super::names::Digest;
-use super::push::{Refusal, Tally, counted, pieces};
+use super::push::{Pieces, Refusal, Tally, counted, pieces};
 use super::{OciAuth, OciFront, OciMetrics, OciPrefix};
-use crate::server::request::{BoxError, Reader};
 use crate::server::testing::{Scripted, Step};
 use crate::server::{AccessKey, ServerConfig};
 use crate::{
@@ -63,19 +63,22 @@ pub(super) fn login(id: &str, secret: &str) -> String {
 }
 
 /// A body of known length.
-pub(super) fn full(bytes: &[u8]) -> Full<Bytes> {
-    Full::new(Bytes::copy_from_slice(bytes))
+pub(super) fn full(bytes: &[u8]) -> OciBody {
+    body::request(Full::new(Bytes::copy_from_slice(bytes)))
+}
+
+/// A body that plays `steps`.
+pub(super) fn scripted(steps: Vec<Step>) -> OciBody {
+    body::request(scripted(steps))
 }
 
 /// A body of pieces that does not say how long it is.
-pub(super) fn unsized_body(
-    parts: &[&'static [u8]],
-) -> StreamBody<stream::Iter<std::vec::IntoIter<Result<Frame<Bytes>, std::io::Error>>>> {
+pub(super) fn unsized_body(parts: &[&'static [u8]]) -> OciBody {
     let frames: Vec<Result<Frame<Bytes>, std::io::Error>> = parts
         .iter()
         .map(|part| Ok(Frame::data(Bytes::from_static(part))))
         .collect();
-    StreamBody::new(stream::iter(frames))
+    body::request(StreamBody::new(stream::iter(frames)))
 }
 
 /// What the front answered.
@@ -139,18 +142,13 @@ impl Rig {
     }
 
     /// A request, as the full key unless the headers log in as another.
-    pub(super) async fn ask<B>(
+    pub(super) async fn ask(
         &self,
         method: Method,
         target: &str,
         headers: &[(&str, &str)],
-        body: B,
-    ) -> Answer
-    where
-        B: Body + Send + 'static,
-        B::Data: Send,
-        B::Error: Into<BoxError>,
-    {
+        body: OciBody,
+    ) -> Answer {
         let mut map = HeaderMap::new();
         map.insert(
             "authorization",
@@ -182,7 +180,6 @@ impl Rig {
     }
 
     /// Begins an upload and gives its id.
-    #[track_caller]
     pub(super) async fn begin(&self) -> String {
         let answer = self.send(Method::POST, "/v2/app/blobs/uploads/").await;
         assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.text());
@@ -536,12 +533,23 @@ async fn a_body_that_is_cut_stores_nothing() {
     let rig = Rig::new();
     let target = format!("/v2/app/blobs/uploads/?digest={}", digest_of(b"ab"));
     let steps = vec![Step::Data(b"a"), Step::Data(b"b"), Step::Fail];
-    let answer = rig
-        .ask(Method::POST, &target, &[], Scripted::new(steps))
-        .await;
+    let answer = rig.ask(Method::POST, &target, &[], scripted(steps)).await;
     let (message, _) = answer.assert_error(StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID");
     assert!(message.contains("could not be read in full"), "{message}");
     assert!(rig.objects().await.is_empty());
+}
+
+/// Asserts that a frame of trailers carries no byte and does not end the body: the blob is the
+/// bytes before and after it.
+#[tokio::test]
+async fn a_frame_of_trailers_carries_no_byte() {
+    let rig = Rig::new();
+    let digest = digest_of(b"ab");
+    let target = format!("/v2/app/blobs/uploads/?digest={digest}");
+    let steps = vec![Step::Data(b"a"), Step::Trailers, Step::Data(b"b")];
+    let answer = rig.ask(Method::POST, &target, &[], scripted(steps)).await;
+    assert_eq!(answer.status, StatusCode::CREATED, "{}", answer.text());
+    assert_eq!(rig.blob(&digest).await.as_deref(), Some(b"ab".as_slice()));
 }
 
 /// Asserts that a body whose next piece does not come within the idle time is refused 400
@@ -555,9 +563,7 @@ async fn a_body_that_stalls_stores_nothing() {
         Step::Wait(Duration::from_secs(3600)),
         Step::Data(b"b"),
     ];
-    let answer = rig
-        .ask(Method::POST, &target, &[], Scripted::new(steps))
-        .await;
+    let answer = rig.ask(Method::POST, &target, &[], scripted(steps)).await;
     let (message, _) = answer.assert_error(StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID");
     assert_eq!(message, "No byte of the request body arrived within 30s.");
     assert!(rig.objects().await.is_empty());
@@ -634,7 +640,7 @@ async fn a_hashed_stream_ends_with_an_error_unless_the_digest_is_right() {
 async fn the_pieces_of_a_request_body_end_at_its_failure() {
     let tally = Arc::new(Tally::default());
     let steps = vec![Step::Data(b"ab"), Step::Fail, Step::Data(b"never")];
-    let reader = Reader::new(Scripted::new(steps), usize::MAX, IDLE);
+    let reader = Pieces::new(scripted(steps), IDLE);
     let out = drained(pieces(reader, Arc::clone(&tally))).await;
     assert_eq!(out.len(), 2);
     assert_eq!(out[0], Ok(Bytes::from_static(b"ab")));
