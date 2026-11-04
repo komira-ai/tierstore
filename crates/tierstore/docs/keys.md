@@ -4,18 +4,18 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 
 ## The keys, and what each may do
 
-| Key | Flag | Key of the file | May do |
-|---|---|---|---|
-| full | `--access-key-file` | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads |
-| read-only | `--read-only-key-file` | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
-| presigning | `--presign-key-file` | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
-| GC | `--gc-key-file` | `server.gc_key_files` | list, head, delete and abort uploads under one prefix, and nothing else; it never reads a body |
-| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else |
-| grant | `--grant-key-file` | `server.grant_key_files` | signs no request: its signature on a read grant (the `x-tierstore-grant` header) lets the bearer get and head the objects the grant lists, until the grant expires, and nothing else |
-| hot tier credential | `--hot-credentials-file` | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
-| cold tier credential | `--cold-credentials-file` | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
+| Key | Key of the file | May do |
+|---|---|---|
+| full | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads |
+| read-only | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
+| presigning | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
+| GC | `server.gc_key_files` | list, head, delete and abort uploads under one prefix, and nothing else; it never reads a body |
+| scoped | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else |
+| grant | `server.grant_key_files` | signs no request: its signature on a read grant (the `x-tierstore-grant` header) lets the bearer get and head the objects the grant lists, until the grant expires, and nothing else |
+| hot tier credential | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
+| cold tier credential | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
 
-Only the full key is required. The read-only, presigning, GC, scoped and grant flags may each be given once for each key. A tier that is a directory needs no credential file.
+Only the full key is required. The read-only, presigning, GC, scoped and grant keys of the file are lists, one file for each key. A tier that is a directory needs no credential file.
 
 A role is not a prefix: a read-only key may read every object of the bucket. To limit a client to prefixes, use a scoped key (or a GC key, or a presigned URL). The key prefixes `_journal/` and `_tiering/` belong to tierstore: a client put or delete there is refused, and a listing leaves them out.
 
@@ -51,7 +51,7 @@ A presigning key file holds the key and its ceiling, all required:
  "ceiling": {"prefix": "cas/b/", "max_expires_secs": 600, "max_object_bytes": 134217728}}
 ```
 
-A presigned URL is good for one PUT of a key under the prefix, for at most the smaller of `max_expires_secs` and `--presign-max-expires` (15 minutes by default), with a body of at most `max_object_bytes` (up to 5 GiB). The body is also held to `--max-request-bytes`; the smaller of the two applies. A second PUT of the key is 412. The signature does not cover the body, so whoever reads the object must check its content.
+A presigned URL is good for one PUT of a key under the prefix, for at most the smaller of `max_expires_secs` and `server.presign_max_expires` (15 minutes by default), with a body of at most `max_object_bytes` (up to 5 GiB). The body is also held to `server.max_request_bytes`; the smaller of the two applies. A second PUT of the key is 412. The signature does not cover the body, so whoever reads the object must check its content.
 
 ## GC keys
 
@@ -78,4 +78,4 @@ A change to the tier credentials takes the same restart.
 
 ## Read grants
 
-A client that holds no key and must read a fixed set of objects for a short time presents a read grant: a token signed with a grant key, sent as one `x-tierstore-grant` header on `GET` and `HEAD`. It names one bucket, an expiry and the exact objects it lists, and allows nothing else. The server refuses a grant that ends more than `--grant-max-lifetime` (15 minutes by default) after its own clock. A grant is a bearer token: whoever holds it can use it until it expires, so use TLS where that matters. A grant key's secret is at least 32 bytes (the server refuses a shorter one at start); the length is counted in the characters as written, so generate it as 32 random bytes in hex (64 characters), for example with `openssl rand -hex 32`. The cap is measured on the server's clock, so a minting service whose clock runs ahead of the server's should mint grants shorter than the cap by at least that skew. The token format is in the README, under Read grants.
+A client that holds no key and must read a fixed set of objects for a short time presents a read grant: a token signed with a grant key, sent as one `x-tierstore-grant` header on `GET` and `HEAD`. It names one bucket, an expiry and the exact objects it lists, and allows nothing else. The server refuses a grant that ends more than `server.grant_max_lifetime` (15 minutes by default) after its own clock. A grant is a bearer token: whoever holds it can use it until it expires, so use TLS where that matters. A grant key's secret is at least 32 bytes (the server refuses a shorter one at start); the length is counted in the characters as written, so generate it as 32 random bytes in hex (64 characters), for example with `openssl rand -hex 32`. The cap is measured on the server's clock, so a minting service whose clock runs ahead of the server's should mint grants shorter than the cap by at least that skew. The token format is in the README, under Read grants.

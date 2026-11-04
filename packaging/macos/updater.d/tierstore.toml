@@ -18,7 +18,7 @@ signer = { repository = "komira-ai/tierstore", workflow = "artifacts.yml" }
 # The account the service runs as (the plist's UserName). Required here.
 uid = "_tierstore"
 registration_ttl_secs = 300
-# The one port of the one instance, on loopback (`listen` and `slot` in tierstore.toml).
+# The one port of the one instance, on loopback (the s3 interface and `slot` in tierstore.toml).
 health_ports = [9300]
 # After cutover, verify must succeed by then (at least verify plus rollback, below), or the
 # updater rolls back.

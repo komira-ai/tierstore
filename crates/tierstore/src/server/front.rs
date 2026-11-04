@@ -13,7 +13,6 @@ use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
 use super::grant::{ensure_distinct as grant_distinct, grant_keys, ids as grant_ids};
 use super::keys::{ensure_distinct, read_credentials, read_only_keys};
-use super::listen::has_duplicate;
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
 use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scoped_keys};
 
@@ -23,7 +22,7 @@ use super::scoped::{ensure_distinct as scoped_distinct, ids as scoped_ids, scope
 #[error("{0}")]
 pub(super) struct InvalidFlags(pub String);
 
-/// The access key id and the secret access key in the file of `--access-key-file`.
+/// The access key id and the secret access key in the file of `server.access_key_file`.
 pub(super) fn read_key(path: &Path) -> Result<(String, String), String> {
     read_credentials("--access-key-file", path)
 }
@@ -100,9 +99,6 @@ pub(super) fn server_config(
     }
     if front.body_idle_timeout.is_zero() {
         return Err("--body-idle-timeout must be longer than zero".into());
-    }
-    if has_duplicate(&front.listen) {
-        return Err(InvalidFlags("--listen is given the same address twice".into()).into());
     }
     let (key_id, secret) = read_key(&front.access_key_file)?;
     let read_only = read_only_keys(&front.read_only_key_file)?;

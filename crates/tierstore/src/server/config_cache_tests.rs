@@ -4,15 +4,22 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::config::{File, from_text, settings_from_text};
-use super::config_cache::{CacheSettings, Rate};
-use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
+use super::config::{from_text, settings_from_text};
+use super::config_cache::{CacheSettings, LocalCacheTable, Rate};
+use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL, oci_interface};
 use super::local_cache::{FILL_CHUNK, SCRUB_MIN_ROUND, SCRUB_RATE, WHOLE_FILL_LIMIT};
 
 /// A build node's file with every key given a value that is not the default.
 const CACHE: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["192.0.2.10:9400"] }
+
+[[interface]]
+type   = "oci"
+params = { addresses = ["192.0.2.10:5000"], tls_cert_file = "/etc/tierstore-cache/oci.crt", tls_key_file = "/etc/tierstore-cache/oci.key", prefix = "images/", max_connections = 16, connection_lifetime = "30m" }
+
 [server]
-listen                = "192.0.2.10:9400"
 proxy_id              = "tierstore-cache-1"
 bucket                = "tierstore"
 region                = "eu-west-1"
@@ -69,20 +76,15 @@ cache  = true
 [[policy]]
 prefix = ""
 cache  = false
-
-[oci]
-listen              = "192.0.2.10:5000"
-tls_cert_file       = "/etc/tierstore-cache/oci.crt"
-tls_key_file        = "/etc/tierstore-cache/oci.key"
-prefix              = "images/"
-max_connections     = 16
-connection_lifetime = "30m"
 "#;
 
 /// The least a build node's file can say.
 const LEAST: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:0"] }
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "c1"
 bucket          = "tier-bucket"
 access_key_file = "key"
@@ -99,10 +101,13 @@ prefix = "cas/"
 cache  = true
 "#;
 
-/// `LEAST` with a policy that keeps the keys of the default `[oci]` prefix, `oci/`.
+/// `LEAST` with a policy that keeps the keys of the default prefix of an `oci` interface, `oci/`.
 const KEEPS_OCI: &str = r#"
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:0"] }
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "c1"
 bucket          = "tier-bucket"
 access_key_file = "key"
@@ -158,7 +163,7 @@ fn a_build_node_file_takes_a_slot() {
 }
 
 /// Asserts that a build node's file makes the settings it says, every key to its field, and that
-/// a storage node's loader (`from_text`, the flags' form) says a build node has no flag form.
+/// a storage node's loader (`from_text`) says the file is a build node's.
 #[test]
 fn a_build_node_file_makes_a_cache() {
     let cache = cache_of(CACHE);
@@ -237,7 +242,7 @@ fn a_build_node_file_makes_a_cache() {
     assert_eq!(cache.scrub_min_round, Duration::from_secs(30 * 60));
 
     let why = from_text(CACHE, DEFAULTS).unwrap_err().to_string();
-    assert!(why.contains("no flag form"), "{why}");
+    assert!(why.contains("the file of a build node"), "{why}");
     let settings = settings_from_text(CACHE, DEFAULTS).unwrap();
     assert!(settings.into_storage().is_none());
     let storage = settings_from_text(GOLDEN, DEFAULTS).unwrap();
@@ -281,8 +286,7 @@ fn a_build_node_file_has_the_defaults_of_the_flags_and_of_the_cache() {
     assert_eq!(cache.upstream.spec, "memory");
 }
 
-/// Asserts that `scrub_rate` of `"off"` or of zero bytes turns the scrub off, and that a rate is
-/// written back by `--print-config`'s form: `off` for none, bytes a second otherwise.
+/// Asserts that `scrub_rate` of `"off"` or of zero bytes turns the scrub off.
 #[test]
 fn a_scrub_rate_of_off_or_zero_turns_the_scrub_off() {
     for off in ["\"off\"", "\"0B/s\""] {
@@ -606,10 +610,10 @@ fn a_storage_node_refuses_a_list_of_endpoints_and_a_cache_policy() {
     assert!(why.contains("keeps no cache"), "{why}");
 }
 
-/// Asserts that a build node's file takes the `[oci]` table with the keys of a storage node's,
-/// each to the field the `--oci-*` flag has, and that a file without the table has no front.
+/// Asserts that a build node's file takes an `oci` interface with the params of a storage node's,
+/// each to the field it has, and that a file without one has no front.
 #[test]
-fn a_build_node_file_with_an_oci_table_makes_the_front() {
+fn a_build_node_file_with_an_oci_interface_makes_the_front() {
     let oci = cache_of(CACHE).oci;
     assert_eq!(oci.listen, vec!["192.0.2.10:5000".parse().unwrap()]);
     assert_eq!(
@@ -624,7 +628,7 @@ fn a_build_node_file_with_an_oci_table_makes_the_front() {
     assert_eq!(oci.max_connections, Some(16));
     assert_eq!(oci.connection_lifetime, Some(Duration::from_secs(1800)));
 
-    let plain = format!("{KEEPS_OCI}\n[oci]\nlisten = \"127.0.0.1:5000\"\n");
+    let plain = format!("{KEEPS_OCI}{}", oci_interface("127.0.0.1:5000", ""));
     let oci = cache_of(&plain).oci;
     assert_eq!(oci.listen, vec!["127.0.0.1:5000".parse().unwrap()]);
     assert_eq!((oci.tls_cert, oci.tls_key, oci.prefix), (None, None, None));
@@ -633,83 +637,72 @@ fn a_build_node_file_with_an_oci_table_makes_the_front() {
     assert!(cache_of(LEAST).oci.listen.is_empty());
 }
 
-/// Asserts that a build node's `listen` keys take a list as a storage node's do, in the S3
-/// table and the `[oci]` table, and are refused with the same messages when an address is twice.
+/// Asserts that a build node's interfaces take lists of addresses as a storage node's do, in the
+/// `s3` and the `oci` entries, and are refused with the same messages when an address is twice.
 #[test]
 fn a_build_node_takes_lists_of_addresses() {
     let server = "[\"192.0.2.10:9400\", \"[::]:9400\"]";
     let oci = "[\"192.0.2.10:5000\", \"[::]:5000\"]";
-    let text =
-        CACHE
-            .replacen("\"192.0.2.10:9400\"", server, 1)
-            .replacen("\"192.0.2.10:5000\"", oci, 1);
+    let text = CACHE.replacen("[\"192.0.2.10:9400\"]", server, 1).replacen(
+        "[\"192.0.2.10:5000\"]",
+        oci,
+        1,
+    );
     let cache = cache_of(&text);
     let wanted = |first: &str, second: &str| vec![first.parse().unwrap(), second.parse().unwrap()];
     assert_eq!(cache.front.listen, wanted("192.0.2.10:9400", "[::]:9400"));
     assert_eq!(cache.oci.listen, wanted("192.0.2.10:5000", "[::]:5000"));
 
     let twice = "[\"192.0.2.10:9400\", \"192.0.2.10:9400\"]";
-    let why = refusal(&CACHE.replacen("\"192.0.2.10:9400\"", twice, 1));
-    assert_eq!(why, "server.listen: the same address is listed twice");
+    let why = refusal(&CACHE.replacen("[\"192.0.2.10:9400\"]", twice, 1));
+    assert_eq!(
+        why,
+        "interface[0].params: the address 192.0.2.10:9400 is listed twice"
+    );
     let twice = "[\"192.0.2.10:5000\", \"192.0.2.10:5000\"]";
-    let why = refusal(&CACHE.replacen("\"192.0.2.10:5000\"", twice, 1));
-    assert_eq!(why, "oci.listen: the same address is listed twice");
+    let why = refusal(&CACHE.replacen("[\"192.0.2.10:5000\"]", twice, 1));
+    assert_eq!(
+        why,
+        "interface[1].params: the address 192.0.2.10:5000 is listed twice"
+    );
 }
 
-/// Asserts that a build node's `[oci]` table is refused exactly as a storage node's is: for each
-/// table below the build node's message equals the storage node's and names the key, so a
-/// certificate without a key, a key without a certificate, any key without `listen`, a count of
-/// zero and a key the table does not have are refused by the one set of rules.
+/// Asserts that a build node's `oci` interface is refused exactly as a storage node's is: for each
+/// case below the build node's message equals the storage node's and names the key, so a
+/// certificate without a key, a key without a certificate, a count of zero and a key the entry
+/// does not have are refused by the one set of rules.
 #[test]
-fn a_build_node_oci_table_is_refused_as_a_storage_nodes_is() {
-    let listen = "listen = \"127.0.0.1:5000\"\n";
+fn a_build_node_oci_interface_is_refused_as_a_storage_nodes_is() {
     let cases = [
         (
-            format!("{listen}tls_cert_file = \"/c\""),
-            "oci.tls_key_file: it is needed with oci.tls_cert_file",
+            ", tls_cert_file = \"/c\"",
+            "interface[1].params.tls_key_file: it is needed with tls_cert_file",
         ),
         (
-            format!("{listen}tls_key_file = \"/k\""),
-            "oci.tls_cert_file: it is needed with oci.tls_key_file",
+            ", tls_key_file = \"/k\"",
+            "interface[1].params.tls_cert_file: it is needed with tls_key_file",
         ),
         (
-            "tls_cert_file = \"/c\"\ntls_key_file = \"/k\"".to_owned(),
-            "oci.tls_cert_file: it needs oci.listen",
+            ", max_connections = 0",
+            "interface[1].params.max_connections",
         ),
-        (
-            "prefix = \"oci/\"".to_owned(),
-            "oci.prefix: it needs oci.listen",
-        ),
-        (
-            "max_connections = 4".to_owned(),
-            "oci.max_connections: it needs",
-        ),
-        (
-            "connection_lifetime = \"1h\"".to_owned(),
-            "oci.connection_lifetime: it needs",
-        ),
-        (String::new(), "oci.listen: it is needed"),
-        (
-            format!("{listen}max_connections = 0"),
-            "oci.max_connections",
-        ),
-        (format!("{listen}bogus = 1"), "bogus"),
+        (", bogus = 1", "bogus"),
     ];
-    for (oci, want) in cases {
-        let build = refusal(&format!("{LEAST}\n[oci]\n{oci}\n"));
-        let storage = refusal(&format!("{MINIMAL}\n[oci]\n{oci}\n"));
-        assert!(build.contains(want), "{oci}: {build}");
+    for (more, want) in cases {
+        let entry = oci_interface("127.0.0.1:5000", more);
+        let build = refusal(&format!("{LEAST}{entry}"));
+        let storage = refusal(&format!("{MINIMAL}{entry}"));
+        assert!(build.contains(want), "{more}: {build}");
         // A refusal of the syntax says where it is, and the two files are not laid out alike.
         assert_eq!(
             without_position(&build),
             without_position(&storage),
-            "{oci}"
+            "{more}"
         );
     }
 }
 
-/// Asserts that a rate reads as a size and `/s`, is refused otherwise, and is written back as a
-/// rate that reads as the same.
+/// Asserts that a rate reads as a size and `/s`, and is refused otherwise.
 #[test]
 fn a_rate_is_a_size_and_a_per_second() {
     let rate = |text: &str| serde_json::from_str::<Rate>(&format!("{text:?}"));
@@ -721,40 +714,29 @@ fn a_rate_is_a_size_and_a_per_second() {
     }
     let why = serde_json::from_str::<Rate>("5").unwrap_err().to_string();
     assert!(why.contains("a rate such as"), "{why}");
-    let written = serde_json::to_string(&Rate(1234)).unwrap();
-    assert_eq!(serde_json::from_str::<Rate>(&written).unwrap(), Rate(1234));
 }
 
-/// Asserts that the tables written back as TOML make the same settings: every table of the
-/// build-node file is written by the code that writes `--print-config`'s files.
-#[test]
-fn a_build_node_file_written_back_makes_the_same_settings() {
-    let file: File = toml::from_str(CACHE).unwrap();
-    let written = toml::to_string(&file).unwrap();
-    let again = cache_of(&written);
-    assert_eq!(format!("{again:?}"), format!("{:?}", cache_of(CACHE)));
-}
-
-/// Asserts that an `[oci]` front whose blobs no policy keeps is refused at load, with a message
-/// that names `oci.prefix` and says which policy decides: none covers the default prefix, the
+/// Asserts that an `oci` front whose blobs no policy keeps is refused at load, with a message
+/// that names `params.prefix` and says which policy decides: none covers the default prefix, the
 /// policy that covers it has `cache = false`, and a given prefix is checked, not the default. A
 /// policy that keeps the prefix (the default, and a given one) loads.
 #[test]
 fn an_oci_front_over_keys_the_cache_does_not_keep_is_refused() {
-    let front = "[oci]\nlisten = \"127.0.0.1:5000\"\n";
+    let front = oci_interface("127.0.0.1:5000", "");
+    let front = front.as_str();
     let none = refusal(&format!("{LEAST}\n{front}"));
-    assert!(none.contains("oci.prefix"), "{none}");
+    assert!(none.contains("params.prefix"), "{none}");
     assert!(none.contains("no [[policy]] covers"), "{none}");
     assert!(none.contains("\"oci/blobs/sha256/\""), "{none}");
 
     let off = "[[policy]]\nprefix = \"\"\ncache = false\n";
     let why = refusal(&format!("{LEAST}\n{off}\n{front}"));
-    assert!(why.contains("oci.prefix"), "{why}");
+    assert!(why.contains("params.prefix"), "{why}");
     assert!(why.contains("cache = false"), "{why}");
 
     let exact = "[[policy]]\nprefix = \"oci/\"\ncache = false\n";
     let why = refusal(&format!("{LEAST}\n{exact}\n{front}"));
-    assert!(why.contains("oci.prefix"), "{why}");
+    assert!(why.contains("params.prefix"), "{why}");
     assert!(why.contains("cache = false"), "{why}");
 
     // A policy prefix must end in `/` and the blobs are flat under `blobs/sha256/`, so no policy
@@ -767,7 +749,7 @@ fn an_oci_front_over_keys_the_cache_does_not_keep_is_refused() {
     let loaded = cache_of(&format!("{LEAST}\n{rest}\n{outside}\n{front}"));
     assert!(!loaded.oci.listen.is_empty());
 
-    let given = format!("{front}prefix = \"layers/\"\n");
+    let given = oci_interface("127.0.0.1:5000", ", prefix = \"layers/\"");
     let why = refusal(&format!("{KEEPS_OCI}\n{given}"));
     assert!(why.contains("\"layers/blobs/sha256/\""), "{why}");
     let layers = "[[policy]]\nprefix = \"layers/\"\ncache = true\n";
@@ -822,8 +804,11 @@ const LOCAL_CACHE_KEYS: [&str; 16] = [
 fn the_readme_documents_the_build_node_file() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let readme = std::fs::read_to_string(root.join("../../packaging/README.md")).unwrap();
-    let blocks: Vec<&str> = readme.split("```toml\n").skip(1).collect();
-    let example = blocks[1].split_once("\n```").unwrap().0;
+    let blocks = readme.split("```toml\n").skip(1);
+    let example = blocks
+        .into_iter()
+        .find(|block| block.contains("[local_cache]"));
+    let example = example.unwrap().split_once("\n```").unwrap().0;
     let cache = cache_of(example);
     assert_eq!(cache.cache.policies.len(), 3);
     for key in LOCAL_CACHE_KEYS {
@@ -833,26 +818,28 @@ fn the_readme_documents_the_build_node_file() {
             .find(|line| line.starts_with('|') && line.contains(&wanted));
         assert!(row.is_some(), "no row for {key}");
     }
-    let file: File = toml::from_str(CACHE).unwrap();
-    let table = toml::Table::try_from(file.local_cache.unwrap()).unwrap();
-    let keys: BTreeSet<&str> = table.keys().map(String::as_str).collect();
+    // The keys the table takes are in the message of serde's refusal of one it does not.
+    let refused = toml::from_str::<LocalCacheTable>("zz_not_a_key = 1\n").unwrap_err();
+    let message = refused.message().to_owned();
+    let (_, expected) = message.split_once("expected").unwrap();
+    let keys: BTreeSet<&str> = expected.split('`').skip(1).step_by(2).collect();
     let listed: BTreeSet<&str> = LOCAL_CACHE_KEYS.iter().copied().collect();
     assert_eq!(keys, listed);
 }
 
-/// Asserts which defect a build-node file with two is refused for: the `[local_cache]` one is
-/// named before an `[oci]` table with no `listen`, and with the `[local_cache]` defect mended the
-/// `[oci]` one is named.
+/// Asserts which defect a build-node file with two is refused for: an interface's is named before
+/// a table's (the interfaces are read first), and with the interface mended the `[local_cache]`
+/// one is named.
 #[test]
-fn a_local_cache_defect_is_named_before_an_oci_one() {
-    let oci = "[oci]\nprefix = \"oci/\"\n";
+fn an_interface_defect_is_named_before_a_local_cache_one() {
+    let oci = "\n[[interface]]\ntype = \"oci\"\nparams = { prefix = \"oci/\" }\n";
     let broken = LEAST.replacen(
         "budget = 1000",
         "budget = 1000\nmax_concurrent_fills = 0",
         1,
     );
-    let why = refusal(&format!("{broken}\n{oci}"));
+    let why = refusal(&format!("{broken}{oci}"));
+    assert_eq!(why, "interface[1].params: it needs port or addresses");
+    let why = refusal(&format!("{broken}{}", oci_interface("127.0.0.1:5000", "")));
     assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
-    let why = refusal(&format!("{LEAST}\n{oci}"));
-    assert!(why.contains("oci.listen"), "{why}");
 }

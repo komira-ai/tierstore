@@ -9,13 +9,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
 
 use super::cli::Cli;
 use super::cli_reconcile::{Gate, reconcile_gated};
 use super::cli_serve::open_gate;
+use super::config_testing::MINIMAL;
 use super::lock::try_take;
 use crate::{
     Backend, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,
@@ -421,27 +421,22 @@ async fn a_release_that_hangs_lets_the_lock_go_and_v_next_takes_the_lease_when_i
     hand_over_after_a_spoiled_release(Spoiled::Hangs).await;
 }
 
-/// The flags of a start that names `lock_file`, if any (`open_gate` reads no key file).
+/// The settings of a start that names `lock_file`, if any (`open_gate` reads no key file).
 fn cli_with_lock(lock_file: Option<&std::path::Path>) -> Cli {
-    let mut args: Vec<String> = [
-        "tierstore",
-        "--listen=127.0.0.1:0",
-        "--proxy-id=p1",
-        "--hot=memory",
-        "--cold=memory",
-        "--hot-bytes=1000",
-        "--bucket=tier-bucket",
-        "--access-key-file=key",
-    ]
-    .map(str::to_owned)
-    .to_vec();
-    if let Some(path) = lock_file {
-        args.push(format!("--lock-file={}", path.display()));
-    }
-    Cli::try_parse_from(args).unwrap()
+    let text = match lock_file {
+        Some(path) => {
+            let given = format!(
+                "budget = 1000\nlock_file = {:?}",
+                path.display().to_string()
+            );
+            MINIMAL.replacen("budget = 1000", &given, 1)
+        }
+        None => MINIMAL.to_owned(),
+    };
+    Cli::from_config_text(&text).unwrap()
 }
 
-/// Asserts that `open_gate` makes no gate when the flags name no lock file, and a gate over the
+/// Asserts that `open_gate` makes no gate when the file names no lock file, and a gate over the
 /// named file when they do: the file is made and the lock is taken at once.
 #[test]
 fn open_gate_makes_a_gate_only_when_a_lock_file_is_named() {

@@ -16,7 +16,7 @@ use x509_parser::extensions::GeneralName;
 /// Why the OCI front cannot start.
 #[derive(Debug, thiserror::Error)]
 pub enum OciError {
-    /// `--oci-prefix` is not usable.
+    /// The `prefix` param of an `oci` interface is not usable.
     #[error("--oci-prefix {prefix:?}: {why}")]
     Prefix {
         /// The prefix given.
@@ -24,7 +24,7 @@ pub enum OciError {
         /// What is wrong with it.
         why: String,
     },
-    /// Only one of `--oci-tls-cert` and `--oci-tls-key` is given.
+    /// Only one of the `tls_cert_file` and `tls_key_file` params is given.
     #[error("{0}")]
     Missing(String),
     /// A certificate or key file cannot be read.
@@ -103,8 +103,8 @@ pub fn plain_warning(listen: SocketAddr) -> Option<String> {
         None
     } else {
         Some(format!(
-            "tierstore: warning: --oci-listen {listen} serves plain HTTP on a non-loopback \
-             address; give --oci-tls-cert and --oci-tls-key to serve HTTPS"
+            "tierstore: warning: the oci interface at {listen} serves plain HTTP on a non-loopback \
+             address; give params tls_cert_file and tls_key_file to serve HTTPS"
         ))
     }
 }

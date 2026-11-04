@@ -115,8 +115,13 @@ fn release(dir: &Path, server: &Path) {
 fn cache_config(port: u16, hot: &Path, cold: &Path, key: &Path) -> String {
     let oci = oci_port(port);
     format!(
-        "[server]\n\
-         listen = [\"0.0.0.0:{port}\", \"[::]:{port}\"]\n\
+        "[[interface]]\n\
+         type = \"s3\"\n\
+         params = {{ addresses = [\"0.0.0.0:{port}\", \"[::]:{port}\"] }}\n\
+         [[interface]]\n\
+         type = \"oci\"\n\
+         params = {{ addresses = [\"0.0.0.0:{oci}\", \"[::]:{oci}\"] }}\n\
+         [server]\n\
          proxy_id = \"tierstore-{port}\"\n\
          slot = {port}\n\
          bucket = \"{BUCKET}\"\n\
@@ -128,8 +133,6 @@ fn cache_config(port: u16, hot: &Path, cold: &Path, key: &Path) -> String {
          [cold_store]\n\
          kind = \"dir\"\n\
          path = \"{cold}\"\n\
-         [oci]\n\
-         listen = [\"0.0.0.0:{oci}\", \"[::]:{oci}\"]\n\
          [[policy]]\n\
          prefix = \"t1/\"\n\
          cache = true\n\
@@ -142,26 +145,34 @@ fn cache_config(port: u16, hot: &Path, cold: &Path, key: &Path) -> String {
     )
 }
 
-/// The command line of a storage node on `port`: the slot template's flags.
-fn storage_args(base: &Path, port: u16, hot: &Path, cold: &Path, key: &Path) -> Vec<String> {
+/// The configuration file of a storage node on `port`: the slot file of the packaging.
+fn storage_config(base: &Path, port: u16, hot: &Path, cold: &Path, key: &Path) -> String {
     let oci = oci_port(port);
-    [
-        format!("--listen=0.0.0.0:{port}"),
-        format!("--listen=[::]:{port}"),
-        format!("--slot={port}"),
-        format!("--proxy-id=tierstore-{port}"),
-        format!("--hot=dir:{}", hot.display()),
-        format!("--cold=dir:{}", cold.display()),
-        "--hot-bytes=268435456".to_owned(),
-        format!("--bucket={BUCKET}"),
-        format!("--access-key-file={}", key.display()),
-        format!("--lock-file={}", base.join("instance.lock").display()),
-        format!("--oci-listen=0.0.0.0:{oci}"),
-        format!("--oci-listen=[::]:{oci}"),
-        format!("--drain-lb-wait={SETTLE}"),
-        "--drain-deadline=60s".to_owned(),
-    ]
-    .into()
+    format!(
+        "[[interface]]\n\
+         type = \"s3\"\n\
+         params = {{ addresses = [\"0.0.0.0:{port}\", \"[::]:{port}\"] }}\n\
+         [[interface]]\n\
+         type = \"oci\"\n\
+         params = {{ addresses = [\"0.0.0.0:{oci}\", \"[::]:{oci}\"] }}\n\
+         [server]\n\
+         proxy_id = \"tierstore-{port}\"\n\
+         slot = {port}\n\
+         bucket = \"{BUCKET}\"\n\
+         access_key_file = \"{key}\"\n\
+         [hot_store]\n\
+         kind = \"dir\"\n\
+         path = \"{hot}\"\n\
+         budget = 268435456\n\
+         lock_file = \"{lock}\"\n\
+         [cold_store]\n\
+         kind = \"dir\"\n\
+         path = \"{cold}\"\n",
+        key = key.display(),
+        hot = hot.display(),
+        cold = cold.display(),
+        lock = base.join("instance.lock").display(),
+    )
 }
 
 impl Site {
@@ -189,27 +200,22 @@ impl Site {
         let key = base.join("keys/access");
         write(&key, &format!("{KEY_ID}\n{SECRET}\n"));
         mode(&key, 0o600);
-        let exec: Exec = match plan.node {
-            Node::Cache => {
-                for port in [A, B] {
-                    let config = cache_config(port, &hot, &cold, &key);
-                    write(&base.join(format!("conf/{port}.toml")), &config);
-                }
-                let conf = base.join("conf");
-                Box::new(move |port| {
-                    vec![
-                        "--config".to_owned(),
-                        conf.join(format!("{port}.toml")).display().to_string(),
-                        format!("--drain-lb-wait={SETTLE}"),
-                        "--drain-deadline=60s".to_owned(),
-                    ]
-                })
-            }
-            Node::Storage => {
-                let (base, hot, cold, key) = (base.clone(), hot.clone(), cold.clone(), key.clone());
-                Box::new(move |port| storage_args(&base, port, &hot, &cold, &key))
-            }
-        };
+        for port in [A, B] {
+            let config = match plan.node {
+                Node::Cache => cache_config(port, &hot, &cold, &key),
+                Node::Storage => storage_config(&base, port, &hot, &cold, &key),
+            };
+            write(&base.join(format!("conf/{port}.toml")), &config);
+        }
+        let conf = base.join("conf");
+        let exec: Exec = Box::new(move |port| {
+            vec![
+                "--config".to_owned(),
+                conf.join(format!("{port}.toml")).display().to_string(),
+                format!("--drain-lb-wait={SETTLE}"),
+                "--drain-deadline=60s".to_owned(),
+            ]
+        });
         let host = Host::new(
             &base,
             [A, B],

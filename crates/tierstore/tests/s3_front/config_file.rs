@@ -1,5 +1,5 @@
-//! The `tierstore` binary started from a configuration file (`--config`), and `--print-config`:
-//! it serves what the same settings given as flags serve, and refuses what the file must not say.
+//! The `tierstore` binary started from a configuration file (`--config`): it serves what the file
+//! says, and refuses what the file must not say and the flags that went.
 
 use std::path::Path;
 
@@ -9,7 +9,7 @@ use objstore_s3::{ByteRange, KeyPrefix, ObjectKey, ObjectStore, PageSize};
 use rustix::process::Signal;
 
 use crate::binary::{run, start};
-use crate::files::{BIN_SECRET, Files};
+use crate::files::{Files, Tables};
 
 /// The calls of one session, and what each answered: two puts, a put of a key that is there,
 /// a ranged read of an object and of one that is not there, a listing, a delete and a listing
@@ -67,7 +67,8 @@ fn strings(words: &[&str]) -> Vec<String> {
 /// a string with a unit.
 fn directory_file(key: &Path, root: &Path) -> String {
     format!(
-        "[server]\nlisten = \"127.0.0.1:0\"\nproxy_id = \"by-hand\"\nbucket = \"tier-bucket\"\n\
+        "[[interface]]\ntype = \"s3\"\nparams = {{ addresses = [\"127.0.0.1:0\"] }}\n\n\
+         [server]\nproxy_id = \"by-hand\"\nbucket = \"tier-bucket\"\n\
          access_key_file = \"{}\"\n\n[hot_store]\nkind = \"dir\"\npath = \"{}\"\nbudget = \"1MiB\"\n\n\
          [cold_store]\nkind = \"dir\"\npath = \"{}\"\n",
         key.display(),
@@ -76,48 +77,26 @@ fn directory_file(key: &Path, root: &Path) -> String {
     )
 }
 
-/// Asserts that `--print-config` over a set of flags writes the file and exits with status 0 and
-/// no start (it has no address bound and says nothing on stderr), that the file names the key
-/// file by its path and not its contents, and that the binary started from that file answers the
-/// session exactly as the binary started from the flags: the same puts, the refusal of the
-/// second put of a key, the ranged reads, the listings and the delete.
+/// Asserts that the binary started from a file answers the session as the file says: the puts,
+/// the refusal of the second put of a key, the ranged reads, the listings and the delete; and
+/// that a key of the file that is not the default (`copy_parallel`) is taken.
 #[tokio::test]
-async fn a_server_started_from_the_printed_file_serves_as_one_started_from_flags() {
+async fn a_server_started_from_a_file_serves_the_session() {
     let files = Files::new("cfg-serve");
-    let flags = files.flags(&["--drain-lb-wait", "50ms", "--copy-parallel", "3"]);
-    let from_flags = served(&flags).await;
-
-    let mut printing = flags.clone();
-    printing.push("--print-config".to_owned());
-    let (code, printed, err) = run(&printing);
-    assert_eq!((code, err.as_str()), (0, ""));
-    assert!(
-        printed.contains(&files.key.display().to_string()),
-        "{printed}"
-    );
-    assert!(!printed.contains(BIN_SECRET), "{printed}");
-    assert!(printed.contains("copy_parallel = 3"), "{printed}");
-    assert!(!printed.contains("drain_"), "{printed}");
-    let file = files.secret("tierstore.toml", &printed);
-
-    let args = strings(&[
-        "--config",
-        &file.display().to_string(),
-        "--drain-lb-wait",
-        "50ms",
-    ]);
-    let from_file = served(&args).await;
-    assert_eq!(from_file, from_flags);
-    assert!(from_file[0].contains("Ok"), "{from_file:?}");
-    assert!(from_file[2].contains("AlreadyExists"), "{from_file:?}");
-    assert!(from_file[4].contains("NotFound"), "{from_file:?}");
-    assert_eq!(from_file[5], "list: [\"cas/a 5\", \"cas/b 6\"]");
-    assert_eq!(from_file[7], "list after delete: [\"cas/a 5\"]");
+    let tables = Tables {
+        hot: "kind = \"memory\"\nbudget = 1048576\ncopy_parallel = 3".to_owned(),
+        ..Tables::default()
+    };
+    let said = served(&files.flags_of(&tables, &["--drain-lb-wait", "50ms"])).await;
+    assert!(said[0].contains("Ok"), "{said:?}");
+    assert!(said[2].contains("AlreadyExists"), "{said:?}");
+    assert!(said[4].contains("NotFound"), "{said:?}");
+    assert_eq!(said[5], "list: [\"cas/a 5\", \"cas/b 6\"]");
+    assert_eq!(said[7], "list after delete: [\"cas/a 5\"]");
 }
 
 /// Asserts that a file written by hand, with directory tiers and a budget written `1MiB`, starts
-/// the binary, which keeps what it is given in the hot tier's directory, as the same tiers given
-/// as flags do.
+/// the binary, which keeps what it is given in the hot tier's directory, on disk.
 #[tokio::test]
 async fn a_file_written_by_hand_with_directory_tiers_keeps_objects_on_disk() {
     let files = Files::new("cfg-dirs");
@@ -134,22 +113,10 @@ async fn a_file_written_by_hand_with_directory_tiers_keeps_objects_on_disk() {
     assert!(root.join("hot/cas~a").is_file());
 }
 
-/// Asserts that `--print-config` over flags that no file can say exits with status 2 and writes
-/// nothing to stdout, and that flags are still accepted without `--config` as they were.
-#[test]
-fn print_config_of_flags_that_no_file_can_say_is_a_refusal() {
-    let files = Files::new("cfg-print-refused");
-    let mut flags = files.flags(&["--print-config"]);
-    flags = crate::files::with(&flags, "--hot", "tape");
-    let (code, out, err) = run(&flags);
-    assert_eq!((code, out.as_str()), (2, ""));
-    assert!(err.contains("--hot") && err.contains("tape"), "{err}");
-}
-
 /// Asserts the refusals of a start with a file, each with status 2, nothing on stdout and a
-/// message that names what is wrong: a data path flag given with the file (all such flags named,
-/// and `--drain-lb-wait` not), `--print-config` with the file, a file that is not there, an
-/// unknown key, an inline secret, and `[local_cache]` along with `[hot_store]` and nothing a cache keeps.
+/// message that names what is wrong: a data path flag given with the file (the first one named,
+/// with its key), a file that is not there, an unknown key, an inline secret, and `[local_cache]`
+/// along with `[hot_store]` and nothing a cache keeps.
 #[test]
 fn a_start_with_a_file_that_must_be_refused_says_why() {
     let files = Files::new("cfg-refused");
@@ -167,11 +134,10 @@ fn a_start_with_a_file_that_must_be_refused_says_why() {
     ]);
     let (code, out, err) = run(&args);
     assert_eq!((code, out.as_str()), (2, ""));
-    assert!(err.starts_with("tierstore: "), "{err}");
-    assert!(err.contains("--listen, --hot"), "{err}");
-    let (code, _, err) = run(&strings(&["--config", &path, "--print-config"]));
-    assert_eq!(code, 2);
-    assert!(err.contains("--print-config"), "{err}");
+    assert!(
+        err.starts_with("tierstore: --listen was removed: "),
+        "{err}"
+    );
     let (code, _, err) = run(&strings(&["--config", "/no/such/tierstore.toml"]));
     assert_eq!(code, 2);
     assert!(err.contains("/no/such/tierstore.toml"), "{err}");

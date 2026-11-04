@@ -1,4 +1,4 @@
-//! The `tierstore` binary as a process: its flags, its start line, its refusals, and its drain on
+//! The `tierstore` binary as a process: its flags and file, its start line, its refusals, and its drain on
 //! SIGTERM and SIGINT.
 
 use std::fs::Permissions;
@@ -18,7 +18,7 @@ use tierstore::server::build_info::{CAPABILITIES, COMMIT, VERSION};
 use tierstore_testkit::reaped::{Reaped, first_line, spawn};
 
 use crate::client::assert_refused;
-use crate::files::{BIN_KEY_ID, BIN_SECRET, Files, with};
+use crate::files::{BIN_KEY_ID, BIN_SECRET, Files, Tables};
 
 const BIN: &str = env!("CARGO_BIN_EXE_tierstore");
 
@@ -153,15 +153,12 @@ async fn until_draining(ready: &str) {
 #[tokio::test]
 async fn it_announces_serves_and_drains_on_sigterm() {
     let files = Files::new("bin-sigterm");
-    let flags = files.flags(&[
-        "--drain-lb-wait",
-        "3s",
-        "--reconcile-interval",
-        "100ms",
-        "--lease-ttl",
-        "1s",
-    ]);
-    let mut running = start(&flags);
+    let tables = Tables {
+        hot: "kind = \"memory\"\nbudget = 1048576\nreconcile_interval = \"100ms\"\nlease_ttl = \"1s\""
+            .to_owned(),
+        ..Tables::default()
+    };
+    let mut running = start(&files.flags_of(&tables, &["--drain-lb-wait", "3s"]));
     let store = running.store();
     let k = ObjectKey::new("cas/bin").unwrap();
     store
@@ -188,36 +185,86 @@ async fn it_drains_on_sigint_too() {
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that `--help` and `--version` exit 0 and print the flags and the version, and that
-/// no flags, a flag that is not known, and a value that is not valid exit 2 with a usage text.
+/// Asserts that `--help` and `--version` exit 0 and print the flags of a run and the version, that
+/// a start without `--config` exits 2 and says the settings are in a file, and that a flag that is
+/// not known and a value that is not valid exit 2 with a usage text.
 #[test]
 fn the_flags_are_parsed_and_refused_as_the_usage_says() {
     let (code, out, _) = run(&["--help".to_owned()]);
     assert_eq!(code, 0);
     let named = [
-        "--listen",
-        "--access-key-file",
+        "--config",
+        "--check-config",
+        "--capabilities",
+        "--drain-lb-wait",
         "--drain-deadline",
-        "--hot-bytes",
     ];
     for flag in named {
         assert!(out.contains(flag), "{flag}");
     }
+    assert!(!out.contains("--listen"), "{out}");
     let (code, out, _) = run(&["--version".to_owned()]);
     assert_eq!(code, 0);
     // The form the release check reads: the name, the build's version (the crate's, or the one
     // the release workflow gave the build), `+`, the commit.
     let version = format!("tierstore {VERSION}+{COMMIT}");
     assert_eq!(out.trim_end(), version);
-    let (code, _, err) = run(&[]);
-    assert_eq!(code, 2);
-    assert!(err.contains("--listen"), "{err}");
+    let (code, out, err) = run(&[]);
+    assert_eq!((code, out.as_str()), (2, ""));
+    assert_eq!(
+        err,
+        "tierstore: --config is needed: the settings are in a file (docs/configuration.md), and tierstore takes no flag for them\n"
+    );
     let files = Files::new("bin-flags");
     let mut unknown = files.flags(&[]);
     unknown.push("--no-such-flag".to_owned());
     assert_eq!(run(&unknown).0, 2);
     let bad_value = files.flags(&["--drain-lb-wait", "soon"]);
     assert_eq!(run(&bad_value).0, 2);
+}
+
+/// Asserts that a flag that used to hold a setting of the data path is refused with status 2, no
+/// output on stdout and a message that is exactly the one naming the key that replaces it, with or
+/// without a file, in either spelling of the flag, and that nothing is started.
+#[test]
+fn a_flag_that_went_is_refused_naming_the_key_that_replaces_it() {
+    let files = Files::new("bin-removed");
+    let config = files.flags(&[]);
+    let cases = [
+        (
+            vec!["--listen", "127.0.0.1:0"],
+            "tierstore: --listen was removed: the file given with --config holds it; declare an [[interface]] with type = \"s3\" and params port or addresses\n",
+        ),
+        (
+            vec!["--hot-bytes=1000"],
+            "tierstore: --hot-bytes was removed: the file given with --config holds it; set hot_store.budget\n",
+        ),
+        (
+            vec!["--oci-listen", "127.0.0.1:0"],
+            "tierstore: --oci-listen was removed: the file given with --config holds it; declare an [[interface]] with type = \"oci\" and params port or addresses\n",
+        ),
+        (
+            vec!["--print-config"],
+            "tierstore: --print-config was removed: there are no flags to print a file for; write the file (docs/configuration.md)\n",
+        ),
+    ];
+    for (flags, want) in cases {
+        let words: Vec<String> = flags.iter().map(|flag| (*flag).to_owned()).collect();
+        let (code, out, err) = run(&words);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (2, "", want),
+            "{flags:?}"
+        );
+        let mut with_file = config.clone();
+        with_file.extend(words);
+        let (code, out, err) = run(&with_file);
+        assert_eq!(
+            (code, out.as_str(), err.as_str()),
+            (2, "", want),
+            "{flags:?}"
+        );
+    }
 }
 
 /// Asserts that `--capabilities`, alone, exits 0 and prints one line for each capability of the
@@ -320,29 +367,52 @@ async fn the_start_line_and_the_gauge_name_the_commit() {
     assert_eq!(running.exit_code().await, Some(0));
 }
 
-/// Asserts that a start that cannot go on exits with status 1 and a reason that names the flag:
-/// a key file that others can read, a tier that names a bucket and says nothing of the store it
-/// is in, water marks out of order, an id that is not an id, and an address that is in use.
+/// Asserts that a start that cannot go on exits with status 1 and a reason that names the key:
+/// a tier that is a directory that cannot be made, water marks out of order, an id that is not an
+/// id, an address that is in use, and a key file that others can read.
 #[test]
 fn a_start_that_cannot_go_on_says_why() {
     let files = Files::new("bin-refused");
     let good = files.flags(&[]);
-    let (code, out, err) = run(&with(&good, "--hot", "s3://hot"));
+    // A directory under a file cannot be made.
+    let under_a_file = format!("{}/sub", files.key.display());
+    let tier = |name: &str| format!("kind = \"dir\"\npath = {under_a_file:?}\n{name}");
+    let hot = Tables {
+        hot: tier("budget = 1048576"),
+        ..Tables::default()
+    };
+    let (code, out, err) = run(&files.flags_of(&hot, &[]));
     assert_eq!((code, out.as_str()), (1, ""));
     assert!(err.starts_with("tierstore: "), "{err}");
-    assert!(err.contains("--hot"), "{err}");
-    let (code, _, err) = run(&with(&good, "--cold", "tape"));
+    assert!(err.contains("hot_store.kind"), "{err}");
+    let cold = Tables {
+        cold: tier(""),
+        ..Tables::default()
+    };
+    let (code, _, err) = run(&files.flags_of(&cold, &[]));
     assert_eq!(code, 1);
-    assert!(err.contains("--cold"), "{err}");
-    let (code, _, err) = run(&files.flags(&["--low-water", "90"]));
+    assert!(err.contains("cold_store.kind"), "{err}");
+    let marks = Tables {
+        hot: "kind = \"memory\"\nbudget = 1048576\nlow_water = 90".to_owned(),
+        ..Tables::default()
+    };
+    let (code, _, err) = run(&files.flags_of(&marks, &[]));
     assert_eq!(code, 1);
-    assert!(err.contains("--low-water"), "{err}");
-    let (code, _, err) = run(&with(&good, "--proxy-id", "a/b"));
+    assert!(err.contains("hot_store.low_water"), "{err}");
+    let id = Tables {
+        proxy_id: "a/b".to_owned(),
+        ..Tables::default()
+    };
+    let (code, _, err) = run(&files.flags_of(&id, &[]));
     assert_eq!(code, 1);
     assert!(err.contains("opening the proxy"), "{err}");
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = taken.local_addr().unwrap().to_string();
-    let (code, _, err) = run(&with(&good, "--listen", &addr));
+    let busy = Tables {
+        listen: vec![addr],
+        ..Tables::default()
+    };
+    let (code, _, err) = run(&files.flags_of(&busy, &[]));
     assert_eq!(code, 1);
     assert!(err.contains("binding"), "{err}");
     drop(taken);
@@ -360,14 +430,14 @@ async fn it_serves_a_read_only_key_from_a_json_file_beside_the_full_key() {
     let files = Files::new("bin-read-only");
     let json = r#"{"access_key_id": "AKIDREADER", "secret_access_key": "reader-secret"}"#;
     let reader_file = files.secret("reader.json", json);
-    let reader_flag = reader_file.display().to_string();
-    let flags = files.flags(&[
-        "--read-only-key-file",
-        reader_flag.as_str(),
-        "--drain-lb-wait",
-        "50ms",
-    ]);
-    let mut running = start(&flags);
+    let tables = Tables {
+        server: format!(
+            "read_only_key_files = [{:?}]",
+            reader_file.display().to_string()
+        ),
+        ..Tables::default()
+    };
+    let mut running = start(&files.flags_of(&tables, &["--drain-lb-wait", "50ms"]));
     let full = running.store();
     let reader = running.store_as("AKIDREADER", "reader-secret");
     let k = ObjectKey::new("cas/ro").unwrap();
@@ -395,20 +465,23 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
     let files = Files::new("bin-read-only-refused");
     let same = files.secret("same", &format!("{BIN_KEY_ID}\nanother-secret\n"));
     let flag = |path: &std::path::Path| {
-        let shown = path.display().to_string();
-        files.flags(&["--read-only-key-file", shown.as_str()])
+        let tables = Tables {
+            server: format!("read_only_key_files = [{:?}]", path.display().to_string()),
+            ..Tables::default()
+        };
+        files.flags_of(&tables, &[])
     };
     let (code, out, err) = run(&flag(same.as_path()));
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.starts_with("tierstore: "), "{err}");
     assert!(err.contains(BIN_KEY_ID), "{err}");
-    assert!(err.contains("--read-only-key-file"), "{err}");
+    assert!(err.contains("server.read_only_key_files"), "{err}");
     assert!(!err.contains("another-secret"), "{err}");
     let extra = r#"{"access_key_id": "A", "secret_access_key": "topsecret", "note": 1}"#;
     let typo = files.secret("typo", extra);
     let (code, _, err) = run(&flag(typo.as_path()));
     assert_eq!(code, 1);
-    assert!(err.contains("--read-only-key-file"), "{err}");
+    assert!(err.contains("server.read_only_key_files"), "{err}");
     assert!(!err.contains("topsecret"), "{err}");
     let open = files.secret("open", "READER\nreader-secret\n");
     std::fs::set_permissions(&open, Permissions::from_mode(0o644)).unwrap();
@@ -438,26 +511,18 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     let cold_key = files.secret("cold-key", "COLDKEY\ncold-secret\n");
     let hot_key = hot_key.display().to_string();
     let cold_key = cold_key.display().to_string();
-    let base = files.flags(&[
-        "--drain-lb-wait",
-        "50ms",
-        "--reconcile-interval",
-        "100ms",
-        "--lease-ttl",
-        "1s",
-        "--hot-endpoint",
-        hot.endpoint(),
-        "--hot-credentials-file",
-        hot_key.as_str(),
-        "--cold-endpoint",
-        cold.endpoint(),
-        "--cold-region",
-        "eu-west-1",
-        "--cold-credentials-file",
-        cold_key.as_str(),
-    ]);
-    let flags = with(&base, "--hot", "s3:hot-bucket");
-    let flags = with(&flags, "--cold", "s3:cold-bucket");
+    let tables = Tables {
+        hot: format!(
+            "kind = \"s3\"\nbucket = \"hot-bucket\"\nendpoint = \"{}\"\ncredentials_file = {hot_key:?}\nbudget = 1048576\nreconcile_interval = \"100ms\"\nlease_ttl = \"1s\"",
+            hot.endpoint()
+        ),
+        cold: format!(
+            "kind = \"s3\"\nbucket = \"cold-bucket\"\nendpoint = \"{}\"\nregion = \"eu-west-1\"\ncredentials_file = {cold_key:?}",
+            cold.endpoint()
+        ),
+        ..Tables::default()
+    };
+    let flags = files.flags_of(&tables, &["--drain-lb-wait", "50ms"]);
     let mut running = start(&flags);
     let store = running.store();
 
@@ -516,25 +581,24 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
 /// Asserts that a start whose cold tier is an S3 store that cannot be reached exits with status
 /// 1 (not 3, which is a store that answered wrongly: the unit restarts a status 1) before it
 /// serves anything: nothing on stdout (no start line), and a last line that says the tier is
-/// unreachable, names the cold tier as the flag gave it and says which check could not be run;
+/// unreachable, names the cold tier as the file gave it and says which check could not be run;
 /// the hot tier, a memory tier, was tested before it and said so.
 #[test]
 fn a_tier_that_cannot_be_reached_by_the_self_test_is_a_start_that_exits_1() {
     let files = Files::new("bin-selftest-refused");
     let secret = files.secret("cold-key", "ID\nsecret\n");
     let key = secret.display().to_string();
-    let described = files.flags(&[
-        "--cold-credentials-file",
-        key.as_str(),
-        "--cold-endpoint",
-        "http://127.0.0.1:1",
-        "--backend-check-wait",
-        "2s",
-    ]);
-    let flags = with(&described, "--cold", "s3:cold-bucket");
+    let tables = Tables {
+        server: "backend_check_wait = \"2s\"".to_owned(),
+        cold: format!(
+            "kind = \"s3\"\nbucket = \"cold-bucket\"\nendpoint = \"http://127.0.0.1:1\"\ncredentials_file = {key:?}"
+        ),
+        ..Tables::default()
+    };
+    let flags = files.flags_of(&tables, &[]);
     let (code, out, err) = run(&flags);
     assert_eq!((code, out.as_str()), (1, ""));
-    // The flag is read: a wait of 2 s allows the first pause (1 s) and not the second (2 s).
+    // The key is read: a wait of 2 s allows the first pause (1 s) and not the second (2 s).
     assert_eq!(err.matches("trying again in 1s").count(), 1, "{err}");
     assert!(!err.contains("trying again in 2s"), "{err}");
     assert!(
@@ -547,36 +611,47 @@ fn a_tier_that_cannot_be_reached_by_the_self_test_is_a_start_that_exits_1() {
     assert!(last.contains("create-only"), "{err}");
 }
 
-/// Asserts that a start with a tier that its flags do not describe exits with status 1 and a
-/// reason that names the flag: an S3 tier with no endpoint, one whose credentials file is not
-/// there, one whose bucket name is not a bucket name, and the flags of an S3 tier given for a
-/// tier that is not one.
+/// Asserts that a tier that its keys do not describe is refused: an S3 tier with no endpoint, and
+/// the keys of an S3 tier given for a tier that is not one, are a file that does not load (status
+/// 2, naming the key); a credentials file that is not there and a bucket name that is not a
+/// bucket name are a start that fails (status 1).
 #[test]
-fn an_s3_tier_that_its_flags_do_not_describe_is_a_start_that_says_why() {
+fn an_s3_tier_that_its_keys_do_not_describe_is_refused_saying_why() {
     let files = Files::new("bin-s3-refused");
     let secret = files.secret("hot-key", "ID\nsecret\n");
     let key = secret.display().to_string();
-    let no_endpoint = files.flags(&["--hot-credentials-file", key.as_str()]);
-    let s3 = with(&no_endpoint, "--hot", "s3:hot-bucket");
-    let (code, out, err) = run(&s3);
-    assert_eq!((code, out.as_str()), (1, ""));
+    let hot = |lines: &str| Tables {
+        hot: format!("budget = 1048576\n{lines}"),
+        ..Tables::default()
+    };
+    let no_endpoint = hot(&format!(
+        "kind = \"s3\"\nbucket = \"hot-bucket\"\ncredentials_file = {key:?}"
+    ));
+    let (code, out, err) = run(&files.flags_of(&no_endpoint, &[]));
+    assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.starts_with("tierstore: "), "{err}");
-    assert!(err.contains("--hot-endpoint"), "{err}");
+    assert!(err.contains("hot_store.endpoint: it is needed"), "{err}");
 
-    let described = files.flags(&[
-        "--hot-credentials-file",
-        key.as_str(),
-        "--hot-endpoint",
-        "http://127.0.0.1:1",
-    ]);
-    let flags = with(&described, "--hot", "s3:hot-bucket");
-    let (code, _, err) = run(&with(&flags, "--hot-credentials-file", "/no/such/file"));
+    let described = |bucket: &str, credentials: &str| {
+        hot(&format!(
+            "kind = \"s3\"\nbucket = \"{bucket}\"\nendpoint = \"http://127.0.0.1:1\"\ncredentials_file = \"{credentials}\""
+        ))
+    };
+    let missing = described("hot-bucket", "/no/such/file");
+    let (code, _, err) = run(&files.flags_of(&missing, &[]));
     assert_eq!(code, 1);
-    assert!(err.contains("--hot-credentials-file"), "{err}");
-    let (code, _, err) = run(&with(&flags, "--hot", "s3:Not_A_Bucket"));
+    assert!(err.contains("hot_store.credentials_file"), "{err}");
+    let named = described("Not_A_Bucket", &key);
+    let (code, _, err) = run(&files.flags_of(&named, &[]));
     assert_eq!(code, 1);
     assert!(err.contains("bucket name"), "{err}");
-    let (code, _, err) = run(&with(&flags, "--hot", "memory"));
-    assert_eq!(code, 1);
-    assert!(err.contains("s3:<bucket>"), "{err}");
+    let memory = hot(&format!(
+        "kind = \"memory\"\nendpoint = \"http://127.0.0.1:1\"\ncredentials_file = {key:?}"
+    ));
+    let (code, _, err) = run(&files.flags_of(&memory, &[]));
+    assert_eq!(code, 2);
+    assert!(
+        err.contains("hot_store.endpoint: not for kind \"memory\""),
+        "{err}"
+    );
 }

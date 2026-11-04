@@ -1,6 +1,6 @@
 //! The `[[policy]]` tables of the configuration file and the rules every shape applies to them.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::config::{ConfigError, invalid};
 use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
@@ -9,7 +9,7 @@ use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
 const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// `[[policy]]`: what is done with the keys under a prefix.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Policy {
     /// The keys it is about: empty for all the rest, or ending in `/`.
