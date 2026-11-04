@@ -10,7 +10,6 @@ const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// `[[policy]]`: what is done with the keys under a prefix.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct Policy {
     /// The keys it is about: empty for all the rest, or ending in `/`.
     pub prefix: String,

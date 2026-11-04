@@ -120,16 +120,18 @@ fn a_file_is_read_from_its_path_and_its_refusals_name_it() {
     assert!(matches!(missing, ConfigError::Read { .. }), "{missing}");
     assert!(missing.to_string().contains("none.toml"), "{missing}");
     let bad = dir.path().join("bad.toml");
-    std::fs::write(&bad, golden_with("[cold_store]", "[cold_store]\nwhat = 1")).unwrap();
+    std::fs::write(&bad, golden_with("[server]", "[server]\nslot = \"x\"")).unwrap();
     let why = load(&bad, DEFAULTS).unwrap_err().to_string();
     assert!(why.contains("bad.toml"), "{why}");
-    assert!(why.contains("what"), "{why}");
+    assert!(why.contains("slot"), "{why}");
 }
 
-/// Asserts that a key or a table the format does not have is refused with its name, whichever
-/// table it is in: the file is a closed set.
+/// Asserts that a key or a table this release does not have, in any table of the file, does not
+/// refuse the file: it loads to the settings the file makes without the key, so that a file
+/// written by a later release starts here. A key it has, given a value of the wrong type, is still
+/// refused with its name, and so are a file that is not TOML and one that lacks a needed key.
 #[test]
-fn an_unknown_key_or_table_is_refused_by_name() {
+fn an_unknown_key_or_table_is_ignored_and_a_known_one_is_still_checked() {
     let cases = [
         golden_with("[server]", "[server]\nbogus = 1"),
         golden_with("[hot_store]", "[hot_store]\nbogus = 1"),
@@ -139,9 +141,9 @@ fn an_unknown_key_or_table_is_refused_by_name() {
         format!("{GOLDEN}\n[[policy]]\nprefix = \"a/\"\nbogus = 1\n"),
         format!("bogus = 1\n{GOLDEN}"),
     ];
+    let plain = from_text(GOLDEN, DEFAULTS).unwrap();
     for text in cases {
-        let why = refusal(&text);
-        assert!(why.contains("bogus"), "{why}");
+        assert_eq!(from_text(&text, DEFAULTS).unwrap(), plain, "{text}");
     }
     let why = refusal(&golden_with(
         "listen                = \"192.0.2.10:9300\"",
@@ -579,7 +581,6 @@ fn an_oci_table_is_refused_as_the_flags_are() {
             format!("{listen}connection_lifetime = 3600"),
             "connection_lifetime",
         ),
-        (format!("{listen}bogus = 1"), "bogus"),
         (format!("{listen}tls_key = \"/k\""), "oci.tls_key: a secret"),
         ("listen = \"nowhere\"".to_owned(), "listen"),
     ];

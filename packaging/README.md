@@ -842,8 +842,9 @@ there or cannot be used is exit status 2 under `--check-config`, where a start e
 
 Each of these exits with status 2 and names the file and the key:
 
-- a key or a table the format does not have (the file is a closed set), and a value of the wrong
-  type;
+- a value of the wrong type in a key the release has (a key or a table it does not have is not
+  refused: it is warned about and ignored, see "Keys this release does not know" in the
+  configuration page);
 - a key that holds a secret: keys and credentials are paths of files, whose names end in `_file`
   or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the
   like are refused wherever they are;

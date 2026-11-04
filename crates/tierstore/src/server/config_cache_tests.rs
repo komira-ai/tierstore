@@ -651,8 +651,8 @@ fn a_build_node_takes_lists_of_addresses() {
 
 /// Asserts that a build node's `[oci]` table is refused exactly as a storage node's is: for each
 /// table below the build node's message equals the storage node's and names the key, so a
-/// certificate without a key, a key without a certificate, any key without `listen`, a count of
-/// zero and a key the table does not have are refused by the one set of rules.
+/// certificate without a key, a key without a certificate, any key without `listen` and a count of
+/// zero are refused by the one set of rules.
 #[test]
 fn a_build_node_oci_table_is_refused_as_a_storage_nodes_is() {
     let listen = "listen = \"127.0.0.1:5000\"\n";
@@ -686,7 +686,6 @@ fn a_build_node_oci_table_is_refused_as_a_storage_nodes_is() {
             format!("{listen}max_connections = 0"),
             "oci.max_connections",
         ),
-        (format!("{listen}bogus = 1"), "bogus"),
     ];
     for (oci, want) in cases {
         let build = refusal(&format!("{LEAST}\n[oci]\n{oci}\n"));

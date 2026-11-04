@@ -202,6 +202,7 @@ mod config_cache;
 mod config_combined;
 mod config_policy;
 mod config_print;
+mod config_unknown;
 mod door;
 mod drain;
 mod front;

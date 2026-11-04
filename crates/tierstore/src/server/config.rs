@@ -54,6 +54,7 @@ use super::cli::{
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_policy::{Policy, check_policies};
+use super::config_unknown::announce_unknown_keys;
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
@@ -146,8 +147,8 @@ pub enum ConfigError {
         /// What the system said.
         source: std::io::Error,
     },
-    /// The file is not TOML, or has a key or a table it must not (the message names it), or lacks
-    /// one it must, or a value of the wrong type. The message holds the place and the key, never
+    /// The file is not TOML, or lacks a key it must have, or has a value of the wrong type (the
+    /// message names the key). The message holds the place and the key, never
     /// the line or the value: the line may hold a secret, and the message goes to a journal.
     #[error("line {line}, column {column}: {what}")]
     Syntax {
@@ -333,7 +334,6 @@ pub(super) enum Kind {
 
 /// The whole file.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct File {
     pub server: ServerTable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,7 +351,6 @@ pub(super) struct File {
 
 /// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
     /// One address, or a list of them.
     pub listen: Addrs,
@@ -387,7 +386,6 @@ pub(super) struct ServerTable {
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
 /// two has (the others are refused in the other).
 #[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct TierTable {
     pub kind: Kind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -435,7 +433,6 @@ pub(super) struct TierTable {
 /// `[oci]`: the read-only OCI front. The table is the front: `listen` is needed in it, and the
 /// other keys are refused without it, as the `--oci-*` flags are.
 #[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct OciTable {
     /// One address, or a list of them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -546,8 +543,8 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
 
 /// Whether a key's name says it holds a secret: it has a word of one, or is a key itself and
 /// not the path of a file. A hint for a message that says what to do, not a gate: what keeps a
-/// secret out of the file is that an unknown key is refused, and the name of a known key that
-/// takes a path (`credentials_file`) cannot tell a path from a secret by its value. The messages
+/// secret out of the file is that `find_secret` looks at every key, and the name of a known key
+/// that takes a path (`credentials_file`) cannot tell a path from a secret by its value. The messages
 /// of the file never repeat a value, so a secret that is given anyway is not echoed.
 fn looks_secret(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
@@ -1051,10 +1048,12 @@ pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError
             return Err(ConfigError::Read { path, source });
         }
     };
-    settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
+    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
         path: path.to_owned(),
         source: Box::new(source),
-    })
+    })?;
+    announce_unknown_keys(&text);
+    Ok(settings)
 }
 
 /// `message` with the name of each flag in it replaced by the key that stands for it in the
