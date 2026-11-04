@@ -18,7 +18,7 @@ use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::listen::{bind_all, local_addrs};
 use super::oci::{OciFront, OciListener, OciMode};
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
 
 /// How long a process that does not hold the `--lock-file` waits between two tries of it.
@@ -123,13 +123,17 @@ pub async fn run_serving(
     let halt = Arc::new(Notify::new());
     let halting = Arc::clone(&halt);
     let serving = async move {
-        let drained = server.serve_all(listeners).await;
-        // The proxy beats until its drain is over: its in-flight requests are finished or cut.
-        beating.stop_heartbeat().await;
+        // The proxy beats until its drain is over: the in-flight requests of both fronts are
+        // finished or cut.
+        let ended = serve_fronts(
+            server.serve_all(listeners),
+            serve_oci(oci, oci_stopped),
+            beating.stop_heartbeat(),
+        )
+        .await;
         halting.notify_one();
-        drained
+        ended
     };
-    let oci_serving = serve_oci(oci, oci_stopped);
     let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
     let interval = cli.reconcile_interval;
     let reconciling = async move {
@@ -138,7 +142,7 @@ pub async fn run_serving(
             None => reconcile(reconciler, interval, halt).await,
         }
     };
-    let (drained, (), oci_cut) = tokio::join!(serving, reconciling, oci_serving);
+    let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);
     watcher.abort();
     eprint!("{}", cut_note(drained));
     eprint!("{}", oci_cut_note(oci_cut));

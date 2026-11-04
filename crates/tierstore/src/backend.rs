@@ -527,12 +527,12 @@ pub trait Backend: Send + Sync {
     ///
     /// # Errors
     /// As [`Backend::get`]. [`Error::Unsupported`] unless the backend overrides this call.
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         _key: &str,
         _range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        Err(no_reservations("get_marked"))
+        Err(no_reservations("get_tagged"))
     }
 
     /// As [`Backend::get`], for a read that is given as the chunks of the bytes: the bytes of

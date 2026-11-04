@@ -172,7 +172,7 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
 ///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
+///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
 ///   made for it. The hot tag is the one the create-only write itself returns
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
@@ -543,7 +543,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
-        match self.cold.get_marked(key, range).await {
+        match self.cold.get_tagged(key, range).await {
             Ok((_, true, _)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(Error::NotFound(key.to_owned()))

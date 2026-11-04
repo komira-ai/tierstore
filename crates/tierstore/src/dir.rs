@@ -123,7 +123,7 @@ impl SyncDir for FsyncDir {
 /// - A streamed read ([`Backend::get_stream`]) opens the file once and reads the range in chunks of
 ///   at most 64 KiB as they are asked for, so that a reader holds one chunk and not the object;
 ///   a replacement or a delete of the name meanwhile leaves it on the file it opened. A read with
-///   the mark ([`Backend::get_marked`]) takes the bytes and the mark from the same open file.
+///   the mark ([`Backend::get_tagged`]) takes the bytes and the mark from the same open file.
 /// - A streamed replacement ([`Backend::put_stream_if_match`]) writes the chunks to a temporary
 ///   file as they arrive, outside the lock, and then, under the lock and the tag check of
 ///   [`Backend::put_if_match`], moves the file over the object and syncs the directory. A body
@@ -825,9 +825,9 @@ impl Backend for DirBackend {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        Ok(self.get_marked(key, range).await?.0)
+        Ok(self.get_tagged(key, range).await?.0)
     }
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,

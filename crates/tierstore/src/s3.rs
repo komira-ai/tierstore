@@ -44,7 +44,7 @@
 //!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
 //!   metadata. A write is sent once: one the store answers with 409 (see below) is
 //!   [`Error::Unavailable`], and the caller reads the key to see whether its write landed. A
-//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_marked` is
+//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_tagged` is
 //!   one GET, whole or ranged, and the mark and the content tag are the metadata header and the
 //!   `ETag` (without its quotes) of that answer, so the bytes, the mark and the tag are those of
 //!   one object whatever is written to the key meanwhile; an answer without an `ETag` is an
@@ -657,7 +657,7 @@ impl Backend for S3Backend {
         self.read_range(&object, key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,

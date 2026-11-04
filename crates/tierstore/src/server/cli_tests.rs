@@ -1,6 +1,6 @@
 //! The flags of the binary: their defaults, parsing and help. The settings made of them and the
-//! skipped checks and checks run before a start are in the two modules below. The reconciler's loop
-//! is tested in `cli_reconcile_tests`.
+//! checks run before a start are in the two modules below. The reconciler's loop is tested in
+//! `cli_reconcile_tests`.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
