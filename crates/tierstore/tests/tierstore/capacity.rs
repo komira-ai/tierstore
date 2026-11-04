@@ -1,9 +1,10 @@
 //! The hot tier's capacity as the proxy sees it: the critical mark, a full hot tier, and the
 //! usage the reconciler publishes.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, ByteRange, Error, Op};
+use tierstore::{Backend, ByteRange, Error, Mono, Op};
 use tokio::time::Instant;
 
 use crate::support::{
@@ -81,13 +82,18 @@ async fn a_put_to_the_cold_tier_needs_the_hot_tier_to_say_it_lacks_the_key() {
     assert_absent(&*rig.cold_mem, "k").await;
 }
 
-/// Asserts that a usage object that is missing, that is not readable, or that is older than
-/// `usage_stale_after` counts as not full (the put goes to the hot tier), and that a fresh
-/// usage at the budget is believed.
+/// Asserts that a usage object that is missing, that is not readable, or that has stood unchanged
+/// for longer than `usage_stale_after` on the proxy's own monotonic clock counts as not full (the
+/// put goes to the hot tier), that a usage at the budget is believed while it is within the
+/// limit (and at the limit itself), and that a rewritten object is believed again. The clock of
+/// the stores, which stamps the `time` of the object, is never read.
 #[tokio::test(start_paused = true)]
 async fn a_usage_that_is_missing_unreadable_or_stale_counts_as_not_full() {
     let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
+    let mono = Arc::new(Mono::new());
+    let mut config = rig.config("p1", 1000);
+    config.mono = mono.clone();
+    let proxy = rig.open(config).await.unwrap();
     proxy.put("a", body("missing")).await.unwrap();
 
     let garbage = body("not json");
@@ -96,14 +102,19 @@ async fn a_usage_that_is_missing_unreadable_or_stale_counts_as_not_full() {
 
     set_usage(&rig, 1000, 0).await;
     rig.clock.set(100_000);
+    proxy.put("e", body("within")).await.unwrap();
+    assert_eq!(read(&*rig.cold_mem, "e").await, body("within"));
+    mono.advance(Duration::from_secs(30));
+    proxy.put("f", body("at the limit")).await.unwrap();
+    assert_eq!(read(&*rig.cold_mem, "f").await, body("at the limit"));
+    mono.advance(Duration::from_millis(1));
     proxy.put("c", body("stale")).await.unwrap();
     for key in ["a", "b", "c"] {
         assert_absent(&*rig.cold_mem, key).await;
         assert!(rig.hot_mem.head(key).await.is_ok());
     }
 
-    set_usage(&rig, 1000, 100_000).await;
-    rig.clock.set(110_000);
+    set_usage(&rig, 1000, 1).await;
     proxy.put("d", body("fresh")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "d").await, body("fresh"));
     assert_absent(&*rig.hot_mem, "d").await;

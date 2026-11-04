@@ -151,7 +151,8 @@
 //!
 //! `GET /usagez`, for alerting and not for a load balancer, is 200 with the age of the usage
 //! object that the reconciler publishes (`_tiering/usage`), and 503 with the reason once that
-//! object is older than [`ServerConfig::usage_stale_after`]. The puts ignore a stale usage, as if
+//! object has stood unchanged for longer than [`ServerConfig::usage_stale_after`], by the clock of
+//! this process (no time that another machine wrote is read). The puts ignore a stale usage, as if
 //! the hot tier were not full, so a stopped reconciler would otherwise show nowhere. A usage
 //! object that is missing is judged by the time the server has run, so that a server that starts
 //! before the first pass of the reconciler is 200 for that long. `/readyz` does not look at the
@@ -451,7 +452,8 @@ pub struct ServerConfig {
     /// binary sets it from `write_through` in `[local_cache]`, the setting that also lets the
     /// cache send the writes on.
     pub cache_writes: bool,
-    /// The age of the usage object past which `/usagez` says 503. A server that has run this
+    /// How long the usage object may stand unchanged, by the clock of the process, before
+    /// `/usagez` says 503. A server that has run this
     /// long without finding any usage object is judged the same way. Longer than the lease and
     /// the pass interval of the reconciler, so that a takeover of the lease does not show.
     pub usage_stale_after: Duration,

@@ -22,7 +22,7 @@ pub(super) enum Verdict {
 }
 
 /// How the cold tier came to hold the hot object's bytes, or not.
-enum Replicated {
+pub(super) enum Replicated {
     /// The cold tier holds them now, or there was nothing to copy.
     Same,
     /// The cold tier holds another object under the key.
@@ -135,7 +135,7 @@ impl EntryReconciler {
 
     /// Refuses a destructive step or a publish to the cold tier when less than the margin of the
     /// lease is left.
-    fn require_lease(&self) -> Result<(), Error> {
+    pub(super) fn require_lease(&self) -> Result<(), Error> {
         if self.lease.margin_ok() {
             return Ok(());
         }
@@ -152,6 +152,7 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return Ok(Replicated::Same),
             Err(error) => return Err(error),
         };
+        self.tally.copied(hot.size, hot.modified);
         match self.cold.head(key).await {
             Ok(cold) => self.compare(key, &hot, &cold).await,
             Err(Error::NotFound(_)) => self.publish(key, &hot).await,
@@ -169,15 +170,35 @@ impl EntryReconciler {
             Err(error) => return Err(error),
         };
         match self.cold.put_stream(key, Some(hot.size), body).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => Ok(Replicated::Same),
+            Ok(()) => {
+                // The tag of the copy is read to be remembered; a copy that cannot be read back
+                // just has no record, and an eviction compares.
+                if let Ok(cold) = self.cold.head(key).await {
+                    self.remember(key, &hot.tag, &cold.tag);
+                }
+                Ok(Replicated::Same)
+            }
+            Err(Error::AlreadyExists(_)) => Ok(Replicated::Same),
             Err(error) => Err(error),
         }
+    }
+
+    /// Records the tags of the two objects of `key`, which hold the same bytes, for the fast path
+    /// of the eviction.
+    fn remember(&self, key: &str, hot: &str, cold: &str) {
+        let limit = self.config.tag_record_limit;
+        self.tags().record(key, hot, cold, limit);
     }
 
     /// Whether the cold object has the bytes of the hot one, read in ranges of at most
     /// [`EntryReconcilerConfig::compare_range`](super::EntryReconcilerConfig) bytes, so that
     /// neither is held whole; the read ends at the first difference.
-    async fn compare(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Replicated, Error> {
+    pub(super) async fn compare(
+        &self,
+        key: &str,
+        hot: &Meta,
+        cold: &Meta,
+    ) -> Result<Replicated, Error> {
         if hot.size != cold.size {
             return Ok(Replicated::Differs);
         }
@@ -192,6 +213,7 @@ impl EntryReconciler {
             }
             offset += range.size();
         }
+        self.remember(key, &hot.tag, &cold.tag);
         Ok(Replicated::Same)
     }
 

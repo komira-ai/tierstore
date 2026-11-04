@@ -1,6 +1,8 @@
 //! `/usagez`, `/readyz` and the age of the usage object that the reconciler publishes. The time
 //! is the clock of the rig, set by hand; nothing waits.
 
+use std::time::Duration;
+
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, StatusCode};
@@ -31,7 +33,15 @@ async fn readyz(rig: &Rig) -> Reply {
     probe(rig, "/readyz").await
 }
 
-/// Publishes a usage object as the reconciler does, stamped at `time`.
+/// Moves the time on by `millis` milliseconds, on the clock of the stores and on the monotonic
+/// clock of the proxy, which is the one that judges how long the usage has stood unchanged.
+fn advance(rig: &Rig, millis: u64) {
+    rig.hot_mem.clock().advance(millis);
+    rig.mono.advance(Duration::from_millis(millis));
+}
+
+/// Publishes a usage object as the reconciler does, stamped `time` (a number that differs from the
+/// one before, so that the object is a rewritten one).
 async fn publish(rig: &Rig, time: u64) {
     let json = format!(r#"{{"hot_bytes":0,"copy_lag":0,"time":{time}}}"#);
     let _ = rig.hot_mem.delete("_tiering/usage").await;
@@ -41,28 +51,28 @@ async fn publish(rig: &Rig, time: u64) {
         .unwrap();
 }
 
-/// Asserts that a usage published within the limit leaves `/usagez` at 200 with its age, and one
-/// published longer ago than the limit makes it 503 with a reason that says it is stale, and that
-/// a fresh publication makes it 200 again. It would catch a `/usagez` that does not look at the
-/// usage, an off-by-one at the limit, and one that stays 503 after the reconciler is back.
+/// Asserts that a usage that has stood unchanged within the limit (by the proxy's own monotonic
+/// clock) leaves `/usagez` at 200 with its age, and one that has not changed for longer than the
+/// limit makes it 503 with a reason that says it is stale, and that a rewritten object makes it
+/// 200 again. It would catch a `/usagez` that does not look at the usage, an off-by-one at the
+/// limit, and one that stays 503 after the reconciler is back.
 #[tokio::test(start_paused = true)]
-async fn usagez_is_503_while_the_usage_is_older_than_the_limit() {
+async fn usagez_is_503_while_the_usage_has_not_changed_for_longer_than_the_limit() {
     let rig = Rig::new(MEBIBYTE).await;
-    let clock = rig.hot_mem.clock();
-    publish(&rig, clock.now()).await;
+    publish(&rig, 1).await;
     let fresh = usagez(&rig).await;
     assert_eq!(fresh.status, StatusCode::OK);
     assert!(fresh.body.contains("published 0s ago"), "{}", fresh.body);
-    clock.advance(LIMIT_MS);
+    advance(&rig, LIMIT_MS);
     let edge = usagez(&rig).await;
     assert_eq!(edge.status, StatusCode::OK, "{}", edge.body);
-    clock.advance(1_000);
+    advance(&rig, 1_000);
     let stale = usagez(&rig).await;
     assert_eq!(stale.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(stale.body.contains("stale"), "{}", stale.body);
     assert!(stale.body.contains("121s"), "{}", stale.body);
     assert!(stale.body.contains("120s"), "{}", stale.body);
-    publish(&rig, clock.now()).await;
+    publish(&rig, 2).await;
     assert_eq!(usagez(&rig).await.status, StatusCode::OK);
 }
 
@@ -72,9 +82,8 @@ async fn usagez_is_503_while_the_usage_is_older_than_the_limit() {
 #[tokio::test(start_paused = true)]
 async fn readyz_stays_200_when_the_usage_is_stale_or_missing() {
     let rig = Rig::new(MEBIBYTE).await;
-    let clock = rig.hot_mem.clock();
-    publish(&rig, clock.now()).await;
-    clock.advance(10 * LIMIT_MS);
+    publish(&rig, 1).await;
+    advance(&rig, 10 * LIMIT_MS);
     assert_eq!(usagez(&rig).await.status, StatusCode::SERVICE_UNAVAILABLE);
     let stale = readyz(&rig).await;
     assert_eq!(stale.status, StatusCode::OK);
@@ -100,7 +109,7 @@ async fn missing_usage_is_ok_within_the_grace_and_not_after() {
     let missing = usagez(&rig).await;
     assert_eq!(missing.status, StatusCode::SERVICE_UNAVAILABLE);
     assert!(missing.body.contains("missing"), "{}", missing.body);
-    publish(&rig, clock.now()).await;
+    publish(&rig, 1).await;
     assert_eq!(usagez(&rig).await.status, StatusCode::OK);
 }
 
@@ -109,8 +118,7 @@ async fn missing_usage_is_ok_within_the_grace_and_not_after() {
 #[tokio::test(start_paused = true)]
 async fn the_drain_is_reported_by_readyz_and_an_unreadable_usage_counts_as_missing() {
     let rig = Rig::new(MEBIBYTE).await;
-    let clock = rig.hot_mem.clock();
-    publish(&rig, clock.now()).await;
+    publish(&rig, 1).await;
     rig.server.begin_drain();
     let draining = readyz(&rig).await;
     assert_eq!(draining.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -133,9 +141,8 @@ async fn the_drain_is_reported_by_readyz_and_an_unreadable_usage_counts_as_missi
 #[tokio::test(start_paused = true)]
 async fn a_stale_usage_does_not_refuse_puts() {
     let rig = Rig::new(MEBIBYTE).await;
-    let clock = rig.hot_mem.clock();
-    publish(&rig, clock.now()).await;
-    clock.advance(LIMIT_MS + 1_000);
+    publish(&rig, 1).await;
+    advance(&rig, LIMIT_MS + 1_000);
     assert_eq!(usagez(&rig).await.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(rig.put("k", b"v").await.status, StatusCode::OK);
 }

@@ -99,6 +99,9 @@ pub(super) struct Rig {
     pub(super) cold_mem: Arc<MemoryBackend>,
     pub(super) hot: Arc<FaultyBackend>,
     pub(super) cold: Arc<FaultyBackend>,
+    /// The monotonic clock of the proxy, which judges how long the usage object has stood
+    /// unchanged; moved by hand.
+    pub(super) mono: Arc<crate::Mono>,
     pub(super) config: ServerConfig,
     pub(super) server: Arc<Server>,
 }
@@ -120,6 +123,8 @@ impl Rig {
         let mut proxy_config = ProxyConfig::new("p1", budget, clock.clone());
         proxy_config.linger = Duration::from_millis(1);
         proxy_config.usage_refresh = Duration::ZERO;
+        let mono = Arc::new(crate::Mono::new());
+        proxy_config.mono = mono.clone();
         let proxy = Proxy::open(hot.clone(), cold.clone(), proxy_config).await;
         let proxy = Arc::new(proxy.expect("a proxy"));
         let backend: Arc<dyn Backend> = proxy.clone();
@@ -133,6 +138,7 @@ impl Rig {
             cold_mem,
             hot,
             cold,
+            mono,
             config,
             server,
         }
