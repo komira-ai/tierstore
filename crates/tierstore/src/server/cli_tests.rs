@@ -363,7 +363,8 @@ fn the_put_permit_wait_of_a_file_reaches_the_built_server() {
     front.gc_key_file = Vec::new();
     front.scoped_key_file = Vec::new();
     front.grant_key_file = Vec::new();
-    let server = crate::server::front::server_config(&front, Arc::new(crate::SystemClock))
+    front.tls = crate::server::front::S3Tls::default();
+    let server = crate::server::front::server_config(&front, Arc::new(crate::SystemClock), false)
         .expect("a server");
     assert_eq!(server.put_permit_wait, Duration::from_secs(25));
 }

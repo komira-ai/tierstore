@@ -63,8 +63,10 @@
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. No request path asks
-//!   for either yet.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. Only the heartbeat
+//!   calls use [`Bounded`]; the put on a journal entry (see [`Entries`]), once the format is
+//!   active, checks the [`Deadline`] to be admitted, to be acknowledged and to clean up. The
+//!   journal path of a put, a delete and a read uses neither yet.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
@@ -78,7 +80,7 @@
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
+//!   body is an [`Entry`]. So far only the puts of a [`Proxy`] whose format is active call them.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

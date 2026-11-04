@@ -44,6 +44,10 @@ pub(crate) fn dns(name: &str) -> SanType {
     SanType::DnsName(name.try_into().expect("a DNS name"))
 }
 
+pub(crate) fn email(text: &str) -> SanType {
+    SanType::Rfc822Name(text.try_into().expect("an e-mail address"))
+}
+
 /// The files of a leaf.
 pub(crate) struct Leaf {
     pub(crate) cert: PathBuf,

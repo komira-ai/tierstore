@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 
 use serde::de::{self, DeserializeOwned, Deserializer, Error as _, Visitor};
 
-use super::config::{File, OciTable, ServerTable, TierTable};
+use super::config::{File, ServerTable, TierTable};
 use super::config_cache::LocalCacheTable;
+use super::config_oci::OciTable;
 use super::config_policy::Policy;
 
 /// A deserializer that is asked for a struct and answers with the names of its fields, which is
