@@ -553,6 +553,18 @@ pub trait Backend: Send + Sync {
         Ok(futures::stream::once(std::future::ready(Ok(whole))).boxed())
     }
 
+    /// Whether `a` and `b`, two HEADs of one key, describe one version of the object. A reader
+    /// that holds to a version while it reads (a cache filling from this backend) asks it of the
+    /// backend the HEADs came from, since only the backend knows what its tags stand for.
+    ///
+    /// The provided implementation is [`Meta::same_content`]: the same size and tag. A backend
+    /// whose tag of an object moves though the object does not (the proxy of two tiers, whose tag
+    /// is the tag of the tier that answers) overrides it; a wrapper over another backend forwards
+    /// the call.
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        a.same_content(b)
+    }
+
     /// Opens a read in one call: the object's [`Meta`] and the bytes of `span` of it (all of it
     /// without one) as a body that is read chunk by chunk, so that a reader that needs both (the
     /// S3 front answers with the headers of the object before the first byte) makes one request

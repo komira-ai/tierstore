@@ -41,11 +41,13 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::{Backend, Clock, SystemClock};
+use crate::{Backend, Clock, Proxy, SystemClock};
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{Addresses, Error, S3Flags, oci_setup_of, open_tier, probe_run_id, signals};
-use super::cli_serve::{bind_oci, bind_s3};
+use super::cli::{
+    Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id, signals,
+};
+use super::cli_serve::{bind_oci, bind_s3, cut_note};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
@@ -54,8 +56,8 @@ use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
 use super::oci::OciListener;
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
-use super::{Drained, Server};
+use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
+use super::{Drained, Server, ServerConfig};
 
 /// How often the eviction pass runs beside the server.
 pub(super) const PASS_INTERVAL: Duration = Duration::from_secs(10);
@@ -102,7 +104,7 @@ pub(super) fn unjudged_warning(why: &str, path: &Path) -> String {
     )
 }
 
-/// Opens the cache in `config`, checks its file system, and says on stderr what
+/// Opens the cache in `config`, checks its file system and the upstream, and says on stderr what
 /// the start found.
 pub(super) async fn open(
     config: &CacheConfig,
@@ -159,7 +161,8 @@ pub(super) async fn open(
 /// Serves `cache` until `stop` resolves, and then drains.
 ///
 /// # Errors
-/// A file system that fails the check of the start, or an address that cannot be bound.
+/// A file system or an upstream that fails the check of the start, or an address that cannot be
+/// bound.
 pub(super) async fn serve_cache(
     settings: &CacheSettings,
     upstream: Arc<dyn Backend>,
@@ -177,49 +180,110 @@ pub(super) async fn serve_cache(
     if settings.cache.write_through {
         config.cache_writes = true;
     }
+    let fronts = Fronts {
+        listen: &settings.front.listen,
+        lb_wait: settings.front.drain_lb_wait,
+        scrub_rate: settings.scrub_rate,
+        scrub_min_round: settings.scrub_min_round,
+        beside_halt: Arc::new(Notify::new()),
+        beating: None,
+    };
+    serve_front(
+        cache,
+        config,
+        oci,
+        fronts,
+        stop,
+        ready,
+        std::future::ready(()),
+    )
+    .await
+}
+
+/// What [`serve_front`] needs besides the cache and the front's own settings.
+pub(super) struct Fronts<'a> {
+    /// The addresses of the S3 front.
+    pub(super) listen: &'a [std::net::SocketAddr],
+    /// How long the drain waits for the load balancer to notice.
+    pub(super) lb_wait: Duration,
+    /// The bytes the scrub reads at each tick, or `None` for no scrub.
+    pub(super) scrub_rate: Option<u64>,
+    /// The shortest time one round of the scrub takes.
+    pub(super) scrub_min_round: Duration,
+    /// Notified when the fronts have drained, for the loop the caller runs `beside` the cache.
+    pub(super) beside_halt: Arc<Notify>,
+    /// The proxy of a storage node, whose heartbeat is stopped when both fronts are done, so that
+    /// it beats until the in-flight requests of the S3 front and of the OCI front are finished or
+    /// cut.
+    pub(super) beating: Option<Arc<Proxy>>,
+}
+
+/// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
+/// the cache and `beside`, until `stop` resolves, and then drains. It is the one serving of a
+/// cache, whatever its upstream is: a store of a build node or the proxy of a storage node.
+/// `beside` is a loop of the caller's that runs until `fronts.beside_halt` is notified.
+///
+/// # Errors
+/// An address that cannot be bound.
+pub(super) async fn serve_front(
+    cache: LocalCache,
+    mut config: ServerConfig,
+    oci: Option<OciSetup>,
+    fronts: Fronts<'_>,
+    stop: impl Future<Output = ()> + Send + 'static,
+    ready: impl FnOnce(Addresses),
+    beside: impl Future<Output = ()>,
+) -> Result<Drained, Error> {
     config.cache = Some(cache.clone());
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    let listeners = bind_cache_s3(&settings.front.listen)?;
+    let listeners = bind_cache_s3(fronts.listen)?;
     let oci = bind_oci(oci, backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
-    let lb_wait = settings.front.drain_lb_wait;
-    let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, lb_wait);
+    let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
     // One Notify for each loop: `notify_one` wakes one waiter, and keeps the wake for a loop that
     // is not waiting just now.
-    let halt = Arc::new(Notify::new());
-    let halting = Arc::clone(&halt);
-    let lock_halt = Arc::new(Notify::new());
-    let lock_halting = Arc::clone(&lock_halt);
-    let halt_scrub = Arc::new(Notify::new());
-    let scrub_halting = Arc::clone(&halt_scrub);
+    let halts: [Arc<Notify>; 4] = [
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::new(Notify::new()),
+        Arc::clone(&fronts.beside_halt),
+    ];
+    let [halt, lock_halt, scrub_halt, _] = halts.clone();
+    let beating = fronts.beating.clone();
     let serving = async move {
-        let drained = server.serve_all(listeners).await;
-        halting.notify_one();
-        lock_halting.notify_one();
-        scrub_halting.notify_one();
-        drained
+        let after = async {
+            if let Some(proxy) = &beating {
+                proxy.stop_heartbeat().await;
+            }
+        };
+        let ended = serve_fronts(
+            server.serve_all(listeners),
+            serve_oci(oci, oci_stopped),
+            after,
+        )
+        .await;
+        for halting in &halts {
+            halting.notify_one();
+        }
+        ended
     };
     let maintaining = cache.maintain(PASS_INTERVAL, halt);
     let holding = cache.hold(LOCK_INTERVAL, lock_halt);
-    let min_round = settings.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
+    let min_round = fronts.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
     let scrubbing = cache.scrub(
-        settings.scrub_rate,
+        fronts.scrub_rate,
         min_round,
         Every::new(SCRUB_TICK),
-        halt_scrub,
+        scrub_halt,
     );
-    let (drained, (), (), (), oci_cut) = tokio::join!(
-        serving,
-        maintaining,
-        holding,
-        scrubbing,
-        serve_oci(oci, oci_stopped)
-    );
+    let ((drained, oci_cut), (), (), (), ()) =
+        tokio::join!(serving, beside, maintaining, holding, scrubbing);
     watcher.abort();
+    eprint!("{}", cut_note(drained));
     eprint!("{}", oci_cut_note(oci_cut));
     eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
@@ -267,7 +331,6 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
         }
         println!("{line} commit={COMMIT}");
     };
-    let drained = run_cache(&settings, stop, announce).await?;
-    eprint!("{}", super::cli_serve::cut_note(drained));
+    run_cache(&settings, stop, announce).await?;
     Ok(())
 }
