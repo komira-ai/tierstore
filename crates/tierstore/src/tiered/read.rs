@@ -23,8 +23,7 @@ impl Inner {
     /// body is given to the caller as it arrives and, unless the hot tier is at its critical mark,
     /// fed at the same time to a streamed create-only write into the hot tier (see
     /// [`relay`](super::relay)): the cold object is read once, nothing is held whole, and the
-    /// copy neither delays nor fails the read. A cold object that is a reservation is not an
-    /// object: a miss. Bytes of the cold read are counted when it opens, from the meta, and a
+    /// copy neither delays nor fails the read. Bytes of the cold read are counted when it opens, from the meta, and a
     /// body that fails later counts an error as well.
     pub(super) async fn open_object(
         self: &Arc<Self>,
@@ -94,13 +93,9 @@ impl Inner {
     }
 
     /// The cold tier's open read of `span`, with the counting of a miss or an error that an
-    /// object that is not there, a reservation, or a failed call is.
+    /// object that is not there or a failed call is.
     async fn cold_open(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
         match self.cold.open_read(key, span).await {
-            Ok(opened) if opened.meta.reservation => {
-                self.counters.miss(Tier::Cold, Read::Get);
-                Err(Error::NotFound(key.to_owned()))
-            }
             Ok(opened) => Ok(opened),
             Err(error @ Error::NotFound(_)) => {
                 self.counters.miss(Tier::Cold, Read::Get);

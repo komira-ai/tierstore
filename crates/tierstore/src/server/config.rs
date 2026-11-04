@@ -352,12 +352,14 @@ pub(super) struct TierTable {
     pub usage_refresh: Option<Dur>,
     #[serde(default)]
     pub journal_page_size: Option<u32>,
+    /// Accepted and ignored: nothing reads it since the reservations went.
     #[serde(default)]
     pub copy_rounds: Option<u32>,
     #[serde(default)]
     pub compare_range: Option<Size>,
     #[serde(default)]
     pub delete_rounds: Option<u32>,
+    /// Accepted and ignored: nothing reads it since the reservations went.
     #[serde(default)]
     pub listing_heads: Option<u32>,
     #[serde(default)]

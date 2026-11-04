@@ -8,8 +8,8 @@
 //! size may take as long as it needs while it keeps arriving, as a ranged read does. The request
 //! is sent again after a failure in transport before the response headers arrived; once valid
 //! headers have arrived the read is given, and a failure after that, even before the first body
-//! byte, is the end of the body, an error, and the caller starts the read again. The reservation
-//! mark is that of the answer's own headers, so the bytes and the mark belong to one object.
+//! byte, is the end of the body, an error, and the caller starts the read again. The entity tag
+//! is that of the answer's own headers, so the bytes and the tag belong to one object.
 
 use std::sync::Arc;
 
@@ -18,7 +18,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
-use super::tagged::{RESERVATION_HEADER, header, retrying};
+use super::tagged::{header, retrying};
 use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
@@ -27,11 +27,8 @@ use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 /// bytes before it were not all that was asked for.
 pub type ObjectBody = BoxStream<'static, Result<Bytes, ObjectStoreError>>;
 
-/// An object, or a range of it, being read: the mark of the answer and the body as it arrives.
+/// An object, or a range of it, being read: the tag of the answer and the body as it arrives.
 pub struct ObjectRead {
-    /// Whether the answer carried the reservation mark: the mark of the object the body is read
-    /// from.
-    pub reservation: bool,
     /// The entity tag of the answer, as the store sends it (quotes included), if it sends one:
     /// the tag of the object the body is read from.
     pub etag: Option<String>,
@@ -66,7 +63,7 @@ fn pieces(conn: Arc<Conn>, resp: Response) -> ObjectBody {
 
 impl S3Store {
     /// Reads the object, or `range` of it (cut at the end of the object), as the pieces of the
-    /// answer's body, with the mark of the answer.
+    /// answer's body.
     ///
     /// # Errors
     /// [`ObjectStoreError::NotFound`] if no object has the key.
@@ -118,12 +115,10 @@ impl S3Store {
             }
             _ => return Err(self.conn.within(failure(resp)).await?),
         };
-        let reservation = header(&resp, RESERVATION_HEADER) == Some("1");
         let etag = header(&resp, "etag").map(str::to_owned);
         let modified_millis = header(&resp, "last-modified").and_then(times::http_date_millis);
         let body = pieces(Arc::clone(&self.conn), resp);
         Ok(ObjectRead {
-            reservation,
             etag,
             size,
             modified_millis,
@@ -133,7 +128,7 @@ impl S3Store {
 
     /// Replaces the object only if its entity tag is `etag` (`If-Match`, the tag sent as it is),
     /// with `len` bytes taken from `body` as they are sent, and gives the tag of the new object as
-    /// the store sends it. The new object is not marked.
+    /// the store sends it.
     ///
     /// A body of at most [`MULTIPART_THRESHOLD`] bytes is gathered and sent as one PUT, as
     /// [`put_stream`](crate::ObjectStore::put_stream) does; a longer one is a multipart upload

@@ -109,8 +109,6 @@ fn range(offset: u64, len: u64) -> Option<ByteRange> {
     ByteRange::new(offset, len)
 }
 
-const MARK: &str = "x-amz-meta-tierstore-reservation: 1";
-
 /// The bytes of the body of a read, and the error that ended it if one did.
 async fn drained(mut body: objstore_s3::s3::ObjectBody) -> (Vec<u8>, Option<ObjectStoreError>) {
     let mut bytes = Vec::new();
@@ -131,24 +129,22 @@ async fn whole(body: objstore_s3::s3::ObjectBody) -> Vec<u8> {
 }
 
 /// Asserts that a streamed read of the whole object is a GET with no `Range`, that its body is
-/// given as it arrives, and that the mark, the size and the time of last write are those of the
+/// given as it arrives, and that the tag, the size and the time of last write are those of the
 /// answer's own headers: present on one answer (the size is its `Content-Length`, the time its
 /// `Last-Modified`), absent on the next (no time).
 #[tokio::test]
-async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answer() {
+async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_tag_of_its_answer() {
     let stamp = "last-modified: Tue, 03 Nov 2026 08:49:37 GMT";
-    let marked = answer("200 OK", &[MARK, "etag: \"one\"", stamp], "abcdefg");
+    let tagged = answer("200 OK", &["etag: \"one\"", stamp], "abcdefg");
     let plain = answer("200 OK", &[], "xyz");
-    let (endpoint, seen) = script(vec![marked, plain]).await;
+    let (endpoint, seen) = script(vec![tagged, plain]).await;
     let s = store(endpoint);
     let read = s.get_stream(key(), None).await.unwrap();
-    assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"one\""));
     assert_eq!(read.size, Some(7));
     assert_eq!(read.modified_millis, Some(1_793_695_777_000));
     assert_eq!(whole(read.body).await, b"abcdefg");
     let read = s.get_stream(key(), None).await.unwrap();
-    assert!(!read.reservation);
     assert_eq!(read.etag, None);
     assert_eq!(read.modified_millis, None);
     assert_eq!(whole(read.body).await, b"xyz");
@@ -163,14 +159,14 @@ async fn a_streamed_read_sends_a_get_and_gives_the_body_and_the_mark_of_its_answ
 }
 
 /// Asserts that a streamed ranged read sends the `Range` of the bytes asked for, checks the
-/// `Content-Range` and the length of the 206 against it, and gives the mark of that answer and the
+/// `Content-Range` and the length of the 206 against it, and gives the tag of that answer and the
 /// size of the whole object, which is the total of the `Content-Range` and not the length of the
 /// bytes read.
 #[tokio::test]
-async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer() {
+async fn a_streamed_ranged_read_sends_the_range_and_gives_the_tag_of_its_answer() {
     let part = answer(
         "206 Partial Content",
-        &["content-range: bytes 2-4/10", MARK, "etag: \"two\""],
+        &["content-range: bytes 2-4/10", "etag: \"two\""],
         "cde",
     );
     let (endpoint, seen) = script(vec![part]).await;
@@ -178,7 +174,6 @@ async fn a_streamed_ranged_read_sends_the_range_and_gives_the_mark_of_its_answer
         .get_stream(key(), range(2, 3))
         .await
         .unwrap();
-    assert!(read.reservation);
     assert_eq!(read.etag.as_deref(), Some("\"two\""));
     assert_eq!(read.size, Some(10));
     assert_eq!(whole(read.body).await, b"cde");
