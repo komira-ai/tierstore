@@ -29,14 +29,18 @@
 //!
 //! A push lists the tag's first version (the newest), reads it, and creates the version after it
 //! (the first, if there is none). A push of the digest the newest version holds writes nothing
-//! and is 201. Of pushes that read the same newest version, the create of one key is won by
-//! exactly one: a loser reads the key back and is 201 if the winner holds the digest it pushed
-//! (the tag is what it asked for), and 409 `TAG_CONFLICT` if the winner holds another, which
-//! changes nothing but the manifest it stored by digest, which is harmless and is still pulled
-//! by that digest. A client that wants its manifest tagged pushes again. The same read-back
-//! settles a create whose answer is unclear (the store said `Unavailable` and the write may have
-//! landed, as an S3 conflict does): the digest of the key is the answer, and a key that is
-//! not there is 503 (the push may be retried). A push that reads after another has finished sees
+//! and is 201 (that version is as acknowledged as any a reader would see). Of pushes that read the same newest version, the create of one key is won by
+//! exactly one: a loser reads the key back, and if the winner holds another digest it is 409
+//! `TAG_CONFLICT`, which changes nothing but the manifest it stored by digest, which is harmless
+//! and is still pulled by that digest (a client that wants its manifest tagged pushes again; if
+//! the winner is then not acknowledged, the 409 was a push to repeat and no tag was lost). If the
+//! winner holds the digest the loser pushed, the loser does not answer 201 from the winner's
+//! version: through the proxy that version is visible before its push is acknowledged and is
+//! removed if the push fails. The loser writes the version after it, with the same create-only
+//! write, and is 201 when that is its own. A push whose create's answer is unclear (the store said
+//! `Unavailable` and the write may have landed, as an S3 conflict does) is settled by reading the
+//! key back: the digest of the key is the answer, and a key that is not there is 503 (the push
+//! may be retried). A push that reads after another has finished sees
 //! what that push left. A listing that lags a write makes a push find
 //! the key of the next version taken, and it is 201 or 409 by the read-back and overwrites
 //! nothing; the stores are required to list consistently with the writes before the listing
@@ -108,8 +112,20 @@ async fn current(backend: &dyn Backend, prefix: &str) -> Result<Option<Digest>, 
     }
 }
 
+/// The suffix of the version before `inv`.
+fn before(inv: u64, key: &str) -> Result<u64, Error> {
+    let before = inv.checked_sub(1);
+    before.ok_or_else(|| Error::Other(format!("{key} is the last version of a tag")))
+}
+
 /// Points the tag whose directory is `prefix` at `digest`: writes the version after the newest,
 /// with the create-only write, unless the newest already holds `digest`.
+///
+/// A create that finds the key taken by a version that holds `digest` is not taken as done: on
+/// the proxy a version is visible in the hot tier before the push that made it is acknowledged,
+/// and is removed if that push then fails, so the loser writes the version after it, which it
+/// owns, and which is the newest whatever becomes of the other. A taken key that holds another
+/// digest is lost.
 ///
 /// # Errors
 /// [`Error::PreconditionFailed`] if another push made the version first and it holds another
@@ -120,43 +136,47 @@ pub(super) async fn point(
     prefix: &str,
     digest: &Digest,
 ) -> Result<(), Error> {
-    let inv = match newest(backend, prefix).await? {
+    let mut inv = match newest(backend, prefix).await? {
         None => u64::MAX,
         Some((inv, key)) => {
             if held(backend, &key).await? == *digest {
                 return Ok(());
             }
-            let before = inv.checked_sub(1);
-            before.ok_or_else(|| Error::Other(format!("{key} is the last version of a tag")))?
+            before(inv, &key)?
         }
     };
-    let key = version_key(prefix, inv);
-    match backend.put(&key, Bytes::from(digest.text())).await {
-        Err(unclear @ (Error::AlreadyExists(_) | Error::Unavailable(_))) => {
-            settle(backend, &key, digest, unclear).await
+    loop {
+        let key = version_key(prefix, inv);
+        match backend.put(&key, Bytes::from(digest.text())).await {
+            Err(Error::AlreadyExists(_)) => match held(backend, &key).await {
+                Ok(found) if found == *digest => inv = before(inv, &key)?,
+                Ok(_) | Err(Error::NotFound(_)) => {
+                    return Err(Error::PreconditionFailed(key));
+                }
+                Err(failure) => return Err(failure),
+            },
+            Err(unclear @ Error::Unavailable(_)) => {
+                return settle(backend, &key, digest, unclear).await;
+            }
+            other => return other,
         }
-        other => other,
     }
 }
 
-/// Decides a create of `key` whose answer `unclear` does not say who made the object: it is won
-/// if the object holds `digest`, lost if it holds another, and if it is not there, lost after
-/// [`Error::AlreadyExists`] (the store said it was taken) and still `unclear` after
-/// [`Error::Unavailable`] (the write did not land, as far as can be told).
+/// Decides a create of `key` answered [`Error::Unavailable`] (`unclear`), which does not say
+/// whether the write landed: it is won if the object holds `digest` (the store holds it, as an S3
+/// conflict leaves it), lost if it holds another, and still `unclear` if it is not there (the
+/// write did not land, as far as can be told).
 async fn settle(
     backend: &dyn Backend,
     key: &str,
     digest: &Digest,
     unclear: Error,
 ) -> Result<(), Error> {
-    let lost = || Error::PreconditionFailed(key.to_owned());
     match held(backend, key).await {
         Ok(found) if found == *digest => Ok(()),
-        Ok(_) => Err(lost()),
-        Err(Error::NotFound(_)) => match unclear {
-            Error::AlreadyExists(_) => Err(lost()),
-            other => Err(other),
-        },
+        Ok(_) => Err(Error::PreconditionFailed(key.to_owned())),
+        Err(Error::NotFound(_)) => Err(unclear),
         Err(failure) => Err(failure),
     }
 }

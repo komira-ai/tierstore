@@ -403,8 +403,9 @@ async fn two_pushes_of_an_existing_tag_have_one_winner() {
 }
 
 /// Asserts that two pushes of one digest to a tag, which both read the tag without a version
-/// before either wrote, are both 201: the loser of the create reads the winner's version back and
-/// finds the digest it asked for. One version is stored.
+/// before either wrote, are both 201: the loser of the create reads the winner's version back,
+/// finds the digest it asked for, and writes the version after it, which it owns. Two versions
+/// are stored, both holding the digest.
 #[tokio::test]
 async fn two_pushes_of_one_digest_are_both_201() {
     let (rig, gate) = gated();
@@ -418,12 +419,17 @@ async fn two_pushes_of_one_digest_are_both_201() {
     assert_eq!(one.status, StatusCode::CREATED, "{}", one.text());
     assert_eq!(two.status, StatusCode::CREATED, "{}", two.text());
     let all = rig.memory.list("oci/tags/app/latest/").await;
-    assert_eq!(all.expect("a listing").len(), 1);
+    assert_eq!(all.expect("a listing").len(), 2);
+    for moves in 0..2 {
+        let held = rig.memory.get(&version("latest", moves), None).await;
+        assert_eq!(held.expect("a version"), digest_of(&bytes).as_bytes());
+    }
 }
 
 /// Asserts what a push does when the create of its version is not clear from the store's answer
 /// (`Unavailable`, as an S3 conflict is, or `AlreadyExists`), by reading the version back: the
-/// digest it asked for is 201, another digest is 409 `TAG_CONFLICT` and is never the tag, and a
+/// digest it asked for is 201 after `Unavailable` and, after `AlreadyExists`, 201 with a version
+/// of its own after the taken one (the taken one may be removed by its pusher), another digest is 409 `TAG_CONFLICT` and is never the tag, and a
 /// version that is not there is 503 after `Unavailable` (try again) and 409 after `AlreadyExists`.
 #[tokio::test]
 async fn an_unclear_create_is_settled_by_reading_the_version_back() {
@@ -454,8 +460,36 @@ async fn an_unclear_create_is_settled_by_reading_the_version_back() {
             None => assert!(held.is_err(), "{tag}"),
             Some(planted) => assert_eq!(held.expect("a version"), planted.as_bytes()),
         }
+        if tag == "a-landed" {
+            let own = rig.memory.get(&version(tag, 1), None).await;
+            assert_eq!(own.expect("a version of its own"), mine_digest.as_bytes());
+            rig.memory.delete(&version(tag, 0)).await.expect("a delete");
+            let by_tag = rig.send(Method::GET, "/v2/app/manifests/a-landed").await;
+            assert_eq!(&by_tag.body, &mine);
+        }
     }
     assert_eq!(rig.metrics.requests("manifest", "conflict"), 3);
+}
+
+/// Asserts that a push that loses the create of the second to last version to a push of its own
+/// digest, and so has no version left to write after it, is 500 `UNKNOWN` and not a 201 from the
+/// other push's version.
+#[tokio::test]
+async fn a_loser_with_no_version_left_to_write_is_500() {
+    let (rig, meddle) = meddled();
+    let made = manifests(&rig, 2).await;
+    let ((mine, mine_digest), (_, other_digest)) = (made[0].clone(), made[1].clone());
+    let second_to_last = "oci/tags/app/edge/00000000000000000001";
+    rig.memory
+        .put(second_to_last, Bytes::from(other_digest))
+        .await
+        .expect("put");
+    meddle.arm(
+        Some(mine_digest.as_str()),
+        Error::AlreadyExists("version".to_owned()),
+    );
+    let put = rig.tag("app", "edge", &mine).await;
+    put.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
 }
 
 /// Asserts that a create answered `Unavailable` whose read-back fails too is 503, and that a
