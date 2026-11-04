@@ -243,8 +243,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// `/usagez` reports it). Above [`ProxyConfig::critical`] of the budget a put is written to the
 /// hot tier as it is under it (it does not wait), and a read of a cold object asks for no
 /// copy-back. At the budget, or when the hot tier answers a put with [`Error::Full`], puts go
-/// straight to the cold tier, create-only, and never fail for lack of room in the hot tier; reads
-/// still use both tiers, and the hot tier is used again once the usage falls (or a
+/// straight to the cold tier, create-only, and the object's data never fails a put for lack of
+/// room in the hot tier. The entry of the key is made in the hot tier first, though: a hot tier
+/// too full to create or update that entry ([`Error::Full`] from it) fails the put before the
+/// cold tier is tried. Reads still use both tiers, and the hot tier is used again once the usage falls (or a
 /// [`ProxyConfig::usage_refresh`] after it said it was full).
 ///
 /// **Known limits.**
