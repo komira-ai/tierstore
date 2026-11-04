@@ -35,7 +35,8 @@ const NOT_YET: &str = "Not in a release yet";
 /// Flags of other programs that a page may name (an example of a podman or curl call, and the
 /// verify commands of the install guide: `sha256sum -c`, `gh attestation verify` online and with
 /// a bundle and a trusted root, and `cosign verify-blob-attestation`), and the flags of the
-/// `update-hook` verb, which are read before the server's flags and are not among them.
+/// verbs (`update-hook`, `format-epoch`, `entries`), which are read before the server's flags and are not among them
+/// (the verbs take the hot tier by `--hot` and its companions, which the server reads from the file).
 const FOREIGN_FLAGS: &[&str] = &[
     "--tls-verify",
     "--repo",
@@ -57,10 +58,43 @@ const FOREIGN_FLAGS: &[&str] = &[
     "--public-port",
     "--poll-interval-ms",
     "--pattern",
+    "--check",
+    "--drain",
+    "--cancel",
+    "--activate",
+    "--apply",
+    "--departed",
+    "--beat",
+    "--beats",
+    "--poll",
+    "--key",
+    "--hot",
+    "--hot-endpoint",
+    "--hot-region",
+    "--hot-credentials-file",
+    "--s3-request-timeout",
 ];
 
 /// Flags of the binary the pages need not name.
 const UNDOCUMENTED_FLAGS: &[&str] = &[];
+
+/// The keys of `[server]` and `[hot_store]` that never had a flag, so are in no entry of `KEYS`:
+/// every page set must name each.
+const FLAGLESS_KEYS: &[&str] = &[
+    "server.s3_connect_timeout",
+    "server.s3_min_bytes_per_sec",
+    "server.s3_pool_idle_timeout",
+    "server.s3_read_retries",
+    "server.s3_read_retry_wait",
+    "hot_store.journal_batch_entries",
+    "hot_store.usage_refresh",
+    "hot_store.journal_page_size",
+    "hot_store.copy_rounds",
+    "hot_store.compare_range",
+    "hot_store.delete_rounds",
+    "hot_store.listing_heads",
+    "hot_store.upload_listing_calls",
+];
 
 /// Keys of the table the pages need not name.
 const UNDOCUMENTED_KEYS: &[&str] = &[];
@@ -501,6 +535,7 @@ fn code() -> Code {
         .iter()
         .flat_map(|(_, keys)| keys.iter().copied())
         .chain(interface)
+        .chain(FLAGLESS_KEYS.iter().copied())
         .map(str::to_owned)
         .collect();
     let mut source = String::new();

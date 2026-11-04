@@ -2,7 +2,7 @@
 //! a refusal that names its key.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
@@ -52,6 +52,32 @@ fn a_storage_node_file_makes_the_settings_it_says() {
     assert_eq!(cli.slot, None);
 }
 
+/// Asserts that a file written for the release before, which sets the two keys of the removed read
+/// grant, still loads: the settings keep both keys (to be ignored with a warning at the start),
+/// every other key is read as it was, and a file without them has none.
+#[test]
+fn a_file_with_the_keys_of_the_removed_read_grant_still_loads() {
+    let old = golden_with(
+        "presign_max_expires   = \"10m\"",
+        "presign_max_expires   = \"10m\"\n\
+         grant_key_files       = [\"/etc/tierstore/grant.key\"]\n\
+         grant_max_lifetime    = \"5m\"",
+    );
+    let from_file = from_text(&old, DEFAULTS).unwrap();
+    assert_eq!(
+        from_file.grant_key_file,
+        vec![PathBuf::from("/etc/tierstore/grant.key")]
+    );
+    assert_eq!(from_file.grant_max_lifetime, Some(Duration::from_secs(300)));
+    assert_eq!(
+        from_file.access_key_file,
+        PathBuf::from("/etc/tierstore/access.key")
+    );
+    let without = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert!(without.grant_key_file.is_empty());
+    assert_eq!(without.grant_max_lifetime, None);
+}
+
 /// Asserts that a file that gives the least a start needs gets, for every key it leaves out, the
 /// documented default, and that the knobs of the run come from the run.
 #[test]
@@ -74,7 +100,8 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(60));
     assert_eq!(cli.backend_check_wait, Duration::from_secs(300));
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
-    assert_eq!(cli.grant_max_lifetime, Duration::from_secs(900));
+    assert_eq!(cli.grant_max_lifetime, None);
+    assert!(cli.grant_key_file.is_empty());
     assert!(cli.oci_listen.is_empty());
     assert!(cli.skip_backend_check.is_empty());
     assert_eq!(DEFAULTS.drain_lb_wait, Duration::from_secs(10));
@@ -272,17 +299,6 @@ fn a_fault_in_the_file_is_reported_without_the_value() {
             "presign_max_expires",
         ),
         (
-            golden_with(
-                "grant_max_lifetime    = \"5m\"",
-                "grant_max_lifetime = \"SENTINEL\"",
-            ),
-            "grant_max_lifetime",
-        ),
-        (
-            golden_with("grant_max_lifetime    = \"5m\"", "grant_max_lifetime = 5"),
-            "grant_max_lifetime",
-        ),
-        (
             golden_with("kind               = \"s3\"", "kind = \"SENTINEL\""),
             "kind",
         ),
@@ -417,6 +433,10 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "usage_stale_after = \"1s\"",
         "journal_linger = \"1s\"",
         "journal_retention = \"1s\"",
+        "heartbeat = \"1s\"",
+        "departure = \"1s\"",
+        "deadline_margin = \"1s\"",
+        "registration_retention = \"1s\"",
     ];
     for line in every {
         let text = minimal_with(

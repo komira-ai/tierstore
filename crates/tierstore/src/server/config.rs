@@ -19,6 +19,8 @@
 //! - `[[interface]]`: the fronts, one entry each: `type = "s3"` or `type = "oci"`, and `params`
 //!   (see [`config_interface`](super::config_interface)). At least one `s3` entry is needed. A
 //!   build node serves the registry from its cache.
+//!   The keys of the release before, `server.listen` and the `[oci]` table, are still read and
+//!   make an `s3` and an `oci` interface (see [`config_interface`](super::config_interface)).
 //! - `[server]`: the id, the bucket and region, the key files, the limits on requests and
 //!   bodies, and the start-up self-test's wait.
 //! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
@@ -46,13 +48,16 @@ use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
     DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_skip,
 };
+use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-use super::config_interface::{InterfaceTable, Interfaces, interfaces};
+use super::config_interface::{InterfaceTable, Interfaces, OciTable, interfaces, with_legacy};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
+use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::FrontSettings;
+use super::listen::Addrs;
 use super::lock::check_lock_path;
 
 /// The key of each flag that the file holds, or held before the flags went: the flag's name
@@ -88,14 +93,21 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
     ("scoped-key-file", &["server.scoped_key_files"]),
-    ("grant-key-file", &["server.grant_key_files"]),
     ("presign-max-expires", &["server.presign_max_expires"]),
+    ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
     ("journal-linger", &["hot_store.journal_linger"]),
     ("journal-retention", &["hot_store.journal_retention"]),
     ("copy-parallel", &["hot_store.copy_parallel"]),
     ("lease-ttl", &["hot_store.lease_ttl"]),
     ("reconcile-interval", &["hot_store.reconcile_interval"]),
+    ("heartbeat", &["hot_store.heartbeat"]),
+    ("departure", &["hot_store.departure"]),
+    ("deadline-margin", &["hot_store.deadline_margin"]),
+    (
+        "registration-retention",
+        &["hot_store.registration_retention"],
+    ),
     ("lock-file", &["hot_store.lock_file"]),
     ("usage-stale-after", &["hot_store.usage_stale_after"]),
     ("max-request-bytes", &["server.max_request_bytes"]),
@@ -216,6 +228,10 @@ pub(super) struct File {
     /// The fronts: `[[interface]]`.
     #[serde(default)]
     pub interface: Vec<InterfaceTable>,
+    /// The registry front as the release before wrote it; an `oci` interface (read-only, see
+    /// [`with_legacy`]).
+    #[serde(default)]
+    pub oci: Option<OciTable>,
     /// The cache of a build node.
     #[serde(default)]
     pub local_cache: Option<LocalCacheTable>,
@@ -223,11 +239,15 @@ pub(super) struct File {
     pub policy: Vec<Policy>,
 }
 
-/// `[server]`: what the process is, and its limits. A key that is left out has the default of
-/// the flag it stands for.
+/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys. A key that
+/// is left out has its default.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
+    /// The address of the S3 front as the release before wrote it: an `s3` interface (see
+    /// [`with_legacy`]).
+    #[serde(default)]
+    pub listen: Option<Addrs>,
     pub proxy_id: String,
     #[serde(default)]
     pub slot: Option<u16>,
@@ -242,9 +262,10 @@ pub(super) struct ServerTable {
     pub gc_key_files: Vec<PathBuf>,
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
+    pub presign_max_expires: Option<Dur>,
     #[serde(default)]
     pub grant_key_files: Vec<PathBuf>,
-    pub presign_max_expires: Option<Dur>,
+    #[serde(default)]
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
@@ -254,6 +275,11 @@ pub(super) struct ServerTable {
     pub body_idle_timeout: Option<Dur>,
     pub s3_request_timeout: Option<Dur>,
     pub backend_check_wait: Option<Dur>,
+    pub s3_connect_timeout: Option<Dur>,
+    pub s3_min_bytes_per_sec: Option<u64>,
+    pub s3_pool_idle_timeout: Option<Dur>,
+    pub s3_read_retries: Option<u32>,
+    pub s3_read_retry_wait: Option<Dur>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
@@ -295,6 +321,29 @@ pub(super) struct TierTable {
     pub journal_linger: Option<Dur>,
     #[serde(default)]
     pub journal_retention: Option<Dur>,
+    #[serde(default)]
+    pub journal_batch_entries: Option<u32>,
+    #[serde(default)]
+    pub usage_refresh: Option<Dur>,
+    #[serde(default)]
+    pub journal_page_size: Option<u32>,
+    #[serde(default)]
+    pub copy_rounds: Option<u32>,
+    #[serde(default)]
+    pub compare_range: Option<Size>,
+    #[serde(default)]
+    pub delete_rounds: Option<u32>,
+    #[serde(default)]
+    pub listing_heads: Option<u32>,
+    #[serde(default)]
+    pub upload_listing_calls: Option<u32>,
+    pub heartbeat: Option<Dur>,
+    #[serde(default)]
+    pub departure: Option<Dur>,
+    #[serde(default)]
+    pub deadline_margin: Option<Dur>,
+    #[serde(default)]
+    pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
     #[serde(default)]
     pub skip_checks: Option<Vec<String>>,
@@ -448,6 +497,24 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
         ("journal_retention", cold.journal_retention.is_some()),
+        (
+            "journal_batch_entries",
+            cold.journal_batch_entries.is_some(),
+        ),
+        ("usage_refresh", cold.usage_refresh.is_some()),
+        ("journal_page_size", cold.journal_page_size.is_some()),
+        ("copy_rounds", cold.copy_rounds.is_some()),
+        ("compare_range", cold.compare_range.is_some()),
+        ("delete_rounds", cold.delete_rounds.is_some()),
+        ("listing_heads", cold.listing_heads.is_some()),
+        ("upload_listing_calls", cold.upload_listing_calls.is_some()),
+        ("heartbeat", cold.heartbeat.is_some()),
+        ("departure", cold.departure.is_some()),
+        ("deadline_margin", cold.deadline_margin.is_some()),
+        (
+            "registration_retention",
+            cold.registration_retention.is_some(),
+        ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -482,14 +549,16 @@ impl Settings {
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
 fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     let File {
-        server,
+        mut server,
         hot_store,
         cold_store,
         interface,
+        oci,
         local_cache,
         policy,
     } = file;
-    let fronts = interfaces(&interface)?;
+    let listed = with_legacy(interface, server.listen.take(), oci)?;
+    let fronts = interfaces(&listed)?;
     match (hot_store, cold_store, local_cache) {
         (Some(hot), Some(cold), None) => {
             check_policies(&policy, false)?;
@@ -557,6 +626,7 @@ pub(super) fn storage(
     let critical = percent("critical", hot.critical, 95)?;
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
+    let hot_tuning = hot_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
@@ -578,6 +648,8 @@ pub(super) fn storage(
         cold_region: cold_parts.region,
         cold_credentials_file: cold_parts.credentials_file,
         s3_request_timeout: shared.s3_request_timeout,
+        s3_client: shared.s3_client,
+        hot_tuning,
         hot_bytes: hot_budget,
         high_water,
         low_water,
@@ -589,8 +661,8 @@ pub(super) fn storage(
         presign_key_file: front.presign_key_file,
         gc_key_file: front.gc_key_file,
         scoped_key_file: front.scoped_key_file,
-        grant_key_file: front.grant_key_file,
         presign_max_expires: front.presign_max_expires,
+        grant_key_file: front.grant_key_file,
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
@@ -601,6 +673,7 @@ pub(super) fn storage(
         reconcile_interval: duration(hot.reconcile_interval, Duration::from_secs(5)),
         lock_file,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
+        heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
         put_permit_wait: front.put_permit_wait,
@@ -623,6 +696,7 @@ pub(super) fn storage(
 pub(super) struct Shared {
     pub front: FrontSettings,
     pub s3_request_timeout: Duration,
+    pub s3_client: S3Client,
     pub backend_check_wait: Duration,
 }
 
@@ -640,6 +714,7 @@ pub(super) fn front_of(
     listen: Vec<SocketAddr>,
     per_run: PerRun,
 ) -> Result<Shared, ConfigError> {
+    let s3_client = s3_client(&server)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -671,9 +746,9 @@ pub(super) fn front_of(
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,
         scoped_key_file: server.scoped_key_files,
-        grant_key_file: server.grant_key_files,
         presign_max_expires: duration(server.presign_max_expires, Duration::from_secs(15 * 60)),
-        grant_max_lifetime: duration(server.grant_max_lifetime, Duration::from_secs(15 * 60)),
+        grant_key_file: server.grant_key_files,
+        grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
@@ -688,6 +763,7 @@ pub(super) fn front_of(
     Ok(Shared {
         front,
         s3_request_timeout: duration(server.s3_request_timeout, Duration::from_secs(60)),
+        s3_client,
         backend_check_wait: duration(server.backend_check_wait, Duration::from_secs(300)),
     })
 }
@@ -728,12 +804,12 @@ impl Cli {
     ///
     /// # Errors
     /// The refusal of a file that is not one of this format, or is the file of a build node.
-    pub fn from_config_text(text: &str) -> Result<Self, super::cli::Error> {
+    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
         let per_run = PerRun {
             drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
         };
-        Ok(from_text(text, per_run)?)
+        from_text(text, per_run)
     }
 }
 

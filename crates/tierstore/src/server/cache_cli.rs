@@ -322,7 +322,13 @@ pub(super) async fn run_cache(
         region: tier.region.as_deref(),
         credentials: tier.credentials_file.as_deref(),
     };
-    let upstream = open_tier("--cold", &tier.spec, &s3, settings.s3_request_timeout)?;
+    let upstream = open_tier(
+        "--cold",
+        &tier.spec,
+        &s3,
+        settings.s3_request_timeout,
+        &settings.s3_client,
+    )?;
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     serve_cache(settings, upstream, disk, stop, ready).await
 }

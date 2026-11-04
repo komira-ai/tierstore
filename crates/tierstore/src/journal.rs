@@ -6,11 +6,19 @@
 //!   object holds it, so the objects that exist have no gaps above the checkpoint of the
 //!   reconciler; the ones at or below it may have been deleted.
 //! - `_tiering/proxies/<proxy_id>`: written when a proxy starts, so that the reconciler finds
-//!   the journals without listing the journal prefix of every proxy.
+//!   the journals without listing the journal prefix of every proxy. Its body is a JSON
+//!   registration (`proto`, `boot`, `hb`), which a proxy that heartbeats rewrites every
+//!   heartbeat; an empty body is the registration of an older release. The reconciler removes
+//!   the registration of a proxy that heartbeated, has left no journal object and has not
+//!   changed for a long time.
 //! - `_tiering/checkpoint/<proxy_id>`: a [`Checkpoint`], rewritten by the reconciler, never to a
 //!   lower value.
 //! - `_tiering/usage`: the usage the reconciler publishes, for the proxies.
 //! - `_tiering/lease`: the lease that makes one reconciler the runner.
+//! - `_tiering/format`: the [`Format`](crate::format::Format) of the store, which says whether
+//!   writes are paused for a change of format.
+//! - `_entries/<sha256 of the key>`: the journal entry of one key (see the module `entry`). The
+//!   prefix is reserved here, so that no client names a key under it, before anything writes it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -23,15 +31,23 @@ pub(crate) const JOURNAL_PREFIX: &str = "_journal/";
 pub(crate) const TIERING_PREFIX: &str = "_tiering/";
 /// The prefix of the objects that say which proxies have journals.
 pub(crate) const PROXIES_PREFIX: &str = "_tiering/proxies/";
+/// The prefix of the journal entries of keys, one object for each key.
+pub(crate) const ENTRIES_PREFIX: &str = "_entries/";
+/// The format of the store: whether writes are paused for a change of format.
+pub(crate) const FORMAT_KEY: &str = "_tiering/format";
 /// The usage the reconciler publishes.
 pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 /// The lease of the reconciler.
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
+/// Every prefix that the proxy keeps for itself: no client names a key under one.
+pub(crate) const RESERVED_PREFIXES: [&str; 3] = [JOURNAL_PREFIX, TIERING_PREFIX, ENTRIES_PREFIX];
+
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    reserved.iter().any(|prefix| key.starts_with(prefix))
+    RESERVED_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 /// The prefix of the journal objects of one proxy.

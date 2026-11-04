@@ -26,9 +26,7 @@ region                = "eu-west-1"
 max_request_bytes     = 134217728
 access_key_file       = "/etc/tierstore-cache/access.key"
 read_only_key_files   = ["/etc/tierstore-cache/clients.key"]
-grant_key_files       = ["/etc/tierstore-cache/grant.key"]
 presign_max_expires   = "10m"
-grant_max_lifetime    = "5m"
 max_concurrent_puts   = 8
 put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
@@ -183,12 +181,7 @@ fn a_build_node_file_makes_a_cache() {
         front.read_only_key_file,
         [PathBuf::from("/etc/tierstore-cache/clients.key")]
     );
-    assert_eq!(
-        front.grant_key_file,
-        [PathBuf::from("/etc/tierstore-cache/grant.key")]
-    );
     assert_eq!(front.presign_max_expires, Duration::from_secs(600));
-    assert_eq!(front.grant_max_lifetime, Duration::from_secs(300));
     assert_eq!(front.max_concurrent_puts, 8);
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
     assert_eq!(front.put_min_bytes_per_sec, 2048);
@@ -840,4 +833,27 @@ fn an_interface_defect_is_named_before_a_local_cache_one() {
     assert_eq!(why, "interface[1].params: it needs port or addresses");
     let why = refusal(&format!("{broken}{}", oci_interface("127.0.0.1:5000", "")));
     assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
+}
+
+/// Asserts that the example in the header of `config_cache.rs` is a file the loader reads as a
+/// build node's, serving the one loopback S3 address the header names and the registry front.
+#[test]
+fn the_example_in_the_module_header_loads() {
+    let source = include_str!("config_cache.rs");
+    let example: String = source
+        .lines()
+        .skip_while(|line| *line != "//! ```toml")
+        .skip(1)
+        .take_while(|line| *line != "//! ```")
+        .map(|line| {
+            line.strip_prefix("//!")
+                .unwrap_or(line)
+                .trim_start_matches(' ')
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(example.contains("[[interface]]"), "{example}");
+    let cache = cache_of(&example);
+    assert_eq!(cache.front.listen, vec!["127.0.0.1:9400".parse().unwrap()]);
+    assert_eq!(cache.oci.listen, vec!["127.0.0.1:5000".parse().unwrap()]);
 }

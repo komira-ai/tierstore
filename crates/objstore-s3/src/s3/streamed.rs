@@ -19,7 +19,7 @@ use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
 use super::tagged::{RESERVATION_HEADER, header, retrying};
-use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, transport};
+use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 
@@ -35,6 +35,13 @@ pub struct ObjectRead {
     /// The entity tag of the answer, as the store sends it (quotes included), if it sends one:
     /// the tag of the object the body is read from.
     pub etag: Option<String>,
+    /// The size of the whole object, not of the bytes read: the `Content-Length` of an answer to
+    /// a read of the whole object, the total of the `Content-Range` of an answer to a ranged one.
+    /// `None` if a whole read's answer carries no `Content-Length`.
+    pub size: Option<u64>,
+    /// When the object was last written, in milliseconds since the Unix epoch, from the answer's
+    /// `Last-Modified`; `None` if the answer carries none or one that is not a date.
+    pub modified_millis: Option<u64>,
     /// The bytes, in pieces. It ends without an error only when the whole body came: the HTTP
     /// client fails a body that is shorter than the `Content-Length` of the answer.
     pub body: ObjectBody,
@@ -72,7 +79,7 @@ impl S3Store {
         key: &ObjectKey,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, ObjectStoreError> {
-        retrying(move || self.open_read(key, range)).await
+        retrying(&self.conn.tuning, move || self.open_read(key, range)).await
     }
 
     async fn open_read(
@@ -85,14 +92,15 @@ impl S3Store {
             .map(|value| vec![("range", value)])
             .unwrap_or_default();
         let resp = self.conn.send_read(key, headers).await?;
-        match (resp.status(), range) {
-            (StatusCode::OK, None) => {}
+        let size = match (resp.status(), range) {
+            (StatusCode::OK, None) => resp.content_length(),
             (StatusCode::PARTIAL_CONTENT, Some(asked)) => {
                 let length = resp.content_length();
                 let length = length.ok_or_else(|| bad(key, "a 206 without Content-Length"))?;
                 let said = header(&resp, "content-range");
                 let held = usize::try_from(length).unwrap_or(usize::MAX);
-                check_partial(said, asked, held).map_err(|why| bad(key, &why))?;
+                let total = check_partial(said, asked, held).map_err(|why| bad(key, &why))?;
+                Some(total)
             }
             (StatusCode::OK, Some(_)) => {
                 let why = "answered 200 to a ranged read: the store ignored Range";
@@ -109,13 +117,16 @@ impl S3Store {
                 return Err(bad(key, "answered 206 to a read of the whole object"));
             }
             _ => return Err(self.conn.within(failure(resp)).await?),
-        }
+        };
         let reservation = header(&resp, RESERVATION_HEADER) == Some("1");
         let etag = header(&resp, "etag").map(str::to_owned);
+        let modified_millis = header(&resp, "last-modified").and_then(times::http_date_millis);
         let body = pieces(Arc::clone(&self.conn), resp);
         Ok(ObjectRead {
             reservation,
             etag,
+            size,
+            modified_millis,
             body,
         })
     }
@@ -145,6 +156,33 @@ impl S3Store {
             return self.put_if_match(key, bytes, etag).await;
         }
         let done = multipart::put(&self.conn, key, len, body, Some(etag)).await?;
+        done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+    }
+
+    /// Creates the object, unmarked, only if the key has none, with `len` bytes taken from `body`
+    /// as they are sent, and gives the tag of the new object as the store sends it (the `ETag` of
+    /// the answer to the write that made it, as [`put_new_tagged`](Self::put_new_tagged) does).
+    ///
+    /// A body of at most [`MULTIPART_THRESHOLD`] bytes is gathered and sent as one PUT with
+    /// `If-None-Match: *`; a longer one is a multipart upload whose completion carries it, so the
+    /// object appears only in the last request, after the whole body was read, and the upload is
+    /// aborted on any failure. A body that fails or has another length than `len` creates
+    /// nothing.
+    ///
+    /// # Errors
+    /// As [`put_new_tagged`](Self::put_new_tagged), and the body's error, or
+    /// [`ObjectStoreError::Body`] for a body of another length than `len`.
+    pub async fn put_stream_new_tagged(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+    ) -> Result<String, ObjectStoreError> {
+        if len <= MULTIPART_THRESHOLD {
+            let bytes = crate::gather(body, len).await?;
+            return self.put_new_tagged(key, bytes).await;
+        }
+        let done = multipart::put(&self.conn, key, len, body, None).await?;
         done.ok_or_else(|| bad(key, "the completion carries no ETag"))
     }
 
@@ -187,12 +225,13 @@ pub(super) fn too_long(limit: u64) -> ObjectStoreError {
 }
 
 /// Checks a 206 answer: `Content-Range` must name exactly the bytes asked for (cut at
-/// the end of the object) and the body must be that long.
+/// the end of the object) and the body must be that long. Gives the size of the whole object,
+/// the total of the `Content-Range`.
 pub(super) fn check_partial(
     content_range: Option<&str>,
     range: ByteRange,
     body_len: usize,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let cr = content_range.ok_or("206 without Content-Range")?;
     let parsed = cr.strip_prefix("bytes ").and_then(|rest| {
         let (span, total) = rest.split_once('/')?;
@@ -219,5 +258,5 @@ pub(super) fn check_partial(
             "Content-Range {cr:?} but the body has {body_len} bytes"
         ));
     }
-    Ok(())
+    Ok(total)
 }

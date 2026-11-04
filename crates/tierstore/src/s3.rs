@@ -29,6 +29,12 @@
 //!   last chunk. The request is sent again after a failure in transport before the response
 //!   headers arrived, and not after: valid headers followed by a failure before the first body
 //!   byte give the read, whose body then ends with the error.
+//! - `open_read` is the same GET whose answer also gives the object's meta: the size (the
+//!   `Content-Length`, or the total of the `Content-Range` of a ranged read), the `ETag`, the
+//!   `Last-Modified` and the mark. A range with an end, or none, is sent as it is; the last bytes
+//!   of an object (a suffix) and a range the store answers 416 to are a HEAD and then a ranged
+//!   GET, as the size is needed to say what they cover. An answer without a `Content-Length`, a
+//!   `Last-Modified` or an `ETag` is an [`Error::Other`].
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
 //!   other backends give it and the S3 front, which quotes it, expects), `Last-Modified` and
 //!   whether the object carries the reservation mark.
@@ -38,7 +44,7 @@
 //!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
 //!   metadata. A write is sent once: one the store answers with 409 (see below) is
 //!   [`Error::Unavailable`], and the caller reads the key to see whether its write landed. A
-//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_marked` is
+//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_tagged` is
 //!   one GET, whole or ranged, and the mark and the content tag are the metadata header and the
 //!   `ETag` (without its quotes) of that answer, so the bytes, the mark and the tag are those of
 //!   one object whatever is written to the key meanwhile; an answer without an `ETag` is an
@@ -144,12 +150,14 @@ use objstore_s3::{
 };
 use tokio::sync::mpsc;
 
+use crate::backend::open_by_head;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter, Window,
 };
 
 pub use objstore_s3::Capabilities;
-pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError};
+pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Tuning};
 
 /// The greatest byte position a `Range` names. A store reads the positions as signed 64-bit
 /// numbers and refuses or ignores a larger one, so a range is cut here before it is sent.
@@ -179,13 +187,21 @@ impl S3Backend {
     ///
     /// # Errors
     /// [`S3ConfigError`] if the endpoint or the bucket name is refused.
-    pub fn new(mut config: S3Config) -> Result<Self, S3ConfigError> {
+    pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
+        Self::new_tuned(config, S3Tuning::default())
+    }
+
+    /// As [`S3Backend::new`], with the idle-connection and read-retry settings `tuning` gives.
+    ///
+    /// # Errors
+    /// [`S3ConfigError`] if the endpoint or the bucket name is refused.
+    pub fn new_tuned(mut config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
         config.capabilities = Capabilities {
             conditional_put: true,
             object_lock: false,
         };
         Ok(Self {
-            store: S3Store::new(config)?,
+            store: S3Store::new_tuned(config, tuning)?,
             if_match_delete: AtomicBool::new(false),
         })
     }
@@ -209,7 +225,7 @@ impl S3Backend {
 
     /// The read of `key`, or of `range` of it, as the chunks of the body of one GET and the mark
     /// of that answer.
-    async fn open(&self, key: &str, range: Option<ByteRange>) -> Result<Opened, Error> {
+    async fn open(&self, key: &str, range: Option<ByteRange>) -> Result<Answered, Error> {
         let object = object_key(key)?;
         let answer = match range {
             None => self.store.get_stream(&object, None).await,
@@ -237,7 +253,7 @@ impl S3Backend {
         object: &ObjectKey,
         key: &str,
         range: ByteRange,
-    ) -> Result<Opened, Error> {
+    ) -> Result<Answered, Error> {
         let head = self.store.head(object).await;
         let head = head.map_err(|e| map_error(e, key))?;
         let size = head.size;
@@ -443,7 +459,7 @@ fn unquoted(etag: &str) -> String {
 
 /// What a read opens: the chunks of its body, the mark and the entity tag (as the store sends it,
 /// if it sends one) of the answer they come from.
-type Opened = (ReadBody, bool, Option<String>);
+type Answered = (ReadBody, bool, Option<String>);
 
 /// The content tag of a read from the `ETag` of its answer, without its quotes. An answer that
 /// has none cannot tell which object was read, so a read that must say is an error.
@@ -570,6 +586,22 @@ impl Backend for S3Backend {
         sent.map_err(|e| map_error(e, key))
     }
 
+    /// The tag is the `ETag` of the answer to the write that made the object (the PUT, or the
+    /// completion of the multipart upload).
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let store = &self.store;
+        let sending = |len, source| store.put_stream_new_tagged(&object, len, source);
+        let sent = streamed(body, len, sending).await?;
+        let tag = sent.map_err(|e| map_error(e, key))?;
+        Ok(unquoted(&tag))
+    }
+
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let object = object_key(key)?;
         let etag = quoted(etag);
@@ -633,7 +665,7 @@ impl Backend for S3Backend {
         self.read_range(&object, key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -650,6 +682,54 @@ impl Backend for S3Backend {
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
         Ok(self.open(key, range).await?.0)
+    }
+
+    /// One GET, whole or ranged, whose answer has the object's size (its `Content-Length`, or the
+    /// total of its `Content-Range`), tag, time of last write and mark, and whose body is given as
+    /// it arrives. A span that is the last bytes of the object (`Suffix`) cannot be sent without
+    /// the size, so it is a HEAD and a ranged GET (see [`open_by_head`]), as is a span the store
+    /// answers 416 to, which the HEAD turns into the unsatisfiable window with the object's meta.
+    /// An answer without a `Content-Length` or `Last-Modified` (a store that sends neither is not
+    /// S3) or without an `ETag` is an [`Error::Other`]: the meta cannot be made up.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        let asked = match span {
+            None => None,
+            Some(Span::Suffix(_)) => return open_by_head(self, key, span).await,
+            Some(Span::From { first, last }) => {
+                let len = last.map_or(u64::MAX, |last| {
+                    last.saturating_sub(first).saturating_add(1)
+                });
+                match client_range(ByteRange::new(first, len)) {
+                    Some(asked) => Some(asked),
+                    None => return open_by_head(self, key, span).await,
+                }
+            }
+        };
+        let object = object_key(key)?;
+        let read = match self.store.get_stream(&object, asked).await {
+            Err(ObjectStoreError::InvalidRange { .. }) => {
+                return open_by_head(self, key, span).await;
+            }
+            answer => answer.map_err(|e| map_error(e, key))?,
+        };
+        let lacks = |what: &str| Error::Other(format!("{key}: the read's answer has no {what}"));
+        let size = read.size.ok_or_else(|| lacks("Content-Length"))?;
+        let modified = read.modified_millis.ok_or_else(|| lacks("Last-Modified"))?;
+        let meta = Meta {
+            size,
+            tag: answered_tag(read.etag, key)?,
+            modified,
+            reservation: read.reservation,
+        };
+        let name = key.to_owned();
+        let body = read
+            .body
+            .map(move |piece| piece.map_err(|e| map_error(e, &name)));
+        Ok(Opened {
+            window: Window::of(span, size),
+            meta,
+            body: body.boxed(),
+        })
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

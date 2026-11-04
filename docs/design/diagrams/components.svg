@@ -37,11 +37,11 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="590" y="236" class="t-m" text-anchor="middle">one proxy behind both fronts</text>
 <text x="590" y="254" class="t-m" text-anchor="middle">put, get, head, delete</text>
 <text x="590" y="272" class="t-m" text-anchor="middle">hot first, cold on a miss</text>
-<text x="590" y="290" class="t-m" text-anchor="middle">writes the journal to hot</text>
+<text x="590" y="290" class="t-m" text-anchor="middle">takes an entry per key in hot</text>
 <rect x="470" y="400" width="240" height="128" rx="5" class="box-o"/>
 <text x="590" y="424" class="b" text-anchor="middle">Reconciler</text>
 <text x="590" y="446" class="t-m" text-anchor="middle">holds the lease</text>
-<text x="590" y="464" class="t-m" text-anchor="middle">reads the journal in hot</text>
+<text x="590" y="464" class="t-m" text-anchor="middle">lists the entries in hot</text>
 <text x="590" y="482" class="t-m" text-anchor="middle">copies hot to cold, create-only</text>
 <text x="590" y="500" class="t-m" text-anchor="middle">evicts from hot when it fills</text>
 <rect x="800" y="120" width="140" height="92" rx="5" class="box-b"/>
