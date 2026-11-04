@@ -7,6 +7,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use super::{Inner, locked, refuse_reserved};
@@ -34,11 +35,22 @@ impl Pause {
 
 /// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write
 /// does, so that the proxy sees a change of the format at its next heartbeat even if no write or
-/// read comes. A read that fails or runs out of time changes nothing: what was kept stays, and the
-/// next write reads the object itself.
-pub(super) async fn refresh(pause: &Mutex<Pause>, hot: &dyn Backend, limit: Duration) {
-    let at = Instant::now();
-    if let Ok(Ok(format)) = tokio::time::timeout(limit, read_format(hot)).await {
+/// read comes. The read goes through `gate`, the one that the reads of the writes go through, so
+/// that reads are made one at a time and an older read never replaces a newer one. A read that
+/// fails or runs out of time (the wait for the gate counts) changes nothing: what was kept stays,
+/// and the next write reads the object itself.
+pub(super) async fn refresh(
+    pause: &Mutex<Pause>,
+    gate: &AsyncMutex<()>,
+    hot: &dyn Backend,
+    limit: Duration,
+) {
+    let read = async {
+        let _gate = gate.lock().await;
+        let at = Instant::now();
+        (at, read_format(hot).await)
+    };
+    if let Ok((at, Ok(format))) = tokio::time::timeout(limit, read).await {
         let mut seen = locked(pause);
         seen.read = Some(at);
         seen.keep(format.as_ref());

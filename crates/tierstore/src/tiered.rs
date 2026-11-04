@@ -328,8 +328,8 @@ struct Inner {
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
     /// One caller reads the format object at a time, so that a caller that waited uses the read of
-    /// the caller before it.
-    format_gate: AsyncMutex<()>,
+    /// the caller before it. The heartbeat's look at the format goes through it too.
+    format_gate: Arc<AsyncMutex<()>>,
     counters: Counters,
     heartbeat: Heartbeat,
 }
@@ -372,7 +372,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
-            format_gate: AsyncMutex::default(),
+            format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,
         };
@@ -818,6 +818,15 @@ impl Backend for Proxy {
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         self.inner.head_object(key).await
+    }
+
+    /// The tag of an object is the tag of the tier that answers, and moves when the proxy copies
+    /// the object from one tier to the other, so versions are told apart by size alone: the proxy
+    /// never replaces an object. Limit: a key that is deleted and put again with a body of the
+    /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
+    /// not affected, as its bytes are checked against the digest.
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        a.size == b.size
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {

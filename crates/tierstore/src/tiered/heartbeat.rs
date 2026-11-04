@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::future::{Either, select};
-use tokio::sync::watch;
+use tokio::sync::{Mutex as AsyncMutex, watch};
 
 use super::pause::{self, Pause};
 use super::{Inner, Proxy, locked};
@@ -111,6 +111,9 @@ struct Beater {
     plain: Arc<dyn Backend>,
     /// What the proxy keeps of the format object, which that look renews.
     seen: Arc<Mutex<Pause>>,
+    /// The gate that the reads of the format by the writes go through, so that the two never
+    /// overlap.
+    gate: Arc<AsyncMutex<()>>,
     /// The longest that look may take: the heartbeat period, as for a beat.
     limit: Duration,
 }
@@ -140,7 +143,7 @@ impl Beater {
     /// Reads the format object and keeps what it says, so that the proxy takes up the epoch at its
     /// next beat, and a proxy that starts after the epoch was written takes it up at its first.
     async fn look_at_format(&self) {
-        pause::refresh(&self.seen, self.plain.as_ref(), self.limit).await;
+        pause::refresh(&self.seen, &self.gate, self.plain.as_ref(), self.limit).await;
     }
 
     /// Writes `body` over the registration that is there, whoever wrote it, or creates it.
@@ -199,6 +202,7 @@ impl Proxy {
             etag: None,
             plain: Arc::clone(&inner.hot),
             seen: Arc::clone(&inner.pause),
+            gate: Arc::clone(&inner.format_gate),
             limit: config.heartbeat,
         };
         let (stop, stopped) = watch::channel(false);
