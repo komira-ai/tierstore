@@ -318,7 +318,7 @@ async fn a_delete_fails_where_the_subdirectory_is_read_only_and_a_read_where_it_
     let refused = backend.delete("_entries/e").await;
     let conditional = backend.delete_if_match("_entries/e", "tag").await;
     std::fs::set_permissions(&inside, Permissions::from_mode(0o700)).unwrap();
-    assert!(matches!(refused, Err(Error::InvalidKey(_))));
+    assert!(matches!(refused, Err(Error::Other(_))));
     assert!(matches!(conditional, Err(Error::PreconditionFailed(_))));
 
     let tag = backend.head("_entries/e").await.unwrap().tag;
