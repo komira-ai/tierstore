@@ -7,9 +7,8 @@
 use std::path::Path;
 
 use super::cli::Cli;
-use super::config::{
-    ConfigError, Dur, File, Kind, OciTable, PerRun, ServerTable, Size, TierTable, from_text,
-};
+use super::config::{ConfigError, File, Kind, OciTable, PerRun, ServerTable, TierTable, from_text};
+use super::config_units::{Dur, Size};
 use super::listen::Addrs;
 
 /// What the file starts with.
@@ -105,9 +104,9 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         presign_key_files: cli.presign_key_file.clone(),
         gc_key_files: cli.gc_key_file.clone(),
         scoped_key_files: cli.scoped_key_file.clone(),
-        grant_key_files: cli.grant_key_file.clone(),
         presign_max_expires: Some(Dur(cli.presign_max_expires)),
-        grant_max_lifetime: Some(Dur(cli.grant_max_lifetime)),
+        grant_key_files: Vec::new(),
+        grant_max_lifetime: None,
         max_request_bytes: Some(cli.max_request_bytes),
         max_concurrent_puts: Some(cli.max_concurrent_puts),
         put_permit_wait: Some(Dur(cli.put_permit_wait)),

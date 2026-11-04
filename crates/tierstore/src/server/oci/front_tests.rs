@@ -10,7 +10,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use super::{MAX_MANIFEST_BYTES, OciFront, OciMetrics, OciPrefix};
-use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op};
+use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, TestClock};
 
 const MANIFEST: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
 
@@ -38,6 +38,29 @@ impl Rig {
             front,
             metrics,
         }
+    }
+
+    /// A front over a proxy whose tiers are in memory (the rig's `memory` is its hot tier), and
+    /// the cold tier.
+    async fn over_a_proxy() -> (Self, Arc<MemoryBackend>) {
+        let clock = Arc::new(TestClock::new());
+        let memory = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
+        let cold = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
+        let mut config = ProxyConfig::new("p1", 1 << 20, clock);
+        config.linger = std::time::Duration::from_millis(1);
+        let proxy = Proxy::open(memory.clone(), cold.clone(), config).await;
+        let proxy = proxy.expect("a proxy");
+        let faulty = Arc::new(FaultyBackend::new(memory.clone()));
+        let metrics = Arc::new(OciMetrics::default());
+        let prefix = OciPrefix::new("oci/").expect("a prefix");
+        let front = OciFront::new(Arc::new(proxy), prefix, Arc::clone(&metrics));
+        let rig = Self {
+            faulty,
+            memory,
+            front,
+            metrics,
+        };
+        (rig, cold)
     }
 
     /// Stores `content` where its digest names it, and gives `sha256:<hex>`.
@@ -592,4 +615,46 @@ async fn a_store_that_fails_is_503_or_500_without_its_message() {
     assert!(!String::from_utf8_lossy(&answer.body).contains("secret"));
     assert_eq!(rig.metrics.requests("blob", "failed"), 1);
     assert_eq!(rig.metrics.requests("manifest", "failed"), 1);
+}
+
+/// Asserts that a front over a proxy serves the blobs of its prefix from either tier, and that a
+/// path that tries to name a key under `_journal/` or `_tiering/` is `UNSUPPORTED`
+/// (404) and reads none: the routes name only `<prefix>blobs/sha256/<hex>`, and the prefix is
+/// never one the proxy keeps for itself (see `OciPrefix`), so the front has no reserved-key check
+/// of its own and the proxy behind it is the one place that refuses those keys.
+#[tokio::test]
+async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
+    let (rig, cold) = Rig::over_a_proxy().await;
+    let hot_digest = rig.seed(b"hot blob").await;
+    let cold_hex = hex_of(b"cold blob");
+    let key = format!("oci/blobs/sha256/{cold_hex}");
+    cold.put(&key, Bytes::from_static(b"cold blob"))
+        .await
+        .unwrap();
+    rig.memory
+        .put("_journal/x", Bytes::from_static(b"secret"))
+        .await
+        .unwrap();
+    let hot = rig.get(&format!("/v2/a/blobs/{hot_digest}")).await;
+    assert_eq!(
+        (hot.status, hot.body.as_slice()),
+        (StatusCode::OK, &b"hot blob"[..])
+    );
+    let cold_path = format!("/v2/a/blobs/sha256:{cold_hex}");
+    let from_cold = rig.get(&cold_path).await;
+    assert_eq!(from_cold.status, StatusCode::OK);
+    assert_eq!(from_cold.body, b"cold blob");
+    let head = rig.ask(Method::HEAD, &cold_path, &[]).await;
+    assert_eq!(head.status, StatusCode::OK);
+    for reserved in ["_journal/x", "_journal/p1/1", "_tiering/lease"] {
+        let answer = rig.get(&format!("/v2/a/blobs/../../{reserved}")).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{reserved}");
+        let expected = (
+            "UNSUPPORTED".to_owned(),
+            "only /v2/, /v2/<name>/manifests/<digest> and /v2/<name>/blobs/<digest> are served"
+                .to_owned(),
+            Value::Null,
+        );
+        assert_eq!(answer.error(), expected, "{reserved}");
+    }
 }

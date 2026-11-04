@@ -20,7 +20,16 @@ one job that needs each (and for `id-token` and `attestations`, only on a push t
 
 For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux-arm64`, `macos-arm64`):
 
-- `tierstore-<commit>-<platform>.tar.gz`: the binary alone, the same bytes on every build;
+- `tierstore-<commit>-<platform>.tar.gz`: the binary `tierstore` and `THIRD-PARTY-LICENSES.txt`, the
+  same bytes on every build of one commit. The notice lists every crate the binary links that is
+  not of this repository, with the licence it declares and the text of each licence file in its top directory
+  (`LICENSE*`, `LICENCE*`, `COPYING*`, `NOTICE*`, `UNLICENSE*`) and of its declared `license_file`
+  (no subdirectory is searched otherwise)
+  (`cargo xtask licenses`, from `cargo metadata` of the build's crate, `server` feature and
+  target; `package --licenses` puts it in the tarball). Procedural macros (not linked) are left out; a crate that ships no
+  licence file is listed with its declared licence and says so; a crate that declares no licence
+  fails the build job. A host extracts the binary by its name
+  (`tar -xzf <tarball> tierstore`), which the notice does not change;
 - `tierstore-<commit>-<platform>.cdx.json`: its CycloneDX SBOM;
 - `tierstore-<commit>-<platform>.tar.gz.sigstore.json`: the bundle of the tarball's own provenance
   attestation, for an offline check;
