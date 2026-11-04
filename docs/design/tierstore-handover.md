@@ -1,23 +1,25 @@
-# tierstore update hook: port-forward hand-over
+# tierstore update hook: hand-over
 
-The host updater this hook plugs into is a separate program with a protocol of its own. This page cites that protocol as
-"the updater protocol" with its section numbers; the sections are the updater's, not this repository's. The protocol is a
-process protocol (steps as arguments, a params file, an exit status and one JSON line), so a hook in any language can
-speak it; this one is written in Rust because tierstore is.
+The host updater this hook plugs into is hostkeeper, a separate program with a protocol of its own: a process protocol (steps as
+arguments, a params file, an exit status and one JSON line), so a hook in any language can speak it; this one is written in Rust
+because tierstore is.
 
-Status: built. The hook is `crates/tierstore/src/server/update_hook/`, and this page is its design of record. Its claims
-about the code name the file and function; they were first checked against the code this repository was imported from.
+Status: built. The hook is `crates/tierstore/src/server/update_hook/`, and the operator's page is
+`crates/tierstore/docs/update-hook.md`. Section 0 is the design of record of the hook: the new instance takes the listening
+sockets of the old one, so no redirect, no second port and no privilege beyond root's are involved. Sections 1 to 4, 9 and 10 describe the
+port-forward design (nftables redirect, slot units on private ports, an updater declaration and a hook-only account) that the
+hook of section 0 replaces; they are kept as the record of that design and each is marked superseded. Sections 5 to 8 (the cache lock,
+entries and lease, the drain, the metrics) are about the server, which both designs share; where they speak of slots or a
+redirect, read the two instances `tierstore@a` and `tierstore@b` and the hand-over.
 
-tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by the generic host
-updater under the updater protocol, 3.2: steps `prepare`, `cutover`, `verify`, `rollback`, `cleanup`; exit `0`, `1`, `75`
-deferred, `76` halt; the last stdout line is one JSON object; every step idempotent; the conformance suite in tierstore's
-CI. The nftables mechanics are in the updater protocol, 4.1.1 to 4.1.5 and are tierstore's, as steps of this hook. This page
-is the hook, and what tierstore itself must change.
+tierstore ships its update as a subcommand of its own binary, `tierstore update-hook <step>`, run by hostkeeper: steps `prepare`,
+`cutover`, `verify`, `rollback`, `cleanup`, `uninstall` and the boot step `restore`; exit `0`, `1`, `75` deferred; the last stdout line
+is one JSON object; every step idempotent.
 
 ## 0. Live update by listening-socket hand-off (server side)
 
-This replaces the port-forward of sections 1 to 4 and the slot ports. The hook and the packaging move to it in a change that
-follows this one; until then both exist, and this section describes the library implementation (`server/handoff/`, entered through `run_handing`); the binary does not call it yet, and that integration comes in the following change.
+This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
+`run_handing`, with the control socket named by `server.handoff_socket`), on Linux; macOS has no hand-over and restarts.
 
 Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
 (`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
@@ -55,11 +57,33 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
   change them (`settings_that_name_other_addresses_take_nothing`).
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
 
-Not in this change: the `server.handoff_socket` and `server.handoff_wait` keys (the wait defaults to a number of seconds that
-is a config key from the start), the update hook's steps, the slot units and ports, and the proxy id that does not derive
-from a port. They are the change that follows.
+### The hook on top of it
 
-## 1. Shape
+The package ships one unit template, `tierstore@.service`, and the hook alternates between its two instances, `tierstore@a` and
+`tierstore@b`, both running `current/bin/tierstore` and serving the public port 9300. hostkeeper switches the link `current` before
+`cutover` and back before `rollback`; the hook never does. An instance starts only when its marker file `/var/lib/tierstore/run-<i>`
+is there (`ConditionPathExists=`), so at boot only the recorded one runs.
+
+- `prepare` reads the node's configuration (`config_file`), requires `server.handoff_socket` for an update, asks both releases for
+  `--capabilities`, and records the mode: a hand-over when both list `handoff-socket-v1`, else a restart. `mode = "restart"` in the
+  manifest's params records a restart whatever the capabilities say, for a storage node whose hot tier is a `dir:` tier, where the
+  lease's compare-and-swap is not atomic across processes. Nothing is started.
+- `cutover` sets the marker of the idle instance and starts it; in a hand-over it takes the sockets and the old instance drains and
+  exits 0, which the template does not restart. In a restart the old instance is stopped first. It then waits for `/readyz` and for
+  the build gauge of 9300 to name the target version.
+- `verify` observes the same and says `promotion_pending` while a build node still serves read-only. `cleanup` is the commit: it
+  confirms afresh, records `stopping`, waits for the old instance to exit and removes its marker. `rollback` starts the previous release
+  on the old letter (the link is back), the new instance gives the sockets back and exits. `restore` starts only the recorded instance.
+- A first install starts `tierstore@a` with a normal bind; its `rollback` stops it and fails with `no_previous_release`.
+- On macOS one launchd job is booted out and bootstrapped again: an update has a gap.
+
+The record is `state.json` in `/var/lib/tierstore-hook`, a JSON object whose keys are the previous release's single-instance record and
+three optional keys of the systemd arm (`live`, `next`, `mode`), so a release reads the record of the one before it and the other way round.
+
+## 1. Shape (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
 
 Two instances run side by side during an update, each on its own private port (slot units `tierstore@9301` and
 `tierstore@9302`); clients call 9300, which one redirect rule sends to the current instance. v-next starts, finds the
@@ -81,7 +105,10 @@ version is only in the start line and `--version`, and is `CARGO_PKG_VERSION`, n
 `tierstore --capabilities`, one capability per line, where `handover-v1` means "has the lock, read-only mode, wildcard
 listeners and the lingering drain".
 
-## 2. The declaration (`/etc/updater.d/tierstore.toml`, installed with the release)
+## 2. The declaration (`/etc/updater.d/tierstore.toml`, installed with the release) (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
 
 | item | value | note |
 |---|---|---|
@@ -116,7 +143,10 @@ manage unit files (a polkit action beyond start and stop), it makes two sources 
 that a crash can split, and a reboot between the two would start both. With `restore` there is one record and one rule
 target, and running it again repairs a rule lost to a `flush ruleset`. The units have no `[Install]`.
 
-## 3. The steps
+## 3. The steps (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
 
 Every step reads the record first and sets state, never "does a thing once": that is what makes a re-run after a crash at
 any point converge. The record, `state.json` in `state_dir`, has `schema`, `serving` (the port the rule names), `previous`
@@ -212,7 +242,10 @@ timeout kills a hung one and the kernel frees the lock. *Idempotent*: every part
 stopped (stop of a stopped unit is a no-op), `previous` cleared. A `cleanup` that fails after `stopping` is re-run forward
 by the updater up to `cleanup_retries` (3) times, then `Failed(after_commit)`; it is never rolled back.
 
-## 4. What tierstore changes in the listener
+## 4. What tierstore changes in the listener (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
 
 The redirect rewrites a remote packet's destination to the address of the interface it arrived on, so the private ports
 listen on the **wildcard of both families**, not loopback (the updater protocol, 4.1.1, Question 6); the guard table keeps a
@@ -352,7 +385,10 @@ a build, slot or mode today, and a scrape of 9300 does not say which instance an
 scrapes the two private ports from the node (the guard blocks off-host); one is down between updates, so an alert is on
 "no instance up", not on `up == 0`.
 
-## 9. Failure cases, per step
+## 9. Failure cases, per step (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
 
 | step | case | what happens | state after |
 |---|---|---|---|
@@ -372,7 +408,15 @@ scrapes the two private ports from the node (the guard blocks off-host); one is 
 | any | host reboots mid-update | `restore` (boot entry point): before `stopping` it starts the previous slot and points the rule at it (an abort, the pending step is rolled back); with `stopping` it starts the new slot, which finds the lock free | one instance; no overlap |
 | any | the disk fills while both run | v-current's fills and eviction handle it as today (`critical`, `free_floor`); v-next writes nothing; stale entries are misses | no corruption |
 
-## 10. Test plan (tests first)
+## 10. Test plan (superseded)
+
+> Superseded by section 0 and `crates/tierstore/docs/update-hook.md`: this section describes the nftables redirect and the slot
+> units, which the hook no longer uses. It is kept as the record of that design.
+
+The test T1 below (a hand-over under load behind real nftables in network namespaces) and its CI job `handover-t1` are removed with
+the nftables redirect: no pull-request check needs `CAP_NET_ADMIN` now. The hook's steps are tested in the library against fakes of
+`systemctl`, `launchctl`, the markers, the host and the instances' answers (`update_hook/systemd_tests`, `launchd_tests`), and the
+socket hand-off, with requests in flight, by `server/handoff/` and `tests/s3_front/handoff.rs`. The plan below is the old one.
 
 House rules: nothing asserts timing, no real sleeps, injected clocks and counted events. Each test names the defect it
 catches and is written red before the code. **Conformance, one line per step** (the suite of the updater protocol, 9, with the
@@ -399,53 +443,7 @@ real hook binary against a fake service and a fake `nft` and `systemctl`):
   one in `state_dir` with a port outside the two, an unknown mode or marker, equal `serving` and `previous`, or a newer
   schema makes every step and `restore` exit `1` with the fake `nft` and `systemctl` recording **no call** (red: a hook
   that takes the port from the record). nft tests: see the updater protocol, 9. The service's own tests follow.
-- **T1 hand-over under load, no retry.** In `crates/tierstore/tests/handover`, run by the CI job `handover-t1`. The real
-  `tierstore update-hook` runs its steps, the real `nft` applies its rules in two network namespaces the test makes and
-  deletes, and two real servers are the slots 9301 and 9302 behind 9300; `systemctl` is a stand-in that starts and stops
-  the test's own processes with the slot unit's semantics. Twelve clients, each sending its next request when it has
-  the previous answer and retrying none: eight S3 clients (create-only puts, every sixteenth an empty object, gets of
-  what they wrote, `/metricz`) through 9300, kept-alive and new connections, in the host and through a veth peer, IPv4
-  and IPv6; four OCI clients (`GET` and `HEAD` of `/v2/`, of a manifest and of blobs by digest, each answer's
-  `Docker-Content-Digest` checked; the content seeded by S3 puts at its `oci/blobs/sha256/` keys) on v-current's own OCI
-  port. Between two steps every client finishes twenty more requests (or an OCI client has ended). The OCI front is
-  read-only and the hook does not redirect it, so an OCI client's sequence ends, cleanly, at v-current's drain (an
-  answer with `Connection: close`, or a clean end of stream), and only after the run has said that drain is coming;
-  until then every OCI request must succeed. Besides the clients, a put and an S3 and an OCI get of 16 MiB are held
-  part-way from before `cutover` until v-current's settle is over (both its listeners refuse), and must then complete
-  (each get is held with more of its answer unsent than the largest send buffer of the kernel, so the server is still
-  sending);
-  and an idle S3 and OCI connection to v-current each write a request after its end of stream and close, which the
-  lingering close reads and counts. The runs, one test each:
-  - (a) build nodes over one cache directory, in `mode=handover` (both staged releases are a test launcher that lists
-    `handover-v1`, so the run does not depend on the server's own `CAPABILITIES`): `prepare`, `cutover`, `verify`, `cleanup`, `verify`. Zero failed
-    requests; the held transfers complete; every acknowledged write, empty ones included, reads back with its bytes and
-    hash; each client on new connections met both slots (`/metricz` through 9300); a direct connect from the veth peer
-    to a private slot is dropped by the guard, IPv4 and IPv6 (counted by a watch table of the test's own around the
-    guard), while the redirected traffic passes; every server that stopped exited 0, v-current's exit note (section 7)
-    naming exactly the idle probes' late requests, one on each front, and the other's none; v-next's promotion and a
-    fresh start on the directory discard nothing.
-  - (b) the same ending in `rollback` before `cleanup`: zero failures; v-current serves read-write through the rule,
-    with no late request; v-next is stopped and its link removed.
-  - (c) storage nodes over a `dir:` hot tier with `mode = "restart"`: `cutover` points the redirect at v-next's port,
-    then stops v-current before it starts v-next, so a new connection in between (v-current's settle, its exit and
-    v-next's start) is refused. The bound asserted: every failed request is an S3 connect into that gap (between just
-    before `cutover` and its return), refused or reset in its handshake, counted and printed; no request whose connect
-    succeeded fails, whatever it reads. No failure outside the gap or of an OCI client, no 5xx, no reset or cut answer on an established
-    connection, no acknowledged write lost; the held transfers complete, and the storage node's exit note names the probes' late
-    requests. v-next's reconciler holds the lease, named for its slot; the entries decode and each acknowledged key is in a tier;
-    once both slots have stopped, no lease is left.
-  - The hook killed by its `nft` right after `cutover` applied the swap, before `swapped`: `restore` puts the rule back
-    on v-current, `rollback` follows, then a whole hand-over; zero failures throughout.
-  - Without P1 and P2 (servers built with the test-only feature `test-drain-off`), run (a) fails: kept-alive S3
-    connections end without an answer at v-current's drain. Apart from that, v-current's drain reads none of the idle
-    probes' late requests: no answer in the drain went to those connections, so only the lingering close (P2) could.
-
-  It needs CAP_NET_ADMIN and runs only with the feature `handover-t1`; without it the workspace's test run ignores it.
-  As a user who may `sudo` (cargo builds as that user; only the test binary runs as root):
-
-  ```sh
-  cargo build -p tierstore --features server,test-drain-off --bin tierstore --target-dir target/drain-off && cargo test -p tierstore --features handover-t1 --test handover --config "target.'cfg(target_os = \"linux\")'.runner = 'sudo'"
-  ```
+- **T1 hand-over under load (superseded).** It ran the hook against real nftables in network namespaces, with the test-only features `handover-t1` and `test-drain-off`. The test, the features and the CI job are removed; nothing here can be run.
 - **T2 lock and self-take.** Two processes on one directory: the second is read-only and its retry count rises while the
   first holds the lock (an injected clock ticks the retries); after the first is killed it takes the lock, runs
   `clear_stage` and `scan` (a half-published sidecar is cleaned), serves a counted fill and says `read-write`; a replaced

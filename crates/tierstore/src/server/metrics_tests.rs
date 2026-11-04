@@ -141,10 +141,10 @@ async fn metricz_has_the_build_gauge_with_version_and_commit() {
 
 /// Asserts that a server given a slot renders it as the `slot` label of the build gauge, on a
 /// storage shape and on one with no proxy, and that a server given none renders no `slot` text
-/// anywhere. On Linux it also asserts that the update hook's reader finds the slot, the version
-/// and the commit in that text (the hook, and so its reader, is built on Linux alone). It would
-/// catch a gauge that never names its slot (the hook's probe through the public port then never
-/// sees the new instance), and a label added to every scrape.
+/// anywhere. Where the hook is built (Linux and macOS) it also asserts that the update hook's
+/// reader finds the slot, the version and the commit in that text. It would catch a gauge that
+/// never names its slot (the hook's probe through the public port then never sees the new
+/// instance), and a label added to every scrape.
 #[tokio::test]
 async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
     use super::build_info::{COMMIT, VERSION};
@@ -164,16 +164,16 @@ async fn metricz_names_the_slot_in_the_build_gauge_only_when_there_is_one() {
             1,
             "{body}"
         );
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let build = super::update_hook::build_of(&body).expect("a gauge");
-            assert!(build.is(9301, VERSION), "{body}");
-            assert!(!build.is(9302, VERSION), "{body}");
+            assert!(build.is(VERSION), "{body}");
+            assert_eq!(build.slot, Some(9301), "{body}");
         }
     }
     let plain = metricz(&Rig::new(BUDGET).await).await.body;
     assert!(!plain.contains("slot"), "{plain}");
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     assert_eq!(
         super::update_hook::build_of(&plain).expect("a gauge").slot,
         None

@@ -3,8 +3,8 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 
 use super::super::ports::{PortError, PortKind, StateDir};
-use super::testing::{SERVICE, account, files, me, my_group, scratch_state};
-use super::{Account, LOCK_FILE, STATE_FILE, StateFiles};
+use super::testing::{files, me, scratch, scratch_state};
+use super::{LOCK_FILE, STATE_FILE, StateFiles};
 
 fn mode(path: &Path, bits: u32) {
     fs::set_permissions(path, fs::Permissions::from_mode(bits)).unwrap();
@@ -24,14 +24,7 @@ fn refused(state: &StateFiles) -> String {
     message(state.lock().err().expect("the directory is refused"))
 }
 
-fn with(dir: &Path, change: impl FnOnce(&mut Account)) -> StateFiles {
-    let mut account = account(dir);
-    change(&mut account);
-    StateFiles::new(dir.to_path_buf(), account)
-}
-
-/// Asserts that a directory owned by the expected user and group with mode 0750, whose group
-/// lists the service account, takes the lock, and that the lock file is made.
+/// Asserts that a directory owned by the expected user with mode 0700 takes the lock, and that the lock file is made.
 #[test]
 fn a_directory_that_is_as_it_must_be_takes_the_lock() {
     let (_guard, dir) = scratch_state("state-ok");
@@ -54,11 +47,11 @@ fn the_lock_is_exclusive_and_released_on_drop() {
 }
 
 /// Asserts that a directory owned by someone other than the expected user is refused, and the
-/// message names both users. It would catch a directory the service owns.
+/// message names both users. It would catch a directory another account owns.
 #[test]
 fn a_directory_of_another_owner_is_refused() {
     let (_guard, dir) = scratch_state("state-owner");
-    let state = with(&dir, |account| account.owner = me() + 1);
+    let state = StateFiles::new(dir.clone(), me() + 1);
     let text = refused(&state);
     assert!(
         text.contains(&format!("is owned by user {}, not {}", me(), me() + 1)),
@@ -66,77 +59,25 @@ fn a_directory_of_another_owner_is_refused() {
     );
 }
 
-/// Asserts that a directory of another group than the hook's is refused, and the message names
-/// both groups. It would catch a directory that a group the hook is not in can reach.
-#[test]
-fn a_directory_of_another_group_is_refused() {
-    let (_guard, dir) = scratch_state("state-group");
-    let state = with(&dir, |account| account.group = my_group() + 1);
-    let text = refused(&state);
-    assert!(
-        text.contains(&format!(
-            "belongs to group {}, not {}",
-            my_group(),
-            my_group() + 1
-        )),
-        "{text}"
-    );
-}
-
-/// Asserts that only the mode 0750 is accepted: 0700 and 0500 (the service could not reach
-/// the slot links), 0000 (which cannot be opened), 0755, 0751, 0770 and 0775 (more than the design allows), and 02750 (setgid)
+/// Asserts that only the mode 0700 is accepted: 0750, 0500, 0755, 0770, 0701 and 02700 (setgid)
 /// are refused, and the message names the mode. It would catch a check of single bits.
 #[test]
-fn only_the_mode_0750_is_accepted() {
+fn only_the_mode_0700_is_accepted() {
     let (_guard, dir) = scratch_state("state-mode");
-    for bits in [
-        0o700, 0o500, 0o755, 0o751, 0o754, 0o770, 0o775, 0o757, 0o2750,
-    ] {
+    for bits in [0o750, 0o500, 0o755, 0o770, 0o701, 0o2700] {
         mode(&dir, bits);
         let text = refused(&files(&dir));
         assert!(text.contains("has mode"), "{bits:o}: {text}");
-        assert!(text.contains("not 0750"), "{bits:o}: {text}");
+        assert!(text.contains("not 0700"), "{bits:o}: {text}");
     }
     mode(&dir, 0o000);
     let text = refused(&files(&dir));
-    mode(&dir, 0o750);
+    mode(&dir, 0o700);
     assert!(text.starts_with("state directory:"), "{text}");
     assert!(files(&dir).lock().is_ok());
 }
 
-/// Asserts that the service account has to be listed in the group the directory belongs to:
-/// not listed, listed only in another group, a group file that cannot be read and malformed
-/// lines in it are refused; a listing among several members passes. It would catch a directory
-/// the service cannot traverse.
-#[test]
-fn the_service_account_must_be_a_member_of_the_group() {
-    let (guard, dir) = scratch_state("state-member");
-    let group = guard.path().join("group");
-    let gid = my_group();
-    for (text, ok) in [
-        (format!("tests:x:{gid}:a,b\n"), false),
-        (format!("tests:x:{gid}:\n"), false),
-        (format!("tests:x:{}:{SERVICE}\n", gid + 1), false),
-        (format!("junk\ntests:x:notanumber:{SERVICE}\n"), false),
-        (String::new(), false),
-        (format!("junk\ntests:x:{gid}:a,{SERVICE},b\n"), true),
-        (format!("first:x:{gid}:a\nsecond:x:{gid}:{SERVICE}\n"), true),
-    ] {
-        fs::write(&group, &text).unwrap();
-        let result = files(&dir).lock();
-        assert_eq!(result.is_ok(), ok, "{text:?}");
-        if !ok {
-            let text = message(result.err().unwrap());
-            assert!(text.contains("is not a member of group"), "{text}");
-        }
-    }
-    fs::remove_file(&group).unwrap();
-    let text = refused(&files(&dir));
-    assert!(text.contains("cannot read"), "{text}");
-}
-
-/// Asserts that a symbolic link to a good directory is refused, as is a file and a path that is
-/// not there.
+/// Asserts that a symbolic link to a good directory is refused, as is a file.
 #[test]
 fn a_link_a_file_and_a_missing_path_are_refused() {
     let (guard, dir) = scratch_state("state-kinds");
@@ -146,7 +87,6 @@ fn a_link_a_file_and_a_missing_path_are_refused() {
     let file = guard.path().join("file");
     fs::write(&file, "x").unwrap();
     assert!(refused(&files(&file)).contains("is not a directory"));
-    assert!(refused(&files(&guard.path().join("absent"))).starts_with("state directory:"));
 }
 
 /// Asserts that a lock file that is a symbolic link is not followed: the lock is refused.
@@ -226,7 +166,7 @@ fn a_save_that_cannot_write_leaves_the_old_record() {
     state.save(b"old").unwrap();
     mode(&dir, 0o500);
     let result = state.save(b"new");
-    mode(&dir, 0o750);
+    mode(&dir, 0o700);
     assert!(message(result.unwrap_err()).starts_with("write "));
     assert_eq!(state.load().unwrap().as_deref(), Some(&b"old"[..]));
 }
@@ -332,7 +272,7 @@ fn the_files_are_reached_through_the_directory_that_was_checked() {
     let moved = guard.path().join("moved");
     fs::rename(&dir, &moved).unwrap();
     fs::create_dir(&dir).unwrap();
-    mode(&dir, 0o750);
+    mode(&dir, 0o700);
     fs::write(dir.join(STATE_FILE), "forged").unwrap();
     mode(&dir.join(STATE_FILE), 0o600);
     assert_eq!(state.load().unwrap().as_deref(), Some(&b"mine"[..]));
@@ -345,124 +285,54 @@ fn the_files_are_reached_through_the_directory_that_was_checked() {
     assert!(moved.join(LOCK_FILE).exists());
 }
 
-/// Writes the passwd file next to the group file of `scratch_state` and refuses or accepts the
-/// service on it. The group file lists nobody.
-fn membership(group: &str, passwd: &str) -> Result<(), String> {
-    let (guard, dir) = scratch_state("state-passwd");
-    fs::write(guard.path().join("group"), group).unwrap();
-    fs::write(guard.path().join("passwd"), passwd).unwrap();
-    let state = files(&dir);
-    match state.lock() {
-        Ok(_held) => Ok(()),
-        Err(error) => Err(message(error)),
-    }
-}
-
-/// Asserts that a service account whose primary group is the directory's group is accepted
-/// though the group file lists no member (a sysusers account made with that primary group is in
-/// no member list). It would catch a check that reads the member lists only.
+/// Asserts that a state directory that is absent is made with mode 0700, its missing parents
+/// with mode 0755, and then takes the lock and keeps a record; a second use finds it as it is.
 #[test]
-fn a_service_whose_primary_group_is_the_directorys_is_a_member() {
-    let gid = my_group();
-    let group = format!("tests:x:{gid}:\n");
-    let passwd =
-        format!("root:x:0:0::/root:/bin/sh\n{SERVICE}:x:4242:{gid}::/:/usr/sbin/nologin\n");
-    assert_eq!(membership(&group, &passwd), Ok(()));
-}
-
-/// Asserts that a service listed in the group's member list is accepted though its primary group
-/// is another one.
-#[test]
-fn a_service_listed_in_the_group_is_a_member() {
-    let gid = my_group();
-    let group = format!("tests:x:{gid}:a,{SERVICE}\n");
-    let passwd = format!("{SERVICE}:x:4242:{}::/:/usr/sbin/nologin\n", gid + 1);
-    assert_eq!(membership(&group, &passwd), Ok(()));
-}
-
-/// Asserts that a service that is neither listed nor has the group as its primary group is
-/// refused, and that the message names the account and the group.
-#[test]
-fn a_service_that_is_neither_listed_nor_in_the_primary_group_is_refused() {
-    let gid = my_group();
-    let group = format!("tests:x:{gid}:a\n");
-    let passwd = format!("{SERVICE}:x:4242:{}::/:/usr/sbin/nologin\n", gid + 1);
-    let text = membership(&group, &passwd).unwrap_err();
-    assert!(text.contains("is not a member of group"), "{text}");
-    assert!(text.contains(SERVICE), "{text}");
-}
-
-/// Asserts that a service with no passwd entry (and not listed) is refused, as are an entry of
-/// another account whose primary group matches, a service name that is only a prefix of an
-/// entry's, and a passwd file with malformed lines.
-#[test]
-fn a_service_with_no_passwd_entry_is_refused() {
-    let gid = my_group();
-    let group = format!("tests:x:{gid}:a\n");
-    for passwd in [
-        String::new(),
-        format!("other:x:4242:{gid}::/:/bin/sh\n"),
-        format!("{SERVICE}x:x:4242:{gid}::/:/bin/sh\n"),
-        format!("junk\n{SERVICE}:x:4242:notanumber::/:/bin/sh\n"),
-    ] {
-        let text = membership(&group, &passwd).unwrap_err();
-        assert!(
-            text.contains("is not a member of group"),
-            "{passwd}: {text}"
+fn an_absent_directory_is_made_private_with_its_parents() {
+    let (_guard, root) = scratch("state-made");
+    let dir = root.join("var/lib/hook");
+    let state = StateFiles::new(dir.clone(), me());
+    let _lock = state.lock().expect("the lock");
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    for parent in [root.join("var"), root.join("var/lib")] {
+        assert_eq!(
+            fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+            0o755
         );
     }
-}
-
-/// A private state directory (a launchd host's) of the tests' own user, mode 0700, with no group
-/// file anywhere near it.
-fn private_dir(name: &str) -> (tierstore_testkit::dir::TestDir, std::path::PathBuf) {
-    let (guard, root) = super::testing::scratch(name);
-    let dir = root.join("state");
-    fs::create_dir(&dir).unwrap();
-    mode(&dir, 0o700);
-    (guard, dir)
-}
-
-/// Asserts that a private state directory of the hook's user with mode 0700 takes the lock and
-/// keeps the record, with no group file to read: the service of a launchd host never reads the
-/// directory, so no account must be in its group. It would catch a launchd host refused for a
-/// group file macOS does not keep its accounts in.
-#[test]
-fn a_private_directory_of_the_hook_takes_the_lock_and_keeps_the_record() {
-    let (_guard, dir) = private_dir("state-private-dir");
-    let state = StateFiles::private(dir.clone(), me());
-    let _lock = state.lock().expect("the lock");
-    assert_eq!(state.load().unwrap(), None);
     state.save(b"{}\n").unwrap();
-    assert_eq!(state.load().unwrap(), Some(b"{}\n".to_vec()));
-    assert!(!dir.parent().unwrap().join("group").exists());
+    assert_eq!(
+        StateFiles::new(dir, me()).load().unwrap(),
+        Some(b"{}\n".to_vec())
+    );
 }
 
-/// Asserts that a private state directory is refused when its mode is not exactly 0700 (0750,
-/// which the two-slot directory has, included) and when another user owns it, and that a record
-/// in it that a group could write is not read. It would catch a private directory that the
-/// service's group could read or that another account could have prepared.
+/// Asserts that a directory that cannot be made is refused with the state port's words: a
+/// parent that cannot be made (the root is read-only) and the directory itself in a read-only
+/// parent.
 #[test]
-fn a_private_directory_is_the_hooks_alone() {
-    let (_guard, dir) = private_dir("state-private-refused");
-    let shown = dir.display();
-    mode(&dir, 0o750);
-    assert_eq!(
-        refused(&StateFiles::private(dir.clone(), me())),
-        format!("state directory: {shown} has mode 0750, not 0700")
-    );
-    mode(&dir, 0o700);
-    assert_eq!(
-        refused(&StateFiles::private(dir.clone(), me() + 1)),
-        format!(
-            "state directory: {shown} is owned by user {}, not {}",
-            me(),
-            me() + 1
-        )
-    );
+fn a_directory_that_cannot_be_made_is_refused() {
+    let (_guard, root) = scratch("state-unmakeable");
+    mode(&root, 0o500);
+    let deep = refused(&StateFiles::new(root.join("a/b"), me()));
+    let direct = refused(&StateFiles::new(root.join("state"), me()));
+    mode(&root, 0o700);
+    assert!(deep.starts_with("state directory:"), "{deep}");
+    assert!(direct.starts_with("state directory:"), "{direct}");
+    assert!(!root.join("state").exists() && !root.join("a").exists());
+}
+
+/// Asserts that a record in a state directory that a group could write to is refused: a record
+/// of mode 0620 is not read.
+#[test]
+fn a_record_that_a_group_could_write_is_not_read() {
+    let (_guard, dir) = scratch_state("state-group-record");
     fs::write(dir.join(STATE_FILE), b"{}").unwrap();
     mode(&dir.join(STATE_FILE), 0o620);
-    let text = message(StateFiles::private(dir.clone(), me()).load().unwrap_err());
+    let text = message(files(&dir).load().unwrap_err());
     assert!(
         text.ends_with("can be written by a group or others"),
         "{text}"

@@ -196,7 +196,7 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | Key | Type, default | What |
 |---|---|---|
 | `server.proxy_id` | string, required | names this process's journal and lease in the hot tier; keep it across restarts and give each process over the same tiers its own |
-| `server.slot` | port, 1 to 65535, none | The private port this instance runs as: the port of its `s3` interface, which the hand-over's unit `tierstore@<port>` is given in its own file (see the packaging README). It is the `slot` label of `tierstore_build_info` on `/metricz`, which the update hook's probe through the public port reads to know which instance answered. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. `slot = 0` or a value that is not a port is refused (exit 2) |
+| `server.slot` | port, 1 to 65535, none | The private port this instance runs as: the port of its `s3` interface. It is added as the `slot` label of `tierstore_build_info` on `/metricz`; the update hook does not read it. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. `slot = 0` or a value that is not a port is refused (exit 2) |
 | `server.bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
 | `server.region` | string, `us-east-1` | the region in the credential scope of a request's signature (not the tiers' regions) |
 | `server.access_key_file` | path, required | the full key file |

@@ -83,8 +83,8 @@ fn a_program_that_does_not_exist_cannot_be_run() {
 /// characters and trimmed.
 #[test]
 fn a_call_and_its_stderr_read_as_words() {
-    let call = Call::new("nft", &["-f", "-"], LIMIT);
-    assert_eq!(call.describe(), "nft -f -");
+    let call = Call::new("systemctl", &["stop", "--"], LIMIT);
+    assert_eq!(call.describe(), "systemctl stop --");
     let long = format!("  {}\n", "e".repeat(500));
     let output = Output {
         code: Some(1),
@@ -95,7 +95,7 @@ fn a_call_and_its_stderr_read_as_words() {
 }
 
 /// Asserts that the child has an environment of its own: nothing of the test's, only the fixed
-/// `PATH` and `LC_ALL=C` (so nft's and systemctl's words do not depend on the host's locale).
+/// `PATH` and `LC_ALL=C` (so systemctl's words do not depend on the host's locale).
 #[test]
 fn the_child_gets_a_clean_environment() {
     let output = SystemRunner

@@ -15,10 +15,8 @@ use std::process::ExitCode;
 
 use serde_json::{Map, Value};
 
-use super::declaration::DeclarationError;
 use super::ports::{PortError, PortKind};
-use super::record::RecordError;
-use super::validate::Invalid;
+use super::record::{Invalid, RecordError};
 
 /// The longest `reason` token.
 pub const MAX_REASON_LEN: usize = 64;
@@ -64,40 +62,39 @@ pub enum Reason {
     BadParams,
     /// Another step holds the lock of the state directory.
     Locked,
-    /// The declaration, the record or the params are not as the hook requires.
+    /// The record is not as the hook requires.
     StateInvalid,
     /// The step does not follow from the record: `cutover` before `prepare`, and so on.
     OutOfOrder,
     /// `cleanup` before a `verify` succeeded.
     NotVerified,
-    /// `rollback`, `cutover` or `prepare` after `cleanup` began to stop v-current.
+    /// `rollback` or `prepare` after `cleanup` began: nothing can be undone.
     Committed,
-    /// `cleanup` could not confirm, freshly, that the new instance serves alone: nothing was
-    /// committed.
+    /// `cleanup` could not confirm, freshly, that the new release serves: nothing was committed.
     NotConfirmed,
-    /// The host cannot take the update now (exit 75): the guard, the conntrack bounds.
+    /// The host cannot take the update now (exit 75): both instances run.
     HostNotReady,
-    /// An instance did not answer `/readyz` with 200.
+    /// An instance that gave its sockets away is still draining (exit 75): try again soon.
+    Draining,
+    /// No instance answered `/readyz` with 200 on the public port.
     NotReady,
-    /// The new instance is read-write while the old one runs: two writers.
-    UnexpectedMode,
-    /// The public port was never answered by the new instance with the staged version.
+    /// The public port was never answered by the release with the version it must report.
     ProbeFailed,
-    /// `verify`: the instance behind the public port is not the new one.
+    /// `verify`: the build gauge on the public port is not the target version.
     WrongBuild,
-    /// `verify`: the redirect does not name the new instance.
-    RedirectWrong,
-    /// `verify`: the old instance no longer answers.
-    PreviousDown,
-    /// The slot to start has no link.
-    NoSlot,
-    /// `nft` failed.
-    NftFailed,
-    /// A unit could not be started or stopped.
+    /// `prepare`: the node's configuration has no `server.handoff_socket`, so the new instance
+    /// could not take the old one's sockets.
+    HandoffNotConfigured,
+    /// `prepare`: there is no configuration file at the path `config_file` names.
+    ConfigMissing,
+    /// The params name a service manager this hook does not drive.
+    ServiceManagerUnknown,
+    /// `rollback` of a first install: there is no release to go back to; what `cutover`
+    /// started is stopped.
+    NoPreviousRelease,
+    /// A unit or the launchd job could not be started, stopped or asked.
     UnitFailed,
-    /// A slot link could not be read, made or removed.
-    LinkFailed,
-    /// The record could not be read or written.
+    /// The record or a start marker could not be read or written.
     StateIo,
     /// The host could not be asked.
     HostFailed,
@@ -105,7 +102,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 21] = [
+    pub const ALL: [Reason; 20] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -115,16 +112,15 @@ impl Reason {
         Reason::Committed,
         Reason::NotConfirmed,
         Reason::HostNotReady,
+        Reason::Draining,
         Reason::NotReady,
-        Reason::UnexpectedMode,
         Reason::ProbeFailed,
         Reason::WrongBuild,
-        Reason::RedirectWrong,
-        Reason::PreviousDown,
-        Reason::NoSlot,
-        Reason::NftFailed,
+        Reason::HandoffNotConfigured,
+        Reason::ConfigMissing,
+        Reason::ServiceManagerUnknown,
+        Reason::NoPreviousRelease,
         Reason::UnitFailed,
-        Reason::LinkFailed,
         Reason::StateIo,
         Reason::HostFailed,
     ];
@@ -142,23 +138,22 @@ impl Reason {
             Reason::Committed => "committed",
             Reason::NotConfirmed => "not_confirmed",
             Reason::HostNotReady => "host_not_ready",
+            Reason::Draining => "draining",
             Reason::NotReady => "not_ready",
-            Reason::UnexpectedMode => "unexpected_mode",
             Reason::ProbeFailed => "probe_failed",
             Reason::WrongBuild => "wrong_build",
-            Reason::RedirectWrong => "redirect_wrong",
-            Reason::PreviousDown => "previous_down",
-            Reason::NoSlot => "no_slot",
-            Reason::NftFailed => "nft_failed",
+            Reason::HandoffNotConfigured => "handoff_not_configured",
+            Reason::ConfigMissing => "config_missing",
+            Reason::ServiceManagerUnknown => "service_manager_unknown",
+            Reason::NoPreviousRelease => "no_previous_release",
             Reason::UnitFailed => "unit_failed",
-            Reason::LinkFailed => "link_failed",
             Reason::StateIo => "state_io",
             Reason::HostFailed => "host_failed",
         }
     }
 
-    /// Whom the reason blames: the host and the hook's own inputs are `environment`; what the
-    /// new release does (or does not do) is `release`.
+    /// Whom the reason blames: the host, the node's configuration and the hook's own inputs are
+    /// `environment`; what the new release (or its package) does or does not do is `release`.
     #[must_use]
     pub const fn class(self) -> Class {
         match self {
@@ -167,13 +162,21 @@ impl Reason {
             | Reason::Locked
             | Reason::StateInvalid
             | Reason::HostNotReady
-            | Reason::NoSlot
-            | Reason::NftFailed
+            | Reason::Draining
+            | Reason::HandoffNotConfigured
+            | Reason::ConfigMissing
             | Reason::UnitFailed
-            | Reason::LinkFailed
             | Reason::StateIo
             | Reason::HostFailed => Class::Environment,
-            _ => Class::Release,
+            Reason::OutOfOrder
+            | Reason::NotVerified
+            | Reason::Committed
+            | Reason::NotConfirmed
+            | Reason::NotReady
+            | Reason::ProbeFailed
+            | Reason::WrongBuild
+            | Reason::ServiceManagerUnknown
+            | Reason::NoPreviousRelease => Class::Release,
         }
     }
 }
@@ -226,15 +229,15 @@ impl Report {
     }
 }
 
-/// How a step ended, as the updater reads it. This hook never halts: a record it cannot trust is
-/// exit 1, and the updater decides what that means for its `rollback`.
+/// How a step ended, as hostkeeper reads it. This hook never halts: a record it cannot trust is
+/// exit 1, and hostkeeper decides what that means for its `rollback`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     /// Exit 0.
     Success,
     /// Exit 1.
     Failure,
-    /// Exit 75: the host is not ready, nothing was done, try later.
+    /// Exit 75: not now; nothing irreversible was done by this run, try the step again later.
     Deferred,
 }
 
@@ -292,8 +295,7 @@ impl Done {
         Done::with(Outcome::Failure, Some(reason), detail.into())
     }
 
-    /// Deferred (exit 75): nothing was done; the updater may order the host again after
-    /// `retry_after_secs`.
+    /// Deferred (exit 75): not now; hostkeeper runs the step again after `retry_after_secs`.
     #[must_use]
     pub fn deferred(reason: Reason, detail: impl Into<String>, retry_after_secs: u64) -> Done {
         let mut done = Done::with(Outcome::Deferred, Some(reason), detail.into());
@@ -307,20 +309,12 @@ impl From<PortError> for Done {
         let reason = match &err {
             PortError::Busy => Reason::Locked,
             PortError::Failed { kind, .. } => match kind {
-                PortKind::Nft => Reason::NftFailed,
-                PortKind::Units => Reason::UnitFailed,
-                PortKind::Slots => Reason::LinkFailed,
-                PortKind::State => Reason::StateIo,
+                PortKind::Units | PortKind::Launchd => Reason::UnitFailed,
+                PortKind::Markers | PortKind::State => Reason::StateIo,
                 PortKind::Instances | PortKind::Host => Reason::HostFailed,
             },
         };
         Done::fail(reason, err.to_string())
-    }
-}
-
-impl From<DeclarationError> for Done {
-    fn from(err: DeclarationError) -> Done {
-        Done::fail(Reason::StateInvalid, err.to_string())
     }
 }
 
