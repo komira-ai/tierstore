@@ -36,8 +36,9 @@ tarball is verified (`docs/ci-and-release.md`). The release also carries
 `tierstore-<commit>-macos-arm64.tar.gz`; the files here are for Linux hosts (a Mac's: `macos/README.md`),
 and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
 binary.
-The tarball holds one member, the binary under its own name (the declaration is not in it
-yet: place it from this directory, below):
+The tarball holds the binary under its own name and `THIRD-PARTY-LICENSES.txt`, the licences of
+the crates linked into it (the declaration is not in it yet: place it from this directory, below;
+extracting `tierstore` by name leaves the notice in the tarball):
 
 ```sh
 tar -xzf tierstore-<commit>-linux-x86_64.tar.gz tierstore
@@ -886,9 +887,8 @@ and switch the unit by changing `ExecStart=` to
 ExecStart=/usr/libexec/tierstore/tierstore --config /etc/tierstore/tierstore.toml --drain-lb-wait 10s --drain-deadline 15m
 ```
 
-The flags and the file are both accepted in this release, so a unit may stay as it is and move
-when it is convenient; the flags are to go in the release after, and `--config` is then the way to
-configure the data path. The shipped `tierstore.service` keeps its flags, and
+The flags and the file are both supported, and no release is planned to remove the flags, so a
+unit may stay as it is and move when it is convenient. The shipped `tierstore.service` keeps its flags, and
 `crates/tierstore/tests/packaging.rs` parses them as the binary parses them. `--print-config` does
 not convert anything else in a unit (a drop-in, the firewall rules).
 
@@ -1004,6 +1004,11 @@ stop it, and the front answers that parameter with 501 `NotImplemented`. If that
 ls` and `list_objects_v2` fail against the front, and the calls that name a key (`get_object`,
 `put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
 client before relying on either.
+
+A put or a CreateMultipartUpload of a key with a character XML 1.0 forbids (U+0000-U+0008, U+000B,
+U+000C, U+000E-U+001F, U+FFFE or U+FFFF) is answered 400 `InvalidArgument` and stores nothing: the
+front's listings are XML 1.0, which cannot carry those characters, and with no `encoding-type=url`
+there is no other way to list such a key. Tab, line feed, U+007F and the C1 controls are allowed.
 
 ## The OCI read front
 
