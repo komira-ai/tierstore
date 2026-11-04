@@ -166,13 +166,18 @@ async fn a_delete_removes_both_copies_and_is_journaled() {
     assert_eq!(again, [entry(JournalOp::Delete, "k", 0, 0)]);
 }
 
-/// Asserts that a client put or delete of a key under `_journal/` or `_tiering/` is
+/// Asserts that a client put or delete of a key under `_journal/`, `_tiering/` or `_entries/` is
 /// refused with `Reserved` and changes nothing, and that the proxy does not replace objects.
 #[tokio::test(start_paused = true)]
 async fn a_client_write_under_a_reserved_prefix_is_refused() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
-    for key in ["_journal/p1/x", "_tiering/lease", "_tiering/usage"] {
+    for key in [
+        "_journal/p1/x",
+        "_tiering/lease",
+        "_tiering/usage",
+        "_entries/0123",
+    ] {
         let put = proxy.put(key, body("v")).await;
         assert_eq!(put, Err(Error::Reserved(key.to_owned())));
         let delete = proxy.delete(key).await;
@@ -196,12 +201,16 @@ async fn a_client_read_or_upload_of_a_reserved_key_is_refused_whichever_tier_hol
     rig.hot_mem.put("_journal/h", body("hot")).await.unwrap();
     rig.cold_mem.put("_tiering/c", body("cold")).await.unwrap();
     rig.cold_mem.put("_journal/c", body("cold")).await.unwrap();
+    rig.cold_mem.put("_entries/c", body("cold")).await.unwrap();
+    rig.hot_mem.put("_entries/h", body("hot")).await.unwrap();
     let parts = [(1, "t".to_owned())];
     for key in [
         "_journal/h",
         "_tiering/c",
         "_tiering/proxies/p1",
         "_journal/c",
+        "_entries/c",
+        "_entries/h",
     ] {
         let refused = Some(Error::Reserved(key.to_owned()));
         assert_eq!(proxy.get(key, None).await.err(), refused, "get {key}");
@@ -229,13 +238,13 @@ async fn a_listing_leaves_out_the_reserved_keys_that_only_the_cold_tier_holds() 
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     proxy.put("a", body("v")).await.unwrap();
-    for key in ["_journal/c", "_tiering/c", "b", "c"] {
+    for key in ["_journal/c", "_tiering/c", "_entries/c", "b", "c"] {
         rig.cold_mem.put(key, body("v")).await.unwrap();
     }
     assert_eq!(keys(&proxy).await, ["a", "b", "c"]);
     assert_eq!(page(&proxy, None, 2).await, ["a", "b"]);
     assert_eq!(page(&proxy, Some("a"), 2).await, ["b", "c"]);
-    for prefix in ["_journal/", "_tiering/", "_"] {
+    for prefix in ["_journal/", "_tiering/", "_entries/", "_"] {
         let listed = proxy.list(prefix).await.unwrap();
         assert!(listed.is_empty(), "{prefix}");
         let paged = proxy.list_page(prefix, None, 10).await.unwrap();

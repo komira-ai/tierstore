@@ -4,9 +4,9 @@
 //! `live_until` is the send time of the last acknowledged beat on the proxy's own monotonic
 //! clock, plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]: past it the
 //! proxy must not destroy or acknowledge anything that another process could take as done by a
-//! live owner. This is the only use of `departure` and the margin today: no request path reads
-//! `live_until` or refuses anything by it yet (enforcing it on destroying calls is future work),
-//! and [`Proxy::is_live`] is how a caller sees it.
+//! live owner. The only request paths that read `live_until` are the puts made on entries (they
+//! start only if the margin is left, acknowledge only while it is live, and remove an entry only
+//! within the margin); [`Proxy::is_live`] is how a caller sees it.
 //!
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just

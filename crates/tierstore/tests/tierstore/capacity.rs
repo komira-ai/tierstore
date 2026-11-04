@@ -232,6 +232,8 @@ async fn the_usage_is_read_once_for_each_refresh_interval() {
     let rig = Rig::new();
     let mut config = rig.config("p1", 1000);
     config.usage_refresh = Duration::from_secs(10);
+    // The format object is not read again either, so that the reads counted are the usage's.
+    config.format_refresh = Duration::from_secs(3600);
     let proxy = rig.open(config).await.unwrap();
 
     proxy.put("a", body("1")).await.unwrap();
