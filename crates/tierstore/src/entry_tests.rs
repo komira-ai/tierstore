@@ -593,7 +593,7 @@ async fn a_step_that_does_not_apply_is_refused_and_makes_no_store_call() {
     let a = rig.actor("a");
     let held = take(&a, "k", Take::Put).await;
     let before = rig.store.calls(Op::PutIfMatch);
-    let refused = a.entries.advance(&held, Step::Seal).await.unwrap();
+    let refused = a.entries.advance(&held, Step::Handover).await.unwrap();
     assert_eq!(refused, Outcome::Refused);
     assert_eq!(rig.store.calls(Op::PutIfMatch), before);
 }
