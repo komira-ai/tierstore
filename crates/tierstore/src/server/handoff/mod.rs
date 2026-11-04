@@ -13,9 +13,10 @@
 //! 3. The taker checks that the addresses are the ones its own settings name, and answers `ack`
 //!    (or `nak`, and the running instance goes on as if nothing had been asked).
 //! 4. On `ack` the running instance gives up its control socket (the file is removed), says
-//!    `done`, and begins its drain: it takes no new connection of the sockets it passed (the
-//!    taker holds them too, so the kernel resets nothing), finishes the requests in flight, and
-//!    ends.
+//!    `done`, and begins its ordinary drain, as if its stop had resolved: from then on every
+//!    answer says `Connection: close`, and it goes on accepting on the sockets it passed (the
+//!    taker holds them too, so the kernel resets nothing) through `--drain-lb-wait`, then takes
+//!    no new connection, finishes the requests in flight, and ends.
 //! 5. After `done` the taker binds the control socket itself, so the next update asks it.
 //!
 //! No port is added, no packet is redirected and no right beyond the user's own is needed. The

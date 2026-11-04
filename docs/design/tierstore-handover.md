@@ -17,7 +17,7 @@ is the hook, and what tierstore itself must change.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook and the packaging move to it in a change that
-follows this one; until then both exist, and this section describes what the binary can do (`server/handoff/`).
+follows this one; until then both exist, and this section describes the library implementation (`server/handoff/`, entered through `run_handing`); the binary does not call it yet, and that integration comes in the following change.
 
 Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
 (`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
