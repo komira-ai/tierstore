@@ -987,8 +987,7 @@ async fn a_restarted_actor_does_not_mistake_the_entry_of_its_earlier_run_for_its
     assert!(stored.entry.nonce.starts_with("p1."));
 }
 
-/// Asserts that two instances of one actor id that differ only in their boot write different nonces
-/// for their first write, as two processes with the same process id, clock and counter would.
+/// Asserts that instances of one actor id that differ only in boot write different first nonces.
 #[tokio::test]
 async fn instances_of_one_actor_that_differ_only_in_boot_write_different_nonces() {
     let rig = Rig::new();
@@ -996,7 +995,6 @@ async fn instances_of_one_actor_that_differ_only_in_boot_write_different_nonces(
     let two = Entries::with_boot(rig.store.clone(), "p1", rig.clock.clone(), "b2");
     taken(one.create("a", Take::Put).await.unwrap());
     taken(two.create("b", Take::Put).await.unwrap());
-    let first = one.read("a").await.unwrap().unwrap().entry.nonce;
-    let second = two.read("b").await.unwrap().unwrap().entry.nonce;
-    assert_eq!((first.as_str(), second.as_str()), ("p1.b1.0", "p1.b2.0"));
+    assert_eq!(one.read("a").await.unwrap().unwrap().entry.nonce, "p1.b1.0");
+    assert_eq!(two.read("b").await.unwrap().unwrap().entry.nonce, "p1.b2.0");
 }
