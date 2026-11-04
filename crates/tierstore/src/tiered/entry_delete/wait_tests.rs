@@ -246,9 +246,9 @@ async fn a_delete_that_meets_a_sealed_copy_back_that_is_never_released_is_answer
 /// of a 12-second budget on a sealed copy-back, and then claims a handed-over delete that is never
 /// released, waits only the five seconds that are left for the release. It reads the entry five
 /// times before the claim (the read that found the sealed entry, then after sleeps of 1, 2 and 4
-/// seconds), once to claim, and three times for the release (after sleeps of 4 and 1 seconds, and
+/// seconds), once to claim, and four times for the release (after sleeps of 1, 2 and 2 seconds, and
 /// the one that ends it), and is answered `Unavailable` with the entry still `(DEL, PENDING)`.
-/// Catches a release wait that starts its budget again at the claim, which reads the entry twelve times, not nine.
+/// Catches a release wait that starts its budget again at the claim, which reads the entry twelve times, not ten.
 #[tokio::test(start_paused = true)]
 async fn a_delete_that_waited_on_a_sealed_entry_and_then_claims_a_delete_waits_only_what_is_left() {
     let wait = DeleteWait {
@@ -279,7 +279,7 @@ async fn a_delete_that_waited_on_a_sealed_entry_and_then_claims_a_delete_waits_o
     assert!(gate.release());
     let answer = delete.await.unwrap();
     assert!(is_unavailable(&answer), "{answer:?}");
-    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 9);
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 10);
     assert_eq!(rig.shape("k").await, handed_over());
 }
 
