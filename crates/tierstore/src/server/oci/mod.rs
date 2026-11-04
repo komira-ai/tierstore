@@ -115,6 +115,8 @@ mod push_manifest_tests;
 #[cfg(test)]
 mod push_tests;
 #[cfg(test)]
+mod tags_stores_tests;
+#[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
 pub(crate) mod test_pki;
