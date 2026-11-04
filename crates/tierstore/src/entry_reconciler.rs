@@ -312,7 +312,7 @@ impl EntryReconciler {
         });
         let worked: Vec<_> = steps.buffer_unordered(parallel).collect().await;
         for (path, error) in failed {
-            self.fail(path, now, error, report);
+            self.fail(path, error, report);
         }
         for (path, key, verdict) in worked {
             match verdict {
@@ -328,13 +328,15 @@ impl EntryReconciler {
                         }
                     }
                 }
-                Err(error) => self.fail(path, now, error, report),
+                Err(error) => self.fail(path, error, report),
             }
         }
     }
 
-    /// Notes that the item at `path` failed at `now`, and when it is tried again.
-    fn fail(&mut self, path: String, now: u64, error: Error, report: &mut StepReport) {
+    /// Notes that the item at `path` failed, now by the monotonic clock (a step can be long), and
+    /// when it is tried again.
+    fn fail(&mut self, path: String, error: Error, report: &mut StepReport) {
+        let now = self.config.base.mono.now();
         let failures = self
             .retries
             .get(&path)
