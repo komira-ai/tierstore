@@ -652,7 +652,8 @@ async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
         assert_eq!(answer.status, StatusCode::NOT_FOUND, "{reserved}");
         let expected = (
             "UNSUPPORTED".to_owned(),
-            "only /v2/, /v2/<name>/manifests/<digest> and /v2/<name>/blobs/<digest> are served"
+            "only /v2/, /v2/<name>/manifests/<reference>, /v2/<name>/blobs/<digest> and \
+             /v2/<name>/tags/list are served"
                 .to_owned(),
             Value::Null,
         );
