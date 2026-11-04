@@ -309,7 +309,7 @@ fn a_list_of_one_endpoint_is_the_upstream() {
 }
 
 /// Asserts each refusal of a build node's file, each naming the key and what is wrong, and none
-/// repeating a value: the three tables together, a layout that is not the only one, a cache that
+/// repeating a value: a hot store with a cache that does not take writes, a layout that is not the only one, a cache that
 /// is turned off, marks out of order or out of range, a budget that is missing or zero, a rate
 /// that is not a rate, no policy that caches, more than one upstream or two ways to give it,
 /// and the keys of a storage node that do nothing here.
@@ -334,8 +334,9 @@ fn a_build_node_file_is_refused_when_it_cannot_be_run() {
             cache_with(
                 "[local_cache]",
                 "[hot_store]\nkind = \"memory\"\nbudget = 1\n\n[local_cache]",
-            ),
-            "is refused with [hot_store]",
+            )
+            .replace("write_through = true", "write_through = false"),
+            "local_cache.write_through",
         ),
         (
             cache_with("\"digest-v1\"", "\"digest-v2\""),
@@ -837,4 +838,21 @@ fn the_readme_documents_the_build_node_file() {
     let keys: BTreeSet<&str> = table.keys().map(String::as_str).collect();
     let listed: BTreeSet<&str> = LOCAL_CACHE_KEYS.iter().copied().collect();
     assert_eq!(keys, listed);
+}
+
+/// Asserts which defect a build-node file with two is refused for: the `[local_cache]` one is
+/// named before an `[oci]` table with no `listen`, and with the `[local_cache]` defect mended the
+/// `[oci]` one is named.
+#[test]
+fn a_local_cache_defect_is_named_before_an_oci_one() {
+    let oci = "[oci]\nprefix = \"oci/\"\n";
+    let broken = LEAST.replacen(
+        "budget = 1000",
+        "budget = 1000\nmax_concurrent_fills = 0",
+        1,
+    );
+    let why = refusal(&format!("{broken}\n{oci}"));
+    assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
+    let why = refusal(&format!("{LEAST}\n{oci}"));
+    assert!(why.contains("oci.listen"), "{why}");
 }

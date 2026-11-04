@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::*;
 use crate::testdir::TestDir;
@@ -96,6 +96,30 @@ fn the_tarball_holds_the_binary_alone_owned_by_root_mode_0755_at_time_0() {
     );
 }
 
+/// A sink that refuses every write.
+struct Full;
+
+impl Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+}
+
+#[test]
+fn a_tarball_that_cannot_be_written_to_its_sink_is_an_error_that_says_so() {
+    // Asserts the error of a sink that refuses its writes: the message names the tarball and
+    // the sink's own error, instead of a panic.
+    let error = tarball_to(Full, "tierstore", BINARY).err();
+    assert_eq!(
+        error.as_deref(),
+        Some("cannot write the tarball: the sink is full")
+    );
+}
+
 #[test]
 fn the_gzip_stream_names_no_file_and_no_time() {
     // Catches: a gzip header carrying the time it was written (so two runs of one
@@ -114,10 +138,10 @@ fn one_binary_packages_to_the_same_bytes_whenever_and_wherever_it_is_built() {
     // both, and must give byte-identical tarballs and identical SHA256SUMS lines.
     let mut sums = Vec::new();
     let mut tgzs = Vec::new();
-    for (n, age) in [("early", 86_400 * 365), ("late", 5)] {
+    for (n, at) in [("early", 1_800_000_000), ("late", 1_900_000_000)] {
         let dir = scratch(&format!("same-bytes-{n}"));
         let (binary, sbom) = inputs(&dir);
-        let when = SystemTime::now() - Duration::from_secs(age);
+        let when = UNIX_EPOCH + Duration::from_secs(at);
         std::fs::File::options()
             .write(true)
             .open(&binary)

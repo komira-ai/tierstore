@@ -3,6 +3,7 @@
 //! state of the cold tier, the delete entries it applies, and the eviction by content tag.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tierstore::{
     Backend, Error, JournalEntry, JournalOp, MemoryBackend, Op, Reconciler, decode_journal,
@@ -590,7 +591,7 @@ async fn a_delete_whose_cold_object_changes_under_it_leaves_the_new_object() {
 }
 
 /// Puts five objects of 21 bytes through a proxy, one journal object each.
-async fn five_objects() -> Rig {
+pub async fn five_objects() -> Rig {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1000).await;
     let value = "x".repeat(21);
@@ -658,6 +659,154 @@ async fn an_eviction_of_an_entry_an_earlier_reconciler_applied_reads_the_tag_fir
     assert_eq!(report.evicted, 1);
     assert_absent(&*rig.hot_mem, "k2").await;
     assert_eq!(second.hot_bytes(), 63);
+}
+
+/// A rig whose five objects were copied by a reconciler that has stopped, and a second reconciler
+/// over it with a budget that makes it evict three of them: it holds no tag of any object.
+pub async fn after_a_takeover() -> (Rig, Reconciler) {
+    let rig = five_objects().await;
+    let mut first = rig.reconciler("r1", 1000);
+    first.pass().await;
+    first.stop().await;
+    let second = rig.reconciler("r2", 100);
+    (rig, second)
+}
+
+/// Asserts that a reconciler that took over after another applied the journal does not evict an
+/// object whose key the cold tier holds no real object of (nothing, or a reservation): the hot
+/// object may be the only copy. It is left in the hot tier, the pass reports no failure, and the
+/// objects after it are evicted down to the low-water mark.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_no_real_object_of() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold_mem.delete("k1").await.unwrap();
+    rig.cold_mem.delete("k2").await.unwrap();
+    let held = rig.cold_mem.put_reservation("k2", reservation(1)).await;
+    held.unwrap();
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_eq!(read(&*rig.hot_mem, "k2").await, body(&"x".repeat(21)));
+    assert_absent(&*rig.hot_mem, "k3").await;
+    assert_absent(&*rig.hot_mem, "k4").await;
+}
+
+/// Asserts that a reconciler that took over does not evict a hot object when the cold tier holds a
+/// real object of the key that is not of the hot object's content (an older copy, while the hot
+/// tier holds acknowledged newer bytes): the hot object is kept, the pass reports no failure, and
+/// the objects after it are evicted down to the low-water mark.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_the_cold_tier_holds_another_object_of() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold_mem.delete("k1").await.unwrap();
+    rig.cold_mem
+        .put("k1", body("an older object"))
+        .await
+        .unwrap();
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_eq!(read(&*rig.cold_mem, "k1").await, body("an older object"));
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
+}
+
+/// Asserts that a candidate an eviction left (the cold tier held no object of its content) is
+/// asked about again by the next pass, in the same order: once the cold tier holds the objects,
+/// the oldest two are evicted. A pass that left all of them evicts nothing and reports no failure.
+#[tokio::test(start_paused = true)]
+async fn a_candidate_that_an_eviction_left_is_evicted_by_a_later_pass_once_cold_holds_it() {
+    let (rig, mut second) = after_a_takeover().await;
+    let keys = ["k1", "k2", "k3", "k4", "k5"];
+    for key in keys {
+        rig.cold_mem.delete(key).await.unwrap();
+    }
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 0);
+    assert_eq!(second.hot_bytes(), 105);
+
+    for key in keys {
+        rig.cold_mem.put(key, body(&"x".repeat(21))).await.unwrap();
+    }
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_eq!(read(&*rig.hot_mem, "k3").await, body(&"x".repeat(21)));
+}
+
+/// Asserts that a failed look at the cold tier before an eviction without a tag is reported, evicts
+/// nothing, and is retried by the next pass, which evicts.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_whose_cold_check_fails_reports_it_and_evicts_on_the_next_pass() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold.fail_next_on(Op::Head, "k1", down());
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, [down()]);
+    assert_eq!(report.evicted, 0);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+}
+
+/// Asserts that a failed last look at the cold tier, made after the bytes of the two tiers were
+/// compared and before the hot object is deleted, is reported, evicts nothing, and is retried by
+/// the next pass, which evicts.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_whose_last_cold_look_fails_reports_it_and_evicts_on_the_next_pass() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold.set_delay(Op::Get, Some(Duration::from_secs(10)));
+
+    let fail_the_next_look = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        rig.cold.fail_next_on(Op::Head, "k1", down());
+    };
+    let (report, ()) = tokio::join!(second.pass(), fail_the_next_look);
+    assert_eq!(report.failed, [down()]);
+    assert_eq!(report.evicted, 0);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+
+    rig.cold.set_delay(Op::Get, None);
+    let report = second.pass().await;
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.hot_mem, "k2").await;
+}
+
+/// Asserts that a reconciler that took over does not evict a hot object whose key the cold tier
+/// came to hold only a reservation of after the bytes of the two tiers were compared and before the
+/// hot object was deleted: the object is kept, the pass reports no failure, and the objects after
+/// it are evicted down to the low-water mark.
+#[tokio::test(start_paused = true)]
+async fn a_takeover_keeps_a_hot_object_whose_cold_copy_became_a_reservation_after_the_comparison() {
+    let (rig, mut second) = after_a_takeover().await;
+    rig.cold.set_delay(Op::Head, Some(Duration::from_secs(10)));
+
+    let replace_the_copy = async {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        rig.cold_mem.delete("k1").await.unwrap();
+        let held = rig.cold_mem.put_reservation("k1", reservation(1)).await;
+        held.unwrap();
+    };
+    let (report, ()) = tokio::join!(second.pass(), replace_the_copy);
+    assert_eq!(report.failed, Vec::<Error>::new());
+    assert_eq!(report.evicted, 2);
+    assert_eq!(read(&*rig.hot_mem, "k1").await, body(&"x".repeat(21)));
+    assert_absent(&*rig.hot_mem, "k2").await;
+    assert_absent(&*rig.hot_mem, "k3").await;
 }
 
 /// Asserts that the new ops count in the usage, the copy lag and the eviction like a plain put: a

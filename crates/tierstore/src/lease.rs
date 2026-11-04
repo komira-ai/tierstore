@@ -36,7 +36,8 @@ fn new_nonce() -> String {
 /// The lease keeps two reconcilers from doing the same work. The copies are create-only and
 /// every other step can be done twice, but a holder only learns that it lost the lease when
 /// it renews it, once for each pass, so a pass longer than `ttl` can run beside another
-/// holder's.
+/// holder's. A holder also checks the lease again, without renewing it, before it stores its
+/// checkpoint ([`Lease::still_held`]); copies and evictions are not fenced.
 pub(crate) struct Lease {
     hot: Arc<dyn Backend>,
     clock: Arc<dyn Clock>,
@@ -78,6 +79,26 @@ impl Lease {
         match self.etag.clone() {
             Some(etag) => self.renew(&etag).await,
             None => self.acquire().await,
+        }
+    }
+
+    /// Whether the lease object still has the content tag this holder last wrote. Only reads: it
+    /// does not renew. A holder that finds it gone or replaced stops holding it, as after a failed
+    /// renewal. If the hot tier does not answer the holder keeps its tag and the error is given.
+    ///
+    /// # Errors
+    /// What the HEAD gives other than not found.
+    pub(crate) async fn still_held(&mut self) -> Result<bool, Error> {
+        let Some(etag) = self.etag.clone() else {
+            return Ok(false);
+        };
+        match self.hot.head(LEASE_KEY).await {
+            Ok(meta) if meta.tag == etag => Ok(true),
+            Ok(_) | Err(Error::NotFound(_)) => {
+                self.etag = None;
+                Ok(false)
+            }
+            Err(error) => Err(error),
         }
     }
 

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tierstore_testkit::dir::TestDir;
 
+use super::fake::world as must;
 use super::fake::{Done, NFT, RELEASE, Reply, SYSTEMCTL, WORLD, World, release, run};
 use super::{GUARD_TABLE, guard_ruleset, redirect_ruleset, redirect_target};
 
@@ -301,4 +302,13 @@ fn a_run_is_the_program_its_name_says() {
             "systemctl stop -- tierstore@9301.service"
         ]
     );
+}
+
+/// Asserts that a call on the world's files that fails stops the stand-in with the call's name
+/// and the reason, and that one that succeeds gives its value.
+#[test]
+#[should_panic(expected = "write to the world: the directory is gone")]
+fn a_failed_call_on_the_world_panics_with_its_name_and_reason() {
+    assert_eq!(must(Ok::<u8, String>(5), "fine"), 5);
+    must(Err::<u8, _>("the directory is gone"), "write to the world");
 }

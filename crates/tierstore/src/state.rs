@@ -193,6 +193,20 @@ impl Books {
         self.stream(proxy).candidates.push_back(candidate);
     }
 
+    /// Puts a candidate that an eviction left back at the front of its stream, with the cursor on
+    /// it. Candidates put back newest first end up in their old order. The cursor goes back to
+    /// the kept candidate on purpose: `pop` moved it past the candidate, and a restart must read
+    /// the candidate again to ask again. It never goes below the cursor the pass began with (a
+    /// candidate lies at or after it), so the stored checkpoint does not regress, and the replay
+    /// from it is safe (a put entry is applied again as a no-op, an eviction is conditional on the
+    /// tag or on the bytes). A candidate that can never be evicted holds the cursor, and the
+    /// journal objects after it are retained, until it is deleted or replaced.
+    pub(crate) fn requeue(&mut self, proxy: &str, candidate: Candidate) {
+        let stream = self.stream(proxy);
+        stream.cursor = candidate.at;
+        stream.candidates.push_front(candidate);
+    }
+
     /// Records that the hot tier does not hold the object of a put entry after all (it was
     /// deleted before the copy). An entry that a later one replaced is ignored.
     pub(crate) fn gone(&mut self, proxy: &str, at: Position, key: &str) {

@@ -44,12 +44,10 @@ pub struct ProxyConfig {
     /// The bytes the hot tier is meant to hold, which the usage the reconciler publishes is
     /// compared with.
     pub hot_budget: u64,
-    /// The share of the budget (0.95, say) above which a put is delayed by `back_pressure`
-    /// and a read does not copy the object it found in the cold tier into the hot tier.
+    /// The share of the budget (0.95, say) above which a read does not copy the object it
+    /// found in the cold tier into the hot tier. A put is not changed by it: it still goes to
+    /// the hot tier, at once, until the usage reaches the budget.
     pub critical: f64,
-    /// How long a put waits before it is written to the hot tier while the usage is above the
-    /// critical share.
-    pub back_pressure: Duration,
     /// The most entries one journal object holds. A batch that reaches it is written at once.
     pub batch_entries: usize,
     /// How long a batch waits for more entries before it is written.
@@ -65,7 +63,7 @@ pub struct ProxyConfig {
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
-    /// critical share of 0.95, a back-pressure of 20 ms, batches of at most 64 entries that
+    /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
@@ -73,7 +71,6 @@ impl ProxyConfig {
             proxy_id: proxy_id.to_owned(),
             hot_budget,
             critical: 0.95,
-            back_pressure: Duration::from_millis(20),
             batch_entries: 64,
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
@@ -149,9 +146,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
 ///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
-///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
-///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
+///   A failed copy-back does not fail the read. A ranged read that misses the hot tier asks the
+///   cold tier for that range alone and copies nothing back: the memory of a read is its range,
+///   whatever the size of the object, and a cache that reads a long object in chunks does not
+///   make the proxy read it whole once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
 ///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
 ///   copied back.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
@@ -219,7 +217,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// older than [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
 /// leaves puts unrestrained: [`Proxy::usage_age`] is how a caller sees it, and the server's
 /// `/usagez` reports it). Above
-/// [`ProxyConfig::critical`] of the budget a put waits [`ProxyConfig::back_pressure`] first.
+/// [`ProxyConfig::critical`] of the budget a put is written to the hot tier as it is under it
+/// (it does not wait), and a read of a cold object is not copied back.
 /// At the budget, or when the hot tier answers a put (of the object, or of the journal object
 /// that holds its entry) with [`Error::Full`], puts go straight to the cold tier, create-only
 /// and unjournaled, and never fail for lack of room in the hot tier; reads still use both
@@ -549,12 +548,13 @@ impl Inner {
                 return Err(error);
             }
         }
-        if let Some(part) = range
-            && self.level().await >= Level::Critical
-        {
-            // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
-            // that part alone: a whole read per chunk of a long blob would be quadratic.
-            self.counters.skipped(Skipped::Critical);
+        if let Some(part) = range {
+            // A read of a part asks the cold tier for that part alone and copies nothing back: a
+            // whole read per chunk of a long blob would be quadratic, and would hold the whole of
+            // the object in memory for a read of a part of it.
+            if self.level().await >= Level::Critical {
+                self.counters.skipped(Skipped::Critical);
+            }
             let (body, _) = self.cold_get(key, Some(part)).await?;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
@@ -568,12 +568,8 @@ impl Inner {
         } else {
             self.copy_back(key, &body, tag).await;
         }
-        let served = match range {
-            Some(range) => range.slice(&body)?,
-            None => body,
-        };
-        self.counters.served(Tier::Cold, served.len());
-        Ok(served)
+        self.counters.served(Tier::Cold, body.len());
+        Ok(body)
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
