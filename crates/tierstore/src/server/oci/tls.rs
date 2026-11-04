@@ -1,6 +1,7 @@
 //! The transport of the OCI front: the certificate and key of TLS, read once at start, and the
 //! check that the certificate names the address clients dial; or, with no certificate, the
-//! warning that a plain HTTP listener is off loopback.
+//! warning that a plain HTTP listener is off loopback. The S3 front takes its acceptor from the same
+//! code ([`s3_acceptor`]), and differs only in what the certificate must name.
 
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::PermissionsExt as _;
@@ -13,7 +14,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::TlsAcceptor;
 use x509_parser::extensions::GeneralName;
 
-/// Why the OCI front cannot start.
+/// Why the OCI front cannot start, or why the certificate and key of the S3 front are refused.
 #[derive(Debug, thiserror::Error)]
 pub enum OciError {
     /// The `prefix` param of an `oci` interface is not usable.
@@ -49,8 +50,13 @@ pub enum OciError {
         why: String,
     },
     /// The certificate and key do not make a TLS configuration.
-    #[error("--oci-tls-cert and --oci-tls-key: {0}")]
-    Config(String),
+    #[error("{flags}: {why}")]
+    Config {
+        /// The two flags that name the files.
+        flags: &'static str,
+        /// What is wrong with them.
+        why: String,
+    },
     /// The address cannot be bound.
     #[error("binding {addr}: {source}")]
     Bind {
@@ -109,8 +115,27 @@ pub fn plain_warning(listen: SocketAddr) -> Option<String> {
     }
 }
 
-const CERT_FLAG: &str = "--oci-tls-cert";
-const KEY_FLAG: &str = "--oci-tls-key";
+/// The flags that name the certificate and the key of a front, for the messages of a refusal.
+#[derive(Clone, Copy)]
+struct Flags {
+    cert: &'static str,
+    key: &'static str,
+    both: &'static str,
+}
+
+/// The flags of the OCI front.
+const OCI_FLAGS: Flags = Flags {
+    cert: "--oci-tls-cert",
+    key: "--oci-tls-key",
+    both: "--oci-tls-cert and --oci-tls-key",
+};
+
+/// The flags of the S3 front.
+const S3_FLAGS: Flags = Flags {
+    cert: "--tls-cert",
+    key: "--tls-key",
+    both: "--tls-cert and --tls-key",
+};
 
 /// The acceptor for the certificate chain in `cert` and the key in `key` (both PEM), which serves
 /// HTTP/1.1 only and asks no client for a certificate. The leaf must carry an IP subjectAltName
@@ -138,6 +163,40 @@ pub fn acceptor_for(
     key: &Path,
     listen: &[SocketAddr],
 ) -> Result<TlsAcceptor, OciError> {
+    acceptor_with(cert, key, OCI_FLAGS, &|facts| {
+        listen.iter().find_map(|addr| unnamed(&facts.ips, *addr))
+    })
+}
+
+/// The acceptor of the S3 front, which `server.tls_cert_file` and `server.tls_key_file` name, for a front that listens
+/// at `listen`: as [`acceptor_for`], except that the leaf may name the front by a DNS name. A leaf
+/// with at least one DNS subjectAltName is accepted whatever IP addresses it names; one with
+/// none must carry an IP subjectAltName for each address, as [`acceptor_for`] asks.
+///
+/// # Errors
+/// As [`acceptor_for`], with the flags of the S3 front in the messages.
+pub fn s3_acceptor(
+    cert: &Path,
+    key: &Path,
+    listen: &[SocketAddr],
+) -> Result<TlsAcceptor, OciError> {
+    acceptor_with(cert, key, S3_FLAGS, &|facts| {
+        if facts.dns.is_empty() {
+            listen.iter().find_map(|addr| unnamed(&facts.ips, *addr))
+        } else {
+            None
+        }
+    })
+}
+
+/// The acceptor for `cert` and `key` once `names` has said the leaf names the front: `names` is
+/// given the facts of the leaf and returns why it does not, or `None`.
+fn acceptor_with(
+    cert: &Path,
+    key: &Path,
+    flags: Flags,
+    names: &dyn Fn(&Facts) -> Option<String>,
+) -> Result<TlsAcceptor, OciError> {
     let read = |flag, path: &Path| {
         std::fs::read(path).map_err(|source| OciError::Read {
             flag,
@@ -150,31 +209,29 @@ pub fn acceptor_for(
         path: path.to_owned(),
         why,
     };
-    let cert_pem = read(CERT_FLAG, cert)?;
-    let key_pem = read(KEY_FLAG, key)?;
+    let cert_pem = read(flags.cert, cert)?;
+    let key_pem = read(flags.key, key)?;
     let chain = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|why| pem_error(CERT_FLAG, cert, format!("not PEM certificates: {why}")))?;
+        .map_err(|why| pem_error(flags.cert, cert, format!("not PEM certificates: {why}")))?;
     let Some(leaf) = chain.first() else {
-        return Err(pem_error(CERT_FLAG, cert, "no certificate".to_owned()));
+        return Err(pem_error(flags.cert, cert, "no certificate".to_owned()));
     };
-    let facts = Facts::of(leaf).map_err(|why| pem_error(CERT_FLAG, cert, why))?;
-    for addr in listen {
-        if let Some(why) = unnamed(&facts.ips, *addr) {
-            return Err(pem_error(CERT_FLAG, cert, why));
-        }
+    let facts = Facts::of(leaf).map_err(|why| pem_error(flags.cert, cert, why))?;
+    if let Some(why) = names(&facts) {
+        return Err(pem_error(flags.cert, cert, why));
     }
     if let Some(why) = facts.not_valid_now() {
-        return Err(pem_error(CERT_FLAG, cert, why));
+        return Err(pem_error(flags.cert, cert, why));
     }
     // A mode that cannot be read counts as open to all.
     let mode = std::fs::metadata(key).map_or(0o777, |meta| meta.permissions().mode());
     if mode & 0o007 != 0 {
         let why = "any user can read the key; make it mode 0640 or 0600".to_owned();
-        return Err(pem_error(KEY_FLAG, key, why));
+        return Err(pem_error(flags.key, key, why));
     }
     let private = PrivateKeyDer::from_pem_slice(&key_pem)
-        .map_err(|why| pem_error(KEY_FLAG, key, format!("not a PEM private key: {why}")))?;
+        .map_err(|why| pem_error(flags.key, key, format!("not a PEM private key: {why}")))?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let built = ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
@@ -183,7 +240,10 @@ pub fn acceptor_for(
                 .with_no_client_auth()
                 .with_single_cert(chain, private)
         });
-    let mut config = built.map_err(|why| OciError::Config(why.to_string()))?;
+    let mut config = built.map_err(|why| OciError::Config {
+        flags: flags.both,
+        why: why.to_string(),
+    })?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
@@ -192,6 +252,8 @@ pub fn acceptor_for(
 struct Facts {
     /// The IP addresses it names in its subjectAltName.
     ips: Vec<IpAddr>,
+    /// The DNS names it names in its subjectAltName.
+    dns: Vec<String>,
     /// Whether the time now is within its validity.
     valid: bool,
     /// Its validity, as text, for the message of a refusal.
@@ -203,8 +265,10 @@ impl Facts {
         let (_, parsed) = x509_parser::parse_x509_certificate(leaf.as_ref())
             .map_err(|why| format!("the first certificate is not X.509: {why}"))?;
         let validity = parsed.validity();
+        let (ips, dns) = alt_names(&parsed);
         Ok(Self {
-            ips: ip_names(&parsed),
+            ips,
+            dns,
             valid: validity.is_valid(),
             period: format!(
                 "notBefore {}, notAfter {}",
@@ -220,18 +284,22 @@ impl Facts {
     }
 }
 
-/// The IP addresses the certificate `parsed` names in its subjectAltName.
-fn ip_names(parsed: &x509_parser::certificate::X509Certificate<'_>) -> Vec<IpAddr> {
+/// The IP addresses and the DNS names the certificate `parsed` names in its subjectAltName.
+fn alt_names(parsed: &x509_parser::certificate::X509Certificate<'_>) -> (Vec<IpAddr>, Vec<String>) {
     // A subjectAltName that cannot be read names nothing.
     let alt = parsed.subject_alternative_name().ok().flatten();
     let names = alt
         .map(|ext| &ext.value.general_names[..])
         .unwrap_or_default();
-    let ips = names.iter().filter_map(|name| match name {
-        GeneralName::IPAddress(bytes) => ip_of(bytes),
-        _ => None,
-    });
-    ips.collect()
+    let (mut ips, mut dns) = (Vec::new(), Vec::new());
+    for name in names {
+        match name {
+            GeneralName::IPAddress(bytes) => ips.extend(ip_of(bytes)),
+            GeneralName::DNSName(text) => dns.push((*text).to_owned()),
+            _ => {}
+        }
+    }
+    (ips, dns)
 }
 
 /// The address of 4 bytes (IPv4) or 16 (IPv6).

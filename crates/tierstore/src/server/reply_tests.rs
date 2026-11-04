@@ -84,6 +84,7 @@ fn each_failure_of_the_store_has_its_status_and_code() {
         Some("The store has no room for this request."),
     );
     check(Error::Reserved(k()), 403, "AccessDenied", None);
+    check(Error::InvalidKey(k()), 400, "KeyTooLongError", None);
     check(Error::InvalidPart(k()), 400, "InvalidPart", None);
     check(
         Error::Unsupported(k()),

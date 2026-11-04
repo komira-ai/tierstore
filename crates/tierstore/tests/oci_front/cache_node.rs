@@ -151,7 +151,7 @@ impl<'a> Node<'a> {
     pub(crate) fn launch(fake: &'a FakeS3, name: &str, launch: &Launch) -> Self {
         fake.require_credentials("UPKEY", "up-secret");
         let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
-        let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
+        let key = secret(&dir, "key", "AKIDCACHE\ncache-secret-0123456789\n");
         let upstream_key = secret(&dir, "upstream.key", "UPKEY\nup-secret\n");
         let cache_dir = launch
             .cache
@@ -516,7 +516,7 @@ async fn a_cached_blob_whose_file_is_removed_is_filled_again() {
 #[test]
 fn a_taken_oci_address_fails_the_start_of_the_process() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "oci-cache-taken");
-    let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
+    let key = secret(&dir, "key", "AKIDCACHE\ncache-secret-0123456789\n");
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bound");
     let busy = taken.local_addr().expect("an address");
     let file = format!(

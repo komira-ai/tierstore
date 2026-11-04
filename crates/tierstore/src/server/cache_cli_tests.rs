@@ -31,7 +31,7 @@ use crate::{
 };
 
 const KEY_ID: &str = "AKIDCACHE";
-const SECRET: &str = "cache-secret";
+const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
 const QUICK: PerRun = PerRun {

@@ -26,6 +26,8 @@ bucket                = "tierstore"
 region                = "eu-west-1"
 max_request_bytes     = 134217728
 access_key_file       = "/etc/tierstore/access.key"
+tls_cert_file         = "/etc/tierstore/s3.crt"
+tls_key_file          = "/etc/tierstore/s3.key"
 read_only_key_files   = ["/etc/tierstore/daemons.key", "/etc/tierstore/other.key"]
 presign_key_files     = ["/etc/tierstore/pack-presign.key"]
 gc_key_files          = ["/etc/tierstore/pack-gc.key"]
@@ -36,6 +38,7 @@ put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
 body_idle_timeout     = "20s"
+min_secret_bytes      = 24
 s3_request_timeout    = "2m"
 backend_check_wait    = "90s"
 

@@ -5,8 +5,8 @@
 //! read at (`If-Match`), and removed by the actor whose work it was (or by the reconciler, when
 //! the entry is sealed). That makes every change of an entry one atomic store call, and a call
 //! that lost a race fails instead of overwriting. This module is the entry's body, its
-//! transitions and the store calls that carry them out. Nothing else of the crate uses it yet: no
-//! request path reads or writes an entry.
+//! transitions and the store calls that carry them out. So far only the puts of a proxy whose
+//! format is active use it (`tiered/entry_put.rs`); no read, delete or reconciler step does.
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by
@@ -306,8 +306,11 @@ fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
 
 /// The store calls on the entries of one actor: a proxy or a reconciler, named by `me`.
 ///
-/// `me` is unique to the process (a proxy id carries its boot), which is what makes the nonces it
-/// writes unique among all writers.
+/// `me` must be unique to the process: the nonces it writes are `me` and a counter that starts at
+/// zero in each [`Entries`], so two instances with one `me` can write the same nonce. A reconciler
+/// passes an id that carries its boot. [`Proxy::open`](crate::Proxy::open) passes the configured
+/// proxy id, which a restarted proxy keeps, so after a restart its nonces can repeat those of its
+/// earlier life; that is a known limit of this release.
 pub struct Entries {
     hot: Arc<dyn Backend>,
     me: String,
