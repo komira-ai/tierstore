@@ -7,10 +7,12 @@ use super::*;
 use crate::entry_reconciler::usage::Tally;
 
 /// Asserts the rules of the count on the tally alone: before the listing reaches a key, or when
-/// the listing read it, or when it was written before the listing started, a copy adds nothing;
-/// otherwise it adds its bytes once, however often it is tried, and a larger body adds the
-/// difference; an eviction behind the listing takes off what the listing or the copies counted,
-/// and one ahead of it, or of an object neither counted, takes off nothing.
+/// the listing read it at the size of the copy, or when it was written before the listing started,
+/// a copy adds nothing; otherwise it adds its bytes once, however often it is tried, a larger body
+/// adds the difference and a smaller one takes it off, and a copy of an object that replaced one
+/// the listing read adds only the difference of the sizes; an eviction behind the listing takes
+/// off what the listing and the copies counted, and one ahead of it, or of an object neither
+/// counted, takes off nothing.
 #[test]
 fn the_tally_counts_each_object_once() {
     let tally = Tally::default();
@@ -24,25 +26,34 @@ fn the_tally_counts_each_object_once() {
     tally.copied("a", 10, 150);
     tally.copied("a", 25, 160);
     tally.copied("b", 5, 99);
-    tally.listed("c", 150);
-    tally.listed("old", 50);
+    tally.listed("c", 7, 150);
+    tally.listed("old", 50, 50);
     tally.copied("c", 7, 150);
     tally.copied("z", 9, 150);
     assert_eq!(tally.finish(), (25, 0));
 
     tally.start(100);
+    tally.reach(Some("t"));
+    tally.listed("r", 10, 150);
+    tally.copied("r", 100, 160);
+    tally.copied("r", 100, 160);
+    tally.listed("s", 20, 150);
+    tally.copied("s", 5, 160);
+    assert_eq!(tally.finish(), (90, 15));
+
+    tally.start(100);
     tally.reach(Some("m"));
     tally.copied("a", 10, 150);
     tally.evicted("a", 10, 150);
-    tally.listed("c", 150);
+    tally.listed("c", 30, 150);
     tally.evicted("c", 30, 150);
     tally.evicted("d", 20, 50);
     tally.evicted("e", 5, 200);
     tally.evicted("z", 9, 50);
-    assert_eq!(tally.finish(), (0, 50));
+    assert_eq!(tally.finish(), (10, 60));
 
     tally.evicted("old", 20, 50);
-    assert_eq!(tally.take_landed(), 0);
+    assert_eq!(tally.take_landed(), (0, 0));
     tally.clear();
 }
 
@@ -141,4 +152,56 @@ async fn an_object_evicted_during_a_listing_is_not_counted_when_the_listing_ends
         last = r.step().await;
     }
     assert_eq!(published(&rig).await.hot_bytes, 15);
+}
+
+/// Asserts that the count does not compare the clock of the hot tier with the leader's: the hot
+/// tier stamps its objects a few minutes behind the leader's clock, a listing of the empty tier
+/// ends, and an object of thirty bytes written after it is added once, so that the figure is
+/// thirty, not zero.
+#[tokio::test]
+async fn an_object_is_counted_whatever_the_clock_of_the_hot_tier_says() {
+    let mut rig = Rig::new();
+    let behind = Arc::new(TestClock::new());
+    behind.set(1_000_000);
+    rig.hot = Arc::new(MemoryBackend::with_clock(behind.clone()));
+    rig.activate().await;
+    let mut r = rig.reconciler();
+    r.step().await;
+    assert_eq!(published(&rig).await.hot_bytes, 0);
+
+    behind.advance(100);
+    rig.hot.put("a", Bytes::from("a".repeat(30))).await.unwrap();
+    land(&rig, "p1", "a").await;
+    rig.mono.advance(Duration::from_secs(10));
+    r.step().await;
+    assert!(rig.cold_has("a").await);
+    assert_eq!(published(&rig).await.hot_bytes, 30);
+}
+
+/// Asserts that an object that replaced one the listing read under the same key is counted at its
+/// own size: `a` of ten bytes is listed, then removed from both tiers and put again with a hundred
+/// bytes, and after its copy the figure is a hundred, not ten.
+#[tokio::test]
+async fn an_object_that_replaced_a_listed_one_is_counted_at_its_own_size() {
+    let rig = Rig::new();
+    rig.activate().await;
+    let ten = Bytes::from("a".repeat(10));
+    rig.hot.put("a", ten.clone()).await.unwrap();
+    rig.cold.put("a", ten).await.unwrap();
+    let mut r = rig.reconciler();
+    r.step().await;
+    assert_eq!(published(&rig).await.hot_bytes, 10);
+
+    rig.hot.delete("a").await.unwrap();
+    rig.cold.delete("a").await.unwrap();
+    rig.clock.advance(1);
+    rig.hot
+        .put("a", Bytes::from("b".repeat(100)))
+        .await
+        .unwrap();
+    land(&rig, "p1", "a").await;
+    rig.mono.advance(Duration::from_secs(10));
+    r.step().await;
+    assert!(rig.cold_has("a").await);
+    assert_eq!(published(&rig).await.hot_bytes, 100);
 }

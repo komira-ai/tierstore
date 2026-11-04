@@ -157,7 +157,7 @@ use crate::{
 };
 
 pub use objstore_s3::Capabilities;
-pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError};
+pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Tuning};
 
 /// The greatest byte position a `Range` names. A store reads the positions as signed 64-bit
 /// numbers and refuses or ignores a larger one, so a range is cut here before it is sent.
@@ -187,13 +187,21 @@ impl S3Backend {
     ///
     /// # Errors
     /// [`S3ConfigError`] if the endpoint or the bucket name is refused.
-    pub fn new(mut config: S3Config) -> Result<Self, S3ConfigError> {
+    pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
+        Self::new_tuned(config, S3Tuning::default())
+    }
+
+    /// As [`S3Backend::new`], with the idle-connection and read-retry settings `tuning` gives.
+    ///
+    /// # Errors
+    /// [`S3ConfigError`] if the endpoint or the bucket name is refused.
+    pub fn new_tuned(mut config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
         config.capabilities = Capabilities {
             conditional_put: true,
             object_lock: false,
         };
         Ok(Self {
-            store: S3Store::new(config)?,
+            store: S3Store::new_tuned(config, tuning)?,
             if_match_delete: AtomicBool::new(false),
         })
     }

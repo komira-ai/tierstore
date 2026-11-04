@@ -138,7 +138,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-# The `--config` file of the `tierstore` binary and the file `--print-config` writes (`server`).
+# The `--config` file of the `tierstore` binary (`server`).
 toml = { workspace = true, optional = true }
 # `fs` and `io-util` for the directory backend, `rt` to journal a copy-back in the background,
 # `sync` for the batches of the journal, `time` for the linger and the injected delays.

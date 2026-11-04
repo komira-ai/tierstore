@@ -20,8 +20,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="20" y="56" class="b" font-size="14" text-anchor="start">A   build node: local_cache + cold_store</text>
 <rect x="20" y="101.0" width="150" height="64" rx="5" class="box-b"/>
 <text x="95.0" y="123.0" class="b" text-anchor="middle">Clients</text>
-<text x="95.0" y="141.0" class="t-m" text-anchor="middle">S3: --listen</text>
-<text x="95.0" y="159.0" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<text x="95.0" y="141.0" class="t-m" text-anchor="middle">S3: s3 interface</text>
+<text x="95.0" y="159.0" class="t-m" text-anchor="middle">OCI: oci interface</text>
 <line x1="170" y1="133.0" x2="208" y2="133.0" class="ln" marker-end="url(#configurations-ak)"/>
 <rect x="190" y="68" width="450" height="130" rx="5" class="box-t"/>
 <text x="204" y="88" class="b" text-anchor="start">tierstore process</text>
@@ -39,8 +39,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="20" y="274" class="b" font-size="14" text-anchor="start">B   storage node: hot_store + cold_store</text>
 <rect x="20" y="359.0" width="150" height="64" rx="5" class="box-b"/>
 <text x="95.0" y="381.0" class="b" text-anchor="middle">Clients</text>
-<text x="95.0" y="399.0" class="t-m" text-anchor="middle">S3: --listen</text>
-<text x="95.0" y="417.0" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<text x="95.0" y="399.0" class="t-m" text-anchor="middle">S3: s3 interface</text>
+<text x="95.0" y="417.0" class="t-m" text-anchor="middle">OCI: oci interface</text>
 <line x1="170" y1="391.0" x2="208" y2="391.0" class="ln" marker-end="url(#configurations-ak)"/>
 <rect x="190" y="286" width="450" height="210" rx="5" class="box-t"/>
 <text x="204" y="306" class="b" text-anchor="start">tierstore process</text>
@@ -68,8 +68,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="20" y="548" class="b" font-size="14" text-anchor="start">C   all three: local_cache + hot_store + cold_store (planned: the loader refuses it)</text>
 <rect x="20" y="593" width="150" height="64" rx="5" class="box-b"/>
 <text x="95.0" y="615" class="b" text-anchor="middle">Clients</text>
-<text x="95.0" y="633" class="t-m" text-anchor="middle">S3: --listen</text>
-<text x="95.0" y="651" class="t-m" text-anchor="middle">OCI: --oci-listen</text>
+<text x="95.0" y="633" class="t-m" text-anchor="middle">S3: s3 interface</text>
+<text x="95.0" y="651" class="t-m" text-anchor="middle">OCI: oci interface</text>
 <line x1="170" y1="625" x2="208" y2="625" class="ln" marker-end="url(#configurations-ak)"/>
 <rect x="190" y="560" width="450" height="290" rx="5" class="box-p"/>
 <text x="204" y="580" class="b" text-anchor="start">tierstore process (planned)</text>
