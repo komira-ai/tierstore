@@ -840,7 +840,7 @@ async fn keys_that_differ_only_by_case_are_two_files() {
     backend.put("foo", body("lower")).await.unwrap();
     assert_eq!(backend.get("Foo", None).await.unwrap(), body("upper"));
     assert_eq!(backend.get("foo", None).await.unwrap(), body("lower"));
-    assert_eq!(names(dir.path()), ["%46oo", "foo"]);
+    assert_eq!(names(dir.path()), ["%46oo", ".uploads", "foo"]);
     let folded: Vec<String> = names(dir.path())
         .iter()
         .map(|name| name.to_ascii_lowercase())
@@ -886,12 +886,12 @@ async fn this_release_reads_a_directory_the_previous_release_wrote() {
     let replaced = backend.put_if_match("Foo", body("newer"), &tag).await;
     replaced.unwrap();
     assert_eq!(backend.get("Foo", None).await.unwrap(), body("newer"));
-    assert_eq!(names(dir.path()), ["Foo", "a~B"]);
+    assert_eq!(names(dir.path()), [".uploads", "Foo", "a~B"]);
     backend.delete("Foo").await.unwrap();
     backend.delete("a/B").await.unwrap();
-    assert_eq!(names(dir.path()), Vec::<String>::new());
+    assert_eq!(names(dir.path()), [".uploads"]);
     backend.put("Foo", body("again")).await.unwrap();
-    assert_eq!(names(dir.path()), ["%46oo"]);
+    assert_eq!(names(dir.path()), ["%46oo", ".uploads"]);
 }
 
 /// Asserts that the data this release writes is read by the previous release's rules where it
@@ -904,7 +904,7 @@ async fn the_previous_release_lists_what_this_release_writes() {
     let (dir, backend) = backend();
     backend.put("cas/d/n1/00012", body("x")).await.unwrap();
     backend.put("Up/Per", body("y")).await.unwrap();
-    assert_eq!(names(dir.path()), ["%55p~%50er", "cas~d~n1~00012"]);
+    assert_eq!(names(dir.path()), ["%55p~%50er", ".uploads", "cas~d~n1~00012"]);
     let keys: Vec<String> = backend
         .list("")
         .await
@@ -913,9 +913,9 @@ async fn the_previous_release_lists_what_this_release_writes() {
         .map(|listed| listed.key)
         .collect();
     assert_eq!(keys, ["Up/Per", "cas/d/n1/00012"]);
-    for name in names(dir.path()) {
-        let key = decode(&name).unwrap();
-        assert!(encode(&key) == name, "{name}");
+    for name in names(dir.path()).iter().filter(|name| !name.starts_with('.')) {
+        let key = decode(name).unwrap();
+        assert_eq!(&encode(&key), name);
     }
 }
 
@@ -929,7 +929,7 @@ async fn an_upper_case_key_that_fits_only_under_the_old_name_is_kept() {
     assert!(encode(&key).len() > NAME_LIMIT);
     backend.put(&key, body("long")).await.unwrap();
     assert_eq!(backend.get(&key, None).await.unwrap(), body("long"));
-    assert_eq!(names(dir.path()), std::slice::from_ref(&key));
+    assert_eq!(names(dir.path()), [".uploads", key.as_str()]);
     let refused = backend.put(&"A".repeat(NAME_LIMIT + 1), body("x")).await;
     assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
 }
