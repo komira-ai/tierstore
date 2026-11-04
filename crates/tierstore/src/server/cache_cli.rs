@@ -345,10 +345,6 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
         super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     let drained = run_cache(&settings, stop, announce).await?;
-<<<<<<< HEAD
-    super::build_info::stderr_log::notes(&super::cli::cut_note(drained));
-=======
     super::build_info::stderr_log::notes(&super::cli_serve::cut_note(drained));
->>>>>>> origin/main
     Ok(())
 }
