@@ -36,6 +36,19 @@
 //! two, so the body can be newer than the tag. That is safe: the tag is the older one, and a
 //! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
 //! Nobody acts on a body without going through such a call.
+//!
+//! The one exception is a store without a delete on the tag: there [`Entries::release`] falls back to
+//! a plain delete, which does not check the tag, so a stale [`Seen`] could remove a newer entry.
+//! It does so only for a sealed entry, which no step changes (the reconciler seals before it
+//! releases, and abandons the release when its seal is [`Outcome::Lost`]). A held entry is changed
+//! under its holder (a delete amends a held put with [`Step::AmendCopy`], the reconciler reaps a
+//! held entry), so there release returns the store's `Unsupported` and deletes nothing.
+//!
+//! # Nonce
+//!
+//! The nonce is `<actor id>.<counter>`, the counter being per [`Entries`]. It is unique only if an
+//! actor id is never used with a counter that starts again: an actor that makes a new [`Entries`]
+//! takes a fresh id, or shares the counter of the old one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -419,8 +432,10 @@ impl Entries {
 
     /// Removes the entry as `seen` has it, if this actor may (it is sealed, or a put or a delete it
     /// holds) and it still has the tag of `seen`. A store that does not do a delete on the tag
-    /// gets a plain delete, which is safe here because nobody changes an entry that is sealed or
-    /// held by its owner.
+    /// gets a plain delete, which does not check the tag, only for a sealed entry, which no step
+    /// changes. For a held entry, which a delete may amend ([`Step::AmendCopy`]) or the reconciler
+    /// reap, it gets nothing deleted and the `Unsupported` error: seal first, and give up the
+    /// release when the seal is [`Outcome::Lost`].
     ///
     /// # Errors
     /// The backend's error for a failed delete (see the module for the ambiguous ones).
@@ -430,7 +445,9 @@ impl Entries {
         }
         let path = entry_key(&seen.entry.key);
         let deleted = match self.hot.delete_if_match(&path, &seen.tag).await {
-            Err(Error::Unsupported(_)) => self.hot.delete(&path).await,
+            Err(Error::Unsupported(_)) if seen.entry.st == EntryState::Sealed => {
+                self.hot.delete(&path).await
+            }
             answer => answer,
         };
         match deleted {
