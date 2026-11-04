@@ -6,7 +6,7 @@
 
 use tokio::time::Instant;
 
-use super::{Inner, locked, refuse_reserved};
+use super::{Inner, refuse_reserved};
 use crate::Error;
 use crate::format::{Format, read_format};
 
@@ -60,16 +60,18 @@ impl Inner {
     /// Whether writes are paused and whether they are made on entries, as of a read of the format
     /// object that is at most `format_refresh` old.
     async fn format_state(&self) -> (bool, bool) {
+        // One caller reads at a time, and the freshness is checked again once the lock is held, so
+        // a caller that waited uses the read of the caller before it, and an older read never
+        // replaces a newer one.
+        let mut seen = self.pause.lock().await;
         let now = Instant::now();
-        let (read, paused, entries) = {
-            let seen = locked(&self.pause);
-            (seen.read, seen.paused, seen.entries)
-        };
-        if read.is_some_and(|at| now.duration_since(at) < self.config.format_refresh) {
-            return (paused, entries);
+        if seen
+            .read
+            .is_some_and(|at| now.duration_since(at) < self.config.format_refresh)
+        {
+            return (seen.paused, seen.entries);
         }
         let found = read_format(self.hot.as_ref()).await;
-        let mut seen = locked(&self.pause);
         seen.read = Some(now);
         if let Ok(format) = found {
             seen.paused = format.as_ref().is_some_and(Format::pauses_writes);

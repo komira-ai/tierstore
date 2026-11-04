@@ -57,7 +57,9 @@ impl EntryReconciler {
     }
 
     /// An entry held by someone: its own put, left by a copy that was cut off, is copied again;
-    /// that of an owner that has departed is reaped; that of a live owner is waited for.
+    /// that of an owner that has departed is reaped, after the uploads it left open are aborted (a
+    /// failure there leaves the entry held by the departed owner, so that the next step does the
+    /// whole again); that of a live owner is waited for.
     async fn held(&self, seen: &Seen, now: u64) -> Result<Verdict, Error> {
         let entry = &seen.entry;
         let Some(owner) = entry.owner.as_deref() else {
@@ -75,11 +77,10 @@ impl EntryReconciler {
         {
             return Ok(Verdict::Pinned);
         }
-        if let Outcome::Done(_) = self.entries.advance(seen, Step::Reap).await?
-            && entry.op == EntryOp::Put
-        {
+        if entry.op == EntryOp::Put {
             self.abort_uploads(&entry.key).await?;
         }
+        self.entries.advance(seen, Step::Reap).await?;
         Ok(Verdict::Changed)
     }
 
@@ -195,7 +196,8 @@ impl EntryReconciler {
     }
 
     /// Aborts the multipart uploads that the dead owner of a put left open for `key`, on both
-    /// tiers. It is safe because the reconciler holds the key now. A store that does not do
+    /// tiers. It is safe because the entry of the key is held by the dead owner, so that no other put
+    /// of the key starts until the entry is reaped. A store that does not do
     /// multipart uploads has none.
     async fn abort_uploads(&self, key: &str) -> Result<(), Error> {
         let page_size = self.config.base.page_size.max(1);

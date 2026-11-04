@@ -1,11 +1,14 @@
 //! The lease that makes one reconciler the runner.
 
+use std::cell::Cell;
 use std::collections::hash_map::RandomState;
-use std::future::Future;
+use std::convert::Infallible;
+use std::future::{Future, poll_fn};
 use std::hash::{BuildHasher, Hasher};
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -39,8 +42,8 @@ pub(crate) fn new_nonce() -> String {
 ///   it saw and when it first saw it. It may replace the object, again with `If-Match`, so of
 ///   two that try at once one fails, once the same tag has stood for `ttl` on its own clock.
 ///   A renewal gives the object a new tag, so a lease that is renewed is never taken. A
-///   contender that has just started therefore waits up to `ttl` before it takes a lease its
-///   holder has left, as long as a holder that stopped without giving it up.
+///   contender that has just started therefore waits at least `ttl` after its first look
+///   before it takes a lease its holder has left, and takes it on a pass after that.
 /// - **Validity.** A holder is valid until `valid_until`, the time before it sent its last
 ///   successful write, plus `ttl`, less `margin`. [`Lease::margin_ok`] says whether at least
 ///   `margin` of that is left, which is the room a call that must end inside the lease needs.
@@ -142,6 +145,7 @@ impl Lease {
     pub(crate) fn margin_ok(&self) -> bool {
         let until = self.shared.valid_until.load(Ordering::SeqCst);
         let now = self.shared.mono.now();
+        // A time that has been reached is past the end, even with a margin of zero.
         until != 0 && now < until && until - now >= self.shared.margin
     }
 
@@ -156,23 +160,54 @@ impl Lease {
         sleeper: &dyn Sleeper,
         work: impl Future<Output = T>,
     ) -> T {
-        let mut work = pin!(work);
-        loop {
-            let wait = sleeper.sleep(Duration::from_millis(self.shared.period));
-            match select(work.as_mut(), wait).await {
-                Either::Left((done, _)) => return done,
-                Either::Right(((), _)) => self.renew_held().await,
+        let writing = Cell::new(false);
+        let work = pin!(work);
+        let timer = pin!(self.renew_forever(sleeper, &writing));
+        match select(work, timer).await {
+            Either::Left((done, mut timer)) => {
+                // A renewal whose write is under way is finished before this returns: dropped
+                // with its answer unread, the write may have replaced the object and left the
+                // holder with the tag before it, which its next check would take for a loss.
+                poll_fn(|cx| {
+                    if writing.get() {
+                        let _ = timer.as_mut().poll(cx);
+                    }
+                    if writing.get() {
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+                done
             }
+            Either::Right((never, _)) => match never {},
         }
     }
 
-    /// Renews the lease if it is held.
-    async fn renew_held(&self) {
+    /// Waits a period and renews, again and again. It is polled beside the work, as one future,
+    /// so that the work keeps running while a renewal waits for the lock of a check of the work.
+    /// `writing` is true while a renewal's write is sent and not yet answered.
+    async fn renew_forever(&self, sleeper: &dyn Sleeper, writing: &Cell<bool>) -> Infallible {
+        loop {
+            sleeper
+                .sleep(Duration::from_millis(self.shared.period))
+                .await;
+            self.renew_held(writing).await;
+        }
+    }
+
+    /// Renews the lease if it is held. A renewal that still waits for the lock has written
+    /// nothing, and is safe to drop; one that has sent its write sets `writing` until it has
+    /// recorded the answer.
+    async fn renew_held(&self, writing: &Cell<bool>) {
         let mut state = self.shared.state.lock().await;
         if let Some(etag) = state.etag.clone() {
+            writing.set(true);
             let sent = self.shared.mono.now();
             let held = self.shared.renew(&mut state, &etag).await;
             self.shared.settle(held, sent);
+            writing.set(false);
         }
     }
 
@@ -267,10 +302,12 @@ impl Shared {
     /// clock of this process, by replacing the object that was seen. The first look at a tag
     /// only writes it down.
     async fn take_over(&self, state: &mut State) -> bool {
-        let looked = self.mono.now();
         let Ok(meta) = self.hot.head(LEASE_KEY).await else {
             return false;
         };
+        // After the HEAD: a tag is first seen when the answer is, not when the question was
+        // asked, as the object may have been written while the call was under way.
+        let looked = self.mono.now();
         let since = match &state.seen {
             Some(seen) if seen.tag == meta.tag => seen.since,
             _ => {

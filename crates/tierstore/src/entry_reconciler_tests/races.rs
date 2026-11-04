@@ -197,3 +197,50 @@ async fn a_cold_publish_and_a_delete_need_the_margin_of_the_lease() {
         }
     }
 }
+
+/// Asserts that the lease is looked at again after the hot read that a copy streams from: with the
+/// hot read parked and the margin of the lease used up meanwhile, the read completes, the cold put
+/// is never sent (the cold tier does not get the object), and the item fails with `Unavailable`.
+#[tokio::test]
+async fn a_copy_whose_lease_margin_runs_out_during_the_hot_read_is_not_published() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("k", bytes("v")).await.unwrap();
+    rig.register("p1").await;
+    land(&rig, "p1", "k").await;
+    let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+    let gate = gated.gate(Op::Get, "k", Phase::Pre);
+    let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    rig.mono.advance(Duration::from_millis(10_001));
+    gate.release();
+    let done = step.await;
+    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+    assert!(!rig.cold_has("k").await);
+    assert!(rig.hot_has("k").await);
+}
+
+/// Asserts that the lease is looked at again after the cold delete of a handed-over delete: with
+/// the cold delete parked and the margin of the lease used up meanwhile, the cold delete completes,
+/// the hot delete is never sent (the hot object stays), and the item fails with `Unavailable`.
+#[tokio::test]
+async fn a_delete_whose_lease_margin_runs_out_during_the_cold_delete_leaves_the_hot_object() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("k", bytes("v")).await.unwrap();
+    rig.cold.put("k", bytes("v")).await.unwrap();
+    rig.plant("k", EntryOp::Del, EntryState::Pending, None)
+        .await;
+    let gated = Arc::new(GateBackend::new(rig.cold.clone()));
+    let gate = gated.gate(Op::Delete, "k", Phase::Pre);
+    let mut r = rig.over(rig.hot.clone(), gated, "r1", |_| {});
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    rig.mono.advance(Duration::from_millis(10_001));
+    gate.release();
+    let done = step.await;
+    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+    assert!(!rig.cold_has("k").await);
+    assert!(rig.hot_has("k").await);
+}

@@ -10,10 +10,12 @@
 //!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler
 //!   applies the journals until each one is applied to its end.
 //! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
-//!   `drain` for the settle time, and every journal it knows is applied to its end. Writes stay
-//!   paused.
-//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
-//!   entries of their keys; it never pauses writes for it.
+//!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
+//!   lets every proxy read `drain` again; it does not wait for a write that a proxy admitted
+//!   earlier and is still running. Writes stay paused.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts and the
+//!   completions of multipart uploads on the entries of their keys, and only while its heartbeat is
+//!   acknowledged; deletes still use the journal. It never pauses writes for it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
