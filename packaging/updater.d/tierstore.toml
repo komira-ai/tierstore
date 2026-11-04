@@ -50,7 +50,7 @@ address_families = ["AF_UNIX", "AF_INET", "AF_INET6", "AF_NETLINK"]
 environment = {}
 
 [hook.timeout_secs]
-# The self-test of the tiers at start (--backend-check-wait) and the readiness of the new slot.
+# The readiness of the new slot.
 prepare = 600
 cutover = 300
 # promotion_bound_secs and a margin.

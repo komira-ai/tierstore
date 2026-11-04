@@ -26,12 +26,8 @@ budget = "1GiB"
 kind = "dir"
 path = "cold"
 <span class="p">$</span> tierstore --config tierstore.toml
-<span class="o">tierstore: testing the hot tier dir:hot
-tierstore: tested the hot tier dir:hot in &lt;N&gt; ms
-tierstore: testing the cold tier dir:cold
-tierstore: tested the cold tier dir:cold in &lt;N&gt; ms
-tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
-<p class="source-note">The file is the one of <a href="/docs/configuration/">the configuration</a>; the process takes no flag for it. The first four lines are written to stderr by <code>probe_tiers</code> and the last to stdout by the binary (<code>crates/tierstore/src/server/cli_probe.rs</code> and <code>cli.rs</code>). Before it binds the address, the process asks each tier the questions its guarantees rest on; see <a href="/docs/operations/#the-start-up-self-test">the start-up self-test</a>.</p>
+<span class="o">tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
+<p class="source-note">The file is the one of <a href="/docs/configuration/">the configuration</a>; the process takes no flag for it. The line is written to stdout by the binary (<code>crates/tierstore/src/server/cli.rs</code>). The process does not test or probe its tiers; see <a href="/docs/operations/#what-tierstore-requires-of-a-store">what tierstore requires of a store</a>.</p>
 
 <h2 id="probes">2. The probes</h2>
 <div class="code transcript"><pre><span class="p">$</span> curl -s http://127.0.0.1:9000/healthz
