@@ -51,7 +51,7 @@ use super::config_combined::{CombinedSettings, combined};
 use super::config_interface::{InterfaceTable, Interfaces, interfaces};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
-use super::config_tuning::{HotTuning, S3Client, hot_tuning, s3_client};
+use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::FrontSettings;
 use super::lock::check_lock_path;
