@@ -109,11 +109,17 @@ impl Fake {
             Ending::Chunked | Ending::Hang => None,
         };
         let data = Frame::data(Bytes::from(self.body));
-        let mut frames: Vec<io::Result<Frame<Bytes>>> = vec![Ok(data)];
+        let mut body: BoxStream<'static, io::Result<Frame<Bytes>>> =
+            stream::iter(vec![Ok(data)]).boxed();
         if matches!(self.ending, Ending::Cut(_)) {
-            frames.push(Err(io::Error::other("cut on purpose")));
+            // The error comes after one yield, so the connection flushes the head and the piece
+            // before it fails: a cut body, not a connection that dies before its headers.
+            let cut = stream::once(async {
+                tokio::task::yield_now().await;
+                Err(io::Error::other("cut on purpose"))
+            });
+            body = body.chain(cut).boxed();
         }
-        let mut body: BoxStream<'static, io::Result<Frame<Bytes>>> = stream::iter(frames).boxed();
         if self.ending == Ending::Stall {
             body = body.chain(stream::pending()).boxed();
         }
