@@ -232,3 +232,27 @@ async fn a_conditional_delete_through_the_proxy_is_unsupported_and_changes_nothi
     assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
     assert_eq!(read(&*rig.hot_mem, "k").await, body("v"));
 }
+
+/// Asserts that a whole `get` of an object only the cold tier holds returns it and, once the format
+/// is active, asks for its copy-back with an entry of the key and copies nothing itself; and that a
+/// proxy whose format is not active (it has read none) asks for nothing.
+#[tokio::test(start_paused = true)]
+async fn a_get_of_a_cold_object_asks_for_its_copy_back_only_on_an_active_format() {
+    let rig = Rig::new();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+    let proxy = rig.proxy("p1", 1000).await;
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
+    crate::support::copy_back_asked(&rig, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
+
+    let plain = Rig::new();
+    plain.cold_mem.put("k", body("value")).await.unwrap();
+    let config = plain.config("p1", 1000);
+    let waiting = tierstore::Proxy::open(plain.hot.clone(), plain.cold.clone(), config)
+        .await
+        .unwrap();
+    assert_eq!(waiting.get("k", None).await.unwrap(), body("value"));
+    tokio::task::yield_now().await;
+    let entry = plain.hot_mem.head(&tierstore::entry_key("k")).await;
+    assert_eq!(entry, Err(Error::NotFound(tierstore::entry_key("k"))));
+}

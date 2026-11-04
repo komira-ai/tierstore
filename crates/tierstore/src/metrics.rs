@@ -149,9 +149,5 @@ impl Counters {
 /// The line of the family `name` (one of the constants above) with `labels`.
 fn sample(text: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {
     let pairs: Vec<String> = labels.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect();
-    if pairs.is_empty() {
-        let _ = writeln!(text, "{name} {value}");
-    } else {
-        let _ = writeln!(text, "{name}{{{}}} {value}", pairs.join(","));
-    }
+    let _ = writeln!(text, "{name}{{{}}} {value}", pairs.join(","));
 }
