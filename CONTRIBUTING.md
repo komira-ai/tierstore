@@ -21,9 +21,9 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-Workflow, licence and `AGENTS.md` checks are tests of the `xtask` crate (`cargo test -p xtask`). Licences, bans and sources
-are checked with `cargo deny check`. CI runs the same checks on every pull request; see
-[docs/ci-and-release.md](docs/ci-and-release.md).
+Workflow and `AGENTS.md` checks are tests of the `xtask` crate (`cargo test -p xtask`). Dependency policy is checked by
+cargo-deny, as CI runs it: `cargo deny --all-features check bans licenses sources`. Advisories are not part of the pull request
+check: they are reported separately and never block a pull request. See [docs/ci-and-release.md](docs/ci-and-release.md).
 
 ## Coverage
 
