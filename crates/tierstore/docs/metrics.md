@@ -124,7 +124,9 @@ value `local` of `tier` is reserved for the build node's cache.
 | `tierstore_reads_total` | counter | `tier`, `op` | a read reached the tier: its hits, misses and errors added up. For `tier="cold"`, the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | counter | `tier` | bytes of object data that gets answered, by the tier that gave them, after a range is applied |
 | `tierstore_bytes_read_total` | counter | `tier` | bytes of object data that gets read from the tier. For `cold`, the whole object for a get without a range, and the range alone for a ranged get |
-| `tierstore_promotions_skipped_total` | counter | `reason`: `critical` | a get found the object in the cold tier and asked for no copy-back |
+| `tierstore_promotions_total` | counter | none | always 0: the proxy no longer copies an object into the hot tier (kept so a query on it keeps a sample) |
+| `tierstore_promoted_bytes_total` | counter | none | always 0, for the same reason |
+| `tierstore_promotions_skipped_total` | counter | `reason`: `critical`, `full`, `raced`, `failed` | a get found the object in the cold tier and asked for no copy-back. Only `critical` counts; `full`, `raced` and `failed` are always 0 |
 
 What they do not count, and how to read them:
 
@@ -133,7 +135,7 @@ What they do not count, and how to read them:
 - Bytes are counted when the proxy hands the read to the front (for a read of the hot tier, when it opens, from the window it covers), so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied counts the hit (cold, if the hot tier missed) but zero bytes read and zero bytes served, unlike a conditional response, whose resolved window can hold bytes.
 - A ranged GET that misses the hot tier asks the cold tier for the range alone and asks for no copy-back, so its `bytes_read` and `bytes_served` are both the range. While the hot tier is at its critical mark it also counts a `critical` skip.
 - A HEAD asks for no copy-back.
-- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier put with "full" a moment ago. It is the one reason left: a read that is not skipped asks for the copy-back with a create-only entry in a task of its own and copies nothing, so the proxy no longer counts promotions, promoted bytes or the reasons `full`, `raced` and `failed`: those series of the earlier releases are gone. The copy-backs are the entry reconciler's work.
+- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier put with "full" a moment ago. It is the one reason that counts: a read that is not skipped asks for the copy-back with a create-only entry in a task of its own and copies nothing, so the proxy no longer counts promotions, promoted bytes or the reasons `full`, `raced` and `failed`: those series of the earlier releases are still rendered, at 0. The copy-backs are the entry reconciler's work.
 - A cold body that fails part way counts a cold error as well as its cold hit (the hit is counted when the read opens), whether the read was of the whole object or of a range.
 
 ### Tier queries

@@ -14,6 +14,8 @@ pub(crate) const READ_ERRORS_TOTAL: &str = "tierstore_read_errors_total";
 pub(crate) const READS_TOTAL: &str = "tierstore_reads_total";
 pub(crate) const BYTES_SERVED_TOTAL: &str = "tierstore_bytes_served_total";
 pub(crate) const BYTES_READ_TOTAL: &str = "tierstore_bytes_read_total";
+pub(crate) const PROMOTIONS_TOTAL: &str = "tierstore_promotions_total";
+pub(crate) const PROMOTED_BYTES_TOTAL: &str = "tierstore_promoted_bytes_total";
 pub(crate) const PROMOTIONS_SKIPPED_TOTAL: &str = "tierstore_promotions_skipped_total";
 
 /// The tier that answered, or was asked.
@@ -46,6 +48,10 @@ pub(crate) enum Skipped {
 
 /// The label of each [`Skipped`], in the order of the enum.
 const SKIPPED: [&str; 1] = ["critical"];
+
+/// The reasons of the earlier releases that the proxy no longer has, which it still renders, at
+/// zero, so that a query on one of them keeps getting a sample.
+const RETIRED_SKIPPED: [&str; 3] = ["full", "raced", "failed"];
 
 /// The counters of one proxy.
 #[derive(Debug, Default)]
@@ -138,9 +144,16 @@ impl Counters {
             );
             sample(&mut text, BYTES_READ_TOTAL, &labels, read(&self.read[tier]));
         }
+        // The proxy no longer copies an object into the hot tier, so these two stay at zero.
+        sample(&mut text, PROMOTIONS_TOTAL, &[], 0);
+        sample(&mut text, PROMOTED_BYTES_TOTAL, &[], 0);
         for (why, counter) in SKIPPED.into_iter().zip(&self.skipped) {
             let labels = [("reason", why)];
             sample(&mut text, PROMOTIONS_SKIPPED_TOTAL, &labels, read(counter));
+        }
+        for why in RETIRED_SKIPPED {
+            let labels = [("reason", why)];
+            sample(&mut text, PROMOTIONS_SKIPPED_TOTAL, &labels, 0);
         }
         text
     }
@@ -149,5 +162,9 @@ impl Counters {
 /// The line of the family `name` (one of the constants above) with `labels`.
 fn sample(text: &mut String, name: &str, labels: &[(&str, &str)], value: u64) {
     let pairs: Vec<String> = labels.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect();
-    let _ = writeln!(text, "{name}{{{}}} {value}", pairs.join(","));
+    if pairs.is_empty() {
+        let _ = writeln!(text, "{name} {value}");
+    } else {
+        let _ = writeln!(text, "{name}{{{}}} {value}", pairs.join(","));
+    }
 }

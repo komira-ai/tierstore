@@ -42,6 +42,31 @@ async fn a_get_of_a_reservation_is_not_found_and_copies_nothing_back() {
     assert_eq!(metric(&proxy, miss), format!("{miss} 1"));
 }
 
+/// Asserts that a ranged get of a reservation is not found, at the normal level (the whole
+/// object is read from the cold tier and the range cut from it) and above the critical mark (the
+/// range alone is asked of the cold tier, which answers a range past the end of the 56 bytes
+/// with an error that a HEAD tells from a failure), for a range inside it, at its end and past
+/// its end.
+#[tokio::test(start_paused = true)]
+async fn a_ranged_get_of_a_reservation_is_not_found() {
+    for critical in [false, true] {
+        let rig = Rig::new();
+        let proxy = rig.proxy("p1", 1000).await;
+        rig.cold_mem
+            .put_reservation("k", reservation(1))
+            .await
+            .unwrap();
+        if critical {
+            set_usage(&rig, 960, 0).await;
+        }
+        for (offset, len) in [(4, 10), (56, 1), (57, 1), (100, 5)] {
+            let range = Some(ByteRange::new(offset, len));
+            let read = proxy.get("k", range).await;
+            assert_eq!(read, Err(not_found("k")), "{critical} {offset}+{len}");
+        }
+    }
+}
+
 /// Asserts that a range past the end of a real object, asked of the cold tier above the critical
 /// mark, stays the error it is, though the proxy asks the cold tier about the key to tell it from a
 /// reservation, and that the same error stays when that question cannot be answered.

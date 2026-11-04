@@ -98,7 +98,8 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 | `tierstore_reads_total` | `tier`, `op` | reads that reached the tier: hits, misses and errors. For `tier="cold"` these are the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | `tier` | bytes of object data that gets answered, by the tier that gave them (the range, if one was asked) |
 | `tierstore_bytes_read_total` | `tier` | bytes of object data gets read from the tier: for `cold`, the whole object for a get without a range and the range alone for a ranged get |
-| `tierstore_promotions_skipped_total` | `reason` = `critical` | cold hits for which no copy-back was asked, by reason |
+| `tierstore_promotions_total`, `tierstore_promoted_bytes_total` | none | always 0 (the proxy no longer copies into the hot tier) |
+| `tierstore_promotions_skipped_total` | `reason` = `critical` (`full`, `raced` and `failed` stay at 0) | cold hits for which no copy-back was asked, by reason |
 
 What the counts mean:
 
@@ -116,8 +117,8 @@ What the counts mean:
   full because it answered an earlier put with "full" a moment ago. A read of a cold object that
   is not skipped asks for its copy-back on the entry of its key and copies nothing itself: the
   copy is the reconciler's, so the proxy counts no promotion. The releases before this one counted
-  promotions, promoted bytes and the skips `full`, `raced` and `failed`; those series are gone,
-  since the proxy no longer makes the copy.
+  promotions, promoted bytes and the skips `full`, `raced` and `failed`; those series are still
+  rendered, at 0, since the proxy no longer makes the copy.
 - A ranged get while the hot tier is at or above its critical mark reads only the range from the
   cold tier: `bytes_read` is the range, no copy-back is asked, and a `critical` skip is counted.
 - A head asks for no copy-back.

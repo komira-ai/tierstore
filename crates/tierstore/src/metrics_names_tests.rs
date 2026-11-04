@@ -4,20 +4,22 @@ use std::collections::BTreeSet;
 
 use crate::metrics::{
     BYTES_READ_TOTAL, BYTES_SERVED_TOTAL, Counters, HITS_TOTAL, MISSES_TOTAL,
-    PROMOTIONS_SKIPPED_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped, Tier,
+    PROMOTED_BYTES_TOTAL, PROMOTIONS_SKIPPED_TOTAL, PROMOTIONS_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped, Tier,
 };
 
-const FAMILIES: [&str; 7] = [
+const FAMILIES: [&str; 9] = [
     HITS_TOTAL,
     MISSES_TOTAL,
     READ_ERRORS_TOTAL,
     READS_TOTAL,
     BYTES_SERVED_TOTAL,
     BYTES_READ_TOTAL,
+    PROMOTIONS_TOTAL,
+    PROMOTED_BYTES_TOTAL,
     PROMOTIONS_SKIPPED_TOTAL,
 ];
 
-/// Asserts that the seven family names differ, start with `tierstore_` and end with `_total`.
+/// Asserts that the nine family names differ, start with `tierstore_` and end with `_total`.
 #[test]
 fn the_family_names_are_distinct_and_start_with_the_prefix() {
     let distinct: BTreeSet<&str> = FAMILIES.into_iter().collect();
@@ -67,6 +69,7 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         expected.push_str(&format!("{BYTES_SERVED_TOTAL}{labels} {served}\n"));
         expected.push_str(&format!("{BYTES_READ_TOTAL}{labels} {read}\n"));
     }
+    expected.push_str(&format!("{PROMOTIONS_TOTAL} 0\n{PROMOTED_BYTES_TOTAL} 0\n"));
     for (index, (why, label)) in skips.into_iter().enumerate() {
         for _ in 0..=index {
             counters.skipped(why);
@@ -75,6 +78,9 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         expected.push_str(&format!(
             "{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} {count}\n"
         ));
+    }
+    for label in ["full", "raced", "failed"] {
+        expected.push_str(&format!("{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} 0\n"));
     }
     assert_eq!(counters.render(), expected);
 }
