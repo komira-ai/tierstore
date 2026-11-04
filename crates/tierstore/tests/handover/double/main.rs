@@ -15,6 +15,13 @@
 //!   in `real` beside it) and the same arguments, so that the service manager's signals reach
 //!   the server itself.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::disallowed_macros,
+    reason = "a stand-in program of a test: what it prints is what the test reads, and a failure of it is the failure the test reports"
+)]
+
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;

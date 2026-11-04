@@ -2869,6 +2869,8 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "http-body-util",
+ "hyper",
  "objstore-s3 0.1.0",
  "rcgen",
  "tierstore 0.3.0",

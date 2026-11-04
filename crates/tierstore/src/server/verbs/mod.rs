@@ -28,6 +28,7 @@ use std::time::Duration;
 use clap::{Args, Parser};
 
 use super::cli::{S3Flags, open_tier, parse_duration};
+use super::config_tuning::S3Client;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
 use crate::{Backend, SystemClock, TokioSleeper};
@@ -82,7 +83,15 @@ impl Hot {
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
         };
-        open_tier("--hot", &self.hot, &s3, self.s3_request_timeout).map_err(VerbError::Refused)
+        // The verbs take no configuration file, so the S3 client has its defaults.
+        open_tier(
+            "--hot",
+            &self.hot,
+            &s3,
+            self.s3_request_timeout,
+            &S3Client::default(),
+        )
+        .map_err(VerbError::Refused)
     }
 }
 

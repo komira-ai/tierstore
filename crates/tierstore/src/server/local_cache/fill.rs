@@ -568,6 +568,10 @@ impl Inner {
     }
 
     /// Links the staged file into the cache, on a thread that may block.
+    #[expect(
+        clippy::expect_used,
+        reason = "a blocking task's panic is a bug, passed on"
+    )]
     async fn commit(
         self: &Arc<Self>,
         staged: &Staged,
@@ -622,6 +626,10 @@ impl Inner {
     }
 
     /// Runs a pass of the eviction if the cache is above its high water mark.
+    #[expect(
+        clippy::expect_used,
+        reason = "a blocking task's panic is a bug, passed on"
+    )]
     pub(super) async fn relieve(self: &Arc<Self>) {
         let held = locked(&self.index).bytes();
         if held > percent_of(self.config.budget, self.config.high_water) {

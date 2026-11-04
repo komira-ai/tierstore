@@ -19,8 +19,8 @@ use crate::{Backend, Check, SelfTestError, SelfTestFailure};
 use super::super::cli_probe::{probe_run_id, probe_tiers};
 use super::super::cli_serve::cut_note;
 use super::{
-    Args, Cli, InvalidFlags, S3Flags, SkippedCheck, build, exit_status, open_tier, parse_duration,
-    parse_skip, read_key, share, tier,
+    Args, Cli, InvalidFlags, S3Client, S3Flags, SkippedCheck, build, exit_status, open_tier,
+    parse_duration, parse_skip, read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]

@@ -3,6 +3,12 @@
 //! the binary's `--check-config` asks (the settings that a start makes from the file, with the
 //! key files it names read, and nothing opened). It prints nothing and exits 0 if the file starts.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::ffi::OsString;
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -177,4 +183,77 @@ fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_
         !succeeded(tierstore_prev::server::cli::main(checking(&with))),
         "the release before refuses a key it does not know"
     );
+}
+
+/// Asserts the one key `require_auth` of an `oci` interface: a file with it set starts on this
+/// branch, and the release before refuses the file at start (it does not know `[[interface]]`)
+/// rather than serve the front anonymously, so a rollback with the key set cannot open a front the
+/// file meant to lock. The same file with the key left out starts on this branch, which serves
+/// the front anonymously as before.
+#[test]
+fn an_oci_interface_with_require_auth_starts_on_this_branch_and_is_refused_by_the_release_before() {
+    use std::io::Write;
+
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-auth-config");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
+    let locked = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&locked)
+        .unwrap();
+    text.write_all(
+        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], require_auth = true }\n",
+    )
+    .unwrap();
+    assert!(succeeded(tierstore::server::cli::main(checking(&locked))));
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &locked
+    ))));
+
+    let open = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&open)
+        .unwrap();
+    text.write_all(
+        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }\n",
+    )
+    .unwrap();
+    assert!(succeeded(tierstore::server::cli::main(checking(&open))));
+}
+
+/// Asserts the one key `stage_read` of an `oci` interface: a file with it set starts on this
+/// branch, and the release before refuses the file at start (an unknown param, and it does not
+/// know `[[interface]]` either); the same file with the key left out starts on this branch with
+/// the default size of a read.
+#[test]
+fn an_oci_interface_with_stage_read_starts_on_this_branch_and_is_refused_by_the_release_before() {
+    use std::io::Write;
+
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-stage-config");
+    let access = private(&dir, "access.key", LONG_ENOUGH);
+    let sized = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&sized)
+        .unwrap();
+    text.write_all(
+        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], stage_read = 4096 }\n",
+    )
+    .unwrap();
+    assert!(succeeded(tierstore::server::cli::main(checking(&sized))));
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &sized
+    ))));
+
+    let plain = file(&dir, &access, "");
+    let mut text = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&plain)
+        .unwrap();
+    text.write_all(
+        b"\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }\n",
+    )
+    .unwrap();
+    assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
 }
