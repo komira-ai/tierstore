@@ -35,8 +35,8 @@ async fn an_open_read_gives_the_meta_and_the_bytes_of_its_span() {
     over_each!(conformance::an_open_read_gives_the_meta_and_the_bytes_of_its_span);
 }
 
-/// Asserts that a streamed replacement of a reservation takes effect only on the tag and a body
-/// that ended whole, and then gives an object that is no reservation, on the in-memory and the
+/// Asserts that a streamed replacement takes effect only on the tag and a body
+/// that ended whole, and then gives the new object, on the in-memory and the
 /// directory backend.
 #[tokio::test]
 async fn a_streamed_replace_takes_the_tag_and_a_whole_body() {

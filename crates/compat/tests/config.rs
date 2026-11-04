@@ -304,3 +304,29 @@ fn an_oci_interface_with_stage_read_starts_on_this_branch_and_is_refused_by_the_
     );
     assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
+
+/// Asserts the one param `upstream` of an `oci` interface: a file with it starts on this branch
+/// (`--check-config` makes the pull-through client as the start does), and the release before
+/// refuses the file at start (it does not know `[[interface]]`) rather than serve a front that
+/// never pulls. The same file without the param starts on this branch, which serves the front as
+/// before.
+#[test]
+fn an_oci_interface_with_an_upstream_starts_on_this_branch_and_is_refused_by_the_release_before() {
+    let node = Node::new("compat-config-oci-upstream");
+    let ok = status(ExitCode::SUCCESS);
+    let pulling = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], upstream = { url = \"http://127.0.0.1:5000\" } }",
+    );
+    let (now, before) = both(&pulling);
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
+
+    let plain = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }",
+    );
+    assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
+}

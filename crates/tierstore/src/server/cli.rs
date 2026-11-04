@@ -101,6 +101,7 @@ use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config_interface::UpstreamTable;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
@@ -111,7 +112,8 @@ use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
-use super::oci::{self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
+use super::oci::{self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix, Upstream};
+use super::oci_upstream_setup::upstream_of;
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -422,6 +424,8 @@ pub struct Cli {
     /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
     /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
     pub oci_stage_read: Option<u64>,
+    /// `params.upstream`: the registry the OCI front pulls a missing object from.
+    pub(super) oci_upstream: Option<UpstreamTable>,
 }
 
 /// The id of a start for the probe of the cache directory's file system: the proxy id (with any character a
@@ -486,6 +490,8 @@ pub(super) struct OciSetup {
     pub(super) auth: Option<OciAuth>,
     /// The most bytes of a stored chunk read in one call at the end of a push.
     pub(super) stage_read: u64,
+    /// The registry a missing manifest or blob is pulled from; `None` pulls nothing.
+    pub(super) upstream: Option<Upstream>,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -665,7 +671,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     proxy.batch_entries = tuning.journal_batch_entries;
     proxy.usage_refresh = tuning.usage_refresh;
     proxy.delete_rounds = tuning.delete_rounds;
-    proxy.listing_heads = tuning.listing_heads;
     proxy.upload_listing_calls = tuning.upload_listing_calls;
     let mut reconciler =
         ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
@@ -675,7 +680,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
     reconciler.page_size = tuning.journal_page_size;
-    reconciler.copy_rounds = tuning.copy_rounds;
     reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;
@@ -716,6 +720,7 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
         stage_read: cli.oci_stage_read,
+        upstream: cli.oci_upstream.clone(),
     };
     oci_setup_of(&flags, server, warn)
 }
@@ -765,6 +770,7 @@ pub(super) fn oci_setup_of(
             return Err(refuse(OciError::Missing(why.to_owned())));
         }
     };
+    let upstream = flags.upstream.as_ref().map(upstream_of).transpose()?;
     let mode = if acceptor.is_some() {
         OciMode::Https
     } else {
@@ -787,6 +793,7 @@ pub(super) fn oci_setup_of(
         limits,
         auth: flags.require_auth.then(|| OciAuth::from_server(server)),
         stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
+        upstream,
     }))
 }
 
@@ -952,3 +959,7 @@ mod oci_tests;
 #[cfg(test)]
 #[path = "grant_cli_tests.rs"]
 mod grant_tests;
+
+#[cfg(test)]
+#[path = "oci_upstream_cli_tests.rs"]
+mod oci_upstream_tests;

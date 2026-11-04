@@ -57,6 +57,9 @@ pub enum OciError {
         /// What is wrong with them.
         why: String,
     },
+    /// `params.upstream` cannot be used: what is wrong with it.
+    #[error("params.upstream: {0}")]
+    Upstream(String),
     /// The address cannot be bound.
     #[error("binding {addr}: {source}")]
     Bind {

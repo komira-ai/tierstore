@@ -51,7 +51,9 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-use super::config_interface::{InterfaceTable, Interfaces, OciTable, interfaces, with_legacy};
+use super::config_interface::{
+    InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
+};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
@@ -352,12 +354,14 @@ pub(super) struct TierTable {
     pub usage_refresh: Option<Dur>,
     #[serde(default)]
     pub journal_page_size: Option<u32>,
+    /// Accepted and ignored: nothing reads it since the reservations went.
     #[serde(default)]
     pub copy_rounds: Option<u32>,
     #[serde(default)]
     pub compare_range: Option<Size>,
     #[serde(default)]
     pub delete_rounds: Option<u32>,
+    /// Accepted and ignored: nothing reads it since the reservations went.
     #[serde(default)]
     pub listing_heads: Option<u32>,
     #[serde(default)]
@@ -438,6 +442,8 @@ pub(super) struct OciFlags {
     pub require_auth: bool,
     /// The most bytes of a stored chunk read in one call at the end of an upload.
     pub stage_read: Option<u64>,
+    /// The registry a miss is pulled from, checked by `config_interface`; none pulls nothing.
+    pub upstream: Option<UpstreamTable>,
 }
 
 impl OciFlags {
@@ -452,6 +458,7 @@ impl OciFlags {
             connection_lifetime: None,
             require_auth: false,
             stage_read: None,
+            upstream: None,
         }
     }
 }
@@ -663,6 +670,7 @@ pub(super) fn storage(
         oci_connection_lifetime: oci.connection_lifetime,
         oci_require_auth: oci.require_auth,
         oci_stage_read: oci.stage_read,
+        oci_upstream: oci.upstream,
     })
 }
 

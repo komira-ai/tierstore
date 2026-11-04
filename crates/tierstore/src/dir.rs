@@ -2,14 +2,14 @@
 //!
 //! A key is the name of one file, percent-encoded: every byte but an ASCII letter or digit
 //! (and a few marks) costs three bytes, so a key whose encoded name is empty or over 255 bytes
-//! (about 85 bytes of non-ASCII text) cannot be stored. A write that validates the key itself (put, create of an upload, streamed
-//! puts, reservations) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`); a read, a
-//! head, a delete and the held-body conditional writes ([`Backend::put_if_match`] and
-//! `put_reservation_if_match`, which first look for the stored object) are [`Error::NotFound`],
+//! (about 85 bytes of non-ASCII text) cannot be stored. A write that validates the key itself
+//! (put, create of an upload, streamed puts) is [`Error::InvalidKey`] (S3 answer 400
+//! `KeyTooLongError`); a read, a head, a delete and the held-body conditional write
+//! ([`Backend::put_if_match`], which first looks for the stored object) are [`Error::NotFound`],
 //! since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -48,15 +48,9 @@ use tags::{finish, modified_of, sha256};
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
 
-/// The mode of the file of an object that is not a reservation: read and write for its owner alone,
-/// so that no other local account reads what a scoped or read-only key is meant to reach.
+/// The mode of the file of an object: read and write for its owner alone, so that no other local
+/// account reads what a scoped or read-only key is meant to reach.
 const PLAIN_MODE: u32 = 0o600;
-
-/// The owner-execute bit, which marks the file of a reservation.
-const MARK_BIT: u32 = 0o100;
-
-/// The mode of the file of a reservation: that of an object, with the mark.
-const MARKED_MODE: u32 = 0o700;
 
 /// The mode of every directory this backend makes (the tier root, the uploads directory and the
 /// directory of an upload): open to its owner alone.
@@ -112,14 +106,6 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   too, so that a delete and a put of new content that come between the check and the removal
 ///   of a conditional delete cannot be undone by it. The directory is synced after the lock is
 ///   released.
-/// - A reservation ([`Backend::put_reservation`], [`Backend::put_reservation_if_match`]) is the
-///   file of an object whose mode has the owner-execute bit, which is the mark that
-///   [`Meta::reservation`] reports. The file is made with that mode, so a put of it is as atomic as
-///   any other, and a plain replacement writes a new file without the bit, which is how a
-///   reservation becomes an object in one step. The format of the file is not changed, so a
-///   release without reservations reads one as a plain object. The mark lives in the file
-///   system: a copy that drops modes (`cp` without `-p`, a restore, some network file systems)
-///   turns a reservation into an unmarked object.
 /// - A streamed put ([`Backend::put_stream`]) writes the chunks to the temporary file as they
 ///   arrive, so that the body is never held in memory; the content tag, which starts the file,
 ///   is written over reserved room after the last chunk, the file is synced, and only then is it
@@ -128,7 +114,7 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 /// - A streamed read ([`Backend::get_stream`]) opens the file once and reads the range in chunks of
 ///   at most 64 KiB as they are asked for, so that a reader holds one chunk and not the object;
 ///   a replacement or a delete of the name meanwhile leaves it on the file it opened. A read with
-///   the mark ([`Backend::get_tagged`]) takes the bytes and the mark from the same open file.
+///   the tag ([`Backend::get_tagged`]) takes the bytes and the tag from the same open file.
 /// - A streamed replacement ([`Backend::put_stream_if_match`]) writes the chunks to a temporary
 ///   file as they arrive, outside the lock, and then, under the lock and the tag check of
 ///   [`Backend::put_if_match`], moves the file over the object and syncs the directory. A body
@@ -223,25 +209,20 @@ impl Drop for Scratch {
     }
 }
 
-/// Makes the new file at `path`, for writing. It is an error if the name is taken, so that two
-/// writers never write to one file.
+/// Makes the new file at `path`, for writing, with the mode [`PLAIN_MODE`] (less the umask). It is
+/// an error if the name is taken, so that two writers never write to one file.
 async fn create_new(path: &Path) -> std::io::Result<File> {
-    create_with_mode(path, PLAIN_MODE).await
-}
-
-/// As [`create_new`], for a file made with the mode `mode` (less the umask).
-async fn create_with_mode(path: &Path, mode: u32) -> std::io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(mode)
+        .mode(PLAIN_MODE)
         .open(path)
         .await
 }
 
-/// Writes `data` to a new file at `path` made with the mode `mode`, and syncs it to the disk.
-async fn create_file(path: &Path, mode: u32, mut data: impl Buf) -> std::io::Result<()> {
-    let mut file = create_with_mode(path, mode).await?;
+/// Writes `data` to a new file at `path`, and syncs it to the disk.
+async fn create_file(path: &Path, mut data: impl Buf) -> std::io::Result<()> {
+    let mut file = create_new(path).await?;
     let written = file.write_all_buf(&mut data).await;
     let flushed = written.and(file.flush().await);
     flushed.and(file.sync_all().await)
@@ -319,8 +300,6 @@ struct Stored {
     tag: [u8; TAG_LEN],
     size: u64,
     modified: u64,
-    /// Whether the file has the mark of a reservation.
-    marked: bool,
 }
 
 impl Stored {
@@ -348,20 +327,20 @@ fn window(size: u64, range: Option<ByteRange>) -> Result<(u64, u64), Error> {
     }
 }
 
-/// The bytes of `range` of the object `stored` was opened from, its mark and its content tag. All
-/// three are those of the one open file (the tag is the header of that file), so a replacement of
-/// the object that comes meanwhile (a new file under the name, whatever its mark and tag) is not
+/// The bytes of `range` of the object `stored` was opened from and its content tag. Both
+/// are those of the one open file (the tag is the header of that file), so a replacement of
+/// the object that comes meanwhile (a new file under the name, whatever its tag) is not
 /// seen by this read.
-async fn read_marked(
+async fn read_tagged(
     mut stored: Stored,
     range: Option<ByteRange>,
-) -> Result<(Bytes, bool, String), Error> {
+) -> Result<(Bytes, String), Error> {
     let (offset, len) = window(stored.size, range)?;
     stored.seek_body(offset).await?;
     let mut body = Vec::new();
     let read = (&mut stored.file).take(len).read_to_end(&mut body).await;
     read.map_err(io_error(&stored.path))?;
-    Ok((Bytes::from(body), stored.marked, hex::encode(stored.tag)))
+    Ok((Bytes::from(body), hex::encode(stored.tag)))
 }
 
 /// The `left` bytes of the body that `stored` is positioned at, as chunks of at most
@@ -406,7 +385,6 @@ async fn open_stored(path: &Path) -> std::io::Result<Stored> {
         tag,
         size: meta.len().saturating_sub(TAG_LEN as u64),
         modified: modified_of(&meta),
-        marked: meta.permissions().mode() & MARK_BIT != 0,
     })
 }
 
@@ -619,13 +597,12 @@ impl DirBackend {
         Ok(gone)
     }
 
-    /// Writes the file of an object with this body to a new temporary file made with the mode
-    /// `mode`.
-    async fn write_temp(&self, body: Bytes, mode: u32) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
+    /// Writes the file of an object with this body to a new temporary file.
+    async fn write_temp(&self, body: Bytes) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
         let tag = sha256(&body);
         let data = Bytes::copy_from_slice(&tag).chain(body);
         let temp = self.temp(&self.root);
-        match create_file(&temp, mode, data).await {
+        match create_file(&temp, data).await {
             Ok(()) => Ok((temp, tag)),
             Err(why) => {
                 let _ = fs::remove_file(&temp).await;
@@ -681,21 +658,14 @@ impl DirBackend {
         }
     }
 
-    /// Replaces the object `key` if it has the content tag `etag`, with a file of the mode
-    /// `mode`, which is what marks it or not, and gives the new tag.
-    async fn replace(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-        mode: u32,
-    ) -> Result<String, Error> {
+    /// Replaces the object `key` if it has the content tag `etag`, and gives the new tag.
+    async fn replace(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let located = self.locate(key).await;
         located.map_err(|_| Error::NotFound(key.to_owned()))?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let path = self.matching(key, etag).await?.path;
-        let (temp, tag) = self.write_temp(body, mode).await?;
+        let (temp, tag) = self.write_temp(body).await?;
         self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
@@ -726,14 +696,7 @@ impl Backend for DirBackend {
     /// The tag is that of the file this call published: the SHA-256 of the bytes it wrote.
     async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let path = self.path(key)?;
-        let (temp, tag) = self.write_temp(body, PLAIN_MODE).await?;
-        self.publish(&temp, &path, key).await?;
-        Ok(hex::encode(tag))
-    }
-
-    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let path = self.path(key)?;
-        let (temp, tag) = self.write_temp(body, MARKED_MODE).await?;
+        let (temp, tag) = self.write_temp(body).await?;
         self.publish(&temp, &path, key).await?;
         Ok(hex::encode(tag))
     }
@@ -768,23 +731,14 @@ impl Backend for DirBackend {
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
-        self.replace(key, body, etag, PLAIN_MODE).await
-    }
-
-    async fn put_reservation_if_match(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, Error> {
-        self.replace(key, body, etag, MARKED_MODE).await
+        self.replace(key, body, etag).await
     }
 
     /// Writes the chunks to a temporary file as they arrive, outside the lock, so that a slow
     /// body holds up no delete or replacement; then, under the lock and the tag check of
     /// [`Backend::put_if_match`], moves the file over the object. A body that fails, a tag that
     /// does not match and a call that is dropped half way remove the temporary file and leave the
-    /// object as it was. The new file has no mark, as after a plain replacement.
+    /// object as it was.
     async fn put_stream_if_match(
         &self,
         key: &str,
@@ -810,8 +764,8 @@ impl Backend for DirBackend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
-        read_marked(self.stored(key).await?, range).await
+    ) -> Result<(Bytes, String), Error> {
+        read_tagged(self.stored(key).await?, range).await
     }
 
     /// Opens the file and gives its bytes in chunks of at most 64 KiB, read as they are asked
@@ -832,7 +786,6 @@ impl Backend for DirBackend {
             size: stored.size,
             tag: hex::encode(stored.tag),
             modified: stored.modified,
-            reservation: stored.marked,
         };
         let window = Window::of(span, meta.size);
         let (offset, len) = match window {
@@ -854,7 +807,6 @@ impl Backend for DirBackend {
             size: stored.size,
             tag: hex::encode(stored.tag),
             modified: stored.modified,
-            reservation: stored.marked,
         })
     }
 
@@ -892,7 +844,7 @@ impl Backend for DirBackend {
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
         let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;
-        let named = create_file(&dir.join(KEY_FILE), PLAIN_MODE, key.as_bytes()).await;
+        let named = create_file(&dir.join(KEY_FILE), key.as_bytes()).await;
         made.and(named).map_err(io_error(&dir))?;
         Ok(id)
     }
