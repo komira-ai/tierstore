@@ -1,6 +1,6 @@
 # tierstore design
 
-This document says why tierstore exists, what it promises, and how the code keeps those promises. It is a living document: a change to code that this text describes changes the text with it. It states the problem first and then the solution, and it marks what is not built yet, so a reader can tell the design from the plan. The coordination protocol of sections 5 to 8 and 10 (one journal entry per key) is **decided and not built**: the code today still uses per-node journals, and section 14 is the order in which the code moves to the design, and section 15 records the decisions of 2026-11-03 that fixed it. Everything outside those sections (the fronts, the tiers, the lease, the local cache, the configurations) describes the code, except the entries (sections 3, 4 and 12), which are decided and not built; where the text names a journal, it means the per-node journal the code has today. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the hand-over of a running node is section 6.7. Terms in bold are defined in the glossary (section 16).
+This document says why tierstore exists, what it promises, and how the code keeps those promises. It is a living document: a change to code that this text describes changes the text with it. It states the problem first and then the solution, and it marks what is not built yet, so a reader can tell the design from the plan. The coordination protocol of sections 5 to 8 and 10 (one journal entry per key) is **decided and not built**: the code today still uses per-node journals, and section 14 is the order in which the code moves to the design, and section 15 records the decisions of 2026-11-03 that fixed it. Everything outside those sections (the fronts, the tiers, the lease, the local cache, the configurations) describes the code, except the entries (sections 3, 4 and 12), which are decided and not built, and so is the removal of the start-up store probes (section 9, decision 9 of section 15): the current binary still runs its start-up self-test (`probe_tiers`), and section 9 describes the design where it says no store is probed; where the text names a journal, it means the per-node journal the code has today. Operators read [crates/tierstore/docs/](../../crates/tierstore/docs/) (start with [overview.md](../../crates/tierstore/docs/overview.md)); the hand-over of a running node is section 6.7. Terms in bold are defined in the glossary (section 16).
 
 ## 1. The problem
 
@@ -42,7 +42,7 @@ Goals:
 - Back-pressure instead of failure when the hot tier fills.
 - Recovery from a restart, a crash or a lost lease using only what is stored in the tiers.
 - Clients see 503 SlowDown only where it is unavoidable, rarely and briefly.
-- A small contract for what a tier must do (section 9), stated and not verified: tierstore is a proxy over a hot and a cold store and does not test them.
+- A small contract for what a tier must do (section 9), documented for the operator; tierstore does not check it.
 
 Non-goals:
 
@@ -50,7 +50,7 @@ Non-goals:
 - Transactions across keys.
 - Recovery of a lost hot tier: objects not yet copied to the cold tier are lost with it.
 - Scrubbing stored objects for bit rot.
-- Protection against clock skew between machines: no timestamp from another machine is compared with anything (section 6.3).
+- Protection against clock skew between machines: no decision uses a clock of another machine, the store's included (sections 6.3 and 6.9); tierstore does not measure the store's clock.
 - Per-write ids in object metadata (section 12).
 - Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`--tls-cert`, `--tls-key`, as on the OCI front).
 
@@ -88,11 +88,11 @@ The configuration file ([server/config.rs](../../crates/tierstore/src/server/con
 
 **B: storage node.** This is the design of sections 5 to 10.
 
-**C: planned.** One process with a local cache in front of the proxy over a hot and a cold tier. The loader refuses the three tables together (`config.rs`, the match that builds `Settings`) with the error "the hot store is already local disk, and a disk cache in front of it would cache a disk with a disk". That reasoning does not hold when the hot store is an S3 bucket. The design treats C as part of the plan: a node that serves its own reads from NVMe and also owns the data. What it needs is in section 14(c). Until it exists, the same read path is reached by chaining: a build node whose `cold_store` is the S3 endpoint of a storage node.
+**C: planned.** The local cache sits in front of the proxy: a cache hit never reaches the hot tier, and the hot+cold pair (the proxy) is the cache's upstream through the same store interface (`Backend`) that a build node's cache uses for its S3 upstream, whether the pair runs in the same process or in another one (section 15, decision 12). One process with a local cache in front of the proxy over a hot and a cold tier. The loader refuses the three tables together (`config.rs`, the match that builds `Settings`) with the error "the hot store is already local disk, and a disk cache in front of it would cache a disk with a disk". That reasoning does not hold when the hot store is an S3 bucket. The design treats C as part of the plan: a node that serves its own reads from NVMe and also owns the data. What it needs is in section 14(c). Until it exists, the same read path is reached by chaining: a build node whose `cold_store` is the S3 endpoint of a storage node.
 
 ## 5. How each operation works
 
-The sequences below are for configuration B and are the **decided design** (not built; section 14). Every store call is shown in code order. The proxy refuses a reserved key (section 7) for get, head, put, delete and multipart before anything else, and leaves reserved keys out of every listing. The reserved prefixes are `_entries/`, `_journal/` and `_tiering/`.
+The sequences below are for configuration B and are the **decided design** (not built; section 14). Every store call is shown in code order. The proxy core refuses a reserved key (section 7) for put, delete, multipart, get and head before anything else, and filters reserved keys from every listing, in one place (section 15, decision 10). The fronts do not filter. The reserved prefixes are `_entries/`, `_journal/` and `_tiering/`.
 
 Notation: K is a key, H(K) and C(K) are its objects in hot and cold, E(K) is its entry. An entry is `(op, state, owner)`: `op` is PUT, DEL, CB (copy-back) or EVICT; `state` is HELD (its owner is working on the key), PENDING (the work has landed or been asked for, and it is the leader's turn) or SEALED (the leader is finishing, nobody else may act). Section 6.2 gives the full state machine.
 
@@ -128,7 +128,7 @@ The front calls `Proxy::open_read(key, span)` once. It gives the object's meta (
 
 1. **Hot hit.** One hot call, `open_read(key, range)`, returns the tag and the body together, at the client's key. The reply is made at once: **a hot hit is one hot round trip and reads no entry.** A hot error other than not-found is returned as it is; cold is not tried (fail closed).
 2. **Hot miss: read cold.** Straight away, with no entry read (a range reads only the range; the body is streamed). The result stands: the bytes, or 404. **A get never reads the journal entry.** A hot miss is one cold read, plus the copy-back request of step 3.
-3. **Ask for a copy-back.** Below level `Critical`, with fewer than 1000 copy-back entries open, the proxy creates `(CB, PENDING)` with a create-only write, best effort; if an entry for the key exists the create does nothing, and any failure is ignored. The reply never waits for it. The proxy copies nothing into hot itself. The leader does, under the entry (section 6.5).
+3. **Ask for a copy-back.** Below level `Critical`, with fewer than `copy_back_max_entries` (1000) copy-back entries open and less than `copy_back_backlog_bytes` (16 MiB) of them waiting, the proxy creates `(CB, PENDING)` with a create-only write, best effort; if an entry for the key exists the create does nothing, and any failure is ignored. The reply never waits for it. The proxy copies nothing into hot itself. The leader does, under the entry (section 6.5).
 
 Why no entry is read: a delete that meets a copy in flight does not answer until that copy has finished (see Delete below). While a copy is running the delete is therefore unacknowledged, and a cold read that returns the key's bytes in that window returns what a not yet acknowledged delete has not covered. Once the delete is acknowledged, both tiers have been deleted after the last cold publish the copy could make, so a cold read answers 404. The earlier draft read the entry first on a hot miss, at the cost of one more hot request in series; the model showed that the wait closes the same window without it (section 8, The model check).
 
@@ -178,7 +178,7 @@ Why: cold must hold the object, byte for byte, before the hot copy goes, so a ge
 
 A listing is the union of both tiers in key order, the hot entry winning on a duplicate. `list_page` reads the hot tier in as many pages as it takes to find `max_keys` data keys after `start_after`, reads one page from the cold tier, merges and cuts. Hot is read first, so a key evicted between the two calls is still seen in cold. Either tier failing fails the listing. The proxy filters `_entries/`, `_journal/` and `_tiering/` from the listings of both tiers. The S3 front supports `list-type=2`, `prefix`, `max-keys`, `continuation-token` and `start-after`; `delimiter` is not supported.
 
-All multipart calls go to the cold tier; the proxy holds no part. A completion is a put in the sense above: it takes the entry first, checks the hot tier, then calls the cold tier's create-only `complete_upload` as its landing. An upload that dies is found by the reaper with `list_uploads(prefix = K)` and aborted (safe, because the reaper holds the key's entry); the bucket lifecycle rule `AbortIncompleteMultipartUpload` is the backstop, and start-up logs a warning if the cold store reports none.
+All multipart calls go to the cold tier; the proxy holds no part. A completion is a put in the sense above: it takes the entry first, checks the hot tier, then calls the cold tier's create-only `complete_upload` as its landing. An upload that dies is found by the reaper with `list_uploads(prefix = K)` and aborted (safe, because the reaper holds the key's entry); the bucket lifecycle rule `AbortIncompleteMultipartUpload` is the backstop,.
 
 ### What a build node's local cache changes
 
@@ -265,7 +265,7 @@ Each process boot gets a fresh id, `<node>-<boot id>`; an id is never reused, so
 
 **The deadline of a holder.** A proxy keeps `live_until = send time of its last successful heartbeat + D - m` (m is a margin, 10 s). Every step of a holder that destroys or acknowledges checks `now < live_until`; if not, it stops, answers 503 and never touches the entry or the data again. Every destructive call (a hot or cold DELETE, an entry delete) has its own timeout, the smaller of `m` and `live_until - now`. A long upload therefore has a renewable deadline, the heartbeat, and no size cap.
 
-**One check at start-up.** Only one relation breaks exclusion if misconfigured, so it is the only one checked: `D >= 6 * heartbeat` and `m <= D / 4`, refused at config parse with the values named. The other relations are documented defaults.
+**One check at config parse.** Only one relation breaks exclusion if misconfigured, so it is the only one checked: `D >= 6 * heartbeat` and `m <= D / 4`, refused at config parse with the values named. The other relations are documented defaults. Every number is a config key with a default (section 6.9, table of keys).
 
 **Registrations.** The leader deletes a registration that has been departed for 10 D and that no entry names, so ids do not accumulate.
 
@@ -286,7 +286,7 @@ Every destructive step of the leader, and the cold publish of a copy, requires `
 
 Why a lease object and not a coordination service: requirement 5 says there is none, and a conditional write on one small object in a store the deployment already has gives exactly one winner. Why a single leader at all: copying, releasing and eviction then have one writer in the normal case, and the entry listing is read by one process. Puts never stop: every process keeps accepting puts and gets through a hand-over or a crash. While there is no leader only the leader's work waits.
 
-**What the hot tier must provide.** The entry, lease and registration writes need a hot tier whose create-only and `If-Match` writes are atomic across processes, because during a live update two processes run at once over one hot tier. An S3-compatible hot bucket provides this. A `dir:` hot tier provides it by doing its create-only, `If-Match` and entry-delete writes under a blocking file lock (taken on a blocking thread) inside its own directory, with a hard link for create-only on a local file system (not NFS); today it is atomic only inside one process, which is why the code still has `--lock-file`. Nothing at start-up checks this (section 9): tierstore does not test its stores, so the choice of a tier that meets it is the deployment's.
+**What the hot tier must provide.** The entry, lease and registration writes need a hot tier whose create-only and `If-Match` writes are atomic across processes, because during a live update two processes run at once over one hot tier. An S3-compatible hot bucket provides this. A `dir:` hot tier provides it by doing its create-only, `If-Match` and entry-delete writes under a blocking file lock (taken on a blocking thread) inside its own directory, with a hard link for create-only on a local file system (not NFS); today it is atomic only inside one process, which is why the code still has `--lock-file`. Section 9 states this as a requirement the operator is responsible for; tierstore does not probe for it.
 
 ### 6.5 The life of a write: entry, copy to cold, release, eviction
 
@@ -301,7 +301,7 @@ The diagram follows one put through its stages; the leader's step for each entry
 | `(PUT, HELD, leader)`, this leader | its own copy is running; nothing else. A new leader finds it only after the owner has departed (reap) |
 | `(DEL, PENDING)` | E6, then roll forward: `cold.delete`, `hot.delete`, E8' |
 | `(DEL, SEALED)` | roll forward again, then E8' |
-| `(CB, PENDING)` | H absent, C present, level below `Critical`: stream the current cold object into a hot temp, then E6 to SEALED, then land it create-only, then E8'. Any other situation: seal and release. At most 1000 copy-back entries are open (a get above that skips the create), one older than 10 minutes is sealed and released without copying, and the pool runs put and delete work before copy-back |
+| `(CB, PENDING)` | H absent, C present, level below `Critical`: stream the current cold object into a hot temp, then E6 to SEALED, then land it create-only, then E8'. Any other situation: seal and release. At most `copy_back_max_entries` (1000) copy-back entries are open and at most `copy_back_backlog_bytes` (16 MiB) wait (a get above either skips the create), one older than `copy_back_max_age` (10 minutes) is sealed and released without copying, and the pool runs put and delete work before copy-back |
 | `(CB, SEALED)` | E8' (the landing happened or is abandoned; a later get asks again) |
 | `(EVICT, SEALED)` | E8' (the hot delete is redone only by a fresh eviction) |
 | `(op, HELD)`, owner departed | E7: reap to PENDING; for a put, abort its multipart uploads by listing. A copy a leader left half done is therefore redone after about D |
@@ -357,7 +357,7 @@ Why: the listening sockets are passed on, never closed, so the kernel's queue of
 
 ### 6.9 Usage and back-pressure
 
-The proxy never measures the hot tier. It rereads the usage object at most once per second and maps it to a level: `Open`, `Critical` (at or above 95% of the budget) or `Full` (at or above the budget). A missing, unreadable or 30-second-old usage counts as `Open`. A hot tier that answers `Full` is latched `Full` for one second. The budget it is compared with is configured separately (`--hot-bytes` or `hot_store.budget`) and reaches the proxy as `ProxyConfig::hot_budget`; the deployment sets it below the real capacity (and leaves headroom for entries on `dir:`). `/usagez` answers 200, or 503 when the usage is older than `--usage-stale-after`.
+The proxy never measures the hot tier. It rereads the usage object at most once per `usage_refresh` (default 1 s) and maps it to a level: `Open`, `Critical` (at or above 95% of the budget) or `Full` (at or above the budget). A missing or unreadable usage object counts as `Open`. So does a stale one: the usage is stale when its tag has not changed for `usage_stale_after` (default 30 s), measured on the proxy's own monotonic clock since it first saw that tag, as the leader judges a registration (section 6.3). The `time` inside the usage body is for display only. No clock of the store or of another machine is compared with anything, and nothing measures the store's clock. A hot tier that answers `Full` is latched `Full` for `usage_refresh`. The budget it is compared with is configured separately (`--hot-bytes` or `hot_store.budget`) and reaches the proxy as `ProxyConfig::hot_budget`; the deployment sets it below the real capacity (and leaves headroom for entries on `dir:`). `/usagez` answers 200, or 503 when the usage is stale by the same rule (`usage_stale_after`).
 
 There is no back-pressure sleep. A put at `Open` or `Critical` takes the normal path; at `Full` it takes the cold path or, if presigned, is refused with 503 `SlowDown` (section 5). `Critical` stops copy-back, so a read does not fill a hot tier that is nearly full.
 
@@ -367,13 +367,40 @@ There is no back-pressure sleep. A put at `Open` or `Critical` takes the normal 
 |---|---|---|---|
 | Heartbeat (registration rewrite) | 10 seconds (`--heartbeat`) | the node | cheap evidence of life; one small write per node per 10 s |
 | Departure of a silent node (D) | 60 seconds without a change (`--departure`) | the leader's own monotonic clock | at least 6 heartbeats; no clocks compared across machines |
-| Margin (m) | 10 seconds | the holder's monotonic clock | a call may start only if its deadline is at least m away; at most D/4 |
+| Margin (m) | 10 seconds | the holder's monotonic clock | subtracted from D to give a holder's deadline `live_until`; a holder's destructive call is bounded by min(m, live_until - now), and a leader keeps a full m of lease before a destructive call or a cold publication; at most D/4 |
 | Lease ttl | 30 seconds; about 30 s from a crash to a new leader | the taker's own monotonic clock | the longest pause in replication after a leader crash |
 | Lease renewal | every ttl/3, on its own timer | the leader | a long copy cannot starve it |
 | Loop wait | 1 s when idle, doubling to `--reconcile-idle-max` (default 10 s) | the leader | bounds ack to cold after a quiet period; no wake ping |
-| Usage refresh | 1 second (proxy), published every 10 s | the proxy | back-pressure reacts within seconds |
+| Usage refresh | 1 second (proxy, `usage_refresh`), published every 10 s (`usage_publish`) | the proxy | back-pressure reacts within seconds |
+| Usage staleness | 30 seconds with an unchanged tag (`usage_stale_after`) | the proxy's own monotonic clock | a dead leader stops being believed; no store clock |
 
 **Measured** on release v0.3.18, dir to dir, a 28-core NVMe machine, release binary: with today's fixed pass interval, ack to cold at p50 is about half the interval (2.72 s at a 5 s interval, 0.71 s at 1 s, 0.12 s at 200 ms, for a 1 KiB object; 64 MiB objects add 0.1 to 0.12 s). Query: a pause of random length, a put, then a poll of the cold file's size every millisecond, 25 samples per size per interval, no mismatches and no timeouts. **Inferred** for this design: the wait is the current back-off, not a fixed interval. While work keeps arriving the leader loops with no sleep, so ack to cold is one scan plus about 7 small requests plus the copy (tens of milliseconds on `dir:`; 0.3 to 1 s for small objects over a remote cold tier at 20 to 30 ms round trip). After a quiet period it is up to the back-off at that moment, about half of it at p50.
+
+### The config keys
+
+Every arbitrary number is a config key with a default, from the start (section 15, decision 11). A key is an entry of the configuration file. The flag spellings shown in the table (`--heartbeat`, `--departure`, `--reconcile-idle-max`) are the **planned** flags of the protocol, not flags the binary has today; `--usage-stale-after` exists today (`rg -n 'heartbeat|departure|reconcile-idle-max' crates/tierstore/src` finds none); section 14 (d2) leaves tierstore taking only `--config`, so they are not built as flags unless a transition needs them. The key names are the design's proposal.
+
+| Key | Default | What it sets |
+|---|---|---|
+| `heartbeat` (`--heartbeat`) | 10 s | registration rewrite interval |
+| `departure` (D, `--departure`) | 60 s | silence before an owner is departed; at least 6 heartbeats |
+| `margin` (m) | 10 s | subtracted from D to give a holder's deadline; a holder's destructive call is bounded by min(m, live_until - now); a leader keeps a full m of lease before a destructive call; at most D/4 |
+| `lease_ttl` | 30 s | time an unchanged lease is believed; renewal every ttl/3 |
+| `reconcile_idle_min` | 1 s | the leader loop's wait when idle, the start of the back-off |
+| `reconcile_idle_max` (`--reconcile-idle-max`) | 10 s | the back-off ceiling; the allowed range is 1 to 10 s |
+| `usage_refresh` | 1 s | how often the proxy rereads the usage object |
+| `usage_publish` | 10 s | how often the leader publishes usage |
+| `usage_stale_after` (`--usage-stale-after`) | 30 s | an unchanged usage tag older than this counts as `Open`, and `/usagez` answers 503 |
+| `critical_percent` | 95 | the share of the budget at which the level is `Critical` |
+| `item_retry_min`, `item_retry_max` | 1 s, 60 s | a failed item's retry back-off |
+| `pool_size` | 16 | concurrent items the leader runs |
+| `copy_back_max_entries` | 1000 | open copy-back entries; a get above it skips the create |
+| `copy_back_backlog_bytes` | 16 MiB | bytes of objects waiting under open copy-back entries; a get above it skips the create |
+| `copy_back_max_age` | 10 min | an older copy-back entry is sealed and released without copying |
+| `registration_reap_after` | 10 D | how long a departed registration that no entry names is kept |
+
+The relations between keys that break exclusion (`D >= 6 * heartbeat`, `m <= D / 4`) are checked at config parse; the others are documented. `--backend-check-wait` goes away with the start-up check (section 9).
+
 
 ## 7. Edge cases the design handles
 
@@ -389,8 +416,8 @@ Each entry is a mechanism and the reason it works. The races between actors are 
 - **An object with no entry.** A hot object with no entry and no cold copy (left by an old binary, or by a landing after a reap) is adopted by the leader with a PENDING entry and replicated (the stray sweep, section 6.6).
 - **Restart.** Nothing is rebuilt. The leader's memory is a bounded set of candidates and timers; the entries and registrations in the hot tier are the only state.
 - **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.4).
-- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses get, head, put, delete and multipart under them and leaves them out of the listings of both tiers; the S3 front refuses each supported call on them (403) before the operation's own processing (a request it refuses as unsupported is answered so first), and the local cache refuses reads and writes of them as well, since its upstream may be a plain bucket.
-- **No start-up test of the stores.** tierstore does not probe its tiers (decision of 2026-11-03: "tierstore is simply a proxy on top of hot and cold stores"). The entry and the lease rest on what section 9 says a store must do, and a store that does not do it is not detected. An earlier design ran a start-up self-test of each tier and refused a wrong answer with exit status 3; it was removed, and the flags that tuned it (`--skip-backend-check`, `--backend-check-wait`) are accepted and ignored with a warning.
+- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket. They are filtered once, in the proxy core: it refuses put, delete, multipart, get and head of a key under them, and drops them from every listing (hot and cold). The fronts add no filter of their own.
+- **No store probes.** tierstore is a proxy and does not probe or self-test a store at start-up. What a store must provide is a documented requirement the operator is responsible for (section 9); a store that does not meet it breaks the entry and the lease, and tierstore does not detect that.
 - **Fail closed.** A put whose cold HEAD fails fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read; a node past its `live_until` answers 503 and touches nothing.
 
 ## 8. Races the design handles
@@ -452,25 +479,28 @@ The ghost (frozen-actor) runs of the decided rule find only the shapes of R1 to 
 
 Both tiers are used through the `Backend` trait. The contract: `put` and `put_stream` are create-only (`AlreadyExists`, `Full`); `put_if_match(key, body, tag)` replaces only if the tag matches and fails on a missing key; `head` returns size, tag and modified time; `delete` of a missing key succeeds; `delete_if_match` is optional and used only as a fence; `list_page` is ordered and honours `start_after`; multipart calls are optional, and `complete_upload` is create-only. A network backend bounds each call with its own timeout.
 
-tierstore does not verify any of this. It writes no probe key, at start-up or later, and asks a store nothing beyond the requests of clients and of its own work. The hot tier must provide atomic create-only and `If-Match` PUTs and strong read-after-write for GET, HEAD and LIST; the cold tier the same create-only PUT, on a single PUT and on the completion of a multipart upload. Known to meet them: Amazon S3, MinIO (conditional PUT) and tierstore's own `dir` store, which meets them among the calls of one process only (section 6.4): two processes over one `dir` hot tier are held apart by `--lock-file`, not by the store. `tierstore format-epoch --check` (section 13) runs no probe: it reads only tierstore's own objects (`_tiering/format`, `_tiering/proxies/`, `_entries/`), and the store requirements are documented, not checked there.
+tierstore is a proxy. It cannot make a store atomic, and it does not probe or self-test a store: nothing runs against a tier at start-up, and no probe key is written. The requirement below is **documented, and the operator is responsible for choosing a store that meets it** (section 15, decision 9). A store that does not meet it breaks the entry and the lease (for example, two writers may both win a create-only put), and tierstore does not detect that.
 
-| Assumption | Why | Verified |
-|---|---|---|
-| Create-only put refuses a second put | One winner per key; the entry and the lease are taken create-only | no |
-| HEAD gives size and a non-empty tag, and the tag `put_if_match` returns equals the next HEAD tag | Lease and entry CAS use the tag from HEAD | no |
-| `If-Match` refuses a wrong tag and accepts the right one | Entry CAS, lease take-over and renewal | no |
-| `If-Match` put on a missing key fails (new) | A late CAS on a deleted entry must not recreate it | no |
-| Ranged read returns the exact bytes | Ranged gets | no |
-| Listing is ordered, paged, honours `start_after` | Reading the entries | no |
-| Delete of a missing key succeeds | Repeated and re-applied deletes, eviction, roll-forward | no |
-| Multipart completion is create-only (cold tier) | A completion is a landing under the entry | no |
-| Create-only and `If-Match` are atomic under concurrent writers, across processes | One winner per entry; one lease holder, also while two processes run during a live update | no |
-| Strong read-after-write for HEAD, GET, LIST | Entry reads and the hot-miss gate | no |
-| Conditional DELETE is honoured | Nothing relies on it; it only fences a stalled actor (R1, R4) | no |
-| Durability and replication of an acknowledged write | An acknowledgement means durable | no |
-| Streaming put and read paths | Client writes | no |
+**The requirement.** A store used as the hot tier supports a conditional PUT: create-only (`If-None-Match: *` or the store's equivalent) and `If-Match` on a tag. Both are atomic between concurrent writers, also across processes, because during a live update two processes run at once over one hot tier. The cold tier needs the create-only put and the create-only multipart completion.
 
-On `dir:` the monotonic clock is the only clock used for any decision (`Instant`), and a VM pause that stops it is a frozen actor (R7). How `S3Backend` maps answers: 507 is `Full`; 408, 429, other 5xx (not 501), transport failures and a 409 conflict are `Unavailable`; 412 on a create-only put is `AlreadyExists`, on `put_if_match` `PreconditionFailed`. `DirBackend` and `MemoryBackend` tag an object with the SHA-256 of its body; `S3Backend` uses the store's ETag, which is an MD5 for a single PUT and something else for a multipart object. Tags are never compared across tiers.
+**Stores known to meet it:** AWS S3 (conditional writes), MinIO, and tierstore's own `dir:` store, which gets atomicity from a blocking file lock inside its directory (section 6.4). Other S3-compatible stores are the operator's to check; the table below says what each property is for.
+
+| Property | Why |
+|---|---|
+| Create-only put refuses a second put | One winner per key; the entry and the lease are taken create-only |
+| HEAD gives size and a non-empty tag, and the tag `put_if_match` returns equals the next HEAD tag | Lease and entry CAS use the tag from HEAD |
+| `If-Match` refuses a wrong tag and accepts the right one | Entry CAS, lease take-over and renewal |
+| `If-Match` put on a missing key fails | A late CAS on a deleted entry must not recreate it |
+| Ranged read returns the exact bytes | Ranged gets |
+| Listing is ordered, paged, honours `start_after` | Reading the entries. A listing may lag a recent write (the trait allows it); this is tolerated, because the reconciler loops and finds the entry on a later pass |
+| Delete of a missing key succeeds | Repeated and re-applied deletes, eviction, roll-forward |
+| Multipart completion is create-only (cold tier) | A completion is a landing under the entry |
+| Create-only and `If-Match` are atomic under concurrent writers, across processes | One winner per entry; one lease holder |
+| Strong read-after-write for HEAD and GET | Entry reads and the hot-miss gate |
+| Conditional DELETE is honoured | Nothing relies on it; it only fences a stalled actor (R1, R4) |
+| Durability and replication of an acknowledged write | An acknowledgement means durable |
+
+No decision uses a clock of another machine, the store's included: every timer is a monotonic clock of the process that decides (`Instant`), and a VM pause that stops it is a frozen actor (R7). How `S3Backend` maps answers: 507 is `Full`; 408, 429, other 5xx (not 501), transport failures and a 409 conflict are `Unavailable`; 412 on a create-only put is `AlreadyExists`, on `put_if_match` `PreconditionFailed`. `DirBackend` and `MemoryBackend` tag an object with the SHA-256 of its body; `S3Backend` uses the store's ETag, which is an MD5 for a single PUT and something else for a multipart object. Tags are never compared across tiers.
 
 ## 10. State
 
@@ -545,7 +575,7 @@ The shape is the end of a sequence of designs, each rejected for a concrete brea
 
 New formats are only additions, but the rollout still has to be safe beside old binaries. Two facts shape it: today a registration is an empty object with no heartbeat, so a new binary cannot tell whether an old writer is alive; and an old binary does not reserve `_entries/`, so it would list, serve and delete entries as client keys. Hence a bridge release and a drain.
 
-**Pre-flight (operator, once).** A lifecycle rule `AbortIncompleteMultipartUpload` on the cold bucket. The hot credential's IAM extended to `_entries/*` and `_tiering/proxies/*`. If the hot bucket is versioned, entry churn (a create and a delete per put) piles up delete markers and slows listing: use an unversioned bucket or expire noncurrent versions after one day. Run `tierstore format-epoch --check` before any write is paused; it writes no probe key, because tierstore does not test its stores (section 9). `tierstore format-epoch --check` (section 13) runs no probe: it reads only tierstore's own objects (`_tiering/format`, `_tiering/proxies/`, `_entries/`), and the store requirements are documented, not checked there.
+**Pre-flight (operator, once).** A lifecycle rule `AbortIncompleteMultipartUpload` on the cold bucket. The hot credential's IAM extended to `_entries/*` and `_tiering/proxies/*`. If the hot bucket is versioned, entry churn (a create and a delete per put) piles up delete markers and slows listing: use an unversioned bucket or expire noncurrent versions after one day. Run `tierstore format-epoch --check`: it reports the format, each registration with its class and the open entries, and says whether `--drain` would be accepted. It asks the store nothing (no probe, no `if-match-missing` check); the store requirement of section 9 is documented, and the operator is responsible for choosing a store that meets it.
 
 1. **Bridge release.** The previous release plus: `_entries/` is a reserved prefix everywhere it is listed (a client key that already starts with `_entries/` can no longer be read, written or listed through the proxy, which refuses it; on `dir:` the file stays on disk and is kept readable by the backend); the registration becomes a heartbeat object; the release watches `_tiering/format` and, under phase `drain`, answers writes 503 and keeps serving reads while its leader applies the journals until every checkpoint is at the head of its journal; it then writes phase `drained`. It changes no data or wire format. It rolls out with the existing hand-off while writes stay up.
 2. **The operator verb `tierstore format-epoch`** (a subcommand, so its tests are Rust; dry-run default; held, never run by CI). `--check` changes nothing. `--drain` refuses unless every registration is of the bridge release with a recent heartbeat, or is named by the operator after a process check (older registrations have no heartbeat and cannot be classified by the tool), then waits for `drained`. `--cancel` writes the previous phase back. Tell the owners of the client fleet before `--drain`: the write pause is minutes, scales with fleet size and cold health, and a cold outage makes the drain wait.
@@ -558,11 +588,11 @@ The compatibility tests of section 8 run the previous release on directories and
 
 ## 14. Future work
 
-**(a) Other object-store APIs and other backends.** What: further fronts over the same proxy, for example the Google Cloud Storage JSON or XML API and Azure Blob, beside the S3 and OCI fronts. Other stores as tiers would be further implementations of `Backend`. Why: clients that do not speak S3 could use the same tiers; the proxy already has one call per operation and does not know the front. Touches: a new module under `server/` per front (request parsing, auth, errors, listing and range semantics of that API); for a new tier, a `Backend` implementation that passes the conformance tests in `tests/tierstore/conformance.rs`, and meets what section 9 requires of a store. Create-only needs a conditional create on the store; an API without one cannot be a tier.
+**(a) Other object-store APIs and other backends.** What: further fronts over the same proxy, for example the Google Cloud Storage JSON or XML API and Azure Blob, beside the S3 and OCI fronts. Other stores as tiers would be further implementations of `Backend`. Why: clients that do not speak S3 could use the same tiers; the proxy already has one call per operation and does not know the front. Touches: a new module under `server/` per front (request parsing, auth, errors, listing and range semantics of that API); for a new tier, a `Backend` implementation that passes the conformance tests in `tests/tierstore/conformance.rs`. Create-only needs a conditional create on the store; an API without one cannot be a tier.
 
 **(b) Tierstore as a file system.** What: a FUSE mount or an NFS gateway over the proxy, read-mostly first. Why: tools that want paths can use immutable objects without an S3 client, and immutability avoids most of what makes a distributed file system hard (no overwrite, no rename). Touches: a front that maps paths to keys and directories to prefixes (listing is by prefix; `delimiter` is not supported); a read path with ranged gets and local caching, for which the build-node `local_cache` is the starting point; writes later, as create-only files closed whole.
 
-**(c) The single-process local_cache + hot_store + cold_store configuration.** What: configuration C of section 4. Why: a node that also owns the data should serve its own reads from local NVMe without a second process and a hop between them. Touches: `config.rs` (accept the three tables), `config_cache.rs` and `cli.rs` (construct the `LocalCache` with the proxy as its `Arc<dyn Backend>` upstream, which it takes as any `Backend`, rather than over an S3 upstream), the start-up checks (only the cache directory's own file-system check applies), the drain and hand-over (a local cache holds a directory lock), and `docs/configuration.md`.
+**(c) The single-process local_cache + hot_store + cold_store configuration.** What: configuration C of section 4. Why: a node that also owns the data should serve its own reads from local NVMe without a second process and a hop between them. Touches: `config.rs` (accept the three tables), `config_cache.rs` and `cli.rs` (construct the `LocalCache` with the proxy as its `Arc<dyn Backend>` upstream, which it takes as any `Backend`, rather than over an S3 upstream), the start-up checks (no tier is probed; only the cache directory's own file-system check applies), the drain and hand-over (a local cache holds a directory lock), and `docs/configuration.md`.
 
 **(d) One entry per key (decided, not built).** What: the design of sections 5 to 8, 10 and 13. Each step is a pull request that can land alone, interfaces before the code that uses them, with its docs, goldens and tests (section 8) in the same pull request. Stage 0 changes no protocol.
 
@@ -572,7 +602,7 @@ The compatibility tests of section 8 run the previous release on directories and
 2. Split the files that are over 1000 lines (`dir.rs`, `tiered.rs`, `cli.rs`, `config.rs`) before they grow; moves only.
 3. A one-call read, `open_read(key, range)` returning the tag and the body together, and a streaming `Proxy::get_stream`; the S3 front uses it. Gives the one-round-trip hot hit and removes the whole-object buffering of the read path. Pull request #94.
 4. `get_marked` becomes `get_tagged` (tag with the body, for entry reads).
-5. (Withdrawn: the `if-match-missing` start-up probe; tierstore does not test its stores.)
+5. Withdrawn (decision 9 of section 15): the `if-match-missing` start-up probe, pull request #93, is not built; no store is probed. The requirement it checked is stated in section 9.
 6. `dir:`: the `.entries` subdirectory for the `_entries/` prefix and a blocking cross-process file lock, with the compatibility tests that the previous release lists such a root and that this release still reads, lists, replaces in place and deletes the root files the previous release made for `_entries/` keys.
 7. The test harness: gate backend, injected monotonic clock, recording sleeper, call counting, each with its own tests.
    Built: `GateBackend` with `Gate` (`Pre` and `Post`, one call per gate), `Mono` (a `Clock` that only `advance` moves), the `Sleeper` trait with `TokioSleeper` and `RecordingSleeper`, and `FaultyBackend::calls_on` and `call_log`. Production code uses the `Sleeper` trait and its default `TokioSleeper` for the lease renewal timer of the reconciler and for the heartbeat in both server paths; `GateBackend`, `Gate`, `Mono`, `RecordingSleeper` and the `FaultyBackend` call counts are for tests. The request paths still read `Instant::now()` in `tiered.rs`, which moves to `Mono` with the code that needs it. The per-call timeout is built as `Bounded` (item 9), which no request path calls yet. Not built yet: the in-memory backend models of section 13.1.
@@ -587,7 +617,7 @@ The compatibility tests of section 8 run the previous release on directories and
 *Stage 2, rollout.*
 
 11. The bridge release: `_entries/` reserved everywhere, `_tiering/format`, the write-503 drain and the `drained` marker.
-12. `tierstore format-epoch` (`--check`, `--drain`, `--cancel`, `--activate`) and the `tierstore entries` verbs, with the runbook.
+12. `tierstore format-epoch` (`--drain`, `--cancel`, `--activate`) and the `tierstore entries` verbs, with the runbook.
 
 *Stage 3, the protocol behind the epoch gate (nodes are inert until activation).*
 
@@ -604,7 +634,7 @@ The compatibility tests of section 8 run the previous release on directories and
 20. Delete the per-node journal, its state and checkpoints, and the old flags (`--reconcile-interval`, `--journal-linger`); update the docs and this document.
 21. Activation wiring and the release; clean-up of the old `_journal/*` objects one release later.
 
-*The pull requests around the plan (2026-11-03).* #87 (an eviction without a tag first checks that cold holds a real object) and #67 (a checkpoint is stored only under a valid lease and never behind the stored one) are **kept** as interim fixes until the redesign replaces them: entry-held eviction (item 14) replaces #87, and removing the checkpoints (item 20) removes what #67 guards. #88 (the cold reservation writers) is **closed**, because reservations are dropped. #89 (the `Cargo.lock` release fix) is **merged**. Items 5 and 3 are open as #93 and #94. Separately signed off, and independent of the protocol: #91 (the grant flags are removed, and a presigned PUT is refused with AccessDenied) and #90 (the nft tables are renamed and the host updater name is banned).
+*The pull requests around the plan (2026-11-03).* #87 (an eviction without a tag first checks that cold holds a real object) and #67 (a checkpoint is stored only under a valid lease and never behind the stored one) are **kept** as interim fixes until the redesign replaces them: entry-held eviction (item 14) replaces #87, and removing the checkpoints (item 20) removes what #67 guards. #88 (the cold reservation writers) is **closed**, because reservations are dropped. #89 (the `Cargo.lock` release fix) is **merged**. Item 5 (#93) is withdrawn (decision 9 of section 15); item 3 is open as #94. Separately signed off, and independent of the protocol: #91 (the grant flags are removed, and a presigned PUT is refused with AccessDenied) and #90 (the nft tables are renamed and the host updater name is banned).
 
 The bridge release of step 11 must ship and be rolled to every node before any step of stage 3 activates. Stages 1 and 3 leave two protocol paths in the code for a period. Today's conditional delete in `Backend` (`delete_if_match`) stays as the optional fence of section 11.
 
@@ -630,7 +660,7 @@ An interface is a front over the same proxy; a later `type = "fs"` (item b) has 
 
 ## 15. Decisions
 
-The decisions of 2026-11-03, taken by the CEO on the design as drafted. They state what the design is; the sections above describe it accordingly.
+The decisions of 2026-11-03, taken by the CEO on the design as drafted (1 to 7, and 8 to 12, the answers to the questions the first list left open). They state what the design is; the sections above describe it accordingly.
 
 1. **A GET never reads the journal entry.** A hot hit is one hot GET. A hot miss is one cold GET, plus the best-effort copy-back request. This **reverses** the earlier draft's entry-first GET. In its place the reconciler CASes `(PUT, PENDING)` to `(PUT, HELD, owner)` before it copies, and any DELETE that meets an in-flight copy waits for it: a DELETE that finds the entry HELD by the reconciler, and a DELETE that claims a handed-over `(DEL, PENDING)` entry (a retry finishing a half-done delete) amend or claim by CAS, delete hot and cold, then poll the entry with the per-item back-off until the reconciler releases it, and only then are acknowledged. Past the request deadline (a frozen or stalled reconciler) the answer is a retryable 503. A DELETE that amends a PENDING (not HELD) put makes the reconciler's CAS to HELD fail, so no copy starts and it does not wait. A DELETE with no entry finishes synchronously. Cold is always deleted at once by the DELETE. Sections 5, 6.2, 6.5 and 8 (The model check); cost: a delete overlapping a copy returns when the copy finishes, and 503s on a frozen reconciler.
 2. **New-key puts fail (503) while cold is down.** Accepted. A consequence of dropping the reservation: write-once is a cold HEAD under the entry, and a cold error is a 503. The alternative, re-checking write-once at replication, reopens the decision and can acknowledge two puts of one key.
@@ -638,15 +668,12 @@ The decisions of 2026-11-03, taken by the CEO on the design as drafted. They sta
 4. **Copy-back is kept,** as its own late pull request (item 18 of the plan, section 14), before the journal is deleted. Cutting it would mean the cache never refills from cold, a regression against today's in-request copy-back.
 5. **Rollout: one planned write pause of a few minutes, no canary.** Accepted, with the owners of the client fleet told beforehand (section 13).
 6. **Residuals R1 to R4 are accepted as written** in section 11, with R3 and R4 stated at their full strength. The model's frozen-actor runs of decision 1 find only these shapes.
-7. **The pull request plan** (section 14): #87 and #67 are kept as interim fixes until the redesign replaces them; #88 is closed; #89 is merged; #93 (the `if-match-missing` probe, item 5) is withdrawn and #94 (the one-call streaming read, item 3) are the new stage-0 pull requests. #91 and #90 are signed off as well.
-
-Still open, not covered by those decisions:
-
-8. Should start-up measure the store's clock against the machine's and refuse beyond a bound (no decision uses a cross-machine clock, so this matters only for the usage staleness check)?
-9. (Resolved: there is no self-test; section 9 says plainly what is assumed and that nothing verifies it.)
-10. Should reserved keys be filtered from cold listings, and from the proxy's get and head, or only at the front?
-11. Should the 1 s usage refresh and the proxy's 30 s staleness limit have flags?
-12. For configuration C, should the local cache sit in front of the proxy (cache hits skip the hot tier) or beside it?
+7. **The pull request plan** (section 14): #87 and #67 are kept as interim fixes until the redesign replaces them; #88 is closed; #89 is merged; #93 (the `if-match-missing` probe, item 5) is withdrawn by decision 9 below, and #94 (the one-call streaming read, item 3) is a new stage-0 pull request. #91 and #90 are signed off as well.
+8. **No store-clock check; staleness is judged by the proxy's own monotonic clock.** Start-up does not measure the store's clock against the machine's. The usage object is stale when its tag has not changed for `usage_stale_after` on the proxy's own monotonic clock, the rule the leader uses for a departed registration. No decision uses a cross-machine clock. Sections 2, 6.9, 9.
+9. **tierstore is a proxy: it states the store requirement and does not probe.** It cannot make a store atomic, so conditional PUT (create-only and `If-Match`, atomic between concurrent writers) is a documented requirement the operator is responsible for. Stores known to meet it: AWS S3, MinIO, and tierstore's `dir:` store with its file lock. The start-up self-test, its probe keys and `--backend-check-wait` are removed from the design, and the planned `if-match-missing` probe (#93, item 5 of section 14) is withdrawn. A lagging listing is tolerated, because the reconciler loops. Sections 2, 7, 9, 13, 14.
+10. **Reserved prefixes are filtered once, in the proxy core.** The proxy refuses get, head, put, delete and multipart of a reserved key and drops reserved keys from every listing, hot and cold; the fronts have no filter of their own. Sections 5 and 7.
+11. **Every arbitrary number is config with a default.** The table of keys after the timings in section 6.9 lists the keys and defaults (usage refresh, staleness limit, D, margin, idle back-off from 1 to 10 s, lease, copy-back cap and backlog of 16 MiB, and the rest). The values of `copy_back_backlog_bytes` and the names of the keys that do not exist yet are the design's proposal.
+12. **In configuration C the local cache sits in front of the proxy.** Cache hits skip the hot tier, and the hot+cold pair is the cache's upstream through the same store interface, in the same process or across processes. Section 4.
 
 ## 16. Glossary
 
@@ -667,7 +694,7 @@ Still open, not covered by those decisions:
 | Reconciler / leader | The one process, chosen by lease, that lists the entries and copies to cold, finishes deletes, copies back, evicts, reaps and publishes usage. The only actor that releases entries it did not take itself. |
 | Departed / D | An owner whose registration is absent or unchanged for D (60 s) on the leader's own monotonic clock. |
 | `live_until` | A proxy's deadline: its last heartbeat's send time plus D minus the margin m. Past it, the proxy answers 503 and touches nothing. |
-| Margin (m) | 10 s; a destructive call may start only if its deadline is at least m away. |
+| Margin (m) | 10 s; subtracted from D in `live_until`. A holder's destructive call is bounded by min(m, live_until - now); a leader needs a full m of lease left before one. |
 | Stray | A hot object with no entry and no cold copy. |
 | CAS | Compare-and-swap: a write conditional on the object's tag (`If-Match`). |
 | Nonce | `<actor id>.<counter>` in every entry body, so a body never repeats and an ambiguous write can be read back. |

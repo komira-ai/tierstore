@@ -86,30 +86,28 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="410" y="406" class="t-m">If-Match</text>
 <line x1="580" y1="386" x2="580" y2="432" class="ln"/>
 <text x="590" y="406" class="t-m">removed after the cut-over release</text>
-<g transform="translate(0,-52)">
-<rect x="20" y="490" width="920" height="62" rx="5" class="box"/>
-<text x="30" y="510" class="b">&lt;client key&gt;  (cold)</text>
-<line x1="220" y1="490" x2="220" y2="552" class="ln"/>
-<text x="230" y="510" class="t-m">the leader's copy; a put at</text>
-<text x="230" y="526" class="t-m">hot Full; a multipart</text>
-<text x="230" y="542" class="t-m">completion</text>
-<line x1="400" y1="490" x2="400" y2="552" class="ln"/>
-<text x="410" y="510" class="t-m">create-only</text>
-<line x1="580" y1="490" x2="580" y2="552" class="ln"/>
-<text x="590" y="510" class="t-m">deleted by the client's delete (and again by the leader</text>
-<text x="590" y="526" class="t-m">when it finishes one)</text>
-<rect x="20" y="558" width="920" height="62" rx="5" class="box-p"/>
-<text x="30" y="578" class="b">_journal/*,</text>
-<text x="30" y="594" class="b">_tiering/checkpoint/*</text>
-<text x="30" y="610" class="b">(hot)</text>
-<line x1="220" y1="558" x2="220" y2="620" class="ln"/>
-<text x="230" y="578" class="t-m">nobody, after cut-over</text>
-<line x1="400" y1="558" x2="400" y2="620" class="ln"/>
-<text x="410" y="578" class="t-m">read only by the bridge</text>
-<text x="410" y="594" class="t-m">release</text>
-<line x1="580" y1="558" x2="580" y2="620" class="ln"/>
-<text x="590" y="578" class="t-m">left in place for one release so a rollback finds them;</text>
-<text x="590" y="594" class="t-m">then deleted</text>
-<text x="20" y="642" class="t-m">Hot holds the data and all coordination state; cold holds client keys only. D = the departure time, 60 s by default.</text>
-</g>
+<rect x="20" y="438" width="920" height="62" rx="5" class="box"/>
+<text x="30" y="458" class="b">&lt;client key&gt;  (cold)</text>
+<line x1="220" y1="438" x2="220" y2="500" class="ln"/>
+<text x="230" y="458" class="t-m">the leader's copy; a put at</text>
+<text x="230" y="474" class="t-m">hot Full; a multipart</text>
+<text x="230" y="490" class="t-m">completion</text>
+<line x1="400" y1="438" x2="400" y2="500" class="ln"/>
+<text x="410" y="458" class="t-m">create-only</text>
+<line x1="580" y1="438" x2="580" y2="500" class="ln"/>
+<text x="590" y="458" class="t-m">deleted by the client's delete (and again by the leader</text>
+<text x="590" y="474" class="t-m">when it finishes one)</text>
+<rect x="20" y="506" width="920" height="62" rx="5" class="box-p"/>
+<text x="30" y="526" class="b">_journal/*,</text>
+<text x="30" y="542" class="b">_tiering/checkpoint/*</text>
+<text x="30" y="558" class="b">(hot)</text>
+<line x1="220" y1="506" x2="220" y2="568" class="ln"/>
+<text x="230" y="526" class="t-m">nobody, after cut-over</text>
+<line x1="400" y1="506" x2="400" y2="568" class="ln"/>
+<text x="410" y="526" class="t-m">read only by the bridge</text>
+<text x="410" y="542" class="t-m">release</text>
+<line x1="580" y1="506" x2="580" y2="568" class="ln"/>
+<text x="590" y="526" class="t-m">left in place for one release so a rollback finds them;</text>
+<text x="590" y="542" class="t-m">then deleted</text>
+<text x="20" y="590" class="t-m">Hot holds the data and all coordination state; cold holds client keys only. D = the departure time, 60 s by default.</text>
 </svg>
