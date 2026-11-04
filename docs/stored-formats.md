@@ -7,7 +7,7 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | What | Where | Format |
 |---|---|---|
 | Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE`, `PUTRESERVED` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` (see below) |
-| Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | empty object |
+| Proxy registration | `_tiering/proxies/<proxy_id>` in the hot tier | JSON: `proto`, `boot`, `hb` (the marker of a release before the heartbeat is an empty object, which is still read) |
 | Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
 | Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
