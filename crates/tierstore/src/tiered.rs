@@ -531,7 +531,10 @@ impl Inner {
                 Some(seen) if seen.body == body => Some(seen),
                 _ => Some(UsageSeen { body, since: mono }),
             },
-            _ => None,
+            // A read that failed says nothing of the object: the body last read keeps its age.
+            (_, None) => before,
+            // A body that is not a usage object is not one to age.
+            (None, Some(_)) => None,
         };
         let limit = self.config.usage_stale_after;
         let fresh = capacity
