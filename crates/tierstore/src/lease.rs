@@ -18,7 +18,7 @@ use crate::{Backend, Clock, Error, Sleeper};
 /// 128 random bits as hex, from the keys the standard library seeds each `RandomState` with
 /// from the operating system's randomness, so that no crate is needed for it. It only has to
 /// differ between two leases, and a guess of it gains nothing: the content tag is not a secret.
-fn new_nonce() -> String {
+pub(crate) fn new_nonce() -> String {
     let bits = |salt: u8| {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_u8(salt);

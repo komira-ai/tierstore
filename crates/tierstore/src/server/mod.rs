@@ -198,12 +198,18 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod cli_heartbeat;
+mod cli_probe;
+mod cli_reconcile;
+mod cli_serve;
 mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
 mod config_policy;
 mod config_print;
+mod config_syntax;
+mod config_units;
 mod door;
 mod drain;
 mod front;
@@ -237,6 +243,8 @@ mod body_stall_tests;
 mod cache_cli_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+#[cfg(test)]
+mod cli_heartbeat_tests;
 #[cfg(test)]
 mod combined_cli_tests;
 #[cfg(test)]

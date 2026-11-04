@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, PartBody,
-    UploadsAfter,
+    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, MonotonicClock,
+    OpenUpload, PartBody, UploadsAfter,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -33,8 +33,13 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod heartbeat;
+#[cfg(test)]
+mod heartbeat_tests;
 mod pause;
 mod put;
+
+use heartbeat::Heartbeat;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -63,13 +68,28 @@ pub struct ProxyConfig {
     pub format_refresh: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
+    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]). Nothing
+    /// that another machine wrote is compared with it.
+    pub mono: Arc<dyn Clock>,
+    /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
+    /// called, and the longest a call of the heartbeat may take.
+    pub heartbeat: Duration,
+    /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
+    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
+    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
+    /// removal of registrations uses its own `registration_retention`.
+    pub departure: Duration,
+    /// The time that must be left before `live_until` for a call that destroys to start; the
+    /// longest such a call may take.
+    pub deadline_margin: Duration,
 }
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, and a
-    /// format object that is read every 5 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
+    /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
+    /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -82,6 +102,10 @@ impl ProxyConfig {
             usage_stale_after: Duration::from_secs(30),
             format_refresh: Duration::from_secs(5),
             clock,
+            mono: Arc::new(MonotonicClock::new()),
+            heartbeat: Duration::from_secs(10),
+            departure: Duration::from_secs(60),
+            deadline_margin: Duration::from_secs(10),
         }
     }
 }
@@ -265,6 +289,7 @@ struct Inner {
     /// What was last read of the format object.
     pause: Mutex<pause::Pause>,
     counters: Counters,
+    heartbeat: Heartbeat,
 }
 
 impl Proxy {
@@ -292,10 +317,8 @@ impl Proxy {
             .filter_map(|object| seq_of(&prefix, &object.key))
             .max();
         let checkpoint = load_checkpoint(hot.as_ref(), id).await?;
-        match hot.put(&proxy_key(id), Bytes::new()).await {
-            Ok(()) | Err(Error::AlreadyExists(_)) => {}
-            Err(error) => return Err(error),
-        }
+        let heartbeat = Heartbeat::new(&config);
+        heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
         let inner = Inner {
             hot,
@@ -306,6 +329,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Mutex::default(),
             counters: Counters::default(),
+            heartbeat,
         };
         Ok(Self {
             inner: Arc::new(inner),
