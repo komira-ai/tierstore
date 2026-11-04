@@ -7,8 +7,15 @@
 //! key, in this release or the one before, has a file of that name: the ordinary key `_entries`
 //! (which is outside the prefix) keeps its own file beside the subdirectory. A listing of the root
 //! keeps only regular files whose name does not start with `.`, so a release that does not know
-//! the subdirectory does not see it. A listing of the prefix `_entries/` reads that subdirectory
-//! and no other directory.
+//! the subdirectory does not see it. A listing of a prefix that can match a key under `_entries/`
+//! reads that subdirectory as well as the root.
+//!
+//! The previous release did not know the prefix: it kept the key `_entries/<name>` as the file
+//! `_entries~<name>` of the root, as it kept any key. Those files stay the keys they were. A head,
+//! a get or a read of such a key finds the file of the subdirectory first and the file of the root
+//! if there is none; a listing has the key once, from the subdirectory if both have it; a delete
+//! removes both; a replacement by the tag writes the subdirectory and then removes the file of the
+//! root; a create-only put finds the key taken. No write makes a file in the root for such a key.
 //!
 //! The lock is an exclusive `flock(2)` on the file `.lock` in the subdirectory. It is held by
 //! each create-only put, each replacement by the content tag and each delete of such a key, from
@@ -22,7 +29,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-use super::{Error, PLAIN_MODE, failed, io_error};
+use super::{Error, NAME_LIMIT, PLAIN_MODE, encode, failed, io_error};
 
 /// The name of the subdirectory of the root that holds the files of these keys. It starts with
 /// `.`, which no encoded key does, so it is never the file of a key.
@@ -37,6 +44,14 @@ const LOCK_FILE: &str = ".lock";
 /// The part of `key` behind the prefix, if it has the prefix.
 pub(super) fn rest(key: &str) -> Option<&str> {
     key.strip_prefix(PREFIX)
+}
+
+/// The file the previous release made for `key`, if `key` has the prefix and that file's name
+/// could be a file name then.
+pub(super) fn legacy(root: &Path, key: &str) -> Option<PathBuf> {
+    rest(key)?;
+    let name = encode(key);
+    (name.len() <= NAME_LIMIT).then(|| root.join(name))
 }
 
 /// The lock of the subdirectory, held until this is dropped.
