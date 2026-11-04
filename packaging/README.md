@@ -267,8 +267,10 @@ variable, and the unit sets none.
 ## GC keys
 
 A GC key (`--gc-key-file`, once per key; JSON of `access_key_id`, `secret_access_key` and `prefix`,
-mode 0600, not a symbolic link, owned by the user the server runs as) is for the process that
-collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
+mode 0600, not a symbolic link, owned by the user the server runs as) is one instance of a scoped key
+(below): the server reads it as a scoped key with a list, a delete and an abort right on
+`[prefix]` (rights a scoped key file cannot give), so the table that follows is the table of scoped keys for those rights. It is for
+the process that collects the objects that presigned PUTs wrote. It signs in the header only (a presigned URL signed
 with it is refused) and may do these, only for a key that starts with its prefix (which ends in `/`)
 and is longer than it:
 
@@ -292,7 +294,7 @@ create-only; it is the only way an object leaves the prefix that presigned PUTs 
 ## Scoped keys
 
 A scoped key (`--scoped-key-file`, once per key; mode 0600, not a symbolic link, owned by the user
-the server runs as) reads, creates and deletes under prefixes that its file lists, and does nothing
+the server runs as) reads, lists, creates and deletes under prefixes that its file lists, and does nothing
 else. It is for a process that must touch some prefixes of the bucket and not the rest, and that
 neither replaces nor deletes what it did not write. It signs in the header, and
 signs presigned GET URLs for objects under its read prefixes (see Presigned GET URLs; a URL of it for
@@ -305,9 +307,11 @@ any other method is refused). The file is JSON of exactly these five fields, all
  "delete_prefixes": []}
 ```
 
+A read prefix lets the key list as well.
+
 Every prefix ends in `/` and is not empty. None may be `_journal/`, `_tiering/` or `_entries/`, be under one, be
 a prefix of one, or have one as a segment (`cas/_journal/`); a file that has one is refused at
-start. A list may be empty, but a key whose three lists are all empty is refused, since it could do
+start. A list may be empty, but a key whose lists are all empty is refused, since it could do
 nothing. The lists may overlap: a prefix in `read_prefixes` and in `write_prefixes` is one the key
 reads and creates under. A key file that is refused (bad JSON, a missing or unknown field, a bad
 prefix, a mode other than 0600) exits 1 at start with a message that names the flag and the file and
@@ -322,12 +326,13 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 
 | call | list | allowed |
 |---|---|---|
-| GetObject, HeadObject | `read_prefixes` | yes, whole or by range |
-| ListObjectsV2 | `read_prefixes` | with a `prefix` parameter inside a read prefix; no prefix or another is 403, not filtered |
-| ListMultipartUploads | `read_prefixes` | the same rule: a `prefix` inside a read prefix |
+| GetObject | `read_prefixes` | yes, whole or by range |
+| HeadObject | `read_prefixes` (a GC key: its list prefix) | yes |
+| ListObjectsV2 | `read_prefixes` (a GC key: its list prefix) | with a `prefix` parameter inside such a prefix; no prefix or another is 403, not filtered |
+| ListMultipartUploads | `read_prefixes` (a GC key: its list prefix) | the same rule: a `prefix` inside such a prefix |
 | PutObject | `write_prefixes` | create-only: no `If-Match`, and `If-None-Match` absent or `*`; a key that exists is `412 PreconditionFailed` |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
-| AbortMultipartUpload | `write_prefixes` | of an upload of such a key (a delete prefix does not allow an abort) |
+| AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |

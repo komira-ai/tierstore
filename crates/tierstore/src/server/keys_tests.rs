@@ -12,8 +12,9 @@ use tierstore_testkit::dir::TestDir;
 use crate::TestClock;
 use crate::server::ServerConfig;
 use crate::server::auth::READ_ONLY;
-use crate::server::gc::OUT_OF_SCOPE;
+use crate::server::gc::GcKey;
 use crate::server::presign::PUT_ONLY;
+use crate::server::scoped::OUT_OF_SCOPE;
 
 use super::{AccessKey, Role, ensure_distinct, read_credentials, read_only_keys};
 
@@ -293,12 +294,19 @@ fn only_a_presigning_key_is_refused_the_listing_of_open_uploads() {
     }
 }
 
-/// Asserts that a GC key may list the open uploads under its own prefix, at the prefix and
-/// deeper, and only there: no prefix, a prefix outside, a prefix that covers its own, and a
-/// reserved one are out of scope.
+/// Asserts that a GC key, found by its id as a scoped role, may list the open uploads under its
+/// own prefix, at the prefix and deeper, and only there: no prefix, a prefix outside, a prefix
+/// that covers its own, and a reserved one are out of scope.
 #[test]
 fn a_gc_key_may_list_the_open_uploads_under_its_prefix_only() {
-    let role = Role::Gc("cas/b/".to_owned());
+    let key = GcKey::new("pack-gc", SECRET, "cas/b/").unwrap();
+    let config = ServerConfig {
+        gc_keys: vec![key],
+        ..ServerConfig::new("b", "k", "s", Arc::new(TestClock::new()))
+    };
+    let (secret, role) = config.key("pack-gc").expect("the GC key is found");
+    assert_eq!(secret, SECRET);
+    assert!(matches!(role, Role::Scoped(_)));
     for inside in ["cas/b/", "cas/b/jobs/", "cas/b/x"] {
         assert_eq!(role.permit_list_uploads(inside), Ok(()), "{inside}");
     }
@@ -306,9 +314,4 @@ fn a_gc_key_may_list_the_open_uploads_under_its_prefix_only() {
         let refused = role.permit_list_uploads(outside);
         assert_eq!(refused, Err(OUT_OF_SCOPE), "{outside}");
     }
-    let reserved = Role::Gc("_journal/".to_owned());
-    assert_eq!(
-        reserved.permit_list_uploads("_journal/x"),
-        Err(OUT_OF_SCOPE)
-    );
 }
