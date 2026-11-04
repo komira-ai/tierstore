@@ -203,3 +203,42 @@ async fn the_removal_of_an_entry_that_does_not_answer_is_cut() {
     assert_eq!(rig.shape("k").await, held_by("p1"));
     assert!(!rig.hot_has("k").await);
 }
+
+/// Asserts that a streamed put whose hot tier answers `Full` after it took the body (it cannot be
+/// offered to the cold tier again) is answered `Full` and removes its entry.
+#[tokio::test]
+async fn a_streamed_put_the_hot_tier_fills_after_taking_the_body_is_full_and_leaves_no_entry() {
+    let rig = Rig::active().await;
+    let gate = rig.hot.gate(Op::Put, "k", Phase::Post);
+    let proxy = rig.proxy.clone();
+    let put = tokio::spawn(async move {
+        proxy
+            .put_stream("k", Some(1), super::entry_put_tests::chunks(&["v"]))
+            .await
+    });
+    gate.parked().await;
+    assert!(gate.release_with(Error::Full("k".to_owned())));
+    let answer = put.await.unwrap();
+    assert_eq!(answer, Err(Error::Full("k".to_owned())));
+    assert_eq!(rig.shape("k").await, None);
+    assert!(!rig.cold_has("k").await);
+}
+
+/// Asserts that a put whose second look at the hot tier (under its entry) fails is answered with
+/// that failure and removes its entry.
+#[tokio::test]
+async fn a_put_whose_look_at_the_hot_tier_under_its_entry_fails_removes_its_entry() {
+    let rig = Rig::active().await;
+    let first = rig.hot.gate(Op::Head, "k", Phase::Pre);
+    let second = rig.hot.gate(Op::Head, "k", Phase::Pre);
+    let proxy = rig.proxy.clone();
+    let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
+    first.parked().await;
+    assert!(first.release());
+    second.parked().await;
+    assert!(second.release_with(Error::Unavailable("down".to_owned())));
+    let answer = put.await.unwrap();
+    assert_eq!(answer, Err(Error::Unavailable("down".to_owned())));
+    assert_eq!(rig.shape("k").await, None);
+    assert!(!rig.hot_has("k").await);
+}

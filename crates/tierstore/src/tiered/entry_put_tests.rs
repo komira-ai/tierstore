@@ -498,3 +498,31 @@ async fn a_streamed_put_whose_landing_gets_no_answer_hands_its_entry_over() {
     assert_eq!(rig.shape("k").await, pending());
     assert!(!rig.hot_has("k").await);
 }
+
+/// Asserts that a put whose first look at the hot tier fails is answered with that failure and
+/// makes no entry.
+#[tokio::test]
+async fn a_put_whose_first_look_at_the_hot_tier_fails_makes_no_entry() {
+    let rig = Rig::active().await;
+    let down = Error::Unavailable("down".to_owned());
+    rig.hot_faults.fail_next_on(Op::Head, "k", down.clone());
+    assert_eq!(rig.proxy.put("k", body("v")).await, Err(down));
+    assert_eq!(rig.hot_faults.calls_on(Op::Put, &entry_key("k")), 0);
+    assert_eq!(rig.shape("k").await, None);
+}
+
+/// Asserts that a put whose acknowledging write of the entry was not answered, and whose entry
+/// could not be read back either, is answered with the write's own `Unavailable` and leaves the
+/// entry held.
+#[tokio::test]
+async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with_its_own_error() {
+    let rig = Rig::active().await;
+    let unanswered = Error::Unavailable("no answer".to_owned());
+    rig.hot_faults
+        .fail_next_on(Op::PutIfMatch, "_entries/", unanswered.clone());
+    let unreadable = Error::Unavailable("no read".to_owned());
+    rig.hot_faults
+        .fail_next_on(Op::Head, &entry_key("k"), unreadable);
+    assert_eq!(rig.proxy.put("k", body("v")).await, Err(unanswered));
+    assert_eq!(rig.shape("k").await, held_by("p1"));
+}
