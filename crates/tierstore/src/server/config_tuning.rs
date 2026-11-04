@@ -48,16 +48,11 @@ pub struct HotTuning {
     pub usage_refresh: Duration,
     /// `hot_store.journal_page_size`: the most journal objects asked for in one listing.
     pub journal_page_size: usize,
-    /// `hot_store.copy_rounds`: how many times a copy reads the cold object again after it
-    /// changed under the copy.
-    pub copy_rounds: u32,
     /// `hot_store.compare_range`: the most bytes of an object one read of a comparison holds.
     pub compare_range: NonZeroU64,
     /// `hot_store.delete_rounds`: how many times a delete looks at the cold object again after it
     /// changed under the delete.
     pub delete_rounds: u32,
-    /// `hot_store.listing_heads`: how many cold objects of a listing are asked about at once.
-    pub listing_heads: usize,
     /// `hot_store.upload_listing_calls`: the most calls to the cold tier one listing of uploads
     /// makes.
     pub upload_listing_calls: u32,
@@ -69,10 +64,8 @@ impl Default for HotTuning {
             journal_batch_entries: 64,
             usage_refresh: Duration::from_secs(1),
             journal_page_size: 100,
-            copy_rounds: 3,
             compare_range: COMPARE_RANGE,
             delete_rounds: 3,
-            listing_heads: 16,
             upload_listing_calls: 100,
         }
     }
@@ -159,7 +152,6 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
     let page = hot
         .journal_page_size
         .unwrap_or(old.journal_page_size as u32);
-    let heads = hot.listing_heads.unwrap_or(old.listing_heads as u32);
     Ok(HotTuning {
         journal_batch_entries: within("hot_store", "journal_batch_entries", batch, 1, 65_536)?
             as usize,
@@ -170,7 +162,6 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
             (MS, HOUR),
         )?,
         journal_page_size: within("hot_store", "journal_page_size", page, 1, 1000)? as usize,
-        copy_rounds: count("copy_rounds", hot.copy_rounds, old.copy_rounds, 100)?,
         compare_range: NonZeroU64::new(within(
             "hot_store",
             "compare_range",
@@ -181,7 +172,6 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
         )?)
         .unwrap_or(old.compare_range),
         delete_rounds: count("delete_rounds", hot.delete_rounds, old.delete_rounds, 100)?,
-        listing_heads: within("hot_store", "listing_heads", heads, 1, 1024)? as usize,
         upload_listing_calls: count(
             "upload_listing_calls",
             hot.upload_listing_calls,
@@ -268,20 +258,16 @@ cache  = true
         assert_eq!(hot.journal_batch_entries, 64);
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
         assert_eq!(hot.journal_page_size, 100);
-        assert_eq!(hot.copy_rounds, 3);
         assert_eq!(hot.compare_range.get(), 1 << 20);
         assert_eq!(hot.delete_rounds, 3);
-        assert_eq!(hot.listing_heads, 16);
         assert_eq!(hot.upload_listing_calls, 100);
         assert_eq!(hot, HotTuning::default());
         let built = built(&mut cli);
         assert_eq!(built.proxy.batch_entries, 64);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
         assert_eq!(built.proxy.delete_rounds, 3);
-        assert_eq!(built.proxy.listing_heads, 16);
         assert_eq!(built.proxy.upload_listing_calls, 100);
         assert_eq!(built.reconciler.page_size, 100);
-        assert_eq!(built.reconciler.copy_rounds, 3);
         assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
     }
 
@@ -296,8 +282,8 @@ cache  = true
         let text = text.replacen(
             "budget = 1000",
             "budget = 1000\njournal_batch_entries = 8\nusage_refresh = \"250ms\"\n\
-             journal_page_size = 20\ncopy_rounds = 5\ncompare_range = \"64KiB\"\n\
-             delete_rounds = 6\nlisting_heads = 4\nupload_listing_calls = 7",
+             journal_page_size = 20\ncompare_range = \"64KiB\"\n\
+             delete_rounds = 6\nupload_listing_calls = 7",
             1,
         );
         let mut cli = from_text(&text, DEFAULTS).unwrap();
@@ -311,10 +297,8 @@ cache  = true
         assert_eq!(built.proxy.batch_entries, 8);
         assert_eq!(built.proxy.usage_refresh, Duration::from_millis(250));
         assert_eq!(built.proxy.delete_rounds, 6);
-        assert_eq!(built.proxy.listing_heads, 4);
         assert_eq!(built.proxy.upload_listing_calls, 7);
         assert_eq!(built.reconciler.page_size, 20);
-        assert_eq!(built.reconciler.copy_rounds, 5);
         assert_eq!(built.reconciler.compare_range.get(), 64 << 10);
     }
 
@@ -387,14 +371,6 @@ cache  = true
                 "hot_store.journal_page_size: 1001 is not between 1 and 1000",
             ),
             (
-                "copy_rounds = 0",
-                "hot_store.copy_rounds: 0 is not between 1 and 100",
-            ),
-            (
-                "copy_rounds = 101",
-                "hot_store.copy_rounds: 101 is not between 1 and 100",
-            ),
-            (
                 "compare_range = 4095",
                 "hot_store.compare_range: 4095 is not between 4096 and 1073741824",
             ),
@@ -405,14 +381,6 @@ cache  = true
             (
                 "delete_rounds = 0",
                 "hot_store.delete_rounds: 0 is not between 1 and 100",
-            ),
-            (
-                "listing_heads = 0",
-                "hot_store.listing_heads: 0 is not between 1 and 1024",
-            ),
-            (
-                "listing_heads = 1025",
-                "hot_store.listing_heads: 1025 is not between 1 and 1024",
             ),
             (
                 "upload_listing_calls = 0",
@@ -426,6 +394,14 @@ cache  = true
         for (line, want) in hot {
             assert_eq!(refusal(&with_hot(line)), want);
         }
+    }
+
+    /// `copy_rounds` and `listing_heads`, which only the reservation code used, are still accepted
+    /// (a file that sets them, of any value, loads) and change nothing.
+    #[test]
+    fn the_retired_keys_are_accepted_and_change_nothing() {
+        let cli = from_text(&with_hot("copy_rounds = 0\nlisting_heads = 5000"), DEFAULTS).unwrap();
+        assert_eq!(cli.hot_tuning, HotTuning::default());
     }
 
     /// The edges of the ranges are taken.
@@ -445,8 +421,8 @@ cache  = true
         assert_eq!(cli.s3_client.tuning.read_retries, 8);
         let edge = with_hot(
             "journal_batch_entries = 65536\nusage_refresh = \"1h\"\njournal_page_size = 1000\n\
-             copy_rounds = 100\ncompare_range = \"1GiB\"\ndelete_rounds = 100\n\
-             listing_heads = 1024\nupload_listing_calls = 100000",
+             compare_range = \"1GiB\"\ndelete_rounds = 100\n\
+             upload_listing_calls = 100000",
         );
         assert_eq!(
             from_text(&edge, DEFAULTS)

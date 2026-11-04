@@ -671,7 +671,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     proxy.batch_entries = tuning.journal_batch_entries;
     proxy.usage_refresh = tuning.usage_refresh;
     proxy.delete_rounds = tuning.delete_rounds;
-    proxy.listing_heads = tuning.listing_heads;
     proxy.upload_listing_calls = tuning.upload_listing_calls;
     let mut reconciler =
         ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
@@ -681,7 +680,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
     reconciler.page_size = tuning.journal_page_size;
-    reconciler.copy_rounds = tuning.copy_rounds;
     reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;

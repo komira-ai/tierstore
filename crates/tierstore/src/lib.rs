@@ -17,11 +17,7 @@
 //!   not override: the provided ones answer [`Error::Unsupported`]. A backend whose store
 //!   must know the length of a part before it is sent overrides
 //!   [`Backend::upload_part_with_len`] too, which the S3 front calls with the `Content-Length`
-//!   of the request. A backend can also write a reservation, an object that is marked as one
-//!   ([`Meta::reservation`]): create-only like a put ([`Backend::put_reservation`]), or in place
-//!   of an object with a given content tag ([`Backend::put_reservation_if_match`]); a plain
-//!   [`Backend::put_if_match`] of it makes a real object. Nothing in the crate writes or reads
-//!   one yet.
+//!   of the request.
 //! - [`MemoryBackend`] is an in-memory backend whose times come from a [`TestClock`] that a
 //!   test sets by hand, and [`FaultyBackend`] wraps a backend to fail or delay chosen calls
 //!   and to count them (per kind of call, and per kind and key): both are for tests, as are
@@ -148,7 +144,6 @@ mod registration_tests;
 mod registrations;
 #[cfg(test)]
 mod registrations_tests;
-mod reservation;
 #[cfg(feature = "s3")]
 pub mod s3;
 #[cfg(feature = "server")]

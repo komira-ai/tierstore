@@ -307,15 +307,6 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     let streamed = gated.put_stream_if_match("o", Some(3), chunks("abe"), &tag);
     held(gated, Op::PutIfMatch, streamed).await;
 
-    let reserved = held(
-        gated,
-        Op::PutReservation,
-        gated.put_reservation("r", bytes("r1")),
-    )
-    .await;
-    let kept = gated.put_reservation_if_match("r", bytes("r2"), &reserved);
-    held(gated, Op::PutReservation, kept).await;
-
     assert_eq!(
         held(gated, Op::Get, gated.get("o", None)).await,
         bytes("abe")
