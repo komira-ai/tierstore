@@ -35,7 +35,8 @@ impl Tiers {
     /// A reconciler `holder` for a hot tier of `budget` bytes, with the default lease of 30
     /// seconds.
     pub fn reconciler(&self, holder: &str, budget: u64) -> Reconciler {
-        let config = ReconcilerConfig::new(holder, budget, self.clock.clone());
+        let mut config = ReconcilerConfig::new(holder, budget, self.clock.clone());
+        config.mono = self.clock.clone();
         Reconciler::new(self.hot.clone(), self.cold.clone(), config)
     }
 

@@ -5,15 +5,35 @@ use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 
+use super::fill::as_object;
 use super::layout::{Sidecar, data_path, meta_path, name_of};
 use super::metrics::{FailedFill, read};
 use super::testing::{Quirk, Rig, digest, pattern};
-use crate::{Backend, Error, Op};
+use crate::{Backend, Error, Meta, Op};
 
 /// The number of entries in the stage directory of the rig.
 fn staged(rig: &Rig) -> usize {
     let stage = rig.config.path.join(".stage");
     std::fs::read_dir(stage).unwrap().count()
+}
+
+/// Asserts that the HEAD of an upstream is read as the cache sees it: a reservation (a marked object
+/// that holds a key that has no object yet) is not found, with the key in the error, and an object
+/// is passed on as it is.
+#[test]
+fn a_reservation_of_the_upstream_is_not_found_and_an_object_is_passed_on() {
+    let head = |reservation| Meta {
+        size: 3,
+        tag: "tag".to_owned(),
+        modified: 7,
+        reservation,
+    };
+    let missing = as_object("cas/k", head(true)).unwrap_err();
+    assert!(
+        matches!(&missing, Error::NotFound(key) if key == "cas/k"),
+        "{missing}"
+    );
+    assert_eq!(as_object("cas/k", head(false)).unwrap(), head(false));
 }
 
 /// Asserts that the misses of one key, all of them started before the upstream answers any,

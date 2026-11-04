@@ -6,6 +6,7 @@
 //! a key that is renamed, fails here. A fixture is changed only by adding a field the readers may
 //! ignore, as `docs/stored-formats.md` says; a changed fixture in a diff is the thing to review.
 
+mod entry_objects;
 mod hook_records;
 mod journal_objects;
 mod local_cache_sidecar;

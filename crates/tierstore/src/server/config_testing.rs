@@ -30,9 +30,7 @@ read_only_key_files   = ["/etc/tierstore/daemons.key", "/etc/tierstore/other.key
 presign_key_files     = ["/etc/tierstore/pack-presign.key"]
 gc_key_files          = ["/etc/tierstore/pack-gc.key"]
 scoped_key_files      = ["/etc/tierstore/scoped.key"]
-grant_key_files       = ["/etc/tierstore/grant.key"]
 presign_max_expires   = "10m"
-grant_max_lifetime    = "5m"
 max_concurrent_puts   = 8
 put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
@@ -58,6 +56,10 @@ lock_file          = "/var/lib/tierstore/instance.lock"
 usage_stale_after  = "3m"
 journal_linger     = "50ms"
 journal_retention  = "12h"
+heartbeat          = "5s"
+departure          = "45s"
+deadline_margin    = "8s"
+registration_retention = "20m"
 
 [cold_store]
 kind             = "s3"
@@ -93,9 +95,7 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--presign-key-file=/etc/tierstore/pack-presign.key",
         "--gc-key-file=/etc/tierstore/pack-gc.key",
         "--scoped-key-file=/etc/tierstore/scoped.key",
-        "--grant-key-file=/etc/tierstore/grant.key",
         "--presign-max-expires=10m",
-        "--grant-max-lifetime=5m",
         "--max-concurrent-puts=8",
         "--put-permit-wait=25s",
         "--put-min-bytes-per-sec=2048",
@@ -118,6 +118,10 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--usage-stale-after=3m",
         "--journal-linger=50ms",
         "--journal-retention=12h",
+        "--heartbeat=5s",
+        "--departure=45s",
+        "--deadline-margin=8s",
+        "--registration-retention=20m",
         "--cold=s3:tierstore-cold",
         "--cold-endpoint=http://127.0.0.1:30900",
         "--cold-region=us-west-2",

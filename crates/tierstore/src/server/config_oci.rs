@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::config::{ConfigError, Dur, addresses, invalid, refuse, require, within};
+use super::config::{ConfigError, addresses, invalid, refuse, require, within};
+use super::config_units::Dur;
 use super::listen::Addrs;
 
 /// The default of `--oci-prefix`.

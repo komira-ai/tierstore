@@ -542,7 +542,7 @@ async fn a_forget_racing_a_scrub_of_the_same_key_is_not_a_mismatch() {
 /// the mark a forget leaves: the scrub leaves the object, rotten or not, and does not clear the
 /// mark, so the fill finds it and removes its own entry.
 #[tokio::test]
-async fn a_scrub_does_not_touch_the_object_of_a_fill_that_a_forget_marked() {
+async fn a_scrub_does_not_touch_the_object_of_a_fill_that_a_forget_tagged() {
     let rig = Rig::with("tscache-scrub-marked", |config| config.write_through = true);
     let keys = fill(&rig, 1, 100).await;
     rot(&rig, &keys[0]);

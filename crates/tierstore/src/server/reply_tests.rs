@@ -42,13 +42,24 @@ fn an_answer_has_its_status_headers_and_body() {
     assert_eq!(made.headers()["x-test"], "a b");
 }
 
-/// Converts an error of the store and checks the status, the code and the text.
-fn check(error: Error, status: u16, code: &str) {
+/// Converts an error of the store and checks the status, the code and the text for the client:
+/// the text of the error when it names only the key, else the fixed `fixed`, with the text of
+/// the error kept as the detail for the log.
+fn check(error: Error, status: u16, code: &str, fixed: Option<&str>) {
     let text = error.to_string();
     let failed = S3Error::from(error);
     let want = StatusCode::from_u16(status).unwrap();
     assert_eq!(failed.kind(), (want, code));
-    assert_eq!(failed.message(), text);
+    match fixed {
+        Some(fixed) => {
+            assert_eq!(failed.message(), fixed);
+            assert_eq!(failed.detail(), Some(text.as_str()));
+        }
+        None => {
+            assert_eq!(failed.message(), text);
+            assert_eq!(failed.detail(), None);
+        }
+    }
 }
 
 /// Asserts the status and the S3 code of each failure of the store: a key that is not there,
@@ -58,15 +69,40 @@ fn check(error: Error, status: u16, code: &str) {
 #[test]
 fn each_failure_of_the_store_has_its_status_and_code() {
     let k = || "k".to_owned();
-    check(Error::NotFound(k()), 404, "NoSuchKey");
-    check(Error::AlreadyExists(k()), 412, "PreconditionFailed");
-    check(Error::PreconditionFailed(k()), 412, "PreconditionFailed");
-    check(Error::Full(k()), 503, "SlowDown");
-    check(Error::Reserved(k()), 403, "AccessDenied");
-    check(Error::InvalidPart(k()), 400, "InvalidPart");
-    check(Error::Unsupported(k()), 501, "NotImplemented");
-    check(Error::Unavailable(k()), 503, "ServiceUnavailable");
-    check(Error::Other(k()), 500, "InternalError");
+    check(Error::NotFound(k()), 404, "NoSuchKey", None);
+    check(Error::AlreadyExists(k()), 412, "PreconditionFailed", None);
+    check(
+        Error::PreconditionFailed(k()),
+        412,
+        "PreconditionFailed",
+        None,
+    );
+    check(
+        Error::Full(k()),
+        503,
+        "SlowDown",
+        Some("The store has no room for this request."),
+    );
+    check(Error::Reserved(k()), 403, "AccessDenied", None);
+    check(Error::InvalidPart(k()), 400, "InvalidPart", None);
+    check(
+        Error::Unsupported(k()),
+        501,
+        "NotImplemented",
+        Some("The store does not do this call."),
+    );
+    check(
+        Error::Unavailable(k()),
+        503,
+        "ServiceUnavailable",
+        Some("The store did not answer."),
+    );
+    check(
+        Error::Other(k()),
+        500,
+        "InternalError",
+        Some("We encountered an internal error."),
+    );
 }
 
 /// Asserts that a request whose body stalled is `RequestTimeout` (400) with `Connection: close`
