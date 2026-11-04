@@ -433,7 +433,7 @@ refusal names the line, the column and the key; any other refusal names the key.
 
 A file has one of three shapes, told apart by its tables: a storage node (`[server]`,
 `[hot_store]` and `[cold_store]`, `[[interface]]` entries (an `s3` one is needed, an `oci` one,
-the read-only registry front, is optional) and `[[policy]]`), a build node (`[server]`,
+the registry front, is optional) and `[[policy]]`), a build node (`[server]`,
 `[local_cache]` and `[cold_store]` with no `[hot_store]`, the same interfaces, and `[[policy]]`),
 which is a read cache (see "A build node" below), and a storage node with a cache in front of its
 own proxy (all three tables; see the end of "A build node").
@@ -708,13 +708,14 @@ the params at their defaults spelled out:
 ```toml
 [[interface]]
 type   = "oci"
-params = { addresses = ["192.0.2.10:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/", max_connections = 64, connection_lifetime = "1h" }
+params = { addresses = ["192.0.2.10:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/", max_connections = 64, connection_lifetime = "1h", stage_read = 1048576 }
 ```
 
 `tls_cert_file` and `tls_key_file` go together; `max_connections` is at least one;
-`connection_lifetime` is a duration as elsewhere. The certificate and the key are named by path, as
-every key file is, so the names end in `_file`. Several `oci` entries make one front on every
-address of theirs, and must agree on these five params.
+`connection_lifetime` is a duration as elsewhere; `stage_read` is a count of bytes, at least one
+(on main, not in v0.0.41, which refuses the param). The certificate and the key are named by path,
+as every key file is, so the names end in `_file`. Several `oci` entries make one front on every
+address of theirs, and must agree on these params.
 
 ### Moving from flags
 
@@ -744,7 +745,7 @@ instead of running with settings it did not read.
 | `hot_store.endpoint`, `cold_store.endpoint` | where the tier's store is, `http://host[:port]` (TLS is not built yet); `hot_store.region` and `cold_store.region` set the signing region of a tier, `us-east-1` if not given |
 | `hot_store.budget` | the bytes the hot tier is meant to hold; the water marks are shares of it (`hot_store.high_water`, `hot_store.low_water`, `hot_store.critical`) |
 | `hot_store.usage_stale_after` | how old the usage that the reconciler publishes may be (2m by default, longer than `hot_store.lease_ttl`) before `/usagez` says 503 with the reason |
-| an `oci` interface | the read-only registry front, off unless the file has one; see The OCI read front |
+| an `oci` interface | the registry front (read-only unless it asks for keys), off unless the file has one; see The OCI read front |
 
 The unit's two flags are the drain on SIGTERM: `--drain-lb-wait` is how long `/readyz` says 503
 while the server goes on accepting and serving (the settle), and `--drain-deadline` is how long it
@@ -867,7 +868,8 @@ The registry front). The params of the entry:
 | `params.prefix` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
-| `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. The front serves no upload yet. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
+| `params.stage_read` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Without it the front is read-only. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
 minute) to send the head of a request, which is also how long an idle connection may wait for its

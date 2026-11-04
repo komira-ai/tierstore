@@ -199,7 +199,9 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = OciFront::new(backend, setup.prefix, setup.metrics).with_auth(setup.auth);
+    let front = OciFront::new(backend, setup.prefix, setup.metrics)
+        .with_auth(setup.auth)
+        .with_stage_read(setup.stage_read);
     let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
