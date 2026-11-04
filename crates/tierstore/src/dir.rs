@@ -555,11 +555,14 @@ impl DirBackend {
     /// Opens the object `key`: its file in the place writes go to, else the file of the previous
     /// release.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        for path in self.files(key)? {
-            match open_stored(&path).await {
+        let files = self.files(key)?;
+        // A replacement renames the new file in, then removes the old: retry the first on a miss.
+        let again = files.first().filter(|_| files.len() > 1);
+        for path in files.iter().chain(again) {
+            match open_stored(path).await {
                 Ok(stored) => return Ok(stored),
                 Err(why) if why.kind() == ErrorKind::NotFound => {}
-                Err(why) => return Err(failed(&path, &why)),
+                Err(why) => return Err(failed(path, &why)),
             }
         }
         Err(Error::NotFound(key.to_owned()))
@@ -608,11 +611,12 @@ impl DirBackend {
         drop(current);
         // The lock keeps out every other call of this backend, so a file that is gone now was
         // taken by another process: the key has no object, as the trait says.
+        // The other file goes first: a failure leaves the object, not a stale file in its place.
+        let others: Vec<PathBuf> = files.into_iter().filter(|file| *file != path).collect();
+        let mut gone = remove_files(&others).await?;
         let removed = fs::remove_file(&path).await;
         let absent = ErrorKind::NotFound;
         removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))?;
-        let others: Vec<PathBuf> = files.into_iter().filter(|file| *file != path).collect();
-        let mut gone = remove_files(&others).await?;
         gone.push(path);
         Ok(gone)
     }
@@ -856,9 +860,10 @@ impl Backend for DirBackend {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let files = self.files(key)?;
-        // Not held across the sync: the names are gone, and a replacement or a delete that
-        // follows needs nothing the sync would protect.
+        // The previous release's file goes first: a failure leaves the object, not a stale file.
+        let mut files = self.files(key)?;
+        files.reverse();
+        // Not held across the sync: a replacement or delete that follows needs nothing it protects.
         let gone = {
             let _entry = self.entry_lock(key).await?;
             let _replacing = self.replacing.lock().await;

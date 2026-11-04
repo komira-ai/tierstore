@@ -684,3 +684,39 @@ async fn keys_that_look_like_the_entries_subdirectory_are_ordinary_objects() {
     assert!(dir.path().join(DIR).is_dir());
     assert_eq!(names(&dir.path().join(DIR)), ["%2Elock", ".lock", "y"]);
 }
+
+/// Asserts that a delete, and a conditional delete by the tag, of a key whose file of the previous
+/// release cannot be removed (it is a directory here) fail and leave the object of the
+/// subdirectory in place, so that the key does not read back as the stale old body.
+#[tokio::test]
+async fn a_failed_delete_of_the_previous_releases_file_keeps_the_current_object() {
+    let (dir, backend) = backend();
+    let key = "_entries/a";
+    let tag = backend.put_tagged(key, body("v2")).await.unwrap();
+    let stuck = dir.path().join("_entries~a");
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("inside"), b"x").unwrap();
+
+    assert!(matches!(backend.delete(key).await, Err(Error::Other(_))));
+    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
+    let refused = backend.delete_if_match(key, &tag).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    assert_eq!(backend.get(key, None).await.unwrap(), body("v2"));
+}
+
+/// Asserts that a read of a key the previous release put as a file of the root never reports it
+/// missing while a replacement by the tag moves it to the subdirectory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_during_the_move_of_a_previous_release_key_finds_the_key() {
+    let (dir, backend) = backend();
+    let backend = Arc::new(backend);
+    for number in 0..100 {
+        let key = format!("_entries/k{number}");
+        let tag = old_release(&dir, &key, "shipped");
+        let reader = Arc::clone(&backend);
+        let name = key.clone();
+        let read = tokio::spawn(async move { reader.get(&name, None).await });
+        backend.put_if_match(&key, body("two"), &tag).await.unwrap();
+        assert!(read.await.unwrap().is_ok(), "{key} read as missing");
+    }
+}
