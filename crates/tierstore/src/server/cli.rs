@@ -33,7 +33,7 @@
 //! [`server`](super) docs), such as the key of the daemons that read blobs. The id of a key is
 //! what a request names it by, so the ids must all differ. The file of every key and credential
 //! flag holds the id and the secret either as JSON, `{"access_key_id": "...",
-//! "secret_access_key": "..."}` (the form kbf's pack flags read; tierstore also refuses any other
+//! "secret_access_key": "..."}` (tierstore also refuses any other
 //! field and an empty value), or as two lines, the id and then the secret; it is JSON when its
 //! first byte that is not white space is `{`. Only its owner may read the file (mode 0600 or
 //! 0400), and no message of the process names a secret.
@@ -51,7 +51,7 @@
 //!
 //! `--listen` and `--oci-listen` may each be given more than once (the file's `listen` keys take a
 //! string or a list): a socket is bound for each address, an IPv6 one for IPv6 only (see
-//! [`listen`](super::listen)), and one server, one drain and one limit on connections serve them
+//! [`listen`](super::listen)), and one server and one drain serve them
 //! all. An address given twice is refused with status 2, and a start that cannot bind every address
 //! is refused with status 1. The start line names every address, separated by commas.
 //!
@@ -188,7 +188,7 @@ pub struct Cli {
     pub capabilities: bool,
     /// An address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. Give the flag
     /// again for each further address (for instance `0.0.0.0:P` and `[::]:P`, which a firewall
-    /// redirect to the port needs): one server, one drain and one limit on connections serve
+    /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     #[arg(long, value_name = "ADDR", required = true)]
     pub listen: Vec<SocketAddr>,
