@@ -107,7 +107,7 @@ fn node(dir: &TestDir, extra: &str) -> Cli {
     let line = format!("access_key_file = {:?}\n{extra}", key.display().to_string());
     let text = MINIMAL.replacen("access_key_file = \"key\"", &line, 1);
     match settings_from_text(&text, DEFAULTS).expect("a file") {
-        Settings::Storage(cli) => cli,
+        Settings::Storage(cli) => *cli,
         other => panic!("a storage node, not {other:?}"),
     }
 }
@@ -216,7 +216,7 @@ fn a_file_with_one_tls_key_is_refused_naming_both_keys() {
         let cli = node(&dir, extra);
         assert_eq!(cli.tls.tls_cert.is_some(), cert);
         assert_eq!(cli.tls.tls_key.is_some(), !cert);
-        let alone = crate::server::cli::checked(&Settings::Storage(cli));
+        let alone = crate::server::cli::checked(&Settings::Storage(Box::new(cli)));
         let why = alone.expect_err("one of the two keys").to_string();
         assert_eq!(
             keys_for_flags(&why),
