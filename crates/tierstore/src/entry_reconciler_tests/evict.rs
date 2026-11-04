@@ -31,6 +31,14 @@ async fn crowded(rig: &Rig, cold: &[&str]) {
     }
 }
 
+/// The entry a create made.
+fn took(created: Created) -> Seen {
+    match created {
+        Created::Taken(seen) => seen,
+        Created::Exists => panic!("the entry exists"),
+    }
+}
+
 /// The usage object, as the proxies read it.
 async fn published(rig: &Rig) -> Usage {
     let body = rig.hot.get(USAGE_KEY, None).await.unwrap();
@@ -90,7 +98,8 @@ async fn eviction_deletes_the_oldest_objects_the_cold_tier_holds_down_to_the_low
         }
     );
     assert!(!rig.hot_has("a").await);
-    assert!(rig.hot_has("b").await && rig.hot_has("c").await);
+    assert!(rig.hot_has("b").await);
+    assert!(rig.hot_has("c").await);
     assert!(rig.cold_has("a").await);
     assert!(rig.entry("a").await.is_none());
     assert_eq!(published(&rig).await.hot_bytes, 60);
@@ -164,6 +173,11 @@ async fn evicting_with_nothing_evictable_waits_at_the_floor() {
     assert_eq!(idle.after(&report(0)), Some(secs(2)));
     assert_eq!(idle.after(&step), Some(secs(1)));
     assert_eq!(idle.after(&step), Some(secs(1)));
+    let evicting = StepReport {
+        evicting: true,
+        ..report(0)
+    };
+    assert_eq!(idle.after(&evicting), Some(secs(1)));
     assert_eq!(idle.after(&report(0)), Some(secs(4)));
 }
 
@@ -186,7 +200,8 @@ async fn a_hot_object_without_a_cold_copy_is_adopted_and_not_evicted() {
     );
     let next = r.step().await;
     assert_eq!(next.changed, 1);
-    assert!(rig.cold_has("a").await && rig.hot_has("a").await);
+    assert!(rig.cold_has("a").await);
+    assert!(rig.hot_has("a").await);
     assert!(rig.entry("a").await.is_none());
 }
 
@@ -223,7 +238,8 @@ async fn eviction_skips_the_compare_for_a_key_this_leader_copied_with_both_tags_
     let mut r = rig.over(rig.hot.clone(), cold.clone(), "r1", small);
     let step = r.step().await;
     assert_eq!(step.evicted, 1);
-    assert!(!rig.hot_has("a").await && rig.cold_has("a").await);
+    assert!(!rig.hot_has("a").await);
+    assert!(rig.cold_has("a").await);
     assert_eq!(cold.calls(Op::Get), 0);
 }
 
@@ -346,18 +362,14 @@ async fn evict_vs_delete_then_identical_reput_keeps_new_object() {
     let mut step = Box::pin(parked.reconciler.step());
     park(&mut step, &parked.gate).await;
     let client = rig.client("p1");
-    let Created::Taken(delete) = client.create("a", Take::Del).await.unwrap() else {
-        panic!("the entry exists");
-    };
+    let delete = took(client.create("a", Take::Del).await.unwrap());
     rig.cold.delete("a").await.unwrap();
     rig.hot.delete("a").await.unwrap();
     assert!(matches!(
         client.release(&delete).await.unwrap(),
         Outcome::Done(())
     ));
-    let Created::Taken(put) = client.create("a", Take::Put).await.unwrap() else {
-        panic!("the entry exists");
-    };
+    let put = took(client.create("a", Take::Put).await.unwrap());
     rig.hot.put("a", thirty("a")).await.unwrap();
     let landed = client.advance(&put, Step::LandPut).await.unwrap();
     assert!(matches!(landed, Outcome::Done(_)));
@@ -388,7 +400,8 @@ async fn an_entry_made_meanwhile_stops_the_eviction_and_is_left_as_made() {
         let done = step.await;
         assert_eq!((done.evicted, done.failed.len()), (0, 0), "{take:?}");
         assert_eq!(rig.shape("a").await, before, "{take:?}");
-        assert!(rig.hot_has("a").await && rig.cold_has("a").await);
+        assert!(rig.hot_has("a").await);
+        assert!(rig.cold_has("a").await);
     }
 }
 
@@ -565,7 +578,8 @@ async fn the_candidates_of_a_listing_are_the_oldest_up_to_the_limit() {
     let step = r.step().await;
     assert_eq!((step.evicted, step.evicting), (1, true));
     assert!(!rig.hot_has("a").await);
-    assert!(rig.hot_has("b").await && rig.hot_has("d").await);
+    assert!(rig.hot_has("b").await);
+    assert!(rig.hot_has("d").await);
     assert_eq!(published(&rig).await.hot_bytes, 90);
 }
 
@@ -595,7 +609,8 @@ async fn a_new_leader_starts_from_the_published_figure_and_lists_a_few_pages_a_s
         config.scan_pages = 1;
     });
     let first = r.step().await;
-    assert!(first.scanning && first.progress());
+    assert!(first.scanning);
+    assert!(first.progress());
     assert_eq!(published(&rig).await.hot_bytes, 1234);
     let mut steps = 1;
     let mut last = first;
@@ -699,7 +714,8 @@ async fn a_failed_listing_or_read_of_the_figure_is_reported_and_tried_again() {
     let mut failed = StepReport::default();
     r.tend_usage(100_000, &mut failed).await;
     assert_eq!(failed.failed, [error]);
-    assert!(!failed.scanning && !failed.progress());
+    assert!(!failed.scanning);
+    assert!(!failed.progress());
     let mut again = StepReport::default();
     r.tend_usage(100_000, &mut again).await;
     assert!(again.failed.is_empty());
@@ -776,4 +792,27 @@ fn the_usage_and_eviction_settings_default_to_the_values_of_the_design() {
     assert_eq!(config.tag_record_limit, 100_000);
     assert_eq!(config.base.high_water, 0.8);
     assert_eq!(config.base.low_water, 0.7);
+}
+
+/// Asserts that a copy whose cold write fails is the item's failure: nothing reaches the cold
+/// tier, no tags are recorded for it, and the entry stays held by the reconciler for the copy to be
+/// done again.
+#[tokio::test]
+async fn a_copy_whose_cold_write_fails_fails_the_item_and_leaves_the_entry_held() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("a", thirty("a")).await.unwrap();
+    land(&rig, "p1", "a").await;
+    let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let error = Error::Unavailable("put".to_owned());
+    cold.fail_next_on(Op::Put, "a", error.clone());
+    let mut r = rig.over(rig.hot.clone(), cold, "r1", small);
+    let step = r.step().await;
+    assert_eq!(step.failed, [error]);
+    assert!(!rig.cold_has("a").await);
+    assert_eq!(
+        rig.shape("a").await,
+        Some((EntryOp::Put, EntryState::Held, Some("r1".to_owned())))
+    );
+    assert!(!r.tags().matches("a", "", ""));
 }
