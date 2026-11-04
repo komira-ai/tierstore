@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use clap::CommandFactory;
 
 use super::cli::Args;
-use super::config::{KEYS, settings_from_text};
+use super::config::{KEYS, keys_for_flags, settings_from_text};
 use super::config_cache::LocalCacheTable;
 use super::config_policy::Policy;
 use super::config_testing::DEFAULTS;
@@ -508,6 +508,11 @@ fn code() -> Code {
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         &mut source,
     );
+    // A start says the keys of the file where the source says a flag (`keys_for_flags`), so a
+    // message the guide quotes is held to the source as the operator reads it, too.
+    let said = keys_for_flags(&source);
+    source.push('\n');
+    source.push_str(&said);
     Code {
         flags,
         keys,
@@ -779,7 +784,7 @@ fn a_quoted_message_that_is_not_in_the_source_is_found() {
     let wrong = "\n```message\ntierstore: this text is nowhere in the program\n```\n";
     let problems = check(&with_appended("troubleshooting.md", wrong), &code());
     assert!(said(&problems, "is not in the source"), "{problems:?}");
-    let right = "\n```message\n--low-water must be below --high-water\n```\n";
+    let right = "\n```message\nhot_store.low_water must be below hot_store.high_water\n```\n";
     let problems = check(&with_appended("troubleshooting.md", right), &code());
     assert!(!said(&problems, "the message"), "{problems:?}");
 }

@@ -1,11 +1,6 @@
 //! Fixtures of the tests of the configuration file, which `config_tests.rs` and
 //! `launch_tests.rs` share.
 
-use std::fs::Permissions;
-use std::os::unix::fs::PermissionsExt;
-
-use tierstore_testkit::dir::TestDir;
-
 use super::config::{DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PerRun};
 
 /// The knobs of a run that gives none of them.
@@ -91,14 +86,6 @@ budget = 1000
 [cold_store]
 kind = "memory"
 "#;
-
-/// Writes `text` as a key file in `dir` that only its owner can read.
-pub(crate) fn write_private(dir: &TestDir, name: &str, text: &str) -> std::path::PathBuf {
-    let path = dir.path().join(name);
-    std::fs::write(&path, text).unwrap();
-    std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
-    path
-}
 
 /// An `[[interface]]` entry of type `oci` that listens at `listen`, with `more` after the address
 /// (each param after a comma: `, prefix = "cas/"`), as text to append to a file.

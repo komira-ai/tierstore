@@ -15,7 +15,7 @@
 //! later and is refused today. Every entry says where it listens with one of two params:
 //! `port`, the wildcard of IPv4 (`0.0.0.0:<port>`), or `addresses`, a socket address or a list
 //! of them. Both, or neither, are refused, and so is an address that two interfaces (or one
-//! interface twice) listen on.
+//! interface twice) listen on, but for a port of 0, which asks the system for a port.
 //!
 //! The entries of a type are served together: one server, one drain and one limit on connections
 //! per type, on every address of the entries of that type. So the `s3` entries take no other
@@ -171,7 +171,8 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             }
         }
         let listen = addresses_of(&at, &table.params)?;
-        for addr in &listen {
+        for addr in listen.iter().filter(|addr| addr.port() != 0) {
+            // A port of 0 asks the system for one: two of them are two ports.
             if let Some((_, other)) = taken.iter().find(|(used, _)| used == addr) {
                 let why = if *other == index {
                     format!("the address {addr} is listed twice")

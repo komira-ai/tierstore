@@ -1,6 +1,6 @@
 # Configuration
 
-tierstore is configured by one TOML file given with `--config <path>`. The file is the only way to say what the data path is: which interfaces it serves, which tiers, which keys, which limits. A key that is left out has the default this page gives. A file holds no secret, only the paths of key files. The process takes no flag for any of it: the flags of earlier builds that did (`--listen`, `--hot`, `--oci-listen` and the rest) are refused at the start, with status 2 and a message that names the key of the file that replaces each, and there is no environment variable.
+tierstore is configured by one TOML file given with `--config <path>`. The file is the only way to say what the data path is: which interfaces it serves, which tiers, which keys, which limits. A key that is left out has the default this page gives. A file holds no secret, only the paths of key files. The process takes no flag for any of it: the flags of earlier builds that did (--listen, --hot, --oci-listen and the rest) are refused at the start, with status 2 and a message that names the key of the file that replaces each, and there is no environment variable.
 
 A file has one of three shapes, told apart by its tables: a storage node (a hot tier and a cold tier), a build node (a read cache on local disk in front of one upstream, `[local_cache]`), and a storage node with a cache in front of its own proxy (all three tables). Every shape has at least one `[[interface]]` of type `s3`.
 
@@ -310,7 +310,7 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 
 ## Moving from flags
 
-A unit that gave flags is moved by writing the file and changing `ExecStart=` to `--config <path>` with the flags of the run. The settings a flag held are in the table that this page's other sections list: each key of `[server]`, `[hot_store]` and `[cold_store]` has the name of the flag that held it with `_` for `-`, the repeated key flags are arrays (`server.read_only_key_files`), `--hot-bytes` is `hot_store.budget`, `--skip-backend-check` is `cold_store.skip_checks`, the `--listen` addresses are the `s3` interfaces and the `--oci-*` flags are the params of an `oci` interface. A start that still gives one of those flags exits with status 2 and a message that names its replacement.
+A unit that gave flags is moved by writing the file and changing `ExecStart=` to `--config <path>` with the flags of the run. Each key of `[server]`, `[hot_store]` and `[cold_store]` has the name of the flag that held it with `_` for `-`, the flags that were repeated are arrays (`server.read_only_key_files`), the budget flag is `hot_store.budget`, the flag that skipped a check is `cold_store.skip_checks`, the listen flags became the `s3` interfaces and the registry flags the params of an `oci` interface. A start that still gives one of those flags exits with status 2 and a message that names its replacement.
 
 ## Not in a release yet
 

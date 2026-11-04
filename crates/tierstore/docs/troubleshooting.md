@@ -13,19 +13,19 @@ Messages go to stderr, prefixed `tierstore: `, and so to the journal: `journalct
 
 ## Messages at start
 
-Settings that depend on each other. These are checked after the file has parsed, and a start that fails one exits with status 1, not 2, so the unit starts again every 30 seconds until the value is fixed (a file's message names the key where a flag's names the flag):
+Settings that depend on each other. These are checked after the file has parsed, and a start that fails one exits with status 1, not 2, so the unit starts again every 30 seconds until the value is fixed:
 
 ```message
---low-water must be below --high-water
---high-water must not be above --critical
---reconcile-interval must be shorter than --lease-ttl
---usage-stale-after must be longer than --lease-ttl
---body-idle-timeout must be longer than zero
---s3-request-timeout must be longer than zero
---bucket <name> is the name of a probe path
+hot_store.low_water must be below hot_store.high_water
+hot_store.high_water must not be above hot_store.critical
+hot_store.reconcile_interval must be shorter than hot_store.lease_ttl
+hot_store.usage_stale_after must be longer than hot_store.lease_ttl
+server.body_idle_timeout must be longer than zero
+server.s3_request_timeout must be longer than zero
+server.bucket <name> is the name of a probe path
 ```
 
-Fix the value; `journalctl -u tierstore` shows the message at every try. `--check-config` does not find these (see [configuration](configuration.md#the-flags-of-a-run)). In a file these name `hot_store.low_water`, `hot_store.high_water` and so on.
+Fix the value; `journalctl -u tierstore` shows the message at every try. `--check-config` does not find these (see [configuration](configuration.md#the-flags-of-a-run)).
 
 A key file:
 
