@@ -1,11 +1,15 @@
 //! The proxy: puts, gets, heads, deletes and listings over the two tiers.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
-use tierstore::{Backend, ByteRange, Error, JournalEntry, JournalOp, Op, PartBody};
+use tierstore::{
+    Backend, ByteRange, CachedStore, Error, FaultyBackend, JournalEntry, JournalOp, MemoryBackend,
+    Meta, Op, PartBody,
+};
 
 use crate::support::{
     Rig, assert_absent, body, check_ranges, journal, journal_key, journal_keys, keys, page, read,
@@ -320,4 +324,42 @@ async fn a_conditional_delete_through_the_proxy_is_unsupported_and_changes_nothi
     assert_eq!(read(&*rig.hot_mem, "k").await, body("v"));
     let objects = journal_keys(&*rig.hot_mem, "p1").await;
     assert_eq!(objects, [journal_key("p1", 1)]);
+}
+
+fn meta(size: u64, tag: &str) -> Meta {
+    Meta {
+        size,
+        tag: tag.to_owned(),
+        modified: 0,
+    }
+}
+
+/// Asserts what the proxy says of two HEADs of a key: they are one version when the sizes are
+/// equal, whatever the tags (a tier's tag moves when the proxy copies the object to the other
+/// tier), and two when the sizes differ; and that a plain backend says the same size and tag.
+#[tokio::test(start_paused = true)]
+async fn the_proxy_tells_versions_apart_by_size_and_a_plain_backend_by_size_and_tag() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    assert!(proxy.same_version(&meta(3, "hot"), &meta(3, "cold")));
+    assert!(!proxy.same_version(&meta(3, "hot"), &meta(4, "hot")));
+
+    let memory = MemoryBackend::new();
+    assert!(memory.same_version(&meta(3, "a"), &meta(3, "a")));
+    assert!(!memory.same_version(&meta(3, "a"), &meta(3, "b")));
+    assert!(!memory.same_version(&meta(3, "a"), &meta(4, "a")));
+}
+
+/// Asserts that the wrappers of a backend (the fault injector and the in-memory cache) give the
+/// answer of the backend they wrap, the proxy's by size here, and not the default.
+#[tokio::test(start_paused = true)]
+async fn the_wrappers_of_a_backend_forward_its_reading_of_a_version() {
+    let rig = Rig::new();
+    let proxy: Arc<dyn Backend> = Arc::new(rig.proxy("p1", 1000).await);
+    let faulty = FaultyBackend::new(Arc::clone(&proxy));
+    let cached = CachedStore::new(proxy, 100);
+    for wrapper in [&faulty as &dyn Backend, &cached] {
+        assert!(wrapper.same_version(&meta(3, "hot"), &meta(3, "cold")));
+        assert!(!wrapper.same_version(&meta(3, "hot"), &meta(4, "hot")));
+    }
 }

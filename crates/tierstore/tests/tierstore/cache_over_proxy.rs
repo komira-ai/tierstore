@@ -62,18 +62,16 @@ impl Tiers {
 
 /// A cache over `upstream` that keeps what is under `img/` and takes writes, in a scratch
 /// directory kept as long as the returned guard.
-fn cache_over(
+pub fn cache_over(
     upstream: Arc<dyn Backend>,
-    tiered: bool,
     change: impl FnOnce(&mut CacheConfig),
 ) -> (TestDir, LocalCache) {
-    cache_observed(upstream, tiered, change, None)
+    cache_observed(upstream, change, None)
 }
 
 /// [`cache_over`] with an observer of the keeps.
 fn cache_observed(
     upstream: Arc<dyn Backend>,
-    tiered: bool,
     change: impl FnOnce(&mut CacheConfig),
     observer: Option<KeepObserver>,
 ) -> (TestDir, LocalCache) {
@@ -81,7 +79,6 @@ fn cache_observed(
     let policies = vec![("img/".to_owned(), true)];
     let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, policies);
     config.write_through = true;
-    config.tiered_upstream = tiered;
     change(&mut config);
     let clock: Arc<dyn Clock> = Arc::new(tierstore::SystemClock);
     let disk = Arc::new(SystemDisk);
@@ -102,7 +99,7 @@ async fn a_cold_only_object_with_another_tag_function_is_filled_and_served() {
         .put("img/a", body("cold bytes"))
         .await
         .unwrap();
-    let (_dir, cache) = cache_over(proxy, true, |_| {});
+    let (_dir, cache) = cache_over(proxy, |_| {});
 
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
     assert_eq!(cache.held(), (10, 1));
@@ -131,7 +128,7 @@ async fn a_ranged_fill_asks_the_cold_tier_for_ranges_only_and_copies_nothing_up(
         let config = ProxyConfig::new("p1", 1 << 20, clock.clone());
         let proxy = Proxy::open(hot_mem.clone(), cold.clone(), config).await;
         cold_mem.put("img/big", body(data)).await.unwrap();
-        let (_dir, cache) = cache_over(Arc::new(proxy.unwrap()), true, |config| {
+        let (_dir, cache) = cache_over(Arc::new(proxy.unwrap()), |config| {
             config.whole_limit = whole_limit;
             config.fill_chunk = 8;
         });
@@ -166,12 +163,11 @@ async fn a_ranged_only_backend_refuses_a_whole_tagged_read_and_answers_a_ranged_
     assert_eq!(tag, backend.head("k").await.unwrap().tag);
 }
 
-/// Asserts that a read through a cache of an object only the cold tier holds is kept without the
-/// tiered option too, now that the proxy copies nothing up for the ranged reads of a fill (the
-/// tag of the object does not move while it is read), and that the next read is a hit that
-/// makes no call to either tier.
+/// Asserts that a read through a cache of an object only the cold tier holds is kept, and the
+/// next read is a hit that makes no call to either tier, whatever the proxy copies up: the proxy
+/// copies nothing up for the ranged reads of a fill, and tells versions apart by size alone.
 #[tokio::test]
-async fn without_the_tiered_option_a_cold_only_object_is_kept_since_nothing_moves_its_tag() {
+async fn a_cold_only_object_is_kept_and_the_next_read_makes_no_call_to_either_tier() {
     let tiers = Tiers::new();
     let proxy = tiers.proxy().await;
     tiers
@@ -179,7 +175,7 @@ async fn without_the_tiered_option_a_cold_only_object_is_kept_since_nothing_move
         .put("img/a", body("cold bytes"))
         .await
         .unwrap();
-    let (_dir, cache) = cache_over(proxy, false, |_| {});
+    let (_dir, cache) = cache_over(proxy, |_| {});
 
     assert_eq!(cache.get("img/a", None).await.unwrap(), body("cold bytes"));
     assert_eq!(cache.held(), (10, 1));
@@ -198,7 +194,7 @@ async fn a_put_through_the_cache_is_kept_and_read_without_a_tier_read() {
     let kept = Arc::new(Notify::new());
     let told = Arc::clone(&kept);
     let observer: KeepObserver = Arc::new(move || told.notify_one());
-    let (_dir, cache) = cache_observed(proxy, true, |_| {}, Some(observer));
+    let (_dir, cache) = cache_observed(proxy, |_| {}, Some(observer));
 
     cache
         .put_stream("img/p", Some(3), chunks(&["abc"]))
@@ -223,7 +219,7 @@ async fn a_hot_only_put_through_the_cache_answers_full_and_stores_nothing_in_col
     let rig = Rig::new();
     let proxy = Arc::new(rig.proxy("p1", 1000).await);
     set_usage(&rig, 1000, 0).await;
-    let (_dir, cache) = cache_over(proxy, true, |_| {});
+    let (_dir, cache) = cache_over(proxy, |_| {});
 
     for key in ["other/h", "img/h"] {
         let full = cache
@@ -250,7 +246,7 @@ async fn a_put_of_a_key_the_hot_tier_holds_is_refused_before_the_body_is_read() 
     let tiers = Tiers::new();
     let proxy = tiers.proxy().await;
     tiers.hot_mem.put("img/h", body("old")).await.unwrap();
-    let (_dir, cache) = cache_over(proxy, true, |_| {});
+    let (_dir, cache) = cache_over(proxy, |_| {});
     let puts = (tiers.hot.calls(Op::Put), tiers.cold.calls(Op::Put));
 
     let asked = Arc::new(AtomicUsize::new(0));

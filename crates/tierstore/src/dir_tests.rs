@@ -157,23 +157,37 @@ async fn a_tagged_put_gives_the_tag_of_the_file_it_published() {
     backend.delete_if_match("k", &tag).await.unwrap();
     assert!(backend.head("k").await.is_err());
     let refused = backend.put_tagged("", body("v")).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
 }
 
-/// Asserts that a key of 255 bytes is stored and one of 256, and the empty key, are refused with
-/// an error for every call that names the key, and that nothing is made for them.
+/// Asserts that a key of 255 bytes is stored; that one of 256, and the empty key, and one whose
+/// encoded name passes 255 bytes though the key itself is short (non-ASCII text), are refused by
+/// the writes that validate the key as `InvalidKey`, are `NotFound` for every read, delete and
+/// held-body conditional write (no such object can exist), and that nothing is made for them. Catches a long key answered 500 for a GET.
 #[tokio::test]
-async fn a_key_that_cannot_be_a_file_name_is_refused() {
+async fn a_key_that_cannot_be_a_file_name_is_refused_by_writes_and_absent_for_reads() {
     let (dir, backend) = backend();
     let longest = "a".repeat(NAME_LIMIT);
     backend.put(&longest, body("v")).await.unwrap();
-    for key in ["a".repeat(NAME_LIMIT + 1), String::new()] {
-        let refused = backend.put(&key, body("v")).await.unwrap_err();
-        assert!(matches!(refused, Error::Other(_)), "{refused}");
-        assert!(backend.get(&key, None).await.is_err());
-        assert!(backend.head(&key).await.is_err());
-        assert!(backend.delete(&key).await.is_err());
-        assert!(backend.create_upload(&key).await.is_err());
+    let wide = "\u{e9}".repeat(NAME_LIMIT / 6 + 1);
+    assert!(wide.len() < NAME_LIMIT);
+    for key in ["a".repeat(NAME_LIMIT + 1), String::new(), wide] {
+        let invalid = Error::InvalidKey(key.clone());
+        assert_eq!(
+            backend.put(&key, body("v")).await.err(),
+            Some(invalid.clone())
+        );
+        let upload = backend.create_upload(&key).await;
+        assert_eq!(upload.err(), Some(invalid));
+        let absent = Error::NotFound(key.clone());
+        assert_eq!(backend.get(&key, None).await.err(), Some(absent.clone()));
+        assert_eq!(backend.head(&key).await.err(), Some(absent.clone()));
+        assert_eq!(backend.delete(&key).await.err(), Some(absent.clone()));
+        let tag = "0".repeat(64);
+        assert_eq!(
+            backend.delete_if_match(&key, &tag).await.err(),
+            Some(absent)
+        );
     }
     assert_eq!(names(dir.path()), [".uploads".to_owned(), longest]);
 }
@@ -604,7 +618,7 @@ async fn a_streamed_put_that_is_dropped_half_way_leaves_nothing() {
 async fn a_streamed_put_of_a_key_that_is_no_file_name_is_refused() {
     let (_dir, backend) = backend();
     let refused = backend.put_stream("", None, pieces(&["x"])).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
 }
 
 /// A body of `len` bytes that differ from place to place, so that a chunk read from the wrong
@@ -755,7 +769,7 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
 
     let refused = backend.put_stream_if_match("", None, pieces(&["x"]), &new);
     let refused = refused.await;
-    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
+    assert!(matches!(refused, Err(Error::InvalidKey(_))), "{refused:?}");
 }
 
 /// Asserts that a streamed replacement that is dropped half way (its caller gave up) removes its
