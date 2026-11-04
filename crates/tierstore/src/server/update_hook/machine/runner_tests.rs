@@ -210,6 +210,10 @@ const HELPER: &str = "server::update_hook::machine::runner_tests::";
 #[test]
 #[ignore = "a helper process of a_helper_left_running_by_the_program_is_killed_with_it"]
 #[allow(clippy::zombie_processes)]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "the test that runs this helper reads its answer from standard output"
+)]
 fn leaves_a_sleeper_holding_the_pipes() {
     let sleeper = Command::new("sleep").arg("infinity").spawn().unwrap();
     println!("sleeper {}", sleeper.id());
