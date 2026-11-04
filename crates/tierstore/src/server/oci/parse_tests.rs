@@ -304,6 +304,8 @@ fn the_counters_count_and_render() {
     metrics.request(RouteKind::Blob, Outcome::Ok);
     metrics.request(RouteKind::Manifest, Outcome::Failed);
     metrics.request(RouteKind::Other, Outcome::NotAllowed);
+    metrics.request(RouteKind::Ping, Outcome::Unauthorized);
+    metrics.request(RouteKind::Blob, Outcome::Denied);
     metrics.sent(7);
     metrics.sent(5);
     metrics.mismatch();
@@ -315,6 +317,8 @@ fn the_counters_count_and_render() {
     assert_eq!(metrics.requests("manifest", "failed"), 1);
     assert_eq!(metrics.requests("other", "not_allowed"), 1);
     assert_eq!(metrics.requests("ping", "ok"), 0);
+    assert_eq!(metrics.requests("ping", "unauthorized"), 1);
+    assert_eq!(metrics.requests("blob", "denied"), 1);
     assert_eq!(metrics.requests("nothing", "ok"), 0);
     assert_eq!(metrics.requests("blob", "nothing"), 0);
     assert_eq!((metrics.bytes_sent(), metrics.mismatches()), (12, 1));
@@ -342,8 +346,8 @@ fn the_counters_count_and_render() {
         plain.contains("tierstore_oci_front_info{mode=\"http\"} 1\n"),
         "{plain}"
     );
-    // Four routes by seven outcomes, five counters' type lines, three totals, the mode.
-    assert_eq!(text.lines().count(), 4 * 7 + 5 + 3 + 1);
+    // Four routes by nine outcomes, five counters' type lines, three totals, the mode.
+    assert_eq!(text.lines().count(), 4 * 9 + 5 + 3 + 1);
 }
 
 /// Asserts a header value that cannot be one is replaced by an empty value, not a panic.

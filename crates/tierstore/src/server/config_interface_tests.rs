@@ -167,6 +167,10 @@ fn an_s3_interface_takes_no_oci_params() {
             "connection_lifetime = \"1h\"",
             "interface[0].params.connection_lifetime: not for type \"s3\"",
         ),
+        (
+            "require_auth = true",
+            "interface[0].params.require_auth: not for type \"s3\"",
+        ),
     ];
     for (param, want) in cases {
         assert_eq!(
@@ -225,16 +229,41 @@ fn oci_interfaces_must_agree_on_the_front() {
             "connection_lifetime = \"2h\"",
             "connection_lifetime",
         ),
+        (
+            "require_auth = true",
+            "require_auth = false",
+            "require_auth",
+        ),
     ];
     for (first, second, name) in cases {
         let first = entry("oci", &format!("port = 5000, {first}"));
         let second = entry("oci", &format!("port = 5001, {second}"));
         let why = refusal(&[s3.clone(), first, second]);
         let want = format!(
-            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections and connection_lifetime"
+            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime and require_auth"
         );
         assert_eq!(why, want);
     }
+}
+
+/// Asserts the `require_auth` param of an `oci` interface: left out or `false` the front is
+/// anonymous, `true` makes it ask for keys, and a value that is not a boolean is refused.
+#[test]
+fn an_oci_interface_asks_for_keys_only_with_require_auth() {
+    let s3 = entry("s3", "port = 9300");
+    let with = |params: &str| made(&[s3.clone(), entry("oci", params)]).unwrap();
+    assert!(!with("port = 5000").oci_require_auth);
+    assert!(!with("port = 5000, require_auth = false").oci_require_auth);
+    assert!(with("port = 5000, require_auth = true").oci_require_auth);
+    let both = made(&[
+        s3.clone(),
+        entry("oci", "port = 5000, require_auth = true"),
+        entry("oci", "port = 5001, require_auth = true"),
+    ])
+    .unwrap();
+    assert!(both.oci_require_auth);
+    let why = refusal(&[s3, entry("oci", "port = 5000, require_auth = \"yes\"")]);
+    assert!(why.contains("expected a boolean"), "{why}");
 }
 
 /// Asserts that an entry with a key the format does not have, and one without a `type`, are

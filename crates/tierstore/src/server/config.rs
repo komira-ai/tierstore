@@ -129,6 +129,7 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-prefix", &["params.prefix"]),
     ("oci-max-connections", &["params.max_connections"]),
     ("oci-connection-lifetime", &["params.connection_lifetime"]),
+    ("oci-require-auth", &["params.require_auth"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -465,6 +466,8 @@ pub(super) struct OciFlags {
     pub prefix: Option<String>,
     pub max_connections: Option<u32>,
     pub connection_lifetime: Option<Duration>,
+    /// Whether the front asks its clients for an access key of the server.
+    pub require_auth: bool,
 }
 
 impl OciFlags {
@@ -477,6 +480,7 @@ impl OciFlags {
             prefix: None,
             max_connections: None,
             connection_lifetime: None,
+            require_auth: false,
         }
     }
 }
@@ -699,6 +703,7 @@ pub(super) fn storage(
         oci_prefix: oci.prefix,
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
+        oci_require_auth: oci.require_auth,
     })
 }
 

@@ -254,7 +254,7 @@ manifest is a hit on the disk when the cache holds it, and a miss under a `[[pol
 - An object is at `<prefix>blobs/sha256/<hex>` (`oci/` by default), manifests included. The
   repository name in a URL is checked against the distribution grammar and then ignored: one
   content-addressed namespace.
-- Anonymous: no token is asked for and `Authorization` is ignored. Only digest-named objects under
+- Anonymous unless `params.require_auth` is true: then Basic login with an access key of the server is required. Otherwise no token is asked for and `Authorization` is ignored. Only digest-named objects under
   the prefix can be read.
 - A manifest is checked against its digest before it is sent; a blob is hashed as it is read and cut
   short, not delivered whole, if it is not its digest. Tags are not served. A manifest is measured
