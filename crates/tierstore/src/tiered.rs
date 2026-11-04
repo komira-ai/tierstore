@@ -1,12 +1,11 @@
 //! The proxy: a store over a hot and a cold backend.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::StreamExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell};
 use tokio::time::Instant;
 
@@ -15,7 +14,6 @@ use crate::journal::{
     proxy_key, seq_of,
 };
 use crate::metrics::{Counters, Read, Skipped, Tier};
-use crate::reservation::RESERVATION_LEN;
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, JournalEntry, JournalOp, Listed, Meta,
     MonotonicClock, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
@@ -41,6 +39,7 @@ mod entry_put_tests;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
+mod listing;
 mod pause;
 mod put;
 mod read;
@@ -98,8 +97,8 @@ impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
-    /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
-    /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
+    /// heartbeat every 10 seconds, a departure time of 60 seconds and a margin of 10 seconds, on
+    /// a [`MonotonicClock`] that reads zero now, a format object that is read every 5 seconds, and
     /// 3 looks at an entry.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
@@ -182,7 +181,7 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
 ///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_marked`: the bytes, the mark and the tag of one object), so it is the
+///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
 ///   made for it. The hot tag is the one the create-only write itself returns
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
@@ -311,7 +310,7 @@ struct Inner {
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
     /// What was last read of the format object.
-    pause: Mutex<pause::Pause>,
+    pause: AsyncMutex<pause::Pause>,
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
     counters: Counters,
@@ -354,7 +353,7 @@ impl Proxy {
             open: Mutex::new(None),
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
-            pause: Mutex::default(),
+            pause: AsyncMutex::default(),
             entries,
             counters: Counters::default(),
             heartbeat,
@@ -561,7 +560,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
-        match self.cold.get_marked(key, range).await {
+        match self.cold.get_tagged(key, range).await {
             Ok((_, true, _)) => {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(Error::NotFound(key.to_owned()))
@@ -710,125 +709,6 @@ impl Inner {
             Err(error) => Err(error),
         }
     }
-
-    /// The object of a cold listing if it is one: a reservation (a marked object of
-    /// [`RESERVATION_LEN`] bytes) and an object that is gone are left out. Only an object of that
-    /// size that the hot listing does not show is asked about, at every listing: a listing gives no
-    /// identity of the version (a key, a size and a time of last write do not tell a real object
-    /// from a reservation that replaced it within the same time), so no answer is kept. A key the
-    /// hot tier shows is shown whatever the cold tier holds under it.
-    async fn visible(
-        &self,
-        object: Listed,
-        in_hot: &BTreeSet<&str>,
-    ) -> Result<Option<Listed>, Error> {
-        let may_hold = object.size == RESERVATION_LEN && !in_hot.contains(object.key.as_str());
-        if !may_hold {
-            return Ok(Some(object));
-        }
-        match self.cold.head(&object.key).await {
-            Ok(meta) if meta.reservation => Ok(None),
-            Ok(_) => Ok(Some(object)),
-            Err(Error::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// The objects of a cold listing that are objects (see `visible`), in the order given, asking
-    /// about [`LISTING_HEADS`] of them at a time.
-    async fn visible_all(
-        &self,
-        listed: Vec<Listed>,
-        in_hot: &[Listed],
-    ) -> Result<Vec<Listed>, Error> {
-        let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
-        let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
-        let checked: Vec<Option<Listed>> = checks.buffered(LISTING_HEADS).try_collect().await?;
-        Ok(checked.into_iter().flatten().collect())
-    }
-
-    /// The first `max_keys` objects of the listing of the cold tier after `start_after` that are
-    /// objects: pages of the cold tier are read until enough are left or the listing ends, so
-    /// that a page the filter cut short is made up, and a short page is the last.
-    async fn cold_page(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        max_keys: usize,
-        in_hot: &[Listed],
-    ) -> Result<Vec<Listed>, Error> {
-        let mut found: Vec<Listed> = Vec::new();
-        let mut after = start_after.map(str::to_owned);
-        loop {
-            let page = self.cold.list_page(prefix, after.as_deref(), max_keys);
-            let page = page.await?;
-            let full_page = page.len() >= max_keys;
-            after = page.last().map(|object| object.key.clone());
-            let data: Vec<Listed> = page.into_iter().filter(is_data).collect();
-            found.extend(self.visible_all(data, in_hot).await?);
-            if !full_page || found.len() >= max_keys {
-                break;
-            }
-        }
-        found.truncate(max_keys);
-        Ok(found)
-    }
-
-    async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        let mut in_hot = self.hot.list(prefix).await?;
-        in_hot.retain(is_data);
-        let mut in_cold = self.cold.list(prefix).await?;
-        in_cold.retain(is_data);
-        let in_cold = self.visible_all(in_cold, &in_hot).await?;
-        Ok(merge(in_hot, in_cold, usize::MAX))
-    }
-
-    async fn list_objects_page(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        max_keys: usize,
-    ) -> Result<Vec<Listed>, Error> {
-        let in_hot = data_page(self.hot.as_ref(), prefix, start_after, max_keys).await?;
-        let in_cold = self
-            .cold_page(prefix, start_after, max_keys, &in_hot)
-            .await?;
-        Ok(merge(in_hot, in_cold, max_keys))
-    }
-}
-
-/// The first `max_keys` objects of the listing of `hot` after `start_after`, without the
-/// objects under the reserved prefixes: pages of the hot tier are read until enough objects
-/// are left or the listing ends.
-async fn data_page(
-    hot: &dyn Backend,
-    prefix: &str,
-    start_after: Option<&str>,
-    max_keys: usize,
-) -> Result<Vec<Listed>, Error> {
-    let mut found: Vec<Listed> = Vec::new();
-    let mut after = start_after.map(str::to_owned);
-    loop {
-        let page = hot.list_page(prefix, after.as_deref(), max_keys).await?;
-        let full_page = page.len() >= max_keys;
-        after = page.last().map(|object| object.key.clone());
-        found.extend(page.into_iter().filter(is_data));
-        if !full_page || found.len() >= max_keys {
-            break;
-        }
-    }
-    found.truncate(max_keys);
-    Ok(found)
-}
-
-/// The objects of both listings, each key once (the hot tier's entry where both have it), in
-/// key order, at most `max_keys` of them.
-fn merge(in_hot: Vec<Listed>, in_cold: Vec<Listed>, max_keys: usize) -> Vec<Listed> {
-    let mut merged: BTreeMap<String, Listed> = BTreeMap::new();
-    for object in in_hot.into_iter().chain(in_cold) {
-        merged.entry(object.key.clone()).or_insert(object);
-    }
-    merged.into_values().take(max_keys).collect()
 }
 
 #[async_trait]

@@ -21,7 +21,9 @@
 //!    full (a presigned put answers [`Error::Full`] instead) or when the put is the completion of
 //!    a multipart upload.
 //! 6. The entry becomes `(PUT, PENDING)`, which is the acknowledgement of the put. If the entry
-//!    changed, the put is not acknowledged and touches nothing again.
+//!    changed, the put is not acknowledged and touches nothing again. If the proxy is no longer
+//!    live when the replace has answered, the put is not acknowledged either ([`Error::Unavailable`]),
+//!    and the entry stays pending.
 //!
 //! A put that fails before the object landed removes its entry and leaves nothing. A put whose
 //! landing may have happened (the store did not answer) makes the entry pending all the same, and
@@ -130,12 +132,18 @@ impl Inner {
     }
 
     /// The acknowledgement of a put: `(PUT, HELD, me)` to `(PUT, PENDING)`, if this proxy is still
-    /// live and the entry is still the one it holds.
+    /// live and the entry is still the one it holds. Liveness is checked again once the replace
+    /// has answered: a proxy that is no longer live then does not acknowledge, and the entry stays
+    /// pending for the reconciler.
     async fn land_put(&self, key: &str, seen: &Seen) -> Result<(), Error> {
         if !self.heartbeat.deadline.is_live() {
             return Err(retry(key, "this proxy's registration is no longer live"));
         }
         match self.entries.advance(seen, Step::LandPut).await {
+            Ok(Outcome::Done(_)) if !self.heartbeat.deadline.is_live() => Err(retry(
+                key,
+                "this proxy's registration stopped being live while the entry was written",
+            )),
             Ok(Outcome::Done(_)) => Ok(()),
             Ok(Outcome::Lost | Outcome::Refused) => Err(retry(key, "the entry changed")),
             Err(error @ Error::Unavailable(_)) => Err(error),
