@@ -117,7 +117,6 @@ use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
-use super::oci::OciMode;
 use super::oci_setup::{OciSetup, oci_setup, oci_setup_of};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
