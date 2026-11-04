@@ -13,10 +13,12 @@ use sha2::{Digest as _, Sha256};
 use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
-use super::{DEFAULT_MANIFEST_BYTES, OciFront, Upstream};
+use super::{OciFront, Upstream};
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::oci::fake_upstream::{Ending, Fake, Registry, Seen};
-use crate::server::oci::{OciMetrics, OciPrefix, UpstreamSettings};
+use crate::server::oci::{
+    DEFAULT_MANIFEST_BYTES, OciMetrics, OciPrefix, OciSizes, UpstreamSettings,
+};
 use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op};
 
 const MANIFEST: &str = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
@@ -548,9 +550,9 @@ async fn a_lowered_manifest_limit_refuses_a_pulled_manifest_just_over_it() {
     };
     let files = files(vec![(path.clone(), Fake::ok(make(80)))]);
     let mut rig = Rig::new(files).await;
-    let sizes = |bytes| super::OciSizes {
+    let sizes = |bytes| OciSizes {
         manifest_bytes: bytes,
-        ..super::OciSizes::default()
+        ..OciSizes::default()
     };
     rig.front = rig.front.with_sizes(sizes(79));
     let refused = rig.get(&path).await;
