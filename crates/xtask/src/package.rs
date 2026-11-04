@@ -1,21 +1,24 @@
-//! `package --binary <path> --sbom <path> --platform <platform> --commit <sha> --out <dir>`:
-//! one binary as a release asset.
+//! `package --binary <path> --sbom <path> [--licenses <path>] --platform <platform> --commit <sha>
+//! --out <dir>`: one binary as a release asset.
 //!
 //! It writes, in `<out>`:
 //!
-//! - `<name>-<commit>-<platform>.tar.gz`: the binary alone, named `<name>` (the file
-//!   name of `--binary`), the exact bytes given (on macOS, the signed binary);
+//! - `<name>-<commit>-<platform>.tar.gz`: the binary, named `<name>` (the file name of
+//!   `--binary`), the exact bytes given (on macOS, the signed binary), and, when `--licenses` is
+//!   given, the third-party licence notice ([`crate::licenses`]) as a second entry named
+//!   [`LICENSES_NAME`] (mode 0644). A host extracts the binary by its name, so the second entry
+//!   changes nothing for it;
 //! - `<name>-<commit>-<platform>.cdx.json`: a copy of `--sbom`;
 //!
 //! and appends both files' lines to `<out>/SHA256SUMS.<platform>` ([`crate::sums`]).
 //! Neither asset may exist already, and the sums file may not list either yet.
 //!
-//! The tarball is the same bytes for the same binary on every runner: one ustar entry
-//! with mode 0755, owner and group 0 and no owner names (so an extraction as root leaves
-//! the binary owned by root, not by the CI runner's uid), modification time 0 (the
+//! The tarball is the same bytes for the same binary (and notice) on every runner: ustar
+//! entries, the binary with mode 0755, owner and group 0 and no owner names (so an extraction as
+//! root leaves the binary owned by root, not by the CI runner's uid), modification time 0 (the
 //! epoch), no extended attributes, in a gzip stream with no file name and time 0
 //! ([`tarball`]). After writing it, `package` reads the file back and refuses it unless
-//! it holds exactly that one entry ([`check_tarball`]).
+//! it holds exactly those entries ([`check_tarball`], [`check_entries`]).
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -27,6 +30,15 @@ use crate::{Error, build_commit, sums};
 
 /// The mode of the binary in the tarball.
 pub const MODE: u32 = 0o755;
+
+/// The name of the third-party licence notice in a tarball.
+pub const LICENSES_NAME: &str = "THIRD-PARTY-LICENSES.txt";
+
+/// The mode of the licence notice in the tarball: a text file, not executable.
+pub const LICENSES_MODE: u32 = 0o644;
+
+/// One file of a tarball: its name, mode and content.
+pub type Entry<'a> = (&'a str, u32, &'a [u8]);
 
 /// The modification time of the binary in the tarball, and of the gzip stream: the
 /// epoch, so the bytes do not depend on when or where the binary was built.
@@ -86,22 +98,33 @@ pub fn tarball(name: &str, bytes: &[u8]) -> Result<Vec<u8>, String> {
 /// # Errors
 /// `name` does not fit a ustar header, or `sink` cannot be written.
 fn tarball_to<W: Write>(sink: W, name: &str, bytes: &[u8]) -> Result<W, String> {
-    let mut header = tar::Header::new_ustar();
-    header
-        .set_path(name)
-        .map_err(|e| format!("{name:?} cannot be a tar entry name: {e}"))?;
-    header.set_entry_type(tar::EntryType::Regular);
-    header.set_size(bytes.len() as u64);
-    header.set_mode(MODE);
-    header.set_uid(0);
-    header.set_gid(0);
-    header.set_mtime(u64::from(MTIME));
-    header.set_cksum();
+    entries_to(sink, &[(name, MODE, bytes)])
+}
+
+/// The tar of `entries`, in order, each with owner and group 0 and time [`MTIME`], gzipped
+/// and written to `sink`, which is given back.
+///
+/// # Errors
+/// A name does not fit a ustar header, or `sink` cannot be written.
+fn entries_to<W: Write>(sink: W, entries: &[Entry]) -> Result<W, String> {
     let gzip = flate2::GzBuilder::new()
         .mtime(MTIME)
         .write(sink, Compression::best());
     let mut tar = tar::Builder::new(gzip);
-    tar.append(&header, bytes).map_err(sink_failed)?;
+    for &(name, mode, bytes) in entries {
+        let mut header = tar::Header::new_ustar();
+        header
+            .set_path(name)
+            .map_err(|e| format!("{name:?} cannot be a tar entry name: {e}"))?;
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(bytes.len() as u64);
+        header.set_mode(mode);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(u64::from(MTIME));
+        header.set_cksum();
+        tar.append(&header, bytes).map_err(sink_failed)?;
+    }
     tar.into_inner()
         .and_then(flate2::write::GzEncoder::finish)
         .map_err(sink_failed)
@@ -115,14 +138,21 @@ fn sink_failed(e: std::io::Error) -> String {
 /// What is wrong with `tgz` as the tarball of the binary `name` holding `bytes`: one
 /// line per problem, none when it is exactly what [`tarball`] writes for them.
 pub fn check_tarball(tgz: &[u8], name: &str, bytes: &[u8]) -> Vec<String> {
+    check_entries(tgz, &[(name, MODE, bytes)])
+}
+
+/// What is wrong with `tgz` as the tarball of exactly `expected`, in order: one line per
+/// problem, none when it is what [`entries_to`] writes for them. An entry past the expected
+/// ones is only counted.
+pub fn check_entries(tgz: &[u8], expected: &[Entry]) -> Vec<String> {
     let mut tar = Vec::new();
     if let Err(e) = flate2::read::GzDecoder::new(tgz).read_to_end(&mut tar) {
         return vec![format!("not a gzip stream: {e}")];
     }
     let mut problems = Vec::new();
-    let mut entries = 0;
     let mut archive = tar::Archive::new(&tar[..]);
     // Only an archive already read from has no entries to list, and this one is fresh.
+    let mut entries = 0;
     for entry in archive.entries().into_iter().flatten() {
         let mut entry = match entry {
             Ok(entry) => entry,
@@ -132,6 +162,9 @@ pub fn check_tarball(tgz: &[u8], name: &str, bytes: &[u8]) -> Vec<String> {
             }
         };
         entries += 1;
+        let Some(&(name, mode, bytes)) = expected.get(entries - 1) else {
+            continue;
+        };
         let h = entry.header();
         let path = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
         let mut wrong = |what: &str, got: String| {
@@ -151,22 +184,22 @@ pub fn check_tarball(tgz: &[u8], name: &str, bytes: &[u8]) -> Vec<String> {
             (
                 "the mode",
                 h.mode().map_or_else(|_| unreadable(), |m| format!("{m:o}")),
-                "755",
+                format!("{mode:o}"),
             ),
             (
                 "the owner",
                 h.uid().map_or_else(|_| unreadable(), |v| v.to_string()),
-                "0",
+                "0".to_owned(),
             ),
             (
                 "the group",
                 h.gid().map_or_else(|_| unreadable(), |v| v.to_string()),
-                "0",
+                "0".to_owned(),
             ),
             (
                 "the time",
                 h.mtime().map_or_else(|_| unreadable(), |v| v.to_string()),
-                "0",
+                "0".to_owned(),
             ),
         ];
         for (what, got, want) in fields {
@@ -181,11 +214,11 @@ pub fn check_tarball(tgz: &[u8], name: &str, bytes: &[u8]) -> Vec<String> {
         let mut held = Vec::new();
         let read = entry.read_to_end(&mut held);
         if read.is_err() | (held != bytes) {
-            wrong("the content", "not the binary's bytes".to_owned());
+            wrong("the content", "not the bytes given".to_owned());
         }
     }
-    if entries != 1 {
-        problems.push(format!("{entries} entries, not 1"));
+    if entries != expected.len() {
+        problems.push(format!("{entries} entries, not {}", expected.len()));
     }
     problems
 }
@@ -206,8 +239,13 @@ pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 /// and refuses it unless [`check_tarball`] finds it holds exactly the binary `name`
 /// with `bytes`.
 pub fn write_tarball(path: &Path, tgz: &[u8], name: &str, bytes: &[u8]) -> Result<(), Error> {
+    write_entries(path, tgz, &[(name, MODE, bytes)])
+}
+
+/// [`write_tarball`] for a tarball of `expected`, which [`check_entries`] checks.
+pub fn write_entries(path: &Path, tgz: &[u8], expected: &[Entry]) -> Result<(), Error> {
     write_new(path, tgz)?;
-    let problems = check_tarball(&read(path)?, name, bytes);
+    let problems = check_entries(&read(path)?, expected);
     if problems.is_empty() {
         return Ok(());
     }
@@ -242,10 +280,23 @@ pub(crate) fn write_sums(path: &Path, lines: &[sums::Line]) -> Result<String, Er
     Ok(text)
 }
 
-/// The `package` verb: the lines to print.
+/// The `package` verb without a licence notice: the lines to print.
 pub fn package(
     binary: &Path,
     sbom: &Path,
+    platform: Platform,
+    commit: &str,
+    out: &Path,
+) -> Result<Vec<String>, Error> {
+    package_with(binary, sbom, None, platform, commit, out)
+}
+
+/// The `package` verb: the lines to print. `licenses` is the notice file to put in the
+/// tarball beside the binary, when given.
+pub fn package_with(
+    binary: &Path,
+    sbom: &Path,
+    licenses: Option<&Path>,
     platform: Platform,
     commit: &str,
     out: &Path,
@@ -267,6 +318,10 @@ pub fn package(
             sbom.display()
         )));
     }
+    let notice = licenses.map(read).transpose()?;
+    if notice.as_ref().is_some_and(Vec::is_empty) {
+        return Err(Error::Failed("the licence notice is empty".to_owned()));
+    }
     let stem = asset_stem(name, commit, platform);
     let tgz_name = format!("{stem}.tar.gz");
     let sbom_name = format!("{stem}.cdx.json");
@@ -281,8 +336,12 @@ pub fn package(
             l.name
         )));
     }
-    let tgz = tarball(name, &bytes).map_err(Error::Failed)?;
-    write_tarball(&out.join(&tgz_name), &tgz, name, &bytes)?;
+    let mut expected = vec![(name, MODE, &bytes[..])];
+    if let Some(notice) = &notice {
+        expected.push((LICENSES_NAME, LICENSES_MODE, &notice[..]));
+    }
+    let tgz = entries_to(Vec::new(), &expected).map_err(Error::Failed)?;
+    write_entries(&out.join(&tgz_name), &tgz, &expected)?;
     write_new(&out.join(&sbom_name), &sbom_bytes)?;
     lines.push(sums::Line {
         sha256: Sha256::of(&tgz),
