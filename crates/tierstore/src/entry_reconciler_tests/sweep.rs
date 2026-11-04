@@ -5,8 +5,8 @@ use super::*;
 /// Asserts that a hot object that is old enough and has no cold object and no entry is adopted
 /// with a `(PUT, PENDING)` entry that the next step copies; that an object that is young, one that
 /// the cold tier has, one that an entry holds, and the reserved objects are not adopted; that the
-/// cold tier is asked about one object per tenth of a second at the default rate of a hundred a
-/// second (the waits are the sleeper's record); that the sweep runs once and then not again until
+/// cold tier is asked about one object per hundredth of a second (10 ms) at the default rate of
+/// a hundred a second (the waits are the sleeper's record); that the sweep runs once and then not again until
 /// its interval has passed on the monotonic clock; and that listings of two objects at a time
 /// miss none.
 #[tokio::test]
@@ -96,4 +96,19 @@ async fn a_failed_call_ends_the_sweep_and_leaves_it_due_but_a_failed_create_does
     assert_eq!(report.strays_adopted, 0);
     assert!(!r.sweep_due(0));
     assert!(rig.entry("stray").await.is_none());
+}
+
+/// Asserts that the pause between two lookups in the cold tier is `1 / stray_rate` seconds rounded
+/// up to a whole microsecond: at 3 a second it is 333334 microseconds, not 333333.
+#[tokio::test]
+async fn the_pause_between_cold_lookups_is_rounded_up_to_a_whole_microsecond() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("stray", bytes("v")).await.unwrap();
+    rig.clock.advance(600_001);
+    let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
+        config.stray_rate = 3;
+    });
+    r.step().await;
+    assert_eq!(rig.waits.asked(), [Duration::from_micros(333_334)]);
 }

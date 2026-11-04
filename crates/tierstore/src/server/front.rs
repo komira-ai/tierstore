@@ -11,7 +11,6 @@ use crate::Clock;
 use super::ServerConfig;
 use super::cli::{Cli, Error};
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
-use super::grant::{ensure_distinct as grant_distinct, grant_keys, ids as grant_ids};
 use super::keys::{ensure_distinct, read_credentials, read_only_keys};
 use super::listen::has_duplicate;
 use super::presign::{ensure_distinct as presign_distinct, presign_keys};
@@ -43,9 +42,9 @@ pub(super) struct FrontSettings {
     pub presign_key_file: Vec<PathBuf>,
     pub gc_key_file: Vec<PathBuf>,
     pub scoped_key_file: Vec<PathBuf>,
-    pub grant_key_file: Vec<PathBuf>,
     pub presign_max_expires: Duration,
-    pub grant_max_lifetime: Duration,
+    pub grant_key_file: Vec<PathBuf>,
+    pub grant_max_lifetime: Option<Duration>,
     pub max_request_bytes: u64,
     pub max_concurrent_puts: u32,
     pub put_permit_wait: Duration,
@@ -70,8 +69,8 @@ impl Cli {
             presign_key_file: self.presign_key_file.clone(),
             gc_key_file: self.gc_key_file.clone(),
             scoped_key_file: self.scoped_key_file.clone(),
-            grant_key_file: self.grant_key_file.clone(),
             presign_max_expires: self.presign_max_expires,
+            grant_key_file: self.grant_key_file.clone(),
             grant_max_lifetime: self.grant_max_lifetime,
             max_request_bytes: self.max_request_bytes,
             max_concurrent_puts: self.max_concurrent_puts,
@@ -82,6 +81,23 @@ impl Cli {
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
         }
+    }
+}
+
+/// Why the settings of the removed read grant are ignored; the end of the operator's warning.
+const GRANT_IGNORED: &str = "is ignored: the read grant was removed; use a presigned GET URL";
+
+/// Says on the operator's stderr, once for each setting, that a setting of the removed read grant
+/// is accepted and ignored: an old unit or file still starts, and its owner is told to move on.
+/// The key files are not read.
+fn warn_grant_ignored(front: &FrontSettings) {
+    if !front.grant_key_file.is_empty() {
+        tracing::warn!("tierstore: --grant-key-file (server.grant_key_files) {GRANT_IGNORED}");
+    }
+    if front.grant_max_lifetime.is_some() {
+        tracing::warn!(
+            "tierstore: --grant-max-lifetime (server.grant_max_lifetime) {GRANT_IGNORED}"
+        );
     }
 }
 
@@ -98,6 +114,7 @@ pub(super) fn server_config(
         let name = &front.bucket;
         return Err(format!("--bucket {name:?} is the name of a probe path").into());
     }
+    warn_grant_ignored(front);
     if front.body_idle_timeout.is_zero() {
         return Err("--body-idle-timeout must be longer than zero".into());
     }
@@ -110,7 +127,6 @@ pub(super) fn server_config(
     let presign = presign_keys(&front.presign_key_file)?;
     let gc = gc_keys(&front.gc_key_file)?;
     let scoped = scoped_keys(&front.scoped_key_file)?;
-    let grant = grant_keys(&front.grant_key_file)?;
     let mut others: Vec<&str> = std::iter::once(key_id.as_str())
         .chain(read_only.iter().map(|key| key.id.as_str()))
         .collect();
@@ -118,17 +134,13 @@ pub(super) fn server_config(
     others.extend(gc_ids(&gc));
     scoped_distinct(&others, &scoped).map_err(InvalidFlags)?;
     others.extend(scoped_ids(&scoped));
-    grant_distinct(&others, &grant).map_err(InvalidFlags)?;
-    others.extend(grant_ids(&grant));
     presign_distinct(&others, &presign).map_err(InvalidFlags)?;
     let mut server = ServerConfig::new(&front.bucket, &key_id, &secret, clock);
     server.read_only_keys = read_only;
     server.presign_keys = presign;
     server.gc_keys = gc;
     server.scoped_keys = scoped;
-    server.grant_keys = grant;
     server.presign_max_expires = front.presign_max_expires;
-    server.grant_max_lifetime = front.grant_max_lifetime;
     server.slot = front.slot;
     server.region = front.region.clone();
     server.max_request_bytes = usize::try_from(front.max_request_bytes).unwrap_or(usize::MAX);

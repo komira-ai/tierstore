@@ -35,25 +35,30 @@ async fn the_reconciler_writes_the_drained_fixture_over_the_drain_fixture() {
     assert_eq!(tiers.stored(FORMAT).await, DRAINED);
 }
 
-/// Asserts that the drain and drained fixtures pause a put with `Unavailable`, and the active
-/// fixture and the fixture of a newer writer (a phase, an epoch and a field this release does not
-/// know) do not.
+/// Asserts that the drain and drained fixtures pause a put with `Unavailable` and the pause text,
+/// that the fixture of a newer writer (a phase, an epoch and a field this release does not know)
+/// pauses nothing, and that the active fixture does not pause either but makes the put on an entry,
+/// which a proxy that has not beaten is not live for.
 #[tokio::test(start_paused = true)]
 async fn the_fixtures_pause_writes_as_their_phases_say() {
-    let cases = [
-        (DRAIN, true),
-        (DRAINED, true),
-        (ACTIVE, false),
-        (NEWER, false),
-    ];
-    for (fixture, paused) in cases {
+    for fixture in [DRAIN, DRAINED] {
         let tiers = Tiers::new();
         tiers.seed(FORMAT, fixture).await;
         let put = eager(&tiers).await.put("k", "v".into()).await;
-        if paused {
-            assert!(matches!(put, Err(Error::Unavailable(_))), "{fixture:?}");
-        } else {
-            assert_eq!(put, Ok(()), "{fixture:?}");
-        }
+        let Err(Error::Unavailable(text)) = put else {
+            panic!("{fixture:?}: {put:?}");
+        };
+        assert!(text.contains("writes are paused"), "{fixture:?}: {text}");
     }
+    let tiers = Tiers::new();
+    tiers.seed(FORMAT, NEWER).await;
+    let put = eager(&tiers).await.put("k", "v".into()).await;
+    assert_eq!(put, Ok(()));
+    let tiers = Tiers::new();
+    tiers.seed(FORMAT, ACTIVE).await;
+    let put = eager(&tiers).await.put("k", "v".into()).await;
+    let Err(Error::Unavailable(text)) = put else {
+        panic!("{put:?}");
+    };
+    assert!(text.contains("not live"), "{text}");
 }

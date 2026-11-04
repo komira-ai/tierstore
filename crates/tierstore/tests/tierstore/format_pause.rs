@@ -1,10 +1,13 @@
 //! The pause of writes: the proxy answers writes with 503 while `_tiering/format` says `drain` or
 //! `drained`, serves reads, and reads the object again after `format_refresh`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tierstore::{Backend, Error, Op, Proxy};
+use tokio::sync::Notify;
 
+use crate::hold::HoldGet;
 use crate::support::{Rig, assert_absent, body, chunks, keys, read};
 
 const FORMAT: &str = "_tiering/format";
@@ -59,27 +62,33 @@ async fn every_write_is_answered_503_while_the_format_says_drain_and_reads_still
     assert_absent(&*rig.hot_mem, "n").await;
 }
 
-/// Asserts which phases pause a put: `drain` and `drained` do, an `active` format with its epoch
-/// and a phase this release does not know do not.
+/// Asserts which phases pause a put: `drain` and `drained` do, a phase this release does not know
+/// does not, and an `active` format with its epoch does not either but makes the put on an entry,
+/// which a proxy that has not beaten is not live for (the answer is `Unavailable` with another
+/// text than the pause's).
 #[tokio::test(start_paused = true)]
 async fn drained_pauses_writes_and_active_and_unknown_phases_do_not() {
     let cases = [
-        (r#"{"phase":"drain"}"#, true),
-        (r#"{"phase":"drained"}"#, true),
-        (r#"{"epoch":2,"phase":"active"}"#, false),
-        (r#"{"phase":"someday","extra":[1]}"#, false),
+        (r#"{"phase":"drain"}"#, Err(paused())),
+        (r#"{"phase":"drained"}"#, Err(paused())),
+        (r#"{"phase":"someday","extra":[1]}"#, Ok(())),
     ];
-    for (json, is_paused) in cases {
+    for (json, want) in cases {
         let rig = Rig::new();
         let proxy = eager_proxy(&rig).await;
         set_format(&rig, json).await;
         let put = proxy.put("k", body("v")).await;
-        assert_eq!(
-            put,
-            if is_paused { Err(paused()) } else { Ok(()) },
-            "{json}"
-        );
+        assert_eq!(put, want, "{json}");
     }
+    let rig = Rig::new();
+    let proxy = eager_proxy(&rig).await;
+    set_format(&rig, r#"{"epoch":2,"phase":"active"}"#).await;
+    let put = proxy.put("k", body("v")).await;
+    let Err(Error::Unavailable(text)) = put else {
+        panic!("{put:?}");
+    };
+    assert!(text.contains("not live"), "{text}");
+    assert_ne!(Error::Unavailable(text), paused());
 }
 
 /// Asserts that deleting the format object (what an operator's cancel does) lets puts and deletes
@@ -130,5 +139,59 @@ async fn an_unreadable_format_keeps_what_the_proxy_read_last() {
     assert_eq!(proxy.put("b", body("v")).await, Err(paused()));
     set_format(&rig, "not json").await;
     assert_eq!(proxy.put("b", body("v")).await, Err(paused()));
+    assert_absent(&*rig.hot_mem, "b").await;
+}
+
+/// Asserts that two callers never read the format object at once, so that a read that was
+/// answered before the object turned to `drain` cannot be stored after a read that saw `drain`.
+/// A write is held with its read of an `active` format on the way back; the object turns to
+/// `drain`, the refresh passes, and a second write arrives. It must wait for the first (the hot
+/// tier has seen one read of the object, not two) and, once the first is let go and is admitted
+/// on what it read, read the object itself and be answered 503. Defects it catches: a refresh
+/// that does not serialize the readers (a second read while the first is out, and the older
+/// result stored over the newer).
+#[tokio::test(start_paused = true)]
+async fn a_second_writer_waits_for_the_read_of_the_format_that_is_out() {
+    let rig = Rig::new();
+    set_format(&rig, r#"{"phase":"active","epoch":1}"#).await;
+    let (entered, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    let held = Arc::new(HoldGet::new(
+        rig.hot.clone(),
+        FORMAT,
+        entered.clone(),
+        release.clone(),
+    ));
+    let mut config = rig.config("p1", 1000);
+    config.format_refresh = Duration::from_secs(5);
+    let proxy = Arc::new(
+        Proxy::open(held.clone(), rig.cold.clone(), config)
+            .await
+            .unwrap(),
+    );
+
+    let first = tokio::spawn({
+        let proxy = proxy.clone();
+        async move { proxy.put("a", body("v")).await }
+    });
+    entered.notified().await;
+    set_format(&rig, r#"{"phase":"drain"}"#).await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let second = tokio::spawn({
+        let proxy = proxy.clone();
+        async move { proxy.put("b", body("v")).await }
+    });
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        held.gets(),
+        1,
+        "the second writer read the format while the first read was out"
+    );
+
+    release.notify_one();
+    assert_eq!(first.await.unwrap(), Ok(()));
+    assert_eq!(second.await.unwrap(), Err(paused()));
+    assert_eq!(held.gets(), 2);
     assert_absent(&*rig.hot_mem, "b").await;
 }

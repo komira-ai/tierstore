@@ -638,7 +638,7 @@ async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
     let tag = backend.put_reservation("k", body("r")).await.unwrap();
     chmod(&dir.path().join("k"), 0o644);
     assert!(!backend.head("k").await.unwrap().reservation);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("r"), false, tag));
 }
 
@@ -769,7 +769,7 @@ async fn a_read_with_the_mark_gives_the_tag_of_the_file_it_read_when_the_key_goe
     let read_a = super::read_marked(opened_a, None).await.unwrap();
     assert_eq!(read_a, (body("alpha"), false, tag_a.clone()));
     assert_ne!(tag_a, tag_b);
-    let now = backend.get_marked("k", None).await.unwrap();
+    let now = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(now, (body("alpha"), false, tag_a));
 }
 
@@ -790,13 +790,13 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
     let absent = backend.put_stream_if_match("none", None, pieces(&["a"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
-    let kept = backend.get_marked("k", None).await.unwrap();
+    let kept = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(kept, (body("old"), true, old.clone()));
 
     let new = backend.put_stream_if_match("k", None, pieces(&["n", "ew"]), &old);
     let new = new.await.unwrap();
     assert_eq!(backend.head("k").await.unwrap().tag, new);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("new"), false, new.clone()));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
 
@@ -822,4 +822,57 @@ async fn a_streamed_replace_that_is_dropped_half_way_leaves_the_object() {
     }
     assert_eq!(names(dir.path()), [".uploads", "k"]);
     assert_eq!(backend.get("k", None).await.unwrap(), "old");
+}
+
+/// The permission bits of the file or directory at `path`.
+fn bits(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// Asserts that the directories a new tier makes (the root and its parents made with it, and the
+/// uploads directory) are open to their owner alone.
+#[test]
+fn a_new_tier_directory_is_open_to_its_owner_alone() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-private");
+    let nested = dir.path().join("a/b");
+    DirBackend::open(&nested).unwrap();
+    assert_eq!(bits(&dir.path().join("a")), 0o700);
+    assert_eq!(bits(&nested), 0o700);
+    assert_eq!(bits(&nested.join(".uploads")), 0o700);
+}
+
+/// Asserts that the files of objects are readable and writable by their owner alone: a put, a
+/// streamed put and a replace make a 0600 file, and a reservation 0700.
+#[tokio::test]
+async fn the_files_of_objects_are_open_to_their_owner_alone() {
+    let (dir, backend) = backend();
+    backend.put("plain", body("x")).await.unwrap();
+    backend
+        .put_stream("streamed", None, pieces(&["x", "y"]))
+        .await
+        .unwrap();
+    let tag = backend.put_reservation("k", body("r")).await.unwrap();
+    assert_eq!(bits(&dir.path().join("plain")), 0o600);
+    assert_eq!(bits(&dir.path().join("streamed")), 0o600);
+    assert_eq!(bits(&dir.path().join("k")), 0o700);
+    backend.put_if_match("k", body("real"), &tag).await.unwrap();
+    assert_eq!(bits(&dir.path().join("k")), 0o600);
+}
+
+/// Asserts that an upload is kept where its owner alone reaches it: the directory of the upload is
+/// 0700, its key file 0600, and a completed part 0600.
+#[tokio::test]
+async fn an_upload_and_its_parts_are_open_to_their_owner_alone() {
+    let (dir, backend) = backend();
+    let id = backend.create_upload("k").await.unwrap();
+    backend
+        .upload_part("k", &id, 1, pieces(&["x"]))
+        .await
+        .unwrap();
+    let upload = dir.path().join(".uploads").join(&id);
+    assert_eq!(bits(&upload), 0o700);
+    assert_eq!(bits(&upload.join("key")), 0o600);
+    for entry in std::fs::read_dir(&upload).unwrap() {
+        assert_eq!(bits(&entry.unwrap().path()) & 0o077, 0);
+    }
 }
