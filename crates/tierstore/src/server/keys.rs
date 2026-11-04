@@ -27,11 +27,8 @@ use std::sync::Arc;
 use hyper::Method;
 use serde::Deserialize;
 
-use crate::journal::is_reserved;
-
 use super::ServerConfig;
 use super::auth::{READ_ONLY, Refusal};
-use super::gc::{NOT_ALLOWED, OUT_OF_SCOPE};
 use super::presign::PUT_ONLY;
 use super::scoped::{NOT_ALLOWED as SCOPED_NOT_ALLOWED, Scopes};
 
@@ -92,9 +89,8 @@ pub(crate) enum Role {
     ReadOnly,
     /// A presigning key: one presigned `PUT`, as far as its grant goes (see `presign`).
     PresignPut,
-    /// A GC key: list, head and delete under this prefix, header-signed (see `gc`).
-    Gc(String),
-    /// A scoped key: read, create and delete under the prefixes of its lists (see `scoped`).
+    /// A scoped key, a GC key included: the rights its lists give under their prefixes (see
+    /// `scoped`).
     Scoped(Arc<Scopes>),
 }
 
@@ -111,9 +107,6 @@ impl Role {
         match self {
             Self::ReadOnly if !reads => Err(READ_ONLY),
             Self::PresignPut if *method != Method::PUT => Err(PUT_ONLY),
-            Self::Gc(_) if !matches!(*method, Method::GET | Method::HEAD | Method::DELETE) => {
-                Err(NOT_ALLOWED)
-            }
             Self::Scoped(_) if !SCOPED_METHODS.contains(method) => Err(SCOPED_NOT_ALLOWED),
             _ => Ok(()),
         }
@@ -125,19 +118,17 @@ impl Role {
     /// it upload ids, which let it do nothing, since a part, a completion and an abort are not
     /// reads. S3 asks for a permission of its own (`s3:ListBucketMultipartUploads`) here.
     ///
-    /// A GC key may list the uploads under its own prefix, as it may abort them: `prefix` must
-    /// start with the prefix of the key and not be a reserved one. A listing with no prefix, or
-    /// with one outside, is [`OUT_OF_SCOPE`] and is not filtered.
+    /// A scoped key (a GC key too) may list the uploads under a prefix of its read or list lists:
+    /// `prefix` must start with one and not be a reserved one. A listing with no prefix, or with
+    /// one outside, is refused and is not filtered.
     ///
     /// # Errors
-    /// [`PUT_ONLY`] for a presigning key, [`OUT_OF_SCOPE`] for a GC key and a prefix that is not
-    /// inside its own.
+    /// [`PUT_ONLY`] for a presigning key, and for a scoped key a prefix that is not inside its
+    /// lists (see `scoped`).
     pub(crate) fn permit_list_uploads(&self, prefix: &str) -> Result<(), Refusal> {
         match self {
             Self::Full | Self::ReadOnly => Ok(()),
             Self::PresignPut => Err(PUT_ONLY),
-            Self::Gc(own) if prefix.starts_with(own.as_str()) && !is_reserved(prefix) => Ok(()),
-            Self::Gc(_) => Err(OUT_OF_SCOPE),
             Self::Scoped(scopes) => scopes.may_list(prefix),
         }
     }
@@ -156,7 +147,7 @@ impl ServerConfig {
         }
         let gc = self
             .gc_key(id)
-            .map(|key| (key.secret(), Role::Gc(key.prefix().to_owned())));
+            .map(|key| (key.secret(), Role::Scoped(key.scopes())));
         gc.or_else(|| {
             let key = self.scoped_key(id)?;
             Some((key.secret(), Role::Scoped(key.scopes())))

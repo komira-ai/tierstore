@@ -24,11 +24,13 @@ async fn rig() -> Rig {
     let made = Rig::with(MEBIBYTE, |config| {
         let a = Prefixes {
             read: &["r/", "rw/"],
+            list: &[],
             write: &["w/", "rw/"],
             delete: &["d/"],
         };
         let b = Prefixes {
             read: &["r/"],
+            list: &[],
             write: &["w/"],
             delete: &[],
         };
@@ -439,6 +441,7 @@ async fn a_refused_scoped_call_is_403_without_its_body_being_read() {
             KEY.1,
             &Prefixes {
                 read: &["r/"],
+                list: &[],
                 write: &["w/"],
                 delete: &["d/"],
             },

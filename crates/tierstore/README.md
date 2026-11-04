@@ -174,8 +174,8 @@ counterpart here.
 | full | `--access-key-file` | everything the front serves |
 | read-only | `--read-only-key-file` | get, head, list |
 | presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
-| GC | `--gc-key-file` | list, head, delete and abort uploads under one prefix |
-| scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
+| GC | `--gc-key-file` | a scoped key with list and delete on one prefix: list, head, delete and abort uploads there |
+| scoped | `--scoped-key-file` | read, list, create and delete under the prefixes of four lists |
 
 The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
 that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
@@ -186,7 +186,8 @@ is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
 ### Scoped keys
 
 A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `read_prefixes`,
-`write_prefixes` and `delete_prefixes`; the lists may be empty, but not all three, and every prefix
+`write_prefixes` and `delete_prefixes`, and optionally `list_prefixes` (empty when absent, so a
+file of the release before loads as it did); the lists may be empty, but not all, and every prefix
 ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
 A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
@@ -195,9 +196,10 @@ is plain data); the command line does, and exits 2.
 
 - `read_prefixes`: GetObject, HeadObject, ListObjectsV2 and ListMultipartUploads (a listing's
   `prefix` parameter must be inside one);
+- `list_prefixes`: HeadObject, ListObjectsV2 and ListMultipartUploads, never GetObject;
 - `write_prefixes`: create-only PutObject (`If-None-Match: *` or no condition; `412` if the key
   exists) and the calls of a multipart upload (create, part, complete, abort);
-- `delete_prefixes`: DeleteObject.
+- `delete_prefixes`: DeleteObject and AbortMultipartUpload.
 
 A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`). Everything else is
 `403 AccessDenied`. Two uses:

@@ -1,5 +1,7 @@
-//! The garbage-collection key: a header-signed key that lists, heads and deletes under one
-//! prefix and does nothing else.
+//! The garbage-collection key: the file format of a scoped key (see `scoped`) that lists, heads
+//! and deletes under one prefix. A GC key is one instance of a scoped key: the server reads a
+//! `--gc-key-file` as a scoped key with a list and a delete right on the prefix of the file, and
+//! no read and no write right. Nothing in the server tells the two apart after the file is read.
 //!
 //! A server has any number of them (`--gc-key-file`, one file per key, mode 0600, the file
 //! itself and owned by the user the server runs as):
@@ -9,29 +11,13 @@
 //! ```
 //!
 //! All three fields are required and no other is allowed. The prefix ends in `/` and is not
-//! `_journal/` or `_tiering/` or under them or a prefix of them. A request signed by the key is
-//! allowed, and only for a key (or a list prefix) that starts with the prefix of the key and is
-//! longer than it, after the path is percent-decoded and with no `..`, no `.` segment and no
-//! control character in it:
-//!
-//! - ListObjectsV2 with a `prefix` parameter inside the prefix of the key (a list with no prefix,
-//!   or one outside, is refused and not filtered), and ListMultipartUploads (`GET ?uploads`) with
-//!   such a prefix, under the same rule (the open uploads under the prefix are listed);
-//! - HeadObject;
-//! - DeleteObject, and AbortMultipartUpload of an upload of such a key.
-//!
-//! Everything else is `403 AccessDenied`, answered before the body is read: GetObject (a GC key never reads
-//! a body), every `PUT` and `POST` (put, part, start and completion of an upload, copy), the calls
-//! on the bucket itself, and every key under `_journal/` or `_tiering/`. The key is refused
-//! on a presigned URL (the URL's key must be a presigning key), as a presigning key is refused in
-//! the header.
-//!
-//! The refusals come in this order, none of them after the body is read: the signature and the key
-//! id (403 or the signature errors), then the method (a `PUT` or `POST` is refused at once), then
-//! the path and query are decoded (a bad encoding is 400, an unknown bucket 404), then the checksum
-//! headers of the request are read (400 or 501), and last the key or list prefix is held to the
-//! prefix of the key. So a call that is both refused and malformed may be answered with the
-//! malformed-request error rather than 403.
+//! `_journal/` or `_tiering/` or under them or a prefix of them. The key may then do what a
+//! scoped key with `list_prefixes` and `delete_prefixes` of `[prefix]` may: ListObjectsV2 and
+//! ListMultipartUploads with a `prefix` parameter inside the prefix, HeadObject, DeleteObject, and
+//! AbortMultipartUpload of an upload of a key longer than the prefix. Everything else, GetObject
+//! included, is `403 AccessDenied`, answered before the body is read, with the refusals and their
+//! order of `scoped`. The key is refused on a presigned URL (the URL's key must be a presigning
+//! key, or a key that reads).
 //!
 //! A delete through the proxy removes the object from both tiers and journals the delete, as for
 //! any key; through a cache with `write_through` it drops the cache's copy of the object and then
@@ -41,38 +27,24 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use hyper::Method;
-use hyper::http::request::Parts;
 use serde::Deserialize;
 
-use crate::journal::is_reserved;
-
 use super::ServerConfig;
-use super::auth::Refusal;
 use super::keys::{AccessKey, read_private_text};
-use super::ops::MULTIPART;
-use super::presign::{PresignError, check_name, validate_prefix};
-use super::request::{Query, Target};
+use super::presign::{PresignError, validate_prefix};
+use super::scoped::Scopes;
 
 /// The flag whose files hold the GC keys.
 const FLAG: &str = "--gc-key-file";
-
-pub(crate) const NOT_ALLOWED: Refusal = Refusal {
-    code: "AccessDenied",
-    message: "Access Denied: this access key lists, heads and deletes under its prefix only.",
-};
-
-pub(crate) const OUT_OF_SCOPE: Refusal = Refusal {
-    code: "AccessDenied",
-    message: "Access Denied: the key, or the listing prefix, is outside the prefix of this access key.",
-};
 
 /// A key that lists, heads and deletes under one prefix.
 #[derive(Clone, PartialEq, Eq)]
 pub struct GcKey {
     key: AccessKey,
     prefix: String,
+    scopes: Arc<Scopes>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +72,7 @@ impl GcKey {
         Ok(Self {
             key: AccessKey::new(id, secret),
             prefix: prefix.to_owned(),
+            scopes: Arc::new(Scopes::listing_and_deleting(prefix)),
         })
     }
 
@@ -135,6 +108,11 @@ impl GcKey {
     pub(super) fn secret(&self) -> &str {
         &self.key.secret
     }
+
+    /// The rights of the key, as a scoped key's, to hand to the role of a request.
+    pub(super) fn scopes(&self) -> Arc<Scopes> {
+        Arc::clone(&self.scopes)
+    }
 }
 
 impl fmt::Debug for GcKey {
@@ -168,49 +146,6 @@ pub(super) fn gc_keys(paths: &[PathBuf]) -> Result<Vec<GcKey>, String> {
 /// The ids of the GC keys, for the check that no two keys of a server share one.
 pub(super) fn ids(keys: &[GcKey]) -> Vec<&str> {
     keys.iter().map(GcKey::id).collect()
-}
-
-/// Whether the call is one a GC key of `prefix` may do.
-///
-/// # Errors
-/// [`NOT_ALLOWED`] for a call of another kind, [`OUT_OF_SCOPE`] for a key or a list prefix that is
-/// not inside the prefix.
-pub(super) fn permit(
-    prefix: &str,
-    parts: &Parts,
-    target: &Target,
-    query: &Query,
-) -> Result<(), Refusal> {
-    // `GcKey::new` also refuses a prefix that is, or covers, `_journal/` or `_tiering/`, so a name
-    // under the prefix of a key is never one of the proxy's; the check of reserved names here is the
-    // second guard, for a caller that builds its prefix another way.
-    let inside = |name: &str| {
-        let longer = name.len() > prefix.len() && name.starts_with(prefix);
-        if longer && !is_reserved(name) && check_name(name).is_ok() {
-            Ok(())
-        } else {
-            Err(OUT_OF_SCOPE)
-        }
-    };
-    let within = |listed: &str| {
-        let reserved = is_reserved(listed);
-        if listed.starts_with(prefix) && !reserved && check_name(listed).is_ok() {
-            Ok(())
-        } else {
-            Err(OUT_OF_SCOPE)
-        }
-    };
-    let multipart = query.has_any(&MULTIPART);
-    match (&parts.method, target, multipart) {
-        (&Method::GET, Target::Bucket, _) => {
-            let listed = query.get("prefix").ok_or(OUT_OF_SCOPE)?;
-            within(listed)
-        }
-        (&Method::HEAD, Target::Object(key), false) | (&Method::DELETE, Target::Object(key), _) => {
-            inside(key)
-        }
-        _ => Err(NOT_ALLOWED),
-    }
 }
 
 /// Refuses a server in which two keys have one id: a request names its key by id alone.

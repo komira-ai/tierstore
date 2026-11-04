@@ -48,6 +48,7 @@ impl Front {
         config.gc_keys = vec![GcKey::new(GC.0, GC.1, "cas/b/").unwrap()];
         let scopes = Prefixes {
             read: &["cas/s/"],
+            list: &[],
             write: &["cas/s/"],
             delete: &["cas/s/"],
         };

@@ -221,6 +221,7 @@ fn the_scoped_role_allows_five_methods_and_lists_uploads_under_read_prefixes() {
         "s",
         &Prefixes {
             read: &["r/"],
+            list: &[],
             write: &["w/"],
             delete: &[],
         },
