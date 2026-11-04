@@ -290,19 +290,18 @@ pub struct Cli {
     #[arg(long)]
     pub presign_key_file: Vec<PathBuf>,
     /// A file that holds a GC key, JSON of exactly `access_key_id`, `secret_access_key` and
-    /// `prefix` (ending in `/`): a scoped key with a list and a delete right on the prefix, that
+    /// `prefix` (ending in `/`): a scoped key with a list, a delete and an abort right on the prefix, that
     /// lists (ListObjectsV2 and ListMultipartUploads, each with a prefix inside its own), heads,
     /// deletes and aborts uploads there and does nothing else; it is refused on a presigned URL. Give the flag once for each such key; all key ids must differ. Only its
     /// owner may read it (mode 0600).
     #[arg(long)]
     pub gc_key_file: Vec<PathBuf>,
     /// A file that holds a scoped key, JSON of exactly `access_key_id`, `secret_access_key`,
-    /// `read_prefixes`, `write_prefixes` and `delete_prefixes`, and optionally `list_prefixes`
+    /// `read_prefixes`, `write_prefixes` and `delete_prefixes`
     /// (lists of prefixes, each ending in `/`; the lists may be empty but not all): a
-    /// header-signed key that gets, heads and lists under its read prefixes, heads and lists under
-    /// its list prefixes, creates objects and multipart uploads under its write prefixes
-    /// (create-only: no `If-Match`, no copy) and deletes objects and aborts uploads under its
-    /// delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. Give the flag once for each such key;
+    /// header-signed key that gets, heads and lists under its read prefixes, creates objects and
+    /// multipart uploads under its write prefixes (create-only: no `If-Match`, no copy; it aborts
+    /// uploads there) and deletes objects under its delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. Give the flag once for each such key;
     /// all key ids must differ. Only its owner may read it (mode 0600).
     #[arg(long)]
     pub scoped_key_file: Vec<PathBuf>,

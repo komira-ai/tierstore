@@ -21,8 +21,6 @@ const FULL: (&str, &str) = (KEY_ID, SECRET);
 const READER: (&str, &str) = ("AKIDREADER", "reader-secret");
 /// Reads `cas/` and nothing else.
 const SCOPED: (&str, &str) = ("scoped-reader", "scoped-secret-0123456789");
-/// Lists and heads `cas/` and does not read it.
-const LISTER: (&str, &str) = ("scoped-lister", "lister-secret-0123456789");
 const GC: (&str, &str) = ("pack-gc", "gc-secret-0123456789");
 
 /// A server whose clock is set by hand, with a read-only key, a scoped key that reads `cas/`
@@ -41,18 +39,10 @@ async fn fixture() -> Fixture {
         config.read_only_keys = vec![AccessKey::new(READER.0, READER.1)];
         let reads = Prefixes {
             read: &["cas/"],
-            list: &[],
             write: &[],
             delete: &[],
         };
-        let lists = Prefixes {
-            list: &["cas/"],
-            ..Prefixes::default()
-        };
-        config.scoped_keys = vec![
-            ScopedKey::new(SCOPED.0, SCOPED.1, &reads).unwrap(),
-            ScopedKey::new(LISTER.0, LISTER.1, &lists).unwrap(),
-        ];
+        config.scoped_keys = vec![ScopedKey::new(SCOPED.0, SCOPED.1, &reads).unwrap()];
         config.gc_keys = vec![GcKey::new(GC.0, GC.1, "cas/").unwrap()];
         config.presign_max_expires = Duration::from_secs(600);
     })
@@ -171,8 +161,7 @@ async fn a_presigned_get_serves_whole_ranged_and_head_for_each_key_that_reads() 
 
 /// Asserts that a presigned GET URL has the rights of the key that signed it and no more: a scoped
 /// key's URL for an object outside its read prefixes is 403 `AccessDenied` and shows nothing of the
-/// object, while the full and the read-only key's URLs for it are served; a GC key, a scoped key
-/// with a list right and no read prefix, an unknown
+/// object, while the full and the read-only key's URLs for it are served; a GC key, an unknown
 /// key id and a key id in another region sign no URL (`InvalidAccessKeyId`); and a URL signed
 /// with the wrong secret is `SignatureDoesNotMatch`.
 #[tokio::test(start_paused = true)]
@@ -189,7 +178,7 @@ async fn a_presigned_get_has_the_rights_of_its_key_and_no_more() {
     assert_eq!(message(&outside), OUT_OF_SCOPE);
     let inside = f.send("GET", &get_url(SCOPED, "cas/a", 300), None).await;
     assert_eq!(inside.body, "CONTENT-OF-A");
-    for key in [GC, LISTER, ("not-held", "any-secret-0123456789")] {
+    for key in [GC, ("not-held", "any-secret-0123456789")] {
         let reply = f.send("GET", &get_url(key, "cas/a", 300), None).await;
         let wanted = (403, "InvalidAccessKeyId".to_owned());
         assert_eq!(refused(&reply), wanted, "{}", key.0);

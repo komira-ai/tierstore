@@ -1,6 +1,7 @@
-//! The scoped key: a header-signed key that has rights (read, list, write, delete) under
-//! prefixes the key file lists, and does nothing else. The GC key (see `gc`) is one instance of
-//! it: delete and list on its one prefix.
+//! The scoped key: a header-signed key that has rights (read, write, delete) under prefixes the
+//! key file lists, and does nothing else. The GC key (see `gc`) is one instance of it: it has,
+//! on its one prefix, two rights a key file cannot give, a list right and an abort right, besides
+//! delete.
 //!
 //! A server has any number of them (`--scoped-key-file`, one file per key, mode 0600, the file
 //! itself and owned by the user the server runs as):
@@ -9,13 +10,10 @@
 //! {"access_key_id": "frontend-packs", "secret_access_key": "...",
 //!  "read_prefixes": ["cas/"],
 //!  "write_prefixes": ["cas/f/fe1/"],
-//!  "delete_prefixes": [],
-//!  "list_prefixes": []}
+//!  "delete_prefixes": []}
 //! ```
 //!
-//! The first five fields are required; `list_prefixes` is optional and is empty when absent (a
-//! file of the release before has no such field: it loads and means what it did, as a read
-//! prefix always let the key list). No other field is allowed. Each prefix ends in `/` and is not
+//! All five fields are required and no other is allowed. Each prefix ends in `/` and is not
 //! `_journal/` or `_tiering/`, under them, a prefix of them, or a path with one of those names as
 //! a segment. The lists may overlap, a list may be empty, and a key whose lists are
 //! all empty is refused (it could do nothing). A request signed by the key is allowed for the
@@ -26,12 +24,14 @@
 //! - **read**: GetObject and HeadObject of such a key; ListObjectsV2 and ListMultipartUploads
 //!   (`GET ?uploads`) with a `prefix` parameter that starts with a read prefix (a list with no
 //!   prefix, or one outside, is refused and not filtered);
-//! - **list**: the same two listings with a `prefix` that starts with a list prefix, and
-//!   HeadObject of such a key, but never GetObject;
+//! - **list** (a GC key only, never a key file): the same two listings with a `prefix` that
+//!   starts with a list prefix, and a header-signed HeadObject of such a key, but never GetObject;
 //! - **write**: a create-only PutObject (no `If-Match`, and `If-None-Match` absent or `*`), and
 //!   the calls of a multipart upload of such a key: CreateMultipartUpload, UploadPart,
 //!   CompleteMultipartUpload and AbortMultipartUpload;
-//! - **delete**: DeleteObject of such a key, and AbortMultipartUpload of an upload of one.
+//! - **delete**: DeleteObject of such a key. A delete prefix does not allow an abort: a key that
+//!   can delete an object cannot cancel another client's upload;
+//! - **abort** (a GC key only, never a key file): AbortMultipartUpload of such a key.
 //!
 //! Everything else is `403 AccessDenied`, answered before the body is read: a replacing put
 //! (`If-Match`), a copy (`x-amz-copy-source`, on a put or on a part), a call on the bucket itself
@@ -40,7 +40,7 @@
 //! key outside the list its kind needs: a read prefix does not let the key write, and a write
 //! prefix does not let it read. A put over a key that exists is `412` as for every create-only
 //! put. A presigned URL signed with the key is good for a `GET` or `HEAD` of one object under a read
-//! prefix, and for nothing else (see `presign`).
+//! prefix, and for nothing else, a list prefix included (see `presign`).
 //!
 //! The refusals come in this order: the signature and the key id, then the method, then the path
 //! and query are decoded, then a listing of uploads is held to its `prefix` (a role's
@@ -84,20 +84,24 @@ pub(crate) const OUT_OF_SCOPE: Refusal = Refusal {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Scopes {
     read: Vec<String>,
+    /// Only a GC key has list prefixes.
     list: Vec<String>,
     write: Vec<String>,
     delete: Vec<String>,
+    /// Only a GC key has abort prefixes.
+    abort: Vec<String>,
 }
 
 impl Scopes {
-    /// The scopes of a key that has only a list and a delete right, under `prefix`: what a GC key
-    /// is. The caller has checked the prefix.
+    /// The scopes of a key that has only a list, a delete and an abort right, under `prefix`: what
+    /// a GC key is. The caller has checked the prefix.
     pub(super) fn listing_and_deleting(prefix: &str) -> Self {
         Self {
             read: Vec::new(),
             list: vec![prefix.to_owned()],
             write: Vec::new(),
             delete: vec![prefix.to_owned()],
+            abort: vec![prefix.to_owned()],
         }
     }
 
@@ -147,7 +151,7 @@ fn valid_prefix(prefix: &str) -> Result<(), PresignError> {
     Ok(())
 }
 
-/// A key that reads, lists, creates and deletes under the prefixes of four lists.
+/// A key that reads, creates and deletes under the prefixes of three lists.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScopedKey {
     key: AccessKey,
@@ -162,8 +166,6 @@ struct KeyFile {
     read_prefixes: Vec<String>,
     write_prefixes: Vec<String>,
     delete_prefixes: Vec<String>,
-    #[serde(default)]
-    list_prefixes: Vec<String>,
 }
 
 /// The prefixes of a [`ScopedKey`], by what the key may do under them.
@@ -171,8 +173,6 @@ struct KeyFile {
 pub struct Prefixes<'a> {
     /// Where the key may read, head and list.
     pub read: &'a [&'a str],
-    /// Where the key may list and head, but not read.
-    pub list: &'a [&'a str],
     /// Where the key may create objects and uploads.
     pub write: &'a [&'a str],
     /// Where the key may delete objects.
@@ -180,24 +180,23 @@ pub struct Prefixes<'a> {
 }
 
 impl ScopedKey {
-    /// The key with this id and secret, limited to the prefixes it may read, list, create under
-    /// and delete under.
+    /// The key with this id and secret, limited to the prefixes it may read, create under and
+    /// delete under.
     ///
     /// # Errors
     /// [`PresignError::Key`] for an empty id or secret, an id with a `/`, `,`, `=` or a
     /// character that is not printable ASCII, a prefix that is not valid, does not end in `/`, or
-    /// is or contains `_journal/` or `_tiering/`, and lists that are all empty.
+    /// is or contains `_journal/` or `_tiering/`, and three lists that are all empty.
     pub fn new(id: &str, secret: &str, prefixes: &Prefixes<'_>) -> Result<Self, PresignError> {
         check_credentials(id, secret)?;
         let Prefixes {
             read,
-            list,
             write,
             delete,
         } = *prefixes;
-        let lists = [read, list, write, delete];
+        let lists = [read, write, delete];
         if lists.iter().all(|list| list.is_empty()) {
-            return Err(PresignError::Key("the prefix lists are all empty"));
+            return Err(PresignError::Key("the three prefix lists are all empty"));
         }
         for prefix in lists.iter().flat_map(|list| list.iter()) {
             valid_prefix(prefix)?;
@@ -205,9 +204,10 @@ impl ScopedKey {
         let own = |list: &[&str]| list.iter().map(|prefix| (*prefix).to_owned()).collect();
         let scopes = Scopes {
             read: own(read),
-            list: own(list),
+            list: Vec::new(),
             write: own(write),
             delete: own(delete),
+            abort: Vec::new(),
         };
         Ok(Self {
             key: AccessKey::new(id, secret),
@@ -216,7 +216,7 @@ impl ScopedKey {
     }
 
     /// The key in the file `path`: JSON of exactly `access_key_id`, `secret_access_key`,
-    /// `read_prefixes`, `write_prefixes` and `delete_prefixes`, and optionally `list_prefixes`, mode 0600 or tighter, the file
+    /// `read_prefixes`, `write_prefixes` and `delete_prefixes`, mode 0600 or tighter, the file
     /// itself, owned by the user the server runs as.
     ///
     /// # Errors
@@ -229,21 +229,18 @@ impl ScopedKey {
         let file = parsed.map_err(|_| {
             fail(
                 "not JSON of exactly access_key_id, secret_access_key, read_prefixes, \
-                 write_prefixes and delete_prefixes, and optionally list_prefixes (each \
-                 a list of strings)",
+                 write_prefixes and delete_prefixes (the last three lists of strings)",
             )
         })?;
         let lists = [
             &file.read_prefixes,
-            &file.list_prefixes,
             &file.write_prefixes,
             &file.delete_prefixes,
         ]
         .map(|list| list.iter().map(String::as_str).collect::<Vec<_>>());
-        let [read, list, write, delete] = &lists;
+        let [read, write, delete] = &lists;
         let prefixes = Prefixes {
             read,
-            list,
             write,
             delete,
         };
@@ -261,12 +258,6 @@ impl ScopedKey {
     #[must_use]
     pub fn read_prefixes(&self) -> &[String] {
         &self.scopes.read
-    }
-
-    /// The prefixes the key may list and head under.
-    #[must_use]
-    pub fn list_prefixes(&self) -> &[String] {
-        &self.scopes.list
     }
 
     /// The prefixes the key may create objects and uploads under.
@@ -355,7 +346,15 @@ pub(super) fn permit(
         }
         (&Method::GET, Target::Object(key), false) => covers(&scopes.read, key, true),
         (&Method::HEAD, Target::Object(key), false) => {
-            covers(&scopes.read, key, true).or_else(|_| covers(&scopes.list, key, true))
+            // A presigned URL (no `authorization` header) is held to the read prefixes.
+            let signed = parts.headers.contains_key("authorization");
+            covers(&scopes.read, key, true).or_else(|refused| {
+                if signed {
+                    covers(&scopes.list, key, true)
+                } else {
+                    Err(refused)
+                }
+            })
         }
         (&Method::PUT, Target::Object(key), false) => {
             covers(&scopes.write, key, true)?;
@@ -369,7 +368,7 @@ pub(super) fn permit(
             covers(&scopes.write, key, true)
         }
         (&Method::DELETE, Target::Object(key), true) => {
-            covers(&scopes.write, key, true).or_else(|_| covers(&scopes.delete, key, true))
+            covers(&scopes.write, key, true).or_else(|_| covers(&scopes.abort, key, true))
         }
         (&Method::DELETE, Target::Object(key), false) => covers(&scopes.delete, key, true),
         _ => Err(NOT_ALLOWED),

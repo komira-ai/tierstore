@@ -96,7 +96,7 @@
 //! A credential that may write one object under a prefix, and expires, is a presigned PUT URL: see [`presign`], and
 //! [`ServerConfig::presign_keys`] for the keys that sign them (`--presign-key-file` in the binary).
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
-//! GC key, which is a scoped key with a list and a delete right on its prefix: see [`gc`], and
+//! GC key, which is a scoped key with a list, a delete and an abort right on its prefix: see [`gc`], and
 //! [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
 //! A key that reads, lists, creates and deletes under the prefixes of the lists in its key file, and replaces and
@@ -284,7 +284,7 @@ mod request_tests;
 #[cfg(test)]
 mod role_tests;
 #[cfg(test)]
-mod scoped_list_tests;
+mod scoped_rights_tests;
 #[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
