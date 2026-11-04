@@ -270,7 +270,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             Some((first_at, first)) => {
                 if let Some(name) = differing(first, &this) {
                     let why = format!(
-                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime and require_auth"
+                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth and stage_read"
                     );
                     return Err(invalid(&format!("{at}.params.{name}"), why));
                 }
