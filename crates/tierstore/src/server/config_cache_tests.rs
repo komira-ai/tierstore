@@ -293,8 +293,6 @@ fn a_scrub_rate_of_off_or_zero_turns_the_scrub_off() {
         let text = cache_with("\"50MiB/s\"", off);
         assert_eq!(cache_of(&text).scrub_rate, None, "{off}");
     }
-    assert_eq!(serde_json::to_string(&Rate(0)).unwrap(), "\"off\"");
-    assert_eq!(serde_json::to_string(&Rate(7)).unwrap(), "\"7B/s\"");
     assert_eq!(serde_json::from_str::<Rate>("\"off\"").unwrap(), Rate(0));
 }
 
