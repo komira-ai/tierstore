@@ -125,7 +125,7 @@ fn certificate(dir: &TestDir) -> (String, String) {
 #[test]
 fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-tls-config");
-    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let access = private(&dir, "access.key", "AKID\na-long-enough-secret\n");
     let (cert, key) = certificate(&dir);
 
     let without = file(&dir, &access, "");
