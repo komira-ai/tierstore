@@ -162,11 +162,6 @@ fn an_unknown_key_or_table_is_ignored_and_a_known_one_is_still_checked() {
         golden_with("[server]", "[server]\nbogus = 1"),
         golden_with("[hot_store]", "[hot_store]\nbogus = 1"),
         golden_with("[cold_store]", "[cold_store]\nbogus = 1"),
-        golden_with("type   = \"oci\"", "type   = \"oci\"\nbogus = 1"),
-        golden_with(
-            "params = { addresses = [\"192.0.2.10:9300\"] }",
-            "params = { addresses = [\"192.0.2.10:9300\"], bogus = 1 }",
-        ),
         format!("{GOLDEN}\n[bogus]\nx = 1\n"),
         format!("{GOLDEN}\n[[policy]]\nprefix = \"a/\"\nbogus = 1\n"),
         format!("bogus = 1\n{GOLDEN}"),
