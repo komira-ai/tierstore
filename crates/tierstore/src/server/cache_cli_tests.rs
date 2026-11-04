@@ -760,11 +760,13 @@ async fn a_build_node_with_a_bad_oci_certificate_is_refused_before_the_cache_ope
 #[tokio::test]
 async fn a_taken_oci_address_stops_the_start_and_closes_the_s3_listener() {
     let node = Node::new("tscache-cli-oci-taken");
+    // The taken listener is bound before the free address is chosen, so the system cannot hand the
+    // same port to both.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let busy = taken.local_addr().unwrap();
     let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let s3 = free.local_addr().unwrap();
     drop(free);
-    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let busy = taken.local_addr().unwrap();
     let text = node.text("", "").replace("127.0.0.1:0", &s3.to_string());
     let text = format!(
         "{text}{}",
