@@ -6,7 +6,7 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 
 | What | Where | Format |
 |---|---|---|
-| Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT` or `DELETE`), `key`, `size`, `time` |
+| Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE`, `PUTRESERVED` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` (see below) |
 | Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | empty object |
 | Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
@@ -14,6 +14,15 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | Cache sidecar | `obj/<aa>/<bb>/<hex>.meta` in the local cache directory | JSON: `key`, `size`, `sha256`, `tag`, `modified` |
 | Update hook record, two slots (Linux) | `state.json` in the hook's state directory | pretty JSON: `schema`, `serving`, `previous`, `mode`, `markers`, `boot_id`, `guard_placed` |
 | Update hook record, single instance (macOS) | `state.json` in the hook's state directory | pretty JSON: `schema`, `kind`, `updating`, `markers`, `from`, `to`, `version` |
+
+### Journal operations and tags
+
+- `PUT`: written by a release that holds no reservation; the object is copied to the cold tier. No tag.
+- `DELETE`: the object was deleted from both tiers; `size` is zero. No tag.
+- `PUTRESERVED`: a put that holds a reservation of the key in the cold tier. `cold_tag` names the reservation; the put replaces it. No `hot_tag`.
+- `PUTMIRROR`: an object a read copied from the cold tier into the hot tier. `cold_tag` is the tag the cold object had and `hot_tag` is the tag the hot tier gave the copy. It is never copied to the cold tier.
+
+Both tags are absent in the entries of releases before these operations, and `hot_tag` is absent in the mirrors of releases before that field. An entry with an operation this release does not know reads as `Unknown` and is skipped.
 
 ## The rule
 
