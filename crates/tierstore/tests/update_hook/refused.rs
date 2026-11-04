@@ -158,7 +158,7 @@ fn a_start_whose_condition_fails_is_not_taken_for_a_running_instance() {
     rig.step("cutover").fails("not_ready");
     assert_eq!(rig.redirect(), Some(a));
     assert_eq!(rig.running(), [a]);
-    assert_eq!(kinds(&rig.effects()), ["set kbf_guard_tierstore"]);
+    assert_eq!(kinds(&rig.effects()), ["set tierstore_guard"]);
 }
 
 /// Asserts the same in a restart (forced by `mode = "restart"`), where `cutover` moves the redirect

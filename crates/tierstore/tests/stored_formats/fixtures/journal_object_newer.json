@@ -1,0 +1,1 @@
+[{"op":"PUT","key":"models/a.bin","size":5,"time":1790000000000,"checksum":"added-later"},{"op":"RENAME","key":"models/b.bin","size":0,"time":1790000000500}]

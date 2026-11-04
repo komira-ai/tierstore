@@ -45,6 +45,16 @@ pub const RELEASE: &str = "tierstore";
 /// The directory of the world, beside the fake programs.
 pub const WORLD: &str = "state";
 
+/// The value of a call on the world's files, which fails only where the test cannot use the
+/// directory it gave. The stand-ins stop with the call and the reason, as a failed assertion
+/// does; the functions that use it say so under `# Panics`.
+pub(super) fn world<T, E: std::fmt::Display>(done: Result<T, E>, what: &str) -> T {
+    match done {
+        Ok(value) => value,
+        Err(error) => panic!("{what}: {error}"),
+    }
+}
+
 /// What a call answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Reply {
@@ -126,16 +136,16 @@ impl World {
     }
 
     fn write(&self, name: &str, text: &str) {
-        fs::write(self.file(name), text).expect("write to the world");
+        world(fs::write(self.file(name), text), "write to the world");
     }
 
     fn append(&self, name: &str, line: &str) {
-        let mut file = fs::OpenOptions::new()
+        let opened = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.file(name))
-            .expect("append to the world");
-        writeln!(file, "{line}").expect("append to the world");
+            .open(self.file(name));
+        let mut file = world(opened, "append to the world");
+        world(writeln!(file, "{line}"), "append to the world");
     }
 
     /// The number a file of the world holds, if it holds one.
@@ -194,8 +204,8 @@ impl World {
         for pipe in ["held", "release"] {
             let path = self.file(pipe);
             let _ = fs::remove_file(&path);
-            mknodat(CWD, &path, FileType::Fifo, Mode::from_raw_mode(0o600), 0)
-                .expect("make a pipe");
+            let made = mknodat(CWD, &path, FileType::Fifo, Mode::from_raw_mode(0o600), 0);
+            world(made, "make a pipe");
         }
         self.write("hold-after", &(self.lines("calls").len() + n).to_string());
     }
@@ -206,9 +216,9 @@ impl World {
     /// The pipe cannot be read.
     pub fn wait_held(&self) {
         let mut said = Vec::new();
-        fs::File::open(self.file("held"))
-            .and_then(|mut pipe| pipe.read_to_end(&mut said))
-            .expect("read the pipe held");
+        let read =
+            fs::File::open(self.file("held")).and_then(|mut pipe| pipe.read_to_end(&mut said));
+        world(read, "read the pipe held");
     }
 
     /// Lets the held hook go on.
@@ -216,23 +226,23 @@ impl World {
     /// # Panics
     /// The pipe cannot be opened.
     pub fn release(&self) {
-        fs::OpenOptions::new()
+        let opened = fs::OpenOptions::new()
             .write(true)
-            .open(self.file("release"))
-            .expect("open the pipe release");
+            .open(self.file("release"));
+        world(opened, "open the pipe release");
     }
 
     /// The side of the handshake the program holding the hook takes.
     fn hold(&self) {
-        fs::OpenOptions::new()
+        let said = fs::OpenOptions::new()
             .write(true)
             .open(self.file("held"))
-            .and_then(|mut pipe| pipe.write_all(b"held\n"))
-            .expect("write the pipe held");
+            .and_then(|mut pipe| pipe.write_all(b"held\n"));
+        world(said, "write the pipe held");
         let mut rest = Vec::new();
-        fs::File::open(self.file("release"))
-            .and_then(|mut pipe| pipe.read_to_end(&mut rest))
-            .expect("read the pipe release");
+        let read =
+            fs::File::open(self.file("release")).and_then(|mut pipe| pipe.read_to_end(&mut rest));
+        world(read, "read the pipe release");
     }
 
     /// A reboot: no unit runs and no table is loaded.
@@ -295,7 +305,7 @@ impl World {
     }
 
     fn set_table(&self, name: &str, rules: &[String]) {
-        fs::create_dir_all(self.file("tables")).expect("tables");
+        world(fs::create_dir_all(self.file("tables")), "tables");
         let text: String = rules.iter().map(|rule| format!("{rule}\n")).collect();
         self.write(&format!("tables/{name}"), &text);
         self.append("effects", &format!("set {name} {}", rules.join(" ; ")));
@@ -362,7 +372,8 @@ impl World {
                 if self.table(table).is_none() {
                     return absent("delete", table);
                 }
-                fs::remove_file(self.file(&format!("tables/{table}"))).expect("delete a table");
+                let deleted = fs::remove_file(self.file(&format!("tables/{table}")));
+                world(deleted, "delete a table");
                 self.append("effects", &format!("delete {table}"));
                 Reply::ok("")
             }
@@ -413,7 +424,7 @@ impl World {
             ["start", "--", unit] => self.start(unit),
             ["stop", "--", unit] => {
                 if self.unit(unit).exists() {
-                    fs::remove_file(self.unit(unit)).expect("stop a unit");
+                    world(fs::remove_file(self.unit(unit)), "stop a unit");
                     self.append("effects", &format!("stop {unit}"));
                 }
                 Reply::ok("")
@@ -458,9 +469,9 @@ impl World {
         };
         let seq = self.number("seq").unwrap_or(0) + 1;
         self.write("seq", &seq.to_string());
-        fs::create_dir_all(self.file("units")).expect("units");
+        world(fs::create_dir_all(self.file("units")), "units");
         let text = format!("{seq}\n{}\n", release.display());
-        fs::write(self.unit(unit), text).expect("start a unit");
+        world(fs::write(self.unit(unit), text), "start a unit");
         self.append("effects", &format!("start {unit}"));
         Reply::ok("")
     }

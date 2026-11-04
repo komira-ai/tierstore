@@ -492,10 +492,11 @@ async fn a_refused_scoped_call_is_403_without_its_body_being_read() {
     }
 }
 
-/// Asserts that a presigned URL signed with a scoped key is refused, for every method: a URL's
-/// key must be a presigning key, and a scoped key signs in the header only; the objects stay.
+/// Asserts that a presigned URL signed with a scoped key is refused for a PUT and a DELETE (a URL
+/// of a key that reads is good for a GET or HEAD only), and for a GET and HEAD of `w/a`, which
+/// the key may write but not read; the objects stay.
 #[tokio::test(start_paused = true)]
-async fn a_presigned_url_signed_with_a_scoped_key_is_refused() {
+async fn a_presigned_url_signed_with_a_scoped_key_reads_only_what_the_key_reads() {
     let rig = rig().await;
     rig.put("r/a", b"CONTENT-OF-A").await;
     let key = AccessKey::new(KEY.0, KEY.1);
@@ -509,11 +510,7 @@ async fn a_presigned_url_signed_with_a_scoped_key_is_refused() {
             .body(http_body_util::Full::new(bytes::Bytes::from_static(b"x")))
             .unwrap();
         let reply = rig.send_raw(signed).await;
-        assert_eq!(
-            denied(&reply),
-            (403, "InvalidAccessKeyId".to_owned()),
-            "{method}"
-        );
+        assert_eq!(denied(&reply), access_denied(), "{method}");
     }
     assert!(!exists(&rig, "w/a").await);
     assert_eq!(rig.get("r/a", None).await.body, "CONTENT-OF-A");

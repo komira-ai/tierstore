@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, UNIX_EPOCH};
 
 use super::*;
 use crate::testdir::TestDir;
@@ -96,6 +96,30 @@ fn the_tarball_holds_the_binary_alone_owned_by_root_mode_0755_at_time_0() {
     );
 }
 
+/// A sink that refuses every write.
+struct Full;
+
+impl Write for Full {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("the sink is full"))
+    }
+}
+
+#[test]
+fn a_tarball_that_cannot_be_written_to_its_sink_is_an_error_that_says_so() {
+    // Asserts the error of a sink that refuses its writes: the message names the tarball and
+    // the sink's own error, instead of a panic.
+    let error = tarball_to(Full, "tierstore", BINARY).err();
+    assert_eq!(
+        error.as_deref(),
+        Some("cannot write the tarball: the sink is full")
+    );
+}
+
 #[test]
 fn the_gzip_stream_names_no_file_and_no_time() {
     // Catches: a gzip header carrying the time it was written (so two runs of one
@@ -114,10 +138,10 @@ fn one_binary_packages_to_the_same_bytes_whenever_and_wherever_it_is_built() {
     // both, and must give byte-identical tarballs and identical SHA256SUMS lines.
     let mut sums = Vec::new();
     let mut tgzs = Vec::new();
-    for (n, age) in [("early", 86_400 * 365), ("late", 5)] {
+    for (n, at) in [("early", 1_800_000_000), ("late", 1_900_000_000)] {
         let dir = scratch(&format!("same-bytes-{n}"));
         let (binary, sbom) = inputs(&dir);
-        let when = SystemTime::now() - Duration::from_secs(age);
+        let when = UNIX_EPOCH + Duration::from_secs(at);
         std::fs::File::options()
             .write(true)
             .open(&binary)
@@ -259,7 +283,7 @@ fn check_tarball_names_each_defect_of_a_planted_tarball() {
         (
             "other bytes",
             tgz_of(&mut [(good_header(n), b"tierstore's BYTES")]),
-            vec![p("the content is not the binary's bytes")],
+            vec![p("the content is not the bytes given")],
         ),
         (
             "two entries",
@@ -499,4 +523,194 @@ fn the_macos_arm64_binary_is_packaged_by_the_same_rules_under_its_own_name() {
     );
     let linux_sums = std::fs::read_to_string(out.join("SHA256SUMS.linux-arm64")).expect("sums");
     assert!(!linux_sums.contains("macos"), "{linux_sums}");
+}
+
+const NOTICE: &[u8] = b"Third-party licences of tierstore\n";
+
+#[test]
+fn a_tarball_with_the_notice_holds_the_binary_then_the_notice_and_extracts_the_binary_by_name() {
+    // Asserts the two entries in order (the binary 0755, the notice 0644, both owned by root at
+    // time 0), the assets and sums lines of a package with a notice, and that a host's
+    // `tar -xzf <tarball> tierstore` still extracts exactly the binary: the notice is additive.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("with-notice");
+    let (binary, sbom) = inputs(&dir);
+    let notice = dir.join("THIRD-PARTY-LICENSES.txt");
+    std::fs::write(&notice, NOTICE).expect("notice");
+    let out = dir.join("dist");
+    package_with(
+        &binary,
+        &sbom,
+        Some(&notice),
+        Platform::LinuxX86_64,
+        COMMIT,
+        &out,
+    )
+    .expect("package");
+    let stem = format!("tierstore-{COMMIT}-linux-x86_64");
+    let tgz_path = out.join(format!("{stem}.tar.gz"));
+    let tgz = std::fs::read(&tgz_path).expect("tgz");
+    assert_eq!(
+        check_entries(
+            &tgz,
+            &[
+                ("tierstore", 0o755, BINARY),
+                ("THIRD-PARTY-LICENSES.txt", 0o644, NOTICE)
+            ]
+        ),
+        Vec::<String>::new()
+    );
+    let tar = gunzip(&tgz);
+    let mut archive = tar::Archive::new(&tar[..]);
+    let names: Vec<String> = archive
+        .entries()
+        .expect("entries")
+        .map(|e| {
+            let e = e.expect("entry");
+            let h = e.header();
+            format!(
+                "{} {:o} {} {} {}",
+                e.path().expect("path").display(),
+                h.mode().expect("mode"),
+                h.uid().expect("uid"),
+                h.gid().expect("gid"),
+                h.mtime().expect("mtime")
+            )
+        })
+        .collect();
+    assert_eq!(
+        names,
+        ["tierstore 755 0 0 0", "THIRD-PARTY-LICENSES.txt 644 0 0 0"]
+    );
+    let sums = std::fs::read_to_string(out.join("SHA256SUMS.linux-x86_64")).expect("sums");
+    assert!(
+        sums.contains(&format!("{}  {stem}.tar.gz\n", Sha256::of(&tgz))),
+        "{sums}"
+    );
+    let into = dir.join("x");
+    std::fs::create_dir(&into).expect("x");
+    let extract = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&tgz_path)
+        .arg("-C")
+        .arg(&into)
+        .arg("tierstore")
+        .status()
+        .expect("tar -x");
+    assert!(extract.success());
+    let file = into.join("tierstore");
+    assert_eq!(std::fs::read(&file).expect("extracted"), BINARY);
+    assert_eq!(
+        std::fs::metadata(&file).expect("stat").permissions().mode() & 0o111,
+        0o111
+    );
+    assert!(!into.join("THIRD-PARTY-LICENSES.txt").exists());
+    // Left here, this executable would be taken for an object by the coverage report.
+    std::fs::remove_file(&file).expect("remove the extracted copy");
+}
+
+#[test]
+fn check_entries_names_each_defect_of_the_notice_and_of_a_missing_or_extra_entry() {
+    // Catches: a tarball whose notice is missing, has the binary's mode, other bytes or sits
+    // in front of the binary being accepted as the tarball written; each row plants one defect.
+    let expected: [Entry; 2] = [
+        ("tierstore", 0o755, BINARY),
+        (LICENSES_NAME, LICENSES_MODE, NOTICE),
+    ];
+    let header = |name: &str, mode: u32, size: usize| {
+        let mut h = good_header(name);
+        h.set_mode(mode);
+        h.set_size(size as u64);
+        h
+    };
+    let rows: Vec<(&str, Vec<u8>, Vec<String>)> = vec![
+        (
+            "the binary alone",
+            tgz_of(&mut [(good_header("tierstore"), BINARY)]),
+            vec!["1 entries, not 2".to_owned()],
+        ),
+        (
+            "the notice with the binary's mode",
+            tgz_of(&mut [
+                (good_header("tierstore"), BINARY),
+                (header(LICENSES_NAME, 0o755, NOTICE.len()), NOTICE),
+            ]),
+            vec![format!("{LICENSES_NAME}: the mode is 755, not 644")],
+        ),
+        (
+            "other notice bytes",
+            tgz_of(&mut [
+                (good_header("tierstore"), BINARY),
+                (header(LICENSES_NAME, 0o644, 5), b"other"),
+            ]),
+            vec![format!(
+                "{LICENSES_NAME}: the content is not the bytes given"
+            )],
+        ),
+        (
+            "the notice first",
+            tgz_of(&mut [
+                (header(LICENSES_NAME, 0o644, NOTICE.len()), NOTICE),
+                (good_header("tierstore"), BINARY),
+            ]),
+            vec![
+                format!("{LICENSES_NAME}: the name is not \"tierstore\""),
+                format!("{LICENSES_NAME}: the mode is 644, not 755"),
+                format!("{LICENSES_NAME}: the content is not the bytes given"),
+                "tierstore: the name is not \"THIRD-PARTY-LICENSES.txt\"".to_owned(),
+                "tierstore: the mode is 755, not 644".to_owned(),
+                "tierstore: the content is not the bytes given".to_owned(),
+            ],
+        ),
+        (
+            "a third entry",
+            tgz_of(&mut [
+                (good_header("tierstore"), BINARY),
+                (header(LICENSES_NAME, 0o644, NOTICE.len()), NOTICE),
+                (good_header("extra"), BINARY),
+            ]),
+            vec!["3 entries, not 2".to_owned()],
+        ),
+    ];
+    for (what, tgz, want) in rows {
+        assert_eq!(check_entries(&tgz, &expected), want, "{what}");
+    }
+}
+
+#[test]
+fn package_refuses_an_empty_or_unreadable_notice_before_writing_anything() {
+    // Catches: a release packaged with an empty notice, or with the notice silently left
+    // out when its file is missing.
+    let dir = scratch("bad-notice");
+    let (binary, sbom) = inputs(&dir);
+    let out = dir.join("dist");
+    let empty = dir.join("empty.txt");
+    std::fs::write(&empty, b"").expect("empty");
+    assert_eq!(
+        package_with(
+            &binary,
+            &sbom,
+            Some(&empty),
+            Platform::LinuxArm64,
+            COMMIT,
+            &out
+        ),
+        Err(Error::Failed("the licence notice is empty".to_owned()))
+    );
+    let missing = dir.join("absent.txt");
+    let e = package_with(
+        &binary,
+        &sbom,
+        Some(&missing),
+        Platform::LinuxArm64,
+        COMMIT,
+        &out,
+    )
+    .expect_err("missing");
+    assert!(
+        e.to_string()
+            .starts_with(&format!("read {}: ", missing.display())),
+        "{e}"
+    );
+    assert!(!out.exists(), "nothing is written for a refused notice");
 }

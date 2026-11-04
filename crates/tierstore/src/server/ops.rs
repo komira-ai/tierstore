@@ -9,9 +9,10 @@ use hyper::body::Body;
 use hyper::header::HeaderMap;
 use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::task::JoinError;
 
 use crate::journal::is_reserved;
-use crate::{ByteRange, Error, Meta, ReadBody};
+use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::handover::hand_over;
@@ -57,41 +58,27 @@ pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
 
-/// What a `Range` header asks for, of an object of a given size.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Window {
-    /// All of it: no range, or one that is not a single valid range.
-    Whole,
-    /// `len` bytes from `start`, the last of which is in the object.
-    Part { start: u64, len: u64 },
-    /// A range that starts at or past the end.
-    Unsatisfiable,
-}
-
-/// The first byte and the last (perhaps past the end) of `bytes=<spec>`, if it is one range.
-fn span(spec: &str, size: u64) -> Option<(u64, u64)> {
+/// The range a `Range` header asks for, if it is one valid single range (`bytes=<first>-<last>`,
+/// `bytes=<first>-` or `bytes=-<count>`); anything else is no range, and asks for the whole
+/// object. What it covers of an object is for the read to say, which knows the size
+/// ([`Span::resolve`]).
+pub(crate) fn asked(range: Option<&str>) -> Option<Span> {
+    let spec = range?.strip_prefix("bytes=")?;
     let (first, last) = spec.split_once('-')?;
     let number = |text: &str| text.parse::<u64>().ok();
     match (first, last) {
-        ("", count) => Some((size.saturating_sub(number(count)?), u64::MAX)),
-        (first, "") => Some((number(first)?, u64::MAX)),
+        ("", count) => Some(Span::Suffix(number(count)?)),
+        (first, "") => Some(Span::From {
+            first: number(first)?,
+            last: None,
+        }),
         (first, last) => {
             let (first, last) = (number(first)?, number(last)?);
-            (first <= last).then_some((first, last))
+            (first <= last).then_some(Span::From {
+                first,
+                last: Some(last),
+            })
         }
-    }
-}
-
-/// What the `Range` header, if there is one, asks for of an object of `size` bytes.
-pub(crate) fn window(range: Option<&str>, size: u64) -> Window {
-    let spec = range.and_then(|text| text.strip_prefix("bytes="));
-    match spec.and_then(|spec| span(spec, size)) {
-        None => Window::Whole,
-        Some((start, _)) if start >= size => Window::Unsatisfiable,
-        Some((start, last)) => Window::Part {
-            start,
-            len: last.min(size - 1) - start + 1,
-        },
     }
 }
 
@@ -124,6 +111,24 @@ fn read_answer(
 fn refuse_reserved(key: &str) -> Result<(), S3Error> {
     if is_reserved(key) {
         return Err(S3Error::from(Error::Reserved(key.to_owned())));
+    }
+    Ok(())
+}
+
+/// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
+/// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
+/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed), and this front does
+/// not support `encoding-type=url`. A key with one would make every page that lists it malformed.
+fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
+    let bad = |c: char| {
+        matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
+            || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+    };
+    if key.chars().any(bad) {
+        return Err(S3Error::invalid(
+            "a key may not have a character XML 1.0 forbids (U+0000-U+0008, U+000B, U+000C, \
+             U+000E-U+001F, U+FFFE, U+FFFF)",
+        ));
     }
     Ok(())
 }
@@ -207,13 +212,22 @@ fn conditional(parts: &Parts, key: &str, meta: &Meta) -> Result<Option<Answer>, 
 /// object from one tier would leave it in the other. The completion of a multipart upload is
 /// carried to its end too, so that the parts it joins are not left half joined. (A put does
 /// the same on its own, see `put_streamed`.)
-async fn detached<T, F>(call: F) -> Result<T, Error>
+pub(super) async fn detached<T, F>(call: F) -> Result<T, Error>
 where
     T: Send + 'static,
     F: Future<Output = Result<T, Error>> + Send + 'static,
 {
-    let done = tokio::spawn(call).await;
-    done.expect("a call to the backend does not panic")
+    joined(tokio::spawn(call).await)
+}
+
+/// What a call run on a task of its own came to: its result, or, if the task panicked or was
+/// cancelled, a failure of the call.
+fn joined<T>(done: Result<Result<T, Error>, JoinError>) -> Result<T, Error> {
+    done.unwrap_or_else(|lost| {
+        Err(Error::Other(format!(
+            "a call to the backend did not finish: {lost}"
+        )))
+    })
 }
 
 /// Whether a put only creates, which is what it does when it has no `If-Match` and its
@@ -262,7 +276,9 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        refuse_unsupported(parts, query, presign.is_some())?;
+        // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
+        // not parameters of the call.
+        refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         let method = parts.method.as_str();
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
@@ -299,21 +315,21 @@ impl Server {
         }
     }
 
+    /// One call to the backend, which gives the object's meta and the body as it arrives: the
+    /// headers are made from the meta and the status from the window the body holds. A
+    /// condition that is not met, or a range that is not satisfiable, drops the body unread.
     async fn get_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
-        let meta = self.backend.head(key).await?;
+        let span = asked(header(&parts.headers, "range"));
+        let Opened { meta, window, body } = self.backend.open_read(key, span).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
         }
         let mut headers = object_headers(&meta);
-        match window(header(&parts.headers, "range"), meta.size) {
-            Window::Whole => {
-                let body = self.backend.get_stream(key, None).await?;
-                Ok(read_answer(StatusCode::OK, &headers, meta.size, body))
-            }
-            Window::Part { start, len } => {
-                let range = ByteRange::new(start, len);
-                let body = self.backend.get_stream(key, Some(range)).await?;
+        match window {
+            Window::Whole => Ok(read_answer(StatusCode::OK, &headers, meta.size, body)),
+            Window::Part(range) => {
+                let (start, len) = (range.offset(), range.size());
                 let (last, size) = (start + len - 1, meta.size);
                 headers.push(("content-range", format!("bytes {start}-{last}/{size}")));
                 Ok(read_answer(
@@ -408,6 +424,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
+        refuse_unlistable(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
@@ -430,7 +447,7 @@ impl Server {
             Some(done) => done,
             None => storing.await,
         };
-        let stored = stored.expect("a call to the backend does not panic");
+        let stored = joined(stored);
         if let Some(error) = refused.take() {
             return Err(error);
         }
@@ -509,6 +526,7 @@ impl Server {
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        refuse_unlistable(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);

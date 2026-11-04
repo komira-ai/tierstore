@@ -13,7 +13,7 @@ other crate of this workspace unless the `s3` feature is on.
   `packaging/README.md` has the flags, the keys and the unit.
 
 An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
-`Authorization` header (and presigned PUT URLs). The packaging notes, the flags and the key files
+`Authorization` header (and presigned GET and PUT URLs). The packaging notes, the flags and the key files
 are in `packaging/README.md`; the roles of a key are in `src/server/keys.rs`.
 
 The operator guide (install, keys and roles, configuration, operations, troubleshooting, limits) is in `docs/`; a test of the crate (`src/server/docs_tests.rs`) holds every page of it to the code, and the site's docs pages are made from it.
@@ -25,8 +25,8 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
-release along with the file.
+in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
+file.
 
 ## When the puts are at their limit
 
@@ -47,12 +47,12 @@ What waiting costs, as the code does it:
   `--drain-deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
-- The client of kbf (`kbf-task`) retries the 503, and a connection that broke while it was still
-  sending the body of a refused PUT, with jittered waits (see its crate docs). It does not retry
-  429, 500, 502 or 504, deliberately.
+- A client should retry the 503, and a connection that broke while it was still
+  sending the body of a refused PUT, with jittered waits. A client should not retry
+  429, 500, 502 or 504, which do not mean a full put queue.
 - The 503 is sent before the body is read, so the front may close the connection under a client
   that is still sending a large body. A client that sees the reset instead of the 503 has to treat
-  it as one; `kbf-task` does.
+  it as one.
 
 ## A build node: a read cache
 
@@ -103,11 +103,10 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 
 What the counts mean:
 
-- An S3 GET reaches the proxy as a head (for the size and the conditions) and then a get. A GET
-  that is answered at the head shows only under `op="head"`: a key that exists nowhere, a
-  conditional that answers 304 or 412, a range that cannot be satisfied. So `op="head"` is a
-  lookup rate: it mixes the client's HEADs with the heads that start every GET. `op="get"`
-  counts only the reads that go on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call),
+  counted under `op="get"` whatever its outcome: a key that exists nowhere, a conditional that
+  answers 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`,
+  and none is counted at `op="head"`. So `op="head"` counts the client's HEADs alone.
 - A hit or a miss is counted when the tier answers, an error when it fails with anything but
   "not found"; an error is neither a hit nor a miss, so a tier that is down does not lower its
   hit rate and shows in `read_errors_total`.
@@ -176,13 +175,12 @@ counterpart here.
 | presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
 | GC | `--gc-key-file` | list, head, delete and abort uploads under one prefix |
 | scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
-| grant | `--grant-key-file` | signs no request; its signature on a read grant (`x-tierstore-grant`) lets the bearer GET and HEAD the objects the grant lists, and nothing else |
 
-A read grant is a token the process that starts a job makes with `server::mint_grant`; the byte
-format is in "Read grants" in `packaging/README.md`. It works on the storage front and on
-the front of a build node alike. A grant is a bearer token (replayable until it expires; use TLS
-where that matters), and the server refuses one that ends beyond `--grant-max-lifetime` (15 minutes
-by default).
+The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
+that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
+key that signed it, until it expires (at most `--presign-max-expires`, 15 minutes by default). A URL
+is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
+`packaging/README.md`.
 
 ### Scoped keys
 
@@ -206,9 +204,9 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
 - the frontend's pack store: `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`,
   `delete_prefixes: []` (add the writer prefix to the delete list to let the frontend remove its
   self-test object and the object of a failed write);
-- build history, `--history-objects 's3://<bucket>/kbf-history?endpoint=...&conditional-put=true'`
+- an append-only history store, `--history-objects 's3://<bucket>/history?endpoint=...&conditional-put=true'`
   (without the last parameter a retried chunk gets `412` for good): `read_prefixes`
-  and `write_prefixes` of `["kbf-history/"]`, `delete_prefixes: []`.
+  and `write_prefixes` of `["history/"]`, `delete_prefixes: []`.
 
 See "Scoped keys" in `packaging/README.md` for the table of calls.
 

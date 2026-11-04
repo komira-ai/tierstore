@@ -21,8 +21,8 @@ fn restore_starts_the_serving_slot() {
     assert_eq!(
         fake.changes(),
         [
-            "nft.apply kbf_guard_tierstore",
-            "nft.apply kbf_forward_tierstore",
+            "nft.apply tierstore_guard",
+            "nft.apply tierstore_forward",
             "units.start tierstore@9301.service"
         ]
     );

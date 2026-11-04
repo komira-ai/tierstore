@@ -159,6 +159,12 @@ pub(crate) fn header_text(text: &str) -> String {
         .collect()
 }
 
+/// `text` as a header value. `header_text` leaves printable ASCII only, which is always one;
+/// a text that is not is answered as `?`, so that the header is still there and shows it.
+pub(crate) fn header_value(text: &str) -> HeaderValue {
+    HeaderValue::from_str(text).unwrap_or_else(|_| HeaderValue::from_static("?"))
+}
+
 /// An answer with these headers (names in lower case) and this body.
 pub(crate) fn answer(
     status: StatusCode,
@@ -171,10 +177,10 @@ pub(crate) fn answer(
     let mut response = Response::new(body);
     *response.status_mut() = status;
     for (name, value) in headers {
-        let value = HeaderValue::from_str(&header_text(value)).expect("printable ASCII");
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static(name), value);
+        response.headers_mut().insert(
+            HeaderName::from_static(name),
+            header_value(&header_text(value)),
+        );
     }
     response
 }
@@ -203,6 +209,8 @@ pub(crate) struct S3Error {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// What the store said, for the log of the server: never sent to the client.
+    detail: Option<String>,
     headers: Vec<(&'static str, String)>,
 }
 
@@ -212,6 +220,7 @@ impl S3Error {
             status,
             code,
             message: message.into(),
+            detail: None,
             headers: Vec::new(),
         }
     }
@@ -337,6 +346,12 @@ impl S3Error {
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
+
+    /// What the store said when the client got a fixed text instead: it can hold a path of the
+    /// host or the address of a backend, so it goes to the log only.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
 }
 
 impl From<Error> for S3Error {
@@ -355,7 +370,21 @@ impl From<Error> for S3Error {
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
             Error::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
         };
-        let mut refusal = Self::new(status, code, error.to_string());
+        let generic = match &error {
+            Error::Full(_) => Some("The store has no room for this request."),
+            Error::Unsupported(_) => Some("The store does not do this call."),
+            Error::Unavailable(_) => Some("The store did not answer."),
+            Error::Other(_) => Some("We encountered an internal error."),
+            _ => None,
+        };
+        let mut refusal = match generic {
+            Some(text) => {
+                let mut hidden = Self::new(status, code, text);
+                hidden.detail = Some(error.to_string());
+                hidden
+            }
+            None => Self::new(status, code, error.to_string()),
+        };
         if matches!(error, Error::Full(_)) {
             refusal.headers.push(("retry-after", "1".to_owned()));
         }
