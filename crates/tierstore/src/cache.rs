@@ -58,6 +58,10 @@ impl Cache {
     }
 
     /// The least recently used key. Only asked for while there is a slot.
+    #[expect(
+        clippy::expect_used,
+        reason = "only asked for while the cache holds a slot"
+    )]
     fn oldest(&self) -> CacheKey {
         let first = self.order.values().next();
         first.cloned().expect("the cache holds a slot")
@@ -165,6 +169,10 @@ impl CachedStore {
 impl Backend for CachedStore {
     fn needs_length(&self) -> bool {
         self.inner.needs_length()
+    }
+
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        self.inner.same_version(a, b)
     }
 
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {

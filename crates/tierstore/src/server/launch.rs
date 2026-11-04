@@ -1,31 +1,22 @@
-//! From the command line to the settings: the flags as they are, or the file `--config` names.
+//! From the command line to the settings: the file `--config` names, and the knobs of the run.
 //!
-//! Without `--config` the flags are parsed as they always were: the same usage, the same
-//! refusals. With it, every flag that describes the data path is refused (the file holds
-//! them), the knobs of the run (the two parts of the drain) are read from the flags, and the
-//! settings are those of the file.
+//! The only flags are those of [`Args`]. A flag that used to describe the data path is refused
+//! with the key of the file that replaces it (see [`removed`]), before the parser sees it, so
+//! that the message says what to do and not that the argument is unexpected.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use clap::parser::ValueSource;
-use clap::{ArgMatches, Command, CommandFactory, Parser};
+use clap::Parser;
 
-use super::cli::Cli;
-use super::config::{
-    ConfigError, DEFAULT_DRAIN_DEADLINE, DEFAULT_DRAIN_LB_WAIT, PER_RUN, PerRun, Settings, load,
-};
+use super::cli::Args;
+use super::config::{ConfigError, PerRun, Settings, load, removed};
 
 /// What the command line made.
 #[derive(Debug)]
 pub(super) struct Launch {
-    /// The settings: the flags', or those of the file (of either shape).
+    /// The settings of the file, of any of the three shapes.
     pub settings: Settings,
-    /// Whether they were read from a file, so that a refusal speaks of its keys.
-    pub from_file: bool,
-    /// Whether `--check-config` was given (with a file): the settings are checked and nothing
-    /// is started.
+    /// Whether `--check-config` was given: the settings are checked and nothing is started.
     pub check_only: bool,
 }
 
@@ -34,74 +25,48 @@ pub(super) struct Launch {
 pub(super) enum Refused {
     /// The parser refused the flags, or was asked for the usage or the version.
     Usage(clap::Error),
-    /// The file, or its use with the flags, was refused.
+    /// The file was refused, or there is none, or a flag is one that went.
     Config(ConfigError),
+}
+
+/// The refusal of the first argument of `args` (the program name first) that is a flag the data
+/// path used to have, whether it is written `--flag value` or `--flag=value`.
+fn removed_flag(args: &[OsString]) -> Option<String> {
+    args.iter()
+        .skip(1)
+        .filter_map(|arg| arg.to_str())
+        .filter_map(|arg| arg.strip_prefix("--"))
+        .map(|arg| arg.split_once('=').map_or(arg, |(name, _)| name))
+        .find_map(removed)
 }
 
 /// The settings that `args` (the program name first) stand for.
 ///
 /// # Errors
-/// [`Refused::Usage`] for flags the parser refuses, and [`Refused::Config`] for a file that is
-/// refused or given with flags that describe the data path.
+/// [`Refused::Usage`] for flags the parser refuses, and [`Refused::Config`] for a flag that went,
+/// a start without `--config`, or a file that is refused.
 pub(super) fn resolve(args: Vec<OsString>) -> Result<Launch, Refused> {
-    let command = Cli::command();
-    // With --config the flags the file replaces are not needed, so they are not required here;
-    // an argument line that fails this parse (the usage, the version, a value that is not valid)
-    // is parsed again below, where the parser says what is wrong exactly as it always has.
-    let relaxed = command.clone().mut_args(|arg| arg.required(false));
-    let given = relaxed.try_get_matches_from(args.clone()).ok();
-    let path = given
-        .as_ref()
-        .and_then(|matches| matches.get_one::<PathBuf>("config"));
-    if let (Some(matches), Some(path)) = (given.as_ref(), path) {
-        let settings = from_file(&command, matches, path).map_err(Refused::Config)?;
-        return Ok(Launch {
-            settings,
-            from_file: true,
-            check_only: matches.get_flag("check_config"),
-        });
+    if let Some(why) = removed_flag(&args) {
+        return Err(Refused::Config(ConfigError::Removed(why)));
     }
-    let cli = Cli::try_parse_from(args).map_err(Refused::Usage)?;
-    if cli.check_config {
-        return Err(Refused::Config(ConfigError::CheckWithoutConfig));
-    }
-    Ok(Launch {
-        settings: Settings::Storage(Box::new(cli)),
-        from_file: false,
-        check_only: false,
-    })
-}
-
-/// The settings of the file at `path`, given the flags `matches` holds.
-fn from_file(
-    command: &Command,
-    matches: &ArgMatches,
-    path: &Path,
-) -> Result<Settings, ConfigError> {
-    if matches.get_flag("print_config") {
-        return Err(ConfigError::PrintWithConfig);
-    }
-    let flags: Vec<String> = command
-        .get_arguments()
-        .filter(|arg| arg.get_long().is_some_and(|long| !PER_RUN.contains(&long)))
-        .filter(|arg| matches.value_source(arg.get_id().as_str()) == Some(ValueSource::CommandLine))
-        .filter_map(|arg| arg.get_long())
-        .map(|long| format!("--{long}"))
-        .collect();
-    if !flags.is_empty() {
-        return Err(ConfigError::Conflict { flags });
-    }
-    let per_run = PerRun {
-        drain_lb_wait: matches
-            .get_one::<Duration>("drain_lb_wait")
-            .copied()
-            .unwrap_or(DEFAULT_DRAIN_LB_WAIT),
-        drain_deadline: matches
-            .get_one::<Duration>("drain_deadline")
-            .copied()
-            .unwrap_or(DEFAULT_DRAIN_DEADLINE),
+    let args = Args::try_parse_from(args).map_err(Refused::Usage)?;
+    let Some(path) = args.config else {
+        let why = if args.check_config {
+            ConfigError::CheckWithoutConfig
+        } else {
+            ConfigError::NoConfig
+        };
+        return Err(Refused::Config(why));
     };
-    load(path, per_run)
+    let per_run = PerRun {
+        drain_lb_wait: args.drain_lb_wait,
+        drain_deadline: args.drain_deadline,
+    };
+    let settings = load(&path, per_run).map_err(Refused::Config)?;
+    Ok(Launch {
+        settings,
+        check_only: args.check_config,
+    })
 }
 
 #[cfg(test)]

@@ -95,15 +95,16 @@ async fn a_reconciler_resumes_from_a_checkpoint_with_a_field_added_later() {
 }
 
 /// Reads `usage` as a proxy with a hot tier of 63 bytes at time 80 and checks what the usage
-/// fixture says: the usage is 30 milliseconds old, and a new object goes straight to the cold
-/// tier because the hot tier is full.
+/// fixture says: the proxy has not seen it change yet (its age is zero on the proxy's own clock,
+/// whatever time the fixture carries), and a new object goes straight to the cold tier because
+/// the hot tier is full.
 async fn read_usage(usage: &[u8]) {
     let tiers = Tiers::new();
     tiers.seed("_tiering/usage", usage).await;
     tiers.clock.set(80);
-    let proxy = tiers.proxy("p1", 63).await.unwrap();
+    let proxy = tiers.proxy_on_clock("p1", 63).await.unwrap();
 
-    assert_eq!(proxy.usage_age().await, Some(Duration::from_millis(30)));
+    assert_eq!(proxy.usage_age().await, Some(Duration::ZERO));
     proxy.put("k", "direct".into()).await.unwrap();
     assert_eq!(tiers.cold_keys().await, ["k"]);
     let in_hot = tiers.hot_keys("k").await;
@@ -111,7 +112,7 @@ async fn read_usage(usage: &[u8]) {
 }
 
 /// Asserts that a proxy that finds the usage of the fixture (63 bytes in a hot tier of 63,
-/// published at time 50) reads it: it says the usage is 30 milliseconds old at time 80, and
+/// published at time 50) reads it: it says the usage has not changed for no time yet, and
 /// writes a new object straight to the cold tier because the hot tier is full. Catches a usage
 /// field that is read as another, or ignored.
 #[tokio::test(start_paused = true)]
@@ -127,19 +128,19 @@ async fn a_proxy_reads_a_usage_with_a_field_added_later() {
     read_usage(USAGE_NEWER).await;
 }
 
-/// Asserts that opening a proxy writes a registration under `_tiering/proxies/<proxy_id>` that is
-/// JSON with `proto` 1, a `boot` and `hb` 0 (a proxy that does not beat yet), and that opening over
-/// the empty marker of the fixture, which a release before the heartbeat wrote, leaves it as it
-/// is.
+/// Asserts that opening a proxy writes a registration with a body under
+/// `_tiering/proxies/<proxy_id>`: a JSON object with `proto` 1, a `boot` and `hb` 0 (a proxy that
+/// has not beaten); and that opening over the empty marker of the fixture, which every release
+/// before wrote, leaves it as it is.
 #[tokio::test(start_paused = true)]
-async fn opening_a_proxy_writes_a_registration_and_leaves_an_empty_marker_as_it_is() {
+async fn opening_a_proxy_writes_a_registration_with_a_body_and_leaves_the_empty_marker() {
     let tiers = Tiers::new();
     tiers.proxy("p1", 1000).await.unwrap();
-    let body = tiers.stored("_tiering/proxies/p1").await;
-    let seen: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(seen["proto"], 1);
-    assert_eq!(seen["hb"], 0);
-    assert!(seen["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
+    let stored = tiers.stored("_tiering/proxies/p1").await;
+    let found: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(found["proto"], 1);
+    assert_eq!(found["hb"], 0);
+    assert!(found["boot"].as_str().is_some_and(|boot| !boot.is_empty()));
 
     tiers.seed("_tiering/proxies/p2", PROXY_MARKER).await;
     tiers.proxy("p2", 1000).await.unwrap();

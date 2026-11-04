@@ -1,5 +1,6 @@
-//! The example unit of the `tierstore` binary (`packaging`) against the binary's flags:
-//! the command line parses as the binary parses it, no secret is on it, the stop timeout covers
+//! The example unit of the `tierstore` binary (`packaging`) against the binary: the command line
+//! parses as the binary parses it and names an example file the binary's loader takes, no secret
+//! is on it or in that file, the stop timeout covers
 //! the drain, nothing starts the unit by itself, and it runs as the account that the sysusers.d
 //! entry makes. And the files of the update hook's hand-over against the hook and the binary:
 //! the declaration (`packaging/updater.d/tierstore.toml`) parses with the hook's own parser
@@ -7,15 +8,23 @@
 //! hook's account, its state directory and the polkit rule of its account give it what the
 //! design gives it and no more.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
-use tierstore::server::cli::Cli;
+use tierstore::server::cli::{Args, Cli};
 
-/// The words in the name of a flag that say it holds a secret.
-const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "password"];
+#[path = "packaging/secrets.rs"]
+mod secrets;
+
+use secrets::assert_no_secret_in_the_flags_or_the_file;
 
 /// The directory of the example files.
 fn dir() -> PathBuf {
@@ -53,15 +62,31 @@ fn exec_start(unit: &str) -> Vec<String> {
         .collect()
 }
 
-/// The unit's command line, parsed as the binary parses its flags (the program name first).
+/// The settings a command line stands for (the program name first): its flags parsed as the
+/// binary parses them, and the file `--config` names, read from `packaging` in place of its
+/// place on the host, `/etc/tierstore/<name>`.
+fn settings(words: Vec<String>) -> Cli {
+    let args = Args::try_parse_from(&words).expect("the unit's flags");
+    let on_host = args.config.expect("--config");
+    assert!(on_host.starts_with("/etc/tierstore"), "{on_host:?}");
+    let name = on_host.file_name().and_then(|name| name.to_str());
+    let text = read(name.expect("a file name"));
+    let mut cli = Cli::from_config_text(&text).expect("the unit's file");
+    cli.drain_lb_wait = args.drain_lb_wait;
+    cli.drain_deadline = args.drain_deadline;
+    cli
+}
+
+/// The settings of the unit's command line.
 fn parse(unit: &str) -> Cli {
-    Cli::try_parse_from(exec_start(unit)).expect("the unit's flags")
+    settings(exec_start(unit))
 }
 
 /// Asserts that the command line of the unit runs the binary of the release as `tierstore`, that
-/// it parses with the flags the binary has, and that it describes two different S3 tiers, each
-/// with an endpoint, and four key files of absolute paths that are not the same file: the full
-/// key, one read-only key (the daemons') and the key of each tier.
+/// it parses with the flags the binary has, and that the file it names (`tierstore.toml`) is one
+/// the binary's loader takes and describes two different S3 tiers, each with an endpoint, and
+/// four key files of absolute paths that are not the same file: the full key, one read-only key
+/// (the daemons') and the key of each tier.
 #[test]
 fn the_command_line_is_the_binarys_flags_for_two_s3_tiers() {
     let unit = read("tierstore.service");
@@ -75,9 +100,9 @@ fn the_command_line_is_the_binarys_flags_for_two_s3_tiers() {
         assert!(endpoint.starts_with("http://"), "{endpoint}");
     }
     let hot_key = cli.hot_credentials_file.as_deref();
-    let hot_key = hot_key.expect("--hot-credentials-file");
+    let hot_key = hot_key.expect("hot_store.credentials_file");
     let cold_key = cli.cold_credentials_file.as_deref();
-    let cold_key = cold_key.expect("--cold-credentials-file");
+    let cold_key = cold_key.expect("cold_store.credentials_file");
     let readers = &cli.read_only_key_file;
     assert_eq!(readers.len(), 1, "{readers:?}");
     let read_only_key = readers[0].as_path();
@@ -94,25 +119,14 @@ fn the_command_line_is_the_binarys_flags_for_two_s3_tiers() {
     assert_eq!(distinct.len(), 4);
 }
 
-/// Asserts that no secret is on the command line or in the environment of the unit: the flags
-/// whose names speak of a key, a secret, a credential, a token or a password are the four that
-/// name a file (`-file`), and the unit sets no environment variable and reads no environment
-/// file.
+/// Asserts that no secret is on the command line, in the file it names or in the environment of
+/// the unit: no flag's name speaks of a key, a secret, a credential, a token or a password, the
+/// keys of the file whose names do are the four that name a file (`_file` or `_files`), and the
+/// unit sets no environment variable and reads no environment file.
 #[test]
 fn no_secret_is_on_the_command_line_or_in_the_environment() {
     let unit = read("tierstore.service");
-    let flags: Vec<String> = exec_start(&unit)
-        .into_iter()
-        .filter(|word| word.starts_with("--"))
-        .collect();
-    let secret_flags: Vec<&String> = flags
-        .iter()
-        .filter(|flag| SECRET_WORDS.iter().any(|name| flag.contains(*name)))
-        .collect();
-    assert_eq!(secret_flags.len(), 4, "{secret_flags:?}");
-    for flag in secret_flags {
-        assert!(flag.ends_with("-file"), "{flag} is not a file");
-    }
+    assert_no_secret_in_the_flags_or_the_file(&exec_start(&unit), &read("tierstore.toml"));
     let lines = unit.lines();
     let environment = lines.filter(|line| line.starts_with("Environment"));
     assert_eq!(environment.count(), 0);
@@ -277,9 +291,10 @@ fn slot_exec_start(port: u16) -> Vec<String> {
     exec_start(&unit)
 }
 
-/// The slot unit's command line for the slot `port`, parsed as the binary parses it.
+/// The settings of the slot unit's command line for the slot `port`: its flags and the file it
+/// names, `tierstore-<port>.toml`.
 fn slot_cli(port: u16) -> Cli {
-    Cli::try_parse_from(slot_exec_start(port)).expect("the slot unit's flags")
+    settings(slot_exec_start(port))
 }
 
 /// What is wrong with the rights the declaration's `[hook]` gives: `CAP_NET_ADMIN` must be
@@ -488,8 +503,8 @@ fn the_hook_holds_cap_net_admin_hook_wide_with_netlink() {
     assert!(!hook_rights_problems(&no_netlink).is_empty(), "no netlink");
 }
 
-/// Asserts that the slot unit's command line parses with the binary's flags for each slot, and
-/// that each slot listens on the wildcard of both families at its own port, names that port as
+/// Asserts that the slot unit's command line parses with the binary's flags for each slot and
+/// names a file of that slot that the binary's loader takes, and that each slot listens on the wildcard of both families at its own port, names that port as
 /// its slot and has a proxy id of its own; that the two slots share one lock file; and that the
 /// unit runs the binary of the slot's link and is skipped when the link is absent.
 #[test]
@@ -504,7 +519,7 @@ fn the_slot_unit_runs_the_slots_binary_on_its_own_port_and_proxy_id() {
         assert!(cli.listen.iter().all(|a| Some(a.port()) == cli.slot));
         assert_eq!(cli.proxy_id, format!("tierstore-{port}"));
         proxy_ids.insert(cli.proxy_id);
-        locks.insert(cli.lock_file.expect("--lock-file"));
+        locks.insert(cli.lock_file.expect("hot_store.lock_file"));
         assert!(cli.hot.starts_with("s3:"), "{}", cli.hot);
         assert!(cli.cold.starts_with("s3:"), "{}", cli.cold);
     }
@@ -541,19 +556,10 @@ fn the_slot_unit_is_not_enabled_covers_the_drain_and_keeps_secrets_off_the_comma
     );
     assert_eq!(value(&unit, "User"), "tierstore");
     assert_eq!(value(&unit, "SupplementaryGroups"), HOOK_USER);
-    let flags: Vec<String> = slot_exec_start(9301)
-        .into_iter()
-        .filter(|word| word.starts_with("--"))
-        .collect();
-    let secret_flags: Vec<&String> = flags
-        .iter()
-        .filter(|flag| SECRET_WORDS.iter().any(|name| flag.contains(*name)))
-        .collect();
-    assert_eq!(secret_flags.len(), 4, "{secret_flags:?}");
-    assert!(
-        secret_flags.iter().all(|f| f.ends_with("-file")),
-        "{secret_flags:?}"
-    );
+    for port in [9301, 9302] {
+        let file = read(&format!("tierstore-{port}.toml"));
+        assert_no_secret_in_the_flags_or_the_file(&slot_exec_start(port), &file);
+    }
     assert_eq!(
         unit.lines()
             .filter(|l| l.starts_with("Environment"))

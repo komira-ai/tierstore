@@ -3,7 +3,6 @@
 //!
 //! ```toml
 //! [server]                      # as for a storage node, without backend_check_wait
-//! listen          = "127.0.0.1:9400"
 //! proxy_id        = "tierstore-cache-1"
 //! bucket          = "tierstore"
 //! access_key_file = "/etc/tierstore-cache/access.key"
@@ -28,11 +27,16 @@
 //! endpoint         = "http://192.0.2.20:9300"
 //! credentials_file = "/etc/tierstore-cache/upstream-read.key"
 //!
-//! [oci]                         # optional: the registry front, served from the cache
-//! listen = "127.0.0.1:5000"
+//! [[interface]]
+//! type   = "s3"
+//! params = { addresses = ["127.0.0.1:9400"] }
+//!
+//! [[interface]]                 # optional: the registry front, served from the cache
+//! type   = "oci"
+//! params = { addresses = ["127.0.0.1:5000"] }
 //!
 //! [[policy]]
-//! prefix = "cas/b/"
+//! prefix = "oci/"             # covers the registry blobs, which the oci interface needs cached
 //! cache  = true
 //! ```
 //!
@@ -43,30 +47,32 @@
 //! multipart-conditional answers (see [`cache_cli`](super::cache_cli)). Left out or `false`, the
 //! node refuses every write with 403 and its upstream key may be a read-only one.
 //!
-//! The file is read into a [`CacheSettings`]. It has no flag form. The `[oci]` table is the
+//! The file is read into a [`CacheSettings`]. An `oci` interface is the
 //! storage node's, with its rules (see [`config`](super::config)). What it refuses, besides what
 //! every file does: a layout that is not `digest-v1`,
 //! `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, a list of more than
 //! one `endpoints` in `[cold_store]` (the cache reads from one upstream), and the keys of the
 //! storage node that do nothing here: `skip_checks`, the reconciler's keys and
-//! `backend_check_wait`. With an `[oci]` table it also refuses a front whose blobs (the keys under
+//! `backend_check_wait`. With an `oci` interface it also refuses a front whose blobs (the keys under
 //! `<prefix>blobs/sha256/`) no `[[policy]]` with `cache = true` keeps.
 
 use std::fmt;
 use std::time::Duration;
 
 use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer};
 
+use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
-    ConfigError, OciFlags, OciTable, PerRun, ServerTable, TierParts, TierTable, duration, front_of,
-    invalid, oci as oci_of, refuse, refuse_hot_keys, require, tier, within,
+    ConfigError, OciFlags, PerRun, ServerTable, TierParts, TierTable, duration, front_of, invalid,
+    refuse, refuse_hot_keys, require, tier, within,
 };
+use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
-use super::oci_setup::DEFAULT_OCI_PREFIX;
 
 /// The only layout of the cache directory.
 const LAYOUT: &str = "digest-v1";
@@ -74,15 +80,6 @@ const LAYOUT: &str = "digest-v1";
 /// A rate in the file: a size and `/s`, such as `50MiB/s`, or `off` (which is 0 bytes a second).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Rate(pub u64);
-
-impl Serialize for Rate {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.0 {
-            0 => serializer.serialize_str("off"),
-            bytes => serializer.serialize_str(&format!("{bytes}B/s")),
-        }
-    }
-}
 
 impl<'de> Deserialize<'de> for Rate {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -114,58 +111,58 @@ impl Visitor<'_> for RateVisitor {
 }
 
 /// `[local_cache]`.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LocalCacheTable {
     /// The cache directory, on the file system that the jobs' scratch is on.
     pub path: std::path::PathBuf,
     /// The layout of the directory: `digest-v1`, the only one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub layout: Option<String>,
     /// The bytes the cache is meant to hold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub budget: Option<Size>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub high_water: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub low_water: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub critical: Option<u8>,
     /// The percent of the file system that is kept free.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub free_floor: Option<u8>,
     /// The most fills that run at once (1 to 64, default 4).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_concurrent_fills: Option<u8>,
     /// The most create-only puts that are copied into the cache at once (1 to 64, default 8).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_concurrent_keeps: Option<u8>,
     /// The longest a put waits for its copy to be put in the cache once the upstream has the
     /// object, such as `5s` (default `5s`, above 0). Past it the put is answered and the copy is
     /// finished in the background.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub keep_wait: Option<Dur>,
     /// The longest a keep runs in all before it is abandoned, such as `60s` (default `60s`,
     /// above 0 and not below `keep_wait`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub keep_deadline: Option<Dur>,
     /// Whether the node takes writes and sends them to the upstream (default `false`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub write_through: Option<bool>,
     /// The most an object may be for a ranged read of it to fill the whole of it (1 byte up to
     /// the budget, default 64 MiB). A larger object is passed through and kept nowhere.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub whole_fill_limit: Option<Size>,
     /// Whether the cache is on: `true`, the default. `false` is refused.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub cache: Option<bool>,
     /// The rate at which the scrub re-reads the objects (`SCRUB_RATE`, 16 MiB/s, if not given);
     /// `"off"` (or `"0B/s"`) turns the scrub off.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub scrub_rate: Option<Rate>,
     /// The least time between the starts of two rounds of the scrub (`SCRUB_MIN_ROUND`, one hour,
     /// if not given); `"0s"` lets a round start as soon as the last is done.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub scrub_min_round: Option<Dur>,
 }
 
@@ -176,11 +173,14 @@ pub(super) struct CacheSettings {
     pub front: FrontSettings,
     /// The limit on a request to an S3 upstream.
     pub s3_request_timeout: Duration,
+    /// The connect timeout, body rate, idle-connection timeout and read retries of the client of
+    /// the upstream.
+    pub s3_client: S3Client,
     /// The upstream: the spec and the flags of an S3 bucket.
     pub upstream: TierParts,
     /// The cache.
     pub cache: CacheConfig,
-    /// The OCI front, as `[oci]` and the `--oci-*` flags make it: `listen` is empty for none.
+    /// The OCI front, as the `oci` interfaces make it: `listen` is empty for none.
     pub oci: OciFlags,
     /// The rate of the scrub in bytes a second: the default if the file gave none; none if the
     /// file turned it off.
@@ -215,7 +215,7 @@ fn percent(key: &str, value: Option<u8>, default: u8, low: u8) -> Result<u8, Con
     within("local_cache", key, value.unwrap_or(default), low, 100)
 }
 
-/// Refuses an `[oci]` front whose blobs the cache would not keep: the keys it reads, under
+/// Refuses an `oci` front whose blobs the cache would not keep: the keys it reads, under
 /// `<prefix>blobs/sha256/`, must be held by the longest `[[policy]]` prefix that covers them with
 /// `cache = true`. A front over a cache that keeps none of what it serves is every pull going to
 /// the upstream; a registry that is meant to pass through is a storage node's front, or no
@@ -237,13 +237,13 @@ pub(super) fn check_oci_is_kept(oci: &OciFlags, policy: &[Policy]) -> Result<(),
                 "the blobs under {probe:?} are covered by the [[policy]] with prefix {:?}, which has cache = false, so every pull would go to the upstream; give a [[policy]] with prefix = {prefix:?} and cache = true",
                 policy.prefix
             );
-            Err(invalid("oci.prefix", why))
+            Err(invalid("oci interface params.prefix", why))
         }
         None => {
             let why = format!(
                 "no [[policy]] covers the blobs under {probe:?}, so every pull would go to the upstream; give a [[policy]] with prefix = {prefix:?} and cache = true"
             );
-            Err(invalid("oci.prefix", why))
+            Err(invalid("oci interface params.prefix", why))
         }
     }
 }
@@ -354,7 +354,7 @@ impl CacheSettings {
     pub(super) fn new(
         server: ServerTable,
         tables: (LocalCacheTable, TierTable),
-        oci_table: Option<OciTable>,
+        fronts: Interfaces,
         policy: &[Policy],
         per_run: PerRun,
     ) -> Result<Self, ConfigError> {
@@ -368,12 +368,13 @@ impl CacheSettings {
         refuse("cold_store", "not for a build node", &skipping)?;
         let upstream = tier("cold_store", &upstream_table(cold)?)?;
         let part = CachePart::new(table, policy)?;
-        let oci = oci_of(oci_table)?;
-        let shared = front_of(server, per_run)?;
+        let oci = fronts.oci;
+        let shared = front_of(server, fronts.s3, per_run)?;
         check_oci_is_kept(&oci, policy)?;
         Ok(Self {
             front: shared.front,
             s3_request_timeout: shared.s3_request_timeout,
+            s3_client: shared.s3_client,
             upstream,
             cache: part.config,
             scrub_min_round: part.scrub_min_round,

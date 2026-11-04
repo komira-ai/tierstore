@@ -1,11 +1,19 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
+//!
+//! A key is the name of one file, percent-encoded: every byte but an ASCII letter or digit
+//! (and a few marks) costs three bytes, so a key whose encoded name is empty or over 255 bytes
+//! (about 85 bytes of non-ASCII text) cannot be stored. A write that validates the key itself (put, create of an upload, streamed
+//! puts, reservations) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`); a read, a
+//! head, a delete and the held-body conditional writes ([`Backend::put_if_match`] and
+//! `put_reservation_if_match`, which first look for the stored object) are [`Error::NotFound`],
+//! since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
@@ -33,7 +41,7 @@ mod sync;
 #[path = "dir_tags.rs"]
 mod tags;
 
-use names::encode;
+use names::{encode, is_id_byte, parse_part, part_name, unique_nanos};
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
 
@@ -79,7 +87,9 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 /// digits, `_`, `-` and a `.` (but not as the first byte) stay as they are, and every other
 /// byte is written as `%` and two hex digits. So no key can name a file outside the directory
 /// or a file the backend keeps for itself (their names start with `.`). A key whose name is
-/// empty or longer than 255 bytes is refused with [`Error::Other`]. The file holds the SHA-256
+/// empty or longer than 255 bytes is refused with [`Error::InvalidKey`] by the writes that
+/// validate the key, and is [`Error::NotFound`] for reads, deletes and the conditional writes
+/// that look for the stored object first (see the module doc). The file holds the SHA-256
 /// of the body, which is the content tag, and then the body, so that a head reads 32 bytes and
 /// not the object.
 ///
@@ -136,6 +146,12 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   reads the current body (see the module `dir_entries`). Their create-only puts, replacements
 ///   by the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
 ///   between processes too.
+///
+/// The directory must be on a case-sensitive file system: a key is a file name with `A-Z` as they
+/// are, so on a case-insensitive one (the default APFS volume on macOS) the keys `Foo` and `foo`
+/// name one file, a get of one returns the other's bytes and a create-only put of one fails for
+/// a key that does not exist. The backend does not probe for this; a file name is not changed
+/// because a release already wrote its objects under it.
 ///
 /// The backend counts on being the only writer of its directory but for other backends over the
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
@@ -194,22 +210,6 @@ fn classify(
     } else {
         failed(path, why)
     }
-}
-
-/// Whether the byte can be in the id of an upload, which names a directory.
-fn is_id_byte(byte: u8) -> bool {
-    matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'-')
-}
-
-/// The name of the file of a part of an upload: its number and its content tag.
-fn part_name(number: u32, tag: &str) -> String {
-    format!("{number:05}-{tag}")
-}
-
-/// The number and the content tag a file name of a part has, if it is one.
-fn parse_part(name: &str) -> Option<(u32, &str)> {
-    let (number, tag) = name.split_once('-')?;
-    Some((number.parse().ok()?, tag))
 }
 
 /// A temporary file that is removed when the guard is dropped: when the call that made it ends or
@@ -473,8 +473,7 @@ impl DirBackend {
             .mode(DIR_MODE)
             .create(&uploads);
         made.map_err(io_error(&uploads))?;
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let opened = OPENED.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
             root,
@@ -501,8 +500,7 @@ impl DirBackend {
         };
         let name = encode(rest);
         if !(1..=NAME_LIMIT).contains(&name.len()) {
-            let text = format!("key {key:?} is empty or too long to be a file name");
-            return Err(Error::Other(text));
+            return Err(Error::InvalidKey(key.to_owned()));
         }
         Ok(dir.join(name))
     }
@@ -567,7 +565,10 @@ impl DirBackend {
 
     /// Opens the object `key`.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        let path = self.locate(key).await?;
+        let path = self
+            .locate(key)
+            .await
+            .map_err(|_| Error::NotFound(key.to_owned()))?;
         let opened = open_stored(&path).await;
         opened.map_err(|why| classify(key, &path, &why, ErrorKind::NotFound, Error::NotFound))
     }
@@ -598,7 +599,9 @@ impl DirBackend {
     /// of this backend replaces or deletes the object in between. Gives the files removed; the
     /// directories are not synced.
     async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<Vec<PathBuf>, Error> {
-        let files = self.files(key)?;
+        let files = self
+            .files(key)
+            .map_err(|_| Error::NotFound(key.to_owned()))?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
@@ -687,7 +690,8 @@ impl DirBackend {
         etag: &str,
         mode: u32,
     ) -> Result<String, Error> {
-        self.locate(key).await?;
+        let located = self.locate(key).await;
+        located.map_err(|_| Error::NotFound(key.to_owned()))?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let path = self.matching(key, etag).await?.path;
@@ -856,7 +860,9 @@ impl Backend for DirBackend {
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
         // The previous release's file goes first: a failure leaves the object, not a stale file.
-        let mut files = self.files(key)?;
+        let mut files = self
+            .files(key)
+            .map_err(|_| Error::NotFound(key.to_owned()))?;
         files.reverse();
         // Not held across the sync: a replacement or delete that follows needs nothing it protects.
         let gone = {
@@ -882,8 +888,7 @@ impl Backend for DirBackend {
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         self.path(key)?;
         let number = self.counter.fetch_add(1, Ordering::SeqCst);
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
         let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;

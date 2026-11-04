@@ -16,7 +16,10 @@ use crate::server::gc::GcKey;
 use crate::server::presign::PUT_ONLY;
 use crate::server::scoped::OUT_OF_SCOPE;
 
-use super::{AccessKey, Role, ensure_distinct, read_credentials, read_only_keys};
+use super::{
+    AccessKey, DEFAULT_MIN_SECRET_BYTES, Role, SecretTooShort, ensure_distinct,
+    ensure_secrets_long_enough, read_credentials, read_only_keys,
+};
 
 /// A secret that no message may carry.
 const SECRET: &str = "topsecret-value-7731";
@@ -243,7 +246,7 @@ fn a_key_is_found_by_its_id_with_its_secret_and_role() {
     config.read_only_keys = vec![
         AccessKey::new("ONE", "one-secret"),
         AccessKey::new("TWO", "two-secret"),
-        AccessKey::new("FULL", "reader-secret"),
+        AccessKey::new("FULL", "reader-secret-0123456789"),
     ];
     assert_eq!(config.key("FULL"), Some(("full-secret", Role::Full)));
     assert_eq!(config.key("ONE"), Some(("one-secret", Role::ReadOnly)));
@@ -314,4 +317,43 @@ fn a_gc_key_may_list_the_open_uploads_under_its_prefix_only() {
         let refused = role.permit_list_uploads(outside);
         assert_eq!(refused, Err(OUT_OF_SCOPE), "{outside}");
     }
+}
+
+/// Asserts the minimum of a secret: one byte short of it is refused with the flag, the id, the
+/// length and the minimum, in exactly these words and without the secret; the minimum itself
+/// and longer are accepted; the first short key of several is the one named; the default is 16.
+#[test]
+fn a_secret_shorter_than_the_minimum_is_refused_by_exact_message() {
+    assert_eq!(DEFAULT_MIN_SECRET_BYTES, 16);
+    let long = "0123456789abcdef";
+    let short = "0123456789abcde";
+    assert_eq!(
+        ensure_secrets_long_enough(16, [("--f", "ID", long)]),
+        Ok(())
+    );
+    assert_eq!(ensure_secrets_long_enough(0, [("--f", "ID", "")]), Ok(()));
+    let want = "--gc-key-file: the secret of the access key \"GC1\" has 15 bytes; at least 16 are \
+                required (--min-secret-bytes)";
+    let keys = [
+        ("--access-key-file", "AKID", long),
+        ("--gc-key-file", "GC1", short),
+    ];
+    let short_key = ensure_secrets_long_enough(16, keys).unwrap_err();
+    assert_eq!(short_key.to_string(), want);
+    assert_eq!(
+        short_key,
+        SecretTooShort {
+            flag: "--gc-key-file".to_owned(),
+            id: "GC1".to_owned(),
+            len: 15,
+            min: 16,
+        }
+    );
+    let two = [("--gc-key-file", "A", "x"), ("--scoped-key-file", "B", "y")];
+    let first = ensure_secrets_long_enough(2, two).unwrap_err();
+    assert_eq!(
+        first.to_string(),
+        "--gc-key-file: the secret of the access key \"A\" has 1 bytes; at least 2 are required \
+         (--min-secret-bytes)"
+    );
 }

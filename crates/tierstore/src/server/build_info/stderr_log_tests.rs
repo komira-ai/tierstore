@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tracing::Level;
 use tracing::subscriber::with_default;
 
-use super::stderr_log::{LineLog, install, try_install};
+use super::stderr_log::{LineLog, install, notes, try_install};
 
 /// A writer whose bytes the test reads back.
 #[derive(Clone, Default)]
@@ -135,4 +135,16 @@ fn a_second_install_is_refused_because_the_first_subscriber_is_kept() {
     // Another test may have set the global default first, so only the second call is asserted.
     install();
     assert!(try_install().is_err());
+}
+
+#[test]
+fn notes_say_each_line_of_a_text_as_a_warning_and_nothing_for_no_text() {
+    let text = capture(Level::WARN, || {
+        notes("tierstore: 3 requests were cut at the drain deadline\ntierstore: 2 were late\n");
+    });
+    assert_eq!(
+        text,
+        "tierstore: 3 requests were cut at the drain deadline\ntierstore: 2 were late\n"
+    );
+    assert_eq!(capture(Level::INFO, || notes("")), "");
 }

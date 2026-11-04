@@ -35,10 +35,10 @@ fn unmarked(page: &str) -> String {
     out
 }
 
-/// The command lines of `page` that start with `start` and hold `has`: markup out, entities
-/// decoded, continued lines joined, a leading `$ ` prompt dropped, words one space apart.
-pub fn commands(page: &str, start: &str, has: &str) -> Vec<String> {
-    unmarked(page)
+/// The command lines of `text`: markup out, entities decoded, continued lines joined, a leading
+/// `$ ` prompt dropped, words one space apart.
+fn lines_of(text: &str) -> Vec<String> {
+    unmarked(text)
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
@@ -48,8 +48,32 @@ pub fn commands(page: &str, start: &str, has: &str) -> Vec<String> {
             let line = line.trim().trim_start_matches("$ ");
             line.split_whitespace().collect::<Vec<_>>().join(" ")
         })
+        .collect()
+}
+
+/// The command lines of `page` that start with `start` and hold `has`.
+pub fn commands(page: &str, start: &str, has: &str) -> Vec<String> {
+    lines_of(page)
+        .into_iter()
         .filter(|line| line.starts_with(start) && line.contains(has))
         .collect()
+}
+
+/// The command lines of each code block of `page` (a `<pre>` of the site page, a fenced block of
+/// the guide), in order, so that a reader can tell two commands of one block from two of
+/// different blocks.
+fn blocks(page: &str) -> Vec<Vec<String>> {
+    if page.contains("<pre") {
+        page.split("<pre")
+            .skip(1)
+            .map(|part| {
+                let body = part.split_once('>').map_or("", |(_, body)| body);
+                lines_of(body.split("</pre>").next().unwrap_or(body))
+            })
+            .collect()
+    } else {
+        page.split("```").skip(1).step_by(2).map(lines_of).collect()
+    }
 }
 
 /// The `--flag` words of a command line.
@@ -78,4 +102,45 @@ fn a_command_is_read_from_a_code_block_of_either_page() {
     assert_eq!(commands(md, "gh a", "--d"), Vec::<String>::new());
     assert_eq!(flags("gh a <f> --b c --d"), ["--b", "--d"]);
     assert_eq!(value_of("gh a <f> --b c --d", "--b"), "c");
+}
+
+/// Whether every `systemctl start tierstore` line of `page` directly follows a
+/// `systemctl daemon-reload` line of the same code block, and the page has at least one such start.
+fn reloads_before_every_start(page: &str) -> bool {
+    let mut starts = 0;
+    for block in blocks(page) {
+        for (at, line) in block.iter().enumerate() {
+            if line == "systemctl start tierstore" {
+                starts += 1;
+                if at == 0 || block[at - 1] != "systemctl daemon-reload" {
+                    return false;
+                }
+            }
+        }
+    }
+    starts > 0
+}
+
+#[test]
+fn a_start_block_reloads_the_unit_first_and_a_start_without_a_reload_is_rejected() {
+    // Catches: an install page that starts the service after the edit without a `daemon-reload`
+    // directly before the start in the same block, such as a reload in an earlier block with the
+    // editing instructions between it and a start-only block (the shape of the pages before this
+    // fix).
+    let good = "```sh\nsystemctl daemon-reload\nsystemctl start tierstore\n```\n";
+    let bare = "```sh\nsystemctl start tierstore\n```\n";
+    let apart = "```sh\nsystemctl daemon-reload\nsystemctl status tierstore\nsystemctl start tierstore\n```\n";
+    let earlier = "```sh\nsystemctl daemon-reload\n```\n\nEdit the unit.\n\n```sh\nsystemctl start tierstore\n```\n";
+    let earlier_html = "<div class=\"code\"><pre><span class=\"p\">$</span> systemctl daemon-reload</pre></div>\n<p>Edit.</p>\n<div class=\"code\"><pre><span class=\"p\">$</span> systemctl start tierstore</pre></div>";
+    let good_html = "<div class=\"code\"><pre><span class=\"p\">$</span> systemctl daemon-reload\n<span class=\"p\">$</span> systemctl start tierstore</pre></div>";
+    assert!(reloads_before_every_start(good));
+    assert!(reloads_before_every_start(good_html));
+    assert!(!reloads_before_every_start(bare));
+    assert!(!reloads_before_every_start(apart));
+    assert!(!reloads_before_every_start(earlier));
+    assert!(!reloads_before_every_start(earlier_html));
+    assert!(!reloads_before_every_start("no commands here"));
+    for (name, page) in pages() {
+        assert!(reloads_before_every_start(&page), "{name}");
+    }
 }

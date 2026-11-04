@@ -172,6 +172,51 @@ pub(super) fn ensure_distinct(full: &str, read_only: &[AccessKey]) -> Result<(),
     Ok(())
 }
 
+/// The fewest bytes a secret access key has unless `--min-secret-bytes` says otherwise.
+pub(super) const DEFAULT_MIN_SECRET_BYTES: u32 = 16;
+
+/// A key whose secret has fewer bytes than the minimum. It carries the flag, the id, the length
+/// and the minimum, and never the secret.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "{flag}: the secret of the access key {id:?} has {len} bytes; at least {min} are required \
+     (--min-secret-bytes)"
+)]
+pub(super) struct SecretTooShort {
+    /// The flag of the file the key is in.
+    pub flag: String,
+    /// The id of the key.
+    pub id: String,
+    /// The bytes the secret has.
+    pub len: usize,
+    /// The fewest bytes a secret may have.
+    pub min: u32,
+}
+
+/// Refuses a server with a key whose secret has fewer than `min` bytes. Each key is the flag
+/// of its file, its id and its secret.
+///
+/// # Errors
+/// The first key that is too short, naming the flag, the id, the length and the minimum (never
+/// the secret).
+pub(super) fn ensure_secrets_long_enough<'a>(
+    min: u32,
+    keys: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> Result<(), SecretTooShort> {
+    for (flag, id, secret) in keys {
+        let len = secret.len();
+        if len < min as usize {
+            return Err(SecretTooShort {
+                flag: flag.to_owned(),
+                id: id.to_owned(),
+                len,
+                min,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// The keys in the files of the flag `--read-only-key-file`, in the order of the flags.
 ///
 /// # Errors

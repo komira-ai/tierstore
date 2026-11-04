@@ -1,12 +1,11 @@
 //! The proxy: a store over a hot and a cold backend.
 
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::StreamExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, OnceCell};
 use tokio::time::Instant;
 
@@ -15,27 +14,21 @@ use crate::journal::{
     proxy_key, seq_of,
 };
 use crate::metrics::{Counters, Read, Skipped, Tier};
-use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, MonotonicClock,
-    OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, JournalEntry, JournalOp, Listed, Meta,
+    MonotonicClock, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
-/// The most calls to the cold tier that one listing of uploads makes to fill a page that the
-/// filter of reserved keys cut short.
-const UPLOAD_LISTING_CALLS: u32 = 100;
-
-/// How many cold objects of a listing that may be reservations are asked about at once.
-const LISTING_HEADS: usize = 16;
-
-/// How many times a delete looks at the cold tier's object again after it changed under the
-/// delete.
-const DELETE_ROUNDS: u32 = 3;
-
 mod copy_back;
+mod entry_put;
+#[cfg(test)]
+mod entry_put_race_tests;
+#[cfg(test)]
+mod entry_put_tests;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
+mod listing;
 mod pause;
 mod put;
 mod read;
@@ -63,38 +56,54 @@ pub struct ProxyConfig {
     /// How long the usage object that was read is used before it is read again, and how long
     /// the hot tier is taken to be full after it said so.
     pub usage_refresh: Duration,
-    /// The age of the usage object past which it is ignored, as if it were missing.
+    /// How long the usage object may stand unchanged, by the monotonic clock of this proxy
+    /// (`mono`), before it is ignored, as if it were missing. The leader rewrites it every
+    /// publication, so an object that no longer changes means the leader has stopped; no time that
+    /// another machine wrote is read.
     pub usage_stale_after: Duration,
+    /// How many times a delete looks at the cold tier's object again after it changed under the
+    /// delete.
+    pub delete_rounds: u32,
+    /// How many cold objects of a listing that may be reservations are asked about at once.
+    pub listing_heads: usize,
+    /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
+    /// filter of reserved keys cut short.
+    pub upload_listing_calls: u32,
     /// How long the format object (`_tiering/format`) that was read is used before it is read
     /// again. When the reads succeed, this is the most time between the operator pausing writes
     /// and a proxy refusing them; a read that fails keeps the last answer, so writes can go on
     /// longer.
     pub format_refresh: Duration,
-    /// The time, for the entries and for the age of the usage object.
+    /// The time, for the entries.
     pub clock: Arc<dyn Clock>,
-    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]). Nothing
+    /// The monotonic clock of this process, for `live_until` (see [`Proxy::is_live`]) and for how
+    /// long the usage object has stood unchanged (`usage_stale_after`). Nothing
     /// that another machine wrote is compared with it.
     pub mono: Arc<dyn Clock>,
     /// How often the proxy rewrites its registration once [`Proxy::start_heartbeat`] has been
     /// called, and the longest a call of the heartbeat may take.
     pub heartbeat: Duration,
     /// How long a proxy that is not heard of stays live, less `deadline_margin`: `live_until`
-    /// is the send time of the last acknowledged beat plus this less the margin. Today it only
-    /// sets that value ([`Proxy::is_live`]); no request path reads it, and the reconciler's
-    /// removal of registrations uses its own `registration_retention`.
+    /// is the send time of the last acknowledged beat plus this less the margin. Only the
+    /// puts made on entries read it ([`Proxy::is_live`]); the reconciler's removal of
+    /// registrations uses its own `registration_retention`.
     pub departure: Duration,
     /// The time that must be left before `live_until` for a call that destroys to start; the
     /// longest such a call may take.
     pub deadline_margin: Duration,
+    /// How many times a put on entries looks again at the entry of its key when it was gone
+    /// between the put's create and its read: past it the put is answered `Unavailable`.
+    pub entry_rounds: u32,
 }
 
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
-    /// heartbeat every 10 seconds, a departure time of 60 seconds and a margin of 10 seconds, on
-    /// a [`MonotonicClock`] that reads zero now, and a format object that is read every 5
-    /// seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, 3 looks
+    /// at the cold object of a delete, 16 cold objects of a listing asked about at once, at
+    /// most 100 calls to the cold tier for one listing of uploads, a heartbeat every 10 seconds, a
+    /// departure time of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads
+    /// zero now, a format object that is read every 5 seconds, and 3 looks at an entry.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -105,12 +114,16 @@ impl ProxyConfig {
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
+            delete_rounds: 3,
+            listing_heads: 16,
+            upload_listing_calls: 100,
             format_refresh: Duration::from_secs(5),
             clock,
             mono: Arc::new(MonotonicClock::new()),
             heartbeat: Duration::from_secs(10),
             departure: Duration::from_secs(60),
             deadline_margin: Duration::from_secs(10),
+            entry_rounds: 3,
         }
     }
 }
@@ -130,9 +143,19 @@ struct Capacity {
     read: Option<(Instant, Option<u64>)>,
     /// Until when the hot tier is taken to be full, after it said so.
     full_until: Option<Instant>,
-    /// When the usage object read last was published, by the clock of the reconciler: none if
-    /// it was missing or unreadable. Unlike the bytes of `read`, it is kept whatever the age.
-    published: Option<u64>,
+    /// The usage object read last and when this proxy first read exactly that object, by its own
+    /// monotonic clock: none if it was missing or unreadable. Unlike the bytes of `read`, it is
+    /// kept whatever the age.
+    seen: Option<UsageSeen>,
+}
+
+/// A usage object as it was read, and when this proxy first saw it.
+struct UsageSeen {
+    /// The body. The content tag of the object is a function of it, so a body that is the same as
+    /// the one before is an object that was not rewritten.
+    body: Bytes,
+    /// The time of the monotonic clock of the first read that gave this body, in milliseconds.
+    since: u64,
 }
 
 /// One journal object being filled, and the outcome of writing it.
@@ -256,9 +279,13 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// starts lists its own journal prefix and its checkpoint, and goes on after the highest
 /// number it finds.
 ///
+/// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
+/// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
+/// key, not in the journal above: see `entry_put.rs`.
+///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
-/// older than [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
+/// unchanged for [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
 /// leaves puts unrestrained: [`Proxy::usage_age`] is how a caller sees it, and the server's
 /// `/usagez` reports it). Above
 /// [`ProxyConfig::critical`] of the budget a put is written to the hot tier as it is under it
@@ -301,6 +328,8 @@ struct Inner {
     capacity: Mutex<Capacity>,
     /// What was last read of the format object.
     pause: AsyncMutex<pause::Pause>,
+    /// The calls on the entries of keys, as this proxy.
+    entries: Entries,
     counters: Counters,
     heartbeat: Heartbeat,
 }
@@ -333,6 +362,7 @@ impl Proxy {
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         let next = newest.unwrap_or(0).max(checkpoint.seq) + 1;
+        let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,
             cold,
@@ -341,6 +371,7 @@ impl Proxy {
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
             pause: AsyncMutex::default(),
+            entries,
             counters: Counters::default(),
             heartbeat,
         };
@@ -349,9 +380,10 @@ impl Proxy {
         })
     }
 
-    /// How long ago the reconciler published the usage object (`_tiering/usage`), by the clock
-    /// of the proxy, as of a read that is at most [`ProxyConfig::usage_refresh`] old. None if the
-    /// object is missing or cannot be read.
+    /// How long the usage object (`_tiering/usage`) has stood unchanged, by the monotonic clock
+    /// of the proxy counted from the first time it read exactly that object, as of a read that is
+    /// at most [`ProxyConfig::usage_refresh`] old. None if the object is missing or cannot be
+    /// read.
     ///
     /// A usage older than [`ProxyConfig::usage_stale_after`] is ignored by the puts, so a
     /// reconciler that has stopped means a hot tier that is never taken to be full; this is the
@@ -485,19 +517,33 @@ impl Inner {
         locked(&self.capacity).full_until = Some(until);
     }
 
-    fn is_fresh(&self, usage: &Usage) -> bool {
-        let age = self.config.clock.now().saturating_sub(usage.time);
-        u128::from(age) <= self.config.usage_stale_after.as_millis()
-    }
-
+    /// Reads the usage object, and notes whether it is the one that was read before: it counts as
+    /// fresh until it has stood unchanged for `usage_stale_after` on the monotonic clock.
     async fn refresh_usage(&self, now: Instant) -> Option<u64> {
         let fetched = self.hot.get(USAGE_KEY, None).await.ok();
-        let usage = fetched.and_then(|body| serde_json::from_slice::<Usage>(&body).ok());
-        let published = usage.as_ref().map(|u| u.time);
-        let hot_bytes = usage.filter(|u| self.is_fresh(u)).map(|u| u.hot_bytes);
+        let mono = self.config.mono.now();
+        let usage = fetched
+            .as_ref()
+            .and_then(|body| serde_json::from_slice::<Usage>(body).ok());
         let mut capacity = locked(&self.capacity);
+        let before = capacity.seen.take();
+        capacity.seen = match (&usage, fetched) {
+            (Some(_), Some(body)) => match before {
+                Some(seen) if seen.body == body => Some(seen),
+                _ => Some(UsageSeen { body, since: mono }),
+            },
+            // A read that failed says nothing of the object: the body last read keeps its age.
+            (_, None) => before,
+            // A body that is not a usage object is not one to age.
+            (None, Some(_)) => None,
+        };
+        let limit = self.config.usage_stale_after;
+        let fresh = capacity
+            .seen
+            .as_ref()
+            .is_some_and(|seen| Duration::from_millis(mono.saturating_sub(seen.since)) <= limit);
+        let hot_bytes = usage.filter(|_| fresh).map(|u| u.hot_bytes);
         capacity.read = Some((now, hot_bytes));
-        capacity.published = published;
         hot_bytes
     }
 
@@ -512,8 +558,8 @@ impl Inner {
 
     async fn usage_age(&self) -> Option<Duration> {
         self.cached_hot_bytes(Instant::now()).await;
-        let published = locked(&self.capacity).published?;
-        let age = self.config.clock.now().saturating_sub(published);
+        let since = locked(&self.capacity).seen.as_ref()?.since;
+        let age = self.config.mono.now().saturating_sub(since);
         Some(Duration::from_millis(age))
     }
 
@@ -666,9 +712,9 @@ impl Inner {
     }
 
     /// Removes the cold tier's object under `key` as `delete_object` says, looking again if the
-    /// object changes between the look and the delete, [`DELETE_ROUNDS`] looks at most.
+    /// object changes between the look and the delete, [`ProxyConfig::delete_rounds`] looks at most.
     async fn remove_from_cold(&self, key: &str) -> Result<(), Error> {
-        for _ in 0..DELETE_ROUNDS {
+        for _ in 0..self.config.delete_rounds {
             let found = match self.cold.head(key).await {
                 Ok(found) => found,
                 Err(Error::NotFound(_)) => return Ok(()),
@@ -695,125 +741,6 @@ impl Inner {
             Err(error) => Err(error),
         }
     }
-
-    /// The object of a cold listing if it is one: a reservation (a marked object of
-    /// [`RESERVATION_LEN`] bytes) and an object that is gone are left out. Only an object of that
-    /// size that the hot listing does not show is asked about, at every listing: a listing gives no
-    /// identity of the version (a key, a size and a time of last write do not tell a real object
-    /// from a reservation that replaced it within the same time), so no answer is kept. A key the
-    /// hot tier shows is shown whatever the cold tier holds under it.
-    async fn visible(
-        &self,
-        object: Listed,
-        in_hot: &BTreeSet<&str>,
-    ) -> Result<Option<Listed>, Error> {
-        let may_hold = object.size == RESERVATION_LEN && !in_hot.contains(object.key.as_str());
-        if !may_hold {
-            return Ok(Some(object));
-        }
-        match self.cold.head(&object.key).await {
-            Ok(meta) if meta.reservation => Ok(None),
-            Ok(_) => Ok(Some(object)),
-            Err(Error::NotFound(_)) => Ok(None),
-            Err(error) => Err(error),
-        }
-    }
-
-    /// The objects of a cold listing that are objects (see `visible`), in the order given, asking
-    /// about [`LISTING_HEADS`] of them at a time.
-    async fn visible_all(
-        &self,
-        listed: Vec<Listed>,
-        in_hot: &[Listed],
-    ) -> Result<Vec<Listed>, Error> {
-        let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
-        let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
-        let checked: Vec<Option<Listed>> = checks.buffered(LISTING_HEADS).try_collect().await?;
-        Ok(checked.into_iter().flatten().collect())
-    }
-
-    /// The first `max_keys` objects of the listing of the cold tier after `start_after` that are
-    /// objects: pages of the cold tier are read until enough are left or the listing ends, so
-    /// that a page the filter cut short is made up, and a short page is the last.
-    async fn cold_page(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        max_keys: usize,
-        in_hot: &[Listed],
-    ) -> Result<Vec<Listed>, Error> {
-        let mut found: Vec<Listed> = Vec::new();
-        let mut after = start_after.map(str::to_owned);
-        loop {
-            let page = self.cold.list_page(prefix, after.as_deref(), max_keys);
-            let page = page.await?;
-            let full_page = page.len() >= max_keys;
-            after = page.last().map(|object| object.key.clone());
-            let data: Vec<Listed> = page.into_iter().filter(is_data).collect();
-            found.extend(self.visible_all(data, in_hot).await?);
-            if !full_page || found.len() >= max_keys {
-                break;
-            }
-        }
-        found.truncate(max_keys);
-        Ok(found)
-    }
-
-    async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        let mut in_hot = self.hot.list(prefix).await?;
-        in_hot.retain(is_data);
-        let mut in_cold = self.cold.list(prefix).await?;
-        in_cold.retain(is_data);
-        let in_cold = self.visible_all(in_cold, &in_hot).await?;
-        Ok(merge(in_hot, in_cold, usize::MAX))
-    }
-
-    async fn list_objects_page(
-        &self,
-        prefix: &str,
-        start_after: Option<&str>,
-        max_keys: usize,
-    ) -> Result<Vec<Listed>, Error> {
-        let in_hot = data_page(self.hot.as_ref(), prefix, start_after, max_keys).await?;
-        let in_cold = self
-            .cold_page(prefix, start_after, max_keys, &in_hot)
-            .await?;
-        Ok(merge(in_hot, in_cold, max_keys))
-    }
-}
-
-/// The first `max_keys` objects of the listing of `hot` after `start_after`, without the
-/// objects under the reserved prefixes: pages of the hot tier are read until enough objects
-/// are left or the listing ends.
-async fn data_page(
-    hot: &dyn Backend,
-    prefix: &str,
-    start_after: Option<&str>,
-    max_keys: usize,
-) -> Result<Vec<Listed>, Error> {
-    let mut found: Vec<Listed> = Vec::new();
-    let mut after = start_after.map(str::to_owned);
-    loop {
-        let page = hot.list_page(prefix, after.as_deref(), max_keys).await?;
-        let full_page = page.len() >= max_keys;
-        after = page.last().map(|object| object.key.clone());
-        found.extend(page.into_iter().filter(is_data));
-        if !full_page || found.len() >= max_keys {
-            break;
-        }
-    }
-    found.truncate(max_keys);
-    Ok(found)
-}
-
-/// The objects of both listings, each key once (the hot tier's entry where both have it), in
-/// key order, at most `max_keys` of them.
-fn merge(in_hot: Vec<Listed>, in_cold: Vec<Listed>, max_keys: usize) -> Vec<Listed> {
-    let mut merged: BTreeMap<String, Listed> = BTreeMap::new();
-    for object in in_hot.into_iter().chain(in_cold) {
-        merged.entry(object.key.clone()).or_insert(object);
-    }
-    merged.into_values().take(max_keys).collect()
 }
 
 #[async_trait]
@@ -889,6 +816,15 @@ impl Backend for Proxy {
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         self.inner.head_object(key).await
+    }
+
+    /// The tag of an object is the tag of the tier that answers, and moves when the proxy copies
+    /// the object from one tier to the other, so versions are told apart by size alone: the proxy
+    /// never replaces an object. Limit: a key that is deleted and put again with a body of the
+    /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
+    /// not affected, as its bytes are checked against the digest.
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        a.size == b.size
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
@@ -970,10 +906,9 @@ impl Backend for Proxy {
         let mut calls = 0;
         while found.len() < max_uploads {
             calls += 1;
-            if calls > UPLOAD_LISTING_CALLS {
-                let text = format!(
-                    "the cold tier's listing of uploads took over {UPLOAD_LISTING_CALLS} calls"
-                );
+            let limit = self.inner.config.upload_listing_calls;
+            if calls > limit {
+                let text = format!("the cold tier's listing of uploads took over {limit} calls");
                 return Err(Error::Unavailable(text));
             }
             let want = max_uploads - found.len();

@@ -496,6 +496,10 @@ impl Inner {
     }
 
     /// Steps 2 and 3: asks the upstream what it gave the object, and puts the copy in the cache.
+    #[expect(
+        clippy::expect_used,
+        reason = "a blocking task's panic is a bug, passed on"
+    )]
     async fn publish_put(
         self: &Arc<Self>,
         key: &str,
