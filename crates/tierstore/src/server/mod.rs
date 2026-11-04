@@ -217,6 +217,7 @@ mod door;
 mod drain;
 mod front;
 pub mod gc;
+pub mod handoff;
 mod handover;
 mod idle;
 mod keys;
