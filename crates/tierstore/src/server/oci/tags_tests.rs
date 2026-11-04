@@ -477,7 +477,6 @@ async fn an_unclear_create_is_settled_by_reading_the_version_back() {
             Some(planted) => assert_eq!(held.expect("a version"), planted.as_bytes()),
         }
         if tag == "a-landed" || tag == "u-landed" {
-            let tag = tag.to_owned();
             let own = rig.memory.get(&version(tag, 1), None).await;
             assert_eq!(own.expect("a version of its own"), mine_digest.as_bytes());
             rig.memory.delete(&version(tag, 0)).await.expect("a delete");
