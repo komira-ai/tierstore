@@ -49,9 +49,8 @@ async fn a_delete_that_amends_a_copy_back_before_the_seal_leaves_no_copy_to_resu
     park(&mut step, &gate).await;
     let pending = client.read("k").await.unwrap().unwrap();
     let amended = client.advance(&pending, Step::Amend).await.unwrap();
-    let Outcome::Done(amended) = amended else {
-        panic!("the amend was not done");
-    };
+    assert!(matches!(amended, Outcome::Done(_)));
+    let amended = client.read("k").await.unwrap().unwrap();
     gate.release();
     assert_eq!(step.await, report(1));
     assert!(!rig.hot_has("k").await);
@@ -64,7 +63,8 @@ async fn a_delete_that_amends_a_copy_back_before_the_seal_leaves_no_copy_to_resu
     let handed = client.advance(&amended, Step::Handover).await.unwrap();
     assert!(matches!(handed, Outcome::Done(_)));
     assert_eq!(r.step().await, report(1));
-    assert!(!rig.hot_has("k").await && !rig.cold_has("k").await);
+    assert!(!rig.hot_has("k").await);
+    assert!(!rig.cold_has("k").await);
     assert!(rig.entry("k").await.is_none());
 }
 
@@ -108,7 +108,8 @@ async fn a_copy_back_with_nothing_to_copy_is_removed_and_changes_no_object() {
     let mut r = rig.over(hot, rig.cold.clone(), "r1", |_| {});
     assert_eq!(r.step().await, report(3));
     assert_eq!(rig.hot.get("in-hot", None).await.unwrap(), bytes("hot"));
-    assert!(!rig.hot_has("gone").await && !rig.hot_has("full").await);
+    assert!(!rig.hot_has("gone").await);
+    assert!(!rig.hot_has("full").await);
     for key in ["in-hot", "gone", "full"] {
         assert!(rig.entry(key).await.is_none(), "{key}");
     }
@@ -188,8 +189,10 @@ async fn copy_backs_over_the_maximum_are_dropped_without_a_copy() {
         config.copy_back_max = 2;
     });
     assert_eq!(r.step().await, report(3));
-    assert!(rig.hot_has("a").await && rig.hot_has("b").await);
-    assert!(!rig.hot_has("c").await && rig.cold_has("c").await);
+    assert!(rig.hot_has("a").await);
+    assert!(rig.hot_has("b").await);
+    assert!(!rig.hot_has("c").await);
+    assert!(rig.cold_has("c").await);
     assert!(rig.entry("c").await.is_none());
 }
 
