@@ -232,6 +232,7 @@ mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
 mod usage_probe;
+mod verbs;
 mod xml;
 
 #[cfg(test)]

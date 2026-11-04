@@ -1,8 +1,10 @@
 //! The puts of a proxy whose format is active (`WriteMode::Entries`): every put, held or
 //! streamed, presigned or the completion of a multipart upload, is made on the journal entry of its
-//! key. The entry decides which of several puts of one key wins. Nothing in this release's
-//! reconciler reads these entries yet: copying the object to the cold tier, removing the entry
-//! and reaping the ones left behind are future work.
+//! key. The entry decides which of several puts of one key wins. The entry reconciler
+//! (`EntryReconciler`, implemented in the library) copies the object to the cold tier, removes the
+//! entry, and reaps the ones left behind by a proxy that departed. The binary does not start it
+//! yet, so until the activation wiring lands the entries a put leaves in a running server stay
+//! where they are.
 //!
 //! A put, in order:
 //!
@@ -28,8 +30,8 @@
 //! A put that fails before the object landed removes its entry and leaves nothing. A put whose
 //! landing may have happened (the store did not answer) makes the entry pending all the same, and
 //! fails, and the entry stays pending. A put that cannot reach the entry again leaves it held.
-//! Copying, removing and taking over such entries is future work for the reconciler; this release
-//! leaves them unprocessed.
+//! Copying, removing and taking over such entries is the work of `EntryReconciler`: it copies a
+//! pending one, finishes a held one once its owner has departed, and removes it.
 
 use std::future::Future;
 
