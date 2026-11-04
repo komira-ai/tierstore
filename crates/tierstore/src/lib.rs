@@ -24,7 +24,10 @@
 //!   one yet.
 //! - [`MemoryBackend`] is an in-memory backend whose times come from a [`TestClock`] that a
 //!   test sets by hand, and [`FaultyBackend`] wraps a backend to fail or delay chosen calls
-//!   and to count them: both are for tests. [`DirBackend`] keeps a bucket in a directory of the
+//!   and to count them (per kind of call, and per kind and key): both are for tests, as are
+//!   [`GateBackend`], which parks a chosen call until a test releases it, [`Mono`], a monotonic
+//!   clock a test advances, and [`RecordingSleeper`], which records the waits a loop asks for
+//!   through [`Sleeper`] and returns at once. [`DirBackend`] keeps a bucket in a directory of the
 //!   local file system, parts of uploads included, which are streamed to files.
 //! - `S3Backend` (feature `s3`, in the module `s3`) is a bucket of an S3-compatible store as
 //!   a [`Backend`]: a create-only put is `If-None-Match: *`, a put that replaces is
@@ -62,6 +65,10 @@
 //!   journal objects, and publishes the hot tier's usage and the copy lag. It never lists
 //!   the data prefixes of either tier: it lists `_tiering/proxies/` and the journal prefix of
 //!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage.
+//! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
+//!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
+//!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
+//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -94,9 +101,19 @@ mod build_commit;
 mod build_version;
 mod cache;
 mod clock;
+#[cfg(test)]
+mod clock_tests;
 mod dir;
+mod entry;
+#[cfg(test)]
+mod entry_tests;
 mod error;
 mod faulty;
+#[cfg(test)]
+mod faulty_tests;
+mod gate;
+#[cfg(test)]
+mod gate_tests;
 mod journal;
 #[cfg(test)]
 mod journal_tests;
@@ -116,15 +133,23 @@ mod selftest;
 mod selftest_tests;
 #[cfg(feature = "server")]
 pub mod server;
+mod sleeper;
+#[cfg(test)]
+mod sleeper_tests;
 mod state;
 mod tiered;
 
 pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter};
 pub use cache::CachedStore;
-pub use clock::{Clock, MonotonicClock, SystemClock};
+pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use dir::DirBackend;
+pub use entry::{
+    Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,
+    encode_entry, entry_key,
+};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
+pub use gate::{Gate, GateBackend, Phase};
 pub use journal::{JournalEntry, JournalOp, decode_journal, encode_journal};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
@@ -134,4 +159,5 @@ pub use selftest::{
     Check, Note, SelfTestError, SelfTestFailure, SelfTestOptions, SweepBudget, Swept, self_test,
     settle_conditional_delete, sweep_probes,
 };
+pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
 pub use tiered::{Proxy, ProxyConfig};
