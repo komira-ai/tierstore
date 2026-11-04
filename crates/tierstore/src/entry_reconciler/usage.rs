@@ -61,6 +61,9 @@ pub(super) struct Books {
     publish_at: Option<u64>,
     /// The objects the last listing offered for eviction, oldest first.
     pub(super) candidates: VecDeque<Candidate>,
+    /// Whether an eviction cycle is open: it opened when the figure passed the high water and
+    /// closes only when the figure is no more than the low water, however many steps that takes.
+    pub(super) evicting: bool,
 }
 
 /// What the calls that run on the pool tell the step, which only a `&self` can reach.
