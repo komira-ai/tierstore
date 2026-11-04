@@ -1,32 +1,35 @@
 //! The format object of the store, `_tiering/format`: what every proxy and the reconciler read to
-//! know whether writes are paused for a change of the format of what is stored.
+//! know whether writes are paused for a change of the format of what is stored, and whether
+//! writes are made on entries.
 //!
 //! The body is a JSON object `{"phase": "drain"}`, `{"phase": "drained"}` or
 //! `{"epoch": 2, "phase": "active"}`; a reader ignores fields it does not know and takes a phase it
-//! does not know to be no pause. No object means the format of every release before this one, and
-//! no pause.
+//! does not know to be no pause. No object means the format of every release before the bridge
+//! release, and no pause; a proxy of this release makes no write on it (see `active`).
 //!
 //! - `drain`: asked for by the operator. A proxy answers every write with
-//!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler
-//!   applies the journals until each one is applied to its end.
-//! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
-//!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
-//!   is an interval, longer than the refresh interval of the proxies' format reads, so a proxy
-//!   whose format reads succeed has read `drain` again; it does not establish that every proxy has
-//!   seen the pause, because a proxy whose reads fail keeps its last answer. It does not wait
-//!   for a write that a proxy admitted earlier and is still running. Writes stay paused.
-//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts, the
-//!   completions of multipart uploads and its deletes on the entries of their keys, and only while
-//!   its heartbeat is acknowledged; it never pauses writes for it. A delete that finds the entry of
-//!   its key held or sealed by another operation, and that it can neither amend nor claim, waits
-//!   for the entry to be released before it changes either tier. A delete that amends a put the
-//!   reconciler holds for a copy, or claims a handed-over delete, is the exception: it deletes both
-//!   tiers, hands the entry over and waits for the release before it is acknowledged.
+//!   [`Error::Unavailable`] (a 503 at the S3 front) and keeps serving reads; the reconciler of the
+//!   bridge release applied the journals until each one was applied to its end.
+//! - `drained`: written by the reconciler of the bridge release (and no one else) when it holds the
+//!   lease, has seen `drain` for the settle time, and every journal it knows is applied to its end.
+//!   Writes stay paused. This release's reconciler never writes it.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
+//!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
+//!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
+//!   answered with [`Error::Unavailable`] and a text that says writes wait for the active format.
+//!   A delete that finds the entry of its key held or sealed by another operation, and that it can
+//!   neither amend nor claim, waits for the entry to be released before it changes either tier. A
+//!   delete that amends a put the reconciler holds for a copy, or claims a handed-over delete, is
+//!   the exception: it deletes both tiers, hands the entry over and waits for the release before it
+//!   is acknowledged.
 
+#[cfg(feature = "server")]
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use crate::journal::{FORMAT_KEY, to_body};
+use crate::journal::FORMAT_KEY;
+#[cfg(feature = "server")]
+use crate::journal::to_body;
 use crate::{Backend, Error};
 
 /// Where the store is in a change of format.
@@ -91,6 +94,7 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the
 /// object changes between the two calls the tag is the older one, and a write over it by that tag
 /// fails.
+#[cfg(feature = "server")]
 pub(crate) async fn read_format_tagged(
     hot: &dyn Backend,
 ) -> Result<Option<(Format, String)>, Error> {
@@ -107,6 +111,7 @@ pub(crate) async fn read_format_tagged(
 }
 
 /// The body of a format object.
+#[cfg(feature = "server")]
 pub(crate) fn format_body(format: &Format) -> Bytes {
     to_body(format)
 }

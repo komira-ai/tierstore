@@ -15,9 +15,8 @@
 //!
 //! A stopping process keeps beating until its drain is over and then calls
 //! [`Proxy::stop_heartbeat`]: there is no flag in the registration for a closing process, it just
-//! stops changing, and the reconciler removes it once it has stayed unchanged for
-//! `ReconcilerConfig::registration_retention` (if that is set, which it is not by default, and
-//! then it is at least `departure`) and the proxy left no journal object.
+//! stops changing, and the reconciler counts its owner as departed once it has stayed unchanged for
+//! the departure time.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -75,9 +74,8 @@ impl Heartbeat {
     /// Writes this process's registration at open: create-only. One that exists is left as it is,
     /// except that of an earlier process that beat: this process does not beat until it starts
     /// its heartbeat, perhaps never, so that registration is replaced by this process's own count
-    /// of zero, which the leader never removes. Left, it would stop changing, be taken for the
-    /// registration of a departed owner and be removed while this process, which may write a
-    /// journal, is alive.
+    /// of zero. Left, it would stop changing and be taken for the registration of a departed
+    /// owner while this process, which may hold entries, is alive.
     pub(super) async fn register(&self, hot: &dyn Backend, key: &str) -> Result<(), Error> {
         match hot.put(key, self.first_body()).await {
             Err(Error::AlreadyExists(_)) => {}
@@ -218,10 +216,9 @@ impl Proxy {
 
     /// Stops the heartbeat and waits until the task has ended, so that no beat follows; a second
     /// caller, at the same time or later, waits for the same end. The
-    /// registration is left as it is: it stops changing, and the reconciler removes it after
-    /// `ReconcilerConfig::registration_retention` if that is set and no journal object is left.
-    /// Afterwards the heartbeat cannot be started
-    /// again, whether it was running or not.
+    /// registration is left as it is: it stops changing, and the reconciler counts its owner as
+    /// departed after the departure time. Afterwards the heartbeat cannot be started again,
+    /// whether it was running or not.
     pub async fn stop_heartbeat(&self) {
         let mut ended = {
             let mut state = locked(&self.inner.heartbeat.state);

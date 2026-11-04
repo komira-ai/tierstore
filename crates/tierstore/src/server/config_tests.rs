@@ -49,7 +49,6 @@ fn a_storage_node_file_makes_the_settings_it_says() {
     assert_eq!(cli.put_permit_wait, Duration::from_secs(25));
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(120));
     assert_eq!(cli.lease_ttl, Duration::from_secs(40));
-    assert_eq!(cli.journal_retention, Duration::from_secs(12 * 3600));
     assert_eq!(cli.slot, None);
 }
 
@@ -88,10 +87,7 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
     assert_eq!(cli.copy_parallel, 16);
     assert_eq!(cli.lease_ttl, Duration::from_secs(30));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(5));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
-    assert_eq!(cli.journal_linger, Duration::from_millis(20));
-    assert_eq!(cli.journal_retention, Duration::from_secs(24 * 3600));
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));
@@ -417,14 +413,14 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "low_water = 1",
         "critical = 1",
         "copy_parallel = 1",
-        "reconcile_interval = \"1s\"",
         "lock_file = \"/var/lib/tierstore/instance.lock\"",
         "usage_stale_after = \"1s\"",
-        "journal_linger = \"1s\"",
-        "journal_retention = \"1s\"",
         "heartbeat = \"1s\"",
         "departure = \"1s\"",
         "deadline_margin = \"1s\"",
+        "journal_linger = \"1s\"",
+        "journal_retention = \"1s\"",
+        "reconcile_interval = \"1s\"",
         "registration_retention = \"1s\"",
     ];
     for line in every {
@@ -726,6 +722,56 @@ fn the_slot_key_is_a_port() {
         assert!(why.contains("slot"), "{bad}: {why}");
     }
     assert!(refusal(&with("0")).contains("server.slot"));
+}
+
+/// Asserts that a file written for the releases before the entries, which sets the eight retired
+/// keys of `[hot_store]`, still loads and makes the settings the file without them makes: the
+/// keys are accepted and their values are not used.
+#[test]
+fn a_file_with_the_retired_journal_keys_still_loads_and_means_what_it_meant_without_them() {
+    let old = golden_with(
+        "lease_ttl          = \"40s\"",
+        "lease_ttl          = \"40s\"\n\
+         journal_linger     = \"50ms\"\n\
+         journal_retention  = \"12h\"\n\
+         reconcile_interval = \"4s\"\n\
+         registration_retention = \"20m\"\n\
+         journal_batch_entries = 8\n\
+         journal_page_size = 20\n\
+         copy_rounds = 5\n\
+         delete_rounds = 6",
+    );
+    let with_keys = from_text(&old, DEFAULTS).unwrap();
+    let without = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert_eq!(with_keys, without);
+}
+
+/// Asserts that `retired_keys` names, in file order of the table, each retired key a `[hot_store]`
+/// sets and no other key.
+#[test]
+fn retired_keys_names_each_retired_key_a_hot_store_sets() {
+    let table: super::TierTable = toml::from_str(
+        "kind = \"memory\"\nlease_ttl = \"1s\"\njournal_linger = \"1s\"\n\
+         journal_retention = \"1s\"\nreconcile_interval = \"1s\"\n\
+         registration_retention = \"1s\"\njournal_batch_entries = 1\njournal_page_size = 1\n\
+         copy_rounds = 1\ndelete_rounds = 1",
+    )
+    .unwrap();
+    assert_eq!(
+        super::retired_keys(&table),
+        [
+            "hot_store.journal_linger",
+            "hot_store.journal_retention",
+            "hot_store.reconcile_interval",
+            "hot_store.registration_retention",
+            "hot_store.journal_batch_entries",
+            "hot_store.journal_page_size",
+            "hot_store.copy_rounds",
+            "hot_store.delete_rounds",
+        ]
+    );
+    let none: super::TierTable = toml::from_str("kind = \"memory\"\nlease_ttl = \"1s\"").unwrap();
+    assert!(super::retired_keys(&none).is_empty());
 }
 
 /// Asserts that a storage node's settings are made of the text with `Cli::from_config_text`, and

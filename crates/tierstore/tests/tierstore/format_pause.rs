@@ -18,6 +18,13 @@ fn paused() -> Error {
     Error::Unavailable(why.to_owned())
 }
 
+/// The error of a write while the format does not say `active` at epoch 2.
+fn waiting() -> Error {
+    let why = "writes wait until the format object says active at epoch 2 \
+               (tierstore format-epoch --activate); reads are served";
+    Error::Unavailable(why.to_owned())
+}
+
 /// Replaces the format object in the hot tier directly.
 async fn set_format(rig: &Rig, json: &str) {
     let _ = rig.hot_mem.delete(FORMAT).await;
@@ -62,16 +69,15 @@ async fn every_write_is_answered_503_while_the_format_says_drain_and_reads_still
     assert_absent(&*rig.hot_mem, "n").await;
 }
 
-/// Asserts which phases pause a put: `drain` and `drained` do, a phase this release does not know
-/// does not, and an `active` format with its epoch does not either but makes the put on an entry,
-/// which a proxy that has not beaten is not live for (the answer is `Unavailable` with another
-/// text than the pause's).
+/// Asserts which phases pause a put: `drain` and `drained` do (the pause's text), a phase this
+/// release does not know is answered with the text that says writes wait for the active format,
+/// and an `active` format with its epoch lets a live proxy put on an entry.
 #[tokio::test(start_paused = true)]
 async fn drained_pauses_writes_and_active_and_unknown_phases_do_not() {
     let cases = [
         (r#"{"phase":"drain"}"#, Err(paused())),
         (r#"{"phase":"drained"}"#, Err(paused())),
-        (r#"{"phase":"someday","extra":[1]}"#, Ok(())),
+        (r#"{"phase":"someday","extra":[1]}"#, Err(waiting())),
     ];
     for (json, want) in cases {
         let rig = Rig::new();
@@ -83,23 +89,21 @@ async fn drained_pauses_writes_and_active_and_unknown_phases_do_not() {
     let rig = Rig::new();
     let proxy = eager_proxy(&rig).await;
     set_format(&rig, r#"{"epoch":2,"phase":"active"}"#).await;
-    let put = proxy.put("k", body("v")).await;
-    let Err(Error::Unavailable(text)) = put else {
-        panic!("{put:?}");
-    };
-    assert!(text.contains("not live"), "{text}");
-    assert_ne!(Error::Unavailable(text), paused());
+    assert_eq!(proxy.put("k", body("v")).await, Ok(()));
 }
 
-/// Asserts that deleting the format object (what an operator's cancel does) lets puts and deletes
-/// through again.
+/// Asserts that writing the active format over a drain lets puts and deletes through again, and
+/// that deleting the format object (what an operator's cancel does) does not: a proxy of this
+/// release takes no write without the active format.
 #[tokio::test(start_paused = true)]
-async fn writes_resume_when_the_format_object_is_deleted() {
+async fn writes_resume_when_the_format_is_active_again_and_not_when_it_is_deleted() {
     let rig = Rig::new();
     let proxy = eager_proxy(&rig).await;
     set_format(&rig, r#"{"phase":"drain"}"#).await;
     assert_eq!(proxy.put("k", body("v")).await, Err(paused()));
     rig.hot_mem.delete(FORMAT).await.unwrap();
+    assert_eq!(proxy.put("k", body("v")).await, Err(waiting()));
+    set_format(&rig, r#"{"epoch":2,"phase":"active"}"#).await;
     proxy.put("k", body("v")).await.unwrap();
     proxy.delete("k").await.unwrap();
 }
@@ -144,10 +148,11 @@ async fn an_unreadable_format_keeps_what_the_proxy_read_last() {
 
 /// Asserts that two callers never read the format object at once, so that a read that was
 /// answered before the object turned to `drain` cannot be stored after a read that saw `drain`.
-/// A write is held with its read of an `active` format on the way back; the object turns to
-/// `drain`, the refresh passes, and a second write arrives. It must wait for the first (the hot
-/// tier has seen one read of the object, not two) and, once the first is let go and is admitted
-/// on what it read, read the object itself and be answered 503. Defects it catches: a refresh
+/// A write is held with its read of an `active` format of epoch 1 on the way back; the object
+/// turns to `drain`, the refresh passes, and a second write arrives. It must wait for the first
+/// (the hot tier has seen one read of the object, not two) and, once the first is let go and is
+/// answered on what it read (the wait for epoch 2), read the object itself and be answered with
+/// the pause. Defects it catches: a refresh
 /// that does not serialize the readers (a second read while the first is out, and the older
 /// result stored over the newer).
 #[tokio::test(start_paused = true)]
@@ -190,8 +195,9 @@ async fn a_second_writer_waits_for_the_read_of_the_format_that_is_out() {
     );
 
     release.notify_one();
-    assert_eq!(first.await.unwrap(), Ok(()));
+    assert_eq!(first.await.unwrap(), Err(waiting()));
     assert_eq!(second.await.unwrap(), Err(paused()));
     assert_eq!(held.gets(), 2);
+    assert_absent(&*rig.hot_mem, "a").await;
     assert_absent(&*rig.hot_mem, "b").await;
 }

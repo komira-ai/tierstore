@@ -1,50 +1,19 @@
 //! The proxy: puts, gets, heads, deletes and listings over the two tiers.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream;
 use tierstore::{
-    Backend, ByteRange, CachedStore, Error, FaultyBackend, JournalEntry, JournalOp, MemoryBackend,
-    Meta, Op, PartBody,
+    Backend, ByteRange, CachedStore, Error, FaultyBackend, MemoryBackend, Meta, Op, PartBody,
 };
 
-use crate::support::{
-    Rig, assert_absent, body, check_ranges, journal, journal_key, journal_keys, keys, page, read,
-};
+use crate::support::{Rig, assert_absent, body, check_ranges, keys, page, read};
 
 /// A body of one chunk, for a part.
 fn part_body(text: &'static str) -> PartBody<'static> {
     stream::once(async move { Ok(Bytes::from_static(text.as_bytes())) }).boxed()
-}
-
-fn entry(op: JournalOp, key: &str, size: u64, time: u64) -> JournalEntry {
-    JournalEntry {
-        op,
-        key: key.to_owned(),
-        size,
-        time,
-        cold_tag: None,
-        hot_tag: None,
-    }
-}
-
-/// Asserts that a put is acknowledged after the journal object that holds its entry is in the
-/// hot tier: when the put returns, the object is in the hot tier and not in the cold tier,
-/// and journal object 1 of the proxy holds one put entry with the key, the size and the time.
-#[tokio::test(start_paused = true)]
-async fn a_put_is_acknowledged_after_its_journal_entry_is_in_the_hot_tier() {
-    let rig = Rig::new();
-    rig.clock.set(42);
-    let proxy = rig.proxy("p1", 1000).await;
-    proxy.put("k", body("value")).await.unwrap();
-
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
-    assert_absent(&*rig.cold_mem, "k").await;
-    let entries = journal(&*rig.hot_mem, "p1", 1).await;
-    assert_eq!(entries, [entry(JournalOp::Put, "k", 5, 42)]);
 }
 
 /// Asserts that a put is refused when the key exists only in the cold tier (the hot tier may
@@ -60,8 +29,6 @@ async fn a_put_is_refused_when_the_key_is_only_in_the_cold_tier() {
     assert_eq!(refused, Err(Error::AlreadyExists("k".to_owned())));
     assert_absent(&*rig.hot_mem, "k").await;
     assert_eq!(read(&*rig.cold_mem, "k").await, body("old"));
-    let journal_objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(journal_objects, Vec::<String>::new());
 }
 
 /// Asserts that a put is refused when the key exists in the hot tier, that the first object
@@ -75,8 +42,6 @@ async fn a_put_is_refused_when_the_key_is_in_the_hot_tier() {
     let refused = proxy.put("k", body("two")).await;
     assert_eq!(refused, Err(Error::AlreadyExists("k".to_owned())));
     assert_eq!(proxy.get("k", None).await.unwrap(), body("one"));
-    let journal_objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(journal_objects, [journal_key("p1", 1)]);
 }
 
 /// Asserts that a get of an object in the hot tier is answered by the hot tier alone.
@@ -92,37 +57,10 @@ async fn a_get_of_a_hot_object_does_not_touch_the_cold_tier() {
     assert_eq!(proxy.head("k").await.unwrap().size, 5);
     assert_eq!(rig.cold.calls(Op::Get), gets);
     assert_eq!(rig.cold.calls(Op::Head), heads);
-    assert_eq!((gets, heads), (0, 2));
-}
-
-/// Asserts that a get of an object only the cold tier holds returns it and copies it back into
-/// the hot tier, journaling the copy as a mirror of the cold object (with its content tag), so
-/// that a second get is answered by the hot
-/// tier; and that a head of such an object copies nothing back.
-#[tokio::test(start_paused = true)]
-async fn a_get_copies_a_cold_object_back_and_a_head_does_not() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    rig.cold_mem.put("k", body("value")).await.unwrap();
-
-    assert_eq!(proxy.head("k").await.unwrap().size, 5);
-    assert_absent(&*rig.hot_mem, "k").await;
-
-    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
-    let entries = journal(&*rig.hot_mem, "p1", 1).await;
-    let mut mirror = entry(JournalOp::PutMirror, "k", 5, 0);
-    mirror.cold_tag = Some(rig.cold_mem.head("k").await.unwrap().tag);
-    mirror.hot_tag = Some(rig.hot_mem.head("k").await.unwrap().tag);
-    assert_eq!(entries, [mirror]);
-
-    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
-    assert_eq!(rig.cold.calls(Op::Get), 1);
 }
 
 /// Asserts that range reads are byte-exact from the hot tier, and again from an object only
-/// the cold tier holds (the first read of it copies the whole object back): the first and last
+/// the cold tier holds (the read asks for no copy and makes none): the first and last
 /// byte, a middle slice, a range past the end, empty ranges, and an error for a range
 /// starting past the end.
 #[tokio::test(start_paused = true)]
@@ -134,7 +72,7 @@ async fn range_reads_are_byte_exact_at_both_tiers() {
 
     rig.cold_mem.put("cold", body("0123456789")).await.unwrap();
     check_ranges(&proxy, "cold").await;
-    assert_eq!(read(&*rig.hot_mem, "cold").await, body("0123456789"));
+    assert_absent(&*rig.hot_mem, "cold").await;
 }
 
 /// Asserts that a get and a head of an object neither tier holds are `NotFound`.
@@ -145,29 +83,6 @@ async fn an_object_neither_tier_holds_is_not_found() {
     let missing = Error::NotFound("k".to_owned());
     assert_eq!(proxy.get("k", None).await.unwrap_err(), missing);
     assert_eq!(proxy.head("k").await.unwrap_err(), missing);
-}
-
-/// Asserts that a delete removes the object from both tiers and appends a delete entry with
-/// size zero, that the key is then not found, and that deleting a key neither tier holds
-/// succeeds and is journaled too.
-#[tokio::test(start_paused = true)]
-async fn a_delete_removes_both_copies_and_is_journaled() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    proxy.put("k", body("value")).await.unwrap();
-    rig.cold_mem.put("k", body("value")).await.unwrap();
-
-    proxy.delete("k").await.unwrap();
-    assert_absent(&*rig.hot_mem, "k").await;
-    assert_absent(&*rig.cold_mem, "k").await;
-    let missing = Error::NotFound("k".to_owned());
-    assert_eq!(proxy.get("k", None).await.unwrap_err(), missing);
-    let entries = journal(&*rig.hot_mem, "p1", 2).await;
-    assert_eq!(entries, [entry(JournalOp::Delete, "k", 0, 0)]);
-
-    proxy.delete("k").await.unwrap();
-    let again = journal(&*rig.hot_mem, "p1", 3).await;
-    assert_eq!(again, [entry(JournalOp::Delete, "k", 0, 0)]);
 }
 
 /// Asserts that a client put or delete of a key under `_journal/`, `_tiering/` or `_entries/` is
@@ -188,8 +103,6 @@ async fn a_client_write_under_a_reserved_prefix_is_refused() {
         assert_eq!(delete, Err(Error::Reserved(key.to_owned())));
         assert_absent(&*rig.hot_mem, key).await;
     }
-    let journal_objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(journal_objects, Vec::<String>::new());
 
     let replaced = proxy.put_if_match("k", body("v"), "tag").await;
     assert!(matches!(replaced, Err(Error::Other(_))));
@@ -275,7 +188,6 @@ async fn a_listing_merges_the_tiers_and_leaves_out_the_reserved_keys() {
     assert_eq!(sizes, [3, 3, 5]);
     let names: Vec<&str> = listed.iter().map(|object| object.key.as_str()).collect();
     assert_eq!(names, ["x/1", "x/2", "x/3"]);
-    assert_eq!(keys(&*rig.hot_mem).await.len(), 5);
 }
 
 /// Asserts that pages of the merged listing continue after the last key of the page before,
@@ -322,8 +234,30 @@ async fn a_conditional_delete_through_the_proxy_is_unsupported_and_changes_nothi
     let refused = proxy.delete_if_match("k", &tag).await.unwrap_err();
     assert!(matches!(refused, Error::Unsupported(_)), "{refused}");
     assert_eq!(read(&*rig.hot_mem, "k").await, body("v"));
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, [journal_key("p1", 1)]);
+}
+
+/// Asserts that a whole `get` of an object only the cold tier holds returns it and, once the format
+/// is active, asks for its copy-back with an entry of the key and copies nothing itself; and that a
+/// proxy whose format is not active (it has read none) asks for nothing.
+#[tokio::test(start_paused = true)]
+async fn a_get_of_a_cold_object_asks_for_its_copy_back_only_on_an_active_format() {
+    let rig = Rig::new();
+    rig.cold_mem.put("k", body("value")).await.unwrap();
+    let proxy = rig.proxy("p1", 1000).await;
+    assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
+    crate::support::copy_back_asked(&rig, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
+
+    let plain = Rig::new();
+    plain.cold_mem.put("k", body("value")).await.unwrap();
+    let config = plain.config("p1", 1000);
+    let waiting = tierstore::Proxy::open(plain.hot.clone(), plain.cold.clone(), config)
+        .await
+        .unwrap();
+    assert_eq!(waiting.get("k", None).await.unwrap(), body("value"));
+    tokio::task::yield_now().await;
+    let entry = plain.hot_mem.head(&tierstore::entry_key("k")).await;
+    assert_eq!(entry, Err(Error::NotFound(tierstore::entry_key("k"))));
 }
 
 fn meta(size: u64, tag: &str) -> Meta {

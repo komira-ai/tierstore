@@ -2,7 +2,7 @@
 
 use hyper::StatusCode;
 
-use crate::{Backend, Op};
+use crate::Op;
 
 use super::AccessKey;
 use super::ops_tests::completion;
@@ -10,6 +10,7 @@ use super::presign::presign_url;
 use super::presign::tests::request;
 use super::testing::{BUCKET, Reply, Rig, texts};
 use super::{GcKey, PresignKey};
+use crate::Backend;
 
 const MEBIBYTE: u64 = 1 << 20;
 const GC: (&str, &str) = ("pack-gc", "gc-secret-0123456789");
@@ -46,8 +47,7 @@ fn access_denied() -> (u16, String) {
 
 /// Asserts the calls a GC key does under its prefix: ListObjectsV2 with a prefix inside its own
 /// (the prefix itself and a deeper one), HeadObject (the size), and DeleteObject, which removes the
-/// object from both tiers (one object is in the hot tier, one in the cold tier only) and
-/// journals the delete; the objects outside the prefix are untouched.
+/// object from both tiers (one object is in the hot tier, one in the cold tier only); the objects outside the prefix are untouched.
 #[tokio::test(start_paused = true)]
 async fn a_gc_key_lists_heads_and_deletes_under_its_prefix() {
     let rig = rig().await;
@@ -85,14 +85,12 @@ async fn a_gc_key_lists_heads_and_deletes_under_its_prefix() {
         (head.status, head.header("content-length")),
         (StatusCode::OK, "3")
     );
-    let journals = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
     for key in ["cas/b/x/1", "cas/b/cold"] {
         let deleted = gc(&rig, "DELETE", &uri(key), &[], b"").await;
         assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{key}");
         assert!(rig.hot_mem.get(key, None).await.is_err(), "{key}");
         assert!(rig.cold_mem.get(key, None).await.is_err(), "{key}");
     }
-    assert!(rig.hot_mem.list("_journal/p1/").await.unwrap().len() > journals);
     assert_eq!(rig.get("cas/b/x/2", None).await.body, "two");
     assert_eq!(rig.get("cas/c/1", None).await.body, "other");
 }

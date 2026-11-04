@@ -217,6 +217,7 @@ impl Lease {
     ///
     /// # Errors
     /// What the HEAD gives other than not found.
+    #[cfg(test)]
     pub(crate) async fn still_held(&self) -> Result<bool, Error> {
         let mut state = self.shared.state.lock().await;
         let Some(etag) = state.etag.clone() else {

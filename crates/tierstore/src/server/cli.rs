@@ -1,7 +1,7 @@
 //! The arguments and the start-up of the `tierstore` binary.
 //!
 //! One process runs three things over the same pair of tiers: a [`Proxy`](crate::Proxy) with the given id,
-//! the S3 front of that proxy ([`Server`](super::Server)), and a [`Reconciler`](crate::Reconciler), which works only while it
+//! the S3 front of that proxy ([`Server`](super::Server)), and an [`EntryReconciler`](crate::EntryReconciler), which works only while it
 //! holds the lease in the hot tier, so that any number of these processes may run over the same
 //! tiers. With `hot_store.lock_file` it works only while the process also holds an exclusive lock on
 //! that file (see [`Gate`](super::cli_reconcile::Gate)): a second process over the same node, started beside the first,
@@ -181,8 +181,8 @@ pub struct Cli {
     /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     pub listen: Vec<SocketAddr>,
-    /// The id of this proxy, which names its journal in the hot tier and its lease. Keep it
-    /// across restarts, and give each process over the same tiers one of its own.
+    /// The id of this proxy, which names its registration in the hot tier and the entries it
+    /// holds. Give each process over the same tiers one of its own.
     pub proxy_id: String,
     /// The certificate and key that make the S3 front serve HTTPS (`server.tls_cert_file` and
     /// `server.tls_key_file`).
@@ -304,18 +304,12 @@ pub struct Cli {
     /// How long the drain waits for requests in flight, for the answers being sent, and for the
     /// connections it closes, once the settle is over.
     pub drain_deadline: Duration,
-    /// How long a batch of journal entries waits for more before it is written.
-    pub journal_linger: Duration,
-    /// How long an applied journal object is kept before it is deleted.
-    pub journal_retention: Duration,
     /// The most objects the reconciler copies to the cold tier at once.
     pub copy_parallel: u32,
     /// How long the reconciler's lease lasts without a renewal.
     pub lease_ttl: Duration,
-    /// How often the reconciler works: shorter than `hot_store.lease_ttl`.
-    pub reconcile_interval: Duration,
-    /// The heartbeat of the proxy and the registration retention: `hot_store.heartbeat`,
-    /// `hot_store.departure`, `hot_store.deadline_margin` and `hot_store.registration_retention`.
+    /// The heartbeat of the proxy: `hot_store.heartbeat`, `hot_store.departure` and
+    /// `hot_store.deadline_margin`.
     pub heartbeat: HeartbeatFlags,
     /// The lock file of this node: an absolute path on a local file system, in a directory that
     /// nothing removes (not under `/run`), the same for every process of one node. The reconciler
@@ -642,9 +636,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.high_water > cli.critical {
         return Err("--high-water must not be above --critical".into());
     }
-    if cli.reconcile_interval >= cli.lease_ttl {
-        return Err("--reconcile-interval must be shorter than --lease-ttl".into());
-    }
     if cli.usage_stale_after <= cli.lease_ttl {
         return Err("--usage-stale-after must be longer than --lease-ttl".into());
     }
@@ -666,11 +657,8 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.critical = share(cli.critical);
-    proxy.linger = cli.journal_linger;
     let tuning = &cli.hot_tuning;
-    proxy.batch_entries = tuning.journal_batch_entries;
     proxy.usage_refresh = tuning.usage_refresh;
-    proxy.delete_rounds = tuning.delete_rounds;
     proxy.upload_listing_calls = tuning.upload_listing_calls;
     let mut reconciler =
         ReconcilerConfig::new(&reconciler_name(&cli.proxy_id), cli.hot_bytes, clock);
@@ -678,10 +666,8 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
-    reconciler.retention = cli.journal_retention;
-    reconciler.page_size = tuning.journal_page_size;
     reconciler.compare_range = tuning.compare_range;
-    cli.heartbeat.apply(&mut proxy, &mut reconciler);
+    cli.heartbeat.apply(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {

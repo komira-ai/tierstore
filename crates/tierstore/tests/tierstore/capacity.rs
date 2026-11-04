@@ -4,12 +4,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tierstore::{Backend, ByteRange, Error, Mono, Op};
+use tierstore::{ByteRange, Error, Mono, Op};
 use tokio::time::Instant;
 
-use crate::support::{
-    Rig, assert_absent, body, journal_entry_keys, journal_key, journal_keys, read, set_usage,
-};
+use crate::support::{Rig, assert_absent, body, read, set_usage};
+use tierstore::Backend;
 
 /// Asserts that a put made while the published usage is at or above the critical share of the
 /// budget and under the budget takes exactly as much of the paused clock as a put made under the
@@ -48,8 +47,6 @@ async fn when_the_usage_is_at_the_budget_puts_go_straight_to_the_cold_tier() {
     proxy.put("k", body("direct")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k").await, body("direct"));
     assert_absent(&*rig.hot_mem, "k").await;
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, [journal_key("p1", 1)]);
 
     assert_eq!(proxy.get("k", None).await.unwrap(), body("direct"));
     assert_absent(&*rig.hot_mem, "k").await;
@@ -63,8 +60,6 @@ async fn when_the_usage_is_at_the_budget_puts_go_straight_to_the_cold_tier() {
     set_usage(&rig, 10, 0).await;
     proxy.put("m", body("back")).await.unwrap();
     assert_eq!(read(&*rig.hot_mem, "m").await, body("back"));
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, [journal_key("p1", 1), journal_key("p1", 2)]);
 }
 
 /// Asserts that a put made while the hot tier is full is an error when the hot tier cannot
@@ -165,41 +160,20 @@ async fn a_capacity_error_from_the_hot_tier_sends_puts_to_cold_until_the_refresh
     proxy.put("k1", body("1")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k1").await, body("1"));
     assert_absent(&*rig.hot_mem, "k1").await;
-    let hot_puts = rig.hot.calls(Op::Put);
 
     proxy.put("k2", body("2")).await.unwrap();
     assert_eq!(read(&*rig.cold_mem, "k2").await, body("2"));
-    assert_eq!(rig.hot.calls(Op::Put), hot_puts);
+    assert_absent(&*rig.hot_mem, "k2").await;
 
     tokio::time::sleep(Duration::from_secs(11)).await;
     proxy.put("k3", body("3")).await.unwrap();
     assert_eq!(read(&*rig.hot_mem, "k3").await, body("3"));
     assert_absent(&*rig.cold_mem, "k3").await;
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, [journal_key("p1", 1)]);
-    let entry_keys = journal_entry_keys(&*rig.hot_mem, "p1", 1).await;
-    assert_eq!(entry_keys, ["k3"]);
 }
 
-/// Asserts that a put whose journal object the hot tier answers with a capacity error does
-/// not fail: the object goes to the cold tier, the copy it first wrote to the hot tier is
-/// removed, and nothing is journaled.
-#[tokio::test(start_paused = true)]
-async fn a_capacity_error_on_the_journal_object_sends_the_put_to_the_cold_tier() {
-    let rig = Rig::new();
-    let proxy = rig.proxy("p1", 1000).await;
-    let full = Error::Full("hot".to_owned());
-    rig.hot.fail_next_on(Op::Put, "_journal/", full);
-
-    proxy.put("k", body("value")).await.unwrap();
-    assert_eq!(read(&*rig.cold_mem, "k").await, body("value"));
-    assert_absent(&*rig.hot_mem, "k").await;
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, Vec::<String>::new());
-}
-
-/// Asserts that a get of an object only the cold tier holds does not copy it into the hot tier
-/// while the usage is above the critical mark, and does once the usage is under it.
+/// Asserts that a get of an object only the cold tier holds asks for no copy-back while the usage
+/// is above the critical mark, and asks for one (an entry of the key) once the usage is under it;
+/// the read copies nothing itself.
 #[tokio::test(start_paused = true)]
 async fn a_get_does_not_copy_back_above_the_critical_mark() {
     let rig = Rig::new();
@@ -212,12 +186,12 @@ async fn a_get_does_not_copy_back_above_the_critical_mark() {
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_absent(&*rig.hot_mem, "k").await;
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, Vec::<String>::new());
+    assert!(rig.hot_mem.head(&tierstore::entry_key("k")).await.is_err());
 
     set_usage(&rig, 100, 0).await;
     assert_eq!(proxy.get("k", None).await.unwrap(), body("value"));
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("value"));
+    crate::support::copy_back_asked(&rig, "k").await;
+    assert_absent(&*rig.hot_mem, "k").await;
 }
 
 /// Asserts that a ranged get of an object only the cold tier holds asks the cold tier for the
@@ -261,8 +235,6 @@ async fn a_failed_copy_back_does_not_fail_the_read() {
     tokio::time::sleep(Duration::from_millis(10)).await;
     assert_absent(&*rig.hot_mem, "k1").await;
     assert_absent(&*rig.hot_mem, "k2").await;
-    let objects = journal_keys(&*rig.hot_mem, "p1").await;
-    assert_eq!(objects, Vec::<String>::new());
 }
 
 /// Asserts that the usage object is read at most once for each `usage_refresh`: a change of

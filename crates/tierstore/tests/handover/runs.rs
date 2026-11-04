@@ -359,8 +359,8 @@ fn a_handover_rolled_back_under_load_fails_no_request() {
 /// 5xx, no reset or cut answer on an established connection, no acknowledged write lost. The
 /// transfers held across the old slot's settle complete, and its drain read the idle probes' late
 /// requests (the storage node's exit note).
-/// The new slot's reconciler holds the lease; the journals are intact, with no two writers, and
-/// once both slots have stopped no lease is left.
+/// The new slot's reconciler holds the lease; the entries are intact, every acknowledged key is in
+/// a tier, and once both slots have stopped no lease is left.
 #[test]
 #[cfg_attr(
     not(feature = "handover-t1"),
@@ -411,7 +411,7 @@ fn a_restart_under_load_fails_only_connects_in_its_gap() {
         checks::lease_held_by(site, B);
         site.services.stop_slot(B);
         checks::exits_are(site, &[(A, &checks::probes_note()), (B, "")]);
-        checks::journals_and_lease(site, &reports, &acked);
+        checks::entries_and_lease(site, &reports, &acked);
     });
 }
 

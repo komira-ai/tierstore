@@ -23,8 +23,8 @@
 //!   make an `s3` and an `oci` interface (see [`config_interface`](super::config_interface)).
 //! - `[server]`: the id, the bucket and region, the key files, the limits on requests and
 //!   bodies.
-//! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the journal,
-//!   the reconciler and its lease.
+//! - `[hot_store]`: the hot tier and what only it has: its budget and water marks, the
+//!   reconciler and its lease, and the heartbeat of the proxy.
 //! - `[cold_store]`: the cold tier.
 //! - `[local_cache]`: the cache directory, its budget and marks (a build node, or a storage node
 //!   that keeps a cache in front of itself).
@@ -104,18 +104,11 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("presign-max-expires", &["server.presign_max_expires"]),
     ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
-    ("journal-linger", &["hot_store.journal_linger"]),
-    ("journal-retention", &["hot_store.journal_retention"]),
     ("copy-parallel", &["hot_store.copy_parallel"]),
     ("lease-ttl", &["hot_store.lease_ttl"]),
-    ("reconcile-interval", &["hot_store.reconcile_interval"]),
     ("heartbeat", &["hot_store.heartbeat"]),
     ("departure", &["hot_store.departure"]),
     ("deadline-margin", &["hot_store.deadline_margin"]),
-    (
-        "registration-retention",
-        &["hot_store.registration_retention"],
-    ),
     ("lock-file", &["hot_store.lock_file"]),
     ("usage-stale-after", &["hot_store.usage_stale_after"]),
     ("max-request-bytes", &["server.max_request_bytes"]),
@@ -482,7 +475,6 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("critical", cold.critical.is_some()),
         ("copy_parallel", cold.copy_parallel.is_some()),
         ("lease_ttl", cold.lease_ttl.is_some()),
-        ("reconcile_interval", cold.reconcile_interval.is_some()),
         ("lock_file", cold.lock_file.is_some()),
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
@@ -501,12 +493,56 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
+        ("reconcile_interval", cold.reconcile_interval.is_some()),
         (
             "registration_retention",
             cold.registration_retention.is_some(),
         ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
+}
+
+/// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
+/// journal and of the journal reconciler (`journal_linger`, `journal_retention`,
+/// `reconcile_interval`, `registration_retention`, `journal_batch_entries`, `journal_page_size`,
+/// `copy_rounds` and `delete_rounds`).
+pub(super) fn retired_keys(hot: &TierTable) -> Vec<&'static str> {
+    let set = [
+        ("hot_store.journal_linger", hot.journal_linger.is_some()),
+        (
+            "hot_store.journal_retention",
+            hot.journal_retention.is_some(),
+        ),
+        (
+            "hot_store.reconcile_interval",
+            hot.reconcile_interval.is_some(),
+        ),
+        (
+            "hot_store.registration_retention",
+            hot.registration_retention.is_some(),
+        ),
+        (
+            "hot_store.journal_batch_entries",
+            hot.journal_batch_entries.is_some(),
+        ),
+        (
+            "hot_store.journal_page_size",
+            hot.journal_page_size.is_some(),
+        ),
+        ("hot_store.copy_rounds", hot.copy_rounds.is_some()),
+        ("hot_store.delete_rounds", hot.delete_rounds.is_some()),
+    ];
+    set.into_iter()
+        .filter_map(|(key, given)| given.then_some(key))
+        .collect()
+}
+
+/// Says on the operator's stderr, once for each key, that a retired key of `[hot_store]` is
+/// accepted and ignored: a file written for the releases before the entries still starts.
+fn warn_retired_keys(hot: &TierTable) {
+    for key in retired_keys(hot) {
+        tracing::warn!("tierstore: {key} is ignored: the journal and its reconciler were removed");
+    }
 }
 
 #[cfg(test)]
@@ -547,6 +583,9 @@ fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
         local_cache,
         policy,
     } = file;
+    if let Some(hot) = &hot_store {
+        warn_retired_keys(hot);
+    }
     let listed = with_legacy(interface, server.listen.take(), oci)?;
     let fronts = interfaces(&listed)?;
     match (hot_store, cold_store, local_cache) {
@@ -644,11 +683,8 @@ pub(super) fn storage(
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
         tls: front.tls,
-        journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
-        journal_retention: duration(hot.journal_retention, Duration::from_secs(24 * 3600)),
         copy_parallel,
         lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
-        reconcile_interval: duration(hot.reconcile_interval, Duration::from_secs(5)),
         lock_file,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),

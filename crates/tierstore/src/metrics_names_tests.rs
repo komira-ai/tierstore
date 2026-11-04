@@ -37,12 +37,7 @@ fn the_family_names_are_distinct_and_start_with_the_prefix() {
 fn the_rendered_text_is_the_text_built_from_the_names() {
     let tiers = [(Tier::Hot, "hot"), (Tier::Cold, "cold")];
     let reads = [(Read::Get, "get"), (Read::Head, "head")];
-    let skips = [
-        (Skipped::Critical, "critical"),
-        (Skipped::Full, "full"),
-        (Skipped::Raced, "raced"),
-        (Skipped::Failed, "failed"),
-    ];
+    let skips = [(Skipped::Critical, "critical")];
     let counters = Counters::default();
     let mut expected = String::new();
     let mut cell = 0_u64;
@@ -75,10 +70,7 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         expected.push_str(&format!("{BYTES_SERVED_TOTAL}{labels} {served}\n"));
         expected.push_str(&format!("{BYTES_READ_TOTAL}{labels} {read}\n"));
     }
-    counters.promoted(7);
-    counters.promoted(5);
-    expected.push_str(&format!("{PROMOTIONS_TOTAL} 2\n"));
-    expected.push_str(&format!("{PROMOTED_BYTES_TOTAL} 12\n"));
+    expected.push_str(&format!("{PROMOTIONS_TOTAL} 0\n{PROMOTED_BYTES_TOTAL} 0\n"));
     for (index, (why, label)) in skips.into_iter().enumerate() {
         for _ in 0..=index {
             counters.skipped(why);
@@ -86,6 +78,11 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         let count = index + 1;
         expected.push_str(&format!(
             "{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} {count}\n"
+        ));
+    }
+    for label in ["full", "raced", "failed"] {
+        expected.push_str(&format!(
+            "{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} 0\n"
         ));
     }
     assert_eq!(counters.render(), expected);

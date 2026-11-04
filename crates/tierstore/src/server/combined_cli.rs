@@ -36,8 +36,10 @@ use super::cli::{Addresses, Error, build, probe_run_id, signals};
 use super::cli_reconcile::{reconcile, reconcile_gated};
 use super::cli_serve::open_gate;
 use super::config_combined::CombinedSettings;
+use super::first_beat::wait_first_beat;
 use super::listen::joined;
 use super::local_cache::{Disk, SystemDisk};
+use super::memory_format::start_format;
 use super::rounds::Rounds;
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
@@ -56,11 +58,14 @@ pub(super) async fn serve_combined(
     let cli = &settings.node;
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
+    start_format(cli, built.hot.as_ref()).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
+    let heartbeat = built.proxy.heartbeat;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
+    wait_first_beat(&proxy, heartbeat).await;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;
@@ -70,12 +75,11 @@ pub(super) async fn serve_combined(
     // Both fronts read, and write, through the cache.
     let beside_halt = Arc::new(Notify::new());
     let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
-    let interval = cli.reconcile_interval;
     let halt = Arc::clone(&beside_halt);
     let reconciling = async move {
         match gate {
-            Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
-            None => reconcile(reconciler, interval, halt).await,
+            Some(gate) => reconcile_gated(reconciler, halt, gate).await,
+            None => reconcile(reconciler, halt).await,
         }
     };
     let fronts = Fronts {

@@ -87,7 +87,7 @@ fn a_duration_is_a_number_and_a_unit() {
 }
 
 /// Asserts that the keys that have defaults have them: the water marks at 80, 70 and 95
-/// percent, a drain of 10 seconds and 15 minutes, a journal linger of 20 milliseconds, and so on.
+/// percent, a drain of 10 seconds and 15 minutes, 16 parallel copies, and so on.
 #[test]
 fn the_keys_have_their_defaults() {
     let cli = Cli::from_config_text(MINIMAL).unwrap();
@@ -102,12 +102,9 @@ fn the_keys_have_their_defaults() {
     assert_eq!((cli.high_water, cli.low_water, cli.critical), (80, 70, 95));
     assert_eq!(cli.drain_lb_wait, Duration::from_secs(10));
     assert_eq!(cli.drain_deadline, Duration::from_secs(900));
-    assert_eq!(cli.journal_linger, Duration::from_millis(20));
-    assert_eq!(cli.journal_retention, Duration::from_secs(24 * 3600));
     assert_eq!(cli.copy_parallel, 16);
     assert_eq!(cli.lease_ttl, Duration::from_secs(30));
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
-    assert_eq!(cli.reconcile_interval, Duration::from_secs(5));
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));

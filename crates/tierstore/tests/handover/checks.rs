@@ -1,10 +1,10 @@
 //! What a run is judged by once its clients have stopped. Each check names the defect it catches.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use tierstore::{Backend, DirBackend, decode_journal};
+use tierstore::{Backend, DirBackend, decode_entry};
 use tierstore_testkit::reaped::{first_line, spawn};
 
 use crate::load::{Acked, Failure, Fault, Kind, Report, hex_sha256};
@@ -343,51 +343,47 @@ pub fn lease_held_by(site: &Site, port: u16) {
 }
 
 /// Asserts, once both slots have stopped cleanly, that the hot tier of a storage node holds intact
-/// journals and no lease, with no two writers: every journal object decodes, the journals are
-/// those of the two slots' proxy ids and of nothing else, each acknowledged key is journaled
-/// exactly once, and each holder gave the lease up as it stopped (a holder deletes the lease
-/// object only if it is still the one it wrote, so a lease another writer overwrote would be
-/// left). Catches two processes writing one journal, and a lease not given up or held by two.
-pub fn journals_and_lease(site: &Site, reports: &[Report], more: &[Acked]) {
+/// entries and no lease, and that every acknowledged key has its object in a tier: every object
+/// under `_entries/` decodes, each acknowledged key is held by the hot tier or the cold tier, and
+/// each holder gave the lease up as it stopped (a holder deletes the lease object only if it is
+/// still the one it wrote, so a lease another writer overwrote would be left). Catches an entry
+/// that does not decode, an acknowledged write that is in neither tier, and a lease not given up
+/// or held by two.
+pub fn entries_and_lease(site: &Site, reports: &[Report], more: &[Acked]) {
     assert!(
         site.services.running().is_empty(),
         "every slot stopped first"
     );
     let (runtime, hot) = hot_tier(site);
-    let ids: BTreeSet<String> = [A, B].map(|port| format!("tierstore-{port}")).into();
-    let mut writers = BTreeSet::new();
-    let mut journaled: BTreeMap<String, u32> = BTreeMap::new();
+    let cold_dir = site.hot.parent().expect("the base directory").join("cold");
+    let cold: Arc<dyn Backend> = Arc::new(DirBackend::open(&cold_dir).expect("the cold tier"));
+    assert_eq!(more.len(), 1, "the held put was acknowledged");
+    let acked: Vec<&Acked> = reports
+        .iter()
+        .flat_map(|report| &report.acked)
+        .chain(more)
+        .collect();
     runtime.block_on(async {
-        let keys = list(&*hot, "_journal/").await;
+        let keys = list(&*hot, "_entries/").await;
         for key in &keys {
-            let id = key["_journal/".len()..].split('/').next().expect("an id");
-            writers.insert(id.to_owned());
             let body = read(&*hot, key).await;
-            let entries = decode_journal(&body).unwrap_or_else(|e| panic!("{key}: {e}"));
-            for entry in entries {
-                *journaled.entry(entry.key).or_default() += 1;
-            }
+            decode_entry(&body).unwrap_or_else(|e| panic!("{key}: {e}"));
         }
         match hot.head("_tiering/lease").await {
             Err(tierstore::Error::NotFound(_)) => {}
             Ok(meta) => panic!("a lease is left after both slots stopped: {meta:?}"),
             Err(other) => panic!("look for the lease: {other}"),
         }
-    });
-    assert_eq!(writers, ids, "the journals' writers");
-    assert_eq!(more.len(), 1, "the held put was acknowledged");
-    for acked in reports.iter().flat_map(|report| &report.acked).chain(more) {
-        assert_eq!(
-            journaled.get(&acked.key),
-            Some(&1),
-            "{} in the journals",
-            acked.key
+        for put in &acked {
+            let held = hot.head(&put.key).await.is_ok() || cold.head(&put.key).await.is_ok();
+            assert!(held, "{} is in neither tier", put.key);
+        }
+        eprintln!(
+            "T1: {} entries intact, {} acknowledged keys in a tier, the lease given up",
+            keys.len(),
+            acked.len()
         );
-    }
-    eprintln!(
-        "T1: journals of {writers:?} intact, {} keys journaled once each, the lease given up",
-        journaled.len()
-    );
+    });
 }
 
 async fn list(hot: &dyn Backend, prefix: &str) -> Vec<String> {

@@ -1,5 +1,6 @@
-//! Tags of the OCI front over the stores it runs on: the proxy over two memory tiers with the
-//! reconciler evicting from the hot one, and directory backends that share a directory. A tag
+//! Tags of the OCI front over the stores it runs on: the proxy over two memory tiers, with a
+//! version moved from the hot tier to the cold one as an eviction leaves it, and directory
+//! backends that share a directory. A tag
 //! move writes a new version, so the proxy, whose objects are write-once, takes it.
 
 use std::sync::Arc;
@@ -17,8 +18,7 @@ use super::push_tests::{Rig, digest_of, front_over, hex_of};
 use super::tags;
 use super::tags_tests::{Gated, manifests, version};
 use crate::{
-    Backend, DirBackend, Error, FaultyBackend, MemoryBackend, Proxy, ProxyConfig, Reconciler,
-    ReconcilerConfig, TestClock,
+    Backend, DirBackend, Error, FaultyBackend, MemoryBackend, Proxy, ProxyConfig, TestClock,
 };
 
 /// A proxy over two memory tiers, and the tiers.
@@ -28,15 +28,21 @@ async fn proxy_over_memory(
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let cold = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let mut config = ProxyConfig::new("p1", 1 << 20, clock.clone());
-    config.linger = Duration::from_millis(1);
     config.usage_refresh = Duration::ZERO;
-    let opened = Proxy::open(hot.clone(), cold.clone(), config).await;
+    let opened = crate::server::testing::live_proxy(hot.clone(), cold.clone(), config).await;
     (Arc::new(opened.expect("a proxy")), hot, cold)
 }
 
+/// Leaves `key` as an eviction does: the cold tier holds the object and the hot tier does not.
+async fn evict(hot: &MemoryBackend, cold: &MemoryBackend, key: &str) {
+    let body = hot.get(key, None).await.expect("the hot object");
+    cold.put(key, body).await.expect("the copy");
+    hot.delete(key).await.expect("the eviction");
+}
+
 /// Asserts the case that was 500 `UNKNOWN`: a tag is pushed over the proxy and its version is
-/// copied to the cold tier and evicted from the hot one, and the tag is then moved. The move is
-/// 201 and not a failure (the proxy replaces nothing: the move is a new object), a pull by tag
+/// left in the cold tier only (as the copy and the eviction of the entry reconciler leave it),
+/// and the tag is then moved. The move is 201 and not a failure (the proxy replaces nothing: the move is a new object), a pull by tag
 /// serves the new manifest and not the old one (the hot tier holds the newer version and the cold
 /// tier the older, and the listing gives the newer first), after the new version is evicted too
 /// it still does, and the first version in the cold tier is byte for byte what it was.
@@ -53,18 +59,11 @@ async fn a_tag_moved_after_its_version_left_the_hot_tier_is_pulled_as_moved() {
     };
     let made = manifests(&rig, 2).await;
     let (first, second) = (made[0].clone(), made[1].clone());
-    let mut reconciler = Reconciler::new(
-        hot.clone(),
-        cold.clone(),
-        ReconcilerConfig::new("r1", 10, clock.clone()),
-    );
 
     let put = rig.tag("app", "latest", &first.0).await;
     assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
-    clock.advance(10);
-    let report = reconciler.pass().await;
-    assert!(report.evicted >= 1, "{report:?}");
     let key = version("latest", 0);
+    evict(&hot, &cold, &key).await;
     assert!(hot.get(&key, None).await.is_err(), "the version left hot");
     assert_eq!(
         cold.get(&key, None).await.expect("cold"),
@@ -80,8 +79,7 @@ async fn a_tag_moved_after_its_version_left_the_hot_tier_is_pulled_as_moved() {
     let newest: Vec<String> = page.expect("a page").into_iter().map(|o| o.key).collect();
     assert_eq!(newest, [version("latest", 1)]);
 
-    clock.advance(10);
-    reconciler.pass().await;
+    evict(&hot, &cold, &version("latest", 1)).await;
     let again = rig.send(Method::GET, "/v2/app/manifests/latest").await;
     assert_eq!(again.body, second.0);
     assert_eq!(

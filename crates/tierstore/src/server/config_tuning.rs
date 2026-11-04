@@ -1,7 +1,7 @@
 //! The keys of the file that tune the data path and that no other module of the loader owns: the
 //! S3 client's connect timeout, body rate, idle-connection timeout and read retries, which
 //! `[server]` has for every tier it reaches (as it has `s3_request_timeout`), and the counts,
-//! rounds and sizes of the proxy and the reconciler that `[hot_store]` has.
+//! counts and sizes of the proxy and the reconciler that `[hot_store]` has.
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, and a
 //! range that a value outside is refused with, naming the key.
@@ -41,18 +41,11 @@ impl Default for S3Client {
 /// The settings of the proxy and the reconciler that `[hot_store]` gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HotTuning {
-    /// `hot_store.journal_batch_entries`: the most entries one journal object holds.
-    pub journal_batch_entries: usize,
     /// `hot_store.usage_refresh`: how long the usage object that was read is used before it is
     /// read again.
     pub usage_refresh: Duration,
-    /// `hot_store.journal_page_size`: the most journal objects asked for in one listing.
-    pub journal_page_size: usize,
     /// `hot_store.compare_range`: the most bytes of an object one read of a comparison holds.
     pub compare_range: NonZeroU64,
-    /// `hot_store.delete_rounds`: how many times a delete looks at the cold object again after it
-    /// changed under the delete.
-    pub delete_rounds: u32,
     /// `hot_store.upload_listing_calls`: the most calls to the cold tier one listing of uploads
     /// makes.
     pub upload_listing_calls: u32,
@@ -61,11 +54,8 @@ pub struct HotTuning {
 impl Default for HotTuning {
     fn default() -> Self {
         Self {
-            journal_batch_entries: 64,
             usage_refresh: Duration::from_secs(1),
-            journal_page_size: 100,
             compare_range: COMPARE_RANGE,
-            delete_rounds: 3,
             upload_listing_calls: 100,
         }
     }
@@ -146,22 +136,13 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
 /// The proxy and reconciler settings `[hot_store]` gives, or the defaults of those it leaves out.
 pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
     let old = HotTuning::default();
-    let batch = hot
-        .journal_batch_entries
-        .unwrap_or(old.journal_batch_entries as u32);
-    let page = hot
-        .journal_page_size
-        .unwrap_or(old.journal_page_size as u32);
     Ok(HotTuning {
-        journal_batch_entries: within("hot_store", "journal_batch_entries", batch, 1, 65_536)?
-            as usize,
         usage_refresh: span(
             ("hot_store", "usage_refresh"),
             hot.usage_refresh,
             old.usage_refresh,
             (MS, HOUR),
         )?,
-        journal_page_size: within("hot_store", "journal_page_size", page, 1, 1000)? as usize,
         compare_range: NonZeroU64::new(within(
             "hot_store",
             "compare_range",
@@ -171,7 +152,6 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
             1 << 30,
         )?)
         .unwrap_or(old.compare_range),
-        delete_rounds: count("delete_rounds", hot.delete_rounds, old.delete_rounds, 100)?,
         upload_listing_calls: count(
             "upload_listing_calls",
             hot.upload_listing_calls,
@@ -255,19 +235,13 @@ cache  = true
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(50));
         assert_eq!(client, S3Client::default());
         let hot = cli.hot_tuning;
-        assert_eq!(hot.journal_batch_entries, 64);
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
-        assert_eq!(hot.journal_page_size, 100);
         assert_eq!(hot.compare_range.get(), 1 << 20);
-        assert_eq!(hot.delete_rounds, 3);
         assert_eq!(hot.upload_listing_calls, 100);
         assert_eq!(hot, HotTuning::default());
         let built = built(&mut cli);
-        assert_eq!(built.proxy.batch_entries, 64);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
-        assert_eq!(built.proxy.delete_rounds, 3);
         assert_eq!(built.proxy.upload_listing_calls, 100);
-        assert_eq!(built.reconciler.page_size, 100);
         assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
     }
 
@@ -281,9 +255,8 @@ cache  = true
         );
         let text = text.replacen(
             "budget = 1000",
-            "budget = 1000\njournal_batch_entries = 8\nusage_refresh = \"250ms\"\n\
-             journal_page_size = 20\ncompare_range = \"64KiB\"\n\
-             delete_rounds = 6\nupload_listing_calls = 7",
+            "budget = 1000\nusage_refresh = \"250ms\"\ncompare_range = \"64KiB\"\n\
+             upload_listing_calls = 7",
             1,
         );
         let mut cli = from_text(&text, DEFAULTS).unwrap();
@@ -294,11 +267,8 @@ cache  = true
         assert_eq!(client.tuning.read_retries, 4);
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(7));
         let built = built(&mut cli);
-        assert_eq!(built.proxy.batch_entries, 8);
         assert_eq!(built.proxy.usage_refresh, Duration::from_millis(250));
-        assert_eq!(built.proxy.delete_rounds, 6);
         assert_eq!(built.proxy.upload_listing_calls, 7);
-        assert_eq!(built.reconciler.page_size, 20);
         assert_eq!(built.reconciler.compare_range.get(), 64 << 10);
     }
 
@@ -347,14 +317,6 @@ cache  = true
         }
         let hot = [
             (
-                "journal_batch_entries = 0",
-                "hot_store.journal_batch_entries: 0 is not between 1 and 65536",
-            ),
-            (
-                "journal_batch_entries = 65537",
-                "hot_store.journal_batch_entries: 65537 is not between 1 and 65536",
-            ),
-            (
                 "usage_refresh = \"0s\"",
                 "hot_store.usage_refresh: 0ms is not between 1ms and 3600000ms",
             ),
@@ -363,24 +325,12 @@ cache  = true
                 "hot_store.usage_refresh: 7200000ms is not between 1ms and 3600000ms",
             ),
             (
-                "journal_page_size = 0",
-                "hot_store.journal_page_size: 0 is not between 1 and 1000",
-            ),
-            (
-                "journal_page_size = 1001",
-                "hot_store.journal_page_size: 1001 is not between 1 and 1000",
-            ),
-            (
                 "compare_range = 4095",
                 "hot_store.compare_range: 4095 is not between 4096 and 1073741824",
             ),
             (
                 "compare_range = \"2GiB\"",
                 "hot_store.compare_range: 2147483648 is not between 4096 and 1073741824",
-            ),
-            (
-                "delete_rounds = 0",
-                "hot_store.delete_rounds: 0 is not between 1 and 100",
             ),
             (
                 "upload_listing_calls = 0",
@@ -420,8 +370,7 @@ cache  = true
         let cli = from_text(&high, DEFAULTS).unwrap();
         assert_eq!(cli.s3_client.tuning.read_retries, 8);
         let edge = with_hot(
-            "journal_batch_entries = 65536\nusage_refresh = \"1h\"\njournal_page_size = 1000\n\
-             compare_range = \"1GiB\"\ndelete_rounds = 100\n\
+            "usage_refresh = \"1h\"\ncompare_range = \"1GiB\"\n\
              upload_listing_calls = 100000",
         );
         assert_eq!(

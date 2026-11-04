@@ -1,5 +1,5 @@
 //! The streamed put through `Server::handle`: the body of a put is not held whole, and the
-//! object is stored, and journaled, only after the last piece was read and every hash came out
+//! object is stored, and its entry made pending, only after the last piece was read and every hash came out
 //! right. The tests over directories run on the real clock, since the file calls of a directory
 //! backend are threads of the runtime that a paused clock does not wait for; nothing in them
 //! measures time.
@@ -14,26 +14,28 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use futures::StreamExt;
-use http_body_util::BodyExt;
+
 use hyper::body::{Body, Frame};
 use hyper::{Request, StatusCode};
 use objstore_s3::s3::fake::FakeS3;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tierstore_testkit::dir::TestDir;
 
 use crate::journal::is_reserved;
 use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
-    Backend, ByteRange, DirBackend, Error, JournalEntry, JournalOp, Listed, Meta, Op, PartBody,
-    Proxy, ProxyConfig, S3Backend, TestClock, decode_journal,
+    Backend, ByteRange, DirBackend, Error, Listed, Meta, Op, PartBody, ProxyConfig, S3Backend,
+    TestClock,
 };
 
 use super::auth::{sign, sign_claiming};
 use super::handover::PIECES_QUEUED;
 use super::request::BoxError;
-use super::testing::{BUCKET, KEY_ID, NOW, Reply, Rig, SECRET, Scripted, Step, texts};
+use super::testing::{BUCKET, KEY_ID, NOW, Reply, Rig, SECRET, Scripted, Step, live_proxy, texts};
 use super::{Server, ServerConfig};
+use futures::StreamExt;
+use http_body_util::BodyExt;
+use sha2::Digest;
 
 /// The size of a piece of a generated body.
 const PIECE: usize = 32 << 10;
@@ -328,9 +330,8 @@ impl Tiers {
         let cold_dir = TestDir::under(std::env::temp_dir(), "tierstore-stream-cold");
         let hot = Arc::new(DirBackend::open(hot_dir.path()).unwrap());
         let cold = Arc::new(DirBackend::open(cold_dir.path()).unwrap());
-        let mut proxy_config = ProxyConfig::new("p1", 1 << 40, clock.clone());
-        proxy_config.linger = Duration::from_millis(1);
-        let proxy = Proxy::open(hot.clone(), cold.clone(), proxy_config).await;
+        let proxy_config = ProxyConfig::new("p1", 1 << 40, clock.clone());
+        let proxy = live_proxy(hot.clone(), cold.clone(), proxy_config).await;
         let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
         config.max_request_bytes = limit;
         let server = Server::new(Arc::new(proxy.unwrap()), config.clone());
@@ -351,16 +352,6 @@ impl Tiers {
         keys.filter(|key| !is_reserved(key)).collect()
     }
 
-    /// The entries of the journal of the proxy, in order.
-    async fn journal(&self) -> Vec<JournalEntry> {
-        let mut entries = Vec::new();
-        for object in self.hot.list("_journal/p1/").await.unwrap() {
-            let bytes = self.hot.get(&object.key, None).await.unwrap();
-            entries.extend(decode_journal(&bytes).unwrap());
-        }
-        entries
-    }
-
     /// Whether a directory holds the temporary file of a put that is not over.
     fn has_temporary_file(dir: &TestDir) -> bool {
         let names = std::fs::read_dir(dir.path()).unwrap();
@@ -368,21 +359,19 @@ impl Tiers {
         names.any(|name| name.to_string_lossy().starts_with(".tmp-"))
     }
 
-    /// Asserts that no object of the client is in either tier, nothing is journaled, and no
-    /// temporary file is left.
+    /// Asserts that no object of the client is in either tier, and no temporary file is left.
     async fn assert_nothing_stored(&self) {
         assert_eq!(Self::data_keys(&self.hot).await, Vec::<String>::new());
         assert_eq!(Self::data_keys(&self.cold).await, Vec::<String>::new());
-        assert_eq!(self.journal().await, Vec::<JournalEntry>::new());
         assert!(!Self::has_temporary_file(&self.hot_dir));
         assert!(!Self::has_temporary_file(&self.cold_dir));
     }
 }
 
 /// Asserts that a body whose hash fails at its very last byte is refused 400 and leaves nothing
-/// visible: no object in either tier, no temporary file and no journal entry, whether the hash
+/// visible: no object in either tier, no temporary file and no entry, whether the hash
 /// is the one the signature covers or a checksum header; and that the body the hashes are right
-/// for is then stored under the same key, with one journal entry, put, of its length.
+/// for is then stored under the same key, with its entry pending.
 #[tokio::test]
 async fn a_hash_that_fails_at_the_last_byte_leaves_nothing_visible() {
     const PIECES: usize = 8;
@@ -425,15 +414,6 @@ async fn a_hash_that_fails_at_the_last_byte_leaves_nothing_visible() {
         Sha256::digest(&object).as_slice(),
         hex::decode(&claim).unwrap()
     );
-    let entry = JournalEntry {
-        op: JournalOp::Put,
-        key: "k".to_owned(),
-        size: (PIECES * PIECE) as u64,
-        time: NOW,
-        cold_tag: None,
-        hot_tag: None,
-    };
-    assert_eq!(tiers.journal().await, [entry]);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));
 }
 
@@ -457,7 +437,7 @@ async fn a_streamed_body_over_the_limit_leaves_nothing_and_one_of_the_limit_is_s
 }
 
 /// Asserts that a put of a key that exists is refused 412 whichever tier holds it, that the
-/// first object and its journal entry are all there is afterwards, and that a key the cold tier
+/// first object and its entry are all there is afterwards, and that a key the cold tier
 /// holds is refused without the body being read to its end: the pieces the body made are no more
 /// than the queue and the pieces in hand.
 #[tokio::test]
@@ -474,7 +454,6 @@ async fn create_only_refuses_an_existing_key_and_stops_reading_a_body_it_will_no
     assert_eq!(again.code(), "PreconditionFailed");
     let kept = tiers.hot.get("k", None).await.unwrap();
     assert_eq!(kept.len(), 2 * PIECE);
-    assert_eq!(tiers.journal().await.len(), 1);
 
     tiers
         .cold
@@ -489,13 +468,12 @@ async fn create_only_refuses_an_existing_key_and_stops_reading_a_body_it_will_no
     assert!(read.load(Ordering::SeqCst) <= PIECES_QUEUED + 2);
     assert_eq!(tiers.cold.get("c", None).await.unwrap(), "old");
     assert_eq!(Tiers::data_keys(&tiers.hot).await, ["k"]);
-    assert_eq!(tiers.journal().await.len(), 1);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));
 }
 
 /// Asserts that a body that fails half way is answered 400 `IncompleteBody`, and that a request
 /// dropped half way (the client went away, the body still to come) ends the stream with an error
-/// and not with its end: in both nothing is stored in either tier and nothing is journaled.
+/// and not with its end: in both nothing is stored in either tier.
 #[tokio::test(start_paused = true)]
 async fn a_body_cut_by_an_error_or_by_the_client_stores_nothing() {
     let rig = Rig::new(1 << 20).await;
@@ -518,8 +496,6 @@ async fn a_body_cut_by_an_error_or_by_the_client_stores_nothing() {
         let held = tier.list("k").await.unwrap();
         assert_eq!(held, Vec::<Listed>::new());
     }
-    let journals = rig.hot_mem.list("_journal/").await.unwrap();
-    assert_eq!(journals, Vec::<Listed>::new());
 }
 
 /// Asserts that a hot tier with no room for the first byte of a streamed put sends the whole
@@ -536,8 +512,6 @@ async fn a_hot_tier_with_no_room_sends_the_streamed_body_to_the_cold_tier() {
     assert_eq!(stored.status, StatusCode::OK);
     assert_eq!(rig.cold_mem.get("k", None).await.unwrap(), "value");
     assert!(rig.hot_mem.get("k", None).await.is_err());
-    let journals = rig.hot_mem.list("_journal/").await.unwrap();
-    assert_eq!(journals, Vec::<Listed>::new());
 }
 
 /// A server over an S3 tier (the loopback S3 service of the tests) whose limit is `limit`.
@@ -858,7 +832,7 @@ async fn a_proxy_with_an_s3_cold_tier_refuses_a_body_of_no_length_or_too_long_be
     let clock = Arc::new(TestClock::new());
     clock.set(NOW);
     let proxy_config = ProxyConfig::new("p1", 1 << 40, clock.clone());
-    let proxy = Proxy::open(hot.clone(), s3_backend(&s3), proxy_config);
+    let proxy = live_proxy(hot.clone(), s3_backend(&s3), proxy_config);
     let proxy = proxy.await.unwrap();
     let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
     config.max_request_bytes = 4 * PIECE;
@@ -887,10 +861,11 @@ async fn a_proxy_with_an_s3_cold_tier_refuses_a_body_of_no_length_or_too_long_be
     assert_eq!(s3.keys(), Vec::<String>::new());
 }
 
-/// Asserts that two streamed puts of one key at once end with one 200 and one 412
-/// `PreconditionFailed`, one object in the hot tier, one journal entry and no temporary file.
+/// Asserts that two streamed puts of one key at once end with one 200 and one refusal (412
+/// `PreconditionFailed` if the first has settled, 503 if its entry is still held), one object in
+/// the hot tier and no temporary file.
 #[tokio::test]
-async fn two_streamed_puts_of_one_key_make_one_object_and_one_journal_entry() {
+async fn two_streamed_puts_of_one_key_make_one_object() {
     let tiers = Tiers::new(256 << 20).await;
     let made = Arc::default();
     let (claim, _) = truth(4);
@@ -901,11 +876,11 @@ async fn two_streamed_puts_of_one_key_make_one_object_and_one_journal_entry() {
 
     let mut statuses = [first.status.as_u16(), second.status.as_u16()];
     statuses.sort_unstable();
-    assert_eq!(statuses, [200, 412]);
+    assert_eq!(statuses[0], 200, "{statuses:?}");
+    assert!(matches!(statuses[1], 412 | 503), "{statuses:?}");
     assert_eq!(Tiers::data_keys(&tiers.hot).await, ["k"]);
     assert_eq!(Tiers::data_keys(&tiers.cold).await, Vec::<String>::new());
     assert_eq!(tiers.hot.get("k", None).await.unwrap().len(), 4 * PIECE);
-    assert_eq!(tiers.journal().await.len(), 1);
     assert!(!Tiers::has_temporary_file(&tiers.hot_dir));
 }
 

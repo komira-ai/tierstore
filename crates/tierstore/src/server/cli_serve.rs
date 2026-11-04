@@ -15,8 +15,10 @@ use crate::{Backend, Proxy, TokioSleeper};
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
+use super::first_beat::wait_first_beat;
 use super::handoff::{Front, Handoff, HandoffError, Inherited, Offer, Socket, Want, take};
 use super::listen::{bind_all, duplicates, local_addrs};
+use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
@@ -126,11 +128,14 @@ pub async fn run_handing(
 ) -> Result<Drained, HandingError> {
     let mut built = build(cli)?;
     let gate = open_gate(cli).map_err(Error::from)?;
+    start_format(cli, built.hot.as_ref()).await?;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
+    let heartbeat = built.proxy.heartbeat;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
+    wait_first_beat(&proxy, heartbeat).await;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
@@ -182,11 +187,10 @@ pub async fn run_handing(
         ended
     };
     let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
-    let interval = cli.reconcile_interval;
     let reconciling = async move {
         match gate {
-            Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
-            None => reconcile(reconciler, interval, halt).await,
+            Some(gate) => reconcile_gated(reconciler, halt, gate).await,
+            None => reconcile(reconciler, halt).await,
         }
     };
     let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);

@@ -78,6 +78,7 @@ async fn an_object_is_put_read_by_range_and_deleted() {
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
     assert_eq!(read(&store, "cas/pack-1", 0, 5).await, "hello");
     store.delete(&k).await.unwrap();
+    h.settle().await;
     store.delete(&k).await.unwrap();
     let gone = store.get_range(&k, window(0, 5)).await.unwrap_err();
     assert!(matches!(gone, ObjectStoreError::NotFound(_)), "{gone}");
@@ -258,8 +259,8 @@ fn pieces(bytes: &Bytes) -> BodyStream {
 }
 
 /// Asserts that an object over the size of one put goes up as a multipart upload with the
-/// client's own parts, is made in the cold tier and not in the hot tier, with nothing journaled,
-/// reads back byte for byte (the read copies it into the hot tier), and that a second upload of
+/// client's own parts, is made in the cold tier and not in the hot tier, reads back byte for byte
+/// (the read asks for its copy into the hot tier and makes none itself), and that a second upload of
 /// the key fails at its completion with `AlreadyExists` and leaves the first object.
 #[tokio::test]
 async fn a_large_object_goes_up_in_parts_and_reads_back() {
@@ -268,12 +269,9 @@ async fn a_large_object_goes_up_in_parts_and_reads_back() {
     let bytes = pattern(MULTIPART_THRESHOLD as usize + 1000);
     let k = key("cas/large");
     let len = bytes.len() as u64;
-    let journal = h.hot_mem.list("_journal/p1/").await.unwrap().len();
     store.put_stream(&k, len, pieces(&bytes)).await.unwrap();
     assert_eq!(h.cold_mem.get("cas/large", None).await.unwrap(), bytes);
     assert!(h.hot_mem.get("cas/large", None).await.is_err());
-    let now = h.hot_mem.list("_journal/p1/").await.unwrap().len();
-    assert_eq!(now, journal);
     assert_eq!(store.get_range(&k, window(0, len)).await.unwrap(), bytes);
     let tail = store.get_range(&k, window(len - 10, 10)).await.unwrap();
     assert_eq!(tail, bytes.slice(bytes.len() - 10..));

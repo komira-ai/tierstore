@@ -93,13 +93,14 @@ mod sweep;
 mod usage;
 mod work;
 
-use backoff::{Idle, retry_delay};
+pub(crate) use backoff::Idle;
+use backoff::retry_delay;
 use evict::Tags;
 use usage::{Books, Tally};
 use work::Verdict;
 
-/// The settings of an [`EntryReconciler`]: those of the [`Reconciler`](crate::Reconciler) it shares
-/// the lease with, and its own.
+/// The settings of an [`EntryReconciler`]: the lease, the pool and the water marks of
+/// [`ReconcilerConfig`], and its own.
 #[derive(Clone)]
 pub struct EntryReconcilerConfig {
     /// The holder of the lease and the owner of the entries it holds (`holder`), the pool of
@@ -153,13 +154,14 @@ pub struct EntryReconcilerConfig {
 
 impl EntryReconcilerConfig {
     /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
-    /// a retry delay of 1 to 60 seconds, comparisons in ranges of 1 MiB, a stray grace of 10
-    /// minutes, a sweep every 24 hours at up to 100 lookups a second, the usage published every 10
-    /// seconds and measured by a listing every 24 hours, 100 pages of a listing a step, 10000
-    /// candidates of the eviction, 100000 remembered tags, copy-backs kept for 10 minutes and at
-    /// most 1000 of them, and a [`TokioSleeper`].
+    /// a retry delay of 1 to 60 seconds, comparisons in ranges of `base.compare_range` (1 MiB), a stray grace of 10
+    /// minutes, a sweep every 24 hours at up to 100 lookups a second, copy-backs kept for 10
+    /// minutes and at most 1000 of them, the usage published every 10 seconds and measured by a
+    /// listing every 24 hours, 100 pages of a listing a step, 10000 candidates of the eviction,
+    /// 100000 remembered tags, and a [`TokioSleeper`].
     #[must_use]
     pub fn new(base: ReconcilerConfig) -> Self {
+        let compare_range = base.compare_range.get();
         Self {
             base,
             departure: Duration::from_secs(60),
@@ -167,7 +169,7 @@ impl EntryReconcilerConfig {
             idle_max: Duration::from_secs(10),
             retry_min: Duration::from_secs(1),
             retry_max: Duration::from_secs(60),
-            compare_range: 1 << 20,
+            compare_range,
             stray_grace: Duration::from_secs(600),
             stray_interval: Duration::from_secs(24 * 3600),
             copy_back_ttl: Duration::from_secs(600),

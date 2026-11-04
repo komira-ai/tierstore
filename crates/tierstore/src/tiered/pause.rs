@@ -1,8 +1,8 @@
 //! The pause of writes: the proxy reads `_tiering/format` (at most once for each
 //! [`ProxyConfig::format_refresh`](super::ProxyConfig::format_refresh)) before each write and
-//! answers it with [`Error::Unavailable`] while the format pauses writes. Reads are never paused.
-//! The same read says which way a write is made: through the journal, or, once the format says
-//! `{"epoch": 2, "phase": "active"}`, on the entry of its key.
+//! answers it with [`Error::Unavailable`] while the format pauses writes, and until it says
+//! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key. Reads are
+//! never paused.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -60,38 +60,26 @@ pub(super) async fn refresh(
     let _ = tokio::time::timeout(limit, read).await;
 }
 
-/// The way a write is made.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum WriteMode {
-    /// Appended to the journal of the proxy.
-    Journal,
-    /// Made on the entry of the key.
-    Entries,
-}
-
 impl Inner {
-    /// Checks that a write of `key` may go on: the key is not reserved and writes are not paused.
+    /// Checks that a write of `key` may go on: the key is not reserved, writes are not paused, and
+    /// the format says that writes are made on entries.
     pub(super) async fn admit_write(&self, key: &str) -> Result<(), Error> {
-        self.admit_write_mode(key).await.map(|_| ())
-    }
-
-    /// As [`Inner::admit_write`], and says how the write is made.
-    pub(super) async fn admit_write_mode(&self, key: &str) -> Result<WriteMode, Error> {
         refuse_reserved(key)?;
         let (paused, entries) = self.format_state().await;
         if paused {
             let why = "writes are paused while the store changes format; retry later";
             return Err(Error::Unavailable(why.to_owned()));
         }
-        Ok(if entries {
-            WriteMode::Entries
-        } else {
-            WriteMode::Journal
-        })
+        if !entries {
+            let why = "writes wait until the format object says active at epoch 2 \
+                       (tierstore format-epoch --activate); reads are served";
+            return Err(Error::Unavailable(why.to_owned()));
+        }
+        Ok(())
     }
 
     /// Whether the format says `active`, so that a read of a cold object asks for a copy-back on
-    /// an entry instead of copying it itself. Reads are never paused.
+    /// an entry. Reads are never paused.
     pub(super) async fn entries_active(&self) -> bool {
         self.format_state().await.1
     }

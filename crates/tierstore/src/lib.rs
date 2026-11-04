@@ -33,51 +33,43 @@
 //!   create-only.
 //! - [`Proxy`] is a store over a hot and a cold backend that is itself a [`Backend`]. Any
 //!   number of proxies (one per node, each with its own id) work over the same two backends,
-//!   and none needs state for correctness. A get reads the hot tier, else the cold tier, and
-//!   copies what it found in the cold tier back into the hot tier; a head does not. A put is
-//!   refused if the key exists in either tier, is written to the hot tier, and is
-//!   acknowledged only after an entry for it is durable in a journal object
-//!   `_journal/<proxy_id>/<seq>` in the hot tier. A delete removes the object from both tiers
-//!   and journals the delete. A listing merges the two tiers. When the hot tier is full the
-//!   proxy writes new objects straight to the cold tier. A multipart upload goes straight to
-//!   the cold tier, part by part, never staged in the proxy: it creates the object there only
-//!   when the upload is completed (create-only: a key that exists in either tier is refused),
-//!   and journals nothing, as a put to the cold tier of a full hot tier does not; a read copies
-//!   the object into the hot tier.
+//!   and none needs state for correctness. A get reads the hot tier, else the cold tier; a head
+//!   does too. A put is refused if the key exists in either tier, is written to the hot tier, and
+//!   is acknowledged when the journal entry of its key (below) says so. A delete removes the
+//!   object from the cold tier at once and finishes on the entry. A listing merges the two tiers.
+//!   When the hot tier is full the proxy writes new objects straight to the cold tier. A multipart
+//!   upload goes straight to the cold tier, part by part, never staged in the proxy: it creates
+//!   the object there only when the upload is completed (create-only: a key that exists in either
+//!   tier is refused), on the entry of the key. A read that finds an object in the cold tier asks
+//!   for its copy into the hot tier on an entry and does not copy it itself. Writes are made
+//!   only while the format object says `{"epoch": 2, "phase": "active"}`; before that they are
+//!   answered with [`Error::Unavailable`] and reads are served.
 //! - A proxy can heartbeat ([`Proxy::start_heartbeat`], [`Proxy::stop_heartbeat`]): it rewrites its
 //!   registration `_tiering/proxies/<proxy_id>` every [`ProxyConfig::heartbeat`], and each beat the
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. The deletes made on
-//!   entries (format active) send their calls through [`Bounded`]; the puts made on entries check
-//!   the [`Deadline`] themselves; no other request path does either.
-//! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
-//!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
-//!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the
-//!   oldest copied objects from the hot tier when it is over its high-water mark, deletes old
-//!   journal objects, and publishes the hot tier's usage and the copy lag. It never lists
-//!   the data prefixes of either tier: it lists `_tiering/proxies/` and the journal prefix of
-//!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage. It also
-//!   removes the registration of a proxy that heartbeated, left no journal object and has not
-//!   changed for [`ReconcilerConfig::registration_retention`] by its own monotonic clock; by
-//!   default that is zero and nothing is removed.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. The puts and deletes
+//!   ask for both; no read path does.
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. The puts, the deletes and the cold reads of a [`Proxy`] whose format is active and the
-//!   [`EntryReconciler`] call them.
-//! - The [`EntryReconciler`] works on the entries in place of the journals: it holds the lease,
-//!   lists `_entries/`, copies each landed put to the cold tier after it has taken the entry,
-//!   finishes the deletes handed over to it, copies the cold object of each copy-back a read asked
-//!   for into the hot tier, reaps the entries of owners that departed, and adopts
-//!   hot objects that have no entry and no cold object. It does nothing until `_tiering/format`
-//!   says `active`; the server binary starts it, in place of the journal [`Reconciler`], at the first
-//!   round that reads the epoch of the entries.
+//!   body is an [`Entry`]. The puts, the deletes and the cold reads of a [`Proxy`] and the
+//!   [`EntryReconciler`] call them. The entry is both the lock on the key while one actor
+//!   changes it and the record the reconciler works from.
+//! - The [`EntryReconciler`] is the one runner, guarded by a lease object in the hot tier: it
+//!   holds the lease, lists `_entries/`, copies each landed put to the cold tier after it has
+//!   taken the entry, finishes the deletes handed over to it, copies the cold object of each
+//!   copy-back a read asked for into the hot tier, evicts the oldest copied objects from the hot
+//!   tier when it is over its high-water mark, publishes the hot tier's usage and the copy lag,
+//!   reaps the entries of owners that departed, and adopts hot objects that have no entry and no
+//!   cold object. It does nothing until `_tiering/format` says `active`. [`ReconcilerConfig`] is
+//!   the part of its settings that is the lease, the pool of copies and the water marks.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
-//! The keys under `_journal/` and `_tiering/` belong to the proxy and the
+//! The keys under `_journal/` (the per-node journals of the releases before the entries, which
+//! this release does not apply; their formats stay readable as bytes, see [`decode_journal`]), `_entries/` and `_tiering/` belong to the proxy and the
 //! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
 //! a listing of either tier leaves them out. The S3 front refuses each supported call on them itself,
 //! before the operation's own processing (a request it refuses as unsupported, such as one with a
@@ -89,7 +81,7 @@
 //! With the `server` feature the crate also has the `server` module, the S3 API front of a
 //! [`Proxy`] (the calls of S3 clients, signed with SigV4, answered from the two tiers, with
 //! request bodies and answers that must make progress and checksums that are verified), and the
-//! `tierstore` binary, which runs a proxy, that front and a [`Reconciler`] in one process
+//! `tierstore` binary, which runs a proxy, that front and an [`EntryReconciler`] in one process
 //! (`cargo build -p tierstore --features server`), over memory, directory or S3 tiers; the
 //! feature turns `s3` on.
 //!
@@ -130,8 +122,6 @@ mod gate;
 #[cfg(test)]
 mod gate_tests;
 mod journal;
-#[cfg(test)]
-mod journal_tests;
 mod lease;
 #[cfg(test)]
 mod lease_tests;
@@ -153,7 +143,6 @@ pub mod server;
 mod sleeper;
 #[cfg(test)]
 mod sleeper_tests;
-mod state;
 mod tiered;
 
 pub use backend::{
@@ -173,9 +162,12 @@ pub use entry_reconciler::{EntryReconciler, EntryReconcilerConfig, StepReport};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
 pub use gate::{Gate, GateBackend, Phase};
-pub use journal::{JournalEntry, JournalOp, decode_journal, encode_journal};
+pub use journal::{
+    Checkpoint, JournalEntry, JournalOp, decode_checkpoint, decode_journal, encode_checkpoint,
+    encode_journal,
+};
 pub use memory::{MemoryBackend, TestClock};
-pub use reconciler::{PassReport, Reconciler, ReconcilerConfig};
+pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};

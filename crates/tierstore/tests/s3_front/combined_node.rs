@@ -7,7 +7,7 @@ use reqwest::Client;
 use rustix::process::Signal;
 
 use crate::binary::{run, start};
-use crate::files::Files;
+use crate::files::{Files, activate_dir};
 
 /// The file of a node with a cache: directory tiers and the cache beside them in the scratch
 /// directory of `files`, and one policy that keeps `cas/`.
@@ -64,6 +64,7 @@ async fn a_combined_node_puts_reads_deletes_and_exits_0_on_sigterm() {
     let files = Files::new("bin-combined-node");
     let root = files.key.parent().unwrap().to_path_buf();
     let config = node_file(&files);
+    activate_dir(&root.join("hot")).await;
     let mut running = start(&args(&config));
     assert!(
         running.line().contains("mode=storage-cache"),

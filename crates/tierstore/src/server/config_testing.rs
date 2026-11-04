@@ -54,15 +54,11 @@ low_water          = 60
 critical           = 97
 copy_parallel      = 8
 lease_ttl          = "40s"
-reconcile_interval = "4s"
 lock_file          = "/var/lib/tierstore/instance.lock"
 usage_stale_after  = "3m"
-journal_linger     = "50ms"
-journal_retention  = "12h"
 heartbeat          = "5s"
 departure          = "45s"
 deadline_margin    = "8s"
-registration_retention = "20m"
 
 [cold_store]
 kind             = "s3"

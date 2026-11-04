@@ -1,13 +1,12 @@
-//! The settings of the heartbeat of a proxy and of the removal of registrations that its owner left:
-//! `hot_store.heartbeat`, `hot_store.departure`, `hot_store.deadline_margin` and
-//! `hot_store.registration_retention`. They are in a struct of their own that
+//! The settings of the heartbeat of a proxy: `hot_store.heartbeat`, `hot_store.departure` and
+//! `hot_store.deadline_margin`. They are in a struct of their own that
 //! [`Cli`](super::cli::Cli) holds. The messages of the check name the old flags, which
 //! [`keys_for_flags`](super::config::keys_for_flags) turns into the keys.
 
 use std::time::Duration;
 
 use super::config::{TierTable, duration};
-use crate::{ProxyConfig, ReconcilerConfig};
+use crate::ProxyConfig;
 
 /// The default of `hot_store.heartbeat`.
 const HEARTBEAT: Duration = Duration::from_secs(10);
@@ -15,31 +14,23 @@ const HEARTBEAT: Duration = Duration::from_secs(10);
 const DEPARTURE: Duration = Duration::from_secs(60);
 /// The default of `hot_store.deadline_margin`.
 const MARGIN: Duration = Duration::from_secs(10);
-/// The default of `hot_store.registration_retention`.
-const RETENTION: Duration = Duration::ZERO;
 
-/// How the proxy heartbeats and how long the reconciler waits.
+/// How the proxy heartbeats and when its owner counts as departed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeartbeatFlags {
     /// How often a proxy rewrites its registration in the hot tier, and the longest one such
     /// call may take. Longer than zero, and at most a sixth of `hot_store.departure`.
     pub heartbeat: Duration,
     /// How long a proxy that is not heard of stays live, less `hot_store.deadline_margin`: the value of
-    /// `Proxy::is_live`. The puts and deletes made on entries read it; the
-    /// removal of registrations uses `hot_store.registration_retention`. At least six times
-    /// `hot_store.heartbeat`.
+    /// `Proxy::is_live`. The puts and deletes made on entries read it, and
+    /// the reconciler counts the owner of an entry as departed when its registration has stood
+    /// unchanged this long. At least six times `hot_store.heartbeat`.
     pub departure: Duration,
     /// The time taken off `hot_store.departure` for `Proxy::is_live`, and the time that must be left
     /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. The
     /// deletes made on entries send their calls through `Bounded`; the puts made on entries check
     /// the time themselves and cut their own cleanup call at it. Longer than zero, and at most a quarter of `hot_store.departure`.
     pub deadline_margin: Duration,
-    /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
-    /// reconciler sees it, before the reconciler removes it, if the proxy left no journal object.
-    /// At least `hot_store.departure`, or zero, which is the default and removes no registration: a proxy
-    /// of a release without the heartbeat that reopens a registration written by this release
-    /// never rewrites it, so set a time only once no such proxy runs.
-    pub registration_retention: Duration,
 }
 
 impl HeartbeatFlags {
@@ -49,7 +40,6 @@ impl HeartbeatFlags {
             heartbeat: duration(hot.heartbeat, HEARTBEAT),
             departure: duration(hot.departure, DEPARTURE),
             deadline_margin: duration(hot.deadline_margin, MARGIN),
-            registration_retention: duration(hot.registration_retention, RETENTION),
         }
     }
 
@@ -65,7 +55,6 @@ impl HeartbeatFlags {
             heartbeat,
             departure,
             deadline_margin: margin,
-            registration_retention: retention,
         } = *self;
         if heartbeat.is_zero() {
             return Err("--heartbeat must be longer than zero".into());
@@ -84,20 +73,13 @@ impl HeartbeatFlags {
                  ({departure:?})"
             ));
         }
-        if !retention.is_zero() && retention < departure {
-            return Err(format!(
-                "--registration-retention ({retention:?}) must be at least --departure \
-                 ({departure:?})"
-            ));
-        }
         Ok(())
     }
 
-    /// Gives the values to the settings of the proxy and of the reconciler.
-    pub(super) fn apply(&self, proxy: &mut ProxyConfig, reconciler: &mut ReconcilerConfig) {
+    /// Gives the values to the settings of the proxy.
+    pub(super) fn apply(&self, proxy: &mut ProxyConfig) {
         proxy.heartbeat = self.heartbeat;
         proxy.departure = self.departure;
         proxy.deadline_margin = self.deadline_margin;
-        reconciler.registration_retention = self.registration_retention;
     }
 }

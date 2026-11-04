@@ -284,7 +284,7 @@ and is longer than it:
 | ListObjectsV2 | with a `prefix` inside the key's; a list with no prefix or another is 403, not filtered |
 | ListMultipartUploads | with a `prefix` inside the key's, the open uploads under it; no prefix or another is 403, not filtered |
 | HeadObject | yes |
-| DeleteObject | yes: from both tiers, journaled as for any delete |
+| DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
 | put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
@@ -338,7 +338,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | PutObject | `write_prefixes` | create-only: no `If-Match`, and `If-None-Match` absent or `*`; a key that exists is `412 PreconditionFailed` |
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
-| DeleteObject | `delete_prefixes` | from both tiers, journaled as for any delete |
+| DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
@@ -442,7 +442,7 @@ own proxy (all three tables; see the end of "A build node").
 
 A file with `[local_cache]` and `[cold_store]` and no `[hot_store]` runs a read cache in front of
 one upstream: typically an S3 endpoint that is the tierstore of a storage node, read with a
-read-only key. It has no journal, no lease and no reconciler; the only things that run beside the
+read-only key. It has no entries, no lease and no reconciler; the only things that run beside the
 front are the fills that a miss starts and the eviction pass. It is not a tier that is written to:
 every call but GET and HEAD (a put, a part, the start or completion of an upload, a delete, a copy,
 CreateBucket) is refused 403 `AccessDenied` with a message that says this is a read cache, before
@@ -726,7 +726,7 @@ instead of running with settings it did not read.
 | key | what |
 |---|---|
 | `[[interface]]` of type `s3` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on: `params.addresses`, or `params.port` for the IPv4 wildcard. Further entries or addresses are served by the same server |
-| `server.proxy_id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
+| `server.proxy_id` | names this process's registration in the hot tier and the entries it holds; give each process over the same tiers one of its own |
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
 | `server.tls_cert_file`, `server.tls_key_file` | the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |

@@ -5,11 +5,26 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::StreamExt;
+use futures::stream;
 use tierstore::{
-    Backend, ByteRange, Error, FaultyBackend, JournalEntry, Listed, MemoryBackend, Meta, PartBody,
-    Proxy, ProxyConfig, Reconciler, ReconcilerConfig, TestClock, decode_journal,
+    Backend, ByteRange, Error, FaultyBackend, Listed, MemoryBackend, Meta, PartBody, Proxy,
+    ProxyConfig, Sleeper, TestClock,
 };
+
+/// The format object of a store whose writes are made on entries.
+const ACTIVE_FORMAT: &str = r#"{"epoch":2,"phase":"active"}"#;
+
+/// A wait that never ends: the heartbeat of a proxy then makes no call after its first beat, so
+/// the only calls are the ones a test is about.
+pub struct Never;
+
+#[async_trait]
+impl Sleeper for Never {
+    async fn sleep(&self, _duration: Duration) {
+        std::future::pending::<()>().await;
+    }
+}
 
 /// A hot and a cold in-memory backend, each behind a fault injector, with one clock that
 /// stamps the objects of both and the entries, leases and ages the store reads. The memory
@@ -38,48 +53,44 @@ impl Rig {
         }
     }
 
-    /// The settings of a proxy `id` with a hot tier of `budget` bytes: a linger of a
-    /// millisecond and the usage read at every put.
+    /// The settings of a proxy `id` with a hot tier of `budget` bytes: the usage read at every
+    /// put.
     pub fn config(&self, id: &str, budget: u64) -> ProxyConfig {
         let mut config = ProxyConfig::new(id, budget, self.clock.clone());
-        config.linger = Duration::from_millis(1);
         config.usage_refresh = Duration::ZERO;
         config
     }
 
-    /// Starts a proxy with these settings over the rig's backends.
+    /// Starts a proxy with these settings over the rig's backends, live and with the format
+    /// active (see [`open_live`]).
     pub async fn open(&self, config: ProxyConfig) -> Result<Proxy, Error> {
-        Proxy::open(self.hot.clone(), self.cold.clone(), config).await
+        open_live(self.hot.clone(), self.cold.clone(), config).await
     }
 
     /// A proxy `id` with a hot tier of `budget` bytes.
     pub async fn proxy(&self, id: &str, budget: u64) -> Proxy {
         self.open(self.config(id, budget)).await.unwrap()
     }
-
-    /// The settings of a reconciler `holder` for a hot tier of `budget` bytes: the water
-    /// marks at 0.8 and 0.7, a lease of 30 seconds and a retention of an hour. The rig's clock
-    /// is also the monotonic clock of the lease, so that setting it moves the lease on.
-    pub fn reconciler_config(&self, holder: &str, budget: u64) -> ReconcilerConfig {
-        let mut config = ReconcilerConfig::new(holder, budget, self.clock.clone());
-        config.mono = self.clock.clone();
-        config
-    }
-
-    /// A reconciler with these settings over the rig's backends.
-    pub fn reconciler_with(&self, config: ReconcilerConfig) -> Reconciler {
-        Reconciler::new(self.hot.clone(), self.cold.clone(), config)
-    }
-
-    /// A reconciler `holder` for a hot tier of `budget` bytes.
-    pub fn reconciler(&self, holder: &str, budget: u64) -> Reconciler {
-        self.reconciler_with(self.reconciler_config(holder, budget))
-    }
 }
 
-/// The key of journal object `seq` of proxy `id`.
-pub fn journal_key(id: &str, seq: u64) -> String {
-    format!("_journal/{id}/{seq:020}")
+/// The key of the format object.
+pub const FORMAT: &str = "_tiering/format";
+
+/// Starts a proxy over `hot` and `cold`, and makes it live: the format object says `active` at
+/// epoch 2 unless the hot tier already has one, and the first beat of the proxy's heartbeat is
+/// acknowledged, which is what a put or a delete on an entry needs.
+pub async fn open_live(
+    hot: Arc<dyn Backend>,
+    cold: Arc<dyn Backend>,
+    config: ProxyConfig,
+) -> Result<Proxy, Error> {
+    let _ = hot.put(FORMAT, body(ACTIVE_FORMAT)).await;
+    let proxy = Proxy::open(hot, cold, config).await?;
+    assert!(proxy.start_heartbeat(Arc::new(Never)));
+    while !proxy.is_live() {
+        tokio::task::yield_now().await;
+    }
+    Ok(proxy)
 }
 
 /// The body of an object with this text.
@@ -114,10 +125,11 @@ pub async fn page(backend: &dyn Backend, start: Option<&str>, max_keys: usize) -
     listed.into_iter().map(|object| object.key).collect()
 }
 
-/// Lets the runtime's other tasks run until the hot tier holds `key`: the copy of a streamed cold
-/// read is a task of its own, beside the response. It waits on that progress and on no clock.
-pub async fn copied(rig: &Rig, key: &str) {
-    while rig.hot_mem.head(key).await.is_err() {
+/// Lets the runtime's other tasks run until the hot tier holds the entry of `key`: the ask for the
+/// copy-back of a cold read is a task of its own, beside the response. It waits on that progress
+/// and on no clock.
+pub async fn copy_back_asked(rig: &Rig, key: &str) {
+    while rig.hot_mem.head(&tierstore::entry_key(key)).await.is_err() {
         tokio::task::yield_now().await;
     }
 }
@@ -126,23 +138,6 @@ pub async fn copied(rig: &Rig, key: &str) {
 pub async fn assert_absent(backend: &dyn Backend, key: &str) {
     let error = backend.head(key).await.unwrap_err();
     assert_eq!(error, Error::NotFound(key.to_owned()));
-}
-
-/// The keys of the journal objects of proxy `id` in the backend.
-pub async fn journal_keys(backend: &dyn Backend, id: &str) -> Vec<String> {
-    keys_under(backend, &format!("_journal/{id}/")).await
-}
-
-/// The entries of journal object `seq` of proxy `id`.
-pub async fn journal(backend: &dyn Backend, id: &str, seq: u64) -> Vec<JournalEntry> {
-    let object = read(backend, &journal_key(id, seq)).await;
-    decode_journal(&object).unwrap()
-}
-
-/// The keys of the entries of journal object `seq` of proxy `id`.
-pub async fn journal_entry_keys(backend: &dyn Backend, id: &str, seq: u64) -> Vec<String> {
-    let entries = journal(backend, id, seq).await;
-    entries.into_iter().map(|entry| entry.key).collect()
 }
 
 /// Replaces the usage object the reconciler would publish, in the hot tier directly.

@@ -156,8 +156,7 @@ async fn until_draining(ready: &str) {
 async fn it_announces_serves_and_drains_on_sigterm() {
     let files = Files::new("bin-sigterm");
     let tables = Tables {
-        hot: "kind = \"memory\"\nbudget = 1048576\nreconcile_interval = \"100ms\"\nlease_ttl = \"1s\""
-            .to_owned(),
+        hot: "kind = \"memory\"\nbudget = 1048576\nlease_ttl = \"1s\"".to_owned(),
         ..Tables::default()
     };
     let mut running = start(&files.flags_of(&tables, &["--drain-lb-wait", "3s"]));
@@ -507,6 +506,18 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
 async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_one() {
     let hot = FakeS3::start().await;
     let cold = FakeS3::start().await;
+    // A hot tier that keeps its format between starts is activated by the operator
+    // (`tierstore format-epoch --activate`): the object is put in it before the node starts.
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    let capabilities = Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    };
+    let format = ObjectKey::new("_tiering/format").unwrap();
+    hot.store(capabilities)
+        .put_new(&format, active, None)
+        .await
+        .unwrap();
     hot.require_credentials("HOTKEY", "hot-secret");
     cold.require_credentials("COLDKEY", "cold-secret");
     let files = Files::new("bin-s3-tiers");
@@ -516,7 +527,7 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     let cold_key = cold_key.display().to_string();
     let tables = Tables {
         hot: format!(
-            "kind = \"s3\"\nbucket = \"hot-bucket\"\nendpoint = \"{}\"\ncredentials_file = {hot_key:?}\nbudget = 1048576\nreconcile_interval = \"100ms\"\nlease_ttl = \"1s\"",
+            "kind = \"s3\"\nbucket = \"hot-bucket\"\nendpoint = \"{}\"\ncredentials_file = {hot_key:?}\nbudget = 1048576\nlease_ttl = \"1s\"",
             hot.endpoint()
         ),
         cold: format!(

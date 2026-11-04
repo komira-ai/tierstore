@@ -11,15 +11,19 @@
 //! - `--check` reads the format object, the registrations and the open entries, prints them, and
 //!   says whether `--drain` would be accepted. It writes nothing and asks the store nothing but
 //!   the objects of tierstore.
-//! - `--drain` writes `{"phase":"drain"}` and waits, with no time limit, for the reconciler to
-//!   write `drained`. It refuses while a registration that is not running is not named on
+//! - `--drain` writes `{"phase":"drain"}` and waits, with no time limit, for a reconciler of the
+//!   bridge release (the one before the entries) to write `drained`, which applies the journals
+//!   first; the reconciler of this release writes it never, so `--drain` is for stores that
+//!   still have journals to apply. It refuses while a registration that is not running is not named on
 //!   `--departed`: a registration of a release before the heartbeat has no heartbeat, only the
 //!   operator can say its process is gone, and a wrong answer lets an old writer go on during the
 //!   pause. A drain that was begun is resumed by running it again.
 //! - `--cancel` puts back the format that was before the drain (the object is deleted, or, if the
 //!   store was at an epoch, `active` of that epoch is written), so that writes resume.
 //! - `--activate` writes `{"epoch":2,"phase":"active"}` over `drained`, once every registration
-//!   that is running has protocol 2 or later.
+//!   that is running has protocol 2 or later. On a store with no format object (a new store) it
+//!   creates the object, if the store has no journal object of the releases before the entries
+//!   (`_journal/`): a store that has one is drained by the bridge release first.
 //!
 //! Without `--apply`, the three that write check, print what they would write and write nothing;
 //! `--drain` still waits if the format already says `drain`, since waiting changes nothing.
@@ -34,7 +38,7 @@ use clap::{Args, Parser};
 use super::registrations::{self, Registration, check_departed, check_protocol};
 use super::{Hot, VerbError, block_on, finished, parse_duration, parsed};
 use crate::format::{Format, FormatPhase, format_body, read_format_tagged};
-use crate::journal::{ENTRIES_PREFIX, FORMAT_KEY, PROXIES_PREFIX};
+use crate::journal::{ENTRIES_PREFIX, FORMAT_KEY, JOURNAL_PREFIX, PROXIES_PREFIX};
 use crate::{Backend, Clock, Error, Sleeper};
 
 /// The epoch `--activate` writes: the number of the format of the protocol with one journal entry
@@ -345,16 +349,27 @@ async fn activate(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError>
         phase: FormatPhase::Active,
         epoch: Some(ACTIVE_EPOCH),
     };
-    let Some((format, tag)) = found.as_ref() else {
-        return Err(not_drained(&found));
+    let tag = match found.as_ref() {
+        Some((format, _)) if *format == active => {
+            writeln!(out, "the format is already active at epoch {ACTIVE_EPOCH}")?;
+            return Ok(());
+        }
+        Some((format, tag)) if format.phase == FormatPhase::Drained => Some(tag.as_str()),
+        Some(_) => return Err(not_drained(&found)),
+        None => {
+            // A new store, or one that was never drained: only a store with no journal object has
+            // nothing that the entries would leave unapplied.
+            let journals = count(work.hot, JOURNAL_PREFIX).await?;
+            if journals > 0 {
+                return Err(VerbError::Refused(format!(
+                    "refusing to activate: there is no format object and the store has {journals} \
+                     journal objects of a release before the entries; drain it with the bridge \
+                     release first"
+                )));
+            }
+            None
+        }
     };
-    if *format == active {
-        writeln!(out, "the format is already active at epoch {ACTIVE_EPOCH}")?;
-        return Ok(());
-    }
-    if format.phase != FormatPhase::Drained {
-        return Err(not_drained(&found));
-    }
     let registrations = registrations_of(work).await?;
     check_departed(&registrations, &work.cli.departed, "activate")?;
     check_protocol(&registrations, ACTIVE_PROTO)?;
@@ -365,11 +380,11 @@ async fn activate(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError>
         )?;
         return Ok(());
     }
-    let wrote = work
-        .hot
-        .put_if_match(FORMAT_KEY, format_body(&active), tag)
-        .await
-        .map(drop);
+    let body = format_body(&active);
+    let wrote = match tag {
+        Some(tag) => work.hot.put_if_match(FORMAT_KEY, body, tag).await.map(drop),
+        None => work.hot.put(FORMAT_KEY, body).await,
+    };
     changed(wrote)?;
     writeln!(out, "wrote the format: active, epoch {ACTIVE_EPOCH}")?;
     writeln!(

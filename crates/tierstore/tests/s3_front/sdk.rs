@@ -167,7 +167,9 @@ async fn sdk_puts_gets_heads_and_deletes_an_object() {
         .unwrap();
     let gone = sdk.head_object().bucket(BUCKET).key("out/a").send().await;
     assert!(gone.unwrap_err().into_service_error().is_not_found());
-    // A delete of a key that is not there succeeds, as it does in S3.
+    // A delete of a key that is not there succeeds, as it does in S3 (once the reconciler has
+    // released the entry the first delete left).
+    h.settle().await;
     sdk.delete_object()
         .bucket(BUCKET)
         .key("out/a")

@@ -2,12 +2,12 @@
 
 use std::fs::Permissions;
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use objstore_s3::{ByteRange, ObjectKey, ObjectStore};
+use objstore_s3::{ByteRange, ObjectKey};
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 
@@ -20,6 +20,8 @@ use super::config_combined::CombinedSettings;
 use super::local_cache::testing::{FakeDisk, Quirk};
 use super::local_cache::{Disk, LocalCache, Mode, SystemDisk};
 use crate::{Backend, Clock, DirBackend, Error as BackendError, MemoryBackend, SystemClock};
+use objstore_s3::ObjectStore;
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
 const KEY_ID: &str = "AKIDCACHE";
@@ -101,6 +103,14 @@ cache  = true
         settings.into_combined().unwrap()
     }
 
+    /// Writes the active format into the hot directory, as `format-epoch --activate` does for a
+    /// new store, so that the node takes writes.
+    async fn activate(&self) {
+        let active = bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+        let hot = Self::tier(self.hot());
+        hot.put("_tiering/format", active).await.unwrap();
+    }
+
     /// The tier directory `path` as a backend, to read what the node stored there.
     fn tier(path: PathBuf) -> DirBackend {
         DirBackend::open(path).unwrap()
@@ -147,6 +157,7 @@ where
 #[tokio::test]
 async fn a_combined_node_serves_a_put_and_answers_the_next_read_from_its_cache() {
     let node = Node::new("tscombined-serve");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let hot = node.hot();
@@ -182,6 +193,7 @@ async fn a_combined_node_serves_a_put_and_answers_the_next_read_from_its_cache()
 #[tokio::test]
 async fn a_delete_through_a_combined_node_removes_the_object_everywhere() {
     let node = Node::new("tscombined-delete");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let hot = node.hot();
@@ -209,6 +221,7 @@ async fn a_delete_through_a_combined_node_removes_the_object_everywhere() {
 #[tokio::test]
 async fn a_combined_node_over_a_held_directory_is_read_only_and_still_writes_through() {
     let node = Node::new("tscombined-held");
+    node.activate().await;
     let settings = node.settings("");
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     let elsewhere: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
@@ -240,6 +253,7 @@ async fn a_combined_node_over_a_held_directory_is_read_only_and_still_writes_thr
 #[tokio::test]
 async fn a_combined_node_with_a_lock_file_serves() {
     let node = Node::new("tscombined-lock");
+    node.activate().await;
     let lock = node.dir.path().join("instance.lock");
     let settings = node.settings(&format!("lock_file = \"{}\"", lock.display()));
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
@@ -253,7 +267,7 @@ async fn a_combined_node_with_a_lock_file_serves() {
 }
 
 /// Asserts the refusals of a start, each with the exit status of its reason: flags that cannot go
-/// together (the reconcile interval not below the lease), a tier that cannot be opened (1, and the
+/// together (a usage staleness not above the lease), a tier that cannot be opened (1, and the
 /// cache directory is not made), a cache directory that cannot be opened (1), a file system that
 /// fails the check of the layout (3), and a budget over the file system (2); and that a budget
 /// exactly the room there is starts.
@@ -263,9 +277,9 @@ async fn a_combined_node_that_cannot_start_exits_with_the_status_of_the_reason()
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
 
     let node = Node::new("tscombined-refused");
-    let late = node.settings("reconcile_interval = \"60s\"");
+    let late = node.settings("usage_stale_after = \"10s\"");
     let why = serving(&late, disk.clone(), nothing).await.unwrap_err();
-    assert!(why.to_string().contains("--reconcile-interval"), "{why}");
+    assert!(why.to_string().contains("--usage-stale-after"), "{why}");
     assert!(!node.cache_dir().exists());
 
     let node = Node::new("tscombined-tier");

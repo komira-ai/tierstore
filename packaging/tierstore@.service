@@ -16,7 +16,7 @@
 # the endpoints (http://host[:port], no path) and the hot tier's budget, the same in both. Keep
 # the s3 interface, the proxy id, `slot` and the lock file as they are: the hook probes the slot on
 # 127.0.0.1:%i, reads the slot label of the build gauge, and the proxy id gives each slot its own
-# journal in the hot tier. The unit runs /etc/tierstore/tierstore-%i.toml, so the two files differ
+# registration in the hot tier and its own entries. The unit runs /etc/tierstore/tierstore-%i.toml, so the two files differ
 # in the port, the proxy id and `slot` and in nothing else. Both slots run this one unit, so they
 # settle for the same --drain-lb-wait.
 #

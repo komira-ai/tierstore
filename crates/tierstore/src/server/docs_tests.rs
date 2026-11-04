@@ -87,12 +87,8 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.s3_pool_idle_timeout",
     "server.s3_read_retries",
     "server.s3_read_retry_wait",
-    "hot_store.journal_batch_entries",
     "hot_store.usage_refresh",
-    "hot_store.journal_page_size",
-    "hot_store.copy_rounds",
     "hot_store.compare_range",
-    "hot_store.delete_rounds",
     "hot_store.listing_heads",
     "hot_store.upload_listing_calls",
 ];

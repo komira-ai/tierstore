@@ -1,8 +1,8 @@
-//! The choice of a node's reconciler by the format object: the journals until the epoch of the
-//! entry protocol is active, the entries from then on.
+//! The rounds of a node's reconciler: nothing is done until the format says `active` at epoch 2,
+//! and then each round is a step of the entry reconciler.
 //!
-//! The tiers are in memory and the proxy's journal write waits on a paused clock, so no test reads
-//! a clock or waits for a time.
+//! The tiers are in memory and the loop waits on a paused clock, so no test reads a clock or waits
+//! for a time.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,11 +11,12 @@ use bytes::Bytes;
 use tokio::sync::Notify;
 
 use super::Rounds;
+use crate::Backend;
 use crate::journal::{FORMAT_KEY, LEASE_KEY};
 use crate::server::cli_reconcile::reconcile;
 use crate::{
-    Backend, Created, Entries, Error, FaultyBackend, MemoryBackend, Op, Outcome, Proxy,
-    ProxyConfig, ReconcilerConfig, Step, Take, TestClock,
+    Created, Entries, Error, FaultyBackend, MemoryBackend, Op, Outcome, ReconcilerConfig, Step,
+    Take, TestClock,
 };
 
 const BUDGET: u64 = 1 << 20;
@@ -48,18 +49,7 @@ impl Rig {
         Rounds::new(self.hot.clone(), self.cold.clone(), config, DEPARTURE)
     }
 
-    /// A put by a proxy that writes journals (no format object yet): the journal object is in the
-    /// hot tier and nothing has applied it.
-    async fn journaled_put(&self, key: &str) {
-        let mut config = ProxyConfig::new("p1", BUDGET, self.clock.clone());
-        config.linger = Duration::from_millis(1);
-        let proxy = Proxy::open(self.hot.clone(), self.cold.clone(), config)
-            .await
-            .unwrap();
-        proxy.put(key, Bytes::from_static(b"v")).await.unwrap();
-    }
-
-    /// A put that landed on its entry, as a proxy of the entry protocol leaves it.
+    /// A put that landed on its entry, as a proxy leaves it.
     async fn landed_put(&self, key: &str) {
         self.hot_mem
             .put(key, Bytes::from_static(b"e"))
@@ -91,11 +81,10 @@ impl Rig {
 }
 
 /// Asserts that with no format object, and with each format that does not run entries (a drain, a
-/// drained store, an epoch below 2), a round is a pass over the journals: the journaled put is
-/// copied to the cold tier, the lease is taken, nothing failed, and the loop is not told to go on at
-/// once.
+/// drained store, an epoch below 2), a round does nothing: the landed put is not copied, no lease
+/// is taken, nothing failed, and the loop is told to wait the idle wait (one second).
 #[tokio::test(start_paused = true)]
-async fn before_the_epoch_a_round_is_a_pass_over_the_journals() {
+async fn before_the_epoch_a_round_does_nothing_and_waits() {
     let formats = [
         "",
         r#"{"phase":"drain"}"#,
@@ -105,40 +94,40 @@ async fn before_the_epoch_a_round_is_a_pass_over_the_journals() {
     ];
     for format in formats {
         let rig = Rig::new();
-        rig.journaled_put("k").await;
+        rig.landed_put("k").await;
         if !format.is_empty() {
             rig.set_format(format).await;
         }
         let round = rig.rounds().round().await;
         assert!(round.failed.is_empty(), "{format}: {:?}", round.failed);
-        assert!(!round.progress, "{format}");
-        assert!(rig.cold_has("k").await, "{format}");
-        assert!(rig.lease_held().await, "{format}");
+        assert_eq!(round.pause, Some(Duration::from_secs(1)), "{format}");
+        assert!(!rig.cold_has("k").await, "{format}");
+        assert!(!rig.lease_held().await, "{format}");
     }
 }
 
-/// Asserts that the round that reads the active format switches: a node that was passing over the
-/// journals gives that lease up, works the entries from then on (a landed put is copied to the
-/// cold tier, its entry removed, the round says there was progress), and never reads a journal
-/// again: a journal object nobody applied before the epoch stays unapplied.
+/// Asserts that the round that reads the active format starts the work: a node that did nothing
+/// before works the entries from then on (a landed put is copied to the cold tier, its entry
+/// removed, the lease taken, and the loop told to go on at once), and gives the lease up when it
+/// stops.
 #[tokio::test(start_paused = true)]
-async fn the_round_that_reads_the_active_format_switches_to_the_entries() {
+async fn the_round_that_reads_the_active_format_works_the_entries() {
     let rig = Rig::new();
+    rig.landed_put("entered").await;
     let mut rounds = rig.rounds();
     assert!(rounds.round().await.failed.is_empty());
-    assert!(rig.lease_held().await);
-    rig.journaled_put("journaled").await;
-    rig.landed_put("entered").await;
+    assert!(!rig.cold_has("entered").await);
+    assert!(!rig.lease_held().await);
+
     rig.set_format(ACTIVE).await;
     let round = rounds.round().await;
     assert!(round.failed.is_empty(), "{:?}", round.failed);
-    assert!(round.progress);
+    assert_eq!(round.pause, None);
     assert!(rig.cold_has("entered").await);
-    assert!(!rig.cold_has("journaled").await);
-    // The quiet step after it: still the entries, no progress, still no journal read.
+    assert!(rig.lease_held().await);
     let next = rounds.round().await;
-    assert!(next.failed.is_empty() && !next.progress);
-    assert!(!rig.cold_has("journaled").await);
+    assert!(next.failed.is_empty());
+    assert!(next.pause.is_some());
     rounds.stop().await;
     assert!(!rig.lease_held().await);
 }
@@ -153,25 +142,25 @@ async fn a_node_that_starts_after_the_epoch_works_the_entries_at_once() {
     let mut rounds = rig.rounds();
     let round = rounds.round().await;
     assert!(round.failed.is_empty(), "{:?}", round.failed);
-    assert!(round.progress);
+    assert_eq!(round.pause, None);
     assert!(rig.cold_has("entered").await);
     assert!(rig.lease_held().await);
     rounds.stop().await;
 }
 
 /// Asserts that a format object that cannot be read fails the round with the store's error and
-/// does nothing (no copy, no lease), because which protocol the fleet is on is not known; the next
-/// round, with the object readable, does the work.
+/// does nothing (no copy, no lease), because whether writes are made on entries is not known; the
+/// next round, with the object readable, does the work.
 #[tokio::test(start_paused = true)]
 async fn a_format_that_cannot_be_read_fails_the_round_and_does_nothing() {
     let rig = Rig::new();
-    rig.journaled_put("k").await;
+    rig.set_format(ACTIVE).await;
+    rig.landed_put("k").await;
     let down = Error::Unavailable("format".to_owned());
     rig.hot.fail_next_on(Op::Get, FORMAT_KEY, down.clone());
     let mut rounds = rig.rounds();
     let round = rounds.round().await;
     assert_eq!(round.failed, [down]);
-    assert!(!round.progress);
     assert!(!rig.cold_has("k").await);
     assert!(!rig.lease_held().await);
     let next = rounds.round().await;
@@ -187,7 +176,7 @@ async fn the_loop_works_the_entries_until_halted_and_gives_the_lease_up() {
     rig.set_format(ACTIVE).await;
     rig.landed_put("entered").await;
     let halt = Arc::new(Notify::new());
-    let working = reconcile(rig.rounds(), Duration::from_secs(5), Arc::clone(&halt));
+    let working = reconcile(rig.rounds(), Arc::clone(&halt));
     let watching = async {
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert!(rig.cold_has("entered").await);

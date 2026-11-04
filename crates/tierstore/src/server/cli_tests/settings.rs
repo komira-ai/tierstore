@@ -53,14 +53,12 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.proxy.proxy_id, "p1");
     assert_eq!(built.proxy.hot_budget, 1000);
     assert_eq!(built.proxy.critical, 0.95);
-    assert_eq!(built.proxy.linger, Duration::from_millis(20));
     assert_eq!(built.reconciler.holder, "p1/reconciler");
     assert_eq!(built.reconciler.hot_budget, 1000);
     assert_eq!(built.reconciler.high_water, 0.8);
     assert_eq!(built.reconciler.low_water, 0.7);
     assert_eq!(built.reconciler.parallel, 16);
     assert_eq!(built.reconciler.lease_ttl, Duration::from_secs(30));
-    assert_eq!(built.reconciler.retention, Duration::from_secs(24 * 3600));
 }
 
 /// Asserts that a file whose `[server] bucket` is the name of a probe path, `metricz` among them,
@@ -80,7 +78,7 @@ fn a_file_with_a_probe_path_as_the_bucket_is_refused() {
 }
 
 /// Asserts that flags that do not fit together are refused with a message that names them: the
-/// water marks out of order, a reconcile interval that is not shorter than the lease, a bucket
+/// water marks out of order, a usage staleness that is not longer than the lease, a bucket
 /// called like a probe path, an idle timeout of zero, a request timeout of zero for the S3
 /// tiers, a tier that cannot be opened, a lock file that is not an absolute path to a file, and a
 /// key file, of the full key or of a read-only one, that cannot be used. None of them is `InvalidFlags`, the refusal that exits with status 2.
@@ -96,8 +94,6 @@ fn flags_that_do_not_fit_together_are_refused() {
     };
     assert!(refused(&|cli| cli.low_water = 80).contains("--low-water"));
     assert!(refused(&|cli| cli.high_water = 96).contains("--high-water"));
-    let interval = refused(&|cli| cli.reconcile_interval = cli.lease_ttl);
-    assert!(interval.contains("--reconcile-interval"), "{interval}");
     let stale = refused(&|cli| cli.usage_stale_after = cli.lease_ttl);
     assert!(stale.contains("--usage-stale-after"), "{stale}");
     assert!(refused(&|cli| cli.bucket = "readyz".to_owned()).contains("probe path"));

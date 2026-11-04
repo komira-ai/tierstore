@@ -12,13 +12,11 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::Backend;
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::LEASE_KEY;
 use crate::lease::Lease;
-use crate::{
-    Backend, Error, GateBackend, MemoryBackend, Mono, Phase, Proxy, ProxyConfig, Reconciler,
-    ReconcilerConfig, Sleeper, TestClock,
-};
+use crate::{Error, GateBackend, MemoryBackend, Mono, Phase, Sleeper, TestClock};
 
 const TTL: u64 = 30_000;
 const RENEW: u64 = 10_000;
@@ -519,57 +517,6 @@ async fn a_renewal_period_of_zero_waits_a_millisecond() {
         _ = &mut run => panic!("the work ended before the test sent"),
         first = waits.recv() => assert_eq!(first, Some(ms(1))),
     }
-}
-
-/// Asserts that the lease is renewed on the timer while a pass is stuck in one copy, and that the
-/// pass then ends having held it throughout. The pass copies `k` and the copy parks in the cold
-/// tier; the timer asks for its first wait (a third of the ttl, 10 s) and the pass has written
-/// the lease once; the monotonic clock moves on by that wait and the wait is let go; the lease
-/// then has its second body while the copy is still parked. Then the copy goes on and the pass
-/// reports the copy and that it held the lease. Catches a reconciler that renews only when a pass
-/// starts, which holds a lease for no longer than the ttl while one copy lasts.
-#[tokio::test]
-async fn the_lease_is_renewed_on_the_timer_while_a_pass_is_stuck_in_a_copy() {
-    let clock = Arc::new(TestClock::new());
-    let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
-    let cold_memory = Arc::new(MemoryBackend::with_clock(clock.clone()));
-    let mut proxy_config = ProxyConfig::new("p1", 1 << 20, clock.clone());
-    proxy_config.linger = ms(1);
-    let proxy = Proxy::open(hot.clone(), cold_memory.clone(), proxy_config)
-        .await
-        .unwrap();
-    proxy.put("k", Bytes::from_static(b"v")).await.unwrap();
-
-    let cold = Arc::new(GateBackend::new(cold_memory));
-    let gate = cold.gate(Op::Put, "k", Phase::Pre);
-    let mono = Arc::new(Mono::new());
-    let (sleeper, mut waits, go) = StepSleeper::new();
-    let mut config = ReconcilerConfig::new("r1", 1 << 20, clock);
-    config.mono = mono.clone();
-    config.sleeper = Arc::new(sleeper);
-    let mut reconciler = Reconciler::new(hot.clone(), cold, config);
-
-    let mut pass = pin!(reconciler.pass());
-    tokio::select! {
-        _ = &mut pass => panic!("the pass ended before the copy parked"),
-        () = gate.parked() => {}
-    }
-    assert_eq!(waits.recv().await, Some(ms(RENEW)));
-    assert_eq!(count(&hot).await, "1");
-
-    mono.advance(ms(RENEW));
-    go.send(()).unwrap();
-    tokio::select! {
-        _ = &mut pass => panic!("the pass ended while its copy was parked"),
-        second = waits.recv() => assert_eq!(second, Some(ms(RENEW))),
-    }
-    assert_eq!(count(&hot).await, "2");
-
-    assert!(gate.release());
-    let report = pass.await;
-    assert!(report.held);
-    assert_eq!(report.copied, 1);
-    assert_eq!(report.failed, Vec::<Error>::new());
 }
 
 /// Asserts that a margin of zero does not keep a lease that has run out: the holder wrote at 0

@@ -6,17 +6,20 @@ use std::time::Duration;
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::{Request, StatusCode};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tokio::time::Instant;
 
-use crate::{Backend, ByteRange, Error, MemoryBackend, Op, Proxy, ProxyConfig, TestClock, Window};
+use crate::{ByteRange, Error, MemoryBackend, Op, ProxyConfig, TestClock, Window};
 
 use super::auth::sign;
 use super::ops::asked;
 use super::testing::{
-    BUCKET, CHECKSUMS, KEY_ID, NOW, Plain, Reply, Rig, SECRET, Scripted, Step, checksum, texts,
+    BUCKET, CHECKSUMS, KEY_ID, NOW, Plain, Reply, Rig, SECRET, Scripted, Step, checksum,
+    live_proxy, texts,
 };
 use super::{Server, ServerConfig};
+use crate::Backend;
+use sha2::Digest;
 
 const MEBIBYTE: u64 = 1 << 20;
 
@@ -59,6 +62,9 @@ async fn an_object_is_put_read_described_and_deleted() {
     assert_eq!(gone.status, StatusCode::NOT_FOUND);
     assert_eq!(gone.code(), "NoSuchKey");
     assert_eq!(gone.header("content-type"), "application/xml");
+    // The delete left its entry for the reconciler; one step releases it, so that the next delete
+    // does not wait for the release.
+    rig.settle().await;
     let again = rig.call("DELETE", "cas/a", b"").await;
     assert_eq!(again.status, StatusCode::NO_CONTENT);
     let absent = rig.call("HEAD", "cas/a", b"").await;
@@ -187,9 +193,10 @@ async fn a_ranged_get_answers_the_bytes_and_the_range() {
 
 /// Asserts that an object only the cold tier holds is described by a head without being copied,
 /// and read, whole or by range, with the same answers as one in the hot tier; a read of a range
-/// copies nothing into the hot tier, and a read of the whole object copies it.
+/// asks for no copy-back, and a read of the whole object asks for one on the entry of the key and
+/// copies nothing itself.
 #[tokio::test(start_paused = true)]
-async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
+async fn an_object_of_the_cold_tier_is_read_and_its_copy_back_asked_for() {
     let rig = Rig::new(MEBIBYTE).await;
     let body = Bytes::from_static(b"0123456789");
     rig.cold_mem.put("cold", body.clone()).await.unwrap();
@@ -203,9 +210,8 @@ async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     assert!(rig.hot_mem.get("cold", None).await.is_err());
     let whole = rig.get("cold", None).await;
     assert_eq!(whole.body, "0123456789");
-    rig.copied("cold").await;
-    let copy = rig.hot_mem.get("cold", None).await.unwrap();
-    assert_eq!(copy, body);
+    rig.copy_back_asked("cold").await;
+    assert!(rig.hot_mem.get("cold", None).await.is_err());
 }
 
 async fn put_all(rig: &Rig, names: &[&str]) {
@@ -427,12 +433,11 @@ pub(super) fn completion(parts: &[(u32, &str)]) -> String {
 /// Asserts that an upload in parts is put together in the cold tier: each part answers its ETag,
 /// the completion creates the parts joined in the order named, the answer names the key and has
 /// the content tag of the object, which is the one a head gives, the object is in the cold tier
-/// and not in the hot tier, nothing is journaled, a read finds it and copies it into the hot
-/// tier, and the upload is gone after.
+/// and not in the hot tier, a read finds it and asks for its copy into the hot tier, and the
+/// upload is gone after.
 #[tokio::test(start_paused = true)]
 async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     let rig = Rig::new(MEBIBYTE).await;
-    let before = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
     let id = start(&rig, "big").await;
     let two = upload(&rig, "big", &id, 2, b"world").await;
     let one = upload(&rig, "big", &id, 1, b"hello ").await;
@@ -446,16 +451,15 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     assert_eq!(texts(&done.body, "ETag").concat(), tag);
     assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "hello world");
     assert!(rig.hot_mem.get("big", None).await.is_err());
-    let after = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
-    assert_eq!(after, before);
+    // The completion is a put on the entry of the key, which finds the object and refuses first.
     let again = complete(&rig, "big", &id, &body).await;
-    assert_eq!(again.status, StatusCode::NOT_FOUND);
-    assert_eq!(again.code(), "NoSuchUpload");
+    assert_eq!(again.status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(again.code(), "PreconditionFailed");
     let head = rig.call("HEAD", "big", b"").await;
     assert_eq!(head.header("etag"), tag);
     assert_eq!(rig.get("big", None).await.body, "hello world");
-    rig.copied("big").await;
-    assert!(rig.hot_mem.get("big", None).await.is_ok());
+    rig.copy_back_asked("big").await;
+    assert!(rig.hot_mem.get("big", None).await.is_err());
     assert_eq!(rig.cold.calls(Op::UploadPart), 2);
 }
 
@@ -653,7 +657,7 @@ async fn dropped(rig: &Rig, method: &str, key: &str, body: &[u8]) {
 }
 
 /// Asserts that a call that changes the store is done to its end when its request is dropped
-/// before the store has answered: a put leaves the object and a journal entry, a delete leaves
+/// before the store has answered: a put leaves the object and its entry, a delete leaves
 /// the key deleted, and the completion of an upload leaves the object in the cold tier.
 #[tokio::test(start_paused = true)]
 async fn a_request_that_is_dropped_still_changes_the_store() {
@@ -662,7 +666,6 @@ async fn a_request_that_is_dropped_still_changes_the_store() {
     let id = start(&rig, "whole").await;
     let part = upload(&rig, "whole", &id, 1, b"a").await;
     let body = completion(&[(1, part.header("etag"))]);
-    let before = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
     rig.hot.set_delay(Op::Put, Some(Duration::from_secs(10)));
     rig.hot.set_delay(Op::Delete, Some(Duration::from_secs(10)));
     let delay = Some(Duration::from_secs(10));
@@ -675,8 +678,6 @@ async fn a_request_that_is_dropped_still_changes_the_store() {
     assert_eq!(rig.hot_mem.get("fresh", None).await.unwrap(), "y");
     assert!(rig.hot_mem.get("gone", None).await.is_err());
     assert_eq!(rig.cold_mem.get("whole", None).await.unwrap(), "a");
-    let after = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
-    assert!(after > before);
 }
 
 /// Sends a put to `uri` whose body is played by `steps`, and whose signature covers `signed`.
@@ -719,13 +720,12 @@ async fn a_put_whose_checksum_matches_is_stored() {
 }
 
 /// Asserts that a put whose body is not the one a checksum header claims is refused with 400
-/// `BadDigest` naming the header and stores nothing, in either tier or in the journal, for each
+/// `BadDigest` naming the header and stores nothing, in either tier, for each
 /// header, and that the same put with the right checksum then succeeds.
 #[tokio::test(start_paused = true)]
 async fn a_put_whose_checksum_does_not_match_is_refused_and_stores_nothing() {
     let rig = Rig::new(MEBIBYTE).await;
     let before = rig.hot_mem.list("").await.unwrap().len();
-    let journals = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
     for name in CHECKSUMS {
         let wrong = checksum(name, b"another body");
         let extra = [(name, wrong.as_str())];
@@ -734,8 +734,6 @@ async fn a_put_whose_checksum_does_not_match_is_refused_and_stores_nothing() {
         assert_eq!(reply.code(), "BadDigest", "{name}");
         let message = texts(&reply.body, "Message").concat();
         assert!(message.contains(name), "{name}");
-        let after = rig.hot_mem.list("_journal/p1/").await.unwrap().len();
-        assert_eq!(after, journals, "{name}");
     }
     assert_eq!(rig.hot_mem.list("").await.unwrap().len(), before);
     assert!(rig.cold_mem.list("").await.unwrap().is_empty());
@@ -944,7 +942,7 @@ async fn a_cold_tier_without_multipart_uploads_answers_not_implemented() {
     clock.set(NOW);
     let hot = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
     let config = ProxyConfig::new("p1", MEBIBYTE, clock.clone());
-    let proxy = Proxy::open(hot, Arc::new(Plain), config).await.unwrap();
+    let proxy = live_proxy(hot, Arc::new(Plain), config).await.unwrap();
     let settings = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
     let server = Server::new(Arc::new(proxy), settings.clone());
     let uploads = "/tier-bucket/k?uploads";

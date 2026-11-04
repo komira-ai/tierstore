@@ -18,7 +18,6 @@ Settings that depend on each other. These are checked after the file has parsed,
 ```message
 hot_store.low_water must be below hot_store.high_water
 hot_store.high_water must not be above hot_store.critical
-hot_store.reconcile_interval must be shorter than hot_store.lease_ttl
 hot_store.usage_stale_after must be longer than hot_store.lease_ttl
 server.body_idle_timeout must be longer than zero
 server.s3_request_timeout must be longer than zero
@@ -134,7 +133,7 @@ Both exit 3 and the unit does not restart. The first is a probe that could not b
 | 413 `EntityTooLarge` | a body longer than `server.max_request_bytes` (or the presigning key's ceiling) |
 | 400 `RequestTimeout` | a body that stalled for `server.body_idle_timeout` or came slower than `server.put_min_bytes_per_sec`; nothing is stored |
 | 503 `SlowDown` | more than `server.max_concurrent_puts` bodies at once for longer than `server.put_permit_wait`, or a put that met a full tier; retry |
-| 503 `ServiceUnavailable` | a tier could not be reached; a drain answers no request 503 (see "A connection ends during a restart") |
+| 503 `ServiceUnavailable` | a write while the format object does not say `active` at epoch 2 (the text names `tierstore format-epoch --activate`; a store is activated once, see [operations](operations.md#rolling-out-the-entry-protocol)), or while it says `drain` or `drained` (writes are paused); a put or delete that met a put, delete or copy of the same key in flight (retry); a delete that waited for the reconciler's release of the key and did not get it before the request deadline; a tier could not be reached; a drain answers no request 503 (see "A connection ends during a restart") |
 | 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or `encoding-type=url` on a listing; set the SDK's checksum calculation to "when required" |
 
 ## The hot tier keeps filling

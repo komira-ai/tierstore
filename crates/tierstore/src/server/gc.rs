@@ -19,9 +19,9 @@
 //! order of `scoped`. The key is refused on a presigned URL (the URL's key must be a presigning
 //! key, or a key that reads).
 //!
-//! A delete through the proxy removes the object from both tiers and journals the delete, as for
-//! any key; through a cache with `write_through` it drops the cache's copy of the object and then
-//! deletes it at the upstream (there is no journal). **A delete by a GC key is not create-only: it is the only way an object leaves
+//! A delete through the proxy removes the object from the cold tier and finishes it on the entry
+//! of the key, as for any key; through a cache with `write_through` it drops the cache's copy of the object and then
+//! deletes it at the upstream (there is no entry). **A delete by a GC key is not create-only: it is the only way an object leaves
 //! `cas/b/`**, since the presigning key can only create, and the full key is not meant for the
 //! frontend.
 

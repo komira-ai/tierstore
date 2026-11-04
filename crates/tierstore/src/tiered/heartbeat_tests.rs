@@ -12,7 +12,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::Semaphore;
 
-use super::pause::{self, WriteMode};
+use super::pause;
 use crate::faulty::{FaultyBackend, Op};
 use crate::journal::{FORMAT_KEY, proxy_key};
 use crate::registration::{PROTO, Registration};
@@ -489,12 +489,12 @@ async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_
         .unwrap();
 
     let inner = Arc::clone(&proxy.inner);
-    let request = tokio::spawn(async move { inner.admit_write_mode("k").await });
+    let request = tokio::spawn(async move { inner.admit_write("k").await });
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     assert!(!request.is_finished());
     assert!(gate.release());
     look.await.unwrap();
 
-    assert_eq!(request.await.unwrap().unwrap(), WriteMode::Entries);
+    request.await.unwrap().unwrap();
 }

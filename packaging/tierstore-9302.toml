@@ -6,7 +6,7 @@
 # Edit before use: the buckets, the endpoints (http://host[:port], no path) and the hot tier's
 # budget, the same in both slot files. Keep the s3 interface, `proxy_id`, `slot` and `lock_file` as
 # they are: the hook probes the slot on 127.0.0.1:9302 and reads the slot label of the build
-# gauge, the proxy id gives each slot its own journal in the hot tier, and the lock file is the
+# gauge, the proxy id gives each slot its own registration and entries in the hot tier, and the lock file is the
 # same for both slots, so that the slot that starts beside a running one serves at once and
 # reconciles once the other has exited. The s3 interface is the wildcard of both families, since
 # a packet that the hook's redirect sends here arrives with the address of the interface it came in on.

@@ -47,7 +47,7 @@ impl Tiers {
 
     async fn proxy(&self) -> Arc<Proxy> {
         let config = ProxyConfig::new("p1", 1 << 20, self.clock.clone());
-        let proxy = Proxy::open(self.hot.clone(), self.cold.clone(), config);
+        let proxy = crate::support::open_live(self.hot.clone(), self.cold.clone(), config);
         Arc::new(proxy.await.unwrap())
     }
 

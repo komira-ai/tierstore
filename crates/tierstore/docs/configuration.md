@@ -58,10 +58,7 @@ low_water          = 70
 critical           = 95
 copy_parallel      = 16
 lease_ttl          = "30s"
-reconcile_interval = "5s"
 usage_stale_after  = "2m"
-journal_linger     = "20ms"
-journal_retention  = "24h"
 
 [cold_store]
 kind             = "s3"
@@ -251,27 +248,19 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.high_water` | percent, 80 | above this share of the budget, eviction begins |
 | `hot_store.low_water` | percent, 70 | eviction goes on down to this share |
 | `hot_store.critical` | percent, 95 | above this share a read of a cold object is not copied back (a put is not slowed; it goes to the cold tier only when the hot tier is full) |
-| `hot_store.journal_linger` | duration, `20ms` | how long a batch of journal entries waits for more |
-| `hot_store.journal_retention` | duration, `24h` | how long an applied journal object is kept |
 | `hot_store.copy_parallel` | count, 16 | the most objects the reconciler copies at once |
 | `hot_store.lease_ttl` | duration, `30s` | how long the lease object must stand unchanged, on another reconciler's own monotonic clock, before it takes the lease over; the holder renews every third of it |
-| `hot_store.reconcile_interval` | duration, `5s` | how often the reconciler works; shorter than the lease |
 | `hot_store.lock_file` | absolute path, none | The lock file of the node: the reconciler works only while this process holds an exclusive lock on it. A process that finds the lock held serves reads and writes through its own proxy and tries the lock again every second; the system frees it when the holder exits or crashes. If the file is replaced, the holder stops its reconciler and waits for the lock on the new file. Give every process of one node the same path, on a local file system, in a directory that nothing removes (`/var/lib/tierstore/`, not a directory under `/run`). The start refuses a path that is not absolute, one that names no file, and one that cannot be opened or is on a network file system. Without it the reconciler works as soon as the process starts |
 | `hot_store.usage_stale_after` | duration, `2m` | how old the published usage may be before `/usagez` says 503; longer than the lease |
-| `hot_store.journal_batch_entries` | count, 64 (1 to 65536) | the most entries one journal object holds; a batch that reaches it is written at once, without waiting `journal_linger` |
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
-| `hot_store.journal_page_size` | count, 100 (1 to 1000) | the most journal objects the reconciler asks the hot tier for in one listing |
-| `hot_store.copy_rounds` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
-| `hot_store.delete_rounds` | count, 3 (1 to 100) | how many times a delete looks at the cold object again after it changed under the delete |
-| `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing |
+| `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
 | `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
-| `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. The removal of registrations does not use it: that uses `registration_retention` |
-| `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The deletes made on entries send their calls through `Bounded`; the puts made on entries check that time themselves and cut their own cleanup call at it |
-| `hot_store.registration_retention` | duration, `0s` | how long the registration of a proxy that heartbeated must stay unchanged before the reconciler removes it, when the proxy left no journal object. A registration with no heartbeat (the empty one of an older release) is never removed. `0s`, the default, removes none: a proxy of a release without the heartbeat that reopens a registration this release wrote never rewrites it, and the removal would take it for a departed owner's, so set a time only once no such proxy runs |
+| `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. |
+| `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |
 
-The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, and a `registration_retention` that is neither zero nor at least `departure`, naming the values.
+The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
 
 ## `[local_cache]`
 
@@ -340,7 +329,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 - the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
-These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the self-test's pauses, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
+These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 
@@ -354,9 +343,13 @@ These describe one run, not the data path, and have no key:
 | `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
 | `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (a lingering close, see [operations](operations.md#drain-and-restart)) |
 
-`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a hot tier that is down (the proxy's open fails, `opening the proxy`) or a store that does not do what tierstore requires of it (nothing checks); the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
+`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
 
 `--help` and `--version` are the usual: `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp.
+
+## Settings that were removed
+
+The entry protocol has no per-node journal and no reconciler interval, so eight settings of `[hot_store]` are gone: `journal_linger`, `journal_retention`, `reconcile_interval`, `registration_retention`, `journal_batch_entries`, `journal_page_size`, `copy_rounds` and `delete_rounds`. A file that still has one of them loads: the key is accepted, its value is not used, and the start says once for each key, `tierstore: hot_store.<key> is ignored: the journal and its reconciler were removed`. In `[cold_store]` the key is refused, as it was, since only `[hot_store]` has it. The reconciler now waits one second after a round that did nothing, doubling to ten seconds, and not at all after a round that changed something.
 
 ## What the loader refuses
 

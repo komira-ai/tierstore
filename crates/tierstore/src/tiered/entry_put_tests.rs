@@ -8,14 +8,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use futures::{StreamExt, stream};
+use futures::stream;
 
+use crate::Backend;
 use crate::entry::{Entries, EntryOp, EntryState, Seen, Take, entry_key};
 use crate::journal::{FORMAT_KEY, USAGE_KEY, Usage};
 use crate::{
-    Backend, Error, FaultyBackend, GateBackend, MemoryBackend, Mono, Op, PartBody, Proxy,
-    ProxyConfig, TestClock,
+    Error, FaultyBackend, GateBackend, MemoryBackend, Mono, Op, PartBody, Proxy, ProxyConfig,
+    TestClock,
 };
+use futures::StreamExt;
 
 /// The format object of a store whose writes are made on entries.
 pub(super) const ACTIVE_FORMAT: &str = r#"{"epoch":2,"phase":"active"}"#;
@@ -74,7 +76,6 @@ impl Rig {
         let cold = Arc::new(FaultyBackend::new(cold_mem.clone()));
         let mut config = ProxyConfig::new("p1", BUDGET, clock.clone());
         config.mono = mono.clone();
-        config.linger = Duration::from_millis(1);
         config.usage_refresh = Duration::ZERO;
         config.format_refresh = Duration::ZERO;
         config.entry_rounds = entry_rounds;
@@ -412,9 +413,10 @@ async fn a_put_of_a_proxy_that_is_not_live_is_unavailable_and_touches_nothing() 
     }
 }
 
-/// Asserts that a put goes through the journal, and makes no entry, while the format object is
-/// missing, says `active` with no epoch or with epoch 1, or is read as another phase; and that it
-/// goes to an entry once the object says epoch 2 (the proxy reads the object at every write here).
+/// Asserts that a put is refused with `Unavailable` and the text that says writes wait for the
+/// active format, and makes no entry and writes no object, while the format object is missing,
+/// says `active` with no epoch or with epoch 1, or is read as another phase; and that it goes to an
+/// entry once the object says epoch 2 (the proxy reads the object at every write here).
 #[tokio::test]
 async fn a_put_is_made_on_an_entry_only_once_the_format_is_active_with_epoch_2() {
     let rig = Rig::with_format("").await;
@@ -429,12 +431,16 @@ async fn a_put_is_made_on_an_entry_only_once_the_format_is_active_with_epoch_2()
         if let Some(json) = format {
             rig.hot_mem.put(FORMAT_KEY, body(json)).await.unwrap();
         }
-        let key = format!("journaled-{n}");
-        rig.proxy.put(&key, body("v")).await.unwrap();
+        let key = format!("waiting-{n}");
+        let put = rig.proxy.put(&key, body("v")).await;
+        let Err(Error::Unavailable(text)) = put else {
+            panic!("{format:?}: {put:?}");
+        };
+        let wait = "writes wait until the format object says active";
+        assert!(text.contains(wait), "{format:?}: {text}");
         assert_eq!(rig.shape(&key).await, None, "{format:?}");
+        assert!(!rig.hot_has(&key).await, "{format:?}");
     }
-    let journal = rig.hot_mem.list("_journal/p1/").await.unwrap();
-    assert!(!journal.is_empty());
     let _ = rig.hot_mem.delete(FORMAT_KEY).await;
     rig.hot_mem
         .put(FORMAT_KEY, body(ACTIVE_FORMAT))

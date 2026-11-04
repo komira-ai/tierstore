@@ -18,15 +18,14 @@ scrape_configs:
 
 **v1: a build-node cache in front of the cold store.** One tierstore process runs on a build node
 with a local directory as a read-through cache over one upstream tierstore. It has no hot tier, no
-journal and no reconciler. A read the cache holds is answered from disk; any other read goes to
+entries and no reconciler. A read the cache holds is answered from disk; any other read goes to
 the upstream, and a key the cache is set to keep is filled into the directory on the way. This is
 the only tierstore hop in v1, and its series describe the cache's own work and its calls to the
 upstream.
 
 **v2: storage nodes with hot and cold tiers.** A storage node runs a proxy over a hot store and a
 cold store. A read asks the hot tier first, and on a miss the cold tier. A get without a range that finds the
-object only in the cold tier reads the whole object, gives it to the client as it arrives, and copies it into the hot tier (a promotion, a streamed write fed by the same read)
-when the hot tier has room; a ranged get reads only its range and copies nothing. Its series are one labelled family per measure, with the tier as a
+object only in the cold tier reads the whole object, gives it to the client as it arrives, and, when the hot tier has room, asks for its copy into the hot tier on the entry of its key (the reconciler makes the copy, so the proxy counts none); a ranged get reads only its range and asks for nothing. Its series are one labelled family per measure, with the tier as a
 label, so one query serves every tier.
 
 A process runs a storage node, a build-node cache, or both. A combined node (`[hot_store]`,
@@ -125,20 +124,19 @@ value `local` of `tier` is reserved for the build node's cache.
 | `tierstore_reads_total` | counter | `tier`, `op` | a read reached the tier: its hits, misses and errors added up. For `tier="cold"`, the reads that had to go to the cold store |
 | `tierstore_bytes_served_total` | counter | `tier` | bytes of object data that gets answered, by the tier that gave them, after a range is applied |
 | `tierstore_bytes_read_total` | counter | `tier` | bytes of object data that gets read from the tier. For `cold`, the whole object for a get without a range, and the range alone for a ranged get |
-| `tierstore_promotions_total` | counter | none | a get copied an object from the cold tier into the hot tier |
-| `tierstore_promoted_bytes_total` | counter | none | bytes of those objects: the whole object (only a get without a range copies one) |
-| `tierstore_promotions_skipped_total` | counter | `reason`: `critical`, `full`, `raced`, `failed` | a get found the object in the cold tier and did not copy it into the hot tier |
+| `tierstore_promotions_total` | counter | none | always 0: the proxy no longer copies an object into the hot tier (kept so a query on it keeps a sample) |
+| `tierstore_promoted_bytes_total` | counter | none | always 0, for the same reason |
+| `tierstore_promotions_skipped_total` | counter | `reason`: `critical`, `full`, `raced`, `failed` | a get found the object in the cold tier and asked for no copy-back. Only `critical` counts; `full`, `raced` and `failed` are always 0 |
 
 What they do not count, and how to read them:
 
-- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call), counted under `op="get"` whatever its outcome: a key that exists in neither tier, a conditional request answered 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`, and none of them is counted at `op="head"`. So `op="head"` counts the clients' HEADs alone. A GET answered 304 or 412 has counted its hit and its bytes read and served although the body was never sent, and one answered 416 has counted its hit and zero bytes read and served; on the cold tier that GET copies nothing (the copy is fed by the body, which was not read) and counts no promotion and no `full`, `raced` or `failed` skip; with the hot tier at its critical mark it does count a `critical` skip, which is counted when the read opens, before the body is known to be unread.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call), counted under `op="get"` whatever its outcome: a key that exists in neither tier, a conditional request answered 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`, and none of them is counted at `op="head"`. So `op="head"` counts the clients' HEADs alone. A GET answered 304 or 412 has counted its hit and its bytes read and served although the body was never sent, and one answered 416 has counted its hit and zero bytes read and served; with the hot tier at its critical mark it counts a `critical` skip, which is counted when the read opens, before the body is known to be unread.
 - An error is neither a hit nor a miss. A tier that is down does not lower its hit rate; it shows in `read_errors_total`. A hot-tier error ends the read: the cold tier is not asked, so a hot outage does not show as cold reads.
 - Bytes are counted when the proxy hands the read to the front (for a read of the hot tier, when it opens, from the window it covers), so a client that disconnects while they are sent still has them counted. A range that cannot be satisfied counts the hit (cold, if the hot tier missed) but zero bytes read and zero bytes served, unlike a conditional response, whose resolved window can hold bytes.
-- A ranged GET that misses the hot tier asks the cold tier for the range alone and copies nothing, so its `bytes_read` and `bytes_served` are both the range and it promotes nothing. While the hot tier is at its critical mark it also counts a `critical` skip.
-- A HEAD promotes nothing.
-- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier copy with "full" a moment ago. `full` is the hot tier answering this copy with "full". `raced` is another read having copied the object first: two concurrent cold GETs of one object read it twice and promote it once, and the second counts `raced`. `failed` is any other error of the copy, and also a copy that was abandoned: the cold body is given to the client as it arrives and the same bytes are queued for the copy, and a copy that falls more than 16 MiB behind, one whose client dropped the body before the last byte, and one whose cold body failed or had other bytes than the cold object's size are abandoned and leave no object in the hot tier.
-- `promotions_total` counts a copy when the hot tier has taken it, before the entry for it is appended to the journal. That append can fail, and then the object can later leave the hot tier with no trace in these counters.
-- The copy of a cold GET runs beside the response and can end after it, so a scrape just after a GET may not yet show its promotion or skip. A cold body that fails part way counts a cold error as well as its cold hit (the hit is counted when the read opens), whether the read was of the whole object or of a range. A GET whose body is never read counts its cold hit and neither a promotion nor a skip, so promotions plus skips can be fewer than cold hits.
+- A ranged GET that misses the hot tier asks the cold tier for the range alone and asks for no copy-back, so its `bytes_read` and `bytes_served` are both the range. While the hot tier is at its critical mark it also counts a `critical` skip.
+- A HEAD asks for no copy-back.
+- `critical` is a skip because the hot tier is at or above its critical mark by the usage the reconciler last published, and also while the proxy takes the hot tier to be full because it answered an earlier put with "full" a moment ago. It is the one reason that counts: a read that is not skipped asks for the copy-back with a create-only entry in a task of its own and copies nothing, so the proxy no longer counts promotions, promoted bytes or the reasons `full`, `raced` and `failed`: those series of the earlier releases are still rendered, at 0. The copy-backs are the entry reconciler's work.
+- A cold body that fails part way counts a cold error as well as its cold hit (the hit is counted when the read opens), whether the read was of the whole object or of a range.
 
 ### Tier queries
 
@@ -209,16 +207,7 @@ sum(rate(tierstore_bytes_served_total[5m]))
 On the hot tier the two byte counters are equal, so the second query is 1 plus the extra bytes
 that whole-object cold reads cost.
 
-### Promotions per cold hit
-
-```promql
-sum(rate(tierstore_promotions_total[5m]))
-  /
-sum(rate(tierstore_hits_total{tier="cold",op="get"}[5m]))
-```
-
-This is at most 1. What keeps it under 1 is the skips, which add up to the rest, plus the GETs
-that were dropped while they copied:
+### Reads with no copy-back asked per cold hit
 
 ```promql
 sum by (reason) (rate(tierstore_promotions_skipped_total[5m]))
@@ -227,13 +216,8 @@ ignoring (reason) group_left
 sum(rate(tierstore_hits_total{tier="cold",op="get"}[5m]))
 ```
 
-Bytes promoted per cold byte read, which is 1 when every cold read is promoted:
-
-```promql
-sum(rate(tierstore_promoted_bytes_total[5m]))
-  /
-sum(rate(tierstore_bytes_read_total{tier="cold"}[5m]))
-```
+This is the share of cold hits that asked for no copy-back because the hot tier was at its
+critical mark.
 
 ## On `/metricz` today
 

@@ -2,7 +2,7 @@
 //! signed for it.
 
 use std::collections::VecDeque;
-use std::future::Future;
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -12,24 +12,27 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
-use http_body_util::BodyExt;
+
 use hyper::body::{Body, Frame};
 use hyper::header::HeaderMap;
 use hyper::{Request, StatusCode};
 use md5::Md5;
 use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY, digest as sha1_of};
 use roxmltree::Document;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tokio::time::{Sleep, sleep};
 
 use crate::{
     Backend, ByteRange, Error, FaultyBackend, Listed, MemoryBackend, Meta, Proxy, ProxyConfig,
-    TestClock,
+    Sleeper, TestClock,
 };
 
 use super::auth::{sign, sign_as};
 use super::request::BoxError;
 use super::{Server, ServerConfig};
+use http_body_util::BodyExt;
+use sha2::Digest;
+use std::future::Future;
 
 pub(super) const KEY_ID: &str = "AKIDEXAMPLE";
 
@@ -92,6 +95,42 @@ impl Reply {
     }
 }
 
+/// The format object of a store whose writes are made on entries.
+pub(super) const ACTIVE_FORMAT: &str = r#"{"epoch":2,"phase":"active"}"#;
+
+/// A wait that never ends: the heartbeat of a proxy then makes no call after its first beat, so the
+/// only calls are the ones a test is about.
+pub(super) struct Never;
+
+#[async_trait]
+impl Sleeper for Never {
+    async fn sleep(&self, _duration: Duration) {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// Starts a proxy over `hot` and `cold` that is live (its first beat is acknowledged and it makes
+/// no other) over a hot tier whose format says `active` at epoch 2, unless it has a format object
+/// already: what a put or a delete on an entry needs.
+pub(super) async fn live_proxy(
+    hot: Arc<dyn Backend>,
+    cold: Arc<dyn Backend>,
+    config: ProxyConfig,
+) -> Result<Proxy, Error> {
+    let _ = hot
+        .put(
+            "_tiering/format",
+            Bytes::from_static(ACTIVE_FORMAT.as_bytes()),
+        )
+        .await;
+    let proxy = Proxy::open(hot, cold, config).await?;
+    assert!(proxy.start_heartbeat(Arc::new(Never)));
+    while !proxy.is_live() {
+        tokio::task::yield_now().await;
+    }
+    Ok(proxy)
+}
+
 /// A server over a proxy whose tiers are in memory, each behind a fault injector, with a
 /// clock set by hand.
 pub(super) struct Rig {
@@ -121,11 +160,12 @@ impl Rig {
         let hot = Arc::new(FaultyBackend::new(hot_mem.clone()));
         let cold = Arc::new(FaultyBackend::new(cold_mem.clone()));
         let mut proxy_config = ProxyConfig::new("p1", budget, clock.clone());
-        proxy_config.linger = Duration::from_millis(1);
         proxy_config.usage_refresh = Duration::ZERO;
+        // Live for as long as a test moves the monotonic clock.
+        proxy_config.departure = Duration::from_secs(1_000_000);
         let mono = Arc::new(crate::Mono::new());
         proxy_config.mono = mono.clone();
-        let proxy = Proxy::open(hot.clone(), cold.clone(), proxy_config).await;
+        let proxy = live_proxy(hot.clone(), cold.clone(), proxy_config).await;
         let proxy = Arc::new(proxy.expect("a proxy"));
         let backend: Arc<dyn Backend> = proxy.clone();
         let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock.clone());
@@ -142,6 +182,20 @@ impl Rig {
             config,
             server,
         }
+    }
+
+    /// Runs the entry reconciler over the rig's tiers until a step changes nothing, as the
+    /// reconciler of the node would between two requests: it copies what the puts left, finishes
+    /// the deletes handed over and removes the entries, which releases what waits for them.
+    pub(super) async fn settle(&self) {
+        let clock = self.hot_mem.clock();
+        let mut base = crate::ReconcilerConfig::new("rig/reconciler", 1 << 30, clock);
+        base.mono = self.mono.clone();
+        let config = crate::EntryReconcilerConfig::new(base);
+        let mut reconciler =
+            crate::EntryReconciler::new(self.hot.clone(), self.cold.clone(), config);
+        while reconciler.step().await.progress() {}
+        reconciler.stop().await;
     }
 
     /// Sends a request signed for the server and reads the answer.
@@ -221,10 +275,11 @@ impl Rig {
         self.send("GET", &uri, &extra, b"").await
     }
 
-    /// Lets the runtime's other tasks run until the hot tier holds `key`: the copy of a cold read
-    /// is a task of its own, beside the response. It waits on that progress and on no clock.
-    pub(super) async fn copied(&self, key: &str) {
-        while self.hot_mem.head(key).await.is_err() {
+    /// Lets the runtime's other tasks run until the hot tier holds the entry of `key`: the ask for
+    /// the copy-back of a cold read is a task of its own, beside the response. It waits on that
+    /// progress and on no clock.
+    pub(super) async fn copy_back_asked(&self, key: &str) {
+        while self.hot_mem.head(&crate::entry_key(key)).await.is_err() {
             tokio::task::yield_now().await;
         }
     }
