@@ -39,13 +39,12 @@
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
 //! `_journal/` or `_tiering/` is refused with `AccessDenied` by each supported call before the
-//! operation's own processing, including the parsing of the XML body of an upload completion; a
+//! operation's own processing (the XML body of an upload completion is not parsed first); a
 //! request refused as unsupported (see above) is answered so first.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
 //! when the client goes away before the answer, so that no object is left without the journal
-//! entry that has it copied. (A put whose body the client had not finished sending is not
-//! carried on: its body is cut, and nothing is stored.)
+//! entry that has it copied. (A put whose body was not all sent is cut, and nothing is stored.)
 //!
 //! # Streamed puts
 //!
@@ -89,9 +88,8 @@
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
 //! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads and HeadBucket and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
-//! multipart upload but the listing, which reads) is
-//! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
-//! nothing. The roles of those keys are of the key and not of a prefix. A put by the full key
+//! multipart upload but the listing, which reads) is answered 403 `AccessDenied` with the S3
+//! error document before its body is read, and changes nothing. The roles of those keys are of the key and not of a prefix. A put by the full key
 //! is create-only but, when the hot tier is full, can race another put of the same key into the
 //! cold tier (see [`Proxy`](crate::Proxy)); a presigned PUT never goes to the cold tier of a
 //! proxy, and on a cache with `write_through` it goes to the upstream like every other put.
@@ -100,9 +98,9 @@
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
 //! GC key: see [`gc`], and [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
-//! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
-//! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
-//! binary).
+//! A key that reads, creates and deletes under the prefixes of three lists in its key file, and
+//! replaces and copies nothing, is a scoped key: see [`scoped`], and
+//! [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the binary).
 //! A client that holds no key and must read one object for a short time presents a presigned GET
 //! URL, signed with the full key, a read-only key or a scoped key (for an object under one of its
 //! read prefixes): see [`presign`], and [`ServerConfig::presign_max_expires`].
@@ -128,9 +126,8 @@
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
 //! CompleteMultipartUpload are the checksums of the whole object it makes, not of its XML body,
-//! so they are ignored there. `Content-MD5` and the signed hash are held to every body.
-//!
-//! A body with no checksum header and the signed hash `UNSIGNED-PAYLOAD` is accepted unchecked.
+//! so they are ignored there. `Content-MD5` and the signed hash are held to every body. A body with
+//! no checksum header and the signed hash `UNSIGNED-PAYLOAD` is accepted unchecked.
 //!
 //! # Idle bodies
 //!
@@ -191,8 +188,8 @@
 //! with the number of requests that the deadline cut: those still running, or still being sent.
 //!
 //! The OCI read front drains the same way, with the same code (`drain` and `linger`) and a drain
-//! of its own (`OciDrain`, which the binary begins with this one). Its late requests are counted in
-//! `tierstore_oci_drain_late_requests_total`.
+//! of its own (`OciDrain`, which the binary begins with this one); its late requests are counted
+//! in `tierstore_oci_drain_late_requests_total`.
 
 mod auth;
 pub mod build_info;
