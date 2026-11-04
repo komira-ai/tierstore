@@ -33,7 +33,7 @@ fn the_tally_counts_each_object_once() {
     assert_eq!(tally.finish(), (25, 0));
 
     tally.start(100);
-    tally.reach(Some("m"));
+    tally.reach(Some("t"));
     tally.listed("r", 10, 150);
     tally.copied("r", 100, 160);
     tally.copied("r", 100, 160);
