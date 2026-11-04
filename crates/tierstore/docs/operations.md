@@ -151,4 +151,4 @@ The delete and one-winner guarantees of a delete or a put that races a copy-back
 
 ## Not in a release yet
 
-- **Waiting for a put slot** (on main, not in v0.0.41). A put over `server.max_concurrent_puts` waits up to `server.put_permit_wait` (15 s) for a slot before it is answered 503 `SlowDown`, and the kbf task client retries a 503 with jittered waits. In v0.0.41 it is answered 503 at once.
+- **Waiting for a put slot** (on main, not in v0.0.41). A put over `server.max_concurrent_puts` waits up to `server.put_permit_wait` (15 s) for a slot before it is answered 503 `SlowDown`. In v0.0.41 it is answered 503 at once.
