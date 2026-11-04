@@ -7,10 +7,8 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use super::{
-    ConfigError, KEYS, PER_RUN, PerRun, format_duration, from_text, keys_for_flags, load,
-    parse_size,
-};
+use super::super::config_units::{format_duration, parse_size};
+use super::{ConfigError, KEYS, PER_RUN, PerRun, from_text, keys_for_flags, load};
 use crate::server::cli::{Cli, parse_duration};
 use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, MINIMAL_FLAGS, golden_flags};
 
@@ -46,6 +44,32 @@ fn a_storage_node_file_makes_the_settings_its_flags_make() {
     assert_eq!(from_file.read_only_key_file.len(), 2);
     assert_eq!(from_file.config, None);
     assert!(!from_file.print_config);
+}
+
+/// Asserts that a file written for the release before, which sets the two keys of the removed read
+/// grant, still loads: the settings are those the same flags make (the keys and the flags are
+/// accepted and kept, to be ignored with a warning at the start), and every other key is read as
+/// it was.
+#[test]
+fn a_file_with_the_keys_of_the_removed_read_grant_still_loads() {
+    let old = golden_with(
+        "presign_max_expires   = \"10m\"",
+        "presign_max_expires   = \"10m\"\n\
+         grant_key_files       = [\"/etc/tierstore/grant.key\"]\n\
+         grant_max_lifetime    = \"5m\"",
+    );
+    let from_file = from_text(&old, DEFAULTS).unwrap();
+    let mut flags = golden_flags();
+    flags.extend([
+        "--grant-key-file=/etc/tierstore/grant.key",
+        "--grant-max-lifetime=5m",
+    ]);
+    let from_flags = Cli::try_parse_from(flags).unwrap();
+    assert_eq!(from_file, from_flags);
+    assert_eq!(from_file.grant_max_lifetime, Some(Duration::from_secs(300)));
+    let without = from_text(GOLDEN, DEFAULTS).unwrap();
+    assert!(without.grant_key_file.is_empty());
+    assert_eq!(without.grant_max_lifetime, None);
 }
 
 /// Asserts that a file that gives the least a start needs gets, for every key it leaves out, the
@@ -241,17 +265,6 @@ fn a_fault_in_the_file_is_reported_without_the_value() {
             "presign_max_expires",
         ),
         (
-            golden_with(
-                "grant_max_lifetime    = \"5m\"",
-                "grant_max_lifetime = \"SENTINEL\"",
-            ),
-            "grant_max_lifetime",
-        ),
-        (
-            golden_with("grant_max_lifetime    = \"5m\"", "grant_max_lifetime = 5"),
-            "grant_max_lifetime",
-        ),
-        (
             golden_with("kind               = \"s3\"", "kind = \"SENTINEL\""),
             "kind",
         ),
@@ -379,6 +392,10 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "usage_stale_after = \"1s\"",
         "journal_linger = \"1s\"",
         "journal_retention = \"1s\"",
+        "heartbeat = \"1s\"",
+        "departure = \"1s\"",
+        "deadline_margin = \"1s\"",
+        "registration_retention = \"1s\"",
     ];
     for line in every {
         let text = minimal_with(

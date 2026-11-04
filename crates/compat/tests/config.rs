@@ -123,3 +123,40 @@ fn a_file_with_the_keys_of_the_removed_self_test_loads_in_both_releases() {
     let ok = status(ExitCode::SUCCESS);
     assert_eq!(both(&file), (ok.clone(), ok));
 }
+
+/// A grant key as the release before wants it: an id and a secret of at least 32 bytes.
+const GRANT_KEY: &str = "AKIDGRANT\n0123456789abcdef0123456789abcdef0123456789abcdef\n";
+
+/// Asserts that a file with a grant key file and a grant lifetime, which the release before starts
+/// (so it is a file of that release), starts on this branch too: the two keys of the removed read
+/// grant are still accepted, and ignored, so that an old unit starts. The grant key file is also
+/// missing in a second file, which this branch starts because it does not read it, and the release
+/// before refuses because it does.
+#[test]
+fn a_file_written_for_the_release_before_with_read_grant_keys_starts_on_this_branch() {
+    let node = Node::new("compat-config-grant");
+    let grant = node.dir.path().join("grant.key");
+    std::fs::write(&grant, GRANT_KEY).unwrap();
+    std::fs::set_permissions(&grant, Permissions::from_mode(0o600)).unwrap();
+    let extra = format!(
+        "grant_key_files = [\"{}\"]\ngrant_max_lifetime = \"5m\"",
+        grant.display()
+    );
+    let ok = status(ExitCode::SUCCESS);
+    assert_eq!(both(&node.file(&extra, "", "")), (ok.clone(), ok.clone()));
+
+    let gone = node.dir.path().join("no-such-grant.key");
+    let extra = format!("grant_key_files = [\"{}\"]", gone.display());
+    let (now, before) = both(&node.file(&extra, "", ""));
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
+}
+
+/// Asserts the other direction: a file with no key of the read grant, which is what this branch
+/// writes (`--print-config` leaves them out), starts on the release before and on this branch.
+#[test]
+fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branch() {
+    let node = Node::new("compat-config-no-grant");
+    let ok = status(ExitCode::SUCCESS);
+    assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
+}

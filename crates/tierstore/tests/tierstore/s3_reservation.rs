@@ -72,10 +72,10 @@ async fn two_reads_are_two_gets(
     tag: &str,
 ) {
     let before = s3.requests().len();
-    let whole = backend.get_marked("k", None).await.unwrap();
+    let whole = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(whole, (held.clone(), marked, tag.to_owned()));
     let range = Some(ByteRange::new(0, 4));
-    let part = backend.get_marked("k", range).await.unwrap();
+    let part = backend.get_tagged("k", range).await.unwrap();
     assert_eq!(part, (held.slice(0..4), marked, tag.to_owned()));
     let sent = s3.requests();
     let methods: Vec<&str> = sent[before..]
@@ -112,7 +112,7 @@ async fn a_key_the_client_cannot_name_is_refused_by_the_reservation_calls() {
     let replaced = backend
         .put_reservation_if_match(key, reservation(1), "t")
         .await;
-    let read = backend.get_marked(key, None).await;
+    let read = backend.get_tagged(key, None).await;
     assert!(matches!(created, Err(Error::Other(_))), "{created:?}");
     assert!(matches!(replaced, Err(Error::Other(_))), "{replaced:?}");
     assert!(matches!(read, Err(Error::Other(_))), "{read:?}");
@@ -145,8 +145,8 @@ async fn a_store_that_resets_connections_fails_the_reservation_calls_as_unavaila
     let replaced = backend
         .put_reservation_if_match("k", reservation(1), "t")
         .await;
-    let read = backend.get_marked("k", None).await;
-    let ranged = backend.get_marked("k", Some(ByteRange::new(0, 4))).await;
+    let read = backend.get_tagged("k", None).await;
+    let ranged = backend.get_tagged("k", Some(ByteRange::new(0, 4))).await;
     for failed in [
         created.unwrap_err(),
         replaced.unwrap_err(),
@@ -191,8 +191,8 @@ async fn endpoint_without_etags() -> String {
 async fn a_read_with_the_mark_whose_answer_has_no_etag_is_an_error() {
     let endpoint = endpoint_without_etags().await;
     let backend = S3Backend::new(config(&endpoint)).unwrap();
-    let whole = backend.get_marked("k", None).await.unwrap_err();
-    let ranged = backend.get_marked("k", Some(ByteRange::new(0, 4)));
+    let whole = backend.get_tagged("k", None).await.unwrap_err();
+    let ranged = backend.get_tagged("k", Some(ByteRange::new(0, 4)));
     let ranged = ranged.await.unwrap_err();
     for failed in [whole, ranged] {
         assert_eq!(

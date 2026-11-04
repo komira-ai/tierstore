@@ -174,8 +174,10 @@ fn every_flag_is_given_in_one_of_the_round_trips() {
     let command = Cli::command();
     // `--config` is the file itself, `--check-config` only checks one, and `--capabilities` prints
     // and exits before any setting is read: a round trip never gives any of them. The two flags of
-    // the removed start-up self-test are read and never written, so no round trip returns them;
-    // their own test is `the_flags_of_the_removed_self_test_are_not_printed`.
+    // the removed start-up self-test and the removed read grant are read and never written, so no
+    // round trip returns them; their own tests are
+    // `the_flags_of_the_removed_self_test_are_not_printed` and
+    // `the_flags_of_the_removed_read_grant_are_not_printed`.
     for arg in command.get_arguments().filter(|arg| {
         !matches!(
             arg.get_long(),
@@ -185,6 +187,8 @@ fn every_flag_is_given_in_one_of_the_round_trips() {
                     | "capabilities"
                     | "skip-backend-check"
                     | "backend-check-wait"
+                    | "grant-key-file"
+                    | "grant-max-lifetime"
             )
         )
     }) {
@@ -213,10 +217,14 @@ fn the_printed_keys_are_the_keys_of_the_table() {
         let (cli, _) = parse(flags);
         printed.extend(keys_of(&render(&cli).unwrap()));
     }
-    // The two keys of the removed start-up self-test are read and never written.
+    // The keys of the removed start-up self-test and of the removed read grant are read and never
+    // written.
     let documented: BTreeSet<String> = KEYS
         .iter()
-        .filter(|(flag, _)| !matches!(*flag, "skip-backend-check" | "backend-check-wait"))
+        .filter(|(flag, _)| {
+            !flag.starts_with("grant-")
+                && !matches!(*flag, "skip-backend-check" | "backend-check-wait")
+        })
         .flat_map(|(_, keys)| keys.iter().map(|key| (*key).to_owned()))
         .collect();
     assert_eq!(printed, documented);
@@ -237,6 +245,22 @@ fn the_flags_of_the_removed_self_test_are_not_printed() {
     assert_eq!(text, render(&new).unwrap());
     assert!(!text.contains("skip_checks"), "{text}");
     assert!(!text.contains("backend_check_wait"), "{text}");
+}
+
+/// Asserts that the flags of the removed read grant are accepted by `--print-config` and left out
+/// of the file it writes, which is the file of the same flags without them.
+#[test]
+fn the_flags_of_the_removed_read_grant_are_not_printed() {
+    let mut old = s3_flags();
+    old.extend([
+        "--grant-key-file=/etc/tierstore/grant.key",
+        "--grant-max-lifetime=5m",
+    ]);
+    let (old, _) = parse(old);
+    let (new, _) = parse(s3_flags());
+    let text = render(&old).unwrap();
+    assert_eq!(text, render(&new).unwrap());
+    assert!(!text.contains("grant"), "{text}");
 }
 
 /// Asserts that the file names the key files by path and holds no key: the files are not read,

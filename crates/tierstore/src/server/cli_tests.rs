@@ -1,5 +1,6 @@
 //! The flags of the binary: their defaults, parsing and help. The settings made of them and the
-//! reconciler's loop are in the two modules below.
+//! checks run before a start are in the two modules below. The reconciler's loop is tested in
+//! `cli_reconcile_tests`.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -7,29 +8,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
-use tokio::sync::Notify;
 
 use crate::server::local_cache::LocalTierFailure;
 use crate::server::{AccessKey, Drained};
-use crate::{
-    Backend, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler, ReconcilerConfig,
-    TestClock,
-};
 
+use super::super::cli_serve::cut_note;
 use super::{
-    Cli, InvalidFlags, S3Flags, build, cut_note, exit_status, open_tier, parse_duration,
-    probe_run_id, read_key, reconcile, share, tier,
+    Cli, InvalidFlags, S3Flags, build, exit_status, open_tier, parse_duration, probe_run_id,
+    read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]
 mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
-
-const MEBIBYTE: u64 = 1 << 20;
 
 /// The JSON form of a key file with the id `JSONID` and the secret `json-secret`.
 const JSON_KEY: &str = r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret"}"#;
@@ -156,7 +150,7 @@ fn the_flags_have_their_defaults() {
     assert!(cli.scoped_key_file.is_empty());
     assert!(cli.grant_key_file.is_empty());
     assert_eq!(cli.presign_max_expires, Duration::from_secs(900));
-    assert_eq!(cli.grant_max_lifetime, Duration::from_secs(900));
+    assert_eq!(cli.grant_max_lifetime, None);
     assert!(cli.skip_backend_check.is_empty());
     assert_eq!(cli.backend_check_wait, None);
     assert_eq!(cli.hot_conditional_delete, None);

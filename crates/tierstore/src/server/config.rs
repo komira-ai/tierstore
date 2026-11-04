@@ -44,17 +44,19 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, parse_duration,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
+use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_policy::{Policy, check_policies};
+use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
+use super::config_units::{Dur, Size};
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
@@ -102,14 +104,21 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
     ("scoped-key-file", &["server.scoped_key_files"]),
-    ("grant-key-file", &["server.grant_key_files"]),
     ("presign-max-expires", &["server.presign_max_expires"]),
+    ("grant-key-file", &["server.grant_key_files"]),
     ("grant-max-lifetime", &["server.grant_max_lifetime"]),
     ("journal-linger", &["hot_store.journal_linger"]),
     ("journal-retention", &["hot_store.journal_retention"]),
     ("copy-parallel", &["hot_store.copy_parallel"]),
     ("lease-ttl", &["hot_store.lease_ttl"]),
     ("reconcile-interval", &["hot_store.reconcile_interval"]),
+    ("heartbeat", &["hot_store.heartbeat"]),
+    ("departure", &["hot_store.departure"]),
+    ("deadline-margin", &["hot_store.deadline_margin"]),
+    (
+        "registration-retention",
+        &["hot_store.registration_retention"],
+    ),
     ("lock-file", &["hot_store.lock_file"]),
     ("usage-stale-after", &["hot_store.usage_stale_after"]),
     ("max-request-bytes", &["server.max_request_bytes"]),
@@ -217,113 +226,6 @@ pub(super) struct PerRun {
     pub drain_deadline: Duration,
 }
 
-/// A duration in the file: a string such as `250ms` or `15m`, as the flags have it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Dur(pub Duration);
-
-impl<'de> Deserialize<'de> for Dur {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_str(DurVisitor)
-    }
-}
-
-struct DurVisitor;
-
-impl Visitor<'_> for DurVisitor {
-    type Value = Dur;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a duration such as \"15m\" (a number and ms, s, m or h)")
-    }
-
-    fn visit_str<E: de::Error>(self, text: &str) -> Result<Dur, E> {
-        match parse_duration(text) {
-            Ok(duration) => Ok(Dur(duration)),
-            // An invalid value, not a custom message and not the reason of the flag (which holds
-            // the text): the refusal of a file names the key and the kind of value it takes and
-            // never shows what was written (see `syntax`).
-            Err(_) => Err(E::invalid_value(de::Unexpected::Str(text), &self)),
-        }
-    }
-}
-
-impl Serialize for Dur {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format_duration(self.0))
-    }
-}
-
-/// The duration as the largest of `h`, `m`, `s` and `ms` that holds it in whole numbers, such
-/// that [`parse_duration`] reads the text back to the same duration.
-pub(super) fn format_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        return "0s".to_owned();
-    }
-    let units = [(3_600_000, "h"), (60_000, "m"), (1000, "s")];
-    for (size, unit) in units {
-        if millis.is_multiple_of(size) {
-            return format!("{}{unit}", millis / size);
-        }
-    }
-    format!("{millis}ms")
-}
-
-/// A number of bytes in the file: an integer, or a string of a number and `B`, `KiB`, `MiB`,
-/// `GiB` or `TiB`, such as `500GiB`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Size(pub u64);
-
-impl Serialize for Size {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Size {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(SizeVisitor)
-    }
-}
-
-struct SizeVisitor;
-
-impl Visitor<'_> for SizeVisitor {
-    type Value = Size;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a number of bytes, or a string such as \"500GiB\"")
-    }
-
-    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Size, E> {
-        match u64::try_from(value) {
-            Ok(bytes) => Ok(Size(bytes)),
-            Err(_) => Err(E::custom("a size is not negative")),
-        }
-    }
-
-    fn visit_str<E: de::Error>(self, text: &str) -> Result<Size, E> {
-        parse_size(text).map(Size).map_err(E::custom)
-    }
-}
-
-/// A size: a whole number and `B`, `KiB`, `MiB`, `GiB` or `TiB`.
-pub(super) fn parse_size(text: &str) -> Result<u64, String> {
-    let bad = || "not a size; use a number and B, KiB, MiB, GiB or TiB, as in 500GiB".to_owned();
-    let unit_at = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
-    let (digits, unit) = text.split_at(unit_at);
-    let count: u64 = digits.parse().map_err(|_| bad())?;
-    let shift = match unit {
-        "B" => 0,
-        "KiB" => 10,
-        "MiB" => 20,
-        "GiB" => 30,
-        "TiB" => 40,
-        _ => return Err(bad()),
-    };
-    count.checked_mul(1 << shift).ok_or_else(bad)
-}
-
 /// What a tier is made of.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -355,8 +257,7 @@ pub(super) struct File {
     pub policy: Vec<Policy>,
 }
 
-/// `[server]`: what the process is, and its limits. A key that is left out has the default of
-/// the flag it stands for.
+/// `[server]`: what the process is, its limits, and two retired no-op `grant_*` keys.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ServerTable {
@@ -376,9 +277,10 @@ pub(super) struct ServerTable {
     pub gc_key_files: Vec<PathBuf>,
     #[serde(default)]
     pub scoped_key_files: Vec<PathBuf>,
-    #[serde(default)]
-    pub grant_key_files: Vec<PathBuf>,
     pub presign_max_expires: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grant_key_files: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
@@ -437,6 +339,14 @@ pub(super) struct TierTable {
     pub journal_linger: Option<Dur>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal_retention: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_margin: Option<Dur>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration_retention: Option<Dur>,
     // Only `[cold_store]` has these.
     /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
     /// still loads.
@@ -509,128 +419,6 @@ pub(super) fn within<T: PartialOrd + fmt::Display>(
 /// The duration of a key, or the default of its flag.
 pub(super) fn duration(value: Option<Dur>, default: Duration) -> Duration {
     value.map_or(default, |dur| dur.0)
-}
-
-/// Whether a key's name says it holds a secret: it has a word of one, or is a key itself and
-/// not the path of a file. A hint for a message that says what to do, not a gate: what keeps a
-/// secret out of the file is that an unknown key is refused, and the name of a known key that
-/// takes a path (`credentials_file`) cannot tell a path from a secret by its value. The messages
-/// of the file never repeat a value, so a secret that is given anyway is not echoed.
-fn looks_secret(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    if key.ends_with("_file") || key.ends_with("_files") {
-        return false;
-    }
-    let words = [
-        "secret",
-        "password",
-        "passphrase",
-        "token",
-        "credentials",
-        "apikey",
-        "psk",
-    ];
-    words.iter().any(|word| key.contains(word))
-        || key == "key"
-        || key.starts_with("access_key")
-        || key.ends_with("_key")
-}
-
-/// The keys of `[local_cache]` that are in no flag, and so not in [`KEYS`].
-const LOCAL_CACHE_KEYS: &[&str] = &[
-    "path",
-    "layout",
-    "max_concurrent_fills",
-    "max_concurrent_keeps",
-    "keep_wait",
-    "keep_deadline",
-    "write_through",
-    "whole_fill_limit",
-    "scrub_rate",
-    "scrub_min_round",
-];
-
-/// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a
-/// `[local_cache]` key or a `[[policy]]` key.
-fn known_key(key: &str) -> bool {
-    matches!(key, "prefix" | "cache")
-        || LOCAL_CACHE_KEYS.contains(&key)
-        || KEYS
-            .iter()
-            .flat_map(|(_, keys)| keys.iter())
-            .any(|name| name.rsplit('.').next() == Some(key))
-}
-
-/// The fault `error` found in `text`, as a [`ConfigError::Syntax`] that does not repeat the line
-/// or the value (the display of the `toml` error does: it shows the line, and its messages for a
-/// value of the wrong type show the value).
-fn syntax(text: &str, error: &toml::de::Error) -> ConfigError {
-    let at = error.span().map_or(0, |span| span.start).min(text.len());
-    let before = &text.as_bytes()[..at];
-    let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
-    let column = before
-        .iter()
-        .rev()
-        .take_while(|byte| **byte != b'\n')
-        .count()
-        + 1;
-    let (key, value) = match text.lines().nth(line - 1).and_then(|l| l.split_once('=')) {
-        Some((key, value)) => (Some(key.trim()), value.trim().trim_matches('"')),
-        None => (None, ""),
-    };
-    // Only a name the file can hold is shown as the key: inside a multi-line string the text before
-    // an `=` is part of a value, which may be a pasted secret.
-    let key = key.filter(|key| known_key(key));
-    let message = error.message();
-    let shows_value = [
-        "invalid type",
-        "invalid value",
-        "invalid length",
-        "unknown variant",
-    ];
-    let what = if shows_value.iter().any(|start| message.starts_with(start)) {
-        let expected = message
-            .rsplit_once(", expected ")
-            .map_or("another value", |(_, expected)| expected);
-        let key = key.unwrap_or("a value");
-        format!("{key}: not a value this key takes (it is not shown); expected {expected}")
-    } else {
-        let message = if value.is_empty() {
-            message.to_owned()
-        } else {
-            message.replace(value, "(value)")
-        };
-        // A value's own parse error (a size, a duration, an address) does not name its key.
-        match key {
-            Some(key) => format!("{key}: {message}"),
-            None => message,
-        }
-    };
-    ConfigError::Syntax { line, column, what }
-}
-
-/// Refuses the first key of `table` (and of the tables inside it) that looks like a secret.
-fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
-    for (key, value) in table {
-        let here = if path.is_empty() {
-            key.clone()
-        } else {
-            format!("{path}.{key}")
-        };
-        if looks_secret(key) {
-            return Err(ConfigError::InlineSecret { key: here });
-        }
-        match value {
-            toml::Value::Table(inner) => find_secret(&here, inner)?,
-            toml::Value::Array(items) => {
-                for inner in items.iter().filter_map(toml::Value::as_table) {
-                    find_secret(&here, inner)?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// The addresses of the `listen` key `key`: at least one, and none twice. The message names the
@@ -733,6 +521,13 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("usage_stale_after", cold.usage_stale_after.is_some()),
         ("journal_linger", cold.journal_linger.is_some()),
         ("journal_retention", cold.journal_retention.is_some()),
+        ("heartbeat", cold.heartbeat.is_some()),
+        ("departure", cold.departure.is_some()),
+        ("deadline_margin", cold.deadline_margin.is_some()),
+        (
+            "registration_retention",
+            cold.registration_retention.is_some(),
+        ),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -864,8 +659,8 @@ pub(super) fn storage(
         presign_key_file: front.presign_key_file,
         gc_key_file: front.gc_key_file,
         scoped_key_file: front.scoped_key_file,
-        grant_key_file: front.grant_key_file,
         presign_max_expires: front.presign_max_expires,
+        grant_key_file: front.grant_key_file,
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
@@ -876,6 +671,7 @@ pub(super) fn storage(
         reconcile_interval: duration(hot.reconcile_interval, Duration::from_secs(5)),
         lock_file,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
+        heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
         put_permit_wait: front.put_permit_wait,
@@ -942,9 +738,9 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,
         scoped_key_file: server.scoped_key_files,
-        grant_key_file: server.grant_key_files,
         presign_max_expires: duration(server.presign_max_expires, Duration::from_secs(15 * 60)),
-        grant_max_lifetime: duration(server.grant_max_lifetime, Duration::from_secs(15 * 60)),
+        grant_key_file: server.grant_key_files,
+        grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
