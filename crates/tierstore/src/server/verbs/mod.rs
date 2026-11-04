@@ -81,6 +81,7 @@ impl Hot {
             endpoint: self.hot_endpoint.as_deref(),
             region: self.hot_region.as_deref(),
             credentials: self.hot_credentials_file.as_deref(),
+            conditional_delete: None,
         };
         open_tier("--hot", &self.hot, &s3, self.s3_request_timeout).map_err(VerbError::Refused)
     }
