@@ -53,9 +53,9 @@ use super::cli::{
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_policy::{Policy, check_policies};
-use super::config_unknown::announce_unknown_keys;
 use super::config_syntax::{find_secret, syntax};
 use super::config_units::{Dur, Size};
+use super::config_unknown::announce_unknown_keys;
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
