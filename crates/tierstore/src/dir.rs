@@ -147,6 +147,12 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   by the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
 ///   between processes too.
 ///
+/// The directory must be on a case-sensitive file system: a key is a file name with `A-Z` as they
+/// are, so on a case-insensitive one (the default APFS volume on macOS) the keys `Foo` and `foo`
+/// name one file, a get of one returns the other's bytes and a create-only put of one fails for
+/// a key that does not exist. The backend does not probe for this; a file name is not changed
+/// because a release already wrote its objects under it.
+///
 /// The backend counts on being the only writer of its directory but for other backends over the
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
 /// create-only, and the temporary files of two backends never have one name, since a name holds
