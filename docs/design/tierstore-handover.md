@@ -215,7 +215,9 @@ It also starts no fills, keeps, eviction or scrub (`scrub_rate` is accepted and 
 ## 6. Journal, lease and proxy id (storage node)
 
 The reconciler takes the lease, in `Reconciler::pass` through `Lease::ensure` (`lease.rs`), on `_tiering/lease` in the hot
-tier: create-only, renewed or taken over by `put_if_match` after `lease_ttl`. The proxy writes `_journal/<proxy_id>/<seq>`
+tier: create-only, renewed (at the start of a pass if less than a third of `lease_ttl` of it is left, and on a timer of its
+own while the pass works) or taken over by `put_if_match` once the same tag has stood for `lease_ttl` on the taker's own
+monotonic clock. The proxy writes `_journal/<proxy_id>/<seq>`
 create-only and skips a taken number (`Inner::write_batch`, `tiered.rs`).
 
 - **Any number of proxies work over the same tiers** (`lib.rs`; `Proxy::open` goes on after the highest number it finds),
