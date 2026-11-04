@@ -50,9 +50,10 @@
 //!
 //! The nonce is `<actor id>.<boot>.<counter>`, the counter being per [`Entries`]. The actor id is
 //! the configured one and is reused when a process restarts, so it cannot make the nonce unique
-//! by itself: each [`Entries`] takes a `boot` of its own (process id, the clock at its creation
-//! and a count of the [`Entries`] made in the process), so a counter that starts again under a
-//! known actor id still writes nonces no earlier instance wrote.
+//! by itself: each [`Entries`] takes a `boot` of its own, 128 random bits from the operating system
+//! (the helper of the lease nonce), so that a counter that starts again under a known actor id, in
+//! this process or in another with the same process id and clock, still writes nonces no earlier
+//! instance wrote.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -311,7 +312,7 @@ fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
 /// The store calls on the entries of one actor: a proxy or a reconciler, named by `me`.
 ///
 /// `me` may be the same in every process of the actor, so the nonces it writes are made unique by
-/// `boot`, which differs for every [`Entries`] ever made.
+/// `boot`, which is random for every [`Entries`] made.
 pub struct Entries {
     hot: Arc<dyn Backend>,
     me: String,
@@ -325,13 +326,7 @@ impl Entries {
     /// `created_ms`.
     #[must_use]
     pub fn new(hot: Arc<dyn Backend>, me: impl Into<String>, clock: Arc<dyn Clock>) -> Self {
-        static MADE: AtomicU64 = AtomicU64::new(0);
-        let boot = format!(
-            "{:x}-{:x}-{:x}",
-            std::process::id(),
-            clock.now(),
-            MADE.fetch_add(1, Ordering::SeqCst)
-        );
+        let boot = crate::lease::new_nonce();
         Self::with_boot(hot, me, clock, boot)
     }
 

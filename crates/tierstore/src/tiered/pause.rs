@@ -45,16 +45,19 @@ pub(super) async fn refresh(
     hot: &dyn Backend,
     limit: Duration,
 ) {
+    // The gate is held until the answer is kept, so no other read can be kept between this read
+    // and its publication, and an older read never replaces a newer one.
     let read = async {
         let _gate = gate.lock().await;
         let at = Instant::now();
-        (at, read_format(hot).await)
-    };
-    if let Ok((at, Ok(format))) = tokio::time::timeout(limit, read).await {
+        let format = read_format(hot).await?;
         let mut seen = locked(pause);
         seen.read = Some(at);
         seen.keep(format.as_ref());
-    }
+        Ok::<(), Error>(())
+    };
+    // A read that fails or runs out of time changes nothing.
+    let _ = tokio::time::timeout(limit, read).await;
 }
 
 /// The way a write is made.
