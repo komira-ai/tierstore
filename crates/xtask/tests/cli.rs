@@ -651,10 +651,10 @@ fn release_set_version_writes_the_version_into_the_manifest_and_the_lock_of_the_
 fn licenses_writes_the_notice_that_package_puts_in_the_tarball_and_a_refused_one_exits_1() {
     // Catches: the flags of `licenses` (--metadata, --package, --out) and of `package
     // --licenses` not reaching their functions, a tarball listing more or less than the binary
-    // and the notice, and a crate without a licence file exiting 0.
+    // and the notice, and a crate that declares no licence exiting 0.
     let d = dir("licenses");
     put(&d, "crates/x/LICENSE", "MIT text of x");
-    put(&d, "crates/y/README", "y has no licence file");
+    put(&d, "crates/y/README", "y declares no licence");
     let manifest = |name: &str| d.join("crates").join(name).join("Cargo.toml");
     let meta = |dep: &str| {
         let package = |name: &str, source: &str| {
@@ -673,7 +673,11 @@ fn licenses_writes_the_notice_that_package_puts_in_the_tarball_and_a_refused_one
         )
     };
     put(&d, "x.json", &meta("x"));
-    put(&d, "y.json", &meta("y"));
+    put(
+        &d,
+        "y.json",
+        &meta("y").replace("\"license\":\"MIT\"", "\"license\":null"),
+    );
     let o = run(
         &d,
         &[
@@ -707,7 +711,7 @@ fn licenses_writes_the_notice_that_package_puts_in_the_tarball_and_a_refused_one
     );
     assert_eq!(o.status.code(), Some(1));
     assert!(
-        stderr(&o).contains("y 1.0.0: ships no licence file"),
+        stderr(&o).contains("y 1.0.0: declares no licence"),
         "{}",
         stderr(&o)
     );

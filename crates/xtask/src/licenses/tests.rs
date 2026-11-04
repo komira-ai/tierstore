@@ -181,19 +181,25 @@ fn only_the_crates_the_binary_links_are_listed_once_each_in_name_and_version_ord
 }
 
 #[test]
-fn crates_without_a_declared_licence_or_without_a_licence_file_are_refused_all_named() {
-    // Catches: a binary released with a crate whose licence text does not travel with it
-    // (MIT and BSD require it): both defects of each crate are named, in one error, and a
-    // directory called LICENSE is not a licence file. Nothing is written by `licenses`.
+fn a_crate_that_declares_no_licence_is_refused_and_every_such_crate_is_named() {
+    // Catches: a binary released with a crate nothing says the licence of: each such crate is
+    // named, in one error, whether or not it ships a licence file. A crate that gives only
+    // `license_file` has declared its licence.
     let dir = scratch("refused");
-    let no_file = krate(&dir, "nofile", &[("README", "x")]);
-    let mut no_licence = pkg(
-        "nolicence",
+    let mut with_file = pkg(
+        "withfile",
         "2.0.0",
         false,
-        &krate(&dir, "nolicence", &[("LICENSE", "t")]),
+        &krate(&dir, "withfile", &[("LICENSE", "t")]),
     );
-    no_licence["license"] = Value::Null;
+    with_file["license"] = Value::Null;
+    let mut without = pkg(
+        "without",
+        "1.0.0",
+        false,
+        &krate(&dir, "without", &[("README", "x")]),
+    );
+    without["license"] = Value::Null;
     let by_file = {
         let mut p = pkg(
             "byfile",
@@ -205,44 +211,115 @@ fn crates_without_a_declared_licence_or_without_a_licence_file_are_refused_all_n
         p["license_file"] = json!("COPYING");
         p
     };
+    let ids = ["withfile 2.0.0", "without 1.0.0", "byfile 1.0.0"];
+    let meta = metadata(
+        vec![
+            pkg("app", "0.1.0", true, "/nowhere/Cargo.toml"),
+            with_file,
+            without,
+            by_file,
+        ],
+        vec![
+            node("app 0.1.0", ids.map(|id| dep(id, &[NORMAL])).to_vec()),
+            node("withfile 2.0.0", vec![]),
+            node("without 1.0.0", vec![]),
+            node("byfile 1.0.0", vec![]),
+        ],
+    );
+    assert_eq!(
+        notice(&meta, "app"),
+        Err(Error::Refused(vec![
+            "withfile 2.0.0: declares no licence".to_owned(),
+            "without 1.0.0: declares no licence".to_owned(),
+        ]))
+    );
+}
+
+#[test]
+fn a_crate_that_ships_no_licence_file_is_listed_with_its_declared_licence_and_says_so() {
+    // Asserts the section of a crate with no licence file (its declared licence and a line
+    // saying it ships none) and that a directory called LICENSE is not taken for a file.
+    let dir = scratch("no-file");
+    let bare = krate(&dir, "bare", &[("README", "x")]);
     let dir_named = krate(&dir, "dirnamed", &[]);
     std::fs::create_dir(dir.join("dirnamed/LICENSE")).expect("directory");
     let meta = metadata(
         vec![
             pkg("app", "0.1.0", true, "/nowhere/Cargo.toml"),
-            pkg("nofile", "1.0.0", false, &no_file),
-            no_licence,
-            by_file,
+            pkg("bare", "1.0.0", false, &bare),
             pkg("dirnamed", "1.0.0", false, &dir_named),
         ],
         vec![
             node(
                 "app 0.1.0",
-                [
-                    "nofile 1.0.0",
-                    "nolicence 2.0.0",
-                    "byfile 1.0.0",
-                    "dirnamed 1.0.0",
-                ]
-                .map(|id| dep(id, &[NORMAL]))
-                .to_vec(),
+                vec![
+                    dep("bare 1.0.0", &[NORMAL]),
+                    dep("dirnamed 1.0.0", &[NORMAL]),
+                ],
             ),
-            node("nofile 1.0.0", vec![]),
-            node("nolicence 2.0.0", vec![]),
-            node("byfile 1.0.0", vec![]),
+            node("bare 1.0.0", vec![]),
             node("dirnamed 1.0.0", vec![]),
         ],
     );
-    let in_dir = |name: &str| dir.join(name).display().to_string();
-    let files = "ships no licence file (a name starting with LICENSE, LICENCE, COPYING, NOTICE, UNLICENSE) in";
-    assert_eq!(
-        notice(&meta, "app"),
-        Err(Error::Refused(vec![
-            format!("dirnamed 1.0.0: {files} {}/", in_dir("dirnamed")),
-            format!("nofile 1.0.0: {files} {}/", in_dir("nofile")),
-            "nolicence 2.0.0: declares no licence".to_owned(),
-        ]))
+    let none = "This crate ships no licence file; its licence is the one declared above.\n";
+    let text = notice(&meta, "app").expect("notice");
+    assert!(
+        text.contains(&format!("\nbare 1.0.0\nlicence: MIT\n\n{none}")),
+        "{text}"
     );
+    assert!(
+        text.ends_with(&format!("\ndirnamed 1.0.0\nlicence: MIT\n\n{none}")),
+        "{text}"
+    );
+    assert!(!text.contains("---"), "{text}");
+}
+
+#[test]
+fn a_procedural_macro_and_what_only_it_needs_are_not_listed() {
+    // Catches: a compiler-side crate (asn1-rs-impl in this repository's tree) named as linked,
+    // with its own dependencies; a crate the macro and a linked crate both need stays listed,
+    // and a crate with other kinds of targets is not taken for a macro.
+    let dir = scratch("macro");
+    let m = |name: &str| krate(&dir, name, &[("LICENSE", name)]);
+    let mut mac = pkg("mac", "1.0.0", false, &m("mac"));
+    mac["targets"] = json!([{"kind": ["proc-macro"]}]);
+    let mut lib = pkg("lib", "1.0.0", false, &m("lib"));
+    lib["targets"] = json!([{"kind": ["lib"]}, {"kind": ["custom-build"]}, {}]);
+    let meta = metadata(
+        vec![
+            pkg("app", "0.1.0", true, "/nowhere/Cargo.toml"),
+            mac,
+            lib,
+            pkg("syn", "1.0.0", false, &m("syn")),
+            pkg("shared", "1.0.0", false, &m("shared")),
+        ],
+        vec![
+            node(
+                "app 0.1.0",
+                vec![dep("mac 1.0.0", &[NORMAL]), dep("lib 1.0.0", &[NORMAL])],
+            ),
+            node(
+                "mac 1.0.0",
+                vec![dep("syn 1.0.0", &[NORMAL]), dep("shared 1.0.0", &[NORMAL])],
+            ),
+            node("lib 1.0.0", vec![dep("shared 1.0.0", &[NORMAL])]),
+            node("shared 1.0.0", vec![]),
+            node("syn 1.0.0", vec![]),
+        ],
+    );
+    let text = notice(&meta, "app").expect("notice");
+    for (name, listed) in [
+        ("lib", true),
+        ("shared", true),
+        ("mac", false),
+        ("syn", false),
+    ] {
+        assert_eq!(
+            text.contains(&format!("\n{name} 1.0.0\n")),
+            listed,
+            "{name}: {text}"
+        );
+    }
 }
 
 #[test]

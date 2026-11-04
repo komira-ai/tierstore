@@ -5,13 +5,15 @@
 //! binary (the build jobs of `artifacts.yml` pass `--filter-platform` with the build's target and
 //! the crate's `server` feature, so the resolution is that of the binary). The notice lists
 //! every crate that is not of this workspace and that `--package` reaches through normal
-//! dependencies (not dev or build dependencies, which are not linked into the binary), once per
+//! dependencies (not dev or build dependencies, which are not linked into the binary, and not
+//! procedural macros, which run in the compiler, nor what only they need), once per
 //! name and version, in name and version order: its licence expression as its manifest gives it,
 //! its repository, and the text of each of its licence files (a file of the crate's directory
 //! whose name starts with `LICENSE`, `LICENCE`, `COPYING`, `NOTICE` or `UNLICENSE`, in any case).
-//! The MIT, BSD and Apache-2.0 licences all require the notice to travel with the binary, so a
-//! crate that declares no licence, or ships no licence file, is refused with every other such
-//! crate named, and nothing is written. `package --licenses` puts the file into the tarball.
+//! A crate that ships no licence file is listed with its declared licence and a line saying so.
+//! A crate that declares no licence (no `license` and no `license_file`) is refused, with every
+//! other such crate named, and nothing is written. `package --licenses` puts the file into the
+//! tarball.
 //!
 //! The output file may not exist already.
 
@@ -36,6 +38,18 @@ fn field<'a, T>(
         Error::Failed(format!(
             "the metadata: {whose} has no `{key}` of the expected type"
         ))
+    })
+}
+
+/// Whether the package `p` is a procedural macro: it runs in the compiler and is not linked into
+/// the binary, nor are its own dependencies (unless something else needs them).
+fn is_proc_macro(p: &Value) -> bool {
+    p["targets"].as_array().is_some_and(|targets| {
+        targets.iter().any(|t| {
+            t["kind"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some("proc-macro")))
+        })
     })
 }
 
@@ -65,7 +79,7 @@ fn third_party<'a>(meta: &'a Value, root: &str) -> Result<Vec<&'a Value>, Error>
     let mut seen = BTreeSet::new();
     let mut todo = vec![start_id];
     while let Some(id) = todo.pop() {
-        if !seen.insert(id) {
+        if by_id.get(id).is_some_and(|p| is_proc_macro(p)) || !seen.insert(id) {
             continue;
         }
         let node = node_of
@@ -99,8 +113,8 @@ fn is_licence_file(name: &str) -> bool {
     LICENCE_FILES.iter().any(|p| upper.starts_with(p))
 }
 
-/// The notice of the crate `p`: its section of the file. A defect of the crate is added to
-/// `problems`.
+/// The notice of the crate `p`: its section of the file. A crate that declares no licence is added
+/// to `problems`.
 fn section(p: &Value, problems: &mut Vec<String>) -> Result<String, Error> {
     let name = field(p, "name", "a package", Value::as_str)?;
     let version = field(p, "version", "a package", Value::as_str)?;
@@ -118,19 +132,17 @@ fn section(p: &Value, problems: &mut Vec<String>) -> Result<String, Error> {
     if declared.is_none() {
         problems.push(format!("{label}: declares no licence"));
     }
-    if files.is_empty() {
-        problems.push(format!(
-            "{label}: ships no licence file (a name starting with {}) in {}",
-            LICENCE_FILES.join(", "),
-            dir.display()
-        ));
-    }
     let mut text = format!(
         "{label}\nlicence: {}\n",
         declared.unwrap_or("none declared")
     );
     if let Some(repository) = p["repository"].as_str() {
         text.push_str(&format!("source: {repository}\n"));
+    }
+    if files.is_empty() {
+        text.push_str(
+            "\nThis crate ships no licence file; its licence is the one declared above.\n",
+        );
     }
     for file in files {
         let bytes = package::read(&file)?;
@@ -146,7 +158,7 @@ fn section(p: &Value, problems: &mut Vec<String>) -> Result<String, Error> {
 /// The notice of everything `root` is built from, as the text of the file.
 ///
 /// # Errors
-/// The metadata is not what `cargo metadata` writes, or a crate has no licence or no licence file.
+/// The metadata is not what `cargo metadata` writes, or a crate declares no licence.
 pub fn notice(meta: &Value, root: &str) -> Result<String, Error> {
     let crates = third_party(meta, root)?;
     let mut problems = Vec::new();
