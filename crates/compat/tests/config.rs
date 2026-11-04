@@ -305,32 +305,28 @@ fn an_oci_interface_with_stage_read_starts_on_this_branch_and_is_refused_by_the_
     assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
 
-/// Asserts the one key `upstream` of an `oci` interface: a file with it starts on this branch (the
-/// pull-through is made, as `--check-config` does) and the release before refuses it, as it does
-/// not know `[[interface]]` at all, rather than serve a front that never pulls. The same file
-/// without the key starts on this branch, which serves the front as before.
+/// Asserts the one param `upstream` of an `oci` interface: a file with it starts on this branch
+/// (`--check-config` makes the pull-through client as the start does), and the release before
+/// refuses the file at start (it does not know `[[interface]]`) rather than serve a front that
+/// never pulls. The same file without the param starts on this branch, which serves the front as
+/// before.
 #[test]
 fn an_oci_interface_with_an_upstream_starts_on_this_branch_and_is_refused_by_the_release_before() {
-    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-upstream-config");
-    let access = private(&dir, "access.key", LONG_ENOUGH);
-    let base = std::fs::read_to_string(file(&dir, &access, "")).unwrap();
-    let write = |name: &str, front: &str| {
-        let path = dir.path().join(name);
-        std::fs::write(
-            &path,
-            format!("{base}\n[[interface]]\ntype = \"oci\"\nparams = {front}\n"),
-        )
-        .unwrap();
-        path.display().to_string()
-    };
-    let without = write("without.toml", "{ addresses = [\"127.0.0.1:0\"] }");
-    let with = write(
-        "with.toml",
-        "{ addresses = [\"127.0.0.1:0\"], upstream = { url = \"http://127.0.0.1:5000\" } }",
+    let node = Node::new("compat-config-oci-upstream");
+    let ok = status(ExitCode::SUCCESS);
+    let pulling = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], upstream = { url = \"http://127.0.0.1:5000\" } }",
     );
-    assert!(succeeded(tierstore::server::cli::main(checking(&without))));
-    assert!(succeeded(tierstore::server::cli::main(checking(&with))));
-    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
-        &with
-    ))));
+    let (now, before) = both(&pulling);
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
+
+    let plain = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"] }",
+    );
+    assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
