@@ -129,13 +129,18 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
 }
 
 /// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
-/// which has no character for a control character or for U+FFFE and U+FFFF, and this front does
+/// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
+/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed), and this front does
 /// not support `encoding-type=url`. A key with one would make every page that lists it malformed.
 fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
-    let bad = |c: char| c.is_control() || matches!(c, '\u{FFFE}' | '\u{FFFF}');
+    let bad = |c: char| {
+        matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
+            || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+    };
     if key.chars().any(bad) {
         return Err(S3Error::invalid(
-            "a key may not have a control character or U+FFFE or U+FFFF",
+            "a key may not have a character XML 1.0 forbids (U+0000-U+0008, U+000B, U+000C, \
+             U+000E-U+001F, U+FFFE, U+FFFF)",
         ));
     }
     Ok(())
