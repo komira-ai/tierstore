@@ -1,6 +1,7 @@
 //! The reconciler: copies what the proxies journal to the cold tier, and frees the hot tier.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +22,9 @@ use crate::{
 };
 
 mod drain;
+
+/// The default of [`ReconcilerConfig::compare_range`]: 1 MiB.
+pub(crate) const COMPARE_RANGE: NonZeroU64 = NonZeroU64::MIN.saturating_add((1 << 20) - 1);
 
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
@@ -55,7 +59,7 @@ pub struct ReconcilerConfig {
     /// How many times a copy reads the cold tier's object again after it changed under the copy.
     pub copy_rounds: u32,
     /// The most bytes of the hot object that one read of a comparison holds.
-    pub compare_range: u64,
+    pub compare_range: NonZeroU64,
     /// How long the format object must have said `drain` (by the monotonic clock of the
     /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
     /// (`ProxyConfig::format_refresh`), so that a proxy whose format reads succeed has read the
@@ -103,7 +107,7 @@ impl ReconcilerConfig {
             retention: Duration::from_secs(3600),
             page_size: 100,
             copy_rounds: 3,
-            compare_range: 1 << 20,
+            compare_range: COMPARE_RANGE,
             drain_settle: Duration::from_secs(15),
             clock,
             mono: Arc::new(MonotonicClock::new()),
@@ -901,7 +905,7 @@ impl Reconciler {
     async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
         let mut offset = 0u64;
         while offset < hot.size {
-            let len = (hot.size - offset).min(self.config.compare_range);
+            let len = (hot.size - offset).min(self.config.compare_range.get());
             let range = ByteRange::new(offset, len);
             let (mine, _, tag) = match self.hot.get_tagged(key, Some(range)).await {
                 Ok(read) => read,

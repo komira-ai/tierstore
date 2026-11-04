@@ -9,6 +9,7 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use crate::reconciler::COMPARE_RANGE;
 use crate::s3::S3Tuning;
 
 use super::config::{ConfigError, ServerTable, TierTable, duration, invalid, within};
@@ -51,7 +52,7 @@ pub struct HotTuning {
     /// changed under the copy.
     pub copy_rounds: u32,
     /// `hot_store.compare_range`: the most bytes of an object one read of a comparison holds.
-    pub compare_range: u64,
+    pub compare_range: NonZeroU64,
     /// `hot_store.delete_rounds`: how many times a delete looks at the cold object again after it
     /// changed under the delete.
     pub delete_rounds: u32,
@@ -69,7 +70,7 @@ impl Default for HotTuning {
             usage_refresh: Duration::from_secs(1),
             journal_page_size: 100,
             copy_rounds: 3,
-            compare_range: 1 << 20,
+            compare_range: COMPARE_RANGE,
             delete_rounds: 3,
             listing_heads: 16,
             upload_listing_calls: 100,
@@ -170,14 +171,15 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
         )?,
         journal_page_size: within("hot_store", "journal_page_size", page, 1, 1000)? as usize,
         copy_rounds: count("copy_rounds", hot.copy_rounds, old.copy_rounds, 100)?,
-        compare_range: within(
+        compare_range: NonZeroU64::new(within(
             "hot_store",
             "compare_range",
             hot.compare_range
-                .map_or(old.compare_range, |size: Size| size.0),
+                .map_or(old.compare_range.get(), |size: Size| size.0),
             4096,
             1 << 30,
-        )?,
+        )?)
+        .unwrap_or(old.compare_range),
         delete_rounds: count("delete_rounds", hot.delete_rounds, old.delete_rounds, 100)?,
         listing_heads: within("hot_store", "listing_heads", heads, 1, 1024)? as usize,
         upload_listing_calls: count(
@@ -267,7 +269,7 @@ cache  = true
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
         assert_eq!(hot.journal_page_size, 100);
         assert_eq!(hot.copy_rounds, 3);
-        assert_eq!(hot.compare_range, 1 << 20);
+        assert_eq!(hot.compare_range.get(), 1 << 20);
         assert_eq!(hot.delete_rounds, 3);
         assert_eq!(hot.listing_heads, 16);
         assert_eq!(hot.upload_listing_calls, 100);
@@ -280,7 +282,7 @@ cache  = true
         assert_eq!(built.proxy.upload_listing_calls, 100);
         assert_eq!(built.reconciler.page_size, 100);
         assert_eq!(built.reconciler.copy_rounds, 3);
-        assert_eq!(built.reconciler.compare_range, 1 << 20);
+        assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
     }
 
     /// Every key of `[server]` and `[hot_store]` of this change parses, and a value that is not
@@ -313,7 +315,7 @@ cache  = true
         assert_eq!(built.proxy.upload_listing_calls, 7);
         assert_eq!(built.reconciler.page_size, 20);
         assert_eq!(built.reconciler.copy_rounds, 5);
-        assert_eq!(built.reconciler.compare_range, 64 << 10);
+        assert_eq!(built.reconciler.compare_range.get(), 64 << 10);
     }
 
     /// `server.s3_min_bytes_per_sec = 0` turns the stretch of a write's time limit off.
@@ -447,7 +449,11 @@ cache  = true
              listing_heads = 1024\nupload_listing_calls = 100000",
         );
         assert_eq!(
-            from_text(&edge, DEFAULTS).unwrap().hot_tuning.compare_range,
+            from_text(&edge, DEFAULTS)
+                .unwrap()
+                .hot_tuning
+                .compare_range
+                .get(),
             1 << 30
         );
         let least = with_hot("compare_range = 4096\nusage_refresh = \"1ms\"");
@@ -455,7 +461,8 @@ cache  = true
             from_text(&least, DEFAULTS)
                 .unwrap()
                 .hot_tuning
-                .compare_range,
+                .compare_range
+                .get(),
             4096
         );
     }

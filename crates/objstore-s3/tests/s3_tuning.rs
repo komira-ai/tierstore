@@ -33,21 +33,32 @@ async fn hang_up() -> (String, Arc<AtomicUsize>) {
     (endpoint, count)
 }
 
+fn config(endpoint: String) -> S3Config {
+    S3Config {
+        endpoint,
+        region: "us-east-1".into(),
+        bucket: "test-bucket".into(),
+        credentials: Credentials::new("AKIDEXAMPLE", "secret"),
+        capabilities: Capabilities::default(),
+        connect_timeout: Duration::from_secs(5),
+        request_timeout: Duration::from_secs(5),
+        min_body_rate: None,
+    }
+}
+
 fn store(endpoint: String, tuning: S3Tuning) -> S3Store {
-    S3Store::new_tuned(
-        S3Config {
-            endpoint,
-            region: "us-east-1".into(),
-            bucket: "test-bucket".into(),
-            credentials: Credentials::new("AKIDEXAMPLE", "secret"),
-            capabilities: Capabilities::default(),
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(5),
-            min_body_rate: None,
-        },
-        tuning,
-    )
-    .unwrap()
+    S3Store::new_tuned(config(endpoint), tuning).unwrap()
+}
+
+/// The number of requests that a failing read of a store makes.
+async fn sends(s: &S3Store, count: &AtomicUsize) -> usize {
+    let key = ObjectKey::new("cas/seg-1").unwrap();
+    let err = s
+        .get_range(&key, ByteRange::new(0, 4).unwrap())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Transport(_)), "{err}");
+    count.load(Ordering::SeqCst)
 }
 
 async fn read_sends(retries: u32) -> usize {
@@ -58,13 +69,7 @@ async fn read_sends(retries: u32) -> usize {
         ..S3Tuning::default()
     };
     let s = store(endpoint, tuning);
-    let key = ObjectKey::new("cas/seg-1").unwrap();
-    let err = s
-        .get_range(&key, ByteRange::new(0, 4).unwrap())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, ObjectStoreError::Transport(_)), "{err}");
-    count.load(Ordering::SeqCst)
+    sends(&s, &count).await
 }
 
 /// A read is sent once more for each retry the tuning gives, and `read_retries = 0` sends it
@@ -75,9 +80,13 @@ async fn a_read_is_sent_once_more_for_each_retry_the_tuning_gives() {
     assert_eq!(read_sends(4).await, 5);
 }
 
-/// `S3Store::new` is the store with the default tuning: three sends of a failing read.
+/// `S3Store::new` is the store with the default tuning: three sends of a failing read, which is
+/// the number the code had before the tuning was a setting.
 #[tokio::test]
 async fn new_sends_a_failing_read_the_default_number_of_times() {
-    assert_eq!(read_sends(READ_RETRIES).await, READ_RETRIES as usize + 1);
+    let (endpoint, count) = hang_up().await;
+    let s = S3Store::new(config(endpoint)).unwrap();
+    assert_eq!(sends(&s, &count).await, 3);
+    assert_eq!(READ_RETRIES, 2);
     assert_eq!(S3Tuning::default().read_retries, READ_RETRIES);
 }
