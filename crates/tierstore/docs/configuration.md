@@ -294,7 +294,7 @@ The read cache of a build node, or of a storage node that keeps it in front of i
 | `local_cache.scrub_min_round` | duration, `"1h"` | the least time between the starts of two scrub rounds, so a small cache is not read again and again; at least `scrub_tick` (`"1s"` unless that is set), or `"0s"` for none |
 | `local_cache.pass_interval` | duration, `10s` (1ms to 1h) | how often the eviction pass runs |
 | `local_cache.lock_interval` | duration, `1s` (1ms to 1h) | how often a cache that does not hold the lock of its directory tries it again, and one that holds it checks that the lock file is still the file at the path |
-| `local_cache.scrub_tick` | duration, `1s` (1ms to 1h) | the time between two ticks of the scrub. `scrub_rate` stays a rate in bytes a second: each tick reads that rate times this. `scrub_min_round` is counted in ticks, and not below one |
+| `local_cache.scrub_tick` | duration, `1s` (1ms to 1h) | the time between two ticks of the scrub. `scrub_rate` stays a rate in bytes a second: each tick reads that rate times this, rounded up and at least a byte. `scrub_min_round` is counted in ticks, rounded up to a whole tick, and not below one |
 | `local_cache.listing_calls` | count, 100 (1 to 1000000) | the most pages of the upstream that one listing reads to make up for the names it leaves out (the reserved ones); a listing that needs more is answered 503 |
 | `local_cache.forget_limit` | count, 65536 (1 to 100000000) | the most keys a read-only cache remembers it deleted or replaced through the upstream; past it the cache is emptied when it takes the lock |
 | `local_cache.fill_chunk` | size, `8MiB` (4KiB to 1GiB) | the bytes a fill reads from the upstream at a time; the memory of a fill, whatever `whole_fill_limit` is |

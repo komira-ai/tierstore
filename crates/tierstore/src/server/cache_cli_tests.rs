@@ -848,6 +848,16 @@ fn the_loops_have_the_times_of_the_settings() {
     assert_eq!(loops.min_round, 1440);
     assert_eq!(Loops::of(&config, None, Duration::ZERO).per_tick, None);
     assert_eq!(Loops::of(&config, None, Duration::ZERO).min_round, 0);
+    // A rate too small for the tick still reads a byte a tick, and a minimum between rounds that
+    // is not a whole number of ticks is rounded up to the next tick.
+    config.scrub_tick = Duration::from_millis(1);
+    assert_eq!(Loops::of(&config, Some(100), hour).per_tick, Some(1));
+    assert_eq!(Loops::of(&config, Some(1500), hour).per_tick, Some(2));
+    config.scrub_tick = secs(1);
+    assert_eq!(
+        Loops::of(&config, None, Duration::from_millis(1500)).min_round,
+        2
+    );
     // A tick of no length is read as a millisecond, and a rate that overflows is the most.
     config.scrub_tick = Duration::ZERO;
     assert_eq!(Loops::of(&config, Some(1_000), hour).per_tick, Some(1));

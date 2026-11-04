@@ -70,7 +70,8 @@ pub(super) struct Loops {
     pub(super) tick: Duration,
     /// The bytes the scrub reads at each tick, or `None` for no scrub.
     pub(super) per_tick: Option<u64>,
-    /// The fewest ticks between the starts of two rounds of the scrub.
+    /// The fewest ticks between the starts of two rounds of the scrub: `scrub_min_round` rounded up
+    /// to whole ticks, so a round never starts sooner than configured.
     pub(super) min_round: u64,
 }
 
@@ -81,14 +82,21 @@ impl Loops {
         let tick = config.scrub_tick;
         let millis = tick.as_millis().max(1);
         let per_tick = |rate: u64| {
-            u64::try_from(u128::from(rate).saturating_mul(millis) / 1000).unwrap_or(u64::MAX)
+            // Rounded up, and at least a byte, so that a small rate on a short tick still moves.
+            u64::try_from(
+                u128::from(rate)
+                    .saturating_mul(millis)
+                    .div_ceil(1000)
+                    .max(1),
+            )
+            .unwrap_or(u64::MAX)
         };
         Self {
             pass: config.pass_interval,
             lock: config.lock_interval,
             tick,
             per_tick: rate.map(per_tick),
-            min_round: u64::try_from(min_round.as_millis() / millis).unwrap_or(u64::MAX),
+            min_round: u64::try_from(min_round.as_millis().div_ceil(millis)).unwrap_or(u64::MAX),
         }
     }
 }
