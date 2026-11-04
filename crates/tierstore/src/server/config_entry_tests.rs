@@ -20,7 +20,7 @@ fn with_hot(lines: &str) -> String {
 }
 
 /// What `build` makes of `cli` with a good key file as its full key.
-fn built(cli: &mut Cli) -> Built {
+fn built_of(cli: &mut Cli) -> Built {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-entry-tuning");
     let path = dir.path().join("key");
     std::fs::write(&path, "AKID\nsecret-0123456789\n").unwrap();
@@ -56,7 +56,7 @@ const ALL: &str = "retry_min = \"2s\"\nretry_max = \"90s\"\nstray_grace = \"20m\
 fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     let mut cli = from_text(MINIMAL, DEFAULTS).unwrap();
     assert_eq!(cli.entry_tuning, EntryTuning::default());
-    let built = built(&mut cli);
+    let built = built_of(&mut cli);
     let old = ProxyConfig::new("p1", 1000, std::sync::Arc::new(SystemClock));
     assert_eq!(built.proxy.usage_stale_after, old.usage_stale_after);
     assert_eq!(built.proxy.format_refresh, old.format_refresh);
@@ -84,7 +84,7 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
 #[test]
 fn every_key_reaches_the_setting_it_stands_for() {
     let mut cli = from_text(&with_hot(ALL), DEFAULTS).unwrap();
-    let built = built(&mut cli);
+    let built = built_of(&mut cli);
     let secs = Duration::from_secs;
     let config = reconciler_of(&built);
     assert_eq!(config.retry_min, secs(2));
@@ -112,11 +112,11 @@ fn every_key_reaches_the_setting_it_stands_for() {
 #[test]
 fn the_usage_limit_of_the_proxy_is_not_the_one_of_usagez() {
     let mut cli = from_text(&with_hot("usage_stale_after = \"5m\""), DEFAULTS).unwrap();
-    let built = built(&mut cli);
+    let built = built_of(&mut cli);
     assert_eq!(built.proxy.usage_stale_after, Duration::from_secs(30));
     assert_eq!(built.server.usage_stale_after, Duration::from_secs(300));
     let mut cli = from_text(&with_hot("proxy_usage_stale_after = \"50s\""), DEFAULTS).unwrap();
-    let built = built(&mut cli);
+    let built = built_of(&mut cli);
     assert_eq!(built.proxy.usage_stale_after, Duration::from_secs(50));
     assert_eq!(built.server.usage_stale_after, Duration::from_secs(120));
 }

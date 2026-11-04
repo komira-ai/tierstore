@@ -52,7 +52,7 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-use super::config_entry::{EntryTuning, entry_tuning};
+use super::config_entry::entry_tuning;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
