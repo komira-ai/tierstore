@@ -8,7 +8,6 @@ use bytes::Bytes;
 use futures::StreamExt as _;
 use tierstore_testkit::dir::TestDir;
 
-use crate::Backend as _;
 use crate::server::cli::{S3Flags, dir_tier, open_tier, s3_backend};
 use crate::server::config_tuning::S3Client;
 
