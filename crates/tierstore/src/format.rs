@@ -14,9 +14,9 @@
 //!   lets a proxy whose format reads succeed read `drain` again; a proxy whose reads fail keeps its
 //!   last answer, so `drained` does not show that every proxy has seen the pause. It does not wait
 //!   for a write that a proxy admitted earlier and is still running. Writes stay paused.
-//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts, deletes and
-//!   the completions of multipart uploads on the entries of their keys, and only while its
-//!   heartbeat is acknowledged. It never pauses writes for it.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts, the
+//!   completions of multipart uploads and its deletes on the entries of their keys, and only while
+//!   its heartbeat is acknowledged; it never pauses writes for it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
