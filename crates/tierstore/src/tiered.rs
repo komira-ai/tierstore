@@ -529,7 +529,10 @@ impl Inner {
                 Some(seen) if seen.body == body => Some(seen),
                 _ => Some(UsageSeen { body, since: mono }),
             },
-            _ => None,
+            // A read that failed says nothing of the object: the body last read keeps its age.
+            (_, None) => before,
+            // A body that is not a usage object is not one to age.
+            (None, Some(_)) => None,
         };
         let limit = self.config.usage_stale_after;
         let fresh = capacity
@@ -814,6 +817,15 @@ impl Backend for Proxy {
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         self.inner.head_object(key).await
+    }
+
+    /// The tag of an object is the tag of the tier that answers, and moves when the proxy copies
+    /// the object from one tier to the other, so versions are told apart by size alone: the proxy
+    /// never replaces an object. Limit: a key that is deleted and put again with a body of the
+    /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
+    /// not affected, as its bytes are checked against the digest.
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        a.size == b.size
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {

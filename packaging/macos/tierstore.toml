@@ -2,7 +2,7 @@
 # disk in front of the cold store), as com.komira.tierstore.plist starts it. root:_tierstore, mode
 # 0640. crates/tierstore/docs/configuration.md says what every key does.
 #
-# Edit before use: the bucket, the endpoint and the budget. Keep `listen` and `slot` as they are:
+# Edit before use: the bucket, the endpoint and the budget. Keep the s3 interface and `slot` as they are:
 # the update hook probes the instance on 127.0.0.1:9300 (health_ports in
 # updater.d/tierstore.toml) and reads the slot label of its build gauge, and the build daemon of
 # this Mac reads through it on that address. Nothing else on the network reaches it.
@@ -10,8 +10,11 @@
 # The key files are owned by _tierstore, mode 0600; the process refuses one its group or others
 # can read.
 
+[[interface]]
+type   = "s3"
+params = { addresses = ["127.0.0.1:9300"] }
+
 [server]
-listen              = "127.0.0.1:9300"
 proxy_id            = "tierstore-cache"
 slot                = 9300
 bucket              = "tierstore"

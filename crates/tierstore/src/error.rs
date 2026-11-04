@@ -20,6 +20,11 @@ pub enum Error {
     /// A client write to a key under a prefix the proxy keeps for itself.
     #[error("key {0} is under a reserved prefix")]
     Reserved(String),
+    /// A key the backend cannot store an object under, such as one that is empty or too long
+    /// to be a file name. No object can have it, so a read or a delete of it is
+    /// [`Error::NotFound`] instead.
+    #[error("key {0} cannot be stored by this backend")]
+    InvalidKey(String),
     /// A body whose bytes do not hash to the name of the object it is written under (a key
     /// named by its content). Nothing is stored.
     #[error("the body of {0} does not hash to the name of the object")]

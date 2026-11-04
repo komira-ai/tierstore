@@ -1,16 +1,16 @@
-//! The sockets of a front that listens on more than one address, and the `listen` key that names
-//! them.
+//! The sockets of a front that listens on more than one address, and the `addresses` param that
+//! names them.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
-use super::{Addrs, LoopbackBind, bind, bind_all, bind_set, has_duplicate, joined, local_addrs};
+use super::{Addrs, LoopbackBind, bind, bind_all, bind_set, joined, local_addrs};
 use crate::server::Drained;
 use crate::server::testing::Rig;
 
@@ -160,18 +160,6 @@ async fn an_address_that_cannot_be_bound_is_named_and_fails_the_set() {
     assert_eq!(why.kind(), std::io::ErrorKind::AddrInUse);
 }
 
-/// Asserts what is the same address: the whole socket address, so the same IP on another port,
-/// and another IP on the same port, are not.
-#[test]
-fn an_address_given_twice_is_a_duplicate() {
-    let a = addr("192.0.2.1:9400");
-    assert!(has_duplicate(&[a, addr("[::]:9400"), a]));
-    assert!(!has_duplicate(&[]));
-    assert!(!has_duplicate(&[a]));
-    assert!(!has_duplicate(&[a, addr("192.0.2.1:9401")]));
-    assert!(!has_duplicate(&[addr("0.0.0.0:9400"), addr("[::]:9400")]));
-}
-
 /// The addresses as the start line shows them.
 #[test]
 fn the_start_line_joins_the_addresses_with_commas() {
@@ -180,39 +168,31 @@ fn the_start_line_joins_the_addresses_with_commas() {
     assert_eq!(joined(&two[..1]), "0.0.0.0:9400");
 }
 
-/// A table of one `listen` key, as the tables of the file have it.
-#[derive(Debug, Deserialize, Serialize)]
+/// A table of one `addresses` key, as the params of an interface have it.
+#[derive(Debug, Deserialize)]
 struct Table {
-    listen: Addrs,
+    addresses: Addrs,
 }
 
-/// Asserts that a `listen` key reads one address as a string and several as a list, and writes
-/// one address as a string, as it always was, and several as a list that reads back.
+/// Asserts that an `addresses` param reads one address as a string and several as a list, and a
+/// list of one as the string.
 #[test]
-fn a_listen_key_is_a_string_or_a_list_and_is_written_as_either() {
-    let one: Table = toml::from_str("listen = \"192.0.2.1:9400\"").expect("a string");
-    assert_eq!(one.listen.0, [addr("192.0.2.1:9400")]);
-    let listed: Table = toml::from_str("listen = [\"192.0.2.1:9400\"]").expect("a list of one");
-    assert_eq!(listed.listen, one.listen);
-    let two: Table = toml::from_str("listen = [\"0.0.0.0:9400\", \"[::]:9400\"]").expect("a list");
-    assert_eq!(two.listen.0, [addr("0.0.0.0:9400"), addr("[::]:9400")]);
-
-    assert_eq!(
-        toml::to_string(&one).expect("written"),
-        "listen = \"192.0.2.1:9400\"\n"
-    );
-    let written = toml::to_string(&two).expect("written");
-    let back: Table = toml::from_str(&written).expect("read back");
-    assert_eq!(back.listen, two.listen);
-    assert!(written.starts_with("listen = [\""), "{written}");
+fn an_addresses_param_is_a_string_or_a_list() {
+    let one: Table = toml::from_str("addresses = \"192.0.2.1:9400\"").expect("a string");
+    assert_eq!(one.addresses.0, [addr("192.0.2.1:9400")]);
+    let listed: Table = toml::from_str("addresses = [\"192.0.2.1:9400\"]").expect("a list of one");
+    assert_eq!(listed.addresses, one.addresses);
+    let two: Table =
+        toml::from_str("addresses = [\"0.0.0.0:9400\", \"[::]:9400\"]").expect("a list");
+    assert_eq!(two.addresses.0, [addr("0.0.0.0:9400"), addr("[::]:9400")]);
 }
 
 /// Asserts that a value that is no address is refused without showing it, in a list as alone.
 #[test]
-fn a_listen_value_that_is_no_address_is_refused_without_its_text() {
+fn an_addresses_value_that_is_no_address_is_refused_without_its_text() {
     for text in [
-        "listen = \"secret-word\"",
-        "listen = [\"192.0.2.1:9400\", \"secret-word\"]",
+        "addresses = \"secret-word\"",
+        "addresses = [\"192.0.2.1:9400\", \"secret-word\"]",
     ] {
         let why = toml::from_str::<Table>(text).expect_err("refused");
         assert!(!why.message().contains("secret-word"), "{}", why.message());

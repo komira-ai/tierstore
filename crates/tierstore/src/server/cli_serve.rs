@@ -30,9 +30,9 @@ pub struct Addresses {
     /// The S3 front, `/healthz`, `/readyz`, `/usagez` and `/metricz`: the first address of
     /// [`s3_all`](Self::s3_all).
     pub s3: SocketAddr,
-    /// Every address the S3 front is bound to, in the order of the `--listen` flags.
+    /// Every address the S3 front is bound to, in the order of the addresses of the `s3` interfaces.
     pub s3_all: Vec<SocketAddr>,
-    /// The OCI read front, if `--oci-listen` was given: the first address of
+    /// The OCI read front, if an `oci` interface was given: the first address of
     /// [`oci_all`](Self::oci_all).
     pub oci: Option<SocketAddr>,
     /// Every address the OCI front is bound to; empty when there is none.
@@ -50,7 +50,7 @@ impl Addresses {
     pub(super) fn of(s3_all: Vec<SocketAddr>, oci: Option<&OciListener>) -> std::io::Result<Self> {
         let oci_all = oci.map(OciListener::local_addrs).transpose()?;
         let oci_all = oci_all.unwrap_or_default();
-        let none = || std::io::Error::other("--listen is needed");
+        let none = || std::io::Error::other("an s3 interface is needed");
         Ok(Self {
             s3: s3_all.first().copied().ok_or_else(none)?,
             s3_all,
