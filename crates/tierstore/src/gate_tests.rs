@@ -320,8 +320,8 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
         held(gated, Op::Get, gated.get("o", None)).await,
         bytes("abe")
     );
-    let marked = held(gated, Op::Get, gated.get_tagged("o", None)).await;
-    assert_eq!(marked.0, bytes("abe"));
+    let tagged = held(gated, Op::Get, gated.get_tagged("o", None)).await;
+    assert_eq!(tagged.0, bytes("abe"));
     let mut body = held(gated, Op::Get, gated.get_stream("o", None)).await;
     assert_eq!(body.next().await.unwrap().unwrap(), bytes("abe"));
     assert_eq!(held(gated, Op::Head, gated.head("o")).await.size, 3);
