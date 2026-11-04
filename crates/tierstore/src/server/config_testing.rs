@@ -24,6 +24,8 @@ bucket                = "tierstore"
 region                = "eu-west-1"
 max_request_bytes     = 134217728
 access_key_file       = "/etc/tierstore/access.key"
+tls_cert_file         = "/etc/tierstore/s3.crt"
+tls_key_file          = "/etc/tierstore/s3.key"
 read_only_key_files   = ["/etc/tierstore/daemons.key", "/etc/tierstore/other.key"]
 presign_key_files     = ["/etc/tierstore/pack-presign.key"]
 gc_key_files          = ["/etc/tierstore/pack-gc.key"]
@@ -87,6 +89,8 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--region=eu-west-1",
         "--max-request-bytes=134217728",
         "--access-key-file=/etc/tierstore/access.key",
+        "--tls-cert=/etc/tierstore/s3.crt",
+        "--tls-key=/etc/tierstore/s3.key",
         "--read-only-key-file=/etc/tierstore/daemons.key",
         "--read-only-key-file=/etc/tierstore/other.key",
         "--presign-key-file=/etc/tierstore/pack-presign.key",

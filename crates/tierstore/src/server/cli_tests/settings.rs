@@ -386,8 +386,7 @@ fn the_key_file_is_an_id_and_a_secret_that_only_its_owner_reads() {
 /// Asserts that a key file whose secret is one byte under the minimum refuses the start, for
 /// each kind of key (full, read-only, presigning, GC, scoped), as invalid flags with exactly the
 /// message of the flag, the id, the length and the minimum and no secret; that a secret of the
-/// minimum starts; and that `--min-secret-bytes` moves the minimum either way, a grant key
-/// of 34 bytes being refused when it is 40.
+/// minimum starts; and that `--min-secret-bytes` moves the minimum either way.
 #[test]
 fn a_secret_under_the_minimum_refuses_the_start_for_every_kind_of_key() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-min-secret");
