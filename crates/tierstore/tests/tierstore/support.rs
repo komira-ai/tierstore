@@ -193,11 +193,22 @@ pub fn broken(texts: &[&'static str], error: &Error) -> PartBody<'static> {
 /// backend's (the way an S3 ETag differs from a SHA-256): every tag it reports is prefixed.
 pub struct Retagged {
     inner: Arc<dyn Backend>,
+    ranged_only: bool,
 }
 
 impl Retagged {
     pub fn over(inner: Arc<dyn Backend>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            ranged_only: false,
+        }
+    }
+
+    /// The same backend, refusing a read of a whole object (a read with no range) as a store
+    /// would that cannot hold an object in memory.
+    pub fn ranged_only(mut self) -> Self {
+        self.ranged_only = true;
+        self
     }
 }
 
@@ -234,6 +245,9 @@ impl Backend for Retagged {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
+        if self.ranged_only && range.is_none() {
+            return Err(Error::Other(format!("a whole read of {key} is refused")));
+        }
         self.inner.get(key, range).await
     }
 
@@ -244,6 +258,9 @@ impl Backend for Retagged {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
+        if self.ranged_only && range.is_none() {
+            return Err(Error::Other(format!("a whole read of {key} is refused")));
+        }
         let (bytes, reservation, tag) = self.inner.get_marked(key, range).await?;
         Ok((bytes, reservation, format!("cold-etag:{tag}")))
     }

@@ -317,8 +317,8 @@ async fn a_cold_hit_streams_before_the_cold_read_finishes() {
 
 /// Asserts that a cold hit is one open read of the cold tier and no other read of it, that the
 /// copy in the hot tier is the exact bytes under the tag the hot write gave, that the next read is
-/// served by the hot tier alone, and that a range is the window of the same single read while the
-/// copy is the whole object (the client stops reading at the end of its range).
+/// served by the hot tier alone, and that a range is one read of the cold tier for the range and
+/// copies nothing into the hot tier.
 #[tokio::test(start_paused = true)]
 async fn a_cold_hit_is_read_once_and_copied_back_with_its_exact_bytes() {
     let object = patterned(300_000);
@@ -347,9 +347,10 @@ async fn a_cold_hit_is_read_once_and_copied_back_with_its_exact_bytes() {
     assert_eq!(ranged.window, Window::Part(ByteRange::new(5, 5)));
     let mut client = ranged.body;
     assert_eq!(client.next().await.unwrap().unwrap(), object.slice(5..10));
+    assert!(client.next().await.is_none());
     drop(client);
-    assert!(run.ended.recv().await.unwrap().is_ok());
-    assert_eq!(run.hot.mem.get("r", None).await.unwrap(), object);
+    assert_eq!(run.hot.puts.load(Ordering::SeqCst), 1);
+    assert_absent(&*run.hot.mem, "r").await;
     assert_eq!(run.cold.opens.load(Ordering::SeqCst), 2);
     assert_eq!(run.cold.others.load(Ordering::SeqCst), 0);
 }
@@ -461,8 +462,7 @@ async fn a_slow_hot_write_never_stalls_the_client_and_is_abandoned_past_the_boun
 }
 
 /// Asserts that a cold body that fails part way gives the client the error after the bytes that
-/// came, and copies nothing; and so does one that fails after the end of the client's range, which
-/// the client has been given whole.
+/// came, and copies nothing.
 #[tokio::test(start_paused = true)]
 async fn a_cold_body_that_fails_copies_nothing() {
     let mut run = start(&[("k", patterned(30))], 10, |cold, _| {
@@ -478,25 +478,6 @@ async fn a_cold_body_that_fails_copies_nothing() {
     let failed = client.next().await.unwrap().unwrap_err();
     assert!(failed.is_unavailable(), "{failed}");
     assert!(client.next().await.is_none());
-    drop(client);
-    let ended = run.ended.recv().await.unwrap();
-    assert!(matches!(ended, Err(Error::Other(_))), "{ended:?}");
-    assert_absent(&*run.hot.mem, "k").await;
-
-    let mut run = start(&[("k", patterned(30))], 10, |cold, _| {
-        cold.cut_after = Some(2)
-    })
-    .await;
-    let span = Some(Span::From {
-        first: 0,
-        last: Some(4),
-    });
-    let opened = run.proxy.open_read("k", span).await.unwrap();
-    let mut client = opened.body;
-    assert_eq!(
-        client.next().await.unwrap().unwrap(),
-        patterned(30).slice(..5)
-    );
     drop(client);
     let ended = run.ended.recv().await.unwrap();
     assert!(matches!(ended, Err(Error::Other(_))), "{ended:?}");
@@ -532,7 +513,7 @@ async fn a_cold_body_of_another_length_than_its_meta_is_not_copied() {
 }
 
 /// Asserts that a streamed read of a range of a cold object (the proxy's `get_stream`) is the
-/// bytes of the range from one read of the cold tier, and that the whole object is copied back.
+/// bytes of the range from one read of the cold tier, and that nothing is copied into the hot tier.
 #[tokio::test(start_paused = true)]
 async fn a_streamed_range_of_a_cold_object_is_one_cold_read() {
     let object = patterned(30);
@@ -543,9 +524,10 @@ async fn a_streamed_range_of_a_cold_object_is_one_cold_read() {
         .await
         .unwrap();
     assert_eq!(client.next().await.unwrap().unwrap(), object.slice(12..16));
+    assert!(client.next().await.is_none());
     drop(client);
-    assert!(run.ended.recv().await.unwrap().is_ok());
-    assert_eq!(run.hot.mem.get("k", None).await.unwrap(), object);
+    assert_eq!(run.hot.puts.load(Ordering::SeqCst), 0);
+    assert_absent(&*run.hot.mem, "k").await;
     assert_eq!(run.cold.opens.load(Ordering::SeqCst), 1);
     assert_eq!(run.cold.others.load(Ordering::SeqCst), 0);
 }
@@ -558,37 +540,23 @@ fn metric(proxy: &Proxy, line: &str) -> String {
 }
 
 /// Asserts that a cold body that has the bytes the meta says in a chunk, and then more bytes or a
-/// failure, is never made an object in the hot tier, whether the client reads the whole body or
-/// has every byte of its range already: the write is not ended by the chunk that makes up the
-/// size, but by the clean end of the body. Each is checked by what the hot write ends with and by
-/// the hot tier holding nothing.
+/// failure, is never made an object in the hot tier: the write is not ended by the chunk that
+/// makes up the size, but by the clean end of the body. Each is checked by what the hot write ends
+/// with and by the hot tier holding nothing.
 #[tokio::test(start_paused = true)]
 async fn a_cold_body_that_goes_on_after_the_size_or_fails_there_is_not_copied() {
-    let first_five = Some(Span::From {
-        first: 0,
-        last: Some(4),
-    });
-    for (cut, span) in [
-        (None, None),
-        (None, first_five),
-        (Some(1), None),
-        (Some(1), first_five),
-    ] {
+    for cut in [None, Some(1)] {
         let object = patterned(20);
         let mut run = start(&[("k", object.clone())], 10, |cold, _| {
             cold.claims = Some(10);
             cold.cut_after = cut;
         })
         .await;
-        let opened = run.proxy.open_read("k", span).await.unwrap();
+        let opened = run.proxy.open_read("k", None).await.unwrap();
         let (got, _) = drained(opened.body).await;
-        let want = if span.is_some() { 5 } else { 10 };
-        assert_eq!(got[..want], object[..want], "{cut:?} {span:?}");
+        assert_eq!(got[..10], object[..10], "{cut:?}");
         let ended = run.ended.recv().await.unwrap();
-        assert!(
-            matches!(ended, Err(Error::Other(_))),
-            "{cut:?} {span:?}: {ended:?}"
-        );
+        assert!(matches!(ended, Err(Error::Other(_))), "{cut:?}: {ended:?}");
         assert_absent(&*run.hot.mem, "k").await;
     }
 }
@@ -620,25 +588,26 @@ async fn the_last_chunk_is_given_to_the_hot_write_only_at_the_end_of_the_cold_bo
     assert_eq!(run.hot.mem.get("k", None).await.unwrap(), object);
 }
 
-/// Asserts that a cold body that fails after the client has been given every byte of its range,
-/// which the copy alone reads on, counts a cold error, and that the same body failing under the
-/// client counts one.
+/// Asserts that a cold body that fails under the client counts a cold error, for a read of the
+/// whole object (whose copy is then abandoned) and for a read of a range (which has no copy).
 #[tokio::test(start_paused = true)]
-async fn a_cold_body_that_fails_after_the_range_counts_a_cold_error() {
+async fn a_cold_body_that_fails_under_the_client_counts_a_cold_error() {
     let errors = "tierstore_read_errors_total{tier=\"cold\",op=\"get\"}";
     let first_five = Some(Span::From {
         first: 0,
         last: Some(4),
     });
-    for (span, drained_by_client) in [(first_five, false), (None, true)] {
+    for (span, cut) in [(first_five, 0), (None, 2)] {
         let mut run = start(&[("k", patterned(30))], 10, |cold, _| {
-            cold.cut_after = Some(2);
+            cold.cut_after = Some(cut);
         })
         .await;
         let opened = run.proxy.open_read("k", span).await.unwrap();
         let (_, error) = drained(opened.body).await;
-        assert_eq!(error.is_some(), drained_by_client);
-        assert!(run.ended.recv().await.unwrap().is_err());
+        assert!(error.is_some(), "{span:?}");
+        if span.is_none() {
+            assert!(run.ended.recv().await.unwrap().is_err());
+        }
         assert_eq!(metric(&run.proxy, errors), format!("{errors} 1"));
     }
 }

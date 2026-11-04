@@ -18,10 +18,9 @@ impl Inner {
     /// no HEAD is made. Bytes are counted when the read opens, from the window, and not as the
     /// body is read.
     ///
-    /// A miss goes to the cold tier. A read of a span, with the hot tier at its critical mark, is
-    /// the cold tier's own stream of that span and copies nothing back. Any other read of the
-    /// cold tier is one read of the whole object, whose body is given to the caller as it
-    /// arrives, cut to the window asked for, and, unless the hot tier is at its critical mark,
+    /// A miss goes to the cold tier. A read of a span is the cold tier's own stream of that span
+    /// and copies nothing back. A read of the whole object is one read of the cold tier, whose
+    /// body is given to the caller as it arrives and, unless the hot tier is at its critical mark,
     /// fed at the same time to a streamed create-only write into the hot tier (see
     /// [`relay`](super::relay)): the cold object is read once, nothing is held whole, and the
     /// copy neither delays nor fails the read. A cold object that is a reservation is not an
@@ -50,9 +49,10 @@ impl Inner {
         if critical {
             self.counters.skipped(Skipped::Critical);
         }
-        if critical && span.is_some() {
-            // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
-            // that part alone: a whole read per chunk of a long blob would be quadratic.
+        if span.is_some() {
+            // A read of a part asks the cold tier for that part alone and copies nothing back: a
+            // whole read per chunk of a long blob would be quadratic, and the memory of a read is
+            // its range.
             let Opened { meta, window, body } = self.cold_open(key, span).await?;
             let served = window.bytes(meta.size) as usize;
             self.counters.hit(Tier::Cold, Read::Get);
@@ -70,16 +70,18 @@ impl Inner {
             return Ok(Opened { meta, window, body });
         }
         let Opened { meta, body, .. } = self.cold_open(key, None).await?;
-        let window = Window::of(span, meta.size);
         self.counters.hit(Tier::Cold, Read::Get);
         self.counters.bytes_read(Tier::Cold, meta.size as usize);
-        self.counters
-            .served(Tier::Cold, window.bytes(meta.size) as usize);
+        self.counters.served(Tier::Cold, meta.size as usize);
         // The tag is that of the very bytes read, so the copy is journaled under it whatever the
         // key holds by then.
         let tee = (!critical).then(|| Tee::new(self, key, meta.size, meta.tag.clone()));
-        let body = relay(self, body, window, tee);
-        Ok(Opened { meta, window, body })
+        let body = relay(self, body, tee);
+        Ok(Opened {
+            meta,
+            window: Window::Whole,
+            body,
+        })
     }
 
     /// The cold tier's open read of `span`, with the counting of a miss or an error that an

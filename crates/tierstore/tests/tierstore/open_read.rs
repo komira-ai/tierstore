@@ -301,8 +301,8 @@ async fn a_missing_key_is_not_found_after_one_call_to_each_tier() {
 
 /// Asserts that a miss in the hot tier is read from the cold tier in one call, with the cold
 /// object's meta, and copied back whole into the hot tier, so that the next read is one call to
-/// the hot tier and none to the cold one; and that a range of the cold object is the window of
-/// the bytes read, while the copy is of the whole object.
+/// the hot tier and none to the cold one; and that a range of the cold object is the cold tier's
+/// own read of that range, which copies nothing.
 #[tokio::test(start_paused = true)]
 async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
     let rig = Rig::new();
@@ -329,8 +329,7 @@ async fn a_hot_miss_falls_to_the_cold_tier_and_is_copied_back() {
     assert_eq!(opened.window, Window::Part(ByteRange::new(7, 3)));
     assert_eq!(opened.meta.size, 10);
     assert_eq!(joined(opened).await, body("789"));
-    copied(&rig, "r").await;
-    assert_eq!(read(&*rig.hot_mem, "r").await, body(TEN));
+    assert_absent(&*rig.hot_mem, "r").await;
 }
 
 /// Asserts that with the hot tier at its critical mark a read of the cold tier copies nothing

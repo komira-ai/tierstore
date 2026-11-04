@@ -312,22 +312,24 @@ async fn a_get_of_a_missing_key_counts_a_miss_on_each_tier() {
     assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
-/// Asserts that a ranged GET of a cold object serves the bytes of the range and reads the whole
-/// object from the cold tier, and that the promotion is of the whole object. It would catch
-/// bytes served counted as the whole object, and cold bytes counted as the range.
+/// Asserts that a ranged GET of a cold object serves the bytes of the range, reads only the range
+/// from the cold tier and promotes nothing, so a second ranged GET is served by the cold tier
+/// again. It would catch cold bytes counted as the whole object, and a ranged read that copies
+/// the object back.
 #[tokio::test]
-async fn a_ranged_get_of_a_cold_object_serves_the_range_and_reads_the_whole() {
+async fn a_ranged_get_of_a_cold_object_serves_and_reads_only_the_range() {
     let rig = cold_only("obj", b"0123456789").await;
     let reply = rig.get("obj", Some("bytes=2-4")).await;
     assert_eq!(reply.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(reply.body, "234");
     assert_eq!(value(&rig, COLD_SERVED).await, 3);
-    assert_eq!(value(&rig, COLD_BYTES).await, 10);
-    reached(&rig, PROMOTIONS, 1).await;
-    assert_eq!(value(&rig, PROMOTED_BYTES).await, 10);
+    assert_eq!(value(&rig, COLD_BYTES).await, 3);
+    assert_eq!(value(&rig, PROMOTED_BYTES).await, 0);
     let again = rig.get("obj", Some("bytes=5-9")).await;
     assert_eq!(again.body, "56789");
-    assert_eq!(value(&rig, HOT_SERVED).await, 5);
+    assert_eq!(value(&rig, HOT_SERVED).await, 0);
+    assert_eq!(value(&rig, COLD_SERVED).await, 8);
+    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that a HEAD of a cold object counts a hot miss, a cold read and a cold hit on the
@@ -439,13 +441,13 @@ async fn a_failed_read_is_not_counted_as_a_hit_or_a_miss() {
     assert_eq!(value(&rig, COLD_HIT_HEAD).await, 0);
     assert_eq!(value(&rig, COLD_MISS_HEAD).await, 0);
 
-    // A range past the end of the object: the cold tier gave the whole object (3 bytes) and the
-    // proxy copied it into the hot tier before it cut the range, which it cannot.
+    // A range past the end of the object: the cold tier is asked for the range alone, cannot
+    // give it, and nothing is read or copied.
     let past = proxy.get("obj", Some(ByteRange::new(9, 1))).await;
     assert!(past.is_err());
     assert_eq!(value(&rig, COLD_SERVED).await, 0);
-    assert_eq!(value(&rig, COLD_BYTES).await, 3);
-    assert_eq!(value(&rig, PROMOTIONS).await, 1);
+    assert_eq!(value(&rig, COLD_BYTES).await, 0);
+    assert_eq!(value(&rig, PROMOTIONS).await, 0);
 }
 
 /// Asserts that an object deleted between the head and the get (the get finds neither tier)

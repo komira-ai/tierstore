@@ -10,9 +10,8 @@
 //! that has more or fewer bytes than the cold tier's meta said, is abandoned in the same way, so
 //! that no partial object is ever written under the key. The chunk that brings the bytes given to
 //! the size of the meta is queued only when the body has ended cleanly there, so the object is
-//! made whole by the end of the body and not by its size being reached. A read of a range is the same read of the
-//! whole object: once the client has the last byte of its range, the rest of the object is read
-//! for the copy alone, in a task of its own.
+//! made whole by the end of the body and not by its size being reached. Only a read of the whole
+//! object is relayed: a read of a range asks the cold tier for the range alone and copies nothing.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -23,7 +22,7 @@ use tokio::sync::mpsc;
 
 use super::Inner;
 use crate::metrics::{Read, Tier};
-use crate::{Error, PartBody, ReadBody, Window};
+use crate::{Error, PartBody, ReadBody};
 
 /// The most bytes of the cold read that wait for the hot write at one time. A hot write that is
 /// further behind than this is abandoned, and the client is served on.
@@ -213,29 +212,11 @@ fn queue(
     .boxed()
 }
 
-/// Reads the rest of a cold body for the copy alone, once the client has been given what it asked
-/// for, up to the end of the body: only a body that ends cleanly, at the size the meta said, makes
-/// the copy whole. A body that fails counts a cold error and leaves the copy abandoned.
-async fn copy_rest(mut body: ReadBody, mut tee: Tee) {
-    loop {
-        match body.next().await {
-            Some(Ok(chunk)) => tee.offer(&chunk),
-            Some(Err(_)) => return tee.failed(),
-            None => return tee.finish(),
-        }
-    }
-}
-
 /// The cold body being given to the client.
 struct Relay {
     inner: Arc<Inner>,
     body: ReadBody,
     tee: Option<Tee>,
-    /// The bytes of the body given so far.
-    at: u64,
-    /// The bytes the client is given: from here, to here (the end excluded).
-    from: u64,
-    to: u64,
     ended: bool,
 }
 
@@ -247,21 +228,7 @@ impl Relay {
                     if let Some(tee) = &mut self.tee {
                         tee.offer(&chunk);
                     }
-                    let (start, end) = (self.at, self.at + chunk.len() as u64);
-                    self.at = end;
-                    let (low, high) = (start.max(self.from), end.min(self.to));
-                    if low < high {
-                        let part = chunk.slice((low - start) as usize..(high - start) as usize);
-                        // The client has every byte it asked for, and may stop reading here: the
-                        // rest of the cold read, up to its end, goes on for the copy alone.
-                        if end >= self.to {
-                            let rest = std::mem::replace(&mut self.body, stream::empty().boxed());
-                            let copy = self.tee.take();
-                            drop(copy.map(|tee| tokio::spawn(copy_rest(rest, tee))));
-                            self.ended = true;
-                        }
-                        return Some((Ok(part), self));
-                    }
+                    return Some((Ok(chunk), self));
                 }
                 Some(Err(error)) => {
                     self.inner.counters.error(Tier::Cold, Read::Get);
@@ -281,26 +248,13 @@ impl Relay {
     }
 }
 
-/// The body the client is given for a whole cold read, cut to `window`; `tee`, if there is one,
-/// copies every byte of the read, not only the window's.
-pub(super) fn relay(
-    inner: &Arc<Inner>,
-    body: ReadBody,
-    window: Window,
-    tee: Option<Tee>,
-) -> ReadBody {
-    let (from, to) = match window {
-        Window::Whole => (0, u64::MAX),
-        Window::Part(range) => (range.offset(), range.offset().saturating_add(range.size())),
-        Window::Unsatisfiable => (0, 0),
-    };
+/// The body the client is given for a whole cold read; `tee`, if there is one, copies every byte
+/// of it.
+pub(super) fn relay(inner: &Arc<Inner>, body: ReadBody, tee: Option<Tee>) -> ReadBody {
     let relay = Relay {
         inner: Arc::clone(inner),
         body,
         tee,
-        at: 0,
-        from,
-        to,
         ended: false,
     };
     stream::unfold(relay, Relay::next).boxed()

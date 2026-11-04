@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
+use tokio::task::JoinError;
 
 use super::disk::Space;
 use super::layout::data_path;
@@ -110,6 +111,13 @@ impl Inner {
     }
 }
 
+/// What a blocking task of the cache made, or `None` after saying on stderr why it made
+/// nothing: it panicked, or the runtime cancelled it at shutdown.
+pub(super) fn joined<T>(done: Result<T, JoinError>, what: &str) -> Option<T> {
+    done.map_err(|error| eprintln!("tierstore: {what} did not finish: {error}"))
+        .ok()
+}
+
 impl LocalCache {
     /// One pass of the eviction now (see the module docs).
     #[must_use]
@@ -128,7 +136,8 @@ impl LocalCache {
             }
             let inner = Arc::clone(&self.inner);
             let pass = tokio::task::spawn_blocking(move || inner.evict_pass());
-            pass.await.expect("a pass does not panic");
+            // A pass that panicked or was cancelled is said on stderr; the loop goes on to the next.
+            let _ = joined(pass.await, "an eviction pass");
         }
         self.inner.flush_touches();
     }

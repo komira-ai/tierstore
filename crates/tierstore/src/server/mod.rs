@@ -194,8 +194,10 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod combined_cli;
 mod config;
 mod config_cache;
+mod config_combined;
 mod config_policy;
 mod config_print;
 mod door;
@@ -232,9 +234,13 @@ mod cache_cli_tests;
 #[cfg(test)]
 mod cache_lock_tests;
 #[cfg(test)]
+mod combined_cli_tests;
+#[cfg(test)]
 mod completion_tests;
 #[cfg(test)]
 mod config_cache_tests;
+#[cfg(test)]
+mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
 #[cfg(test)]
@@ -259,6 +265,7 @@ mod metrics_race_tests;
 mod metrics_tests;
 #[cfg(test)]
 mod one_call_get_tests;
+mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;
 #[cfg(test)]
