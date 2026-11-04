@@ -49,7 +49,7 @@ tierstore &lt;version&gt; listen=127.0.0.1:9000</span></pre></div>
 <span class="o">503</span>
 <span class="p">$</span> curl -s http://127.0.0.1:9000/readyz
 <span class="o">draining</span></pre></div>
-<p class="source-note">Both requests are made inside the <code>--drain-lb-wait</code> window (give the flag a few seconds to try this). The status and the body are those of <code>/readyz</code> in <code>server/mod.rs</code>; the exit status 0 is documented in <code>server/cli.rs</code> and <code>packaging/tierstore/README.md</code>, "Stopping it".</p>
+<p class="source-note">Both requests are made inside the <code>--drain-lb-wait</code> window (give the flag a few seconds to try this). The status and the body are those of <code>/readyz</code> in <code>server/mod.rs</code>; the exit status 0 is documented in <code>server/cli.rs</code> and <code>packaging/README.md</code>, "Stopping it".</p>
 
 <h2 id="flags-gone">4. The flags that went</h2>
 <p>The process takes only <code>--config</code> for its data path. A flag that an earlier build took for it is refused at the start, with exit status 2 and the key of the file that replaces it:</p>

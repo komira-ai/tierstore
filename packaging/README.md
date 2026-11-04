@@ -731,6 +731,7 @@ instead of running with settings it did not read.
 | `server.proxy_id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `server.bucket` | the name of the one bucket clients see |
 | `server.access_key_file`, `server.read_only_key_files` | the full key, and the read-only keys (a list); see above |
+| `server.tls_cert_file`, `server.tls_key_file` | on main, not in v0.0.41: the certificate chain and the key (PEM) that make the S3 front serve HTTPS; both, or neither (plain HTTP, the default) |
 | `server.presign_key_files`, `server.presign_max_expires` | presigning keys with their ceilings, and the longest expiry of any URL (a presigned GET needs no key file of its own: see Presigned GET URLs); see Presigned PUT URLs |
 | `server.gc_key_files` | GC keys; see GC keys |
 | `server.scoped_key_files` | scoped keys; see Scoped keys |
@@ -748,7 +749,7 @@ flags of a run.
 
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style, over plain HTTP (on main, not in v0.0.41, over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -756,7 +757,7 @@ what "tested" means below.
 
 | setting | value | why |
 |---|---|---|
-| endpoint | `http://<host>:<port>` of the `s3` interface | the front has no TLS; an `https://` endpoint fails |
+| endpoint | `http://<host>:<port>` of the `s3` interface (on main, not in v0.0.41, `https://` when the file has `server.tls_cert_file` and `server.tls_key_file`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
 | addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
 | bucket | the `server.bucket` name | there is one; other names are not served |
 | region | tierstore's own `server.region` (not `hot_store.region` or `cold_store.region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |

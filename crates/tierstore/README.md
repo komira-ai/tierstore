@@ -210,6 +210,17 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
 
 See "Scoped keys" in `packaging/README.md` for the table of calls.
 
+## HTTPS on the S3 front
+
+On main (not in v0.0.41) the keys `server.tls_cert_file` and `server.tls_key_file` of the
+configuration file make every socket of the S3 front serve HTTPS. Without them it serves plain
+HTTP, the default; off loopback the start then prints one warning line on stderr, naming the
+non-loopback addresses. The certificate may name the front by a DNS name, by an IP address, or both
+(a DNS name is enough whatever the listen address; with none, each listen address needs an IP name).
+A key file that any user can read, a key that is not the certificate's, an expired certificate, one
+of the two keys without the other (exit 2) and a file that cannot be read (exit 1) stop the start.
+The files are read once; a new certificate takes a restart. A tier's `endpoint` is still `http://`.
+
 ## The OCI read front
 
 With an `oci` interface in the file (`type = "oci"`) the binary also serves the objects of the store

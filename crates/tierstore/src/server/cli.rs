@@ -107,15 +107,13 @@ use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 #[cfg(test)]
 use super::front::read_key;
-use super::front::{InvalidFlags, server_config};
+use super::front::{InvalidFlags, S3Tls, refuse, server_config};
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
 use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::update_hook;
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -193,6 +191,9 @@ pub struct Cli {
     /// The id of this proxy, which names its journal in the hot tier and its lease. Keep it
     /// across restarts, and give each process over the same tiers one of its own.
     pub proxy_id: String,
+    /// The certificate and key that make the S3 front serve HTTPS (`server.tls_cert_file` and
+    /// `server.tls_key_file`).
+    pub tls: S3Tls,
     /// The slot port this instance runs as, 1 to 65535: the private port of one of the two slots
     /// of a hand-over, which the slot unit passes as `server.slot %i`. It is the `slot` label of
     /// `tierstore_build_info` on `/metricz`, by which the update hook's probe through the public
@@ -620,7 +621,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         check_lock_path(path).map_err(|why| format!("--lock-file {path:?} {why}"))?;
     }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let mut server = server_config(&cli.front(), Arc::clone(&clock))?;
+    let mut server = server_config(&cli.front(), Arc::clone(&clock), true)?;
     server.usage_stale_after = cli.usage_stale_after;
     let timeout = cli.s3_request_timeout;
     let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout)?;
@@ -686,13 +687,6 @@ pub(super) fn oci_setup_of(
         return Ok(None);
     }
     let listen = flags.listen.clone();
-    let refuse = |why: OciError| -> Error {
-        if why.is_invalid_flags() {
-            InvalidFlags(why.to_string()).into()
-        } else {
-            why.into()
-        }
-    };
     let lifetime = flags.connection_lifetime.unwrap_or(DEFAULT_OCI_LIFETIME);
     if lifetime.is_zero() {
         return Err(
@@ -794,10 +788,10 @@ fn capabilities(args: &[OsString]) -> ExitCode {
 pub fn main(args: Vec<OsString>) -> ExitCode {
     // Before anything can say something: the operator messages go through `tracing`.
     super::build_info::stderr_log::install();
-    // The host updater's hook: a verb of its own, answered before any flag is parsed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if args.get(1).is_some_and(|verb| verb == update_hook::VERB) {
-        return update_hook::main(&args);
+    // The verbs (the host updater's hook, the operator's `format-epoch` and `entries`): each is
+    // answered before any flag is parsed.
+    if let Some(status) = super::verbs::answer(&args) {
+        return status;
     }
     // Before the flags are parsed: it needs none of the flags a start requires.
     if args.iter().skip(1).any(|arg| arg == "--capabilities") {
@@ -858,7 +852,7 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     match settings {
         Settings::Storage(cli) => {
-            let server = server_config(&cli.front(), clock)?;
+            let server = server_config(&cli.front(), clock, false)?;
             // The `oci_*` fields: the prefix, the lifetime and the TLS files, as a start checks them.
             oci_setup(cli, &server, false).map(drop)
         }
@@ -866,12 +860,12 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
             Err("--s3-request-timeout must be longer than zero".into())
         }
         Settings::Cache(cache) => {
-            let server = server_config(&cache.front, clock)?;
+            let server = server_config(&cache.front, clock, false)?;
             // The `[oci]` table, with the checks a start makes of it.
             oci_setup_of(&cache.oci, &server, false).map(drop)
         }
         Settings::Combined(combined) => {
-            let server = server_config(&combined.node.front(), clock)?;
+            let server = server_config(&combined.node.front(), clock, false)?;
             oci_setup(&combined.node, &server, false).map(drop)
         }
     }

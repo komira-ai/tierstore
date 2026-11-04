@@ -118,3 +118,40 @@ fn a_file_with_the_oci_table_of_the_release_before_starts_on_both() {
     ))));
     assert!(!succeeded(tierstore::server::cli::main(checking(&bare))));
 }
+
+/// A self-signed certificate that names `tierstore.test`, and its key, written under `dir`; the
+/// paths of the two files. The key is private to its owner, as the front requires.
+fn certificate(dir: &TestDir) -> (String, String) {
+    let made = rcgen::generate_simple_self_signed(vec!["tierstore.test".to_owned()]).unwrap();
+    let cert = private(dir, "front.pem", &made.cert.pem());
+    let key = private(dir, "front.key", &made.signing_key.serialize_pem());
+    (cert, key)
+}
+
+/// Asserts that a file with `tls_cert_file` and `tls_key_file`, the keys of the S3 front's TLS, is
+/// started by this branch and is refused by the release before, which does not know the keys (its
+/// tables refuse an unknown key, as for every key added since): an operator gives the keys after
+/// the upgrade. The same file without the two keys starts on both.
+#[test]
+fn a_file_with_the_s3_tls_keys_starts_on_this_branch_and_a_file_without_them_on_both() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-tls-config");
+    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let (cert, key) = certificate(&dir);
+
+    let without = file(&dir, &access, "");
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(
+        &without
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&without))));
+
+    let extra = format!("tls_cert_file = \"{cert}\"\ntls_key_file = \"{key}\"\n");
+    let with = file(&dir, &access, &extra);
+    assert!(
+        succeeded(tierstore::server::cli::main(checking(&with))),
+        "this branch starts a file with the TLS keys"
+    );
+    assert!(
+        !succeeded(tierstore_prev::server::cli::main(checking(&with))),
+        "the release before refuses a key it does not know"
+    );
+}
