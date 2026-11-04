@@ -240,9 +240,9 @@ pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backen
     assert!(head.reservation);
     assert_eq!((head.size, head.tag.as_str()), (56, tag.as_str()));
     assert_eq!(backend.get("k", None).await.unwrap(), held);
-    let whole = backend.get_marked("k", None).await.unwrap();
+    let whole = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(whole, (held.clone(), true, tag.clone()));
-    let part = backend.get_marked("k", Some(ByteRange::new(4, 10))).await;
+    let part = backend.get_tagged("k", Some(ByteRange::new(4, 10))).await;
     assert_eq!(part.unwrap(), (held.slice(4..14), true, tag.clone()));
     let listed = backend.list("").await.unwrap();
     let rows: Vec<(&str, u64)> = listed.iter().map(|o| (o.key.as_str(), o.size)).collect();
@@ -250,14 +250,14 @@ pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backen
 
     let missing = Error::NotFound("absent".to_owned());
     assert_eq!(
-        backend.get_marked("absent", None).await,
+        backend.get_tagged("absent", None).await,
         Err(missing.clone())
     );
     let ranged = backend
-        .get_marked("absent", Some(ByteRange::new(0, 1)))
+        .get_tagged("absent", Some(ByteRange::new(0, 1)))
         .await;
     assert_eq!(ranged, Err(missing));
-    let past = backend.get_marked("k", Some(ByteRange::new(57, 1))).await;
+    let past = backend.get_tagged("k", Some(ByteRange::new(57, 1))).await;
     assert!(matches!(past, Err(Error::Other(_))), "{past:?}");
 }
 
@@ -279,7 +279,7 @@ pub async fn a_reservation_and_a_put_each_refuse_a_key_the_other_holds(backend: 
     assert_eq!(refused, Err(Error::AlreadyExists("real".to_owned())));
     let real = backend.head("real").await.unwrap().tag;
     assert_eq!(
-        backend.get_marked("real", None).await.unwrap(),
+        backend.get_tagged("real", None).await.unwrap(),
         (body("x"), false, real)
     );
 }
@@ -296,7 +296,7 @@ pub async fn a_plain_object_is_not_a_reservation(backend: &dyn Backend) {
         .unwrap();
     for key in ["empty", "same", "streamed"] {
         assert!(!backend.head(key).await.unwrap().reservation, "{key}");
-        let read = backend.get_marked(key, None).await.unwrap();
+        let read = backend.get_tagged(key, None).await.unwrap();
         assert!(!read.1, "{key}");
     }
     assert_eq!(backend.head("same").await.unwrap().size, 56);
@@ -313,7 +313,7 @@ pub async fn a_plain_replace_of_a_reservation_makes_a_real_object(backend: &dyn 
     let new = backend.put_if_match("k", body("real"), &tag).await.unwrap();
     let head = backend.head("k").await.unwrap();
     assert_eq!((head.reservation, head.tag), (false, new.clone()));
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("real"), false, new));
 }
 
@@ -416,7 +416,7 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
         .put_stream_if_match("k", Some(8), failing, &old)
         .await;
     assert_eq!(failed, Err(cut));
-    let kept = backend.get_marked("k", None).await.unwrap();
+    let kept = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(kept, (reservation(1), true, old.clone()));
     assert_eq!(backend.head("k").await.unwrap().tag, old);
 
