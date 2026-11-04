@@ -836,6 +836,7 @@ fn a_new_tier_directory_is_open_to_its_owner_alone() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-private");
     let nested = dir.path().join("a/b");
     DirBackend::open(&nested).unwrap();
+    assert_eq!(bits(&dir.path().join("a")), 0o700);
     assert_eq!(bits(&nested), 0o700);
     assert_eq!(bits(&nested.join(".uploads")), 0o700);
 }
