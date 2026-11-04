@@ -40,7 +40,7 @@ fn took(created: Created) -> Seen {
 }
 
 /// The usage object, as the proxies read it.
-async fn published(rig: &Rig) -> Usage {
+pub(super) async fn published(rig: &Rig) -> Usage {
     let body = rig.hot.get(USAGE_KEY, None).await.unwrap();
     serde_json::from_slice(&body).unwrap()
 }
@@ -708,10 +708,10 @@ async fn the_usage_is_published_again_when_the_interval_has_run_out() {
 }
 
 /// Asserts that between listings the figure moves by what the leader does: an object copied that
-/// was written at or after the start of the last listing adds its bytes (an object written in the
-/// same millisecond as the start counts as landed, since the write time cannot say otherwise), one
-/// that was written before the start does not (the listing has it), and one that was copied before
-/// the first listing is not counted twice.
+/// was written at or after the start of the last listing and that the listing did not read adds its
+/// bytes (also one written in the same millisecond as the start), one that was written before the
+/// start does not (the listing has it), and one that was copied before the first listing is not
+/// counted twice.
 #[tokio::test]
 async fn between_listings_the_figure_adds_the_objects_copied_that_landed_after_the_listing() {
     let rig = Rig::new();
