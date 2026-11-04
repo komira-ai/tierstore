@@ -53,11 +53,11 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-pub(super) use super::config_oci::{OciFlags, UpstreamTable, oci};
+use super::config_oci::{OciTable, oci};
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
 use super::config_units::{Dur, Size};
-use super::front::FrontSettings;
+use super::front::{FrontSettings, S3Tls};
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
 
@@ -100,6 +100,8 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("bucket", &["server.bucket"]),
     ("region", &["server.region"]),
     ("access-key-file", &["server.access_key_file"]),
+    ("tls-cert", &["server.tls_cert_file"]),
+    ("tls-key", &["server.tls_key_file"]),
     ("read-only-key-file", &["server.read_only_key_files"]),
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
@@ -266,6 +268,10 @@ pub(super) struct ServerTable {
     pub bucket: String,
     pub region: Option<String>,
     pub access_key_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<PathBuf>,
     #[serde(default)]
     pub read_only_key_files: Vec<PathBuf>,
     #[serde(default)]
@@ -343,36 +349,6 @@ pub(super) struct TierTable {
     /// `endpoint`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoints: Option<Vec<String>>,
-}
-
-/// `[oci]`: the read-only OCI front. The table is the front: `listen` is needed in it, and the
-/// other keys are refused without it, as the `--oci-*` flags are.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OciTable {
-    /// One address, or a list of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<Addrs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_cert_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_key_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_lifetime: Option<Dur>,
-    /// Whether clients must present an access key of the server (`--oci-require-auth`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_auth: Option<bool>,
-    /// The most bytes of a stored chunk read in one call at the end of an upload
-    /// (`--oci-stage-read`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage_read: Option<u64>,
-    /// The registry a miss is pulled from. It has no flag form.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<UpstreamTable>,
 }
 
 pub(super) fn invalid(key: &str, why: impl Into<String>) -> ConfigError {
@@ -660,6 +636,7 @@ pub(super) fn storage(
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
+        tls: front.tls,
         journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
         journal_retention: duration(hot.journal_retention, Duration::from_secs(24 * 3600)),
         copy_parallel,
@@ -733,6 +710,10 @@ pub(super) fn front_of(server: ServerTable, per_run: PerRun) -> Result<Shared, C
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
         access_key_file: server.access_key_file,
+        tls: S3Tls {
+            tls_cert: server.tls_cert_file,
+            tls_key: server.tls_key_file,
+        },
         read_only_key_file: server.read_only_key_files,
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,

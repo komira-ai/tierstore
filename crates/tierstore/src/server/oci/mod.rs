@@ -158,7 +158,7 @@ pub use body::{BodyError, OciBody};
 pub(crate) use listener::OciDrain;
 pub use listener::{OciLimits, OciListener};
 pub use metrics::OciMetrics;
-pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
+pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning, s3_acceptor};
 pub use upstream::{Reply, Upstream, UpstreamError, UpstreamSettings};
 
 pub(crate) use push::DEFAULT_STAGE_READ;

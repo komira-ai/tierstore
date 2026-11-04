@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::UpstreamTable;
-use crate::server::config::{Dur, from_text, settings_from_text};
+use crate::server::config::{from_text, settings_from_text};
 use crate::server::config_print::render;
 use crate::server::config_testing::{DEFAULTS, MINIMAL};
+use crate::server::config_units::Dur;
 
 /// `MINIMAL` with an `[oci]` front and the text `upstream` after it.
 fn with_upstream(upstream: &str) -> String {

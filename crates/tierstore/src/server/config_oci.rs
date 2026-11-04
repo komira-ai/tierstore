@@ -1,4 +1,6 @@
-//! The `[oci]` table checked as the `--oci-*` flags are (see `config`).
+//! The `[oci]` table of the configuration file, and the flags it stands for: the read-only OCI
+//! front's table is the front, `listen` is needed in it, and the other keys are refused without
+//! it, as the `--oci-*` flags are.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -6,7 +8,21 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::config::{ConfigError, Dur, OciTable, addresses, invalid, refuse, require, within};
+use super::config::{ConfigError, addresses, invalid, refuse, require, within};
+use super::config_units::Dur;
+use super::listen::Addrs;
+
+/// The default of `--oci-prefix`.
+pub(super) const DEFAULT_OCI_PREFIX: &str = "oci/";
+
+/// The default of `--oci-max-connections`.
+pub(super) const DEFAULT_OCI_CONNECTIONS: u32 = 64;
+
+/// The default of `--oci-connection-lifetime`.
+pub(super) const DEFAULT_OCI_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// How long a client has to finish the TLS handshake with the OCI front.
+pub(super) const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
 
 /// `[oci.upstream]`: the registry the front pulls an object from when its store has none (see
 /// `oci::upstream`). The password is in the file `password_file`, never in this one.
@@ -33,6 +49,36 @@ pub(super) struct UpstreamTable {
     /// The most redirects one request follows (4 if left out).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_redirects: Option<u32>,
+}
+
+/// `[oci]`: the read-only OCI front. The table is the front: `listen` is needed in it, and the
+/// other keys are refused without it, as the `--oci-*` flags are.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OciTable {
+    /// One address, or a list of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<Addrs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_connections: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_lifetime: Option<Dur>,
+    /// Whether clients must present an access key of the server (`--oci-require-auth`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_auth: Option<bool>,
+    /// The most bytes of a stored chunk read in one call at the end of an upload
+    /// (`--oci-stage-read`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_read: Option<u64>,
+    /// The registry a miss is pulled from. It has no flag form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<UpstreamTable>,
 }
 
 /// The OCI front's table checked as its flags are: the values of the `--oci-*` flags.

@@ -2873,6 +2873,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "objstore-s3 0.1.0",
+ "rcgen",
  "tierstore 0.3.0",
  "tierstore 0.3.0 (git+https://github.com/komira-ai/tierstore?rev=6b60319efd148fba3d7fc0f7e6217d64b097642e)",
  "tierstore-testkit",

@@ -217,7 +217,8 @@ impl OciFront {
                     tracing::warn!("tierstore: oci: the upstream's {path} was cut: {why}");
                     unavailable("the upstream's blob could not be read in full", detail)
                 }
-                None => store_failed(&failure, &key, BLOB_UNKNOWN, detail),
+                // A range refusal is made only by a push's chunk body, never by a pull's.
+                Some(Refusal::Range) | None => store_failed(&failure, &key, BLOB_UNKNOWN, detail),
             }),
         }
     }

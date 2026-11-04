@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use super::ServerConfig;
 use super::cli::{Cli, Error};
-use super::config::OciFlags;
-use super::config_oci::UpstreamTable;
-use super::front::InvalidFlags;
+use super::config_oci::{
+    DEFAULT_OCI_CONNECTIONS, DEFAULT_OCI_LIFETIME, DEFAULT_OCI_PREFIX, OCI_HANDSHAKE, OciFlags,
+    UpstreamTable,
+};
+use super::front::{InvalidFlags, refuse};
 use super::keys::read_private_text;
 use super::listen::has_duplicate;
 use super::oci::{
@@ -33,23 +35,11 @@ pub(super) struct OciSetup {
     pub(super) upstream: Option<Upstream>,
 }
 
-/// The default of `--oci-prefix`.
-pub(super) const DEFAULT_OCI_PREFIX: &str = "oci/";
-
-/// The default of `--oci-max-connections`.
-const DEFAULT_OCI_CONNECTIONS: u32 = 64;
-
-/// The default of `--oci-connection-lifetime`.
-const DEFAULT_OCI_LIFETIME: Duration = Duration::from_secs(3600);
-
 /// The default of `oci.upstream.timeout`.
 const DEFAULT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The default of `oci.upstream.max_redirects`.
 const DEFAULT_UPSTREAM_REDIRECTS: u32 = 4;
-
-/// How long a client has to finish the TLS handshake with the OCI front.
-const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
 
 /// Checks the OCI front's flags and files, and makes its TLS, if `--oci-listen` is given. A prefix,
 /// certificate or key that cannot work is an `InvalidFlags` (exit 2, as a restart cannot mend it);
@@ -95,7 +85,7 @@ pub(super) fn oci_setup_of(
         );
     }
     let prefix = flags.prefix.as_deref().unwrap_or(DEFAULT_OCI_PREFIX);
-    let prefix = OciPrefix::new(prefix).map_err(refused)?;
+    let prefix = OciPrefix::new(prefix).map_err(refuse)?;
     let plain = flags.tls_cert.is_none() && flags.tls_key.is_none();
     let in_the_clear = listen
         .iter()
@@ -109,7 +99,7 @@ pub(super) fn oci_setup_of(
         return Err(InvalidFlags(why).into());
     }
     let acceptor = match (&flags.tls_cert, &flags.tls_key) {
-        (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refused)?),
+        (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refuse)?),
         (None, None) => {
             let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
             for warning in warnings.filter(|_| warn) {
@@ -119,7 +109,7 @@ pub(super) fn oci_setup_of(
         }
         _ => {
             let why = "--oci-tls-cert and --oci-tls-key go together: give both, or neither";
-            return Err(refused(OciError::Missing(why.to_owned())));
+            return Err(refuse(OciError::Missing(why.to_owned())));
         }
     };
     let upstream = flags.upstream.as_ref().map(upstream_of).transpose()?;
@@ -147,16 +137,6 @@ pub(super) fn oci_setup_of(
         stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
         upstream,
     }))
-}
-
-/// The error for a front that cannot start: flags and files a restart cannot mend are an
-/// `InvalidFlags` (exit 2), the rest is what it is.
-fn refused(why: OciError) -> Error {
-    if why.is_invalid_flags() {
-        InvalidFlags(why.to_string()).into()
-    } else {
-        why.into()
-    }
 }
 
 /// The client for `[oci.upstream]`: its password and CA certificates are read here, once.
@@ -195,5 +175,5 @@ fn upstream_of(table: &UpstreamTable) -> Result<Upstream, Error> {
             .map_or(DEFAULT_UPSTREAM_TIMEOUT, |timeout| timeout.0),
         max_redirects: table.max_redirects.unwrap_or(DEFAULT_UPSTREAM_REDIRECTS),
     };
-    Upstream::new(settings).map_err(refused)
+    Upstream::new(settings).map_err(refuse)
 }
