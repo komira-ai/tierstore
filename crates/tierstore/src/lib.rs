@@ -63,8 +63,10 @@
 //!   store acknowledges moves its `live_until` on, on a monotonic clock of its own, to the time
 //!   the request was sent plus [`ProxyConfig::departure`] less [`ProxyConfig::deadline_margin`]
 //!   ([`Proxy::is_live`]). [`Bounded`] gives the calls a holder makes a limit, and a call that
-//!   destroys starts only if its [`Deadline`] is at least the margin away. No request path asks
-//!   for either yet.
+//!   destroys starts only if its [`Deadline`] is at least the margin away. Only the heartbeat
+//!   calls use [`Bounded`]; the put on a journal entry (see [`Entries`]), once the format is
+//!   active, checks the [`Deadline`] to be admitted, to be acknowledged and to clean up. The
+//!   journal path of a put, a delete and a read uses neither yet.
 //! - [`Reconciler`] is the one runner, guarded by a lease object in the hot tier. It tails
 //!   the journals, copies each put from the hot tier to the cold tier (in parallel, bounded),
 //!   applies the deletes, records how far it got in a checkpoint per proxy, evicts the

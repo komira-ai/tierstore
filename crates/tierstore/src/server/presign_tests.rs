@@ -359,6 +359,8 @@ fn names_and_prefixes_are_checked() {
         "_journal/",
         "_journal/p1/",
         "_tiering/usage",
+        "_entries/",
+        "_entries/ab",
         "a/../",
     ] {
         assert!(validate_prefix(bad).is_err(), "{bad:?}");
