@@ -19,9 +19,7 @@ region                = "eu-west-1"
 max_request_bytes     = 134217728
 access_key_file       = "/etc/tierstore-cache/access.key"
 read_only_key_files   = ["/etc/tierstore-cache/clients.key"]
-grant_key_files       = ["/etc/tierstore-cache/grant.key"]
 presign_max_expires   = "10m"
-grant_max_lifetime    = "5m"
 max_concurrent_puts   = 8
 put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
@@ -178,12 +176,7 @@ fn a_build_node_file_makes_a_cache() {
         front.read_only_key_file,
         [PathBuf::from("/etc/tierstore-cache/clients.key")]
     );
-    assert_eq!(
-        front.grant_key_file,
-        [PathBuf::from("/etc/tierstore-cache/grant.key")]
-    );
     assert_eq!(front.presign_max_expires, Duration::from_secs(600));
-    assert_eq!(front.grant_max_lifetime, Duration::from_secs(300));
     assert_eq!(front.max_concurrent_puts, 8);
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
     assert_eq!(front.put_min_bytes_per_sec, 2048);
@@ -309,7 +302,7 @@ fn a_list_of_one_endpoint_is_the_upstream() {
 }
 
 /// Asserts each refusal of a build node's file, each naming the key and what is wrong, and none
-/// repeating a value: the three tables together, a layout that is not the only one, a cache that
+/// repeating a value: a hot store with a cache that does not take writes, a layout that is not the only one, a cache that
 /// is turned off, marks out of order or out of range, a budget that is missing or zero, a rate
 /// that is not a rate, no policy that caches, more than one upstream or two ways to give it,
 /// and the keys of a storage node that do nothing here.
@@ -334,8 +327,9 @@ fn a_build_node_file_is_refused_when_it_cannot_be_run() {
             cache_with(
                 "[local_cache]",
                 "[hot_store]\nkind = \"memory\"\nbudget = 1\n\n[local_cache]",
-            ),
-            "is refused with [hot_store]",
+            )
+            .replace("write_through = true", "write_through = false"),
+            "local_cache.write_through",
         ),
         (
             cache_with("\"digest-v1\"", "\"digest-v2\""),

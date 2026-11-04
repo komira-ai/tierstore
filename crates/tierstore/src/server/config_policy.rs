@@ -3,10 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::config::{ConfigError, invalid};
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
-
-/// The prefixes of keys that tierstore keeps for itself: no policy may name them.
-const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
+use crate::journal::RESERVED_PREFIXES;
 
 /// `[[policy]]`: what is done with the keys under a prefix.
 #[derive(Debug, Deserialize, Serialize)]
@@ -31,12 +28,15 @@ pub(super) fn check_policies(policies: &[Policy], caching: bool) -> Result<(), C
                 format!("{prefix:?} does not end in /"),
             ));
         }
-        if let Some(reserved) = RESERVED.iter().find(|name| prefix.starts_with(**name)) {
+        if let Some(reserved) = RESERVED_PREFIXES
+            .iter()
+            .find(|name| prefix.starts_with(**name))
+        {
             let why = format!("{prefix:?} is under {reserved:?}, which tierstore keeps for itself");
             return Err(invalid(&format!("{key}.prefix"), why));
         }
         if policy.cache && !caching {
-            let why = "a storage node keeps no cache: it needs [local_cache] and no [hot_store]";
+            let why = "a node without [local_cache] keeps no cache: give it [local_cache]";
             return Err(invalid(&format!("{key}.cache"), why));
         }
         for (before, other) in policies.iter().enumerate().take(at) {

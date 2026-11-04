@@ -14,7 +14,6 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 use sha2::{Digest, Sha256};
 
 use super::ServerConfig;
-use super::grant::{self, GRANT_HEADER};
 use super::keys::Role;
 use super::presign::{self, Grant, PRESIGN_ONLY};
 use super::reply::S3Error;
@@ -190,8 +189,25 @@ pub(super) fn canonical(
     ))
 }
 
+/// The size of the input block of SHA-256, which is the size of an HMAC-SHA-256 key.
+const BLOCK: usize = 64;
+
+/// `key` as RFC 2104 makes it a key of the hash's block size: hashed first if it is longer than
+/// the block, then padded with zeros. Built here so that the key given to the HMAC has the size
+/// the type asks for and no length can be refused.
+pub(super) fn block_key(key: &[u8]) -> [u8; BLOCK] {
+    let mut block = [0_u8; BLOCK];
+    if key.len() > BLOCK {
+        let hashed = Sha256::digest(key);
+        block[..hashed.len()].copy_from_slice(&hashed);
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    block
+}
+
 pub(super) fn keyed(key: &[u8]) -> Hmac<Sha256> {
-    <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts a key of any length")
+    <Hmac<Sha256> as KeyInit>::new(&block_key(key).into())
 }
 
 pub(super) fn hmac(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -224,15 +240,11 @@ pub(super) fn string_to_sign_for(stamp: &str, scope: (&str, &str), request: &str
 ///
 /// Gives the value of its `x-amz-content-sha256` header, the hash of the body that the
 /// signature covers, which the caller checks the body against, and the role of the key it is
-/// signed with. The key is the one whose id the credential names, in the server's region. A
-/// request with the header of a read grant is not checked as SigV4 at all (see `grant`).
+/// signed with. The key is the one whose id the credential names, in the server's region.
 ///
 /// # Errors
 /// The [`Refusal`] that says what is wrong with the request.
 pub(crate) fn verify(config: &ServerConfig, parts: &Parts) -> Result<Signed, Refusal> {
-    if parts.headers.contains_key(GRANT_HEADER) {
-        return grant::verify(config, parts);
-    }
     let Some(text) = header(&parts.headers, "authorization") else {
         return presign::verify_query(config, parts);
     };

@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 601" width="960" height="601" role="img" aria-label="Table of five rejected designs and the chosen one: conditional DELETE everywhere, unique hot names with a pointer or a cold lookup, per-key busy markers, cold tombstones with a serial release, and write ids in object metadata, each with what it does and the break that rejected it. The chosen design is one journal entry per key.">
+<title>Why this shape: the designs that were tried and why each lost</title>
+<defs><marker id="alternatives-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="alternatives-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="601" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Why this shape: what was tried, and the break that ended each design</text>
+<rect x="20" y="52" width="920" height="28" rx="5" class="box-b"/>
+<text x="32" y="71" class="b">Design</text>
+<text x="240" y="71" class="b">What it did</text>
+<text x="540" y="71" class="b">Why it lost</text>
+<rect x="20" y="86" width="920" height="84" rx="5" class="box"/>
+<line x1="230" y1="86" x2="230" y2="170" class="ln"/>
+<line x1="530" y1="86" x2="530" y2="170" class="ln"/>
+<text x="32" y="108" class="b">Conditional DELETE</text>
+<text x="32" y="125" class="b">everywhere</text>
+<text x="242" y="108" class="t-m">Eviction, delete and release all use DELETE</text>
+<text x="242" y="125" class="t-m">If-Match on the tag just read.</text>
+<text x="542" y="108" class="t-m">MinIO ignores a conditional DELETE and RustFS does not enforce</text>
+<text x="542" y="125" class="t-m">it. And a content tag is the same before and after a delete and</text>
+<text x="542" y="142" class="t-m">a byte-identical re-put, so even an honoured condition removes</text>
+<text x="542" y="159" class="t-m">the new object.</text>
+<rect x="20" y="178" width="920" height="84" rx="5" class="box"/>
+<line x1="230" y1="178" x2="230" y2="262" class="ln"/>
+<line x1="530" y1="178" x2="530" y2="262" class="ln"/>
+<text x="32" y="200" class="b">Unique hot names, with a</text>
+<text x="32" y="217" class="b">pointer or a cold lookup</text>
+<text x="242" y="200" class="t-m">Each write lands under a unique hot name; a</text>
+<text x="242" y="217" class="t-m">pointer, or a cold lookup on every GET, finds</text>
+<text x="242" y="234" class="t-m">the live one.</text>
+<text x="542" y="200" class="t-m">A hot hit stops being one round trip at the client's key. A</text>
+<text x="542" y="217" class="t-m">pointer layer serves deleted or replaced keys for as long as it</text>
+<text x="542" y="234" class="t-m">is cached. Gates and stripes fail when a delayed request is</text>
+<text x="542" y="251" class="t-m">retried.</text>
+<rect x="20" y="270" width="920" height="50" rx="5" class="box"/>
+<line x1="230" y1="270" x2="230" y2="320" class="ln"/>
+<line x1="530" y1="270" x2="530" y2="320" class="ln"/>
+<text x="32" y="292" class="b">Per-key busy markers</text>
+<text x="242" y="292" class="t-m">A marker object says a key is busy; every</text>
+<text x="242" y="309" class="t-m">destructive act first lists for markers.</text>
+<text x="542" y="292" class="t-m">Every destructive act needs a LIST first, which is slow and not</text>
+<text x="542" y="309" class="t-m">atomic with the act. Its own attack review found one fatal gap.</text>
+<rect x="20" y="328" width="920" height="67" rx="5" class="box"/>
+<line x1="230" y1="328" x2="230" y2="395" class="ln"/>
+<line x1="530" y1="328" x2="530" y2="395" class="ln"/>
+<text x="32" y="350" class="b">Cold tombstones with a</text>
+<text x="32" y="367" class="b">serial release</text>
+<text x="242" y="350" class="t-m">A delete leaves a tombstone in cold; no cold</text>
+<text x="242" y="367" class="t-m">object is ever deleted, and tombstones expire</text>
+<text x="242" y="384" class="t-m">by lifecycle.</text>
+<text x="542" y="350" class="t-m">Uploads were aborted at a 60 s deadline, which is a size cap on</text>
+<text x="542" y="367" class="t-m">uploads that the data path does not allow. Several hot orphan</text>
+<text x="542" y="384" class="t-m">windows could still serve deleted bytes.</text>
+<rect x="20" y="403" width="920" height="101" rx="5" class="box"/>
+<line x1="230" y1="403" x2="230" y2="504" class="ln"/>
+<line x1="530" y1="403" x2="530" y2="504" class="ln"/>
+<text x="32" y="425" class="b">Write ids in object</text>
+<text x="32" y="442" class="b">metadata</text>
+<text x="242" y="425" class="t-m">Every write carries a unique id in its</text>
+<text x="242" y="442" class="t-m">metadata; a delete or evict names the id it</text>
+<text x="242" y="459" class="t-m">saw.</text>
+<text x="542" y="425" class="t-m">A format change to every stored object in both tiers (dir:</text>
+<text x="542" y="442" class="t-m">needs a sidecar or xattr; metadata surviving multipart</text>
+<text x="542" y="459" class="t-m">completion is unverified). And it still needs the store to act</text>
+<text x="542" y="476" class="t-m">on the id atomically, which a store that ignores conditional</text>
+<text x="542" y="493" class="t-m">DELETE cannot.</text>
+<rect x="20" y="512" width="920" height="67" rx="5" class="box-o"/>
+<line x1="230" y1="512" x2="230" y2="579" class="ln-o"/>
+<line x1="530" y1="512" x2="530" y2="579" class="ln-o"/>
+<text x="32" y="534" class="b">One entry per key, in hot</text>
+<text x="242" y="534" class="t-m">A small object per key being changed: create-</text>
+<text x="242" y="551" class="t-m">only, changed by If-Match compare-and-swap,</text>
+<text x="242" y="568" class="t-m">released by its holder.</text>
+<text x="542" y="534" class="t-m">Chosen. Actors take turns on one key in one atomic place; no</text>
+<text x="542" y="551" class="t-m">conditional DELETE; the hot hit stays at the client's key; the</text>
+<text x="542" y="568" class="t-m">object is also the work queue.</text>
+</svg>

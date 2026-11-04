@@ -2,7 +2,7 @@
 
 tierstore is configured by flags, or by one TOML file given with `--config <path>`. The two make the same settings and run the same code: the file is read into the settings the flags make, and a key that is left out has the default of its flag. A file holds no secret, only the paths of key files.
 
-> `--config` and `--print-config` came with v0.0.39, the build-node shape with v0.0.40; `--check-config` and `local_cache.write_through` are on main and not in v0.0.40. Every flag below works in every release. A file has one of two shapes, told apart by its tables: a storage node (a hot tier and a cold tier, as the flags have) and a build node (a read cache on local disk in front of one upstream, `[local_cache]`). The build node has no flag form.
+> `--config` and `--print-config` came with v0.0.39, the build-node shape with v0.0.40; `--check-config` and `local_cache.write_through` are on main and not in v0.0.40. Every flag below works in every release. A file has one of three shapes, told apart by its tables: a storage node (a hot tier and a cold tier, as the flags have), a build node (a read cache on local disk in front of one upstream, `[local_cache]`), and a storage node with a cache in front of its own proxy (all three tables, on main and not in v0.0.41). The build node and the storage node with a cache have no flag form.
 
 ## A file for a storage node
 
@@ -105,6 +105,39 @@ cache  = true
 
 How the cache behaves is in [operations](operations.md#a-build-node). The file is started as a storage node's is, with `--config` and the per-run flags.
 
+## A file for a storage node with a cache
+
+On main, not in v0.0.41. One process that owns the data and keeps a disk cache in front of its own proxy: the file has `[hot_store]`, `[cold_store]` and `[local_cache]`. The S3 front and the OCI front read from the cache; the cache reads from, and writes to, the proxy, which is a storage node's (both tiers, the journal, the reconciler). The tiers are tested at the start as a storage node's are; the cache's own self-test of an upstream is not run, because its upstream is the proxy:
+
+```toml
+[server]
+listen          = "127.0.0.1:9300"
+proxy_id        = "tierstore-1"
+bucket          = "tierstore"
+access_key_file = "/etc/tierstore/access.key"
+
+[hot_store]
+kind   = "dir"
+path   = "/srv/tierstore/hot"
+budget = "500GiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-cold"
+endpoint         = "http://s3-cold.example:9000"
+credentials_file = "/etc/tierstore/cold.key"
+
+[local_cache]
+path   = "/var/lib/tierstore-cache"
+budget = "40GiB"
+
+[[policy]]
+prefix = "cas/b/"
+cache  = true
+```
+
+The keys of each table are those of the storage node and of the build node. What differs: `local_cache.write_through` is true whether it is left out or given (the node owns the data and takes writes, which pass through the cache so that its entries stay right), and `false` is refused; the cache path (absolute, as the directory of a `dir` tier must be) may not be the directory of a `dir` tier, inside it or around it, nor around the lock file or the key files of `[oci]`; `server.backend_check_wait`, `cold_store.skip_checks` and the reconciler's keys of `[hot_store]` keep their meaning (a build node refuses them). What the cache keeps, how a hand-over behaves and what to expect are in [operations](operations.md#a-storage-node-with-a-local-cache) and [limits](limits.md#a-storage-node-with-a-local-cache). The start line says `mode=storage-cache`.
+
 ## Types
 
 - A duration is a string of a whole number and `ms`, `s`, `m` or `h`: `250ms`, `15m`.
@@ -117,7 +150,7 @@ How the cache behaves is in [operations](operations.md#a-build-node). The file i
 
 | Key | Flag | Type, default | What |
 |---|---|---|---|
-| `server.listen` | `--listen` | address or list of addresses, required | where the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz` are served. On main, not in v0.0.41: when the file has a `[local_cache]` table (a build node), the server also binds 127.0.0.1 on the port of each listen address, once for each distinct port, so that processes on the node reach it at `http://127.0.0.1:<port>`; the start is refused, naming loopback and the port, if that cannot be bound. Nothing is added for a port that already has `127.0.0.1` or the IPv4 wildcard `0.0.0.0` on it (the wildcard covers loopback, and a second bind would be refused), and an IPv6 address adds IPv4 loopback only, never `::1`. Without `[local_cache]` exactly the listed addresses are bound. A list (the flag given again for each address) is served on every address by one server, with one drain and one limit on connections, and a start that cannot bind every address is refused. To listen on the wildcard of both families give `0.0.0.0:<port>` and `[::]:<port>`: an IPv6 address is bound for IPv6 only, so the two do not clash. An address given twice is refused, naming the key |
+| `server.listen` | `--listen` | address or list of addresses, required | where the S3 API, `/healthz`, `/readyz`, `/usagez` and `/metricz` are served. On main, not in v0.0.41: when the file has a `[local_cache]` table (a build node, or a storage node with a cache), the server also binds 127.0.0.1 on the port of each listen address, once for each distinct port, so that processes on the node reach it at `http://127.0.0.1:<port>`; the start is refused, naming loopback and the port, if that cannot be bound. Nothing is added for a port that already has `127.0.0.1` or the IPv4 wildcard `0.0.0.0` on it (the wildcard covers loopback, and a second bind would be refused), and an IPv6 address adds IPv4 loopback only, never `::1`. Without `[local_cache]` exactly the listed addresses are bound. A list (the flag given again for each address) is served on every address by one server, with one drain, and a start that cannot bind every address is refused. To listen on the wildcard of both families give `0.0.0.0:<port>` and `[::]:<port>`: an IPv6 address is bound for IPv6 only, so the two do not clash. An address given twice is refused, naming the key |
 | `server.proxy_id` | `--proxy-id` | string, required | names this process's journal and lease in the hot tier; keep it across restarts and give each process over the same tiers its own |
 | `server.slot` | `--slot` | port, 1 to 65535, none | on main, not in v0.0.41. The private port this instance runs as, which the hand-over's slot units pass as `--slot %i` (the unit `tierstore@<port>` listens on `<port>` too). It is the `slot` label of `tierstore_build_info` on `/metricz`, which the update hook's probe through the public port reads to know which instance answered. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. A start with `--slot 0` or a value that is not a port is refused (exit 2), and so is `slot = 0` in the file |
 | `server.bucket` | `--bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
@@ -127,9 +160,9 @@ How the cache behaves is in [operations](operations.md#a-build-node). The file i
 | `server.presign_key_files` | `--presign-key-file` | paths, none | presigning key files |
 | `server.gc_key_files` | `--gc-key-file` | paths, none | GC key files |
 | `server.scoped_key_files` | `--scoped-key-file` | paths, none | scoped key files |
-| `server.grant_key_files` | `--grant-key-file` | paths, none | grant key files |
-| `server.grant_max_lifetime` | `--grant-max-lifetime` | duration, `15m` | the longest a read grant may still have to live when it is checked: a grant that ends later is refused 403 |
-| `server.presign_max_expires` | `--presign-max-expires` | duration, `15m` | the longest expiry of any presigned URL |
+| `server.presign_max_expires` | `--presign-max-expires` | duration, `15m` | the longest expiry of any presigned URL, a GET or a PUT |
+| `server.grant_key_files` | `--grant-key-file` | paths, none | deprecated, ignored: the read grant was removed (use a presigned GET URL). Accepted so that a file written for the release before still starts; the files are not read, and the server logs `tierstore: --grant-key-file (server.grant_key_files) is ignored: the read grant was removed; use a presigned GET URL` |
+| `server.grant_max_lifetime` | `--grant-max-lifetime` | duration, none | deprecated, ignored, like `server.grant_key_files`; its warning names `--grant-max-lifetime (server.grant_max_lifetime)` |
 | `server.max_request_bytes` | `--max-request-bytes` | bytes, 268435456 (256 MiB) | the longest body of a request: the longest object and the longest part. A body over it is refused with 413 and nothing is stored |
 | `server.max_concurrent_puts` | `--max-concurrent-puts` | count, 32 | the most put bodies and parts taken at once; one more waits for one to end, up to `server.put_permit_wait` |
 | `server.put_permit_wait` | `--put-permit-wait` | duration, `15s` | on main, not in v0.0.41. How long a put that finds every put slot taken waits for one to end before it is answered 503 `SlowDown` with `Retry-After: 1`; `0s` answers at once. No byte of its body is read while it waits, and a waiter counts as in flight in a drain (never past `--drain-deadline`) |
@@ -166,16 +199,20 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.journal_linger` | `--journal-linger` | duration, `20ms` | how long a batch of journal entries waits for more |
 | `hot_store.journal_retention` | `--journal-retention` | duration, `24h` | how long an applied journal object is kept |
 | `hot_store.copy_parallel` | `--copy-parallel` | count, 16 | the most objects the reconciler copies at once |
-| `hot_store.lease_ttl` | `--lease-ttl` | duration, `30s` | how long the reconciler's lease lasts without a renewal |
+| `hot_store.lease_ttl` | `--lease-ttl` | duration, `30s` | how long the lease object must stand unchanged, on another reconciler's own monotonic clock, before it takes the lease over; the holder renews every third of it |
 | `hot_store.reconcile_interval` | `--reconcile-interval` | duration, `5s` | how often the reconciler works; shorter than the lease |
 | `hot_store.lock_file` | `--lock-file` | absolute path, none | on main, not in v0.0.41. the lock file of the node: the reconciler works only while this process holds an exclusive lock on it. A process that finds the lock held serves reads and writes through its own proxy and tries the lock again every second; the system frees it when the holder exits or crashes. If the file is replaced, the holder stops its reconciler and waits for the lock on the new file. Give every process of one node the same path, on a local file system, in a directory that nothing removes (`/var/lib/tierstore/`, not a directory under `/run`). The start refuses a path that is not absolute, one that names no file, and one that cannot be opened or is on a network file system. Without it the reconciler works as soon as the process starts |
 | `hot_store.usage_stale_after` | `--usage-stale-after` | duration, `2m` | how old the published usage may be before `/usagez` says 503; longer than the lease |
+| `hot_store.heartbeat` | `--heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. Nothing in the request paths depends on it yet |
+| `hot_store.departure` | `--departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. Today it only sets that value; no request path reads it, and nothing is refused or destroyed by it yet (enforcing it on destroying calls is future work). The removal of registrations does not use it: that uses `registration_retention` |
+| `hot_store.deadline_margin` | `--deadline-margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. No request path uses `Bounded` yet |
+| `hot_store.registration_retention` | `--registration-retention` | duration, `0s` | how long the registration of a proxy that heartbeated must stay unchanged before the reconciler removes it, when the proxy left no journal object. A registration with no heartbeat (the empty one of an older release) is never removed. `0s`, the default, removes none: a proxy of a release without the heartbeat that reopens a registration this release wrote never rewrites it, and the removal would take it for a departed owner's, so set a time only once no such proxy runs |
 
-The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`.
+The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, and a `registration_retention` that is neither zero nor at least `departure`, naming the values.
 
 ## `[local_cache]`
 
-The read cache of a build node. On main, not in v0.0.41, a build node also serves its S3 port on 127.0.0.1 (see `server.listen`). A GET or HEAD of a key that a `[[policy]]` with `cache = true` holds is answered from the directory and filled from the upstream on a miss; every other call to the front but GET and HEAD is refused 403, unless `write_through` is `true`. The table has no flag.
+The read cache of a build node, or of a storage node that keeps it in front of its own proxy (a file with `[hot_store]` too). On main, not in v0.0.41, a build node also serves its S3 port on 127.0.0.1 (see `server.listen`). A GET or HEAD of a key that a `[[policy]]` with `cache = true` holds is answered from the directory and filled from the upstream on a miss; every other call to the front but GET and HEAD is refused 403, unless `write_through` is `true`. The table has no flag.
 
 | Key | Type, default | What |
 |---|---|---|
@@ -190,7 +227,7 @@ The read cache of a build node. On main, not in v0.0.41, a build node also serve
 | `local_cache.max_concurrent_keeps` | count, 8 (1 to 64) | on main, not in v0.0.41. The most create-only puts copied into the cache at once, apart from the fills; a put that finds them all running succeeds and is not kept. A process that does not hold the lock of the cache directory (see [operations](operations.md#the-cache-lock-and-read-only-mode)) keeps no put at all |
 | `local_cache.keep_wait` | duration, `5s` (above 0) | on main, not in v0.0.41. The longest a put waits, once the upstream has the object, for its copy to land in the cache; past it the put is answered and the copy finishes in the background |
 | `local_cache.keep_deadline` | duration, `60s` (above 0, not below `keep_wait`) | on main, not in v0.0.41. The longest a copy takes in all, from the upstream's acknowledgement; a copy not done by then is abandoned and its stage file removed |
-| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the start runs the self-test of a storage node against the upstream and exits 3 if it answers one wrongly |
+| `local_cache.write_through` | boolean, `false` | `false`: the node refuses every write with 403. `true`: it takes the writes its keys may do and sends each to the upstream, which must then be read with a key that may write; the start runs the self-test of a storage node against the upstream and exits 3 if it answers one wrongly. In a file with `[hot_store]` too it is `true` whether left out or given, `false` is refused, and no self-test of the upstream is run (the upstream is the node's own proxy, whose tiers are tested) |
 | `local_cache.whole_fill_limit` | size, 64 MiB (1 byte to `budget`) | on main, not in v0.0.41. the most an object may be for a ranged read of it to fill the whole of it; a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | boolean, `true` | `false` is refused: leave `[local_cache]` out to run without a cache |
 | `local_cache.scrub_rate` | rate, `"16MiB/s"` | a size and `/s`, such as `"50MiB/s"`: the rate at which the scrub re-reads cached objects and hashes them again; `"off"` or `"0B/s"` turns the scrub off (not in a release yet, see [limits](limits.md)) |
@@ -232,7 +269,7 @@ The front reads objects at `<prefix>blobs/sha256/<hex>` and serves GET and HEAD 
 
 ## `[[policy]]`
 
-`[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. On a storage node a policy is read and checked and has no effect, and `policy.cache = true` is refused, since it has no cache. On a build node a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/` or `_tiering/`.
+`[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. Without `[local_cache]` a policy is read and checked and has no effect, and `policy.cache = true` is refused, since there is no cache. With `[local_cache]` (a build node, or a storage node with a cache) a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/` or `_tiering/`.
 
 ## The flags that stay flags
 
@@ -247,7 +284,7 @@ These describe one run, not the data path, and have no key:
 | `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
 | `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (on main, not in v0.0.41: a lingering close, see [operations](operations.md#drain-and-restart)) |
 
-`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down or answers the self-test wrongly; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
+`--check-config` finds what the loader refuses (see "What the loader refuses"), a `bucket` that is a probe path name, a zero `body_idle_timeout`, a key file that is not owned by the user, is open to others or is a link, two keys with one id, and, in the file of a build node, a zero `s3_request_timeout`. It does not find what a start checks after that: the water marks out of order, `reconcile_interval` not below `lease_ttl`, `usage_stale_after` not above `lease_ttl`, the heartbeat values out of the relations above, or a zero `s3_request_timeout` in a storage node's file (a start exits 1 on each, and the unit tries again every 30 seconds); a tier that is down or answers the self-test wrongly; the cache directory and a `budget` over the size of its file system. A file that passes `--check-config` can still fail to start.
 
 `--help` and `--version` are the usual; on main `--version` prints the version, `+` and the commit the binary was built from (`tierstore 0.3.0+0123456789ab`), and the start line ends with ` commit=<commit>`. The commit is twelve hex digits, or `unknown` for a build that had neither a git checkout nor a stamp. A start that gives `--config` and any other flag but `--drain-lb-wait`, `--drain-deadline` and `--check-config` is refused with exit status 2.
 
@@ -257,8 +294,9 @@ Each of these exits with status 2 and names the file and the key (a syntax error
 
 - a key or a table the format does not have, and a value of the wrong type;
 - a key that holds a secret: keys and credentials are paths of files whose names end in `_file` or `_files`; `secret_access_key`, `access_key_id`, `password`, a name with `token` in it and the like are refused anywhere;
-- a file that is neither a storage node's (`[hot_store]` and `[cold_store]`) nor a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`), and all three tables together;
-- in a build node's file, an `[oci]` table, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
+- a file that is none of a storage node's (`[hot_store]` and `[cold_store]`), a build node's (`[local_cache]` and `[cold_store]`, no `[hot_store]`) and a storage node's with a cache (all three tables);
+- in a storage node's file with a cache, `write_through = false`, a relative cache `path`, `dir` tier directory, `lock_file` or `[oci]` key file, and a cache `path` that is a tier's directory, inside it or around it (or around the lock file or the key files of `[oci]`);
+- in the file of a build node or of a storage node with a cache, an `[oci]` table whose blobs no `[[policy]]` with `cache = true` keeps, a `layout` other than `digest-v1`, `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, and more than one entry in `endpoints`;
 - a key a tier's `kind` does not take, a `dir` tier without `path`, an `s3` tier without `bucket`, `endpoint` or `credentials_file`, and a key only one tier has in the other (`budget` and the reconciler's keys belong to `[hot_store]`, `skip_checks` to `[cold_store]`);
 - a water mark outside 1 to 100, and a budget, count or limit of zero;
 - an `[oci]` table without `listen`, with only one of the certificate and the key, or with `max_connections = 0`;

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use tierstore_testkit::dir::TestDir;
 
+use super::fake::world as must;
 use super::fake::{Done, NFT, RELEASE, Reply, SYSTEMCTL, WORLD, World, release, run};
 use super::{GUARD_TABLE, guard_ruleset, redirect_ruleset, redirect_target};
 
@@ -47,11 +48,7 @@ impl Read for Broken {
 #[test]
 fn the_fake_nft_answers_as_nft_does() {
     let (_dir, world, _) = world("hook-fake-nft");
-    let listed = nft(
-        &world,
-        &["list", "table", "inet", "kbf_forward_tierstore"],
-        "",
-    );
+    let listed = nft(&world, &["list", "table", "inet", "tierstore_forward"], "");
     assert_eq!(listed.code, 1);
     assert!(listed.stderr.contains("No such file or directory"));
     assert!(listed.stdout.is_empty());
@@ -63,16 +60,10 @@ fn the_fake_nft_answers_as_nft_does() {
     for port in [9301, 9301, 9302] {
         let applied = nft(&world, &["-f", "-"], &redirect_ruleset(9300, port));
         assert_eq!(applied.code, 0, "{applied:?}");
-        let listed = nft(
-            &world,
-            &["list", "table", "inet", "kbf_forward_tierstore"],
-            "",
-        );
+        let listed = nft(&world, &["list", "table", "inet", "tierstore_forward"], "");
         assert_eq!(listed.code, 0);
         assert!(
-            listed
-                .stdout
-                .starts_with("table inet kbf_forward_tierstore {"),
+            listed.stdout.starts_with("table inet tierstore_forward {"),
             "{listed:?}"
         );
         assert_eq!(redirect_target(&listed.stdout), Some(port));
@@ -82,9 +73,9 @@ fn the_fake_nft_answers_as_nft_does() {
     assert_eq!(guard.code, 0);
     let effects = world.lines("effects");
     assert_eq!(effects.len(), 3, "{effects:#?}");
-    assert!(effects[0].starts_with("set kbf_forward_tierstore ") && effects[0].ends_with(":9301"));
+    assert!(effects[0].starts_with("set tierstore_forward ") && effects[0].ends_with(":9301"));
     assert!(effects[1].ends_with(":9302"), "{effects:#?}");
-    assert!(effects[2].starts_with("set kbf_guard_tierstore "));
+    assert!(effects[2].starts_with("set tierstore_guard "));
     assert_eq!(world.tables().len(), 2);
 
     let bad = format!("{}bounce\n", redirect_ruleset(9300, 9301));
@@ -107,13 +98,13 @@ fn the_fake_nft_answers_as_nft_does() {
     assert!(!world.tables().contains_key(GUARD_TABLE));
     assert_eq!(
         world.lines("effects").last().unwrap(),
-        "delete kbf_guard_tierstore"
+        "delete tierstore_guard"
     );
     assert_eq!(nft(&world, &["monitor"], "").code, 1);
     assert_eq!(world.lines("calls").len(), 15);
     assert_eq!(
         world.lines("calls")[0],
-        "nft list table inet kbf_forward_tierstore"
+        "nft list table inet tierstore_forward"
     );
 }
 
@@ -214,7 +205,7 @@ fn a_call_fails_or_kills_as_the_test_scripts_it() {
         }
     );
     world.kill_after(Some(2));
-    let listing = ["list", "table", "inet", "kbf_forward_tierstore"];
+    let listing = ["list", "table", "inet", "tierstore_forward"];
     assert!(!world.call(NFT, &listing, &mut io::empty()).kill_parent);
     assert!(world.call(NFT, &listing, &mut io::empty()).kill_parent);
     assert!(!world.call(NFT, &listing, &mut io::empty()).kill_parent);
@@ -301,4 +292,13 @@ fn a_run_is_the_program_its_name_says() {
             "systemctl stop -- tierstore@9301.service"
         ]
     );
+}
+
+/// Asserts that a call on the world's files that fails stops the stand-in with the call's name
+/// and the reason, and that one that succeeds gives its value.
+#[test]
+#[should_panic(expected = "write to the world: the directory is gone")]
+fn a_failed_call_on_the_world_panics_with_its_name_and_reason() {
+    assert_eq!(must(Ok::<u8, String>(5), "fine"), 5);
+    must(Err::<u8, _>("the directory is gone"), "write to the world");
 }

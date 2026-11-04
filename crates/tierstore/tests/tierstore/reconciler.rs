@@ -112,8 +112,9 @@ async fn a_reconciler_that_dies_mid_batch_is_resumed_without_loss() {
     assert_eq!(stored, r#"{"seq":2,"evict_seq":0,"evict_idx":0}"#);
     drop(first);
 
-    rig.clock.advance(31_000);
     let mut second = rig.reconciler("r2", 1000);
+    assert!(!second.pass().await.held);
+    rig.clock.advance(31_000);
     let report = second.pass().await;
     assert!(report.held);
     assert_eq!(report.copied, 3);

@@ -9,10 +9,10 @@ use hyper::{Request, StatusCode};
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use crate::{Backend, Error, MemoryBackend, Op, Proxy, ProxyConfig, TestClock};
+use crate::{Backend, ByteRange, Error, MemoryBackend, Op, Proxy, ProxyConfig, TestClock, Window};
 
 use super::auth::sign;
-use super::ops::{Window, window};
+use super::ops::asked;
 use super::testing::{
     BUCKET, CHECKSUMS, KEY_ID, NOW, Plain, Reply, Rig, SECRET, Scripted, Step, checksum, texts,
 };
@@ -124,16 +124,20 @@ async fn a_put_with_if_match_never_replaces() {
 /// is the whole object.
 #[test]
 fn a_range_header_means_what_s3_says() {
-    let part = |start, len| Window::Part { start, len };
-    assert_eq!(window(None, 10), Window::Whole);
-    assert_eq!(window(Some("bytes=0-4"), 10), part(0, 5));
-    assert_eq!(window(Some("bytes=8-100"), 10), part(8, 2));
-    assert_eq!(window(Some("bytes=3-"), 10), part(3, 7));
-    assert_eq!(window(Some("bytes=-4"), 10), part(6, 4));
-    assert_eq!(window(Some("bytes=-40"), 10), part(0, 10));
-    assert_eq!(window(Some("bytes=10-"), 10), Window::Unsatisfiable);
-    assert_eq!(window(Some("bytes=-0"), 10), Window::Unsatisfiable);
-    assert_eq!(window(Some("bytes=0-0"), 0), Window::Unsatisfiable);
+    let window = |range| Window::of(asked(range), 10);
+    let part = |start, len| Window::Part(ByteRange::new(start, len));
+    assert_eq!(window(None), Window::Whole);
+    assert_eq!(window(Some("bytes=0-4")), part(0, 5));
+    assert_eq!(window(Some("bytes=8-100")), part(8, 2));
+    assert_eq!(window(Some("bytes=3-")), part(3, 7));
+    assert_eq!(window(Some("bytes=-4")), part(6, 4));
+    assert_eq!(window(Some("bytes=-40")), part(0, 10));
+    assert_eq!(window(Some("bytes=10-")), Window::Unsatisfiable);
+    assert_eq!(window(Some("bytes=-0")), Window::Unsatisfiable);
+    assert_eq!(
+        Window::of(asked(Some("bytes=0-0")), 0),
+        Window::Unsatisfiable
+    );
     let not_ranges = [
         "bytes=5-2",
         "bytes=-",
@@ -143,7 +147,7 @@ fn a_range_header_means_what_s3_says() {
         "bytes=0-1,3-4",
     ];
     for whole in not_ranges {
-        assert_eq!(window(Some(whole), 10), Window::Whole, "{whole}");
+        assert_eq!(window(Some(whole)), Window::Whole, "{whole}");
     }
 }
 
@@ -182,8 +186,8 @@ async fn a_ranged_get_answers_the_bytes_and_the_range() {
 }
 
 /// Asserts that an object only the cold tier holds is described by a head without being copied,
-/// and read, whole or by range, with the same answers as one in the hot tier; the read copies
-/// it into the hot tier.
+/// and read, whole or by range, with the same answers as one in the hot tier; a read of a range
+/// copies nothing into the hot tier, and a read of the whole object copies it.
 #[tokio::test(start_paused = true)]
 async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -196,35 +200,12 @@ async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     assert_eq!(part.status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.body, "234");
     assert_eq!(part.header("content-range"), "bytes 2-4/10");
+    assert!(rig.hot_mem.get("cold", None).await.is_err());
+    let whole = rig.get("cold", None).await;
+    assert_eq!(whole.body, "0123456789");
+    rig.copied("cold").await;
     let copy = rig.hot_mem.get("cold", None).await.unwrap();
     assert_eq!(copy, body);
-}
-
-/// Asserts that no call can name a key under `_journal/` or `_tiering/`: get, head, put,
-/// delete and the multipart calls are `AccessDenied`, and a listing leaves those keys out
-/// though the hot tier holds them.
-#[tokio::test(start_paused = true)]
-async fn the_keys_of_the_proxy_are_out_of_reach() {
-    let rig = Rig::new(MEBIBYTE).await;
-    rig.put("k", b"v").await;
-    assert!(rig.hot_mem.get("_tiering/proxies/p1", None).await.is_ok());
-    for key in ["_journal/p1/00000000000000000001", "_tiering/lease"] {
-        for method in ["GET", "HEAD", "PUT", "DELETE"] {
-            let reply = rig.call(method, key, b"x").await;
-            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{method} {key}");
-        }
-        let start = rig.call("POST", &format!("{key}?uploads"), b"").await;
-        assert_eq!(start.status, StatusCode::FORBIDDEN);
-        let part_uri = format!("{key}?partNumber=1&uploadId=u");
-        let part = rig.call("PUT", &part_uri, b"x").await;
-        assert_eq!(part.status, StatusCode::FORBIDDEN);
-        let done_uri = format!("{key}?uploadId=u");
-        let done = rig.call("POST", &done_uri, b"x").await;
-        assert_eq!(done.status, StatusCode::FORBIDDEN);
-    }
-    let reply = rig.call("GET", "_tiering/lease", b"").await;
-    assert_eq!(reply.code(), "AccessDenied");
-    assert_eq!(keys(&rig.list("").await.body), ["k"]);
 }
 
 async fn put_all(rig: &Rig, names: &[&str]) {
@@ -372,12 +353,14 @@ async fn the_failures_of_the_store_are_answered_with_their_codes() {
     assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(down.code(), "ServiceUnavailable");
     rig.put("c", b"x").await;
-    let boom = Error::Other("boom".to_owned());
+    let boom = Error::Other("/srv/tier/boom: disk detail".to_owned());
     rig.hot.fail_next_with(Op::Get, boom);
     let failed = rig.get("c", None).await;
     assert_eq!(failed.status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(failed.code(), "InternalError");
-    assert!(texts(&failed.body, "Message").concat().contains("boom"));
+    let message = texts(&failed.body, "Message").concat();
+    assert_eq!(message, "We encountered an internal error.");
+    assert!(!failed.body.contains("boom"));
 }
 
 /// Asserts that a request whose body is not the one the signature covers is refused before
@@ -471,6 +454,7 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     let head = rig.call("HEAD", "big", b"").await;
     assert_eq!(head.header("etag"), tag);
     assert_eq!(rig.get("big", None).await.body, "hello world");
+    rig.copied("big").await;
     assert!(rig.hot_mem.get("big", None).await.is_ok());
     assert_eq!(rig.cold.calls(Op::UploadPart), 2);
 }

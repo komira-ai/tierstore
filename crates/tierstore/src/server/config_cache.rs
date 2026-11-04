@@ -45,7 +45,7 @@
 //!
 //! The file is read into a [`CacheSettings`]. It has no flag form. The `[oci]` table is the
 //! storage node's, with its rules (see [`config`](super::config)). What it refuses, besides what
-//! every file does: a `[hot_store]` along with `[local_cache]`, a layout that is not `digest-v1`,
+//! every file does: a layout that is not `digest-v1`,
 //! `cache = false`, marks out of order, no `[[policy]]` with `cache = true`, a list of more than
 //! one `endpoints` in `[cold_store]` (the cache reads from one upstream), and the keys of the
 //! storage node that do nothing here: `skip_checks`, the reconciler's keys and
@@ -60,11 +60,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
-    ConfigError, Dur, OciFlags, OciTable, PerRun, ServerTable, Size, TierParts, TierTable,
-    duration, front_of, invalid, oci as oci_of, parse_size, refuse, refuse_hot_keys, require, tier,
-    within,
+    ConfigError, OciFlags, OciTable, PerRun, ServerTable, TierParts, TierTable, duration, front_of,
+    invalid, oci as oci_of, refuse, refuse_hot_keys, require, tier, within,
 };
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 
@@ -220,7 +220,7 @@ fn percent(key: &str, value: Option<u8>, default: u8, low: u8) -> Result<u8, Con
 /// `cache = true`. A front over a cache that keeps none of what it serves is every pull going to
 /// the upstream; a registry that is meant to pass through is a storage node's front, or no
 /// cache, so there is no use of this to keep.
-fn check_oci_is_kept(oci: &OciFlags, policy: &[Policy]) -> Result<(), ConfigError> {
+pub(super) fn check_oci_is_kept(oci: &OciFlags, policy: &[Policy]) -> Result<(), ConfigError> {
     if oci.listen.is_empty() {
         return Ok(());
     }

@@ -1,10 +1,10 @@
 //! The flags and the start-up of the `tierstore` binary.
 //!
-//! One process runs three things over the same pair of tiers: a [`Proxy`] with the given id,
-//! the S3 front of that proxy ([`Server`]), and a [`Reconciler`], which works only while it
+//! One process runs three things over the same pair of tiers: a [`Proxy`](crate::Proxy) with the given id,
+//! the S3 front of that proxy ([`Server`](super::Server)), and a [`Reconciler`](crate::Reconciler), which works only while it
 //! holds the lease in the hot tier, so that any number of these processes may run over the same
 //! tiers. With `--lock-file` it works only while the process also holds an exclusive lock on
-//! that file (see [`Gate`]): a second process over the same node, started beside the first,
+//! that file (see [`Gate`](super::cli_reconcile::Gate)): a second process over the same node, started beside the first,
 //! serves at once and reconciles when the first has exited. The settings are flags, or one TOML
 //! file given with `--config` (see
 //! [`config`](super::config) for the format, and `--print-config`, which prints the file for
@@ -33,7 +33,7 @@
 //! [`server`](super) docs), such as the key of the daemons that read blobs. The id of a key is
 //! what a request names it by, so the ids must all differ. The file of every key and credential
 //! flag holds the id and the secret either as JSON, `{"access_key_id": "...",
-//! "secret_access_key": "..."}` (the form kbf's pack flags read; tierstore also refuses any other
+//! "secret_access_key": "..."}` (tierstore also refuses any other
 //! field and an empty value), or as two lines, the id and then the secret; it is JSON when its
 //! first byte that is not white space is `{`. Only its owner may read the file (mode 0600 or
 //! 0400), and no message of the process names a secret.
@@ -51,7 +51,7 @@
 //!
 //! `--listen` and `--oci-listen` may each be given more than once (the file's `listen` keys take a
 //! string or a list): a socket is bound for each address, an IPv6 one for IPv6 only (see
-//! [`listen`](super::listen)), and one server, one drain and one limit on connections serve them
+//! [`listen`](super::listen)), and one server and one drain serve them
 //! all. An address given twice is refused with status 2, and a start that cannot bind every address
 //! is refused with status 1. The start line names every address, separated by commas.
 //!
@@ -64,7 +64,7 @@
 //! refused or given with flags that describe the data path.
 //!
 //! Before it opens the proxy or binds the address, the process asks each tier the questions its
-//! guarantees rest on (see [`self_test`]) under a probe key in `_tiering/selftest/` that is
+//! guarantees rest on (see [`self_test`](crate::self_test)) under a probe key in `_tiering/selftest/` that is
 //! new for each start and deleted afterwards. A tier that answers one wrongly (a create-only put
 //! that overwrites, an `If-Match` that is ignored, a range answered with the whole object, a
 //! head with no `Last-Modified`, a listing that ignores `start-after`, and on the cold tier a
@@ -90,39 +90,35 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Parser;
-use tokio::net::TcpListener;
-use tokio::sync::Notify;
 
 use crate::s3::{Capabilities, Credentials, S3Config};
 use crate::{
-    Backend, Check, Clock, DirBackend, MemoryBackend, MonotonicClock, Proxy, ProxyConfig,
-    Reconciler, ReconcilerConfig, S3Backend, SelfTestError, SelfTestOptions, SweepBudget,
-    SystemClock, self_test, settle_conditional_delete, sweep_probes,
+    Backend, Check, Clock, DirBackend, MemoryBackend, ProxyConfig, ReconcilerConfig, S3Backend,
+    SelfTestError, SystemClock,
 };
 
+use super::ServerConfig;
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
 use super::cache_cli::serve_cache_until_signalled;
+use super::cli_heartbeat::HeartbeatFlags;
+pub use super::cli_serve::{Addresses, run, run_serving};
+use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_print::render;
-use super::drain::late_of;
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, server_config};
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
-use super::listen::{bind_all, has_duplicate, joined, local_addrs};
+use super::listen::{has_duplicate, joined};
 use super::local_cache::LocalTierFailure;
-use super::lock::{self, LockFile, check_lock_path};
-use super::oci::{
-    self, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
-};
-use super::stop_watcher::{oci_cut_note, serve_oci, stop_watcher};
+use super::lock::check_lock_path;
+use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use super::update_hook;
-use super::{Drained, Server, ServerConfig};
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -184,7 +180,7 @@ pub struct Cli {
     pub capabilities: bool,
     /// An address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. Give the flag
     /// again for each further address (for instance `0.0.0.0:P` and `[::]:P`, which a firewall
-    /// redirect to the port needs): one server, one drain and one limit on connections serve
+    /// redirect to the port needs): one server and one drain serve
     /// them all. An address that is given twice is refused.
     #[arg(long, value_name = "ADDR", required = true)]
     pub listen: Vec<SocketAddr>,
@@ -301,25 +297,21 @@ pub struct Cli {
     /// `/`; all five required, the lists may be empty but not all three): a header-signed key that
     /// gets, heads and lists under its read prefixes, creates objects and multipart uploads under
     /// its write prefixes (create-only: no `If-Match`, no copy) and deletes objects under its
-    /// delete prefixes; it is refused on a presigned URL. Give the flag once for each such key;
+    /// delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. Give the flag once for each such key;
     /// all key ids must differ. Only its owner may read it (mode 0600).
     #[arg(long)]
     pub scoped_key_file: Vec<PathBuf>,
-    /// A file that holds a grant key: the id and the secret, JSON of exactly `access_key_id` and
-    /// `secret_access_key` or two lines. The key signs no request. It is the key whose signature
-    /// on a read grant (the `x-tierstore-grant` header) the server accepts, and a request with a
-    /// grant that lists an object may get and head that object and nothing else. Give the flag
-    /// once for each such key; all key ids must differ. Only its owner may read it (mode 0600).
-    #[arg(long)]
-    pub grant_key_file: Vec<PathBuf>,
     /// The longest `X-Amz-Expires` that a presigned URL may have, whatever the ceiling of its key
     /// says: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "15m", value_parser = parse_duration)]
     pub presign_max_expires: Duration,
-    /// The longest a read grant may have left to live when the server checks it: a grant that
-    /// ends later than this from now is refused. A number and `ms`, `s`, `m` or `h`.
-    #[arg(long, default_value = "15m", value_parser = parse_duration)]
-    pub grant_max_lifetime: Duration,
+    /// Deprecated and ignored: the read grant was removed (use a presigned GET URL). Accepted, and
+    /// its files are not read, so that a unit that sets it still starts; stderr says it is ignored.
+    #[arg(long)]
+    pub grant_key_file: Vec<PathBuf>,
+    /// Deprecated, and ignored, like `--grant-key-file`: a number and `ms`, `s`, `m` or `h`.
+    #[arg(long, value_parser = parse_duration)]
+    pub grant_max_lifetime: Option<Duration>,
     /// How long, after the drain began, the server goes on serving everything, so that the
     /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
@@ -343,6 +335,8 @@ pub struct Cli {
     /// How often the reconciler works: shorter than `--lease-ttl`.
     #[arg(long, default_value = "5s", value_parser = parse_duration)]
     pub reconcile_interval: Duration,
+    #[command(flatten)]
+    pub heartbeat: HeartbeatFlags,
     /// The lock file of this node: an absolute path on a local file system, in a directory that
     /// nothing removes (not under `/run`), the same for every process of one node. The reconciler
     /// works only while this process holds an exclusive lock on the file; a process that finds
@@ -531,24 +525,24 @@ fn share(percent: u8) -> f64 {
 }
 
 /// What the flags make.
-struct Built {
-    server: ServerConfig,
-    proxy: ProxyConfig,
-    reconciler: ReconcilerConfig,
-    hot: Arc<dyn Backend>,
-    cold: Arc<dyn Backend>,
-    oci: Option<OciSetup>,
+pub(super) struct Built {
+    pub(super) server: ServerConfig,
+    pub(super) proxy: ProxyConfig,
+    pub(super) reconciler: ReconcilerConfig,
+    pub(super) hot: Arc<dyn Backend>,
+    pub(super) cold: Arc<dyn Backend>,
+    pub(super) oci: Option<OciSetup>,
 }
 
 /// The OCI front, as far as the flags and files go: the proxy it reads is not open yet.
 pub(super) struct OciSetup {
     /// The addresses, which are at least one.
-    listen: Vec<SocketAddr>,
+    pub(super) listen: Vec<SocketAddr>,
     /// `None` serves plain HTTP.
-    acceptor: Option<tokio_rustls::TlsAcceptor>,
-    prefix: OciPrefix,
+    pub(super) acceptor: Option<tokio_rustls::TlsAcceptor>,
+    pub(super) prefix: OciPrefix,
     pub(super) metrics: Arc<OciMetrics>,
-    limits: OciLimits,
+    pub(super) limits: OciLimits,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -657,7 +651,7 @@ fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
 }
 
 /// Checks the flags that depend on each other, and makes the settings they stand for.
-fn build(cli: &Cli) -> Result<Built, Error> {
+pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.low_water >= cli.high_water {
         return Err("--low-water must be below --high-water".into());
     }
@@ -673,6 +667,7 @@ fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.s3_request_timeout.is_zero() {
         return Err("--s3-request-timeout must be longer than zero".into());
     }
+    cli.heartbeat.check()?;
     if let Some(path) = &cli.lock_file {
         check_lock_path(path).map_err(|why| format!("--lock-file {path:?} {why}"))?;
     }
@@ -691,6 +686,7 @@ fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
+    cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
@@ -797,392 +793,6 @@ pub(super) fn oci_setup_of(
     }))
 }
 
-/// How long [`reconcile`] waits for the lease to be given up once it is halted.
-const STOP_WAIT: Duration = Duration::from_secs(5);
-
-/// How long a process that does not hold the `--lock-file` waits between two tries of it.
-const LOCK_RETRY: Duration = Duration::from_secs(1);
-
-/// Runs a pass of `reconciler` now and then every `interval`, until `halt` is notified. Then
-/// it gives the lease up. The calls that failed in a pass are reported on stderr.
-///
-/// A halt cuts the pass that is running, so that the process leaves within the drain deadline
-/// whatever the pass is doing. Nothing goes on from a pass that is cut: the copies are
-/// create-only and the checkpoints conditional, so the next reconciler does again what the pass
-/// had not finished.
-pub(crate) async fn reconcile(mut reconciler: Reconciler, interval: Duration, halt: Arc<Notify>) {
-    let _ = run_passes(&mut reconciler, interval, &halt, None).await;
-    let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
-}
-
-/// What ended a run of passes.
-#[derive(Debug, PartialEq, Eq)]
-enum Ended {
-    /// The halt.
-    Halted,
-    /// The lock file at the path is not the file that is held.
-    Lost,
-}
-
-/// Runs passes as [`reconcile`] does, until the halt or, if there is a `lock`, until the lock
-/// file is not the one at its path any more (looked at before each pass).
-async fn run_passes(
-    reconciler: &mut Reconciler,
-    interval: Duration,
-    halt: &Notify,
-    lock: Option<&LockFile>,
-) -> Ended {
-    loop {
-        if lock.is_some_and(|file| !file.is_current()) {
-            return Ended::Lost;
-        }
-        tokio::select! {
-            biased;
-            () = halt.notified() => return Ended::Halted,
-            report = reconciler.pass() => {
-                for error in &report.failed {
-                    eprintln!("tierstore: reconciler: {error}");
-                }
-            }
-        }
-        tokio::select! {
-            () = halt.notified() => return Ended::Halted,
-            () = tokio::time::sleep(interval) => {}
-        }
-    }
-}
-
-/// The lock file a storage node's reconciler works under (`--lock-file`).
-#[derive(Debug)]
-pub(crate) struct Gate {
-    path: PathBuf,
-    /// How long to wait between two tries of a lock that is held by another process.
-    retry: Duration,
-    /// The lock, if the try at the start took it; the reconciler's first run uses it.
-    taken: Option<LockFile>,
-}
-
-impl Gate {
-    /// Opens the lock file at `path` and tries the lock once, now.
-    ///
-    /// # Errors
-    /// What the system said about the file: it cannot be made or opened, it is a link, or it is
-    /// on a network file system.
-    pub(crate) fn open(path: &Path, retry: Duration) -> std::io::Result<Self> {
-        Ok(Self {
-            path: path.to_owned(),
-            retry,
-            taken: lock::try_take(path)?,
-        })
-    }
-}
-
-/// Tries the lock every `retry` until it is taken (`Some`) or `halt` is notified (`None`). A try
-/// that fails is said on stderr and tried again. It runs on a thread that may block, so nothing
-/// waits on the lock on the runtime.
-async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<LockFile> {
-    loop {
-        tokio::select! {
-            biased;
-            () = halt.notified() => return None,
-            () = tokio::time::sleep(retry) => {}
-        }
-        let owned = path.to_owned();
-        let trying = tokio::task::spawn_blocking(move || lock::try_take(&owned));
-        match trying.await.expect("a try of the lock does not panic") {
-            Ok(Some(file)) => return Some(file),
-            Ok(None) => {}
-            Err(why) => eprintln!("tierstore: lock file {}: {why}", path.display()),
-        }
-    }
-}
-
-/// [`reconcile`], but only while this process holds the lock file of `gate`: it does not touch
-/// the tiers (no lease, no pass) until it holds the lock, takes it by trying every
-/// `gate.retry` while another process holds it, and stops (giving the lease up) and waits for the
-/// lock again if the lock file is replaced. It gives the lease up before it lets the lock go,
-/// when it is halted as when the file was replaced, so the process that takes the lock next finds
-/// the lease free at its first pass.
-pub(crate) async fn reconcile_gated(
-    mut reconciler: Reconciler,
-    interval: Duration,
-    halt: Arc<Notify>,
-    mut gate: Gate,
-) {
-    loop {
-        let file = match gate.taken.take() {
-            Some(file) => file,
-            None => match wait_for_lock(&gate.path, gate.retry, &halt).await {
-                Some(file) => file,
-                // Halted before the lock was taken: no lease is held, none was taken since the
-                // last stop.
-                None => return,
-            },
-        };
-        let ended = run_passes(&mut reconciler, interval, &halt, Some(&file)).await;
-        if ended == Ended::Lost {
-            eprintln!(
-                "tierstore: lock file {}: the file was replaced; the reconciler stops until the \
-                 lock is taken again",
-                gate.path.display()
-            );
-        }
-        // The lease first, then the lock: a process waiting for the lock must not get it while
-        // the lease is still held, or its first pass finds the lease taken and does nothing.
-        let _ = tokio::time::timeout(STOP_WAIT, reconciler.stop()).await;
-        drop(file);
-        if ended == Ended::Halted {
-            return;
-        }
-    }
-}
-
-/// The id of a start for the probe keys of its self-test: the proxy id (with any character a
-/// key cannot carry replaced by `_`), the time of the start and the process id, so that two
-/// starts never share a probe key.
-pub(super) fn probe_run_id(proxy_id: &str, now: u64, process: u32) -> String {
-    let safe = |c: char| {
-        if c.is_ascii_alphanumeric() || c == '-' {
-            c
-        } else {
-            '_'
-        }
-    };
-    let proxy: String = proxy_id.chars().map(safe).collect();
-    format!("{proxy}-{now}-{process}")
-}
-
-/// The pause before the first repeat of a check of the self-test that could not reach its tier;
-/// each repeat waits twice as long as the one before.
-const SELF_TEST_FIRST_PAUSE: Duration = Duration::from_secs(1);
-
-/// The longest pause between two attempts at a tier the self-test could not reach.
-const SELF_TEST_MAX_PAUSE: Duration = Duration::from_secs(30);
-
-/// Asks each tier the questions of the self-test, the hot tier first, and says on stderr which
-/// checks the flags leave out, a line before and after each tier with how long it took, and
-/// what the test notes (a check skipped because the tier is full, an attempt repeated, a probe key
-/// not deleted). The cold tier is also asked about multipart uploads, an S3 tier how its conditional
-/// deletes go (never a failure). A tier that did not answer is asked again, after pauses from one
-/// second doubling to thirty, for `wait` (each tier has the whole of it).
-///
-/// # Errors
-/// The [`SelfTestError`] of the first tier to answer a check wrongly (a violation: exit status 3)
-/// or not to answer within `wait` (unreachable: exit status 1).
-async fn probe_tiers(
-    cli: &Cli,
-    hot: &dyn Backend,
-    cold: &dyn Backend,
-    wait: Duration,
-) -> Result<(), Error> {
-    let mut skip = Vec::new();
-    for skipped in &cli.skip_backend_check {
-        eprintln!(
-            "tierstore: skipping the {} check of the tiers: {}",
-            skipped.check, skipped.reason
-        );
-        skip.push(skipped.check);
-    }
-    let run_id = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
-    let hot_name = format!("hot tier {}", cli.hot);
-    let cold_name = format!("cold tier {}", cli.cold);
-    let tiers = [(&hot_name, hot, false), (&cold_name, cold, true)];
-    for (name, backend, multipart) in tiers {
-        let options = SelfTestOptions {
-            name,
-            run_id: &run_id,
-            multipart,
-            skip: &skip,
-            wait,
-            pause: SELF_TEST_FIRST_PAUSE,
-            max_pause: SELF_TEST_MAX_PAUSE,
-        };
-        let note = |line: String| eprintln!("tierstore: {line}");
-        eprintln!("tierstore: testing the {name}");
-        let started = Instant::now();
-        let outcome = self_test(backend, &options, &note).await;
-        let took = started.elapsed().as_millis();
-        eprintln!("tierstore: tested the {name} in {took} ms");
-        outcome?;
-        settle_conditional_delete(backend, &options, &note).await;
-        // Bounded in keys and in time (no delete starts after it), on a clock the machine's clock does not move.
-        let budget = SweepBudget::default();
-        sweep_probes(backend, &options, budget, &MonotonicClock::new(), &note).await;
-    }
-    Ok(())
-}
-
-/// The addresses [`run_serving`] is bound to.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Addresses {
-    /// The S3 front, `/healthz`, `/readyz`, `/usagez` and `/metricz`: the first address of
-    /// [`s3_all`](Self::s3_all).
-    pub s3: SocketAddr,
-    /// Every address the S3 front is bound to, in the order of the `--listen` flags.
-    pub s3_all: Vec<SocketAddr>,
-    /// The OCI read front, if `--oci-listen` was given: the first address of
-    /// [`oci_all`](Self::oci_all).
-    pub oci: Option<SocketAddr>,
-    /// Every address the OCI front is bound to; empty when there is none.
-    pub oci_all: Vec<SocketAddr>,
-    /// How the OCI front carries its connections: `Some` exactly when [`oci`](Self::oci) is.
-    pub oci_mode: Option<OciMode>,
-}
-
-impl Addresses {
-    /// The addresses of the sockets bound: the S3 front's, which are at least one, and the OCI
-    /// front's, if it is served.
-    ///
-    /// # Errors
-    /// A socket's address cannot be read, or the S3 front has none.
-    pub(super) fn of(s3_all: Vec<SocketAddr>, oci: Option<&OciListener>) -> std::io::Result<Self> {
-        let oci_all = oci.map(OciListener::local_addrs).transpose()?;
-        let oci_all = oci_all.unwrap_or_default();
-        let none = || std::io::Error::other("--listen is needed");
-        Ok(Self {
-            s3: s3_all.first().copied().ok_or_else(none)?,
-            s3_all,
-            oci: oci_all.first().copied(),
-            oci_all,
-            oci_mode: oci.map(OciListener::mode),
-        })
-    }
-}
-
-/// Binds the S3 front's sockets, one for each of `addrs`.
-///
-/// # Errors
-/// An address cannot be bound; the message names it.
-pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
-    bind_all(addrs).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
-}
-
-/// Opens the proxy and serves it until `stop` resolves, and then drains.
-///
-/// The tiers are tested first (see [`self_test`]): a tier that fails is an error before the
-/// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over.
-///
-/// # Errors
-/// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
-/// that fails the self-test (a [`SelfTestError`]), a proxy that cannot be opened, or an address
-/// that cannot be bound.
-pub async fn run(
-    cli: &Cli,
-    stop: impl Future<Output = ()> + Send + 'static,
-    ready: impl FnOnce(SocketAddr),
-) -> Result<Drained, Error> {
-    run_serving(cli, stop, |bound| ready(bound.s3)).await
-}
-
-/// [`run`], telling `ready` the address of the OCI front too when it is served.
-///
-/// The OCI front drains as the S3 front does: from the stop on every answer says
-/// `Connection: close`; it keeps serving through `--drain-lb-wait`, then takes no new connection,
-/// closes each idle connection with a lingering close and each other one in the same way once its
-/// answer is out, and waits for them within `--drain-deadline`.
-///
-/// # Errors
-/// As [`run`], and the OCI front's flags and files (see [`OciError`]).
-pub async fn run_serving(
-    cli: &Cli,
-    stop: impl Future<Output = ()> + Send + 'static,
-    ready: impl FnOnce(Addresses),
-) -> Result<Drained, Error> {
-    let mut built = build(cli)?;
-    let gate = open_gate(cli)?;
-    let (hot, cold) = (built.hot.as_ref(), built.cold.as_ref());
-    probe_tiers(cli, hot, cold, cli.backend_check_wait).await?;
-    let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
-    let opened = Proxy::open(hot, cold, built.proxy).await;
-    let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
-    built.server.proxy = Some(Arc::clone(&proxy));
-    let oci_backend: Arc<dyn Backend> = proxy.clone();
-    let server = Server::new(proxy, built.server);
-    let listeners = bind_s3(&cli.listen)?;
-    let oci = bind_oci(built.oci, oci_backend).await?;
-    ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
-    let oci_drain = oci.as_ref().map(OciListener::drain);
-    let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
-    let (watcher, oci_stopped) =
-        stop_watcher(stop, Arc::clone(&server), oci_drain, cli.drain_lb_wait);
-    let halt = Arc::new(Notify::new());
-    let halting = Arc::clone(&halt);
-    let serving = async move {
-        let drained = server.serve_all(listeners).await;
-        halting.notify_one();
-        drained
-    };
-    let oci_serving = serve_oci(oci, oci_stopped);
-    let reconciler = Reconciler::new(built.hot, built.cold, built.reconciler);
-    let interval = cli.reconcile_interval;
-    let reconciling = async move {
-        match gate {
-            Some(gate) => reconcile_gated(reconciler, interval, halt, gate).await,
-            None => reconcile(reconciler, interval, halt).await,
-        }
-    };
-    let (drained, (), oci_cut) = tokio::join!(serving, reconciling, oci_serving);
-    watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
-    Ok(drained)
-}
-
-/// Takes the lock file of the hot tier, if the flags name one: one try now, so that a lock file
-/// that cannot be used stops the start; the reconciler's loop takes it later if another process
-/// holds it now.
-///
-/// # Errors
-/// A lock file that cannot be opened.
-pub(super) fn open_gate(cli: &Cli) -> Result<Option<Gate>, LockFileError> {
-    match &cli.lock_file {
-        Some(path) => match Gate::open(path, LOCK_RETRY) {
-            Ok(gate) => Ok(Some(gate)),
-            Err(source) => Err(LockFileError {
-                path: path.clone(),
-                source,
-            }),
-        },
-        None => Ok(None),
-    }
-}
-
-/// A lock file that cannot be opened: the file and what the system said.
-#[derive(Debug, thiserror::Error)]
-#[error("--lock-file {}: {source}", path.display())]
-pub(super) struct LockFileError {
-    path: PathBuf,
-    source: std::io::Error,
-}
-
-/// What [`run`] reports on stderr of a drain: a line when the drain deadline cut requests, and
-/// nothing when it cut none.
-pub(super) fn cut_note(drained: Drained) -> String {
-    match drained.abandoned {
-        0 => String::new(),
-        cut => format!("tierstore: {cut} requests were cut at the drain deadline\n"),
-    }
-}
-
-/// Binds the OCI front over `backend` as `setup` says: none when there is no setup. The backend
-/// is whatever the node reads from: the proxy of a storage node, the cache of a build node.
-///
-/// # Errors
-/// An address that cannot be bound.
-pub(super) async fn bind_oci(
-    setup: Option<OciSetup>,
-    backend: Arc<dyn Backend>,
-) -> Result<Option<OciListener>, Error> {
-    let Some(setup) = setup else {
-        return Ok(None);
-    };
-    let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
-    let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
-    Ok(Some(bound?))
-}
-
 /// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns.
 pub(super) fn signals() -> std::io::Result<impl Future<Output = ()> + Send + 'static> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -1271,6 +881,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Settings::Storage(cli) if cli.print_config => return print_config(&cli),
         Settings::Storage(cli) => blocking(serve_until_signalled(*cli)),
         Settings::Cache(cache) => blocking(serve_cache_until_signalled(*cache)),
+        Settings::Combined(node) => blocking(serve_combined_until_signalled(*node)),
     };
     match started {
         Ok(()) => ExitCode::SUCCESS,
@@ -1322,6 +933,10 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
             // The `[oci]` table, with the checks a start makes of it.
             oci_setup_of(&cache.oci, &server, false).map(drop)
         }
+        Settings::Combined(combined) => {
+            let server = server_config(&combined.node.front(), clock)?;
+            oci_setup(&combined.node, &server, false).map(drop)
+        }
     }
 }
 
@@ -1369,3 +984,7 @@ mod tests;
 #[cfg(test)]
 #[path = "oci_cli_tests.rs"]
 mod oci_tests;
+
+#[cfg(test)]
+#[path = "grant_cli_tests.rs"]
+mod grant_tests;
