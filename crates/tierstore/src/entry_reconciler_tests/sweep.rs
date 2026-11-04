@@ -30,7 +30,8 @@ async fn a_stray_is_adopted_once_old_enough_and_the_sweep_repeats_only_after_its
         (first.strays_adopted, first.pinned, first.changed),
         (1, 1, 0)
     );
-    assert!(first.progress() && first.failed.is_empty());
+    assert!(first.progress());
+    assert!(first.failed.is_empty());
     assert_eq!(r.strays_adopted(), 1);
     let pause = Duration::from_millis(10);
     assert_eq!(rig.waits.asked(), [pause; 3]);
@@ -38,7 +39,8 @@ async fn a_stray_is_adopted_once_old_enough_and_the_sweep_repeats_only_after_its
         rig.shape("stray").await,
         Some((EntryOp::Put, EntryState::Pending, None))
     );
-    assert!(!rig.cold_has("young").await && rig.entry("young").await.is_none());
+    assert!(!rig.cold_has("young").await);
+    assert!(rig.entry("young").await.is_none());
 
     assert_eq!(
         r.step().await,
@@ -47,7 +49,8 @@ async fn a_stray_is_adopted_once_old_enough_and_the_sweep_repeats_only_after_its
             ..report(1)
         }
     );
-    assert!(rig.cold_has("stray").await && rig.entry("stray").await.is_none());
+    assert!(rig.cold_has("stray").await);
+    assert!(rig.entry("stray").await.is_none());
     assert_eq!(rig.waits.asked().len(), 3);
 
     rig.mono.advance(Duration::from_secs(24 * 3600 - 1));

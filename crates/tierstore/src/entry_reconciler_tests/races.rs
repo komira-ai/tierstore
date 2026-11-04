@@ -60,9 +60,9 @@ async fn a_delete_that_amends_a_copy_in_flight_has_its_entry_released_after_the_
     let held = read(&rig, "p1", "k").await;
     assert_eq!(held.entry.owner.as_deref(), Some("r1"));
     let client = rig.client("p1");
-    let Outcome::Done(amended) = client.advance(&held, Step::AmendCopy).await.unwrap() else {
-        panic!("the amend lost");
-    };
+    let amend = client.advance(&held, Step::AmendCopy).await.unwrap();
+    assert!(matches!(amend, Outcome::Done(_)));
+    let amended = read(&rig, "p1", "k").await;
     assert!(Step::AmendCopy.waits());
     gate.release();
     assert_eq!(step.await, report(1));
@@ -184,7 +184,7 @@ async fn a_cold_publish_and_a_delete_need_the_margin_of_the_lease() {
             if !allowed {
                 assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
                 let again = r.step().await;
-                assert!(again.backed_off == 1 && again.changed == 0);
+                assert_eq!((again.backed_off, again.changed), (1, 0));
                 rig.mono.advance(Duration::from_secs(1));
                 assert_eq!(r.step().await.changed, 1);
                 let moved = if delete {

@@ -201,7 +201,8 @@ async fn nothing_is_done_until_the_format_is_active() {
     let mut r = rig.over(faulty, rig.cold.clone(), "r1", |_| {});
     let failed = r.step().await;
     assert_eq!(failed.failed, [error]);
-    assert!(!failed.active && !failed.held);
+    assert!(!failed.active);
+    assert!(!failed.held);
 }
 
 /// Asserts that a landed put is held by the reconciler, copied to the cold tier, sealed and
@@ -545,6 +546,23 @@ async fn a_delete_whose_cold_call_fails_is_finished_by_a_later_step() {
     rig.mono.advance(Duration::from_secs(1));
     assert_eq!(r.step().await, report(1));
     assert!(!rig.hot_has("k").await && !rig.cold_has("k").await);
+}
+
+/// Asserts that a delete whose call answers that the object is not there is finished all the same:
+/// the entry is removed and nothing fails.
+#[tokio::test]
+async fn a_delete_of_an_object_that_is_already_gone_is_finished() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.plant("k", EntryOp::Del, EntryState::Sealed, None).await;
+    let hot = Arc::new(FaultyBackend::new(rig.hot.clone()));
+    let cold = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let gone = || Error::NotFound("k".to_owned());
+    hot.fail_next_on(Op::Delete, "k", gone());
+    cold.fail_next_with(Op::Delete, gone());
+    let mut r = rig.over(hot, cold, "r1", |_| {});
+    assert_eq!(r.step().await, report(1));
+    assert!(rig.entry("k").await.is_none());
 }
 
 /// Asserts that an item that fails is not tried again before its delay: the delay is one second
