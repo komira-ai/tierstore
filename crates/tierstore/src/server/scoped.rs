@@ -51,7 +51,7 @@ use hyper::Method;
 use hyper::http::request::Parts;
 use serde::Deserialize;
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
+use crate::journal::RESERVED_PREFIXES;
 
 use super::ServerConfig;
 use super::auth::Refusal;
@@ -114,7 +114,7 @@ fn valid_prefix(prefix: &str) -> Result<(), PresignError> {
             "a prefix is not a valid prefix ending in /",
         ));
     }
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX].map(|name| name.trim_end_matches('/'));
+    let reserved = RESERVED_PREFIXES.map(|name| name.trim_end_matches('/'));
     if prefix.split('/').any(|segment| reserved.contains(&segment)) {
         return Err(PresignError::Key(
             "a prefix is, or contains, _journal/ or _tiering/",

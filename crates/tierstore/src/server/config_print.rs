@@ -7,9 +7,8 @@
 use std::path::Path;
 
 use super::cli::Cli;
-use super::config::{
-    ConfigError, Dur, File, Kind, OciTable, PerRun, ServerTable, Size, TierTable, from_text,
-};
+use super::config::{ConfigError, File, Kind, OciTable, PerRun, ServerTable, TierTable, from_text};
+use super::config_units::{Dur, Size};
 use super::listen::Addrs;
 
 /// What the file starts with.

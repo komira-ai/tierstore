@@ -92,7 +92,7 @@ The configuration file ([server/config.rs](../../crates/tierstore/src/server/con
 
 ## 5. How each operation works
 
-The sequences below are for configuration B and are the **decided design** (not built; section 14). Every store call is shown in code order. The proxy refuses a reserved key (section 7) for put, delete and multipart before anything else. A get or head of a reserved key is refused by the S3 front (403); the proxy does not check it. The reserved prefixes are `_entries/`, `_journal/` and `_tiering/`.
+The sequences below are for configuration B and are the **decided design** (not built; section 14). Every store call is shown in code order. The proxy refuses a reserved key (section 7) for get, head, put, delete and multipart before anything else, and leaves reserved keys out of every listing. The reserved prefixes are `_entries/`, `_journal/` and `_tiering/`.
 
 Notation: K is a key, H(K) and C(K) are its objects in hot and cold, E(K) is its entry. An entry is `(op, state, owner)`: `op` is PUT, DEL, CB (copy-back) or EVICT; `state` is HELD (its owner is working on the key), PENDING (the work has landed or been asked for, and it is the leader's turn) or SEALED (the leader is finishing, nobody else may act). Section 6.2 gives the full state machine.
 
@@ -123,6 +123,8 @@ Why this order: one atomic place, the entry, serialises every actor on the key. 
 ### Get
 
 ![Get: hot first, then cold on a miss; no entry is read](diagrams/seq-get.svg)
+
+The front calls `Proxy::open_read(key, span)` once. It gives the object's meta (size, tag, time of last write) and the body as chunks, so the front builds its headers, decides a condition (304, 412) or an unsatisfiable range, and streams the body from one call. `span` is the `Range` header as it came (`first-last`, `first-` or `-count`); the read resolves it against the size it finds. A hit in the hot tier is one call to the hot tier (`hot.open_read`: one GET on S3, one open file on `dir:`), whose body the proxy passes on without holding it. `Proxy::get_stream` is the same read for a byte range and returns the body alone. The numbers below are the numbers of the diagram, which shows `Proxy::get`; `open_read` follows the same steps, with step 1 as `hot.open_read` and the cold read of step 2 as `cold.open_read`, whose meta says whether the object is a reservation. In the current code, before the copy-back below is built, a read of the whole object that misses the hot tier (`open_read`, `get_stream`) is held nowhere: its body is given to the caller as it arrives and the same chunks are queued for a streamed create-only write into the hot tier (`put_stream_tagged`), which runs beside the response, never delays or fails it, and is abandoned if it falls more than 16 MiB behind or the caller drops the body before the last byte (so no partial object is left in the hot tier). A read of a range that misses the hot tier is the cold tier's own stream of the range and copies nothing. `Proxy::get` still holds the object whole when it has no range.
 
 1. **Hot hit.** One hot call, `open_read(key, range)`, returns the tag and the body together, at the client's key. The reply is made at once: **a hot hit is one hot round trip and reads no entry.** A hot error other than not-found is returned as it is; cold is not tried (fail closed).
 2. **Hot miss: read cold.** Straight away, with no entry read (a range reads only the range; the body is streamed). The result stands: the bytes, or 404. **A get never reads the journal entry.** A hot miss is one cold read, plus the copy-back request of step 3.
@@ -174,7 +176,7 @@ Why: cold must hold the object, byte for byte, before the hot copy goes, so a ge
 
 ### List and multipart
 
-A listing is the union of both tiers in key order, the hot entry winning on a duplicate. `list_page` reads the hot tier in as many pages as it takes to find `max_keys` data keys after `start_after`, reads one page from the cold tier, merges and cuts. Hot is read first, so a key evicted between the two calls is still seen in cold. Either tier failing fails the listing. The proxy filters `_entries/`, `_journal/` and `_tiering/` from the hot listing. The S3 front supports `list-type=2`, `prefix`, `max-keys`, `continuation-token` and `start-after`; `delimiter` is not supported.
+A listing is the union of both tiers in key order, the hot entry winning on a duplicate. `list_page` reads the hot tier in as many pages as it takes to find `max_keys` data keys after `start_after`, reads one page from the cold tier, merges and cuts. Hot is read first, so a key evicted between the two calls is still seen in cold. Either tier failing fails the listing. The proxy filters `_entries/`, `_journal/` and `_tiering/` from the listings of both tiers. The S3 front supports `list-type=2`, `prefix`, `max-keys`, `continuation-token` and `start-after`; `delimiter` is not supported.
 
 All multipart calls go to the cold tier; the proxy holds no part. A completion is a put in the sense above: it takes the entry first, checks the hot tier, then calls the cold tier's create-only `complete_upload` as its landing. An upload that dies is found by the reaper with `list_uploads(prefix = K)` and aborted (safe, because the reaper holds the key's entry); the bucket lifecycle rule `AbortIncompleteMultipartUpload` is the backstop, and start-up logs a warning if the cold store reports none.
 
@@ -387,7 +389,7 @@ Each entry is a mechanism and the reason it works. The races between actors are 
 - **An object with no entry.** A hot object with no entry and no cold copy (left by an old binary, or by a landing after a reap) is adopted by the leader with a PENDING entry and replicated (the stray sweep, section 6.6).
 - **Restart.** Nothing is rebuilt. The leader's memory is a bounded set of candidates and timers; the entries and registrations in the hot tier are the only state.
 - **Lease take-over by `If-Match`.** Many processes may find the lease expired or absent at once; create-only, or `If-Match` on the tag just read, lets exactly one succeed. This needs a hot tier whose writes are atomic across processes: an S3 bucket, or a `dir:` tier with its own file lock (section 6.4).
-- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses put, delete and multipart under them, and the S3 front refuses every call on them (403). The proxy filters them from the hot listing.
+- **Reserved prefixes.** `_entries/`, `_journal/` and `_tiering/` hold coordination state in the hot bucket. The proxy refuses get, head, put, delete and multipart under them and leaves them out of the listings of both tiers; the S3 front refuses each supported call on them (403) before the operation's own processing (a request it refuses as unsupported is answered so first), and the local cache refuses reads and writes of them as well, since its upstream may be a plain bucket.
 - **The start-up self-test.** Before any address is bound, each tier is probed (section 9). A store whose create-only put or `If-Match` does not hold, or that recreates a missing key on an `If-Match` put, is refused with exit status 3, so the entry and the lease are never built on a store that cannot keep them.
 - **Fail closed.** A put whose cold HEAD fails fails; a get whose hot read errors does not fall through to cold; a copy-back never fails a read; a node past its `live_until` answers 503 and touches nothing.
 
@@ -574,6 +576,7 @@ The compatibility tests of section 8 run the previous release on directories and
 5. The `if-match-missing` start-up probe. Pull request #93.
 6. `dir:`: the `_entries/` subdirectory and a blocking cross-process file lock, with the compatibility test that the previous release lists such a root.
 7. The test harness: gate backend, injected monotonic clock, recording sleeper, call counting, each with its own tests.
+   Built: `GateBackend` with `Gate` (`Pre` and `Post`, one call per gate), `Mono` (a `Clock` that only `advance` moves), the `Sleeper` trait with `TokioSleeper` and `RecordingSleeper`, and `FaultyBackend::calls_on` and `call_log`. Nothing in production code calls them yet: the `Instant::now()` calls of `tiered.rs` move to `Mono` and the loops to `Sleeper` with the code that needs them. Not built yet: the elapsed future for the per-call timeout and the in-memory backend models of section 13.1.
 
 *Stage 1, entry layer, dark (nothing calls it).*
 

@@ -25,8 +25,8 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
-release along with the file.
+in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
+file.
 
 ## When the puts are at their limit
 
@@ -103,11 +103,10 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 
 What the counts mean:
 
-- An S3 GET reaches the proxy as a head (for the size and the conditions) and then a get. A GET
-  that is answered at the head shows only under `op="head"`: a key that exists nowhere, a
-  conditional that answers 304 or 412, a range that cannot be satisfied. So `op="head"` is a
-  lookup rate: it mixes the client's HEADs with the heads that start every GET. `op="get"`
-  counts only the reads that go on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call),
+  counted under `op="get"` whatever its outcome: a key that exists nowhere, a conditional that
+  answers 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`,
+  and none is counted at `op="head"`. So `op="head"` counts the client's HEADs alone.
 - A hit or a miss is counted when the tier answers, an error when it fails with anything but
   "not found"; an error is neither a hit nor a miss, so a tier that is down does not lower its
   hit rate and shows in `read_errors_total`.

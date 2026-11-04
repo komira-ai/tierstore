@@ -14,8 +14,8 @@
 //!   the version, a step of it sets an `env` of its own (which would change the target, the
 //!   version or a pin of the commands below without changing their text), its `run:` steps are not exactly
 //!   [`build_commands`] in that order (the build, the SBOM, the check of the built binary, the
-//!   package, the unpack of the tarball with the runner's own `tar` and the check of the binary
-//!   unpacked from it), it uses an action other than checkout, a cache restore that restores
+//!   resolution of the build's crates, the third-party licence notice, the package, the unpack of
+//!   the tarball with the runner's own `tar` and the check of the binary unpacked from it), it uses an action other than checkout, a cache restore that restores
 //!   nothing on a push (`lookup-only`), a cache save and the upload, or it uploads another
 //!   artifact than `assets-<platform>` from `dist/`;
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
@@ -125,8 +125,10 @@ pub fn build_commands(b: &Build) -> Vec<String> {
         "cargo xtask build-commit \"target/$TARGET/release/tierstore\" \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\"".to_owned(),
         "cargo cyclonedx --format json --spec-version 1.5 --describe binaries --target \"$TARGET\"".to_owned(),
         "cmp Cargo.lock \"$RUNNER_TEMP/Cargo.lock.release\"".to_owned(),
+        "cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform \"$TARGET\" > \"$RUNNER_TEMP/metadata.json\"".to_owned(),
+        "cargo xtask licenses --metadata \"$RUNNER_TEMP/metadata.json\" --package tierstore --out \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\"".to_owned(),
         format!(
-            "cargo xtask package --binary \"target/$TARGET/release/tierstore\" --sbom crates/tierstore/tierstore_bin.cdx.json --platform {platform} --commit \"$GITHUB_SHA\" --out dist"
+            "cargo xtask package --binary \"target/$TARGET/release/tierstore\" --sbom crates/tierstore/tierstore_bin.cdx.json --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\" --platform {platform} --commit \"$GITHUB_SHA\" --out dist"
         ),
         "mkdir \"$RUNNER_TEMP/unpacked\"".to_owned(),
         format!(

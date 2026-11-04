@@ -17,8 +17,8 @@ use crate::journal::{
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::reservation::RESERVATION_LEN;
 use crate::{
-    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, PartBody,
-    UploadsAfter,
+    Backend, ByteRange, Clock, Error, JournalEntry, JournalOp, Listed, Meta, OpenUpload, Opened,
+    PartBody, ReadBody, Span, UploadsAfter, Window,
 };
 
 /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
@@ -34,6 +34,8 @@ const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
 mod put;
+mod read;
+mod relay;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -146,10 +148,18 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
 ///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A ranged read that misses the hot tier asks the
-///   cold tier for that range alone and copies nothing back: the memory of a read is its range,
-///   whatever the size of the object, and a cache that reads a long object in chunks does not
-///   make the proxy read it whole once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
+///   A failed copy-back does not fail the read. A read through [`Backend::open_read`] or
+///   [`Backend::get_stream`] of the whole object reads the cold object once and gives its body to
+///   the caller as it arrives, never held whole; the same chunks are queued for a streamed
+///   create-only write into the hot tier (`put_stream_tagged`, which gives the hot tag of the
+///   object it made), in a task of its own. The caller is never made to wait for that write: if it
+///   falls more than 16 MiB behind, fails, or the caller drops the body before the last byte (a
+///   client that went away), the write is abandoned and leaves no object, and a body of another
+///   length than the cold meta's is not copied. A read that is not given its body (a 304, a 412)
+///   copies nothing. A ranged read that misses the hot tier asks the cold tier for that range
+///   alone and copies nothing back: the memory of a read is its range, whatever the size of the
+///   object, and a cache that reads a long object in chunks does not make the proxy read it whole
+///   once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
 ///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
 ///   copied back.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
@@ -185,15 +195,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   put that has not written its object yet, and is left (the delete finds no object, so it
 ///   comes before that put).
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
-///   hold the key), in key order, without the keys under the reserved prefixes `_journal/` and
-///   `_tiering/`, and without reservations: a cold object of the size of one that the hot
+///   hold the key), in key order, without the keys under the reserved prefixes
+///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
 ///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
 ///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
 ///   version of an object to know it by). A HEAD that fails fails the listing.
 ///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
 ///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
-///   short is made up from the next). A put or a delete of a key under a reserved prefix is
-///   refused with [`Error::Reserved`].
+///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
+///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
+///   local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -535,6 +546,7 @@ impl Inner {
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<Bytes, Error> {
+        refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
                 self.counters.hit(Tier::Hot, Read::Get);
@@ -573,6 +585,7 @@ impl Inner {
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
+        refuse_reserved(key)?;
         match self.hot.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Hot, Read::Head);
@@ -700,7 +713,8 @@ impl Inner {
             let page = page.await?;
             let full_page = page.len() >= max_keys;
             after = page.last().map(|object| object.key.clone());
-            found.extend(self.visible_all(page, in_hot).await?);
+            let data: Vec<Listed> = page.into_iter().filter(is_data).collect();
+            found.extend(self.visible_all(data, in_hot).await?);
             if !full_page || found.len() >= max_keys {
                 break;
             }
@@ -712,7 +726,8 @@ impl Inner {
     async fn list_objects(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
         let mut in_hot = self.hot.list(prefix).await?;
         in_hot.retain(is_data);
-        let in_cold = self.cold.list(prefix).await?;
+        let mut in_cold = self.cold.list(prefix).await?;
+        in_cold.retain(is_data);
         let in_cold = self.visible_all(in_cold, &in_hot).await?;
         Ok(merge(in_hot, in_cold, usize::MAX))
     }
@@ -804,6 +819,36 @@ impl Backend for Proxy {
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.inner.get_object(key, range).await
+    }
+
+    /// One call to the hot tier on a hit, with the object's meta, and a body that is the hot
+    /// tier's own stream (see `open_object`).
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        self.inner.open_object(key, span).await
+    }
+
+    /// A streamed read: the hot tier's own stream on a hit, and not the object collected as
+    /// [`Backend::get`] gives it. A range of no bytes, or one that starts at or past the end, is
+    /// answered as `get` answers it (an empty body, or an error if it starts past the end), from
+    /// the size the open read gave and with no read of the object collected.
+    async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
+        // A range of no bytes is opened as one of the byte at its start: no body of it is read.
+        let span = range.map(|range| Span::From {
+            first: range.offset(),
+            last: Some(
+                range
+                    .offset()
+                    .saturating_add(range.size().saturating_sub(1)),
+            ),
+        });
+        let opened = self.inner.open_object(key, span).await?;
+        match range {
+            Some(range) if range.size() == 0 || opened.window == Window::Unsatisfiable => {
+                range.within(opened.meta.size)?;
+                Ok(futures::stream::empty().boxed())
+            }
+            _ => Ok(opened.body),
+        }
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

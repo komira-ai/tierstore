@@ -44,17 +44,18 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::de::{self, Visitor};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use super::cli::{
     Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_duration, parse_skip,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION, SkippedCheck, parse_skip,
 };
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
 use super::config_policy::{Policy, check_policies};
 use super::config_unknown::announce_unknown_keys;
+use super::config_syntax::{find_secret, syntax};
+use super::config_units::{Dur, Size};
 use super::front::FrontSettings;
 use super::listen::{Addrs, has_duplicate};
 use super::lock::check_lock_path;
@@ -210,113 +211,6 @@ pub(super) struct PerRun {
     pub drain_lb_wait: Duration,
     /// `--drain-deadline`.
     pub drain_deadline: Duration,
-}
-
-/// A duration in the file: a string such as `250ms` or `15m`, as the flags have it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Dur(pub Duration);
-
-impl<'de> Deserialize<'de> for Dur {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_str(DurVisitor)
-    }
-}
-
-struct DurVisitor;
-
-impl Visitor<'_> for DurVisitor {
-    type Value = Dur;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a duration such as \"15m\" (a number and ms, s, m or h)")
-    }
-
-    fn visit_str<E: de::Error>(self, text: &str) -> Result<Dur, E> {
-        match parse_duration(text) {
-            Ok(duration) => Ok(Dur(duration)),
-            // An invalid value, not a custom message and not the reason of the flag (which holds
-            // the text): the refusal of a file names the key and the kind of value it takes and
-            // never shows what was written (see `syntax`).
-            Err(_) => Err(E::invalid_value(de::Unexpected::Str(text), &self)),
-        }
-    }
-}
-
-impl Serialize for Dur {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&format_duration(self.0))
-    }
-}
-
-/// The duration as the largest of `h`, `m`, `s` and `ms` that holds it in whole numbers, such
-/// that [`parse_duration`] reads the text back to the same duration.
-pub(super) fn format_duration(duration: Duration) -> String {
-    let millis = duration.as_millis();
-    if millis == 0 {
-        return "0s".to_owned();
-    }
-    let units = [(3_600_000, "h"), (60_000, "m"), (1000, "s")];
-    for (size, unit) in units {
-        if millis.is_multiple_of(size) {
-            return format!("{}{unit}", millis / size);
-        }
-    }
-    format!("{millis}ms")
-}
-
-/// A number of bytes in the file: an integer, or a string of a number and `B`, `KiB`, `MiB`,
-/// `GiB` or `TiB`, such as `500GiB`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Size(pub u64);
-
-impl Serialize for Size {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for Size {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(SizeVisitor)
-    }
-}
-
-struct SizeVisitor;
-
-impl Visitor<'_> for SizeVisitor {
-    type Value = Size;
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a number of bytes, or a string such as \"500GiB\"")
-    }
-
-    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Size, E> {
-        match u64::try_from(value) {
-            Ok(bytes) => Ok(Size(bytes)),
-            Err(_) => Err(E::custom("a size is not negative")),
-        }
-    }
-
-    fn visit_str<E: de::Error>(self, text: &str) -> Result<Size, E> {
-        parse_size(text).map(Size).map_err(E::custom)
-    }
-}
-
-/// A size: a whole number and `B`, `KiB`, `MiB`, `GiB` or `TiB`.
-pub(super) fn parse_size(text: &str) -> Result<u64, String> {
-    let bad = || "not a size; use a number and B, KiB, MiB, GiB or TiB, as in 500GiB".to_owned();
-    let unit_at = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
-    let (digits, unit) = text.split_at(unit_at);
-    let count: u64 = digits.parse().map_err(|_| bad())?;
-    let shift = match unit {
-        "B" => 0,
-        "KiB" => 10,
-        "MiB" => 20,
-        "GiB" => 30,
-        "TiB" => 40,
-        _ => return Err(bad()),
-    };
-    count.checked_mul(1 << shift).ok_or_else(bad)
 }
 
 /// What a tier is made of.
@@ -539,128 +433,6 @@ pub(super) fn tier(name: &str, table: &TierTable) -> Result<TierParts, ConfigErr
         region: table.region.clone(),
         credentials_file: table.credentials_file.clone(),
     })
-}
-
-/// Whether a key's name says it holds a secret: it has a word of one, or is a key itself and
-/// not the path of a file. A hint for a message that says what to do, not a gate: what keeps a
-/// secret out of the file is that `find_secret` looks at every key, and the name of a known key
-/// that takes a path (`credentials_file`) cannot tell a path from a secret by its value. The messages
-/// of the file never repeat a value, so a secret that is given anyway is not echoed.
-fn looks_secret(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    if key.ends_with("_file") || key.ends_with("_files") {
-        return false;
-    }
-    let words = [
-        "secret",
-        "password",
-        "passphrase",
-        "token",
-        "credentials",
-        "apikey",
-        "psk",
-    ];
-    words.iter().any(|word| key.contains(word))
-        || key == "key"
-        || key.starts_with("access_key")
-        || key.ends_with("_key")
-}
-
-/// The keys of `[local_cache]` that are in no flag, and so not in [`KEYS`].
-const LOCAL_CACHE_KEYS: &[&str] = &[
-    "path",
-    "layout",
-    "max_concurrent_fills",
-    "max_concurrent_keeps",
-    "keep_wait",
-    "keep_deadline",
-    "write_through",
-    "whole_fill_limit",
-    "scrub_rate",
-    "scrub_min_round",
-];
-
-/// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a
-/// `[local_cache]` key or a `[[policy]]` key.
-fn known_key(key: &str) -> bool {
-    matches!(key, "prefix" | "cache")
-        || LOCAL_CACHE_KEYS.contains(&key)
-        || KEYS
-            .iter()
-            .flat_map(|(_, keys)| keys.iter())
-            .any(|name| name.rsplit('.').next() == Some(key))
-}
-
-/// The fault `error` found in `text`, as a [`ConfigError::Syntax`] that does not repeat the line
-/// or the value (the display of the `toml` error does: it shows the line, and its messages for a
-/// value of the wrong type show the value).
-fn syntax(text: &str, error: &toml::de::Error) -> ConfigError {
-    let at = error.span().map_or(0, |span| span.start).min(text.len());
-    let before = &text.as_bytes()[..at];
-    let line = before.iter().filter(|byte| **byte == b'\n').count() + 1;
-    let column = before
-        .iter()
-        .rev()
-        .take_while(|byte| **byte != b'\n')
-        .count()
-        + 1;
-    let (key, value) = match text.lines().nth(line - 1).and_then(|l| l.split_once('=')) {
-        Some((key, value)) => (Some(key.trim()), value.trim().trim_matches('"')),
-        None => (None, ""),
-    };
-    // Only a name the file can hold is shown as the key: inside a multi-line string the text before
-    // an `=` is part of a value, which may be a pasted secret.
-    let key = key.filter(|key| known_key(key));
-    let message = error.message();
-    let shows_value = [
-        "invalid type",
-        "invalid value",
-        "invalid length",
-        "unknown variant",
-    ];
-    let what = if shows_value.iter().any(|start| message.starts_with(start)) {
-        let expected = message
-            .rsplit_once(", expected ")
-            .map_or("another value", |(_, expected)| expected);
-        let key = key.unwrap_or("a value");
-        format!("{key}: not a value this key takes (it is not shown); expected {expected}")
-    } else {
-        let message = if value.is_empty() {
-            message.to_owned()
-        } else {
-            message.replace(value, "(value)")
-        };
-        // A value's own parse error (a size, a duration, an address) does not name its key.
-        match key {
-            Some(key) => format!("{key}: {message}"),
-            None => message,
-        }
-    };
-    ConfigError::Syntax { line, column, what }
-}
-
-/// Refuses the first key of `table` (and of the tables inside it) that looks like a secret.
-fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
-    for (key, value) in table {
-        let here = if path.is_empty() {
-            key.clone()
-        } else {
-            format!("{path}.{key}")
-        };
-        if looks_secret(key) {
-            return Err(ConfigError::InlineSecret { key: here });
-        }
-        match value {
-            toml::Value::Table(inner) => find_secret(&here, inner)?,
-            toml::Value::Array(items) => {
-                for inner in items.iter().filter_map(toml::Value::as_table) {
-                    find_secret(&here, inner)?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// The addresses of the `listen` key `key`: at least one, and none twice. The message names the

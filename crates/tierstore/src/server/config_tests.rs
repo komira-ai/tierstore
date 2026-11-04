@@ -7,10 +7,8 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use super::{
-    ConfigError, KEYS, PER_RUN, PerRun, format_duration, from_text, keys_for_flags, load,
-    parse_size,
-};
+use super::super::config_units::{format_duration, parse_size};
+use super::{ConfigError, KEYS, PER_RUN, PerRun, from_text, keys_for_flags, load};
 use crate::server::cli::{Cli, parse_duration};
 use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, MINIMAL_FLAGS, golden_flags};
 
