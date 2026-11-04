@@ -17,8 +17,8 @@ use crate::server::{AccessKey, Drained};
 
 use super::super::cli_serve::cut_note;
 use super::{
-    Args, Cli, InvalidFlags, S3Flags, build, exit_status, open_tier, parse_duration, probe_run_id,
-    read_key, share, tier,
+    Args, Cli, InvalidFlags, S3Client, S3Flags, build, exit_status, open_tier, parse_duration,
+    probe_run_id, read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use futures::{StreamExt, TryStreamExt, stream};
 
-use super::{Inner, LISTING_HEADS, is_data};
+use super::{Inner, is_data};
 use crate::reservation::RESERVATION_LEN;
 use crate::{Backend, Error, Listed};
 
@@ -33,7 +33,7 @@ impl Inner {
     }
 
     /// The objects of a cold listing that are objects (see `visible`), in the order given, asking
-    /// about [`LISTING_HEADS`] of them at a time.
+    /// about [`ProxyConfig::listing_heads`] of them at a time.
     async fn visible_all(
         &self,
         listed: Vec<Listed>,
@@ -41,7 +41,10 @@ impl Inner {
     ) -> Result<Vec<Listed>, Error> {
         let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
         let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
-        let checked: Vec<Option<Listed>> = checks.buffered(LISTING_HEADS).try_collect().await?;
+        let checked: Vec<Option<Listed>> = checks
+            .buffered(self.config.listing_heads.max(1))
+            .try_collect()
+            .await?;
         Ok(checked.into_iter().flatten().collect())
     }
 

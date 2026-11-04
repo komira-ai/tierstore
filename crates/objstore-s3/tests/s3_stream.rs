@@ -2,6 +2,12 @@
 //! server on loopback: what each request carries, and how each answer, and each piece of a body,
 //! is read.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 

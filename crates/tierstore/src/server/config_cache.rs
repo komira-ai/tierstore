@@ -69,6 +69,7 @@ use super::config::{
 };
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
+use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
@@ -172,6 +173,9 @@ pub(super) struct CacheSettings {
     pub front: FrontSettings,
     /// The limit on a request to an S3 upstream.
     pub s3_request_timeout: Duration,
+    /// The connect timeout, body rate, idle-connection timeout and read retries of the client of
+    /// the upstream.
+    pub s3_client: S3Client,
     /// The upstream: the spec and the flags of an S3 bucket.
     pub upstream: TierParts,
     /// The cache.
@@ -370,6 +374,7 @@ impl CacheSettings {
         Ok(Self {
             front: shared.front,
             s3_request_timeout: shared.s3_request_timeout,
+            s3_client: shared.s3_client,
             upstream,
             cache: part.config,
             scrub_min_round: part.scrub_min_round,

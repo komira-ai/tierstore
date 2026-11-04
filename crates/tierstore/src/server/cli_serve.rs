@@ -73,7 +73,8 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 /// The tiers are not tested or probed. The proxy is opened over them, which reads and writes the
 /// hot tier's own state, so a hot tier that cannot be reached is an error here; the cold tier is
 /// first asked by the first request that needs it. `ready` is called with the address the server
-/// is bound to, before the first request is taken. Returns when the drain is over.
+/// is bound to, before the first request is taken. Returns when the drain is over. What it says on the
+/// way is `tracing` events: a caller that installs no subscriber sees none of it.
 ///
 /// # Errors
 /// A flag that is not valid with the others, a key file or a tier that cannot be used, a proxy
@@ -141,9 +142,9 @@ pub async fn run_serving(
     };
     let ((drained, oci_cut), ()) = tokio::join!(serving, reconciling);
     watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -195,7 +196,10 @@ pub(super) async fn bind_oci(
     let Some(setup) = setup else {
         return Ok(None);
     };
-    let front = Arc::new(OciFront::new(backend, setup.prefix, setup.metrics));
+    let front = OciFront::new(backend, setup.prefix, setup.metrics)
+        .with_auth(setup.auth)
+        .with_stage_read(setup.stage_read);
+    let front = Arc::new(front);
     let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
     Ok(Some(bound?))
 }

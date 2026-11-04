@@ -16,6 +16,8 @@ publish.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
 objstore-s3 = { workspace = true, features = ["testkit"] }
 rcgen.workspace = true
 # `server` for the binary's own entry point (`server::cli::main`), which `tests/config.rs` runs on

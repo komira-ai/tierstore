@@ -13,6 +13,7 @@ use tierstore_testkit::dir::TestDir;
 use super::cli::{S3Flags, build, check_conditional_delete, exit_status, open_tier};
 use super::config::from_text;
 use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL};
+use super::config_tuning::S3Client;
 use crate::Error;
 
 /// The message of the refusal of this file text.
@@ -172,7 +173,13 @@ async fn the_setting_decides_whether_an_s3_tier_sends_the_delete_with_if_match()
             credentials: Some(credentials.as_path()),
             conditional_delete: setting,
         };
-        let opened = open_tier("--cold", "s3:tier-test", &flags, Duration::from_secs(30));
+        let opened = open_tier(
+            "--cold",
+            "s3:tier-test",
+            &flags,
+            Duration::from_secs(30),
+            &S3Client::default(),
+        );
         let tier = opened.unwrap();
         assert!(s3.requests().is_empty(), "{setting:?}");
         tier.put("k", Bytes::from_static(b"v")).await.unwrap();

@@ -225,7 +225,7 @@ The files are read once; a new certificate takes a restart. A tier's `endpoint` 
 ## The OCI read front
 
 With an `oci` interface in the file (`type = "oci"`) the binary also serves the objects of the store
-as a read-only container registry (`server::oci`), so that podman and other registry clients pull an
+as a container registry (`server::oci`; read-only unless it asks for keys), so that podman and other registry clients pull an
 image by digest from the same tiers. It runs in one of two modes:
 
 - **HTTPS**, with the `tls_cert_file` and `tls_key_file` params, at any address.
@@ -239,9 +239,10 @@ image by digest from the same tiers. It runs in one of two modes:
 The start line and `/metricz` say which mode runs.
 
 The params of an `oci` interface are `port` or `addresses` (where it listens), `tls_cert_file`,
-`tls_key_file`, `prefix`, `max_connections` and `connection_lifetime`: the certificate and the key
-go together and `max_connections` is at least 1. Several `oci` interfaces make one front on every
-address of theirs and must agree on the last five.
+`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth` and `stage_read`
+(the most bytes of a stored chunk a push reads in one call): the certificate and the key go together
+and `max_connections` and `stage_read` are at least 1. Several `oci` interfaces make one front on
+every address of theirs and must agree on all but the addresses.
 
 The front runs on both shapes of the file. On a storage node it reads through the proxy. On a
 build node (`[local_cache]` and `[cold_store]`, see above) the same interfaces, with the same
@@ -251,11 +252,13 @@ manifest is a hit on the disk when the cache holds it, and a miss under a `[[pol
 ` oci-listen=<address> (http|https)`, and `/metricz` shows the OCI block and the cache block.
 
 - `GET` and `HEAD` of `/v2/`, `/v2/<name>/manifests/sha256:<hex>` and
-  `/v2/<name>/blobs/sha256:<hex>`; anything else is 404, and any other method 405.
+  `/v2/<name>/blobs/sha256:<hex>`; anything else is 404, and any other method 405. A front that
+  asks for keys (`params.require_auth`) also takes pushes: monolithic and chunked blob uploads and
+  `PUT` of a manifest, each blob hashed as it is stored.
 - An object is at `<prefix>blobs/sha256/<hex>` (`oci/` by default), manifests included. The
   repository name in a URL is checked against the distribution grammar and then ignored: one
   content-addressed namespace.
-- Anonymous: no token is asked for and `Authorization` is ignored. Only digest-named objects under
+- Anonymous unless `params.require_auth` is true: then Basic login with an access key of the server is required. Otherwise no token is asked for and `Authorization` is ignored. Only digest-named objects under
   the prefix can be read.
 - A manifest is checked against its digest before it is sent; a blob is hashed as it is read and cut
   short, not delivered whole, if it is not its digest. Tags are not served. A manifest is measured

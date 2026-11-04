@@ -8,6 +8,12 @@
 //! hook's account, its state directory and the polkit rule of its account give it what the
 //! design gives it and no more.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

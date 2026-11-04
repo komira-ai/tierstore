@@ -377,6 +377,10 @@ pub fn signed(method: &str, host: &str, key: &str, body: &[u8]) -> Vec<(String, 
 
 /// The time now as SigV4 writes it (`20270115T080000Z`): the servers run on the real clock, and
 /// refuse a request whose time is far from theirs.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the servers under test run on the machine's clock, so the request is signed with it"
+)]
 fn amz_now() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

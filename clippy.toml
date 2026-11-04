@@ -12,6 +12,21 @@ disallowed-methods = [
     { path = "std::env::vars_os", reason = "configuration is a flag, not an environment variable (AGENTS.md S2)" },
     { path = "std::env::set_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
     { path = "std::env::remove_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
+    # A real clock is read in the clock modules only; everything else is handed a clock, so a
+    # test can move time without waiting for it (AGENTS.md T10).
+    { path = "std::time::Instant::now", reason = "read the time through a clock, not the machine's (AGENTS.md T10)" },
+    { path = "std::time::SystemTime::now", reason = "read the time through a clock, not the machine's (AGENTS.md T10)" },
+]
+
+# Operator messages go through `tracing`, not the process's standard streams. The output of a
+# command that answers the person who ran it (`--version`, `--print-config`) and of a build
+# script is not logging; its site says so with `#[expect(clippy::disallowed_macros, reason)]`.
+disallowed-macros = [
+    { path = "std::println", reason = "operator messages go through tracing" },
+    { path = "std::print", reason = "operator messages go through tracing" },
+    { path = "std::eprintln", reason = "operator messages go through tracing" },
+    { path = "std::eprint", reason = "operator messages go through tracing" },
+    { path = "std::dbg", reason = "a debugging aid does not ship" },
 ]
 
 # Tests may `unwrap` and `expect`: a failed one is the failure the test reports. The lints

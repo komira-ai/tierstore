@@ -295,7 +295,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
             credentials,
             conditional_delete: None,
         };
-        let opened = open_tier("--cold", spec, &flags, timeout);
+        let opened = open_tier("--cold", spec, &flags, timeout, &S3Client::default());
         opened.err().expect("refused")
     };
     let no_endpoint = refused("s3:bucket", None, Some(&good));
@@ -331,7 +331,7 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
             credentials,
             conditional_delete: None,
         };
-        let opened = open_tier("--hot", "memory", &flags, timeout);
+        let opened = open_tier("--hot", "memory", &flags, timeout, &S3Client::default());
         let why = opened.err().unwrap();
         assert!(why.contains("--hot"), "{why}");
         assert!(why.contains("s3:<bucket>"), "{why}");
@@ -342,8 +342,10 @@ fn an_s3_tier_that_its_flags_do_not_describe_is_refused() {
         credentials: None,
         conditional_delete: None,
     };
-    assert!(open_tier("--hot", "memory", &none, timeout).is_ok());
-    let unknown = open_tier("--hot", "tape", &none, timeout).err().unwrap();
+    assert!(open_tier("--hot", "memory", &none, timeout, &S3Client::default()).is_ok());
+    let unknown = open_tier("--hot", "tape", &none, timeout, &S3Client::default())
+        .err()
+        .unwrap();
     assert!(unknown.contains("s3:<bucket>"), "{unknown}");
 }
 

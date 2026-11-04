@@ -2,6 +2,12 @@
 //! not signed as the store signs is refused `403 SignatureDoesNotMatch`, whatever way it
 //! falls short, and does nothing.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use objstore_s3::s3::fake::FakeS3;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

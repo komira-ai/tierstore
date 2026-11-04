@@ -2,6 +2,12 @@
 //! shared in one directory with the release before it. The release before is the real `tierstore`
 //! library of its commit (`tierstore_prev`), not a copy of its behaviour.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::Arc;
 
 use bytes::Bytes;
