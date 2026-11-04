@@ -52,7 +52,9 @@ impl Rig {
 
     /// As [`Rig::rounds`], made the way the serving paths make them: with `tuning`.
     fn tuned_rounds(&self, tuning: &EntryTuning) -> Rounds {
-        let config = ReconcilerConfig::new("node/reconciler", BUDGET, self.clock.clone());
+        let mut config = ReconcilerConfig::new("node/reconciler", BUDGET, self.clock.clone());
+        // The usage is paced by the monotonic clock, which the test moves.
+        config.mono = self.clock.clone();
         Rounds::tuned(
             self.hot.clone(),
             self.cold.clone(),
