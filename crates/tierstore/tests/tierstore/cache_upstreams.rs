@@ -10,10 +10,10 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use tierstore::{Backend, ByteRange, Error, MemoryBackend, Proxy, ProxyConfig, TestClock};
+use tierstore::{Backend, ByteRange, Error, MemoryBackend, ProxyConfig, TestClock};
 
 use crate::cache_over_proxy::cache_over;
-use crate::support::{assert_absent, body, chunks, keys_under, read};
+use crate::support::{assert_absent, body, chunks, keys_under, open_live, read};
 
 /// An upstream and the store a test puts the objects it reads in: the store itself, or, behind
 /// the proxy, its cold tier (so that the proxy has to find the object there).
@@ -31,13 +31,14 @@ fn plain() -> Upstream {
     }
 }
 
-/// An in-process proxy over two stores as the upstream; `behind` is its cold tier.
+/// An in-process proxy over two stores as the upstream, live and active at epoch 2 so that it
+/// takes writes; `behind` is its cold tier.
 async fn proxied() -> Upstream {
     let clock = Arc::new(TestClock::new());
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let cold = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let config = ProxyConfig::new("p1", 1 << 20, clock);
-    let proxy = Proxy::open(hot, cold.clone(), config).await.unwrap();
+    let proxy = open_live(hot, cold.clone(), config).await.unwrap();
     Upstream {
         upstream: Arc::new(proxy),
         behind: cold,
