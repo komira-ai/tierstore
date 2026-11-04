@@ -929,7 +929,7 @@ async fn an_upper_case_key_that_fits_only_under_the_old_name_is_kept() {
     assert!(encode(&key).len() > NAME_LIMIT);
     backend.put(&key, body("long")).await.unwrap();
     assert_eq!(backend.get(&key, None).await.unwrap(), body("long"));
-    assert_eq!(names(dir.path()), [key.clone()]);
+    assert_eq!(names(dir.path()), std::slice::from_ref(&key));
     let refused = backend.put(&"A".repeat(NAME_LIMIT + 1), body("x")).await;
     assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
 }
