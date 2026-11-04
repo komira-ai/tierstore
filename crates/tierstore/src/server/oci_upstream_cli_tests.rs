@@ -15,11 +15,11 @@ use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
 
 use super::{Cli, Error, build, exit_status};
+use crate::server::cli_serve::bind_oci;
 use crate::server::config::Dur;
 use crate::server::config_oci::UpstreamTable;
 use crate::server::oci::fake_upstream::{Fake, Registry};
 use crate::server::oci::test_pki::ca;
-use crate::server::cli_serve::bind_oci;
 use crate::{Backend, MemoryBackend};
 
 /// The flags of a start with a plain OCI front on loopback and no upstream.
