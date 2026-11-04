@@ -809,6 +809,10 @@ impl Server {
     /// [`Server::handle`] for a request that came on a connection with this `wire`: a streamed
     /// answer holds the wire until its body is over, so that the drain does not close the
     /// connection in the middle of it.
+    #[expect(
+        clippy::expect_used,
+        reason = "a request id is hex digits, which a header value holds"
+    )]
     async fn handle_on<B>(
         &self,
         request: Request<B>,

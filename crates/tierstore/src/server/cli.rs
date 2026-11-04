@@ -881,6 +881,7 @@ impl Gate {
 /// Tries the lock every `retry` until it is taken (`Some`) or `halt` is notified (`None`). A try
 /// that fails is said on stderr and tried again. It runs on a thread that may block, so nothing
 /// waits on the lock on the runtime.
+#[expect(clippy::expect_used, reason = "a task panic is passed on")]
 async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<LockFile> {
     loop {
         tokio::select! {

@@ -42,6 +42,10 @@ enum Served {
 }
 
 /// `len` bytes of `file` from `offset`, read on a thread that may block.
+#[expect(
+    clippy::expect_used,
+    reason = "a blocking task's panic is a bug, passed on"
+)]
 async fn read_piece(file: Arc<File>, offset: u64, len: u64) -> io::Result<Bytes> {
     let reading = tokio::task::spawn_blocking(move || {
         // `len` is at most a chunk, which memory holds.
@@ -147,6 +151,10 @@ impl Inner {
 
     /// The bytes of `range` of the object as a stream, if it is in the cache: `hit` says whether
     /// this is a read the cache answers on its own (a hit) or the read that follows a fill.
+    #[expect(
+        clippy::expect_used,
+        reason = "a blocking task's panic is a bug, passed on"
+    )]
     pub(super) async fn open_kept(
         self: &Arc<Self>,
         name: &Name,

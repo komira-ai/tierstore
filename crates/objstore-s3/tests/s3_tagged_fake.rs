@@ -2,6 +2,12 @@
 //! the loopback S3 service of `s3::fake`, which has to honour the conditions as S3 does for
 //! the tests of other crates to mean anything.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;

@@ -20,6 +20,11 @@
 //! on the servers' start lines. Each server's settle (`--drain-lb-wait`) is the one real
 //! duration, short and not zero, and no assertion depends on it.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
 #![cfg(target_os = "linux")]
 
 mod checks;

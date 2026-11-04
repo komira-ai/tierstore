@@ -3,6 +3,12 @@
 //! both, the binary's flags start it, and the binary lists `handover-v1` only with the behaviours
 //! the name promises.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 mod binary;
 mod cache_node;
 mod client;

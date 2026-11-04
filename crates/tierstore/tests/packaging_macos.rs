@@ -5,6 +5,12 @@
 //! and the plist, the file, the declaration (`updater.d/tierstore.toml`) and the hook name the
 //! same job, program, account and port, so that none of them can drift from the others.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

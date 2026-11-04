@@ -4,6 +4,12 @@
 //! for a failure, 2 for a usage error) and the words of an error; the logic of each verb is
 //! tested beside it, in the library.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
