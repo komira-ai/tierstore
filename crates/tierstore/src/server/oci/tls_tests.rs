@@ -133,8 +133,8 @@ fn an_expired_certificate_and_an_open_key_are_refused() {
     let ca = ca();
     let names = || vec![ip("127.0.0.1")];
     let past = leaf_with(dir.path(), "past", &ca, names(), |params| {
-        params.not_before = date_time_ymd(2020, 1, 1);
-        params.not_after = date_time_ymd(2021, 1, 1);
+        params.not_before = date_time_ymd(2026, 9, 1);
+        params.not_after = date_time_ymd(2026, 9, 2);
     });
     let future = leaf_with(dir.path(), "future", &ca, names(), |params| {
         params.not_before = date_time_ymd(3000, 1, 1);
@@ -147,7 +147,7 @@ fn an_expired_certificate_and_an_open_key_are_refused() {
         assert!(why.contains("notBefore"), "{why}");
         assert!(why.contains("notAfter"), "{why}");
     }
-    assert!(refusal(&past.cert, &past.key, "127.0.0.1:443").contains("2021"));
+    assert!(refusal(&past.cert, &past.key, "127.0.0.1:443").contains("2026"));
 
     let good = leaf(dir.path(), "good", &ca, names());
     let mode = |bits| std::fs::set_permissions(&good.key, Permissions::from_mode(bits));
