@@ -175,11 +175,12 @@ impl OciAuth {
 }
 
 /// Whether `offered` is `secret`, compared without stopping at the first byte that differs: the
-/// tag of a fixed text under each as an HMAC key is checked by `ring`, whose check takes the same
-/// time whatever the tags are, and whatever the length of the secrets.
+/// tag of each as the message under one fixed HMAC key is taken, and `ring` checks the two tags in
+/// the same time whatever they are. The secrets are messages, not keys, so a secret and the same
+/// secret followed by NUL bytes give different tags.
 fn same_secret(secret: &str, offered: &str) -> bool {
-    const TEXT: &[u8] = b"tierstore oci login";
-    let key = |text: &str| hmac::Key::new(hmac::HMAC_SHA256, text.as_bytes());
-    let offered = hmac::sign(&key(offered), TEXT);
-    hmac::verify(&key(secret), TEXT, offered.as_ref()).is_ok()
+    const KEY: &[u8] = b"tierstore oci login";
+    let key = hmac::Key::new(hmac::HMAC_SHA256, KEY);
+    let offered = hmac::sign(&key, offered.as_bytes());
+    hmac::verify(&key, secret.as_bytes(), offered.as_ref()).is_ok()
 }
