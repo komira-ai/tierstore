@@ -32,6 +32,16 @@ impl Tiers {
         Proxy::open(self.hot.clone(), self.cold.clone(), config).await
     }
 
+    /// As [`Tiers::proxy`], with the monotonic clock of the proxy the same clock as the stores',
+    /// which a test moves by hand.
+    pub async fn proxy_on_clock(&self, id: &str, budget: u64) -> Result<Proxy, Error> {
+        let mut config = ProxyConfig::new(id, budget, self.clock.clone());
+        config.linger = Duration::from_millis(1);
+        config.usage_refresh = Duration::ZERO;
+        config.mono = self.clock.clone();
+        Proxy::open(self.hot.clone(), self.cold.clone(), config).await
+    }
+
     /// A reconciler `holder` for a hot tier of `budget` bytes, with the default lease of 30
     /// seconds.
     pub fn reconciler(&self, holder: &str, budget: u64) -> Reconciler {
