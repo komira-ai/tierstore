@@ -25,8 +25,16 @@
 //!    - `(DEL, PENDING)` and `(DEL, SEALED)`: seal, delete the key from the cold tier and then from
 //!      the hot tier (the margin of the lease checked first), and remove the entry; a delete that
 //!      waits for that removal answers then.
-//!    - `(PUT|CB|EVICT, SEALED)`: removed. `(CB, PENDING)`: sealed and removed without a copy (the
-//!      copy-back of an entry is not done by this release).
+//!    - `(CB, PENDING)`: a copy-back that a read asked for. If it was first seen more than
+//!      [`EntryReconcilerConfig::copy_back_ttl`] ago on this process's monotonic clock, or more than
+//!      [`EntryReconcilerConfig::copy_back_max`] copy-backs are open and it is among the newest, it
+//!      is sealed and removed without a copy. Otherwise it is sealed, and then, under the seal (a
+//!      delete cannot amend a sealed entry, so none can run beside the copy), the cold object the
+//!      key holds now is streamed into the hot tier, create-only, if the hot tier has none; then
+//!      the entry is removed. A cold object that is gone, a hot object that is there, or a hot
+//!      tier that answers full is nothing to copy, and the entry is removed all the same.
+//!    - `(PUT|CB|EVICT, SEALED)`: removed (a copy-back that was sealed is not copied again: a later
+//!      read asks again).
 //!    - `(PUT|DEL, HELD, other)`: nothing while `other` is live; once it has departed (its
 //!      registration is gone, or has stood unchanged for [`EntryReconcilerConfig::departure`] on
 //!      this process's monotonic clock, counted from the first time it was seen), the entry is
@@ -62,7 +70,7 @@ use tokio::sync::Notify;
 
 use crate::backend::Backend;
 use crate::deadline::millis;
-use crate::entry::{Entries, EntryOp};
+use crate::entry::{Entries, EntryOp, entry_key};
 use crate::format::{FormatPhase, read_format};
 use crate::journal::PROXIES_PREFIX;
 use crate::lease::Lease;
@@ -70,6 +78,7 @@ use crate::registrations::Registrations;
 use crate::{Error, ReconcilerConfig, Sleeper, TokioSleeper};
 
 mod backoff;
+mod copy_back;
 mod sweep;
 mod work;
 
@@ -102,6 +111,12 @@ pub struct EntryReconcilerConfig {
     pub stray_grace: Duration,
     /// How often the stray sweep runs, after the one at takeover.
     pub stray_interval: Duration,
+    /// How long a copy-back that was asked for may wait, on this process's monotonic clock from
+    /// the first step that sees it, before it is dropped without a copy.
+    pub copy_back_ttl: Duration,
+    /// The most copy-backs that are copied: the oldest this many, by when they were first seen;
+    /// the rest are dropped without a copy.
+    pub copy_back_max: usize,
     /// The most cold lookups per second of the stray sweep.
     pub stray_rate: u32,
     /// What the loop waits on between steps, and between the lookups of the sweep. The renewal of
@@ -112,7 +127,8 @@ pub struct EntryReconcilerConfig {
 impl EntryReconcilerConfig {
     /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
     /// a retry delay of 1 to 60 seconds, comparisons in ranges of 1 MiB, a stray grace of 10
-    /// minutes, a sweep every 24 hours at up to 100 lookups a second, and a [`TokioSleeper`].
+    /// minutes, a sweep every 24 hours at up to 100 lookups a second, copy-backs kept for 10 minutes and at
+    /// most 1000 of them, and a [`TokioSleeper`].
     #[must_use]
     pub fn new(base: ReconcilerConfig) -> Self {
         Self {
@@ -125,6 +141,8 @@ impl EntryReconcilerConfig {
             compare_range: 1 << 20,
             stray_grace: Duration::from_secs(600),
             stray_interval: Duration::from_secs(24 * 3600),
+            copy_back_ttl: Duration::from_secs(600),
+            copy_back_max: 1000,
             stray_rate: 100,
             waiter: Arc::new(TokioSleeper),
         }
@@ -179,6 +197,10 @@ pub struct EntryReconciler {
     /// When the stray sweep runs next, on the monotonic clock; `None` for at the next step.
     sweep_at: Option<u64>,
     strays_adopted: u64,
+    /// The open copy-backs by key: the nonce of the entry and when it was first seen.
+    copy_backs: BTreeMap<String, (String, u64)>,
+    /// The keys whose copy-back this step drops without a copy (too old, or over the maximum).
+    copy_back_drops: BTreeSet<String>,
 }
 
 impl EntryReconciler {
@@ -211,6 +233,8 @@ impl EntryReconciler {
             retries: BTreeMap::new(),
             sweep_at: None,
             strays_adopted: 0,
+            copy_backs: BTreeMap::new(),
+            copy_back_drops: BTreeSet::new(),
         }
     }
 
@@ -232,6 +256,8 @@ impl EntryReconciler {
         self.retries.clear();
         self.registrations = Registrations::default();
         self.sweep_at = None;
+        self.copy_backs.clear();
+        self.copy_back_drops.clear();
     }
 
     /// Does one step, if the format is active and the lease is held.
@@ -275,6 +301,8 @@ impl EntryReconciler {
         };
         let listed: BTreeSet<&String> = paths.iter().collect();
         self.retries.retain(|path, _| listed.contains(path));
+        self.copy_backs
+            .retain(|key, _| listed.contains(&entry_key(key)));
         let waiting = |path: &String| self.retries.get(path).is_some_and(|r| r.until > now);
         let (backed_off, due): (Vec<String>, Vec<String>) =
             paths.iter().cloned().partition(waiting);
@@ -305,6 +333,7 @@ impl EntryReconciler {
             }
         }
         items.sort_by_key(|(_, seen)| seen.entry.op == EntryOp::Cb);
+        self.note_copy_backs(&items, now);
         let this = &*self;
         let steps = stream::iter(items).map(|(path, seen)| async move {
             let verdict = this.process(&seen, now).await;

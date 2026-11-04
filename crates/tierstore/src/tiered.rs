@@ -33,6 +33,8 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+#[cfg(test)]
+mod copy_back_tests;
 mod entry_put;
 #[cfg(test)]
 mod entry_put_race_tests;
@@ -177,31 +179,17 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// [`Reconciler`](crate::Reconciler) does the flushing from the journals the proxies write.
 ///
 /// - **Get** reads the hot tier, else the cold tier. An object it read from the cold tier is
-///   copied back into the hot tier, create-only (it is fine if another read got there
-///   first), unless the hot tier is above the critical mark; the copy is journaled as a mirror
-///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
-///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
-///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
-///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
-///   made for it. The hot tag is the one the create-only write itself returns
-///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
-///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
-///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A read through [`Backend::open_read`] or
-///   [`Backend::get_stream`] of the whole object reads the cold object once and gives its body to
-///   the caller as it arrives, never held whole; the same chunks are queued for a streamed
-///   create-only write into the hot tier (`put_stream_tagged`, which gives the hot tag of the
-///   object it made), in a task of its own. The caller is never made to wait for that write: if it
-///   falls more than 16 MiB behind, fails, or the caller drops the body before the last byte (a
-///   client that went away), the write is abandoned and leaves no object, and a body of another
-///   length than the cold meta's is not copied. A read that is not given its body (a 304, a 412)
-///   copies nothing. A ranged read that misses the hot tier asks the cold tier for that range
-///   alone and copies nothing back: the memory of a read is its range, whatever the size of the
-///   object, and a cache that reads a long object in chunks does not make the proxy read it whole
-///   once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
-///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
-///   copied back.
+///   copied back into the hot tier, create-only, unless the hot tier is above the critical mark,
+///   and a failed copy-back does not fail the read. Two ways, by the format. Before it is active
+///   the read copies the object itself (the bytes the read gives, queued for a streamed
+///   create-only write into the hot tier in a task of its own, abandoned if it falls more than
+///   16 MiB behind or the caller drops the body) and journals the copy as a mirror (`PutMirror`)
+///   with the cold tier's tag of the bytes it read and the hot tier's tag of the copy, which are
+///   never compared with each other. Once it is active the read copies nothing and reads no entry:
+///   it asks for the copy-back with a create-only `(CB, PENDING)` entry of the key in a task of its
+///   own (nothing happens if an entry exists), and the entry reconciler copies the cold object under
+///   the entry. A read of a range copies nothing back, and neither does a read that is not given
+///   its body (a 304, a 412). A reservation in the cold tier is not an object: not found.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
 ///   not found.
 /// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
@@ -265,7 +253,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///
 /// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
 /// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
-/// key, not in the journal above: see `entry_put.rs`.
+/// key, not in the journal above (`entry_put.rs`), and a read of a cold object asks for a copy-back
+/// on an entry (`copy_back.rs`).
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -293,9 +282,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   hot tier's create-only write alone decides it. For the other keys the race remains: the
 ///   reconciler then counts the cold tier's object as the copy of the hot tier's, and the object
 ///   of the cold tier is the one that stays.
-/// - A get that copies an object back into the hot tier while it is deleted may put it back
-///   there, with a put entry after the delete entry; reads are served that copy until the
-///   reconciler's next pass, which finds the cold tier without the object and drops the mirror.
+/// - Before the format is active, a get that copies an object back into the hot tier while it is
+///   deleted may put it back there, with a put entry after the delete entry; reads are served that
+///   copy until the reconciler's next pass, which finds the cold tier without the object and drops
+///   the mirror. On entries a copy-back lands only under a seal that a delete cannot amend.
 pub struct Proxy {
     inner: Arc<Inner>,
 }
@@ -628,6 +618,8 @@ impl Inner {
         let (body, tag) = self.cold_get(key, None).await?;
         if critical {
             self.counters.skipped(Skipped::Critical);
+        } else if self.entries_active().await {
+            self.ask_copy_back(key);
         } else {
             self.copy_back(key, &body, tag).await;
         }

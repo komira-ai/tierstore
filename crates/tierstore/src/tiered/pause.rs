@@ -51,6 +51,12 @@ impl Inner {
         })
     }
 
+    /// Whether the format says `active`, so that a read of a cold object asks for a copy-back on
+    /// an entry instead of copying it itself. Reads are never paused.
+    pub(super) async fn entries_active(&self) -> bool {
+        self.format_state().await.1
+    }
+
     /// Whether writes are paused and whether they are made on entries, as of a read of the format
     /// object that is at most `format_refresh` old.
     async fn format_state(&self) -> (bool, bool) {

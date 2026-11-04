@@ -46,10 +46,7 @@ impl EntryReconciler {
                 Some(sealed) => self.finish_delete(&sealed).await,
                 None => Ok(Verdict::Changed),
             },
-            (EntryOp::Cb, EntryState::Pending) => match self.seal(seen).await? {
-                Some(sealed) => self.release(&sealed).await,
-                None => Ok(Verdict::Changed),
-            },
+            (EntryOp::Cb, EntryState::Pending) => self.copy_back(seen).await,
             (EntryOp::Del, EntryState::Sealed) => self.finish_delete(seen).await,
             (EntryOp::Put | EntryOp::Cb | EntryOp::Evict, EntryState::Sealed) => {
                 self.release(seen).await
@@ -110,7 +107,7 @@ impl EntryReconciler {
     }
 
     /// Seals the entry, or gives `None` when it changed under the call.
-    async fn seal(&self, seen: &Seen) -> Result<Option<Seen>, Error> {
+    pub(super) async fn seal(&self, seen: &Seen) -> Result<Option<Seen>, Error> {
         match self.entries.advance(seen, Step::Seal).await? {
             Outcome::Done(sealed) => Ok(Some(sealed)),
             Outcome::Lost | Outcome::Refused => Ok(None),
@@ -118,7 +115,7 @@ impl EntryReconciler {
     }
 
     /// Removes a sealed entry.
-    async fn release(&self, sealed: &Seen) -> Result<Verdict, Error> {
+    pub(super) async fn release(&self, sealed: &Seen) -> Result<Verdict, Error> {
         self.entries.release(sealed).await?;
         Ok(Verdict::Changed)
     }
@@ -136,7 +133,7 @@ impl EntryReconciler {
 
     /// Refuses a destructive step or a publish to the cold tier when less than the margin of the
     /// lease is left.
-    fn require_lease(&self) -> Result<(), Error> {
+    pub(super) fn require_lease(&self) -> Result<(), Error> {
         if self.lease.margin_ok() {
             return Ok(());
         }

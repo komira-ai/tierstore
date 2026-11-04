@@ -6,8 +6,9 @@
 //! the entry is sealed). That makes every change of an entry one atomic store call, and a call
 //! that lost a race fails instead of overwriting. This module is the entry's body, its
 //! transitions and the store calls that carry them out. The puts of a proxy whose format is active
-//! use it (`tiered/entry_put.rs`), and so does the entry reconciler
-//! ([`EntryReconciler`](crate::EntryReconciler)); no read or delete does.
+//! use it (`tiered/entry_put.rs`), so do its reads of a cold object, which ask for a copy-back
+//! (`tiered/copy_back.rs`), and so does the entry reconciler
+//! ([`EntryReconciler`](crate::EntryReconciler)); no delete does yet.
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by
