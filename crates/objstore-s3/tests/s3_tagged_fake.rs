@@ -20,6 +20,10 @@ fn key(name: &str) -> ObjectKey {
     ObjectKey::new(name).unwrap()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fake service stamps objects with the machine's time, and the test compares with it"
+)]
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

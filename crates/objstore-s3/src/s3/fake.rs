@@ -194,6 +194,10 @@ impl State {
 }
 
 /// The second the system clock says.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fake service stamps objects with the machine's time, as a real service does"
+)]
 fn system_seconds() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH);
     since.map_or(0, |since| since.as_secs())
@@ -320,6 +324,10 @@ impl FakeS3 {
     ///
     /// # Panics
     /// No loopback port could be bound.
+    #[expect(
+        clippy::expect_used,
+        reason = "a test double: a port that cannot be bound is the failure the test reports, as documented under Panics"
+    )]
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -355,6 +363,10 @@ impl FakeS3 {
     /// # Panics
     /// Never: the configuration is valid.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test double: its configuration is valid, as documented under Panics"
+    )]
     pub fn store(&self, capabilities: Capabilities) -> S3Store {
         S3Store::new(S3Config {
             endpoint: self.endpoint.clone(),

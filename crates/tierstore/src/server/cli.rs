@@ -90,7 +90,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -766,7 +766,7 @@ pub(super) fn oci_setup_of(
         (None, None) => {
             let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
             for warning in warnings.filter(|_| warn) {
-                eprintln!("{warning}");
+                tracing::warn!("{warning}");
             }
             None
         }
@@ -842,7 +842,7 @@ async fn run_passes(
             () = halt.notified() => return Ended::Halted,
             report = reconciler.pass() => {
                 for error in &report.failed {
-                    eprintln!("tierstore: reconciler: {error}");
+                    tracing::warn!("tierstore: reconciler: {error}");
                 }
             }
         }
@@ -893,7 +893,7 @@ async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<Lo
         match trying.await.expect("a try of the lock does not panic") {
             Ok(Some(file)) => return Some(file),
             Ok(None) => {}
-            Err(why) => eprintln!("tierstore: lock file {}: {why}", path.display()),
+            Err(why) => tracing::warn!("tierstore: lock file {}: {why}", path.display()),
         }
     }
 }
@@ -922,7 +922,7 @@ pub(crate) async fn reconcile_gated(
         };
         let ended = run_passes(&mut reconciler, interval, &halt, Some(&file)).await;
         if ended == Ended::Lost {
-            eprintln!(
+            tracing::warn!(
                 "tierstore: lock file {}: the file was replaced; the reconciler stops until the \
                  lock is taken again",
                 gate.path.display()
@@ -977,12 +977,9 @@ pub(super) async fn probe_tiers(
     wait: Duration,
 ) -> Result<(), Error> {
     let mut skip = Vec::new();
-    for skipped in &cli.skip_backend_check {
-        eprintln!(
-            "tierstore: skipping the {} check of the tiers: {}",
-            skipped.check, skipped.reason
-        );
-        skip.push(skipped.check);
+    for SkippedCheck { check, reason } in &cli.skip_backend_check {
+        tracing::info!("tierstore: skipping the {check} check of the tiers: {reason}");
+        skip.push(*check);
     }
     let run_id = probe_run_id(&cli.proxy_id, SystemClock.now(), std::process::id());
     let hot_name = format!("hot tier {}", cli.hot);
@@ -998,12 +995,12 @@ pub(super) async fn probe_tiers(
             pause: SELF_TEST_FIRST_PAUSE,
             max_pause: SELF_TEST_MAX_PAUSE,
         };
-        let note = |line: String| eprintln!("tierstore: {line}");
-        eprintln!("tierstore: testing the {name}");
-        let started = Instant::now();
+        let note = |line: String| tracing::info!("tierstore: {line}");
+        tracing::info!("tierstore: testing the {name}");
+        let started = crate::clock::MonotonicClock::new();
         let outcome = self_test(backend, &options, &note).await;
-        let took = started.elapsed().as_millis();
-        eprintln!("tierstore: tested the {name} in {took} ms");
+        let took = started.now();
+        tracing::info!("tierstore: tested the {name} in {took} ms");
         outcome?;
         settle_conditional_delete(backend, &options, &note).await;
         // Bounded in keys and in time (no delete starts after it), on a clock the machine's clock does not move.
@@ -1125,9 +1122,9 @@ pub async fn run_serving(
     };
     let (drained, (), oci_cut) = tokio::join!(serving, reconciling, oci_serving);
     watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -1205,7 +1202,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        let _ = writeln!(std::io::stdout(), "{line} commit={COMMIT}");
     };
     run_serving(&cli, stop, announce).await?;
     Ok(())
@@ -1225,11 +1222,11 @@ fn capabilities(args: &[OsString]) -> ExitCode {
     match args.iter().skip(1).find(|arg| *arg != "--capabilities") {
         Some(other) => {
             let other = other.to_string_lossy();
-            eprintln!("tierstore: --capabilities takes no other flag, got {other}");
+            tracing::error!("tierstore: --capabilities takes no other flag, got {other}");
             ExitCode::from(2)
         }
         None => {
-            print!("{}", capabilities_text(CAPABILITIES));
+            let _ = write!(std::io::stdout(), "{}", capabilities_text(CAPABILITIES));
             ExitCode::SUCCESS
         }
     }
@@ -1256,7 +1253,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(if usage.use_stderr() { 2 } else { 0 });
         }
         Err(Refused::Config(why)) => {
-            eprintln!("tierstore: {why}");
+            tracing::error!("tierstore: {why}");
             return ExitCode::from(2);
         }
     };
@@ -1284,7 +1281,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             } else {
                 text
             };
-            eprintln!("tierstore: {text}");
+            tracing::error!("tierstore: {text}");
             ExitCode::from(exit_status(&why))
         }
     }
@@ -1301,7 +1298,7 @@ fn check_config(settings: &Settings) -> ExitCode {
     match checked(settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(2)
         }
     }
@@ -1340,13 +1337,13 @@ fn print_config(cli: &Cli) -> ExitCode {
             match std::io::stdout().write_all(text.as_bytes()) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(why) => {
-                    eprintln!("tierstore: --print-config: writing the file: {why}");
+                    tracing::error!("tierstore: --print-config: writing the file: {why}");
                     ExitCode::from(1)
                 }
             }
         }
         Err(why) => {
-            eprintln!("tierstore: {why}");
+            tracing::error!("tierstore: {why}");
             ExitCode::from(2)
         }
     }

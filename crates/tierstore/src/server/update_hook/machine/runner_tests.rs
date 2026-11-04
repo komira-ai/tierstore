@@ -130,6 +130,10 @@ fn boxed<R: Read + Send + 'static>(reader: R) -> Option<Box<dyn Read + Send>> {
     Some(Box::new(reader))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a deadline for a real child process, thirty seconds from now (AGENTS.md T10 follow-up)"
+)]
 fn soon() -> Instant {
     Instant::now() + Duration::from_secs(30)
 }
@@ -172,6 +176,10 @@ impl Read for Blocks {
 /// and that the call then reports that it was not drained. The deadline is the present, so it
 /// has passed when the call looks and no wait is raced.
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a deadline that has already passed, for a real pipe (AGENTS.md T10 follow-up)"
+)]
 fn a_stream_that_does_not_end_is_waited_for_only_until_the_deadline() {
     let (release, wait) = mpsc::channel();
     let drained = drain(boxed(Blocks(wait)));

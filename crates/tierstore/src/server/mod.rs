@@ -848,7 +848,7 @@ impl Server {
     /// Logs a request that was ended because its body stalled.
     fn log_stalled(&self, parts: &Parts, id: &str, why: &str) {
         let (method, path) = (&parts.method, parts.uri.path());
-        eprintln!("tierstore: request {id} ({method} {path}): {why} Closed.");
+        tracing::warn!("tierstore: request {id} ({method} {path}): {why} Closed.");
     }
 
     async fn respond<B>(&self, parts: &Parts, body: B) -> Result<Answer, S3Error>

@@ -46,6 +46,10 @@ impl DerefMut for Reaped {
 }
 
 impl Drop for Reaped {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the grace a child gets to exit is real time: a drop has no clock to read"
+    )]
     fn drop(&mut self) {
         if matches!(self.0.try_wait(), Ok(Some(_))) {
             return;

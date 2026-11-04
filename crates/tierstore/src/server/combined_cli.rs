@@ -27,6 +27,7 @@
 //! stop with the server.
 
 use std::future::Future;
+use std::io::Write as _;
 use std::sync::Arc;
 
 use tokio::sync::Notify;
@@ -126,9 +127,9 @@ pub(super) async fn serve_combined(
         serve_oci(oci, oci_stopped)
     );
     watcher.abort();
-    eprint!("{}", cut_note(drained));
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&cut_note(drained));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -144,7 +145,7 @@ pub(super) async fn serve_combined_until_signalled(
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        let _ = writeln!(std::io::stdout(), "{line} commit={COMMIT}");
     };
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     serve_combined(&settings, disk, stop, announce).await?;

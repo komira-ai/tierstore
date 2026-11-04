@@ -496,6 +496,10 @@ impl DirBackend {
         let uploads = root.join(UPLOADS);
         let made = std::fs::create_dir_all(&uploads);
         made.map_err(io_error(&uploads))?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a name no other open of this directory shares, not a time anyone judges"
+        )]
         let since = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
         let opened = OPENED.fetch_add(1, Ordering::SeqCst);
@@ -813,6 +817,10 @@ impl Backend for DirBackend {
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         self.path(key)?;
         let number = self.counter.fetch_add(1, Ordering::SeqCst);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a name no other upload shares, not a time anyone judges"
+        )]
         let since = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());

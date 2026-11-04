@@ -405,6 +405,10 @@ pub(super) struct Inner {
 /// of the open in nanoseconds and the number of caches opened in this process before it.
 fn stage_prefix() -> String {
     static OPENED: AtomicU64 = AtomicU64::new(0);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a name no other cache shares, not a time anyone judges"
+    )]
     let since = SystemTime::now().duration_since(UNIX_EPOCH);
     let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
     let number = OPENED.fetch_add(1, Ordering::Relaxed);

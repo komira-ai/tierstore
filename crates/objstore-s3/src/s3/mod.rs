@@ -433,7 +433,12 @@ impl Conn {
             Some(k) => format!("/{}/{}", self.bucket, k.as_str()),
             None => format!("/{}", self.bucket),
         };
-        let amz_date = Utc::of(SystemTime::now(), false).amz();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a request is signed with the machine's time, which the service checks; a clock for the store is a follow-up"
+        )]
+        let now = SystemTime::now();
+        let amz_date = Utc::of(now, false).amz();
         headers.push(("x-amz-content-sha256", payload.to_owned()));
         headers.push(("x-amz-date", amz_date.clone()));
         let authorization = Signer {

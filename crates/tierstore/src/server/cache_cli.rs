@@ -44,6 +44,7 @@
 //! write self-test of the upstream are left out there.
 
 use std::future::Future;
+use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -118,11 +119,11 @@ async fn test_upstream(upstream: &dyn Backend, run: &str, spec: &str) -> Result<
         pause: Duration::from_secs(1),
         max_pause: Duration::from_secs(30),
     };
-    let note = |line: String| eprintln!("tierstore: {line}");
-    eprintln!("tierstore: testing the {name} for writes");
+    let note = |line: String| tracing::info!("tierstore: {line}");
+    tracing::info!("tierstore: testing the {name} for writes");
     self_test(upstream, &options, &note).await?;
     settle_conditional_delete(upstream, &options, &note).await;
-    eprintln!("tierstore: tested the {name}");
+    tracing::info!("tierstore: tested the {name}");
     Ok(())
 }
 
@@ -140,7 +141,7 @@ async fn sweep_upstream(upstream: Arc<dyn Backend>, run: String, spec: String) {
         pause: Duration::from_secs(1),
         max_pause: Duration::from_secs(30),
     };
-    let note = |line: String| eprintln!("tierstore: {line}");
+    let note = |line: String| tracing::info!("tierstore: {line}");
     let budget = SweepBudget::default();
     // The budget is a span of time, so it runs on a clock that the machine's clock being set
     // cannot move. The age of a key is judged on the store's clock, inside the sweep.
@@ -190,7 +191,7 @@ pub(super) async fn open(
     // read-only one is on the directory, and the file system, that the holder's check passed.
     match cache.mode() {
         Mode::ReadWrite => check_local(&*disk, cache.path(), run)?,
-        Mode::ReadOnly => eprintln!(
+        Mode::ReadOnly => tracing::warn!(
             "tierstore: local cache at {}: another process holds the lock; read-only, and the \
              file system check is left to it",
             config.path.display()
@@ -210,10 +211,10 @@ pub(super) async fn open(
             return Err(Box::new(InvalidFlags(text)));
         }
         Ok(_) => {}
-        Err(why) => eprintln!("{}", unjudged_warning(&why, cache.path())),
+        Err(why) => tracing::warn!("{}", unjudged_warning(&why, cache.path())),
     }
     let (bytes, objects) = cache.held();
-    eprintln!(
+    tracing::info!(
         "tierstore: local cache at {}: {objects} objects, {bytes} bytes, {} files removed at \
          start, {}",
         config.path.display(),
@@ -298,8 +299,8 @@ pub(super) async fn serve_cache(
     if let Some(sweeping) = sweeping {
         sweeping.abort();
     }
-    eprint!("{}", oci_cut_note(oci_cut));
-    eprint!("{}", late_of(&late_s3, late_oci.as_ref()));
+    super::build_info::stderr_log::notes(&oci_cut_note(oci_cut));
+    super::build_info::stderr_log::notes(&late_of(&late_s3, late_oci.as_ref()));
     Ok(drained)
 }
 
@@ -342,9 +343,9 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        let _ = writeln!(std::io::stdout(), "{line} commit={COMMIT}");
     };
     let drained = run_cache(&settings, stop, announce).await?;
-    eprint!("{}", super::cli::cut_note(drained));
+    super::build_info::stderr_log::notes(&super::cli::cut_note(drained));
     Ok(())
 }
