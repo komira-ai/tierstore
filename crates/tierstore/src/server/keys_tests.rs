@@ -16,8 +16,8 @@ use crate::server::gc::OUT_OF_SCOPE;
 use crate::server::presign::PUT_ONLY;
 
 use super::{
-    AccessKey, DEFAULT_MIN_SECRET_BYTES, Role, ensure_distinct, ensure_secrets_long_enough,
-    read_credentials, read_only_keys,
+    AccessKey, DEFAULT_MIN_SECRET_BYTES, Role, SecretTooShort, ensure_distinct,
+    ensure_secrets_long_enough, read_credentials, read_only_keys,
 };
 
 /// A secret that no message may carry.
@@ -335,9 +335,22 @@ fn a_secret_shorter_than_the_minimum_is_refused_by_exact_message() {
         ("--access-key-file", "AKID", long),
         ("--gc-key-file", "GC1", short),
     ];
-    assert_eq!(ensure_secrets_long_enough(16, keys), Err(want.to_owned()));
+    let short_key = ensure_secrets_long_enough(16, keys).unwrap_err();
+    assert_eq!(short_key.to_string(), want);
+    assert_eq!(
+        short_key,
+        SecretTooShort {
+            flag: "--gc-key-file".to_owned(),
+            id: "GC1".to_owned(),
+            len: 15,
+            min: 16,
+        }
+    );
     let two = [("--gc-key-file", "A", "x"), ("--scoped-key-file", "B", "y")];
     let first = ensure_secrets_long_enough(2, two).unwrap_err();
-    assert!(first.starts_with("--gc-key-file: the secret of the access key \"A\" has 1 bytes"));
-    assert!(!first.contains(short));
+    assert_eq!(
+        first.to_string(),
+        "--gc-key-file: the secret of the access key \"A\" has 1 bytes; at least 2 are required \
+         (--min-secret-bytes)"
+    );
 }

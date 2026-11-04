@@ -145,7 +145,8 @@ pub(super) fn server_config(
                 .iter()
                 .map(|k| ("--grant-key-file", k.id.as_str(), k.secret.as_str())),
         );
-    ensure_secrets_long_enough(front.min_secret_bytes, secrets).map_err(InvalidFlags)?;
+    ensure_secrets_long_enough(front.min_secret_bytes, secrets)
+        .map_err(|short| InvalidFlags(short.to_string()))?;
     let mut server = ServerConfig::new(&front.bucket, &key_id, &secret, clock);
     server.read_only_keys = read_only;
     server.presign_keys = presign;

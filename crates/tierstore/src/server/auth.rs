@@ -19,7 +19,7 @@ use super::keys::Role;
 use super::presign::{self, Grant, PRESIGN_ONLY};
 use super::reply::S3Error;
 use super::request::{header, query_pairs};
-use super::time::{amz_date, parse_amz_date};
+use super::time::parse_amz_date;
 
 /// How far the time of a request may be from the server's, either way.
 const SKEW_MILLIS: u64 = 15 * 60 * 1000;
@@ -335,6 +335,8 @@ pub(crate) fn sign_claiming(
     use bytes::Bytes;
     use http_body_util::Full;
     use hyper::Request;
+
+    use super::time::amz_date;
 
     let (id, secret) = key;
     let stamp = amz_date(config.clock.now());

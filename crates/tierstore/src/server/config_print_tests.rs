@@ -201,7 +201,9 @@ fn keys_of(text: &str) -> BTreeSet<String> {
 #[test]
 fn the_printed_keys_are_the_keys_of_the_table() {
     let mut printed = BTreeSet::new();
-    for flags in [s3_flags(), dir_flags()] {
+    let mut minimum = dir_flags();
+    minimum.push("--min-secret-bytes=24");
+    for flags in [s3_flags(), dir_flags(), minimum] {
         let (cli, _) = parse(flags);
         printed.extend(keys_of(&render(&cli).unwrap()));
     }
@@ -288,4 +290,26 @@ fn the_slot_is_printed_as_a_key_and_loads_back() {
     let (cli, _) = parse(dir_flags());
     let table: toml::Table = toml::from_str(&render(&cli).unwrap()).unwrap();
     assert!(!table["server"].as_table().unwrap().contains_key("slot"));
+}
+
+/// Asserts the compatibility of the minimum secret length in a printed file: the file printed for
+/// the default minimum has no `min_secret_bytes` key, so the previous release, which refuses a key
+/// it does not know, still reads it; a minimum other than the default is printed under
+/// `server.min_secret_bytes` and loads back to the same settings, 0 included.
+#[test]
+fn the_minimum_secret_length_is_printed_only_when_it_is_not_the_default() {
+    let (cli, _) = parse(dir_flags());
+    let text = render(&cli).unwrap();
+    assert!(!text.contains("min_secret_bytes"), "{text}");
+    for minimum in ["24", "0"] {
+        let flag = format!("--min-secret-bytes={minimum}");
+        let mut flags = dir_flags();
+        flags.push(&flag);
+        let (cli, per_run) = parse(flags);
+        let text = render(&cli).unwrap();
+        let line = format!("min_secret_bytes = {minimum}\n");
+        assert!(text.contains(&line), "{text}");
+        let loaded = from_text(&text, per_run).unwrap();
+        assert_eq!(loaded.min_secret_bytes, cli.min_secret_bytes);
+    }
 }

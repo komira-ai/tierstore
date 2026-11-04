@@ -645,6 +645,10 @@ fn syntax(text: &str, error: &toml::de::Error) -> ConfigError {
     ConfigError::Syntax { line, column, what }
 }
 
+/// The one key whose name holds the word `secret` and whose value is a number of bytes, not a
+/// secret.
+const MIN_SECRET_KEY: &str = "server.min_secret_bytes";
+
 /// Refuses the first key of `table` (and of the tables inside it) that looks like a secret.
 fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
     for (key, value) in table {
@@ -653,7 +657,7 @@ fn find_secret(path: &str, table: &toml::Table) -> Result<(), ConfigError> {
         } else {
             format!("{path}.{key}")
         };
-        if looks_secret(key) {
+        if here != MIN_SECRET_KEY && looks_secret(key) {
             return Err(ConfigError::InlineSecret { key: here });
         }
         match value {

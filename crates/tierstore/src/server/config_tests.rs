@@ -850,3 +850,35 @@ fn the_slot_key_makes_the_slot_flag_and_is_a_port() {
     }
     assert!(refusal(&with("0")).contains("server.slot"));
 }
+
+/// Asserts that `server.min_secret_bytes`, a number whose name holds the word `secret`, is read
+/// as a setting and not refused as an inline secret, while the same name in any other table, or
+/// at the top, still is, and a value that is not a count of bytes is refused by its key.
+#[test]
+fn the_minimum_secret_length_is_a_setting_and_no_other_key_of_that_name_is() {
+    let loaded = from_text(
+        &golden_with("min_secret_bytes      = 24", "min_secret_bytes = 7"),
+        DEFAULTS,
+    )
+    .unwrap();
+    assert_eq!(loaded.min_secret_bytes, 7);
+    for table in ["[hot_store]", "[cold_store]"] {
+        let why = refusal(&golden_with(
+            table,
+            &format!("{table}\nmin_secret_bytes = 7"),
+        ));
+        assert!(
+            why.contains(&format!("{}.min_secret_bytes", &table[1..table.len() - 1])),
+            "{why}"
+        );
+        assert!(why.contains("never in the file"), "{why}");
+    }
+    let why = refusal(&format!("min_secret_bytes = 7\n{GOLDEN}"));
+    assert!(why.contains("never in the file"), "{why}");
+    let why = refusal(&golden_with(
+        "min_secret_bytes      = 24",
+        "min_secret_bytes = \"SENTINEL\"",
+    ));
+    assert!(why.contains("min_secret_bytes"), "{why}");
+    assert!(!why.contains("SENTINEL"), "{why}");
+}

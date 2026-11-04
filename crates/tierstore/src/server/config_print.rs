@@ -10,6 +10,7 @@ use super::cli::Cli;
 use super::config::{
     ConfigError, Dur, File, Kind, OciTable, PerRun, ServerTable, Size, TierTable, from_text,
 };
+use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
 
 /// What the file starts with.
@@ -114,7 +115,10 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
         put_min_bytes_per_sec: Some(cli.put_min_bytes_per_sec),
         put_rate_grace: Some(Dur(cli.put_rate_grace)),
         body_idle_timeout: Some(Dur(cli.body_idle_timeout)),
-        min_secret_bytes: Some(cli.min_secret_bytes),
+        // Left out at its default, so that the file printed for default flags is one the previous
+        // release also reads (it refuses a key it does not know).
+        min_secret_bytes: (cli.min_secret_bytes != DEFAULT_MIN_SECRET_BYTES)
+            .then_some(cli.min_secret_bytes),
         s3_request_timeout: Some(Dur(cli.s3_request_timeout)),
         backend_check_wait: Some(Dur(cli.backend_check_wait)),
     };
