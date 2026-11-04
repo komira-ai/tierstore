@@ -136,9 +136,9 @@ fn a_handover_cut_after_any_call_finishes_when_run_again_and_repeats_nothing() {
         assert_eq!(
             kinds(&cut.rig.effects()),
             [
-                "set kbf_guard_tierstore",
+                "set tierstore_guard",
                 format!("start tierstore@{b}.service").as_str(),
-                "set kbf_forward_tierstore",
+                "set tierstore_forward",
                 format!("stop tierstore@{a}.service").as_str(),
             ],
             "cut after call {n}"

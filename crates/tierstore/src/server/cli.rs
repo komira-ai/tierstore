@@ -33,7 +33,7 @@
 //! [`server`](super) docs), such as the key of the daemons that read blobs. The id of a key is
 //! what a request names it by, so the ids must all differ. The file of every key and credential
 //! flag holds the id and the secret either as JSON, `{"access_key_id": "...",
-//! "secret_access_key": "..."}` (the form kbf's pack flags read; tierstore also refuses any other
+//! "secret_access_key": "..."}` (tierstore also refuses any other
 //! field and an empty value), or as two lines, the id and then the secret; it is JSON when its
 //! first byte that is not white space is `{`. Only its owner may read the file (mode 0600 or
 //! 0400), and no message of the process names a secret.

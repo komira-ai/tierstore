@@ -83,7 +83,7 @@ tierstore is a Cargo workspace of Rust crates; these are the rules of its code. 
 
 ## 3. This repository
 
-- B16 BLOCK. kbf/tierstore data paths: action commands run network-less in the job container (explicit logged opt-in only). Outputs are read once (hash and store in one pass), no blob size cap, no whole-file buffering. Jobs write only to their own output path with no delete privilege.
+- B16 BLOCK. tierstore data paths: action commands run network-less in the job container (explicit logged opt-in only). Outputs are read once (hash and store in one pass), no blob size cap, no whole-file buffering. Jobs write only to their own output path with no delete privilege.
 - B17 SHOULD. Host updates use one generic updater with per-service update-hook subcommands declared in a root-owned file; no per-roll scripts or per-service logic in the updater.
 - B10 BLOCK (this repository). Every workflow also has a top-level `permissions: {}`, and a write scope is held only by the jobs, and under the `if:`, that the workflow lint lists for it.
 
