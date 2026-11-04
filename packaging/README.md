@@ -426,7 +426,7 @@ A file has one of three shapes, told apart by its tables: a storage node (`[serv
 and `[cold_store]`, as the flags are, and an optional `[oci]` (the read-only registry front) and
 `[[policy]]`), a build node (`[server]`, `[local_cache]` and `[cold_store]` with no
 `[hot_store]`, an optional `[oci]`, and `[[policy]]`), which is a read cache and has no flag form (see
-"A build node" below), and, on main, a storage node with a cache in front of its own proxy (all
+"A build node" below), and a storage node with a cache in front of its own proxy (all
 three tables, no flag form either; see the end of "A build node"). All three take the same `[oci]`
 table. A file for a storage node:
 
@@ -531,7 +531,7 @@ nothing is kept. A body that is cut leaves nothing at the upstream or in the cac
 `/metricz` has `tierstore_cache_writes_through_total` (puts the upstream took),
 `tierstore_cache_write_exists_total` (puts answered 412) and
 `tierstore_cache_write_keep_skipped_total{reason}` with the reasons `budget` (also a body of no
-declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (on main, not in v0.0.41: the cache does not hold the lock of its directory, so it copies nothing);
+declared length), `io`, `busy`, `head`, `deleted`, `slow` (the disk did not keep up), `deadline` (the copy was abandoned) and `read_only` (the cache does not hold the lock of its directory, so it copies nothing);
 `tierstore_cache_keeps_expired_total` counts the puts answered before their copy was done.
 
 ```toml
@@ -677,7 +677,7 @@ put 403.
 of a read-only key, in practice, or of a key that writes with `write_through`), and without `skip_checks` and the keys of the reconciler. `[server]`
 is as for a storage node, without `backend_check_wait`. A `[[policy]]` with `cache = true` is needed.
 The three tables `[hot_store]`, `[local_cache]` and `[cold_store]` together are a storage node with
-a cache in front of its own proxy (on main, not in v0.0.41): the S3 and OCI fronts read through the
+a cache in front of its own proxy: the S3 and OCI fronts read through the
 cache, the cache reads from and writes to the proxy, `write_through` is true (left out or given;
 `false` is refused), and the start does not run the upstream's self-test (the upstream is the
 proxy, whose tiers the start tests), so the table's `write_through` row below does not apply to it.
@@ -762,9 +762,9 @@ the flags of the binary against this table, so a flag added without a key fails 
 
 | flag | key | what |
 |---|---|---|
-| `--listen` | `server.listen` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses, served by one server (see Filling in the flags) |
+| `--listen` | `server.listen` | the address the S3 API, `/healthz`, `/readyz` and `/usagez` are served on. The flag may be given again, and the key may be a list of addresses, served by one server (see Filling in the flags) |
 | `--proxy-id` | `server.proxy_id` | names the journal and the lease of this process |
-| `--slot` | `server.slot` | on main, not in v0.0.41: the private port of a hand-over slot (1 to 65535), the `slot` label of `tierstore_build_info`; the slot unit passes `--slot %i` |
+| `--slot` | `server.slot` | the private port of a hand-over slot (1 to 65535), the `slot` label of `tierstore_build_info`; the slot unit passes `--slot %i` |
 | `--hot` | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | the hot tier: `kind` is `memory`, `dir` (with `path`) or `s3` (with `bucket`, `endpoint` and `credentials_file`); in a flag, `memory`, `dir:<path>` or `s3:<bucket>` |
 | `--cold` | `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | the cold tier, in the same three kinds |
 | `--hot-endpoint` | `hot_store.endpoint` | `http://host[:port]` of an `s3` hot tier |
@@ -795,7 +795,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--copy-parallel` | `hot_store.copy_parallel` | the most objects the reconciler copies at once |
 | `--lease-ttl` | `hot_store.lease_ttl` | how long the reconciler's lease lasts without a renewal |
 | `--reconcile-interval` | `hot_store.reconcile_interval` | how often the reconciler works |
-| `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles (on main, not in v0.0.41) |
+| `--lock-file` | `hot_store.lock_file` | the lock file the reconciler works under: only the process that holds it reconciles |
 | `--usage-stale-after` | `hot_store.usage_stale_after` | how old the published usage may be before `/usagez` says 503 |
 | `--heartbeat` | `hot_store.heartbeat` | how often a proxy rewrites its registration, and the longest one such call may take (`10s`) |
 | `--departure` | `hot_store.departure` | how long a proxy that is not heard of stays live, less the margin below; only the puts on journal entries (active format) read `Proxy::is_live`, the journal path does not, and registration removal uses the retention below (`60s`; at least six times `--heartbeat`) |
@@ -809,7 +809,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--body-idle-timeout` | `server.body_idle_timeout` | how long a body or an answer may go without a byte |
 | `--skip-backend-check` | `cold_store.skip_checks` | a list of `CHECK=REASON` texts: the start-up check that is left out, with its reason (only `multipart-conditional`; it runs on the cold tier) |
 | `--backend-check-wait` | `server.backend_check_wait` | how long the start-up self-test asks again of a tier that does not answer |
-| `--oci-listen` | `oci.listen` | where the registry front listens; the front is off without the `[oci]` table. On main, not in v0.0.41: the flag may be given again, and the key may be a list of addresses |
+| `--oci-listen` | `oci.listen` | where the registry front listens; the front is off without the `[oci]` table. The flag may be given again, and the key may be a list of addresses |
 | `--oci-tls-cert` | `oci.tls_cert_file` | the certificate chain (PEM) of the front; with `oci.tls_key_file`, or neither |
 | `--oci-tls-key` | `oci.tls_key_file` | the private key (PEM) of the front |
 | `--oci-prefix` | `oci.prefix` | the key prefix the front reads, ending in `/` (`oci/` if left out) |
@@ -823,7 +823,7 @@ the flags (`--drain-lb-wait`, `--drain-deadline` and `--check-config` may go wit
 that the checks of the start make (water marks out of order, a key file others can read) names the
 keys of the file where the flag-mode message names the flags.
 
-`tierstore --capabilities` (on main, not in v0.0.41) prints what this build can do, one
+`tierstore --capabilities` prints what this build can do, one
 capability to a line, and exits with status 0; a build with none prints nothing. It takes no other
 flag and needs none of those a start requires: with any other argument it prints nothing on stdout,
 says on stderr `tierstore: --capabilities takes no other flag, got <argument>`, and exits with
@@ -905,7 +905,7 @@ The unit's `ExecStart=` is a complete command line. The flags to edit:
 
 | flag | what |
 |---|---|
-| `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. On main, not in v0.0.41: give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server and one drain serve them all (connections to the S3 front are not capped; only `--oci-max-connections` caps those of the registry front), an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
+| `--listen` | the address the S3 API, `/healthz` and `/readyz` are served on. Give it again for each further address (for the wildcard of both families, `0.0.0.0:<port>` and `[::]:<port>`; an IPv6 address is bound for IPv6 only, so they do not clash); one server and one drain serve them all (connections to the S3 front are not capped; only `--oci-max-connections` caps those of the registry front), an address given twice is refused (exit 2), and the start line shows them as `listen=<a>,<b>`. A wildcard and a specific address on one port, or one address on both `--listen` and `--oci-listen`, are refused by the system at bind on Linux (exit 1, naming the address); on macOS and the BSDs `SO_REUSEADDR` can let them share the port |
 | `--proxy-id` | names this process's journal and its lease in the hot tier; keep it across restarts, and give each process over the same tiers one of its own |
 | `--bucket` | the name of the one bucket clients see |
 | `--tls-cert`, `--tls-key` | on main, not in v0.0.41. Both or neither (one without the other is refused, exit 2). The certificate chain (leaf first) and the private key, PEM, that make every socket of the S3 front serve HTTPS; without them it serves plain HTTP, and off loopback the start prints one warning line on stderr naming the addresses. The leaf may name the front by a DNS name (any), by an IP address, or both; with no DNS name it needs an IP name for each `--listen` address. A key file that any user can read, a key that is not the certificate's and a leaf that is expired are refused. The files are read once. Tier endpoints are still `http://`, so a build node cannot use an HTTPS front as its upstream |
@@ -1033,7 +1033,7 @@ the front then reads through the node's local cache, not a proxy (see The regist
 
 | flag | what |
 |---|---|
-| `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. On main, not in v0.0.41: give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
+| `--oci-listen ADDR` | where the registry front listens. With `--oci-tls-cert` and `--oci-tls-key` it is HTTPS; with neither it is plain HTTP, at any address; off loopback (127/8 and `::1` are loopback; `0.0.0.0` and `::` are not) the start prints one warning line, and a certificate and key are advised. Give the flag again for each further address; one front, one limit on connections and one drain serve them all, and an address given twice is refused (exit 2); the start line shows them as `oci-listen=<a>,<b> (https)` or `(http)`, and a plain front prints one warning line for each address off loopback |
 | `--oci-tls-cert PATH`, `--oci-tls-key PATH` | both or neither (one without the other is refused at start, exit 2). The certificate chain (leaf first) and the private key, PEM. Clients dial an IP address, so the leaf must carry an IP subjectAltName for `--oci-listen` (for each of them, when it is given more than once; any IP subjectAltName, if the address is `0.0.0.0` or `::`); a certificate without one, one that is expired or not yet valid, a key file any user can read (the "other" mode bits; a group may), or an unreadable file, is refused at start. The files are read once: a new certificate takes a restart, so renew it before it expires |
 | `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
@@ -1196,9 +1196,7 @@ writing, so that the client reads a clean end of stream, and reads until the cli
 seconds at most). A request already on the wire is served, with `Connection: close`, never
 answered 503; one that arrives within a round trip of the end of the stream cannot be answered
 and is counted in `tierstore_drain_late_requests_total`. It waits for the requests in flight and
-the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0. This
-is on main, not in v0.0.41, which answers a request on a connection that is open after the settle
-503 `ServiceUnavailable`. `TimeoutStopSec=` is set above
+the connections for at most `--drain-deadline`, gives up the reconciler's lease and exits 0. `TimeoutStopSec=` is set above
 the sum of the two flags and the lease's wait, so that systemd does not send SIGKILL to a drain
 in progress; if `--drain-deadline` is raised, raise it too. A start that fails is tried again
 after 30 seconds; exit status 2 (a command line the argument parser refused: an unknown flag, a
