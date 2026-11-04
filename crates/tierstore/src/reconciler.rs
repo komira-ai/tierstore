@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
+use tokio::time::Instant;
 
 use crate::backend::ByteRange;
 use crate::journal::{
@@ -17,6 +18,8 @@ use crate::state::{Books, Stream};
 use crate::{
     Backend, Clock, Error, JournalEntry, JournalOp, Meta, MonotonicClock, Sleeper, TokioSleeper,
 };
+
+mod drain;
 
 /// How many times a copy reads the cold tier's object again after it changed under the copy.
 const COPY_ROUNDS: u32 = 3;
@@ -51,6 +54,10 @@ pub struct ReconcilerConfig {
     pub retention: Duration,
     /// The most journal objects asked for in one listing.
     pub page_size: usize,
+    /// How long the format object must have said `drain` (by the monotonic clock of the
+    /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
+    /// (`ProxyConfig::format_refresh`), so that every proxy has stopped writing journals.
+    pub drain_settle: Duration,
     /// The time, for the retention and the usage object. It must agree with the times the hot
     /// tier gives its objects to within the retention. The lease does not use it.
     pub clock: Arc<dyn Clock>,
@@ -67,7 +74,8 @@ impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
     /// retention of an hour, listings of 100 journal objects, a renewal and a margin of a third
-    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime.
+    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime,
+    /// and a drain settle time of 15 seconds.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -81,6 +89,7 @@ impl ReconcilerConfig {
             lease_margin: None,
             retention: Duration::from_secs(3600),
             page_size: 100,
+            drain_settle: Duration::from_secs(15),
             clock,
             mono: Arc::new(MonotonicClock::new()),
             sleeper: Arc::new(TokioSleeper),
@@ -313,6 +322,9 @@ fn millis(duration: Duration) -> u64 {
 ///   itself. One that is applied after more than the retention since that put is applied as a
 ///   plain key's is, which can take an object that a put that went straight to the cold tier made
 ///   after the delete.
+/// - While `_tiering/format` says `drain`, the last step of a pass that had no failure, after
+///   [`ReconcilerConfig::drain_settle`] of seeing it, replaces it by `drained` (see the module
+///   `format`).
 /// - After a restart the journal objects before the position of the stored checkpoint that
 ///   are still younger than the retention are not read again, and are never deleted.
 pub struct Reconciler {
@@ -321,6 +333,8 @@ pub struct Reconciler {
     config: ReconcilerConfig,
     lease: Lease,
     books: Books,
+    /// Since when the format object has said `drain`, as this reconciler has seen it.
+    draining: Option<Instant>,
 }
 
 impl Reconciler {
@@ -339,6 +353,7 @@ impl Reconciler {
             config,
             lease,
             books: Books::default(),
+            draining: None,
         }
     }
 
@@ -358,6 +373,7 @@ impl Reconciler {
     pub async fn stop(&mut self) {
         self.lease.release().await;
         self.books = Books::default();
+        self.forget_drain();
     }
 
     /// Takes the lease, or renews it if less than the margin of it is left, and, if it holds
@@ -366,6 +382,7 @@ impl Reconciler {
     pub async fn pass(&mut self) -> PassReport {
         if !self.lease.ensure().await {
             self.books = Books::default();
+            self.forget_drain();
             return PassReport::default();
         }
         let lease = self.lease.clone();
@@ -400,6 +417,7 @@ impl Reconciler {
             Ok(true) => {}
             Ok(false) => {
                 self.books = Books::default();
+                self.forget_drain();
                 return report;
             }
             Err(error) => {
@@ -411,6 +429,7 @@ impl Reconciler {
             self.persist(id, &mut report).await;
             self.prune(id, &mut report).await;
         }
+        self.settle_drain(&mut report).await;
         self.publish(&mut report).await;
         report
     }

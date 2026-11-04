@@ -65,11 +65,19 @@
 //!   journal objects, and publishes the hot tier's usage and the copy lag. It never lists
 //!   the data prefixes of either tier: it lists `_tiering/proxies/` and the journal prefix of
 //!   each proxy, and reads the journal objects, the checkpoints, the lease and the usage.
+//! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
+//!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
+//!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
+//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
-//! The keys under `_journal/` and `_tiering/` belong to the proxy and the reconciler: a
-//! client put or delete there is refused, and a listing leaves them out.
+//! The keys under `_journal/` and `_tiering/` belong to the proxy and the
+//! reconciler: a client get, head, put, delete or upload there is refused by the [`Proxy`], and
+//! a listing of either tier leaves them out. The S3 front refuses each supported call on them itself,
+//! before the operation's own processing (a request it refuses as unsupported, such as one with a
+//! `versionId`, is answered so first); the local cache refuses them as well, since its upstream
+//! may be a plain bucket.
 //!
 //! Every proxy, reconciler and cache takes its settings as constructor parameters.
 //!
@@ -96,10 +104,16 @@ mod clock;
 #[cfg(test)]
 mod clock_tests;
 mod dir;
+mod entry;
+#[cfg(test)]
+mod entry_tests;
 mod error;
 mod faulty;
 #[cfg(test)]
 mod faulty_tests;
+mod format;
+#[cfg(test)]
+mod format_tests;
 mod gate;
 #[cfg(test)]
 mod gate_tests;
@@ -132,6 +146,10 @@ pub use backend::{Backend, ByteRange, Listed, Meta, OpenUpload, PartBody, ReadBo
 pub use cache::CachedStore;
 pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use dir::DirBackend;
+pub use entry::{
+    Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,
+    encode_entry, entry_key,
+};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
 pub use gate::{Gate, GateBackend, Phase};

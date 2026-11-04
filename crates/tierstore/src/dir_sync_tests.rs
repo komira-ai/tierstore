@@ -329,3 +329,41 @@ async fn the_real_sync_of_a_directory_succeeds_and_of_a_missing_one_fails() {
     let missing = dir.path().join("absent");
     assert!(super::FsyncDir.sync_dir(&missing).await.is_err());
 }
+
+/// The directories that were synced, in order.
+fn synced(seen: &Log) -> Vec<PathBuf> {
+    let seen = seen.lock().unwrap();
+    seen.iter().map(|seen| seen.dir.clone()).collect()
+}
+
+/// Asserts that a call that changes a key under `_entries/` syncs the subdirectory that holds its
+/// file and not the root, whether it is a put, a replacement, a conditional delete or a delete,
+/// and that the root is synced too, once, by the put that made the subdirectory.
+#[tokio::test]
+async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_only_when_it_made_it() {
+    let (dir, backend, seen) = recorded(None, false);
+    let inside = dir.path().join("_entries");
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    assert_eq!(synced(&seen), [dir.path().to_owned(), inside.clone()]);
+    let tag = backend.put_tagged("_entries/b", body("two")).await.unwrap();
+    let tag = backend.put_if_match("_entries/b", body("three"), &tag);
+    let tag = tag.await.unwrap();
+    backend.delete_if_match("_entries/b", &tag).await.unwrap();
+    backend.delete("_entries/a").await.unwrap();
+
+    let mut expected = vec![dir.path().to_owned()];
+    expected.extend(std::iter::repeat_n(inside, 5));
+    assert_eq!(synced(&seen), expected);
+}
+
+/// Asserts that a put that makes the subdirectory of `_entries/` fails, and leaves no object, when
+/// the sync of the root that makes the new subdirectory durable fails.
+#[tokio::test]
+async fn an_entry_put_fails_when_the_sync_of_the_new_subdirectory_fails() {
+    let (_dir, backend, _seen) = recorded(None, true);
+    let refused = backend.put("_entries/a", body("one")).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    let listed = backend.list("_entries/").await.unwrap();
+    assert!(listed.is_empty());
+}
