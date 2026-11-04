@@ -19,8 +19,7 @@
 //! bucket or the service, a multipart call, and a query parameter beyond the six of SigV4 and
 //! `x-id` are `403 AccessDenied`. The URL has the rights of its key and no more: a URL of the
 //! full or a read-only key may read any object a client may read, and a URL of a scoped key only
-//! an object under one of the key's read prefixes. A scoped key with no read prefix (a GC key) signs no URL. A URL is good for at
-//! most [`ServerConfig::presign_max_expires`] (15 minutes by default) from its `X-Amz-Date`, and
+h//! most [`ServerConfig::presign_max_expires`] (15 minutes by default) from its `X-Amz-Date`, and
 //! is refused from the second `X-Amz-Date + X-Amz-Expires` on. Every request is checked on its
 //! own (each part of a parallel download is a request), so a URL serves any number of requests
 //! until it expires. It is a bearer credential: whoever holds the URL can use it until then, so
@@ -85,7 +84,7 @@ use hyper::http::request::Parts;
 use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX, is_reserved};
+use crate::journal::{RESERVED_PREFIXES, is_reserved};
 
 use super::ServerConfig;
 use super::auth::{
@@ -204,8 +203,11 @@ pub fn validate_prefix(prefix: &str) -> Result<(), PresignError> {
         return Err(PresignError::Name("starts with /"));
     }
     check_name(prefix)?;
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    if is_reserved(prefix) || reserved.iter().any(|name| name.starts_with(prefix)) {
+    if is_reserved(prefix)
+        || RESERVED_PREFIXES
+            .iter()
+            .any(|name| name.starts_with(prefix))
+    {
         return Err(PresignError::Name("reserved"));
     }
     Ok(())
@@ -491,9 +493,7 @@ struct Signer<'a> {
 }
 
 impl<'a> Signer<'a> {
-    /// The key with this id: a presigning key, or the full, a read-only or a scoped key that
-    /// has a read prefix. A scoped key with none (a GC key is one) signs no URL.
-    fn of(config: &'a ServerConfig, id: &str) -> Option<Self> {
+h    fn of(config: &'a ServerConfig, id: &str) -> Option<Self> {
         if let Some(key) = config.presign_key(id) {
             return Some(Self {
                 secret: &key.key.secret,
@@ -503,14 +503,7 @@ impl<'a> Signer<'a> {
             });
         }
         let (secret, role) = config.key(id)?;
-        // `config.key` gives the full, a read-only or a scoped role: only a scoped key may have
-        // no read right.
-        let reads = match &role {
-            Role::Scoped(scopes) => scopes.reads(),
-            _ => true,
-        };
-        reads.then_some(Self {
-            secret,
+h            secret,
             role,
             grant: None,
             max_expires_secs: MAX_EXPIRES_SECS,

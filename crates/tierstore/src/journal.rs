@@ -6,7 +6,11 @@
 //!   object holds it, so the objects that exist have no gaps above the checkpoint of the
 //!   reconciler; the ones at or below it may have been deleted.
 //! - `_tiering/proxies/<proxy_id>`: written when a proxy starts, so that the reconciler finds
-//!   the journals without listing the journal prefix of every proxy.
+//!   the journals without listing the journal prefix of every proxy. Its body is a JSON
+//!   registration (`proto`, `boot`, `hb`), which a proxy that heartbeats rewrites every
+//!   heartbeat; an empty body is the registration of an older release. The reconciler removes
+//!   the registration of a proxy that heartbeated, has left no journal object and has not
+//!   changed for a long time.
 //! - `_tiering/checkpoint/<proxy_id>`: a [`Checkpoint`], rewritten by the reconciler, never to a
 //!   lower value.
 //! - `_tiering/usage`: the usage the reconciler publishes, for the proxies.
@@ -28,10 +32,14 @@ pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 /// The lease of the reconciler.
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
+/// Every prefix that the proxy keeps for itself: no client names a key under one.
+pub(crate) const RESERVED_PREFIXES: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
+
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    reserved.iter().any(|prefix| key.starts_with(prefix))
+    RESERVED_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 /// The prefix of the journal objects of one proxy.

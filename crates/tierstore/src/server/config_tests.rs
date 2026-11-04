@@ -7,10 +7,8 @@ use std::time::Duration;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
 
-use super::{
-    ConfigError, KEYS, PER_RUN, PerRun, format_duration, from_text, keys_for_flags, load,
-    parse_size,
-};
+use super::super::config_units::{format_duration, parse_size};
+use super::{ConfigError, KEYS, PER_RUN, PerRun, from_text, keys_for_flags, load};
 use crate::server::cli::{Cli, parse_duration};
 use crate::server::config_testing::{DEFAULTS, GOLDEN, MINIMAL, MINIMAL_FLAGS, golden_flags};
 
@@ -400,6 +398,10 @@ fn the_keys_only_one_tier_has_are_refused_in_the_other() {
         "usage_stale_after = \"1s\"",
         "journal_linger = \"1s\"",
         "journal_retention = \"1s\"",
+        "heartbeat = \"1s\"",
+        "departure = \"1s\"",
+        "deadline_margin = \"1s\"",
+        "registration_retention = \"1s\"",
     ];
     for line in every {
         let text = minimal_with(

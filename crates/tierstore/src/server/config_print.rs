@@ -7,9 +7,8 @@
 use std::path::Path;
 
 use super::cli::Cli;
-use super::config::{
-    ConfigError, Dur, File, Kind, OciTable, PerRun, ServerTable, Size, TierTable, from_text,
-};
+use super::config::{ConfigError, File, Kind, OciTable, PerRun, ServerTable, TierTable, from_text};
+use super::config_units::{Dur, Size};
 use super::listen::Addrs;
 
 /// What the file starts with.
@@ -82,6 +81,7 @@ pub(super) fn render(cli: &Cli) -> Result<String, ConfigError> {
     hot.usage_stale_after = Some(Dur(cli.usage_stale_after));
     hot.journal_linger = Some(Dur(cli.journal_linger));
     hot.journal_retention = Some(Dur(cli.journal_retention));
+    cli.heartbeat.put_in(&mut hot);
     let cold_s3 = S3Flags {
         endpoint: cli.cold_endpoint.as_deref(),
         region: cli.cold_region.as_deref(),

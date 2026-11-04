@@ -10,7 +10,7 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 | read-only | `--read-only-key-file` | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket; also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
 | presigning | `--presign-key-file` | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
 | GC | `--gc-key-file` | `server.gc_key_files` | a scoped key with a list, a delete and an abort right on one prefix: list, head, delete and abort uploads under it, and nothing else; it never reads a body |
-| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, list, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
+| scoped | `--scoped-key-file` | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
 | hot tier credential | `--hot-credentials-file` | `hot_store.credentials_file` | not a client key: what tierstore signs its own requests to an `s3` hot tier with |
 | cold tier credential | `--cold-credentials-file` | `cold_store.credentials_file` | not a client key: the same for an `s3` cold tier |
 
