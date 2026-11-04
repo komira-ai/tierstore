@@ -60,6 +60,7 @@ pub(super) struct Params {
     pub prefix: Option<String>,
     pub max_connections: Option<u32>,
     pub connection_lifetime: Option<Dur>,
+    pub require_auth: Option<bool>,
 }
 
 /// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
@@ -115,6 +116,7 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
         ("prefix", params.prefix.is_some()),
         ("max_connections", params.max_connections.is_some()),
         ("connection_lifetime", params.connection_lifetime.is_some()),
+        ("require_auth", params.require_auth.is_some()),
     ];
     super::config::refuse(&place, "not for type \"s3\"", &others)
 }
@@ -144,6 +146,7 @@ fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags
         prefix: params.prefix.clone(),
         max_connections,
         connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
+        require_auth: params.require_auth.unwrap_or(false),
     })
 }
 
@@ -161,6 +164,7 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
             "connection_lifetime",
             first.connection_lifetime == next.connection_lifetime,
         ),
+        ("require_auth", first.require_auth == next.require_auth),
     ];
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
 }
@@ -258,7 +262,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             Some((first_at, first)) => {
                 if let Some(name) = differing(first, &this) {
                     let why = format!(
-                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections and connection_lifetime"
+                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime and require_auth"
                     );
                     return Err(invalid(&format!("{at}.params.{name}"), why));
                 }

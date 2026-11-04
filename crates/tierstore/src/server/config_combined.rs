@@ -90,6 +90,7 @@ fn oci_flags(node: &Cli) -> OciFlags {
         prefix: node.oci_prefix.clone(),
         max_connections: node.oci_max_connections,
         connection_lifetime: node.oci_connection_lifetime,
+        require_auth: node.oci_require_auth,
     }
 }
 

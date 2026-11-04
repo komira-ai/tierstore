@@ -38,7 +38,8 @@
 //!
 //! An `oci` interface adds a fourth thing: a read-only OCI distribution front (see
 //! [`oci`](super::oci)), served from the same proxy, so that podman pulls an image by digest from
-//! the tiers. With `params.tls_cert_file` and `params.tls_key_file` it is HTTPS (the certificate must carry an
+//! the tiers; with `params.require_auth` it asks each client for an access key (HTTP Basic), and
+//! plain HTTP off loopback is then refused. With `params.tls_cert_file` and `params.tls_key_file` it is HTTPS (the certificate must carry an
 //! IP subjectAltName for the address and be valid now, and the key file must not be readable by
 //! every user; the start checks). With neither it is plain HTTP, at any address; off loopback
 //! the start prints one warning line on stderr, and a certificate is advised. One of the two
@@ -113,7 +114,7 @@ use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
-use super::oci::{self, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
+use super::oci::{self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix};
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -382,7 +383,7 @@ pub struct Cli {
     /// Serves a read-only OCI distribution front at this address, from the same tiers (see the
     /// [`oci`](super::oci) docs): `GET` and `HEAD` of `/v2/`, of `/v2/<name>/manifests/<digest>`
     /// and of `/v2/<name>/blobs/<digest>`, so that podman and other registry clients pull an
-    /// image by digest. Anonymous: no token is ever asked for. Objects are read at
+    /// image by digest. Anonymous unless `params.require_auth` is true. Objects are read at
     /// `<params.prefix>blobs/sha256/<hex>`. With `params.tls_cert_file` and `params.tls_key_file` it is
     /// HTTPS, and clients dial an IP address, so the certificate must carry an IP subjectAltName
     /// for this address (any IP, if it is unspecified), which the start checks. With neither it
@@ -413,6 +414,12 @@ pub struct Cli {
     /// send a request, and the time it may leave an answer unread, are those of the S3 front's
     /// timeouts (a minute, and `server.body_idle_timeout`).
     pub oci_connection_lifetime: Option<Duration>,
+    /// `params.require_auth`: asks each client of the OCI front for an access key of this server (HTTP Basic: the id
+    /// as the user name, the secret as the password), and answers 401 without one. A key that
+    /// reads (the read-only key, the full key, a scoped key with a read prefix over the front's
+    /// objects) may pull, and one that writes (the full key, a scoped key with such a write
+    /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
+    pub oci_require_auth: bool,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -494,6 +501,8 @@ pub(super) struct OciSetup {
     pub(super) prefix: OciPrefix,
     pub(super) metrics: Arc<OciMetrics>,
     pub(super) limits: OciLimits,
+    /// The keys the front asks of a client, with `params.require_auth`; `None` serves anonymously.
+    pub(super) auth: Option<OciAuth>,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -685,6 +694,7 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         prefix: cli.oci_prefix.clone(),
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime,
+        require_auth: cli.oci_require_auth,
     };
     oci_setup_of(&flags, server, warn)
 }
@@ -708,6 +718,18 @@ pub(super) fn oci_setup_of(
     }
     let prefix = flags.prefix.as_deref().unwrap_or(DEFAULT_OCI_PREFIX);
     let prefix = OciPrefix::new(prefix).map_err(refuse)?;
+    let plain = flags.tls_cert.is_none() && flags.tls_key.is_none();
+    let in_the_clear = listen
+        .iter()
+        .find(|addr| oci::plain_warning(**addr).is_some());
+    if let (true, true, Some(addr)) = (flags.require_auth, plain, in_the_clear) {
+        let why = format!(
+            "--oci-require-auth sends each client's secret as HTTP Basic, which plain HTTP at \
+             {addr} would carry in the clear: give --oci-tls-cert and --oci-tls-key, or listen \
+             on loopback"
+        );
+        return Err(InvalidFlags(why).into());
+    }
     let acceptor = match (&flags.tls_cert, &flags.tls_key) {
         (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refuse)?),
         (None, None) => {
@@ -742,6 +764,7 @@ pub(super) fn oci_setup_of(
         prefix,
         metrics: Arc::new(OciMetrics::with_mode(mode)),
         limits,
+        auth: flags.require_auth.then(|| OciAuth::from_server(server)),
     }))
 }
 

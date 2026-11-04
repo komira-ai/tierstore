@@ -33,18 +33,24 @@ pub(super) enum Outcome {
     NotAllowed,
     /// 416.
     Unsatisfiable,
+    /// 401: no key of the server, or a wrong secret.
+    Unauthorized,
+    /// 403: a key of the server that lacks the right the call needs.
+    Denied,
     /// 5xx: a store that failed, an object that is not what its name says.
     Failed,
 }
 
 /// The label of each outcome, in the order of [`Outcome`].
-const OUTCOMES: [&str; 7] = [
+const OUTCOMES: [&str; 9] = [
     "ok",
     "partial",
     "not_found",
     "invalid",
     "not_allowed",
     "range_not_satisfiable",
+    "unauthorized",
+    "denied",
     "failed",
 ];
 
