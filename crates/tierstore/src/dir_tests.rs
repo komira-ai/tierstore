@@ -904,7 +904,10 @@ async fn the_previous_release_lists_what_this_release_writes() {
     let (dir, backend) = backend();
     backend.put("cas/d/n1/00012", body("x")).await.unwrap();
     backend.put("Up/Per", body("y")).await.unwrap();
-    assert_eq!(names(dir.path()), ["%55p~%50er", ".uploads", "cas~d~n1~00012"]);
+    assert_eq!(
+        names(dir.path()),
+        ["%55p~%50er", ".uploads", "cas~d~n1~00012"]
+    );
     let keys: Vec<String> = backend
         .list("")
         .await
@@ -913,7 +916,10 @@ async fn the_previous_release_lists_what_this_release_writes() {
         .map(|listed| listed.key)
         .collect();
     assert_eq!(keys, ["Up/Per", "cas/d/n1/00012"]);
-    for name in names(dir.path()).iter().filter(|name| !name.starts_with('.')) {
+    for name in names(dir.path())
+        .iter()
+        .filter(|name| !name.starts_with('.'))
+    {
         let key = decode(name).unwrap();
         assert_eq!(&encode(&key), name);
     }
