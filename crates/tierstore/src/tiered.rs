@@ -64,8 +64,10 @@ pub struct ProxyConfig {
     /// publication, so an object that no longer changes means the leader has stopped; no time that
     /// another machine wrote is read.
     pub usage_stale_after: Duration,
-    /// How long the format object (`_tiering/format`) that was read is used before it is read
-    /// again: the most time between the operator pausing writes and a proxy refusing them.
+    /// The refresh interval: how long the format object (`_tiering/format`) that was read is used
+    /// before it is read again. Under successful reads a proxy reads a pause at the next write
+    /// after this interval; it is not a bound on how long a pause takes to reach a proxy, nor an
+    /// acknowledgement of it, because a read that fails keeps the last answer and writes go on.
     pub format_refresh: Duration,
     /// The time, for the entries.
     pub clock: Arc<dyn Clock>,

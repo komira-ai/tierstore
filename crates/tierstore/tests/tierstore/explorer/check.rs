@@ -63,15 +63,31 @@ fn is_put_done(kind: &Kind) -> Option<(&str, bool)> {
     }
 }
 
+/// Whether the put that ended at `ended` began before the event at `limit`: only such a put could
+/// have supplied a get that was answered at `limit`. A put with no start in the history is taken
+/// to have begun at the first event.
+fn put_started_before(history: &[Event], ended: usize, limit: usize) -> bool {
+    let who = history[ended].who;
+    history[..ended]
+        .iter()
+        .rposition(|earlier| earlier.who == who && matches!(earlier.kind, Kind::PutStart { .. }))
+        .unwrap_or(0)
+        < limit
+}
+
 /// The rules a run breaks, each as a sentence; empty for a run that breaks none.
 ///
 /// - **Write-once.** Two acknowledged puts of the key have a delete that ended between them.
 /// - **No acknowledged put lost.** The last acknowledged put, if no delete ended after it, is what
 ///   a get answers and what the cold tier holds at the end.
-/// - **No acknowledged delete undone.** After an acknowledged delete, with every put ended before
-///   it and answered, neither tier holds the key and a get answers not found.
+/// - **No acknowledged delete undone.** After an acknowledged delete, neither tier holds the key
+///   and a get answers not found, unless a put overlapped the delete: an acknowledged put that
+///   ended after the delete was acknowledged, or a refused put that ended after the delete began
+///   (a refusal may still have landed its bytes). A refused put that ended before the delete began
+///   excuses nothing.
 /// - **No get of a deleted key.** A get that began after a delete was acknowledged never answers
-///   the bytes of a put that the delete covered.
+///   the bytes of a put that the delete covered, unless a put of the same bytes that ended after
+///   the delete had begun before the get was answered.
 /// - **Liveness.** From the quiet state the reconciler reaches a step that changes nothing, no
 ///   entry is left, and the two tiers never hold different bytes.
 #[must_use]
@@ -131,9 +147,21 @@ pub fn judge(history: &[Event], end: &End) -> Vec<String> {
 
     let last_acked_delete = delete_ends.iter().rev().find(|(_, acked)| *acked);
     if let Some(&(at, _)) = last_acked_delete {
-        let settled = put_ends
+        let began = history[..at]
             .iter()
-            .all(|(ended, _, acked)| *ended < at && *acked);
+            .rposition(|earlier| {
+                earlier.who == history[at].who && earlier.kind == Kind::DeleteStart
+            })
+            .unwrap_or(0);
+        // A put overlaps the delete when it ended after the delete began. An acknowledged put
+        // that ended before the delete was acknowledged is ordered by it; a refused put may have
+        // landed its bytes late, so only one that overlaps the delete is excused. A refused put
+        // that ended before the delete began leaves the delete's duty whole.
+        let settled = put_ends.iter().all(
+            |&(ended, _, acked)| {
+                if acked { ended < at } else { ended < began }
+            },
+        );
         let present = end.hot.is_some() || end.cold.is_some() || end.read != Ok(None);
         if settled && present {
             broken.push(format!(
@@ -159,9 +187,9 @@ pub fn judge(history: &[Event], end: &End) -> Vec<String> {
             let put_before = acked_puts
                 .iter()
                 .any(|&(put, bytes)| bytes == text && put < deleted);
-            let rewritten = put_ends
-                .iter()
-                .any(|&(ended, bytes, _)| bytes == text && ended > deleted);
+            let rewritten = put_ends.iter().any(|&(ended, bytes, _)| {
+                bytes == text && ended > deleted && put_started_before(history, ended, at)
+            });
             acked && deleted < began && put_before && !rewritten
         });
         if covered {
@@ -320,6 +348,46 @@ mod tests {
         );
     }
 
+    /// Asserts that a refused put that ended before an acknowledged delete began does not excuse
+    /// bytes left in both tiers: an acknowledged put of "old", a refused put of "new", an
+    /// acknowledged delete, and an end that holds "old" is reported as an undone delete.
+    #[test]
+    fn a_refused_put_before_an_acknowledged_delete_does_not_excuse_resurrection() {
+        let mut history = put(0, "old", true);
+        history.extend(put(1, "new", false));
+        history.extend(delete(0, true));
+        history.extend(get(0, Some("old")));
+        let broken = judge(&history, &holding("old"));
+        assert!(
+            broken
+                .iter()
+                .any(|line| line.starts_with("acknowledged delete undone")),
+            "{broken:?}"
+        );
+    }
+
+    /// Asserts that a refused put that overlaps an acknowledged delete is excused: its bytes may
+    /// have landed after the delete.
+    #[test]
+    fn a_refused_put_overlapping_an_acknowledged_delete_is_excused() {
+        let mut history = put(SEED, "old", true);
+        history.push(ev(
+            1,
+            Kind::PutStart {
+                text: "new".to_owned(),
+            },
+        ));
+        history.extend(delete(0, true));
+        history.push(ev(
+            1,
+            Kind::PutDone {
+                text: "new".to_owned(),
+                acked: false,
+            },
+        ));
+        assert_eq!(judge(&history, &holding("new")), Vec::<String>::new());
+    }
+
     /// Asserts that a delete that was not acknowledged does not oblige the key to be gone.
     #[test]
     fn an_unacknowledged_delete_leaves_the_key_free_to_stay() {
@@ -363,6 +431,45 @@ mod tests {
         history.extend(delete(0, true));
         history.extend(put(0, "bytes0", true));
         history.extend(get(0, Some("bytes0")));
+        assert_eq!(judge(&history, &holding("bytes0")), Vec::<String>::new());
+    }
+
+    /// Asserts that a put of the same bytes that begins only after the get was answered does not
+    /// excuse the get: the get returned deleted bytes before any replacement put began.
+    #[test]
+    fn a_later_put_of_the_same_bytes_does_not_excuse_an_earlier_get() {
+        let mut history = put(SEED, "bytes0", true);
+        history.extend(delete(0, true));
+        history.extend(get(1, Some("bytes0")));
+        history.extend(put(0, "bytes0", true));
+        let broken = judge(&history, &holding("bytes0"));
+        assert_eq!(broken.len(), 1, "{broken:?}");
+        assert!(
+            broken[0].starts_with("a get began after a delete"),
+            "{broken:?}"
+        );
+    }
+
+    /// Asserts that a put of the same bytes that began before the get was answered and ended
+    /// after the delete still excuses the get, though it ended after the get.
+    #[test]
+    fn a_put_in_flight_when_the_get_is_answered_excuses_it() {
+        let mut history = put(SEED, "bytes0", true);
+        history.extend(delete(0, true));
+        history.push(ev(
+            2,
+            Kind::PutStart {
+                text: "bytes0".to_owned(),
+            },
+        ));
+        history.extend(get(1, Some("bytes0")));
+        history.push(ev(
+            2,
+            Kind::PutDone {
+                text: "bytes0".to_owned(),
+                acked: true,
+            },
+        ));
         assert_eq!(judge(&history, &holding("bytes0")), Vec::<String>::new());
     }
 

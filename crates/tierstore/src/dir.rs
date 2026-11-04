@@ -24,6 +24,8 @@ use crate::{
 
 #[path = "dir_entries.rs"]
 mod entries;
+#[path = "dir_list.rs"]
+mod listing;
 #[path = "dir_names.rs"]
 mod names;
 #[path = "dir_sync.rs"]
@@ -31,7 +33,7 @@ mod sync;
 #[path = "dir_tags.rs"]
 mod tags;
 
-use names::{decode, encode};
+use names::encode;
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
 
@@ -128,10 +130,12 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 ///   upload that is never completed or aborted stays until it is aborted.
 ///
 /// - The keys that start with `_entries/` are files of the subdirectory `.entries/` of the root
-///   (a name no key encodes to, so the key `_entries` keeps its own file), which is made by the first write of one and is not listed with the other keys; a listing of
-///   the prefix `_entries/` reads that subdirectory only. Their create-only puts, replacements by
-///   the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
-///   between processes over the directory too (see the module `dir_entries`).
+///   (a name no key encodes to), which the first write of one makes, unless the previous release
+///   made the key a file of the root, named like any key: that file is the key for as long as it
+///   exists, and is read, listed, replaced and deleted in place, so that the previous release
+///   reads the current body (see the module `dir_entries`). Their create-only puts, replacements
+///   by the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
+///   between processes too.
 ///
 /// The backend counts on being the only writer of its directory but for other backends over the
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
@@ -435,45 +439,17 @@ async fn stored_parts(dir: &Path) -> Result<Vec<StoredPart>, Error> {
     Ok(parts)
 }
 
-/// Adds to `found` the objects of the directory `dir` whose key, which is `base` and then what
-/// the file name decodes to, starts with `prefix`. A root (`base` empty) leaves out a file that
-/// would be a key under `_entries/`, which is read from the subdirectory, and a subdirectory
-/// that is not there has no objects.
-async fn list_dir(
-    dir: &Path,
-    base: &str,
-    prefix: &str,
-    found: &mut Vec<Listed>,
-) -> Result<(), Error> {
-    let fail = io_error(dir);
-    let opened = fs::read_dir(dir).await;
-    let mut files = match opened {
-        Err(why) if !base.is_empty() && why.kind() == ErrorKind::NotFound => return Ok(()),
-        opened => opened.map_err(&fail)?,
-    };
-    while let Some(entry) = files.next_entry().await.map_err(&fail)? {
-        let name = entry.file_name();
-        let key = name
-            .to_str()
-            .filter(|name| !name.starts_with('.'))
-            .and_then(decode)
-            .map(|key| format!("{base}{key}"))
-            .filter(|key| key.starts_with(prefix))
-            .filter(|key| !base.is_empty() || entries::rest(key).is_none());
-        let Some(key) = key else {
-            continue;
-        };
-        let meta = entry.metadata().await.ok();
-        let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
-            continue;
-        };
-        found.push(Listed {
-            key,
-            size: meta.len().saturating_sub(TAG_LEN as u64),
-            modified: modified_of(&meta),
-        });
+/// Removes each of `files`, one that is not there being no error, and gives those removed.
+async fn remove_files(files: &[PathBuf]) -> Result<Vec<PathBuf>, Error> {
+    let mut gone = Vec::new();
+    for file in files {
+        match fs::remove_file(file).await {
+            Ok(()) => gone.push(file.clone()),
+            Err(why) if why.kind() == ErrorKind::NotFound => {}
+            Err(why) => return Err(failed(file, &why)),
+        }
     }
-    Ok(())
+    Ok(gone)
 }
 
 impl DirBackend {
@@ -531,6 +507,38 @@ impl DirBackend {
         Ok(dir.join(name))
     }
 
+    /// The files the object `key` may be in: for a key under `_entries/`, the file the previous
+    /// release made in the root comes second (see the module `dir_entries`). A key that makes no
+    /// file name has none; an error unless the previous release could have a file for it.
+    fn files(&self, key: &str) -> Result<Vec<PathBuf>, Error> {
+        let legacy = entries::legacy(&self.root, key);
+        match self.path(key) {
+            Ok(path) => Ok(std::iter::once(path).chain(legacy).collect()),
+            Err(error) => legacy.map(|old| vec![old]).ok_or(error),
+        }
+    }
+
+    /// The file the object `key` is in or, if it has none, would be made in: the file the previous
+    /// release made in the root where there is one, which a key keeps for its whole life, else
+    /// the one a write makes now.
+    async fn locate(&self, key: &str) -> Result<PathBuf, Error> {
+        let legacy = entries::legacy(&self.root, key);
+        if let Some(old) = legacy
+            && fs::try_exists(&old).await.unwrap_or(false)
+        {
+            return Ok(old);
+        }
+        self.path(key)
+    }
+
+    /// Syncs the directory of each of the files `changed` calls removed or made.
+    async fn sync_parents(&self, changed: &[PathBuf]) -> Result<(), Error> {
+        for file in changed {
+            self.sync(file.parent().unwrap_or(&self.root)).await?;
+        }
+        Ok(())
+    }
+
     /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
     /// hold (none for any other key), making the subdirectory if it is not there. It is taken
     /// before the `replacing` lock, always, so that no two calls wait for each other. The root is
@@ -559,10 +567,9 @@ impl DirBackend {
 
     /// Opens the object `key`.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        let path = self.path(key)?;
+        let path = self.locate(key).await?;
         let opened = open_stored(&path).await;
-        let absent = ErrorKind::NotFound;
-        opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
+        opened.map_err(|why| classify(key, &path, &why, ErrorKind::NotFound, Error::NotFound))
     }
 
     /// Opens the object `key` if its content tag is `etag`. The caller holds the `replacing` lock,
@@ -576,20 +583,22 @@ impl DirBackend {
         }
     }
 
-    /// Moves the temporary file `temp` over the file of `current`, so that the name holds the
-    /// new body whole or the old one, and syncs the directory. The temporary file is gone either
+    /// Moves the temporary file `temp` over `path`, the file of the object (the name holds the
+    /// new body whole or the old one), and syncs the directory. The temporary file is gone either
     /// way. The caller holds the `replacing` lock.
-    async fn install(&self, temp: &Path, current: &Stored) -> Result<(), Error> {
-        let renamed = fs::rename(temp, &current.path).await;
+    async fn install(&self, temp: &Path, path: &Path) -> Result<(), Error> {
+        let renamed = fs::rename(temp, path).await;
         let _ = fs::remove_file(temp).await;
-        renamed.map_err(io_error(&current.path))?;
-        self.sync(current.path.parent().unwrap_or(&self.root)).await
+        renamed.map_err(io_error(path))?;
+        self.sync(path.parent().unwrap_or(&self.root)).await
     }
 
-    /// Removes the file of the object `key` if its content tag is `etag`, with the lock that
+    /// Removes the files of the object `key` if its content tag is `etag`, with the lock that
     /// replacements and deletes take held from the check to the removal, so that no other call
-    /// of this backend replaces or deletes the object in between. The directory is not synced.
-    async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+    /// of this backend replaces or deletes the object in between. Gives the files removed; the
+    /// directories are not synced.
+    async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<Vec<PathBuf>, Error> {
+        let files = self.files(key)?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
@@ -597,9 +606,14 @@ impl DirBackend {
         drop(current);
         // The lock keeps out every other call of this backend, so a file that is gone now was
         // taken by another process: the key has no object, as the trait says.
+        // The other file goes first: a failure leaves the object, not a stale file in its place.
+        let others: Vec<PathBuf> = files.into_iter().filter(|file| *file != path).collect();
+        let mut gone = remove_files(&others).await?;
         let removed = fs::remove_file(&path).await;
         let absent = ErrorKind::NotFound;
-        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
+        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))?;
+        gone.push(path);
+        Ok(gone)
     }
 
     /// Writes the file of an object with this body to a new temporary file made with the mode
@@ -628,6 +642,13 @@ impl DirBackend {
         // included.
         let _scratch = Scratch(temp.to_owned());
         let _entry = self.entry_lock(key).await?;
+        // The key is taken where the previous release made it, though not under the name a write
+        // makes now.
+        if let Some(old) = entries::legacy(&self.root, key)
+            && fs::try_exists(&old).await.unwrap_or(false)
+        {
+            return Err(Error::AlreadyExists(key.to_owned()));
+        }
         let dir = path.parent().unwrap_or(&self.root);
         let linked = fs::hard_link(temp, path).await;
         let _ = fs::remove_file(temp).await;
@@ -666,11 +687,12 @@ impl DirBackend {
         etag: &str,
         mode: u32,
     ) -> Result<String, Error> {
+        self.locate(key).await?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
-        let current = self.matching(key, etag).await?;
+        let path = self.matching(key, etag).await?.path;
         let (temp, tag) = self.write_temp(body, mode).await?;
-        self.install(&temp, &current).await?;
+        self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
 
@@ -766,14 +788,14 @@ impl Backend for DirBackend {
         mut body: PartBody<'_>,
         etag: &str,
     ) -> Result<String, Error> {
-        self.path(key)?;
+        self.locate(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = write_object_stream(&temp, &mut body).await?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
-        let current = self.matching(key, etag).await?;
-        self.install(&temp, &current).await?;
+        let path = self.matching(key, etag).await?.path;
+        self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
 
@@ -833,40 +855,28 @@ impl Backend for DirBackend {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let path = self.path(key)?;
-        // Not held across the sync: the name is gone, and a replacement or a delete that
-        // follows needs nothing the sync would protect.
-        let removed = {
+        // The previous release's file goes first: a failure leaves the object, not a stale file.
+        let mut files = self.files(key)?;
+        files.reverse();
+        // Not held across the sync: a replacement or delete that follows needs nothing it protects.
+        let gone = {
             let _entry = self.entry_lock(key).await?;
             let _replacing = self.replacing.lock().await;
-            fs::remove_file(&path).await
+            remove_files(&files).await?
         };
-        match removed {
-            Ok(()) => self.sync(path.parent().unwrap_or(&self.root)).await,
-            Err(why) if why.kind() != ErrorKind::NotFound => Err(failed(&path, &why)),
-            Err(_) => Ok(()),
-        }
+        self.sync_parents(&gone).await
     }
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
-        let path = self.path(key)?;
-        self.unlink_if_match(key, etag).await?;
-        self.sync(path.parent().unwrap_or(&self.root)).await
+        let gone = self.unlink_if_match(key, etag).await?;
+        self.sync_parents(&gone).await
     }
 
-    /// The root holds the keys that do not start with `_entries/`; the subdirectory holds the
-    /// others, and is read only if `prefix` can match one of them.
+    /// The root holds the keys that do not start with `_entries/`, and the files of the previous
+    /// release for those that do; the subdirectory holds the others, and is read only if
+    /// `prefix` can match one of them. A key in both is listed once, from the root.
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        let mut found = Vec::new();
-        if !prefix.starts_with(entries::PREFIX) {
-            list_dir(&self.root, "", prefix, &mut found).await?;
-        }
-        if entries::PREFIX.starts_with(prefix) || prefix.starts_with(entries::PREFIX) {
-            let dir = self.root.join(entries::DIR);
-            list_dir(&dir, entries::PREFIX, prefix, &mut found).await?;
-        }
-        found.sort();
-        Ok(found)
+        listing::list(&self.root, prefix).await
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {

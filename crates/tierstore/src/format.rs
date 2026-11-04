@@ -17,6 +17,11 @@
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
 //!   answered with [`Error::Unavailable`] and a text that says writes wait for the active format.
+//!   A delete that finds the entry of its key held or sealed by another operation, and that it can
+//!   neither amend nor claim, waits for the entry to be released before it changes either tier. A
+//!   delete that amends a put the reconciler holds for a copy, or claims a handed-over delete, is
+//!   the exception: it deletes both tiers, hands the entry over and waits for the release before it
+//!   is acknowledged.
 
 #[cfg(feature = "server")]
 use bytes::Bytes;

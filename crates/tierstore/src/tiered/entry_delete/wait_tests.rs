@@ -242,6 +242,47 @@ async fn a_delete_that_meets_a_sealed_copy_back_that_is_never_released_is_answer
     assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 7);
 }
 
+/// Asserts that all the waits of one delete share its budget: a delete that waits seven seconds
+/// of a 12-second budget on a sealed copy-back, and then claims a handed-over delete that is never
+/// released, waits only the five seconds that are left for the release. It reads the entry five
+/// times before the claim (the read that found the sealed entry, then after sleeps of 1, 2 and 4
+/// seconds), once to claim, and four times for the release (after sleeps of 1, 2 and 2 seconds, and
+/// the one that ends it), and is answered `Unavailable` with the entry still `(DEL, PENDING)`.
+/// Catches a release wait that starts its budget again at the claim, which reads the entry twelve times, not ten.
+#[tokio::test(start_paused = true)]
+async fn a_delete_that_waited_on_a_sealed_entry_and_then_claims_a_delete_waits_only_what_is_left() {
+    let wait = DeleteWait {
+        wait: Duration::from_secs(12),
+        poll_min: Duration::from_secs(1),
+        poll_max: Duration::from_secs(4),
+    };
+    let rig = Rig::build_waiting(ACTIVE_FORMAT, 3, wait).await;
+    let sealed = sealed_copy_back(&rig).await;
+    let mut gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let proxy = rig.proxy.clone();
+    let delete = tokio::spawn(async move { proxy.delete("k").await });
+    gate.parked().await;
+    for _ in 0..4 {
+        let next = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+        assert!(gate.release());
+        next.parked().await;
+        gate = next;
+    }
+    let other = rig.other();
+    assert_eq!(other.release(&sealed).await.unwrap(), Outcome::Done(()));
+    let Created::Taken(taken) = other.create("k", Take::Del).await.unwrap() else {
+        panic!("the entry of k exists");
+    };
+    let Outcome::Done(_) = other.advance(&taken, Step::Handover).await.unwrap() else {
+        panic!("the handover of k was lost");
+    };
+    assert!(gate.release());
+    let answer = delete.await.unwrap();
+    assert!(is_unavailable(&answer), "{answer:?}");
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 10);
+    assert_eq!(rig.shape("k").await, handed_over());
+}
+
 /// The entry of `k` as the reconciler `other` leaves it while it works: the cold tier has the
 /// object, and the entry is sealed with the operation `take` made (a put's or an eviction's).
 async fn sealed_entry(rig: &Rig, take: Take) -> Seen {

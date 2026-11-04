@@ -52,8 +52,10 @@ enum What {
 }
 
 /// The verb: `args` are the program name, `entries` and the rest. Returns the exit status: 0, 1
-/// for a failed call or an entry that cannot be read (the reason on `err`), 2 for a flag that is
-/// not valid.
+/// for a failed call (the reason on `err`), 2 for a flag that is not valid. An entry whose body
+/// cannot be decoded is reported differently by the two forms: `ls` prints it on `out` as
+/// `<name> unreadable: <reason>`, goes on with the others and returns 0; `show` returns 1 with
+/// the reason on `err`.
 pub(super) fn run(
     args: &[OsString],
     out: &mut dyn Write,

@@ -9,21 +9,29 @@
 //! the listing runs). Another listing starts every
 //! [`EntryReconcilerConfig::usage_scan_interval`](super::EntryReconcilerConfig). Between listings
 //! the figure moves by what this leader does: the bytes of an object it copies that landed after
-//! the listing started are added, and the bytes of an object it evicts are taken off. While a
-//! listing runs, an object whose key the listing has yet to reach is left to the listing, which
-//! reads it. What tells an object that landed after a listing from one that the listing read is
-//! its write time, taken as landed when it is at or after the start of the listing: an object
-//! written in the same millisecond as the start that the listing did read is counted twice, and
-//! an object copied after the listing passed its key and written before the start is not counted.
-//! A delete that a client finishes by itself is not seen, so the figure may be too high until the
-//! next listing; the doubled count too can only make the hot tier look fuller than it is.
+//! the listing started are added, and the bytes of an object it evicts are taken off. Each object
+//! counts once: the listing remembers the keys it read of the objects written at or after its
+//! start, and the leader remembers the keys whose bytes it added, so that
+//!
+//! - an object whose key the listing has yet to reach, or that the listing read, is left to the
+//!   listing and adds nothing, whatever its write time;
+//! - an object the listing did not read (written after its page was read, or after it ended) adds
+//!   its bytes once, however often its copy is tried;
+//! - an object written before the listing started is in the listing and adds nothing;
+//! - an object evicted while a listing runs, whose key the listing has passed, is taken off the
+//!   figure the listing ends with, so that the end of the listing does not bring it back; an
+//!   object evicted ahead of the listing is not read by it.
+//!
+//! These records are kept until the next listing starts, so they hold the keys of the objects
+//! written since the last listing started that this leader copied or the listing read. A delete
+//! that a client finishes by itself is not seen, so the figure may be too high until the next
+//! listing.
 //!
 //! The bytes that the cold tier does not hold yet (`copy_lag`) are those of the keys whose copy
 //! failed, or that the leader gave an entry because the cold tier had no copy, until the copy is
 //! made or the hot object is gone.
 
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{EntryReconciler, StepReport};
@@ -69,34 +77,110 @@ pub(super) struct Books {
 /// What the calls that run on the pool tell the step, which only a `&self` can reach.
 #[derive(Default)]
 pub(super) struct Tally {
-    /// The wall-clock time the last listing started at (zero before the first): an object written
-    /// before it is in that listing.
-    listed_from: AtomicU64,
-    /// The bytes of the objects copied since that landed after it.
-    landed: AtomicU64,
-    /// How far the listing in progress has read, if one is: none when no listing runs, and then
-    /// `Some(None)` before its first page.
-    reached: Mutex<Option<Option<String>>>,
+    /// The count of the objects that landed or went since the last listing started.
+    landing: Mutex<Landing>,
     /// The keys whose hot object the cold tier does not hold yet, with the bytes of each.
     lagging: Mutex<BTreeMap<String, u64>>,
 }
 
+/// The objects that landed or went since the last listing started, so that each is counted once
+/// whether the listing read it or not.
+#[derive(Default)]
+struct Landing {
+    /// The wall-clock time the last listing started at (zero before the first): an object written
+    /// before it is in that listing.
+    from: u64,
+    /// How far the listing in progress has read, if one is: none when no listing runs, and then
+    /// `Some(None)` before its first page.
+    reached: Option<Option<String>>,
+    /// The keys the last listing read of the objects written at or after its start.
+    listed: BTreeSet<String>,
+    /// The keys whose bytes were added to `landed`, with the bytes added for each, so that a copy
+    /// tried again adds nothing more.
+    counted: BTreeMap<String, u64>,
+    /// The bytes of the objects added since the figure last took them.
+    landed: u64,
+    /// The bytes of the objects the listing in progress has read and the leader has evicted since.
+    deducted: u64,
+}
+
+impl Landing {
+    /// Whether the listing in progress has yet to reach `key`.
+    fn ahead(&self, key: &str) -> bool {
+        self.reached
+            .as_ref()
+            .is_some_and(|after| after.as_deref().is_none_or(|after| key > after))
+    }
+}
+
 impl Tally {
     /// Notes that the object `key` of `size` bytes, last written at `modified`, is being copied.
+    /// Its bytes are added once, however often the copy is tried: not if the listing has read it or
+    /// has yet to reach its key, and not if it was written before the listing started.
     pub(super) fn copied(&self, key: &str, size: u64, modified: u64) {
-        let ahead = self
-            .reached()
-            .as_ref()
-            .is_some_and(|after| after.as_deref().is_none_or(|after| key > after));
-        if !ahead && modified >= self.listed_from.load(Ordering::SeqCst) {
-            self.landed.fetch_add(size, Ordering::SeqCst);
+        let mut landing = self.landing();
+        if modified < landing.from || landing.ahead(key) || landing.listed.contains(key) {
+            return;
+        }
+        let before = landing.counted.insert(key.to_owned(), size).unwrap_or(0);
+        landing.landed = landing.landed.saturating_add(size.saturating_sub(before));
+    }
+
+    /// Notes that the listing has read the object `key`, last written at `modified`.
+    pub(super) fn listed(&self, key: &str, modified: u64) {
+        let mut landing = self.landing();
+        if modified >= landing.from {
+            landing.listed.insert(key.to_owned());
         }
     }
 
-    /// Notes how far the listing in progress has read: `Some(None)` for none of it, none for
-    /// no listing.
-    pub(super) fn reach(&self, to: Option<Option<String>>) {
-        *self.reached() = to;
+    /// Notes that the leader has evicted the object `key` of `size` bytes, last written at
+    /// `modified`. While a listing runs and has passed the key, the bytes the listing or the
+    /// copies counted for it are taken off the figure the listing will end with.
+    pub(super) fn evicted(&self, key: &str, size: u64, modified: u64) {
+        let mut landing = self.landing();
+        let behind = landing.reached.is_some() && !landing.ahead(key);
+        let counted = landing.counted.remove(key);
+        let listed = landing.listed.remove(key) || modified < landing.from;
+        if !behind {
+            return;
+        }
+        match counted {
+            Some(added) => landing.landed = landing.landed.saturating_sub(added),
+            None if listed => landing.deducted = landing.deducted.saturating_add(size),
+            None => {}
+        }
+    }
+
+    /// Starts the count of a listing that starts at `from`.
+    pub(super) fn start(&self, from: u64) {
+        let mut landing = self.landing();
+        *landing = Landing {
+            from,
+            reached: Some(None),
+            ..Landing::default()
+        };
+    }
+
+    /// Notes how far the listing in progress has read.
+    pub(super) fn reach(&self, to: Option<&str>) {
+        self.landing().reached = Some(to.map(str::to_owned));
+    }
+
+    /// Ends the listing in progress and gives the bytes to add to what it read: the bytes landed,
+    /// less those it read of objects evicted since.
+    pub(super) fn finish(&self) -> (u64, u64) {
+        let mut landing = self.landing();
+        landing.reached = None;
+        (
+            std::mem::take(&mut landing.landed),
+            std::mem::take(&mut landing.deducted),
+        )
+    }
+
+    /// Takes the bytes landed since they were last taken.
+    pub(super) fn take_landed(&self) -> u64 {
+        std::mem::take(&mut self.landing().landed)
     }
 
     /// Notes that the cold tier does not hold the hot object `key` of `size` bytes yet.
@@ -119,15 +203,13 @@ impl Tally {
 
     /// Forgets everything: a new leader starts over.
     pub(super) fn clear(&self) {
-        self.listed_from.store(0, Ordering::SeqCst);
-        self.landed.store(0, Ordering::SeqCst);
-        self.reach(None);
+        *self.landing() = Landing::default();
         self.lagging().clear();
     }
 
-    fn reached(&self) -> MutexGuard<'_, Option<Option<String>>> {
+    fn landing(&self) -> MutexGuard<'_, Landing> {
         // No method panics while holding the lock, so a poisoned state is still whole.
-        self.reached.lock().unwrap_or_else(PoisonError::into_inner)
+        self.landing.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn lagging(&self) -> MutexGuard<'_, BTreeMap<String, u64>> {
@@ -158,7 +240,7 @@ impl EntryReconciler {
 
     /// Adds the bytes of the objects copied since the last listing started to the figure.
     fn fold_landed(&mut self) {
-        let landed = self.tally.landed.swap(0, Ordering::SeqCst);
+        let landed = self.tally.take_landed();
         self.books.bytes = self.books.bytes.map(|bytes| bytes.saturating_add(landed));
     }
 
@@ -180,9 +262,7 @@ impl EntryReconciler {
     /// deltas, and those listed are counted by the listing.
     fn start_scan(&mut self) -> Scan {
         self.fold_landed();
-        let from = self.config.base.clock.now();
-        self.tally.listed_from.store(from, Ordering::SeqCst);
-        self.tally.reach(Some(None));
+        self.tally.start(self.config.base.clock.now());
         Scan {
             after: None,
             bytes: 0,
@@ -217,6 +297,7 @@ impl EntryReconciler {
                 if reserved {
                     continue;
                 }
+                self.tally.listed(&object.key, object.modified);
                 scan.bytes = scan.bytes.saturating_add(object.size);
                 scan.oldest
                     .push((object.modified, object.key.clone(), object.size));
@@ -229,7 +310,7 @@ impl EntryReconciler {
                 return false;
             }
             scan.after = page.last().map(|object| object.key.clone());
-            self.tally.reach(Some(scan.after.clone()));
+            self.tally.reach(scan.after.as_deref());
         }
         self.books.scan = Some(scan);
         true
@@ -237,9 +318,9 @@ impl EntryReconciler {
 
     /// Takes the result of the listing that has read its last page.
     fn end_scan(&mut self, scan: Scan, now: u64) {
-        self.tally.reach(None);
-        let landed = self.tally.landed.swap(0, Ordering::SeqCst);
-        self.books.bytes = Some(scan.bytes.saturating_add(landed));
+        let (landed, deducted) = self.tally.finish();
+        let bytes = scan.bytes.saturating_add(landed);
+        self.books.bytes = Some(bytes.saturating_sub(deducted));
         self.books.candidates = scan.oldest.into_sorted_vec().into();
         let wait = millis(self.config.usage_scan_interval);
         self.books.scan_at = Some(now.saturating_add(wait));
