@@ -77,7 +77,7 @@ fn a_method_asks_for_the_right_it_needs() {
 
 /// Asserts that a request with no login, with a header that is not text, with another scheme, with
 /// a scheme and no credentials, with credentials that are not base64, that are not UTF-8, that have
-/// no colon, that name no key of the server or that have a wrong secret is `Unauthorized`; the scheme
+/// no colon, that name no key of the server or that have a wrong secret (also the right secret followed by NUL bytes) is `Unauthorized`; the scheme
 /// is matched without regard to case, and the login is split at its first colon, so a secret with more after it is a wrong one.
 #[test]
 fn a_login_is_checked_in_every_part() {
@@ -103,6 +103,8 @@ fn a_login_is_checked_in_every_part() {
     assert!(unauthorized(&login("FULL", "full-secre")));
     assert!(unauthorized(&login("FULL", "full-secret-and-more")));
     assert!(unauthorized(&login("FULL", "")));
+    assert!(unauthorized(&login("FULL", "full-secret\0")));
+    assert!(unauthorized(&login("FULL", "full-secret\0\0")));
     assert_eq!(auth.check(&login("FULL", "full-secret"), Need::Any), Ok(()));
     let lower = format!("basic {}", STANDARD.encode("FULL:full-secret"));
     assert_eq!(auth.check(&with(&lower), Need::Any), Ok(()));
