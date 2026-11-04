@@ -1060,7 +1060,8 @@ pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
 ///
 /// The tiers are tested first (see [`self_test`]): a tier that fails is an error before the
 /// proxy is opened or the address bound. `ready` is called with the address the server is bound
-/// to, before the first request is taken. Returns when the drain is over.
+/// to, before the first request is taken. Returns when the drain is over. What it says on the
+/// way is `tracing` events: a caller that installs no subscriber sees none of it.
 ///
 /// # Errors
 /// A flag that is not valid with the others, a key file or a tier that cannot be used, a tier
@@ -1203,7 +1204,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
         }
-        let _ = writeln!(std::io::stdout(), "{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     run_serving(&cli, stop, announce).await?;
     Ok(())
@@ -1227,7 +1228,7 @@ fn capabilities(args: &[OsString]) -> ExitCode {
             ExitCode::from(2)
         }
         None => {
-            let _ = write!(std::io::stdout(), "{}", capabilities_text(CAPABILITIES));
+            super::build_info::stderr_log::answer(&capabilities_text(CAPABILITIES));
             ExitCode::SUCCESS
         }
     }

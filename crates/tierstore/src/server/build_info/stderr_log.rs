@@ -53,6 +53,16 @@ pub(crate) fn notes(text: &str) {
     }
 }
 
+/// Writes `text` to standard output: the answer of a command, or the start line a supervisor
+/// reads, which is not logging. Like `print!`, it panics when standard output cannot be written.
+#[expect(
+    clippy::disallowed_macros,
+    reason = "an answer on standard output, which is not logging"
+)]
+pub(crate) fn answer(text: &str) {
+    print!("{text}");
+}
+
 /// A subscriber that writes one line to `W` for each event at `max` or more severe.
 pub(super) struct LineLog<W> {
     out: Mutex<W>,

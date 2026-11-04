@@ -44,7 +44,6 @@
 //! write self-test of the upstream are left out there.
 
 use std::future::Future;
-use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -343,7 +342,7 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        let _ = writeln!(std::io::stdout(), "{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     let drained = run_cache(&settings, stop, announce).await?;
     super::build_info::stderr_log::notes(&super::cli::cut_note(drained));
