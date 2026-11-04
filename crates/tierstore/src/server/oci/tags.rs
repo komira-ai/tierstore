@@ -28,8 +28,10 @@
 //! # Two pushes of one tag
 //!
 //! A push lists the tag's first version (the newest), reads it, and creates the version after it
-//! (the first, if there is none). A push of the digest the newest version holds writes nothing
-//! and is 201 (that version is as acknowledged as any a reader would see). Of pushes that read the same newest version, the create of one key is won by
+//! (the first, if there is none). A push of the digest the newest version holds still writes a
+//! version of its own: that version may be one another push has made and not yet acknowledged
+//! (through the proxy it is visible before its push is acknowledged and is removed if the push
+//! fails), so only a version this push made is evidence that its tag was moved. Of pushes that read the same newest version, the create of one key is won by
 //! exactly one: a loser reads the key back, and if the winner holds another digest it is 409
 //! `TAG_CONFLICT`, which changes nothing but the manifest it stored by digest, which is harmless
 //! and is still pulled by that digest (a client that wants its manifest tagged pushes again; if
@@ -119,7 +121,7 @@ fn before(inv: u64, key: &str) -> Result<u64, Error> {
 }
 
 /// Points the tag whose directory is `prefix` at `digest`: writes the version after the newest,
-/// with the create-only write, unless the newest already holds `digest`.
+/// with the create-only write, also when the newest already holds `digest`.
 ///
 /// A create that finds the key taken by a version that holds `digest` is not taken as done: on
 /// the proxy a version is visible in the hot tier before the push that made it is acknowledged,
@@ -139,9 +141,7 @@ pub(super) async fn point(
     let mut inv = match newest(backend, prefix).await? {
         None => u64::MAX,
         Some((inv, key)) => {
-            if held(backend, &key).await? == *digest {
-                return Ok(());
-            }
+            held(backend, &key).await?;
             before(inv, &key)?
         }
     };

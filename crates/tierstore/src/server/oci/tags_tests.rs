@@ -313,19 +313,35 @@ async fn the_newest_version_is_the_tag() {
     assert_eq!(held.expect("a listing").len(), 3);
 }
 
-/// Asserts that a push of the digest the tag already holds is 201 and writes no version, so that
-/// pushing one image again and again does not add objects.
+/// Asserts that a push of the digest the tag already holds is 201 and writes a version of its
+/// own, and that the tag still points at the digest after the version it found is removed (as
+/// the proxy removes a version whose push then fails to journal): a 201 is never answered from
+/// a version another push made.
 #[tokio::test]
-async fn a_push_of_the_digest_the_tag_holds_writes_nothing() {
+async fn a_push_of_the_digest_the_tag_holds_writes_a_version_of_its_own() {
     let rig = Rig::new();
-    let bytes = manifests(&rig, 1).await.remove(0).0;
-    for _ in 0..3 {
-        let put = rig.tag("app", "latest", &bytes).await;
-        assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
+    let made = manifests(&rig, 1).await;
+    let (bytes, digest) = (&made[0].0, &made[0].1);
+    rig.memory
+        .put(&version("latest", 0), Bytes::from(digest.clone()))
+        .await
+        .expect("put");
+    let put = rig.tag("app", "latest", bytes).await;
+    assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
+    let own = rig.memory.get(&version("latest", 1), None).await;
+    assert_eq!(own.expect("a version of its own"), digest.as_bytes());
+    rig.memory
+        .delete(&version("latest", 0))
+        .await
+        .expect("a delete");
+    let by_tag = rig.send(Method::GET, "/v2/app/manifests/latest").await;
+    assert_eq!(&by_tag.body, bytes);
+    for _ in 0..2 {
+        let again = rig.tag("app", "latest", bytes).await;
+        assert_eq!(again.status, StatusCode::CREATED, "{}", again.text());
     }
     let held = rig.memory.list("oci/tags/app/latest/").await;
-    assert_eq!(held.expect("a listing").len(), 1);
-    assert_eq!(rig.metrics.requests("manifest", "created"), 3);
+    assert_eq!(held.expect("a listing").len(), 3);
 }
 
 /// Asserts that of two pushes of a tag that does not exist, which both found it without a version
