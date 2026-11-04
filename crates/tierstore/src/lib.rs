@@ -195,4 +195,4 @@ pub use selftest::{
     settle_conditional_delete, sweep_probes,
 };
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{Proxy, ProxyConfig};
+pub use tiered::{DeleteWait, Proxy, ProxyConfig};

@@ -33,6 +33,7 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod entry_delete;
 mod entry_put;
 #[cfg(test)]
 mod entry_put_race_tests;
@@ -44,7 +45,9 @@ mod heartbeat_tests;
 mod pause;
 mod put;
 
+pub use entry_delete::DeleteWait;
 use heartbeat::Heartbeat;
+use pause::WriteMode;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -90,6 +93,8 @@ pub struct ProxyConfig {
     /// How many times a put on entries looks again at the entry of its key when it was gone
     /// between the put's create and its read: past it the put is answered `Unavailable`.
     pub entry_rounds: u32,
+    /// How a delete that met a copy in flight waits for the reconciler to release the entry.
+    pub delete_wait: DeleteWait,
 }
 
 impl ProxyConfig {
@@ -98,7 +103,7 @@ impl ProxyConfig {
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, a
     /// format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
     /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
-    /// 3 looks at an entry.
+    /// 3 looks at an entry, and the [`DeleteWait`] of [`DeleteWait::new`].
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -116,6 +121,7 @@ impl ProxyConfig {
             departure: Duration::from_secs(60),
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
+            delete_wait: DeleteWait::new(),
         }
     }
 }
@@ -255,7 +261,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///
 /// **Entries.** While the format object says `{"epoch": 2, "phase": "active"}` a put (held,
 /// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
-/// key, not in the journal above: see `entry_put.rs`.
+/// key, not in the journal above: see `entry_put.rs`. So is a delete (see `entry_delete.rs`):
+/// the cold tier's object is deleted at once, and a delete that meets a copy in flight waits for
+/// the reconciler to release the entry ([`DeleteWait`]).
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -663,7 +671,9 @@ impl Inner {
     /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
     /// a put in flight, and the delete, which finds no object, is one that comes before it.
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.admit_write(key).await?;
+        if self.admit_write_mode(key).await? == WriteMode::Entries {
+            return self.delete_on_entry(key).await;
+        }
         self.remove_from_cold(key).await?;
         self.hot.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0, None))

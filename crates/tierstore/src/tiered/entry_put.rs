@@ -54,7 +54,7 @@ fn landing(error: Error) -> Failed {
 }
 
 /// A refusal that a client retries.
-fn retry(key: &str, why: &str) -> Error {
+pub(super) fn retry(key: &str, why: &str) -> Error {
     Error::Unavailable(format!("{why} for {key}; retry later"))
 }
 
@@ -90,7 +90,7 @@ impl Inner {
     }
 
     /// Fails with [`Error::Unavailable`] unless this proxy may destroy and acknowledge now.
-    fn require_live(&self, key: &str) -> Result<(), Error> {
+    pub(super) fn require_live(&self, key: &str) -> Result<(), Error> {
         if self.heartbeat.deadline.allows_start() {
             Ok(())
         } else {

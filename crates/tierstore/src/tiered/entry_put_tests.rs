@@ -53,6 +53,15 @@ impl Rig {
 
     /// As [`Rig::with_format`], with `entry_rounds` looks at an entry for a put.
     pub(super) async fn build(format: &str, entry_rounds: u32) -> Self {
+        Self::build_waiting(format, entry_rounds, crate::DeleteWait::new()).await
+    }
+
+    /// As [`Rig::build`], with the wait of a delete for the release of an entry.
+    pub(super) async fn build_waiting(
+        format: &str,
+        entry_rounds: u32,
+        delete_wait: crate::DeleteWait,
+    ) -> Self {
         let clock = Arc::new(TestClock::new());
         let mono = Arc::new(Mono::new());
         let hot_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
@@ -69,6 +78,7 @@ impl Rig {
         config.usage_refresh = Duration::ZERO;
         config.format_refresh = Duration::ZERO;
         config.entry_rounds = entry_rounds;
+        config.delete_wait = delete_wait;
         let proxy = Proxy::open(hot.clone(), cold.clone(), config)
             .await
             .unwrap();
