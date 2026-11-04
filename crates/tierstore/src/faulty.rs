@@ -20,8 +20,6 @@ pub enum Op {
     Put,
     /// [`Backend::put_if_match`].
     PutIfMatch,
-    /// [`Backend::put_reservation`] and [`Backend::put_reservation_if_match`].
-    PutReservation,
     /// [`Backend::get`], [`Backend::get_tagged`], [`Backend::get_stream`] and
     /// [`Backend::open_read`].
     Get,
@@ -304,24 +302,6 @@ impl Backend for FaultyBackend {
         self.inner.put_stream_if_match(key, len, body, etag).await
     }
 
-    /// A reservation is a call of kind [`Op::PutReservation`], not of kind [`Op::Put`].
-    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        self.enter(Op::PutReservation, key).await?;
-        self.inner.put_reservation(key, body).await
-    }
-
-    /// As `put_reservation`, a call of kind [`Op::PutReservation`].
-    async fn put_reservation_if_match(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, Error> {
-        self.enter(Op::PutReservation, key).await?;
-        let inner = &self.inner;
-        inner.put_reservation_if_match(key, body, etag).await
-    }
-
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let asked = range.map(|range| (range.offset(), range.size()));
         self.plan().ranges.push(asked);
@@ -329,13 +309,13 @@ impl Backend for FaultyBackend {
         self.inner.get(key, range).await
     }
 
-    /// A read with the mark is a call of kind [`Op::Get`], as a read without it is, and is given
+    /// A read with its tag is a call of kind [`Op::Get`], as a read without it is, and is given
     /// by the wrapped backend's own call.
     async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         let asked = range.map(|range| (range.offset(), range.size()));
         self.plan().ranges.push(asked);
         self.enter(Op::Get, key).await?;

@@ -67,8 +67,6 @@ pub struct ProxyConfig {
     /// How many times a delete looks at the cold tier's object again after it changed under the
     /// delete.
     pub delete_rounds: u32,
-    /// How many cold objects of a listing that may be reservations are asked about at once.
-    pub listing_heads: usize,
     /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
     /// filter of reserved keys cut short.
     pub upload_listing_calls: u32,
@@ -105,7 +103,7 @@ impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, 3 looks
-    /// at the cold object of a delete, 16 cold objects of a listing asked about at once, at
+    /// at the cold object of a delete, at
     /// most 100 calls to the cold tier for one listing of uploads, a heartbeat every 10 seconds, a
     /// departure time of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads
     /// zero now, a format object that is read every 5 seconds, 3 looks at an entry, and the
@@ -121,7 +119,6 @@ impl ProxyConfig {
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
             delete_rounds: 3,
-            listing_heads: 16,
             upload_listing_calls: 100,
             format_refresh: Duration::from_secs(5),
             clock,
@@ -205,7 +202,7 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`PutMirror`, with the content tag the cold object has and the tag the hot tier gives the
 ///   copy), in the background, so that the reconciler can evict it again, and can drop it if the
 ///   cold tier no longer holds that object. The cold tag is the one the cold tier's read gives
-///   with the bytes (`get_tagged`: the bytes, the mark and the tag of one object), so it is the
+///   with the bytes (`get_tagged`: the bytes and the tag of one object), so it is the
 ///   tag of the bytes copied whatever the key held before or after; no HEAD of the cold tier is
 ///   made for it. The hot tag is the one the create-only write itself returns
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
@@ -222,11 +219,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   copies nothing. A ranged read that misses the hot tier asks the cold tier for that range
 ///   alone and copies nothing back: the memory of a read is its range, whatever the size of the
 ///   object, and a cache that reads a long object in chunks does not make the proxy read it whole
-///   once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
-///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
-///   copied back.
-/// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
-///   not found.
+///   once for each chunk.
+/// - **Head** reads the hot tier, else the cold tier, and copies nothing back.
 /// - **Put** is refused with [`Error::AlreadyExists`] if the key exists in the cold tier (it
 ///   may have been evicted from the hot tier) or in the hot tier. The cold tier is asked
 ///   first (a HEAD); then the object is written to the hot tier, create-only; then the cold
@@ -253,21 +247,15 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   fails with [`Error::Full`] (the tier is latched full, and the client's retry goes to the
 ///   cold tier); if it took none, the cold tier gets the whole body as for a held put.
 /// - **Delete** removes the object from the cold tier first, by its content tag (looking again if
-///   it changed, three times at most), then from the hot tier, then appends a delete entry. A
-///   reservation in the cold tier is removed only if the hot tier holds the key; a bare one is a
-///   put that has not written its object yet, and is left (the delete finds no object, so it
-///   comes before that put).
+///   it changed, three times at most), then from the hot tier, then appends a delete entry.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes
-///   `_journal/` and `_tiering/` (whichever tier holds them), and without reservations: a cold object of the size of one that the hot
-///   listing does not show is asked about with a HEAD (sixteen at a time; an object a HEAD finds
-///   real is shown, and no answer is kept from one listing to the next, since a listing gives no
-///   version of an object to know it by). A HEAD that fails fails the listing.
+///   `_journal/` and `_tiering/` (whichever tier holds them).
 ///   [`Backend::list_page`] pages through the merged listing: the last key of a page is the
-///   continuation token, and `max_keys` is kept to (a page of the cold tier that the filter cut
-///   short is made up from the next). A get, a head, a put, a delete and every multipart call of
-///   a key under a reserved prefix is refused with [`Error::Reserved`]. The S3 front and the
-///   local cache of a build node refuse those keys as well, each for itself.
+///   continuation token, and `max_keys` is kept to (a page of a tier that the filter of
+///   the reserved prefixes cut short is made up from the next). A get, a head, a put, a delete and
+///   every multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The
+///   S3 front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
 ///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
 ///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
@@ -592,21 +580,15 @@ impl Inner {
         self.classify(hot_bytes)
     }
 
-    /// A get of the cold tier, counted as a hit, a miss or an error of it. A reservation is not an
-    /// object: the read of one is a miss. The read gives the mark and the content tag with the
-    /// bytes, all of one object; an error that is neither "not found" nor "unavailable" (a range
-    /// past the end of the 56 bytes of a reservation is one) is told from a failure by one HEAD.
+    /// A get of the cold tier, counted as a hit, a miss or an error of it. The read gives the
+    /// content tag with the bytes, both of one object.
     async fn cold_get(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
         match self.cold.get_tagged(key, range).await {
-            Ok((_, true, _)) => {
-                self.counters.miss(Tier::Cold, Read::Get);
-                Err(Error::NotFound(key.to_owned()))
-            }
-            Ok((body, false, tag)) => {
+            Ok((body, tag)) => {
                 self.counters.hit(Tier::Cold, Read::Get);
                 self.counters.bytes_read(Tier::Cold, body.len());
                 Ok((body, tag))
@@ -615,20 +597,10 @@ impl Inner {
                 self.counters.miss(Tier::Cold, Read::Get);
                 Err(error)
             }
-            Err(error @ Error::Unavailable(_)) => {
+            Err(error) => {
                 self.counters.error(Tier::Cold, Read::Get);
                 Err(error)
             }
-            Err(error) => match self.cold.head(key).await {
-                Ok(meta) if meta.reservation => {
-                    self.counters.miss(Tier::Cold, Read::Get);
-                    Err(Error::NotFound(key.to_owned()))
-                }
-                _ => {
-                    self.counters.error(Tier::Cold, Read::Get);
-                    Err(error)
-                }
-            },
         }
     }
 
@@ -689,10 +661,6 @@ impl Inner {
             }
         }
         match self.cold.head(key).await {
-            Ok(meta) if meta.reservation => {
-                self.counters.miss(Tier::Cold, Read::Head);
-                Err(Error::NotFound(key.to_owned()))
-            }
             Ok(meta) => {
                 self.counters.hit(Tier::Cold, Read::Head);
                 Ok(meta)
@@ -709,9 +677,7 @@ impl Inner {
     }
 
     /// Deletes the object: the cold tier's object first, by its content tag, then the hot tier's,
-    /// then a delete entry is appended (the books forget the key). A reservation is removed only
-    /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
-    /// a put in flight, and the delete, which finds no object, is one that comes before it.
+    /// then a delete entry is appended (the books forget the key).
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
         if self.admit_write_mode(key).await? == WriteMode::Entries {
             return self.delete_on_entry(key).await;
@@ -731,9 +697,6 @@ impl Inner {
                 Err(Error::NotFound(_)) => return Ok(()),
                 Err(error) => return Err(error),
             };
-            if found.reservation && !self.hot_holds(key).await? {
-                return Ok(());
-            }
             match self.cold.delete_if_match(key, &found.tag).await {
                 Ok(()) | Err(Error::NotFound(_)) => return Ok(()),
                 Err(Error::PreconditionFailed(_)) => {}
@@ -742,15 +705,6 @@ impl Inner {
         }
         let text = format!("the cold copy of {key} kept changing under its delete");
         Err(Error::Unavailable(text))
-    }
-
-    /// Whether the hot tier holds an object under `key`.
-    async fn hot_holds(&self, key: &str) -> Result<bool, Error> {
-        match self.hot.head(key).await {
-            Ok(_) => Ok(true),
-            Err(Error::NotFound(_)) => Ok(false),
-            Err(error) => Err(error),
-        }
     }
 }
 

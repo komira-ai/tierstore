@@ -260,10 +260,10 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.journal_batch_entries` | count, 64 (1 to 65536) | the most entries one journal object holds; a batch that reaches it is written at once, without waiting `journal_linger` |
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
 | `hot_store.journal_page_size` | count, 100 (1 to 1000) | the most journal objects the reconciler asks the hot tier for in one listing |
-| `hot_store.copy_rounds` | count, 3 (1 to 100) | how many times a copy to the cold tier reads the cold object again after it changed under the copy, before the copy is given up and tried at the next pass |
+| `hot_store.copy_rounds` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.delete_rounds` | count, 3 (1 to 100) | how many times a delete looks at the cold object again after it changed under the delete |
-| `hot_store.listing_heads` | count, 16 (1 to 1024) | how many cold objects of a listing, which may be reservations, are asked about at once |
+| `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing |
 | `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
 | `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. The removal of registrations does not use it: that uses `registration_retention` |
@@ -307,7 +307,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 
 - the limits of the S3 protocol that the code holds to: the 1024-byte longest key, 1000 keys to a listing page, 5 MiB to 5 GiB for a part, 10000 parts to an upload, the 604800-second longest presigned expiry, the 15-minute clock skew SigV4 allows, and the 64-byte block of the HMAC;
 - the limits of the OCI distribution format: the 255-byte longest repository name and the 128-byte longest tag;
-- the sizes of the formats the program writes: the 56-byte reservation record, the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
+- the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
 These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the self-test's pauses, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.

@@ -79,14 +79,10 @@ pub(crate) fn checkpoint_key(proxy_id: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum JournalOp {
-    /// An object was written to the hot tier, and is to be copied to the cold tier. Written by a
-    /// release that holds no reservation; the cold tier is not known to decide the key.
+    /// An object was written to the hot tier, and is to be copied to the cold tier.
     Put,
     /// An object was deleted from both tiers; the cold tier is to be told again.
     Delete,
-    /// An object was written to the hot tier by a put that holds a reservation of the key in the
-    /// cold tier ([`JournalEntry::cold_tag`] names it), and is to replace that reservation.
-    PutReserved,
     /// An object was copied from the cold tier into the hot tier by a read
     /// ([`JournalEntry::cold_tag`] is the tag the cold object had), so that the reconciler can
     /// evict it again ([`JournalEntry::hot_tag`] is the tag the hot tier gave the copy). It is
@@ -99,10 +95,10 @@ pub enum JournalOp {
 }
 
 impl JournalOp {
-    /// Whether the entry puts an object into the hot tier (a put, a reserved put or a mirror).
+    /// Whether the entry puts an object into the hot tier (a put or a mirror).
     #[must_use]
     pub(crate) fn is_put(self) -> bool {
-        matches!(self, Self::Put | Self::PutReserved | Self::PutMirror)
+        matches!(self, Self::Put | Self::PutMirror)
     }
 }
 
@@ -118,9 +114,8 @@ pub struct JournalEntry {
     /// When it happened, in milliseconds, by the clock of the proxy.
     pub time: u64,
     /// The content tag of the cold tier's object that the entry is about, for a
-    /// [`JournalOp::PutReserved`] (the reservation of the put) and a [`JournalOp::PutMirror`]
-    /// (the object read); absent in every other entry, and in the entries of releases before
-    /// these ops.
+    /// [`JournalOp::PutMirror`] (the object read); absent in every other entry, and in the entries
+    /// of releases before that op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cold_tag: Option<String>,
     /// The content tag the hot tier gave the object of a [`JournalOp::PutMirror`] when the copy

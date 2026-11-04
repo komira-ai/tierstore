@@ -255,17 +255,17 @@ impl Backend for Retagged {
     }
 
     /// The read of the inner backend, with the tag prefixed as [`Backend::head`] prefixes it:
-    /// the trait says the tag of a marked read is the one `head` gives for that object.
+    /// the trait says the tag of a tagged read is the one `head` gives for that object.
     async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         if self.ranged_only && range.is_none() {
             return Err(Error::Other(format!("a whole read of {key} is refused")));
         }
-        let (bytes, reservation, tag) = self.inner.get_tagged(key, range).await?;
-        Ok((bytes, reservation, format!("cold-etag:{tag}")))
+        let (bytes, tag) = self.inner.get_tagged(key, range).await?;
+        Ok((bytes, format!("cold-etag:{tag}")))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
