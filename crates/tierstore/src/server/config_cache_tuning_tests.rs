@@ -155,7 +155,7 @@ fn a_count_or_size_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
     }
     let gib = 1_u64 << 30;
     assert_eq!(
-        refusal("fill_chunk = \"4095\""),
+        refusal("fill_chunk = \"4095B\""),
         format!("local_cache.fill_chunk: 4095 is not between 4096 and {gib}")
     );
     assert_eq!(
@@ -168,7 +168,7 @@ fn a_count_or_size_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
     assert_eq!(cache_of("fill_chunk = \"4KiB\"").cache.fill_chunk, 4096);
     assert_eq!(cache_of("fill_chunk = \"1GiB\"").cache.fill_chunk, gib);
     assert_eq!(
-        refusal("keep_queue_bytes = \"0\""),
+        refusal("keep_queue_bytes = \"0B\""),
         format!("local_cache.keep_queue_bytes: 0 is not between 1 and {gib}")
     );
     assert_eq!(
@@ -179,7 +179,7 @@ fn a_count_or_size_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         )
     );
     assert_eq!(
-        cache_of("keep_queue_bytes = \"1\"").cache.keep_queue_bytes,
+        cache_of("keep_queue_bytes = \"1B\"").cache.keep_queue_bytes,
         1
     );
     assert_eq!(
