@@ -383,7 +383,7 @@ async fn a_listing_that_never_gets_past_the_reserved_keys_stops_at_the_cap() {
 /// says so in its error, and a listing of uploads does the same; and a cap of 0 is read as 1.
 #[tokio::test]
 async fn the_cap_on_the_pages_of_a_listing_is_the_listing_calls_of_the_settings() {
-    for (cap, asked) in [(7, 7), (0, 1)] {
+    for (cap, asked) in [(7_u32, 7_u32), (0, 1)] {
         let inner = MemoryBackend::new();
         for key in ["_journal/a", "_journal/b", "_journal/c"] {
             inner.put(key, Bytes::from_static(b"x")).await.unwrap();
