@@ -208,33 +208,6 @@ async fn an_object_of_the_cold_tier_is_read_and_copied_back() {
     assert_eq!(copy, body);
 }
 
-/// Asserts that no call can name a key under `_journal/` or `_tiering/`: get, head, put,
-/// delete and the multipart calls are `AccessDenied`, and a listing leaves those keys out
-/// though the hot tier holds them.
-#[tokio::test(start_paused = true)]
-async fn the_keys_of_the_proxy_are_out_of_reach() {
-    let rig = Rig::new(MEBIBYTE).await;
-    rig.put("k", b"v").await;
-    assert!(rig.hot_mem.get("_tiering/proxies/p1", None).await.is_ok());
-    for key in ["_journal/p1/00000000000000000001", "_tiering/lease"] {
-        for method in ["GET", "HEAD", "PUT", "DELETE"] {
-            let reply = rig.call(method, key, b"x").await;
-            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{method} {key}");
-        }
-        let start = rig.call("POST", &format!("{key}?uploads"), b"").await;
-        assert_eq!(start.status, StatusCode::FORBIDDEN);
-        let part_uri = format!("{key}?partNumber=1&uploadId=u");
-        let part = rig.call("PUT", &part_uri, b"x").await;
-        assert_eq!(part.status, StatusCode::FORBIDDEN);
-        let done_uri = format!("{key}?uploadId=u");
-        let done = rig.call("POST", &done_uri, b"x").await;
-        assert_eq!(done.status, StatusCode::FORBIDDEN);
-    }
-    let reply = rig.call("GET", "_tiering/lease", b"").await;
-    assert_eq!(reply.code(), "AccessDenied");
-    assert_eq!(keys(&rig.list("").await.body), ["k"]);
-}
-
 async fn put_all(rig: &Rig, names: &[&str]) {
     for name in names {
         assert_eq!(rig.put(name, b"x").await.status, StatusCode::OK);

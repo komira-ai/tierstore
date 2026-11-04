@@ -565,7 +565,9 @@ cache  = false
 ```
 
 What it keeps: a key is kept if the longest `[[policy]]` prefix that holds it says `cache = true`
-(and it is not under `_journal/` or `_tiering/`). Every other key, and every listing, goes to the
+(and it is not under `_journal/` or `_tiering/`: a GET, ranged GET or HEAD of such a
+key is refused with 403 `AccessDenied` without a look at the disk or the upstream, and a listing
+leaves them out). Every other key that is not kept, and every other listing, goes to the
 upstream as it is and is never kept. A HEAD, GET or ranged GET of a kept object is answered from the
 disk and makes no call to the upstream. A GET of an object that is not there reads it from the
 upstream in chunks of 8 MiB into `<path>/.stage/`, hashing the bytes as they pass, and links it into

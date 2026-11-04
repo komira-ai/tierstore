@@ -28,10 +28,14 @@ pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 /// The lease of the reconciler.
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
+/// Every prefix that the proxy keeps for itself: no client names a key under one.
+pub(crate) const RESERVED_PREFIXES: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
+
 /// Whether a key is under a prefix that the proxy keeps for itself.
 pub(crate) fn is_reserved(key: &str) -> bool {
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    reserved.iter().any(|prefix| key.starts_with(prefix))
+    RESERVED_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
 }
 
 /// The prefix of the journal objects of one proxy.
