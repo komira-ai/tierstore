@@ -210,6 +210,7 @@ mod drain;
 mod front;
 pub mod gc;
 pub mod grant;
+pub mod handoff;
 mod handover;
 mod idle;
 mod keys;

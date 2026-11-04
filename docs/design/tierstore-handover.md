@@ -14,6 +14,51 @@ deferred, `76` halt; the last stdout line is one JSON object; every step idempot
 CI. The nftables mechanics are in [`host-updates.md`][hu] 4.1.1 to 4.1.5 and are tierstore's, as steps of this hook. This page
 is the hook, and what tierstore itself must change.
 
+## 0. Live update by listening-socket hand-off (server side)
+
+This replaces the port-forward of sections 1 to 4 and the slot ports. The hook and the packaging move to it in a change that
+follows this one; until then both exist, and this section describes what the binary can do (`server/handoff/`).
+
+Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
+(`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
+
+Solution: the new instance asks the old one for its bound listening sockets. They are the same sockets, so no connection
+the kernel holds is reset when the old one stops accepting.
+
+Sequence of one update (one control socket, a file in the state directory, mode 0600, its user only):
+
+```
+new                                     old (running)
+ | connect, "take 1"  ----------------->  |
+ |                                        | one taker at a time: another is answered "refused"
+ | <---- "offer" + "<front> <addr>"...    |
+ |       + the sockets (SCM_RIGHTS)       |
+ | addresses match the settings?          |
+ | "ack" (else "nak": old goes on) ---->  |
+ |                                        | removes the control socket, begins its drain
+ | <---- "done"                           | (requests in flight finish, then it exits)
+ | binds the control socket itself        |
+ | serves the inherited sockets           |
+```
+
+Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handoff.rs`:
+
+- A put half sent when the new instance takes over is answered by the old one, which waits for it
+  (`a_request_in_flight_finishes_and_none_fails_while_the_sockets_change_hands`).
+- A second taker is refused while one is at it, and a taker that says `nak` or goes away leaves the old instance able to
+  serve the next (`a_second_taker_is_refused_while_the_first_is_at_it`, `an_offer_names_its_sockets_and_an_ack_ends_it`).
+- No file, or a file no one listens on (an instance that was killed), means a cold start: the new instance binds its own
+  sockets (`with_no_file_there_nothing_answers`, `a_file_no_one_listens_on_is_the_same_as_none`). A running instance that
+  accepts and never answers is not a cold start: the start fails after `Handoff::wait`
+  (`an_instance_that_never_answers_ends_in_a_timeout`).
+- Settings that name other addresses than the running instance serves do not take its sockets, since a live update cannot
+  change them (`settings_that_name_other_addresses_take_nothing`).
+- A taker of another user is refused (`a_taker_of_another_user_is_refused`).
+
+Not in this change: the `server.handoff_socket` and `server.handoff_wait` keys (the wait defaults to a number of seconds that
+is a config key from the start), the update hook's steps, the slot units and ports, and the proxy id that does not derive
+from a port. They are the change that follows.
+
 ## 1. Shape
 
 Two instances run side by side during an update, each on its own private port (slot units `tierstore@9301` and

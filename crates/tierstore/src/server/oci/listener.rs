@@ -146,14 +146,33 @@ impl OciListener {
     ) -> Result<Self, OciError> {
         let bound = listen::bind_all(addrs);
         let bound = bound.map_err(|(addr, source)| OciError::Bind { addr, source })?;
+        Ok(Self::over(bound, acceptor, front, limits))
+    }
+
+    /// A listener that serves from sockets that are already bound and listening, as `bind_all`
+    /// does from the ones it binds: those a running instance handed over (see `handoff`).
+    pub(crate) fn over(
+        bound: Vec<tokio::net::TcpListener>,
+        acceptor: Option<TlsAcceptor>,
+        front: Arc<OciFront>,
+        limits: OciLimits,
+    ) -> Self {
         let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
-        Ok(Self {
+        Self {
             listeners: Listeners::new(bound),
             acceptor,
             front,
             limits,
             shared,
-        })
+        }
+    }
+
+    /// A copy of each socket's descriptor, to offer to a successor (see `handoff`).
+    ///
+    /// # Errors
+    /// A descriptor cannot be copied.
+    pub(crate) fn duplicates(&self) -> std::io::Result<Vec<std::net::TcpListener>> {
+        self.listeners.duplicates()
     }
 
     /// The handle that begins the listener's drain (see [`OciDrain`]).
