@@ -33,10 +33,10 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
-mod pause;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
+mod pause;
 mod put;
 mod read;
 mod relay;
