@@ -112,7 +112,6 @@ impl Visitor<'_> for RateVisitor {
 
 /// `[local_cache]`.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub(super) struct LocalCacheTable {
     /// The cache directory, on the file system that the jobs' scratch is on.
     pub path: std::path::PathBuf,

@@ -7,6 +7,7 @@ use std::time::Duration;
 use super::config::{from_text, settings_from_text};
 use super::config_cache::{CacheSettings, LocalCacheTable, Rate};
 use super::config_testing::{DEFAULTS, GOLDEN, MINIMAL, oci_interface};
+use super::config_unknown::fields_of;
 use super::local_cache::{FILL_CHUNK, SCRUB_MIN_ROUND, SCRUB_RATE, WHOLE_FILL_LIMIT};
 
 /// A build node's file with every key given a value that is not the default.
@@ -809,11 +810,8 @@ fn the_readme_documents_the_build_node_file() {
             .find(|line| line.starts_with('|') && line.contains(&wanted));
         assert!(row.is_some(), "no row for {key}");
     }
-    // The keys the table takes are in the message of serde's refusal of one it does not.
-    let refused = toml::from_str::<LocalCacheTable>("zz_not_a_key = 1\n").unwrap_err();
-    let message = refused.message().to_owned();
-    let (_, expected) = message.split_once("expected").unwrap();
-    let keys: BTreeSet<&str> = expected.split('`').skip(1).step_by(2).collect();
+    // The keys the table takes are the fields of its struct.
+    let keys: BTreeSet<&str> = fields_of::<LocalCacheTable>().iter().copied().collect();
     let listed: BTreeSet<&str> = LOCAL_CACHE_KEYS.iter().copied().collect();
     assert_eq!(keys, listed);
 }
