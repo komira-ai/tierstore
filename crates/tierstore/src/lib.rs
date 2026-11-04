@@ -78,7 +78,7 @@
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. So far only the puts of a [`Proxy`] whose format is active and the
+//!   body is an [`Entry`]. So far only the puts and deletes of a [`Proxy`] whose format is active and the
 //!   [`EntryReconciler`] call them.
 //! - The [`EntryReconciler`] works on the entries in place of the journals: it holds the lease,
 //!   lists `_entries/`, copies each landed put to the cold tier after it has taken the entry,
