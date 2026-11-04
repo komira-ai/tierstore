@@ -95,6 +95,7 @@ fn the_oci_flags_are_printed_as_the_oci_table() {
             "listen",
             "max_connections",
             "prefix",
+            "require_auth",
             "tls_cert_file",
             "tls_key_file"
         ]
