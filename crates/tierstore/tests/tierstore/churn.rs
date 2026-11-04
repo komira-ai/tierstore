@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta, PartBody};
+use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta};
 
 /// A memory backend whose listings also show one object that is not there: an object that was
 /// deleted after the listing was cut, with the size of a reservation. A HEAD of it is not found.
