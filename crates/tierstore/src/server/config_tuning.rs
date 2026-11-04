@@ -191,9 +191,13 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
-    use super::super::cli::build;
+    use tierstore_testkit::dir::TestDir;
+
+    use super::super::cli::{Built, Cli, build};
     use super::super::config::{from_text, settings_from_text};
     use super::super::config_testing::{DEFAULTS, MINIMAL};
     use super::{HotTuning, S3Client};
@@ -231,6 +235,16 @@ cache  = true
         MINIMAL.replacen("budget = 1000", &format!("budget = 1000\n{line}"), 1)
     }
 
+    /// What `build` makes of `cli` with a good key file as its full key.
+    fn built(cli: &mut Cli) -> Built {
+        let dir = TestDir::under(std::env::temp_dir(), "tierstore-tuning");
+        let path = dir.path().join("key");
+        std::fs::write(&path, "AKID\nsecret\n").unwrap();
+        std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        cli.access_key_file = path;
+        build(cli).unwrap()
+    }
+
     fn refusal(text: &str) -> String {
         from_text(text, DEFAULTS).unwrap_err().to_string()
     }
@@ -240,7 +254,7 @@ cache  = true
     /// reconciler's counts and sizes, in the file's settings and in what `build` makes of them.
     #[test]
     fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
-        let cli = from_text(MINIMAL, DEFAULTS).unwrap();
+        let mut cli = from_text(MINIMAL, DEFAULTS).unwrap();
         let client = cli.s3_client;
         assert_eq!(client.connect_timeout, Duration::from_secs(5));
         assert_eq!(client.min_body_rate.map(|rate| rate.get()), Some(1 << 20));
@@ -258,7 +272,7 @@ cache  = true
         assert_eq!(hot.listing_heads, 16);
         assert_eq!(hot.upload_listing_calls, 100);
         assert_eq!(hot, HotTuning::default());
-        let built = build(&cli).unwrap();
+        let built = built(&mut cli);
         assert_eq!(built.proxy.batch_entries, 64);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
         assert_eq!(built.proxy.delete_rounds, 3);
@@ -284,14 +298,14 @@ cache  = true
              delete_rounds = 6\nlisting_heads = 4\nupload_listing_calls = 7",
             1,
         );
-        let cli = from_text(&text, DEFAULTS).unwrap();
+        let mut cli = from_text(&text, DEFAULTS).unwrap();
         let client = cli.s3_client;
         assert_eq!(client.connect_timeout, Duration::from_secs(2));
         assert_eq!(client.min_body_rate.map(|rate| rate.get()), Some(4096));
         assert_eq!(client.tuning.pool_idle_timeout, Duration::from_secs(10));
         assert_eq!(client.tuning.read_retries, 4);
         assert_eq!(client.tuning.read_retry_wait, Duration::from_millis(7));
-        let built = build(&cli).unwrap();
+        let built = built(&mut cli);
         assert_eq!(built.proxy.batch_entries, 8);
         assert_eq!(built.proxy.usage_refresh, Duration::from_millis(250));
         assert_eq!(built.proxy.delete_rounds, 6);
