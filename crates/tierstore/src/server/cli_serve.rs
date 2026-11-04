@@ -265,7 +265,7 @@ pub(super) async fn bind_oci(
     setup: Option<OciSetup>,
     backend: Arc<dyn Backend>,
 ) -> Result<Option<OciListener>, Error> {
-    bind_oci_from(setup, backend, None).await
+    Ok(bind_oci_from(setup, backend, None).await?)
 }
 
 /// [`bind_oci`], over the sockets of a running instance (`inherited`) in place of new ones: none
