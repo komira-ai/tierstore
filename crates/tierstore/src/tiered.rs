@@ -146,9 +146,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   (`put_tagged`), so no HEAD of the hot tier follows; a failed journal entry removes the copy
 ///   with `delete_if_match` on that tag, and if no tag was obtained nothing is deleted. The two tags are never compared with each
 ///   other: the tiers may tag the same bytes differently.
-///   A failed copy-back does not fail the read. A ranged read that misses the hot tier reads the
-///   whole object from the cold tier, since the hot tier takes the whole of it, and cuts the
-///   range from that. A *reservation* in the cold tier (a marked 56-byte object, see
+///   A failed copy-back does not fail the read. A ranged read that misses the hot tier asks the
+///   cold tier for that range alone and copies nothing back: the memory of a read is its range,
+///   whatever the size of the object, and a cache that reads a long object in chunks does not
+///   make the proxy read it whole once for each chunk. A *reservation* in the cold tier (a marked 56-byte object, see
 ///   [`Backend::put_reservation`]) is not an object: a read of it is not found, and nothing is
 ///   copied back.
 /// - **Head** reads the hot tier, else the cold tier, and copies nothing back; a reservation is
@@ -547,12 +548,13 @@ impl Inner {
                 return Err(error);
             }
         }
-        if let Some(part) = range
-            && self.level().await >= Level::Critical
-        {
-            // A read of a part, with the hot tier too full to take a copy, asks the cold tier for
-            // that part alone: a whole read per chunk of a long blob would be quadratic.
-            self.counters.skipped(Skipped::Critical);
+        if let Some(part) = range {
+            // A read of a part asks the cold tier for that part alone and copies nothing back: a
+            // whole read per chunk of a long blob would be quadratic, and would hold the whole of
+            // the object in memory for a read of a part of it.
+            if self.level().await >= Level::Critical {
+                self.counters.skipped(Skipped::Critical);
+            }
             let (body, _) = self.cold_get(key, Some(part)).await?;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
@@ -566,12 +568,8 @@ impl Inner {
         } else {
             self.copy_back(key, &body, tag).await;
         }
-        let served = match range {
-            Some(range) => range.slice(&body)?,
-            None => body,
-        };
-        self.counters.served(Tier::Cold, served.len());
-        Ok(served)
+        self.counters.served(Tier::Cold, body.len());
+        Ok(body)
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {

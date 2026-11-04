@@ -44,14 +44,19 @@ The configuration file:
 ```message
 <key>: a secret is never in the file; give the path of the file that holds it (a key whose name ends in _file)
 --config cannot be given with <flags>: the file holds what they hold (only --drain-lb-wait and --drain-deadline go with it)
-<key>: a storage node keeps no cache: it needs [local_cache] and no [hot_store]
+<key>: a node without [local_cache] keeps no cache: give it [local_cache]
 <key>: the file needs both [hot_store] and [cold_store] (the storage-node shape), or [local_cache] and [cold_store] without [hot_store] (the build-node shape)
-<key>: is refused with [hot_store]: the hot store is already local disk, and a disk cache in front of it would cache a disk with a disk
+<key>: a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true
+<key>: must not be the directory of <tier>, inside it or around it: the tier would list the cache's files as objects
+<key>: must be an absolute path (it is compared with the directories of the tiers)
+<key>: must be an absolute path to be compared with <tier>'s directory
+<key>: must not hold <key>: it is not a place for the cache's files
+<key>: is in a file with [hot_store] too, which has no flag form
 <key>: no [[policy]] covers the blobs under <prefix>, so every pull would go to the upstream; give a [[policy]] with prefix = <prefix> and cache = true
 <key>: the blobs under <prefix> are covered by the [[policy]] with prefix <prefix>, which has cache = false, so every pull would go to the upstream; give a [[policy]] with prefix = <prefix> and cache = true
 ```
 
-Move the setting into the file as a path, or take the flag out of the command line; give the file one of the two shapes, a storage node's or a build node's, and leave `[local_cache]` out of a storage node's. A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
+Move the setting into the file as a path, or take the flag out of the command line; give the file one of the three shapes: a storage node's, a build node's, or a storage node's with a `[local_cache]` in front of it (all three tables). A cache needs a `[[policy]]` with `cache = true`, a `write_through` that is not `false` when the node has a hot store, and a `path` that is absolute and is not a tier's directory, inside it or around it (a `dir` tier's directory is absolute too). A message of a syntax error reads `line <N>, column <M>: <key>: ...` and never repeats the value.
 
 The tiers:
 

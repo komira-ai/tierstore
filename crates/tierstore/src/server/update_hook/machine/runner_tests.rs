@@ -169,12 +169,13 @@ impl Read for Blocks {
 }
 
 /// Asserts that a stream that does not reach its end is waited for only until the deadline,
-/// and that the call then reports that it was not drained.
+/// and that the call then reports that it was not drained. The deadline is the present, so it
+/// has passed when the call looks and no wait is raced.
 #[test]
 fn a_stream_that_does_not_end_is_waited_for_only_until_the_deadline() {
     let (release, wait) = mpsc::channel();
     let drained = drain(boxed(Blocks(wait)));
-    let error = collect(&drained, Instant::now() + Duration::from_millis(100)).unwrap_err();
+    let error = collect(&drained, Instant::now()).unwrap_err();
     assert_eq!(error.to_string(), "the output was not drained in time");
     drop(release);
 }

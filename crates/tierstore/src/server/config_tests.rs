@@ -299,16 +299,16 @@ fn a_fault_inside_a_multi_line_string_shows_nothing_of_the_string() {
     assert!(!why.contains("SENTINEL"), "{why}");
 }
 
-/// Asserts that `[local_cache]` along with `[hot_store]` is refused, with the reason, and that a
-/// file with neither shape's tables (`[local_cache]` alone, or a storage node's file missing
-/// `[hot_store]` or `[cold_store]`) is refused for the shape.
+/// Asserts that `[local_cache]` along with `[hot_store]` is read as a node with a cache, which
+/// needs what a cache needs (here a policy that keeps something, the first thing it checks), and
+/// that a file with none of the three shapes' tables (`[local_cache]` alone, or a storage node's
+/// file missing `[hot_store]` or `[cold_store]`) is refused for the shape.
 #[test]
-fn a_local_cache_with_a_hot_store_and_any_shape_but_the_two_are_refused() {
+fn a_hot_store_with_a_local_cache_needs_what_a_cache_needs_and_other_shapes_are_refused() {
     let cache = format!("{GOLDEN}\n[local_cache]\npath = \"/var/cache\"\n");
-    let why = refusal(&cache);
-    assert!(
-        why.contains("local_cache") && why.contains("is refused with [hot_store]"),
-        "{why}"
+    assert_eq!(
+        refusal(&cache),
+        "policy: no policy has cache = true, so nothing would be kept"
     );
     let only_cache = minimal_with(
         "[hot_store]\nkind   = \"memory\"\nbudget = 1000\n\n[cold_store]\nkind = \"memory\"\n",
