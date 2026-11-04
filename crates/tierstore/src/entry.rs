@@ -44,11 +44,8 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::journal::to_body;
+use crate::journal::{ENTRIES_PREFIX, to_body};
 use crate::{Backend, Clock, Error};
-
-/// The prefix of the entries in the hot tier.
-pub(crate) const ENTRIES_PREFIX: &str = "_entries/";
 
 /// The `v` of the bodies this release writes.
 const ENTRY_VERSION: u32 = 1;

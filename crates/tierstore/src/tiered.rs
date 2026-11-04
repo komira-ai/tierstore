@@ -33,6 +33,7 @@ const LISTING_HEADS: usize = 16;
 const DELETE_ROUNDS: u32 = 3;
 
 mod copy_back;
+mod pause;
 mod put;
 
 /// The settings of a [`Proxy`].
@@ -57,6 +58,9 @@ pub struct ProxyConfig {
     pub usage_refresh: Duration,
     /// The age of the usage object past which it is ignored, as if it were missing.
     pub usage_stale_after: Duration,
+    /// How long the format object (`_tiering/format`) that was read is used before it is read
+    /// again: the most time between the operator pausing writes and a proxy refusing them.
+    pub format_refresh: Duration,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
 }
@@ -64,7 +68,8 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, and a
+    /// format object that is read every 5 seconds.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -75,6 +80,7 @@ impl ProxyConfig {
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
+            format_refresh: Duration::from_secs(5),
             clock,
         }
     }
@@ -256,6 +262,8 @@ struct Inner {
     /// the objects are written one at a time, and a number is used again if its write failed.
     next_seq: AsyncMutex<u64>,
     capacity: Mutex<Capacity>,
+    /// What was last read of the format object.
+    pause: Mutex<pause::Pause>,
     counters: Counters,
 }
 
@@ -296,6 +304,7 @@ impl Proxy {
             open: Mutex::new(None),
             next_seq: AsyncMutex::new(next),
             capacity: Mutex::new(Capacity::default()),
+            pause: Mutex::default(),
             counters: Counters::default(),
         };
         Ok(Self {
@@ -612,7 +621,7 @@ impl Inner {
     /// if the hot tier holds the key, which is an acknowledged put or about to be; a bare one is
     /// a put in flight, and the delete, which finds no object, is one that comes before it.
     async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        refuse_reserved(key)?;
+        self.admit_write(key).await?;
         self.remove_from_cold(key).await?;
         self.hot.delete(key).await?;
         self.append(self.entry(JournalOp::Delete, key, 0, None))
@@ -835,7 +844,7 @@ impl Backend for Proxy {
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         self.inner.cold.create_upload(key).await
     }
 
@@ -858,7 +867,7 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        refuse_reserved(key)?;
+        self.inner.admit_write(key).await?;
         let cold = &self.inner.cold;
         let upload = cold.upload_part_with_len(key, id, number, len, body);
         upload.await
