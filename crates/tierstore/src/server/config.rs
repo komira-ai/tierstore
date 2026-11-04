@@ -56,7 +56,8 @@ use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
-use super::front::FrontSettings;
+use super::front::{FrontSettings, S3Tls};
+use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
 use super::lock::check_lock_path;
 
@@ -89,6 +90,8 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("bucket", &["server.bucket"]),
     ("region", &["server.region"]),
     ("access-key-file", &["server.access_key_file"]),
+    ("tls-cert", &["server.tls_cert_file"]),
+    ("tls-key", &["server.tls_key_file"]),
     ("read-only-key-file", &["server.read_only_key_files"]),
     ("presign-key-file", &["server.presign_key_files"]),
     ("gc-key-file", &["server.gc_key_files"]),
@@ -116,6 +119,7 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("put-min-bytes-per-sec", &["server.put_min_bytes_per_sec"]),
     ("put-rate-grace", &["server.put_rate_grace"]),
     ("body-idle-timeout", &["server.body_idle_timeout"]),
+    ("min-secret-bytes", &["server.min_secret_bytes"]),
     ("skip-backend-check", &["cold_store.skip_checks"]),
     ("backend-check-wait", &["server.backend_check_wait"]),
     // The params of an `oci` interface; the names end in `_file`, as every key that holds a path to a
@@ -254,6 +258,10 @@ pub(super) struct ServerTable {
     pub bucket: String,
     pub region: Option<String>,
     pub access_key_file: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<PathBuf>,
     #[serde(default)]
     pub read_only_key_files: Vec<PathBuf>,
     #[serde(default)]
@@ -273,6 +281,7 @@ pub(super) struct ServerTable {
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
     pub body_idle_timeout: Option<Dur>,
+    pub min_secret_bytes: Option<u32>,
     pub s3_request_timeout: Option<Dur>,
     pub backend_check_wait: Option<Dur>,
     pub s3_connect_timeout: Option<Dur>,
@@ -666,6 +675,7 @@ pub(super) fn storage(
         grant_max_lifetime: front.grant_max_lifetime,
         drain_lb_wait: front.drain_lb_wait,
         drain_deadline: front.drain_deadline,
+        tls: front.tls,
         journal_linger: duration(hot.journal_linger, Duration::from_millis(20)),
         journal_retention: duration(hot.journal_retention, Duration::from_secs(24 * 3600)),
         copy_parallel,
@@ -680,6 +690,7 @@ pub(super) fn storage(
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
+        min_secret_bytes: front.min_secret_bytes,
         skip_backend_check,
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
@@ -742,6 +753,10 @@ pub(super) fn front_of(
         bucket: server.bucket,
         region: server.region.unwrap_or_else(|| DEFAULT_REGION.to_owned()),
         access_key_file: server.access_key_file,
+        tls: S3Tls {
+            tls_cert: server.tls_cert_file,
+            tls_key: server.tls_key_file,
+        },
         read_only_key_file: server.read_only_key_files,
         presign_key_file: server.presign_key_files,
         gc_key_file: server.gc_key_files,
@@ -757,6 +772,7 @@ pub(super) fn front_of(
             .unwrap_or(DEFAULT_PUT_MIN_BYTES_PER_SEC),
         put_rate_grace: duration(server.put_rate_grace, Duration::from_secs(30)),
         body_idle_timeout: duration(server.body_idle_timeout, Duration::from_secs(30)),
+        min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,
     };

@@ -107,7 +107,7 @@ use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_tuning::{HotTuning, S3Client};
 #[cfg(test)]
 use super::front::read_key;
-use super::front::{InvalidFlags, server_config};
+use super::front::{InvalidFlags, S3Tls, refuse, server_config};
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
@@ -184,6 +184,9 @@ pub struct Cli {
     /// The id of this proxy, which names its journal in the hot tier and its lease. Keep it
     /// across restarts, and give each process over the same tiers one of its own.
     pub proxy_id: String,
+    /// The certificate and key that make the S3 front serve HTTPS (`server.tls_cert_file` and
+    /// `server.tls_key_file`).
+    pub tls: S3Tls,
     /// The slot port this instance runs as, 1 to 65535: the private port of one of the two slots
     /// of a hand-over, which the slot unit passes as `server.slot %i`. It is the `slot` label of
     /// `tierstore_build_info` on `/metricz`, by which the update hook's probe through the public
@@ -263,17 +266,17 @@ pub struct Cli {
     /// its owner may read it (mode 0600).
     pub presign_key_file: Vec<PathBuf>,
     /// A file that holds a GC key, JSON of exactly `access_key_id`, `secret_access_key` and
-    /// `prefix` (ending in `/`): a header-signed key that lists (ListObjectsV2 and
-    /// ListMultipartUploads, each with a prefix inside its own), heads, deletes and aborts uploads
-    /// under the prefix and does nothing else (no get, no put, no bucket call); it is refused on a
-    /// presigned URL. Give the flag once for each such key; all key ids must differ. Only its
-    /// owner may read it (mode 0600).
+    /// `prefix` (ending in `/`): a scoped key with a list, a delete and an abort right on the
+    /// prefix, that lists (ListObjectsV2 and ListMultipartUploads, each with a prefix inside its
+    /// own), heads, deletes and aborts uploads there and does nothing else; it is refused on a
+    /// presigned URL. List each such key once; all key ids must differ. Only its owner may read
+    /// it (mode 0600).
     pub gc_key_file: Vec<PathBuf>,
     /// A file that holds a scoped key, JSON of exactly `access_key_id`, `secret_access_key`,
     /// `read_prefixes`, `write_prefixes` and `delete_prefixes` (lists of prefixes, each ending in
     /// `/`; all five required, the lists may be empty but not all three): a header-signed key that
     /// gets, heads and lists under its read prefixes, creates objects and multipart uploads under
-    /// its write prefixes (create-only: no `If-Match`, no copy) and deletes objects under its
+    /// its write prefixes (create-only: no `If-Match`, no copy; it aborts uploads there) and deletes objects under its
     /// delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. List
     /// each such key once; all key ids must differ. Only its owner may read it (mode 0600).
     pub scoped_key_file: Vec<PathBuf>,
@@ -357,6 +360,10 @@ pub struct Cli {
     /// is closed; a connection whose client stops reading an answer is closed. Both are
     /// logged on stderr, and a drain waits no longer than this for a stalled client.
     pub body_idle_timeout: Duration,
+    /// The fewest bytes a secret access key may have, whichever kind of key it is (full,
+    /// read-only, presigning, GC or scoped): a server whose key file holds a shorter
+    /// secret does not start.
+    pub min_secret_bytes: u32,
     /// Leaves the multipart-completion check of the start-up self-test out, for a reason:
     /// `multipart-conditional=REASON`, where REASON says why the store cannot pass it (for
     /// example `multipart-conditional=store-ignores-if-none-match-on-completion`). It is the
@@ -618,7 +625,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         check_lock_path(path).map_err(|why| format!("--lock-file {path:?} {why}"))?;
     }
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let mut server = server_config(&cli.front(), Arc::clone(&clock))?;
+    let mut server = server_config(&cli.front(), Arc::clone(&clock), true)?;
     server.usage_stale_after = cli.usage_stale_after;
     let timeout = cli.s3_request_timeout;
     let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout, &cli.s3_client)?;
@@ -693,13 +700,6 @@ pub(super) fn oci_setup_of(
         return Ok(None);
     }
     let listen = flags.listen.clone();
-    let refuse = |why: OciError| -> Error {
-        if why.is_invalid_flags() {
-            InvalidFlags(why.to_string()).into()
-        } else {
-            why.into()
-        }
-    };
     let lifetime = flags.connection_lifetime.unwrap_or(DEFAULT_OCI_LIFETIME);
     if lifetime.is_zero() {
         return Err(
@@ -865,7 +865,7 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     match settings {
         Settings::Storage(cli) => {
-            let server = server_config(&cli.front(), clock)?;
+            let server = server_config(&cli.front(), clock, false)?;
             // The `oci_*` fields: the prefix, the lifetime and the TLS files, as a start checks them.
             oci_setup(cli, &server, false).map(drop)
         }
@@ -873,12 +873,12 @@ pub(super) fn checked(settings: &Settings) -> Result<(), Error> {
             Err("--s3-request-timeout must be longer than zero".into())
         }
         Settings::Cache(cache) => {
-            let server = server_config(&cache.front, clock)?;
+            let server = server_config(&cache.front, clock, false)?;
             // The `[oci]` table, with the checks a start makes of it.
             oci_setup_of(&cache.oci, &server, false).map(drop)
         }
         Settings::Combined(combined) => {
-            let server = server_config(&combined.node.front(), clock)?;
+            let server = server_config(&combined.node.front(), clock, false)?;
             oci_setup(&combined.node, &server, false).map(drop)
         }
     }

@@ -248,7 +248,11 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
     let mut text = read("tierstore.toml");
     for name in ["access.key", "daemons.key", "upstream-read.key"] {
         let key = scratch.path().join(name);
-        std::fs::write(&key, format!("ID{}\nsecret-{name}\n", name.len())).unwrap();
+        std::fs::write(
+            &key,
+            format!("ID{}\nsecret-{name}-0123456789\n", name.len()),
+        )
+        .unwrap();
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         let shipped = format!("{LAUNCHD_LINKS_DIR}/etc/{name}");
         assert!(text.contains(&shipped), "{shipped}");

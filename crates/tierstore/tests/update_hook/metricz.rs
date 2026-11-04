@@ -18,7 +18,7 @@ use crate::stub::SlotScript;
 /// given, and returns the body of its `/metricz`.
 fn served_metricz(rig: &Rig, slot: Option<u16>) -> String {
     let key = rig.root.join("server-key");
-    fs::write(&key, "AKIDHOOK\nhook-secret\n").unwrap();
+    fs::write(&key, "AKIDHOOK\nhook-secret-0123456789\n").unwrap();
     fs::set_permissions(&key, Permissions::from_mode(0o600)).unwrap();
     let slot_line = slot.map_or_else(String::new, |slot| format!("slot = {slot}\n"));
     let config = rig.root.join("server.toml");

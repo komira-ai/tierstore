@@ -98,9 +98,10 @@
 //! A credential that may write one object under a prefix, and expires, is a presigned PUT URL: see [`presign`], and
 //! [`ServerConfig::presign_keys`] for the keys that sign them (`--presign-key-file` in the binary).
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
-//! GC key: see [`gc`], and [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
+//! GC key, which is a scoped key with a list, a delete and an abort right on its prefix: see [`gc`], and
+//! [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
-//! A key that reads, creates and deletes under the prefixes of three lists in its key file, and replaces and
+//! A key that reads, lists, creates and deletes under the prefixes of the lists in its key file, and replaces and
 //! copies nothing, is a scoped key: see [`scoped`], and [`ServerConfig::scoped_keys`] (`--scoped-key-file` in the
 //! binary).
 //! A client that holds no key and must read one object for a short time presents a presigned GET
@@ -229,6 +230,7 @@ mod ops;
 pub mod presign;
 mod reply;
 mod request;
+mod s3_tls;
 pub mod scoped;
 mod stop_watcher;
 mod time;
@@ -300,6 +302,8 @@ mod reserved_tests;
 #[cfg(test)]
 mod role_tests;
 #[cfg(test)]
+mod scoped_rights_tests;
+#[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
 mod scoped_tests;
@@ -360,6 +364,7 @@ use listen::Listeners;
 pub use reply::AnswerBody;
 use reply::{Answer, S3Error, answer};
 use request::{BoxError, Check, Query, Reader, Target, resolve};
+use s3_tls::TlsListeners;
 
 /// The settings of a [`Server`].
 #[derive(Clone)]
@@ -467,6 +472,9 @@ pub struct ServerConfig {
     /// not `clock`, so that a step of the clock of the machine (the time service setting it)
     /// while the server waits for a piece does not count for or against the client.
     pub rate_clock: Arc<dyn Clock>,
+    /// The TLS of the listeners: `Some` serves every connection of [`Server::serve_all`] over
+    /// HTTPS, and `None` (the default) serves plain HTTP.
+    pub tls: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl ServerConfig {
@@ -508,6 +516,7 @@ impl ServerConfig {
             slot: None,
             clock,
             rate_clock: Arc::new(MonotonicClock::new()),
+            tls: None,
         }
     }
 }
@@ -686,7 +695,11 @@ impl Server {
     /// the connections open, takes the connections of all of them, and the drain closes every
     /// one of them.
     pub async fn serve_all(self: &Arc<Self>, listeners: Vec<TcpListener>) -> Drained {
-        self.serve_from(Listeners::new(listeners)).await
+        let incoming = Listeners::new(listeners);
+        match self.config.tls.clone() {
+            Some(acceptor) => self.serve_from(TlsListeners::new(incoming, acceptor)).await,
+            None => self.serve_from(incoming).await,
+        }
     }
 
     /// [`Server::serve`] over any source of connections: the tests serve pipes.
@@ -900,9 +913,6 @@ impl Server {
         }
         let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
         let check = Check::new(&signed.payload, &parts.headers, data)?;
-        if let Role::Gc(prefix) = &signed.role {
-            gc::permit(prefix, parts, &target, &query)?;
-        }
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }

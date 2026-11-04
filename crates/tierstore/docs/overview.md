@@ -4,14 +4,14 @@ tierstore is an S3-compatible object store server that puts a small, fast tier i
 
 This guide is for the person who installs and runs it. It describes what is on the main branch of the source today. A piece that is planned and not in the code is described only under a heading titled "Not in a release yet", so you can tell the two apart.
 
-> Which release first carries what: the configuration file (`--config`) came with v0.0.39; the OCI read front and the build node (`[local_cache]`, the read cache) with v0.0.40. `--check-config`, `local_cache.write_through` and the hot and cold counters on `/metricz` are on main and not in v0.0.40; the drain's `Connection: close` and lingering close, and `tierstore_drain_late_requests_total`, are on main and not in v0.0.41. The data-path flags of those releases are gone: the file is the only way to configure the process, and its `[[interface]]` list says what it serves. The pages say where a setting needs a build of main.
+> Every flag and key these pages describe is in the release built from main.
 
 ## The shape of a deployment
 
 One `tierstore` process runs three things over the same pair of tiers:
 
 - a proxy, which answers reads and takes writes;
-- the S3 front of that proxy, which checks signatures and serves one bucket, path-style, over plain HTTP;
+- the S3 front of that proxy, which checks signatures and serves one bucket, path-style, over plain HTTP, or over HTTPS with `server.tls_cert_file` and `server.tls_key_file`;
 - a reconciler, which copies written objects to the cold tier, applies deletes, evicts from the hot tier and publishes the hot tier's usage. Only one reconciler works at a time: it holds a lease in the hot tier, so any number of processes may run over the same tiers.
 
 A tier is `memory` (lost when the process stops, for tests), `dir:<path>` (a directory of the local file system) or `s3:<bucket>` (a bucket of an S3-compatible store).

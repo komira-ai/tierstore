@@ -63,7 +63,6 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
     assert_eq!(cache.config.policies, [("cas/b/".to_owned(), true)]);
     assert_eq!(cache.config.high_water, 90);
     assert!(cache.config.write_through);
-    assert!(cache.config.tiered_upstream);
     assert!(cache.scrub_rate.is_some());
 
     let given = text().replacen(
@@ -73,7 +72,6 @@ fn a_file_with_the_three_tables_makes_a_combined_node() {
     );
     let given = combined(&given);
     assert!(given.cache.config.write_through);
-    assert!(given.cache.config.tiered_upstream);
 }
 
 /// Asserts each refusal of the file of a node with a cache, by the exact message (the key and what

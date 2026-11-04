@@ -9,7 +9,7 @@ use tierstore_testkit::dir::TestDir;
 /// The access key in the key file.
 pub const BIN_KEY_ID: &str = "AKIDBIN";
 
-pub const BIN_SECRET: &str = "bin-secret";
+pub const BIN_SECRET: &str = "bin-secret-0123456789";
 
 /// The parts of the file of a start that a test changes. The rest is the same in every start: a
 /// bucket called `tier-bucket` and the key file of [`Files`].

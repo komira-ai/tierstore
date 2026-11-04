@@ -2,12 +2,13 @@
 //! tier is full, to the cold tier, and the creation of the object of a multipart upload. The
 //! rules they follow are those of the type's rustdoc.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::pause::WriteMode;
 use super::{Inner, Level};
 use crate::{Error, JournalOp, PartBody};
 
@@ -16,27 +17,35 @@ use crate::{Error, JournalOp, PartBody};
 /// counts the bytes that were taken (the size of the object, for the journal), and a tier that
 /// refuses the put before it took a byte is followed by the other tier, which gets the whole
 /// body.
-struct Offered<'a> {
+pub(super) struct Offered<'a> {
     /// The rest of the body; `None` once it has ended or failed.
     rest: AsyncMutex<Option<PartBody<'a>>>,
     taken: AtomicU64,
+    /// Whether the body ended with an error.
+    failed: AtomicBool,
 }
 
 impl<'a> Offered<'a> {
-    fn new(body: PartBody<'a>) -> Self {
+    pub(super) fn new(body: PartBody<'a>) -> Self {
         Self {
             rest: AsyncMutex::new(Some(body)),
             taken: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
         }
     }
 
     /// The number of bytes of the body taken so far.
-    fn taken(&self) -> u64 {
+    pub(super) fn taken(&self) -> u64 {
         self.taken.load(Ordering::SeqCst)
     }
 
+    /// Whether the body ended with an error.
+    pub(super) fn failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+
     /// The rest of the body as a stream. It ends after the end of the body or an error of it.
-    fn view(&self) -> PartBody<'_> {
+    pub(super) fn view(&self) -> PartBody<'_> {
         stream::unfold(self, |offered| async move {
             let mut rest = offered.rest.lock().await;
             let next = rest.as_mut()?.next().await;
@@ -46,7 +55,11 @@ impl<'a> Offered<'a> {
                         .taken
                         .fetch_add(chunk.len() as u64, Ordering::SeqCst);
                 }
-                Some(Err(_)) | None => *rest = None,
+                Some(Err(_)) => {
+                    offered.failed.store(true, Ordering::SeqCst);
+                    *rest = None;
+                }
+                None => *rest = None,
             }
             drop(rest);
             Some((next?, offered))
@@ -82,7 +95,9 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        self.admit_write(key).await?;
+        if self.admit_write_mode(key).await? == WriteMode::Entries {
+            return self.complete_on_entry(key, id, parts).await;
+        }
         self.check_not_in_hot(key).await?;
         self.cold.complete_upload(key, id, parts).await
     }
@@ -123,7 +138,9 @@ impl Inner {
     }
 
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.admit_write(key).await?;
+        if self.admit_write_mode(key).await? == WriteMode::Entries {
+            return self.put_held_on_entry(key, body).await;
+        }
         match self.cold.head(key).await {
             Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
             Err(Error::NotFound(_)) => {}
@@ -195,7 +212,9 @@ impl Inner {
         body: PartBody<'_>,
         hot_only: bool,
     ) -> Result<(), Error> {
-        self.admit_write(key).await?;
+        if self.admit_write_mode(key).await? == WriteMode::Entries {
+            return self.put_streamed_on_entry(key, len, body, hot_only).await;
+        }
         match self.cold.head(key).await {
             Ok(_) => return Err(Error::AlreadyExists(key.to_owned())),
             Err(Error::NotFound(_)) => {}
