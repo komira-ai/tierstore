@@ -24,13 +24,11 @@ async fn rig() -> Rig {
     let made = Rig::with(MEBIBYTE, |config| {
         let a = Prefixes {
             read: &["r/", "rw/"],
-            list: &[],
             write: &["w/", "rw/"],
             delete: &["d/"],
         };
         let b = Prefixes {
             read: &["r/"],
-            list: &[],
             write: &["w/"],
             delete: &[],
         };
@@ -314,9 +312,9 @@ async fn a_scoped_key_runs_a_multipart_upload_under_a_write_prefix() {
 
 /// Asserts that a multipart call outside the write prefixes is 403 at every step: the start for a
 /// key under a read prefix, a delete prefix or another prefix; and, for an upload the full key
-/// began at a key outside, the part, the completion and the abort; each leaves the upload in
-/// place, so the full key completes it after, and a part that copies is 403 inside the prefix.
-/// Under a delete prefix the part and the completion are 403 and the abort is allowed.
+/// began at a key outside, the part, the completion and the abort (a delete prefix does not
+/// allow an abort); each leaves the upload in place, so the full key completes it after, and a
+/// part that copies is 403 inside the prefix.
 #[tokio::test(start_paused = true)]
 async fn a_multipart_call_outside_the_write_prefixes_is_refused_at_every_step() {
     let rig = rig().await;
@@ -324,7 +322,7 @@ async fn a_multipart_call_outside_the_write_prefixes_is_refused_at_every_step() 
         let reply = scoped(&rig, "POST", &uri(&format!("{key}?uploads")), &[], b"").await;
         assert_eq!(denied(&reply), access_denied(), "start {key}");
     }
-    for key in ["other/big", "r/big"] {
+    for key in ["other/big", "d/big", "r/big"] {
         let started = rig.call("POST", &format!("{key}?uploads"), b"").await;
         let id = texts(&started.body, "UploadId").concat();
         let part = uri(&format!("{key}?partNumber=1&uploadId={id}"));
@@ -347,21 +345,6 @@ async fn a_multipart_call_outside_the_write_prefixes_is_refused_at_every_step() 
         assert_eq!(ended.status, StatusCode::OK, "{key}: {}", ended.body);
         assert!(exists(&rig, key).await, "{key}");
     }
-    let started = rig.call("POST", "d/big?uploads", b"").await;
-    let id = texts(&started.body, "UploadId").concat();
-    let part = uri(&format!("d/big?partNumber=1&uploadId={id}"));
-    let refused = scoped(&rig, "PUT", &part, &[], b"p").await;
-    assert_eq!(denied(&refused), access_denied(), "part d/big");
-    let done = completion(&[(1, "\"etag\"")]);
-    let complete = uri(&format!("d/big?uploadId={id}"));
-    let refused = scoped(&rig, "POST", &complete, &[], done.as_bytes()).await;
-    assert_eq!(denied(&refused), access_denied(), "complete d/big");
-    let aborted = scoped(&rig, "DELETE", &complete, &[], b"").await;
-    assert_eq!(aborted.status, StatusCode::NO_CONTENT, "abort d/big");
-    let resume = format!("d/big?uploadId={id}");
-    let gone = rig.call("POST", &resume, done.as_bytes()).await;
-    assert_eq!(gone.status, StatusCode::NOT_FOUND);
-    assert!(!exists(&rig, "d/big").await);
     let started = scoped(&rig, "POST", &uri("w/copy?uploads"), &[], b"").await;
     let id = texts(&started.body, "UploadId").concat();
     let part = uri(&format!("w/copy?partNumber=1&uploadId={id}"));
@@ -456,7 +439,6 @@ async fn a_refused_scoped_call_is_403_without_its_body_being_read() {
             KEY.1,
             &Prefixes {
                 read: &["r/"],
-                list: &[],
                 write: &["w/"],
                 delete: &["d/"],
             },

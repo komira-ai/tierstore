@@ -1,5 +1,6 @@
 //! The flags of the binary: their defaults, parsing and help. The settings made of them and the
-//! reconciler's loop are in the two modules below.
+//! checks run before a start are in the two modules below. The reconciler's loop is tested in
+//! `cli_reconcile_tests`.
 
 use std::fs::Permissions;
 use std::os::unix::fs::PermissionsExt;
@@ -7,29 +8,24 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use clap::{CommandFactory, Parser};
 use tierstore_testkit::dir::TestDir;
-use tokio::sync::Notify;
 
 use crate::selftest_tests::{Flaw, Flawed};
 use crate::server::{AccessKey, Drained};
-use crate::{
-    Backend, Check, FaultyBackend, MemoryBackend, Op, Proxy, ProxyConfig, Reconciler,
-    ReconcilerConfig, SelfTestError, SelfTestFailure, TestClock,
-};
+use crate::{Backend, Check, SelfTestError, SelfTestFailure};
 
+use super::super::cli_probe::{probe_run_id, probe_tiers};
+use super::super::cli_serve::cut_note;
 use super::{
-    Cli, InvalidFlags, S3Flags, SkippedCheck, build, cut_note, exit_status, open_tier,
-    parse_duration, parse_skip, probe_run_id, probe_tiers, read_key, reconcile, share, tier,
+    Cli, InvalidFlags, S3Flags, SkippedCheck, build, exit_status, open_tier, parse_duration,
+    parse_skip, read_key, share, tier,
 };
 
 #[path = "cli_tests/settings.rs"]
 mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
-
-const MEBIBYTE: u64 = 1 << 20;
 
 /// The JSON form of a key file with the id `JSONID` and the secret `json-secret`.
 const JSON_KEY: &str = r#"{"access_key_id": "JSONID", "secret_access_key": "json-secret"}"#;

@@ -7,8 +7,10 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 | What | Where | Format |
 |---|---|---|
 | Journal object | `_journal/<proxy_id>/<seq>` in the hot tier, `seq` in 20 digits | JSON list of entries: `op` (`PUT`, `DELETE`, `PUTRESERVED` or `PUTMIRROR`), `key`, `size`, `time`, and the optional `cold_tag` and `hot_tag` (see below) |
-| Proxy marker | `_tiering/proxies/<proxy_id>` in the hot tier | empty object |
+| Key entry (reserved by every release since the bridge release, not yet written by any release path) | `_entries/<sha256 hex of the key>` in the hot tier | JSON: `v`, `key`, `op` (`PUT`, `DEL`, `CB` or `EVICT`), `st` (`HELD`, `PENDING` or `SEALED`), `owner` (or `null`), `nonce`, `created_ms` |
+| Proxy registration | `_tiering/proxies/<proxy_id>` in the hot tier | JSON: `proto`, `boot`, `hb` (the marker of a release before the heartbeat is an empty object, which is still read) |
 | Checkpoint | `_tiering/checkpoint/<proxy_id>` in the hot tier | JSON: `seq`, `evict_seq`, `evict_idx` |
+| Format | `_tiering/format` in the hot tier | JSON: `phase` (`drain`, `drained` or `active`), and the optional `epoch` (see below) |
 | Usage | `_tiering/usage` in the hot tier | JSON: `hot_bytes`, `copy_lag`, `time` |
 | Lease | `_tiering/lease` in the hot tier | three lines: the holder, a nonce, the count of bodies written |
 | OCI upload session and chunks | `<prefix>uploads/<id>/begin` (empty) and `<prefix>uploads/<id>/c<20-digit offset>` in the store behind the OCI front | the session is an empty object; each chunk is the bytes of one `PATCH`; both are deleted when the upload ends or is cancelled |
@@ -24,6 +26,16 @@ tierstore keeps a few small objects and files of its own. A new release reads wh
 - `PUTMIRROR`: an object a read copied from the cold tier into the hot tier. `cold_tag` is the tag the cold object had and `hot_tag` is the tag the hot tier gave the copy. It is never copied to the cold tier.
 
 Both tags are absent in the entries of releases before these operations, and `hot_tag` is absent in the mirrors of releases before that field. An entry with an operation this release does not know reads as `Unknown` and is skipped.
+
+### Key entries
+
+An entry says who is working on a key and what is to be done next. A reader ignores fields it does not know and reads an `op` or `st` it does not know as `Unknown`, which no transition accepts. `created_ms` is for metrics only. `nonce` is written afresh by every write, so that an actor that did not get an answer to a write reads the entry back and tells whether the write was its own.
+
+### The format object
+
+`_tiering/format` says whether writes are paused for a change of format. No object means no pause, which is the state of every release before the bridge release. A proxy reads it before a write, at most once for each `format_refresh` (5 seconds); while `phase` is `drain` or `drained` it answers every write (put, streamed put, delete, and the multipart calls that create, write a part or complete) with 503 `ServiceUnavailable` and keeps serving reads. The operator writes `drain`. The reconciler that holds the lease writes `drained` over it (only over the object it read, by its tag) once it has seen `drain` for `drain_settle` (15 seconds), long enough for a proxy whose format reads succeed to read it again (a proxy whose format reads fail keeps its earlier state, so `drained` does not show that every proxy saw the pause; a write admitted earlier and still running is not waited for), and a pass applied every journal object without a failure; it keeps the `epoch`. Deleting the object lifts the pause. A reader ignores fields it does not know and takes a `phase` it does not know (and `active`) to be no pause.
+
+The prefix `_entries/` is reserved: no client put, delete, read or listing names a key under it, in the proxy, the local cache, the OCI prefix, the scoped and GC key prefixes and the presigned URLs. A client key that starts with `_entries/` is therefore refused by the bridge release; a release before it treats such a key as a client key (and on a directory tier it neither lists nor reads the `_entries/` subdirectory that the entry objects are kept in).
 
 ## The rule
 

@@ -56,7 +56,9 @@ use crate::{
 };
 
 use super::build_info::{COMMIT, VERSION};
-use super::cli::{Addresses, Error, S3Flags, bind_oci, bind_s3, open_tier, probe_run_id, signals};
+use super::cli::{Addresses, Error, S3Flags, open_tier, signals};
+use super::cli_probe::probe_run_id;
+use super::cli_serve::{bind_oci, bind_s3};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
@@ -344,6 +346,6 @@ pub(super) async fn serve_cache_until_signalled(settings: CacheSettings) -> Resu
         println!("{line} commit={COMMIT}");
     };
     let drained = run_cache(&settings, stop, announce).await?;
-    eprint!("{}", super::cli::cut_note(drained));
+    eprint!("{}", super::cli_serve::cut_note(drained));
     Ok(())
 }

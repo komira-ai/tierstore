@@ -107,6 +107,7 @@ fn a_gc_key_may_list_head_delete_and_abort_and_nothing_else() {
         let (parts, ()) = Request::builder()
             .method(method)
             .uri(uri)
+            .header("authorization", "AWS4-HMAC-SHA256 header-signed")
             .body(())
             .unwrap()
             .into_parts();

@@ -136,9 +136,7 @@ pub(super) fn oci_setup_of(
         prefix: prefix.clone(),
         metrics: Arc::new(OciMetrics::with_mode(mode)),
         limits,
-        auth: flags
-            .require_auth
-            .then(|| OciAuth::from_server(server, &prefix)),
+        auth: flags.require_auth.then(|| OciAuth::from_server(server)),
         stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
     }))
 }

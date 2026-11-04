@@ -127,7 +127,7 @@ use hyper::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
+use crate::journal::RESERVED_PREFIXES;
 use crate::{Backend, ByteRange, Error};
 
 pub use auth::OciAuth;
@@ -147,9 +147,6 @@ use range::Range;
 
 /// The largest manifest or index served.
 pub const MAX_MANIFEST_BYTES: u64 = 4 << 20;
-
-/// The prefixes the proxy keeps for itself, which the front's must not overlap.
-const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// The longest piece of request text an error echoes back.
 const ECHO_BYTES: usize = 256;
@@ -183,7 +180,10 @@ impl OciPrefix {
                 "it must be segments of letters, digits, . _ and -, separated by single /",
             ));
         }
-        if RESERVED.iter().any(|reserved| text.starts_with(reserved)) {
+        if RESERVED_PREFIXES
+            .iter()
+            .any(|reserved| text.starts_with(reserved))
+        {
             return Err(refuse("it overlaps a prefix the store keeps for itself"));
         }
         Ok(Self(text.to_owned()))
@@ -234,10 +234,12 @@ impl OciFront {
     }
 
     /// The front, asking each client for a key of `auth` (see the `Access` section of the module
-    /// docs); with none it is anonymous, as [`new`](Self::new) makes it.
+    /// docs); with none it is anonymous, as [`new`](Self::new) makes it. What each key may do is
+    /// worked out from this front's own prefix, so keys made for the server cannot reach objects
+    /// outside what their prefixes cover here.
     #[must_use]
     pub fn with_auth(mut self, auth: Option<OciAuth>) -> Self {
-        self.auth = auth;
+        self.auth = auth.map(|auth| auth.bound(&self.prefix));
         self
     }
 

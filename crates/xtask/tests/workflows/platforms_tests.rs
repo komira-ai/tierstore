@@ -249,6 +249,42 @@ const BUILD_DEFECTS: &[(&str, &str, &str, &str)] = &[
     ),
     (
         MAC,
+        " --licenses \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\"",
+        "",
+        "macos-arm64: does not run `cargo xtask package",
+    ),
+    (
+        MAC,
+        "cargo metadata --locked --format-version 1",
+        "cargo metadata --format-version 1",
+        "macos-arm64: does not run `cargo metadata --locked",
+    ),
+    (
+        MAC,
+        "--features server --filter-platform \"$TARGET\" >",
+        "--features server >",
+        "macos-arm64: does not run `cargo metadata --locked",
+    ),
+    (
+        MAC,
+        "--package tierstore --out \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\"",
+        "--package xtask --out \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\"",
+        "macos-arm64: does not run `cargo xtask licenses",
+    ),
+    (
+        MAC,
+        "      - name: Third-party licence notice\n        run: cargo xtask licenses --metadata \"$RUNNER_TEMP/metadata.json\" --package tierstore --out \"$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt\"\n",
+        "",
+        "macos-arm64: does not run `cargo xtask licenses",
+    ),
+    (
+        MAC,
+        "      - name: Resolve the crates of this build\n        run: cargo metadata --locked --format-version 1 --manifest-path crates/tierstore/Cargo.toml --features server --filter-platform \"$TARGET\" > \"$RUNNER_TEMP/metadata.json\"\n",
+        "",
+        "macos-arm64: does not run `cargo metadata --locked",
+    ),
+    (
+        MAC,
         "-macos-arm64.tar.gz\" -C",
         "-linux-arm64.tar.gz\" -C",
         "macos-arm64: does not run `tar -xzf",
