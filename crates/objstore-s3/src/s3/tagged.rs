@@ -5,7 +5,7 @@
 //!
 //! They are inherent methods of [`S3Store`], so the trait and the other stores are as they
 //! were. A read is sent again after a failure in transport, as a ranged read is (see
-//! [`READ_RETRIES`]); the replace and the delete are sent once, since a connection that fails
+//! [`S3Tuning::read_retries`]); the replace and the delete are sent once, since a connection that fails
 //! before the answer leaves it unknown whether the object was replaced or deleted, and only the
 //! caller can read it back.
 //!
@@ -31,7 +31,7 @@ use std::future::Future;
 use bytes::Bytes;
 use reqwest::{Method, Response, StatusCode};
 
-use super::{READ_RETRIES, READ_RETRY_WAIT, S3Store, failure, is_retryable, times, transport, xml};
+use super::{S3Store, S3Tuning, failure, is_retryable, times, transport, xml};
 use crate::{KeyPrefix, ListToken, ObjectKey, ObjectStoreError, PageSize};
 
 /// The user metadata header that marks an object as a reservation.
@@ -76,12 +76,15 @@ pub struct StampedPage {
 
 /// Runs `once` until it answers: it is run again after a failure in transport, with the
 /// waits and the count of a ranged read.
-pub(super) async fn retrying<T, Fut>(mut once: impl FnMut() -> Fut) -> Result<T, ObjectStoreError>
+pub(super) async fn retrying<T, Fut>(
+    tuning: &S3Tuning,
+    mut once: impl FnMut() -> Fut,
+) -> Result<T, ObjectStoreError>
 where
     Fut: Future<Output = Result<T, ObjectStoreError>>,
 {
-    let mut wait = READ_RETRY_WAIT;
-    for _ in 0..READ_RETRIES {
+    let mut wait = tuning.read_retry_wait;
+    for _ in 0..tuning.read_retries {
         match once().await {
             Err(e) if is_retryable(&e) => {
                 tracing::debug!(error = %e, "read failed in transport; sending it again");
@@ -250,7 +253,7 @@ impl S3Store {
     /// [`ObjectStoreError::NotFound`] if no object has the key.
     /// [`ObjectStoreError::Protocol`] if the answer lacks a size, a tag or a readable time.
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectHead, ObjectStoreError> {
-        retrying(move || self.head_once(key)).await
+        retrying(&self.conn.tuning, move || self.head_once(key)).await
     }
 
     async fn head_once(&self, key: &ObjectKey) -> Result<ObjectHead, ObjectStoreError> {
@@ -284,7 +287,7 @@ impl S3Store {
     /// # Errors
     /// [`ObjectStoreError::NotFound`] if no object has the key.
     pub async fn get_all(&self, key: &ObjectKey) -> Result<Bytes, ObjectStoreError> {
-        let read = retrying(move || self.get_all_once(key)).await;
+        let read = retrying(&self.conn.tuning, move || self.get_all_once(key)).await;
         read.map(|(bytes, _, _)| bytes)
     }
 
@@ -298,7 +301,7 @@ impl S3Store {
         &self,
         key: &ObjectKey,
     ) -> Result<(Bytes, bool, Option<String>), ObjectStoreError> {
-        retrying(move || self.get_all_once(key)).await
+        retrying(&self.conn.tuning, move || self.get_all_once(key)).await
     }
 
     async fn get_all_once(
@@ -333,7 +336,10 @@ impl S3Store {
         after: Option<&ListToken>,
         max_keys: PageSize,
     ) -> Result<StampedPage, ObjectStoreError> {
-        let body = retrying(move || self.list_body(prefix, after, max_keys)).await?;
+        let body = retrying(&self.conn.tuning, move || {
+            self.list_body(prefix, after, max_keys)
+        })
+        .await?;
         xml::stamped_page(&body)
     }
 }

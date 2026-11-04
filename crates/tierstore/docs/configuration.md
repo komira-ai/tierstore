@@ -172,7 +172,7 @@ type   = "oci"
 params = { addresses = ["127.0.0.1:5000"], tls_cert_file = "/etc/tierstore/oci.crt", tls_key_file = "/etc/tierstore/oci.key", prefix = "oci/" }
 ```
 
-At least one entry has type `s3`. The entries of a type are served together: one server, one drain and one limit on connections for all the `s3` entries, and the same for the `oci` entries, on every address of the entries of that type. An address two entries listen on, or one entry lists twice, is refused, naming the entries (a port of 0, which asks the system for a port, is never the same as another). Each entry says where it listens with one of `params.port` and `params.addresses`, and not both.
+At least one entry has type `s3`. The entries of a type are served together: one server and one drain for all the `s3` entries, and the same for the `oci` entries (which also share one limit on connections, `params.max_connections`; the `s3` server has no such limit), on every address of the entries of that type. An address two entries listen on, or one entry lists twice, is refused, naming the entries (a port of 0, which asks the system for a port, is never the same as another). Each entry says where it listens with one of `params.port` and `params.addresses`, and not both.
 
 | Key | Type, default | What |
 |---|---|---|
@@ -214,6 +214,11 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.body_idle_timeout` | duration, `30s` | how long a body or an answer may go without a byte; more than zero |
 | `server.s3_request_timeout` | duration, `60s` | the limit on a request to an `s3` tier (both tiers); more than zero. Set it longer than the longest multipart completion your store takes |
 | `server.backend_check_wait` | duration, `5m` | how long the start-up self-test asks again of a tier that does not answer; `0s` asks once |
+| `server.s3_connect_timeout` | duration, `5s` (1ms to 10m) | how long a connection to an `s3` tier (both tiers, or the upstream of a cache) may take to be opened |
+| `server.s3_min_bytes_per_sec` | bytes a second, 1048576 | the slowest rate at which the body of a write to an `s3` tier is taken to go: a write may take `s3_request_timeout` plus its length at this rate; 0 gives every request `s3_request_timeout` however large its body |
+| `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
+| `server.s3_read_retries` | count, 2 (0 to 8) | how many times a read of an `s3` tier that failed in transport (a connection closed after the request went out) is sent again; 0 sends it once. A read that timed out is never sent again |
+| `server.s3_read_retry_wait` | duration, `50ms` (1ms to 10s) | the wait before the first resend of a read; each resend waits twice the one before |
 
 ## `[hot_store]` and `[cold_store]`
 
@@ -246,6 +251,14 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.reconcile_interval` | duration, `5s` | how often the reconciler works; shorter than the lease |
 | `hot_store.lock_file` | absolute path, none | on main, not in v0.0.41. the lock file of the node: the reconciler works only while this process holds an exclusive lock on it. A process that finds the lock held serves reads and writes through its own proxy and tries the lock again every second; the system frees it when the holder exits or crashes. If the file is replaced, the holder stops its reconciler and waits for the lock on the new file. Give every process of one node the same path, on a local file system, in a directory that nothing removes (`/var/lib/tierstore/`, not a directory under `/run`). The start refuses a path that is not absolute, one that names no file, and one that cannot be opened or is on a network file system. Without it the reconciler works as soon as the process starts |
 | `hot_store.usage_stale_after` | duration, `2m` | how old the published usage may be before `/usagez` says 503; longer than the lease |
+| `hot_store.journal_batch_entries` | count, 64 (1 to 65536) | the most entries one journal object holds; a batch that reaches it is written at once, without waiting `journal_linger` |
+| `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
+| `hot_store.journal_page_size` | count, 100 (1 to 1000) | the most journal objects the reconciler asks the hot tier for in one listing |
+| `hot_store.copy_rounds` | count, 3 (1 to 100) | how many times a copy to the cold tier reads the cold object again after it changed under the copy, before the copy is given up and tried at the next pass |
+| `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
+| `hot_store.delete_rounds` | count, 3 (1 to 100) | how many times a delete looks at the cold object again after it changed under the delete |
+| `hot_store.listing_heads` | count, 16 (1 to 1024) | how many cold objects of a listing, which may be reservations, are asked about at once |
+| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 
 The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, a `reconcile_interval` at or above `lease_ttl`, and a `usage_stale_after` at or below `lease_ttl`.
 
@@ -277,6 +290,17 @@ The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may h
 ## `[[policy]]`
 
 `[[policy]]` has a `prefix` (empty for all the rest, or ending in `/`) and `cache`. Without `[local_cache]` a policy is read and checked and has no effect, and `policy.cache = true` is refused, since there is no cache. With `[local_cache]` (a build node, or a storage node with a cache) a key is kept if the longest prefix that holds it says `cache = true`, and at least one policy must say so. Two non-empty prefixes may not nest, a prefix may not be listed twice, and none may lie under `_journal/` or `_tiering/`.
+
+## What is not a key
+
+A value of the code is a key when it is a tuning choice: an interval, a timeout, a limit, a back-off, a retry count or a buffer size that an operator may have a reason to change. These are not keys, because they are not choices of this program:
+
+- the limits of the S3 protocol that the code holds to: the 1024-byte longest key, 1000 keys to a listing page, 5 MiB to 5 GiB for a part, 10000 parts to an upload, the 604800-second longest presigned expiry, the 15-minute clock skew SigV4 allows, and the 64-byte block of the HMAC;
+- the limits of the OCI distribution format: the 255-byte longest repository name and the 128-byte longest tag;
+- the sizes of the formats the program writes: the 56-byte reservation record, the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
+- the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
+
+These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the self-test's pauses, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 

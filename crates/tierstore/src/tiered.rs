@@ -21,17 +21,6 @@ use crate::{
     UploadsAfter,
 };
 
-/// The most calls to the cold tier that one listing of uploads makes to fill a page that the
-/// filter of reserved keys cut short.
-const UPLOAD_LISTING_CALLS: u32 = 100;
-
-/// How many cold objects of a listing that may be reservations are asked about at once.
-const LISTING_HEADS: usize = 16;
-
-/// How many times a delete looks at the cold tier's object again after it changed under the
-/// delete.
-const DELETE_ROUNDS: u32 = 3;
-
 mod copy_back;
 mod put;
 
@@ -57,6 +46,14 @@ pub struct ProxyConfig {
     pub usage_refresh: Duration,
     /// The age of the usage object past which it is ignored, as if it were missing.
     pub usage_stale_after: Duration,
+    /// How many times a delete looks at the cold tier's object again after it changed under the
+    /// delete.
+    pub delete_rounds: u32,
+    /// How many cold objects of a listing that may be reservations are asked about at once.
+    pub listing_heads: usize,
+    /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
+    /// filter of reserved keys cut short.
+    pub upload_listing_calls: u32,
     /// The time, for the entries and for the age of the usage object.
     pub clock: Arc<dyn Clock>,
 }
@@ -64,7 +61,9 @@ pub struct ProxyConfig {
 impl ProxyConfig {
     /// The settings for a proxy `proxy_id` and a hot tier of `hot_budget` bytes, with a
     /// critical share of 0.95, batches of at most 64 entries that
-    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds.
+    /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, 3 looks
+    /// at the cold object of a delete, 16 cold objects of a listing asked about at once, and at
+    /// most 100 calls to the cold tier for one listing of uploads.
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -75,6 +74,9 @@ impl ProxyConfig {
             linger: Duration::from_millis(50),
             usage_refresh: Duration::from_secs(1),
             usage_stale_after: Duration::from_secs(30),
+            delete_rounds: 3,
+            listing_heads: 16,
+            upload_listing_calls: 100,
             clock,
         }
     }
@@ -617,9 +619,9 @@ impl Inner {
     }
 
     /// Removes the cold tier's object under `key` as `delete_object` says, looking again if the
-    /// object changes between the look and the delete, [`DELETE_ROUNDS`] looks at most.
+    /// object changes between the look and the delete, [`ProxyConfig::delete_rounds`] looks at most.
     async fn remove_from_cold(&self, key: &str) -> Result<(), Error> {
-        for _ in 0..DELETE_ROUNDS {
+        for _ in 0..self.config.delete_rounds {
             let found = match self.cold.head(key).await {
                 Ok(found) => found,
                 Err(Error::NotFound(_)) => return Ok(()),
@@ -671,7 +673,7 @@ impl Inner {
     }
 
     /// The objects of a cold listing that are objects (see `visible`), in the order given, asking
-    /// about [`LISTING_HEADS`] of them at a time.
+    /// about [`ProxyConfig::listing_heads`] of them at a time.
     async fn visible_all(
         &self,
         listed: Vec<Listed>,
@@ -679,7 +681,10 @@ impl Inner {
     ) -> Result<Vec<Listed>, Error> {
         let shown: BTreeSet<&str> = in_hot.iter().map(|object| object.key.as_str()).collect();
         let checks = stream::iter(listed).map(|object| self.visible(object, &shown));
-        let checked: Vec<Option<Listed>> = checks.buffered(LISTING_HEADS).try_collect().await?;
+        let checked: Vec<Option<Listed>> = checks
+            .buffered(self.config.listing_heads.max(1))
+            .try_collect()
+            .await?;
         Ok(checked.into_iter().flatten().collect())
     }
 
@@ -889,10 +894,9 @@ impl Backend for Proxy {
         let mut calls = 0;
         while found.len() < max_uploads {
             calls += 1;
-            if calls > UPLOAD_LISTING_CALLS {
-                let text = format!(
-                    "the cold tier's listing of uploads took over {UPLOAD_LISTING_CALLS} calls"
-                );
+            let limit = self.inner.config.upload_listing_calls;
+            if calls > limit {
+                let text = format!("the cold tier's listing of uploads took over {limit} calls");
                 return Err(Error::Unavailable(text));
             }
             let want = max_uploads - found.len();

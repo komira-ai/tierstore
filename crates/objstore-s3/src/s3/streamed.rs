@@ -72,7 +72,7 @@ impl S3Store {
         key: &ObjectKey,
         range: Option<ByteRange>,
     ) -> Result<ObjectRead, ObjectStoreError> {
-        retrying(move || self.open_read(key, range)).await
+        retrying(&self.conn.tuning, move || self.open_read(key, range)).await
     }
 
     async fn open_read(

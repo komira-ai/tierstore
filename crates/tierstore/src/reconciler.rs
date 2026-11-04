@@ -16,9 +16,6 @@ use crate::state::Candidate;
 use crate::state::{Books, Stream};
 use crate::{Backend, Clock, Error, JournalEntry, JournalOp, Meta};
 
-/// How many times a copy reads the cold tier's object again after it changed under the copy.
-const COPY_ROUNDS: u32 = 3;
-
 /// The settings of a [`Reconciler`].
 #[derive(Clone)]
 pub struct ReconcilerConfig {
@@ -42,6 +39,10 @@ pub struct ReconcilerConfig {
     pub retention: Duration,
     /// The most journal objects asked for in one listing.
     pub page_size: usize,
+    /// How many times a copy reads the cold tier's object again after it changed under the copy.
+    pub copy_rounds: u32,
+    /// The most bytes of the hot object that one read of a comparison holds.
+    pub compare_range: u64,
     /// The time, for the lease, the retention and the usage object. It must agree with the
     /// times the hot tier gives its objects to within the lease ttl and the retention.
     pub clock: Arc<dyn Clock>,
@@ -50,7 +51,8 @@ pub struct ReconcilerConfig {
 impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
-    /// retention of an hour, and listings of 100 journal objects.
+    /// retention of an hour, listings of 100 journal objects, 3 looks at a cold object that changes
+    /// under a copy, and comparisons in reads of 1 MiB.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -62,6 +64,8 @@ impl ReconcilerConfig {
             lease_ttl: Duration::from_secs(30),
             retention: Duration::from_secs(3600),
             page_size: 100,
+            copy_rounds: 3,
+            compare_range: 1 << 20,
             clock,
         }
     }
@@ -503,13 +507,13 @@ impl Reconciler {
     }
 
     /// Settles one key with the cold tier (see the type), looking again if the cold tier's object
-    /// changes under a replacement, up to [`COPY_ROUNDS`] looks.
+    /// changes under a replacement, up to [`ReconcilerConfig::copy_rounds`] looks.
     async fn copy_key(
         &self,
         key: &str,
         want: &Wanted<'_>,
     ) -> Result<Option<(String, String)>, Error> {
-        for _ in 0..COPY_ROUNDS {
+        for _ in 0..self.config.copy_rounds {
             if let Round::Done(tag) = self.copy_round(key, want).await? {
                 return Ok(tag.map(|tag| (key.to_owned(), tag)));
             }
@@ -795,7 +799,7 @@ impl Reconciler {
 
     /// Whether the cold tier holds the bytes of `hot`, which is what a HEAD of the hot tier gave,
     /// in the object `cold` (what a HEAD of the cold tier gave). Both tiers are read in ranges of
-    /// at most [`COMPARE_RANGE`] bytes, each read with its content tag and mark in one call, so
+    /// at most [`ReconcilerConfig::compare_range`] bytes, each read with its content tag and mark in one call, so
     /// that every byte compared is of the object whose tag a HEAD gave: a range of another object
     /// (a key replaced between the HEAD and the read, and put back before the next look) has
     /// another tag, a range of a reservation is marked, and either ends the comparison with
@@ -805,7 +809,7 @@ impl Reconciler {
     async fn same_bytes(&self, key: &str, hot: &Meta, cold: &Meta) -> Result<Option<bool>, Error> {
         let mut offset = 0u64;
         while offset < hot.size {
-            let len = (hot.size - offset).min(COMPARE_RANGE);
+            let len = (hot.size - offset).min(self.config.compare_range);
             let range = ByteRange::new(offset, len);
             let (mine, _, tag) = match self.hot.get_marked(key, Some(range)).await {
                 Ok(read) => read,
@@ -879,6 +883,3 @@ impl Reconciler {
         }
     }
 }
-
-/// The most bytes of the hot object that one read of a comparison holds.
-const COMPARE_RANGE: u64 = 1 << 20;

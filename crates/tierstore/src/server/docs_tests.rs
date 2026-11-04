@@ -62,6 +62,24 @@ const FOREIGN_FLAGS: &[&str] = &[
 /// Flags of the binary the pages need not name.
 const UNDOCUMENTED_FLAGS: &[&str] = &[];
 
+/// The keys of `[server]` and `[hot_store]` that never had a flag, so are in no entry of `KEYS`:
+/// every page set must name each.
+const FLAGLESS_KEYS: &[&str] = &[
+    "server.s3_connect_timeout",
+    "server.s3_min_bytes_per_sec",
+    "server.s3_pool_idle_timeout",
+    "server.s3_read_retries",
+    "server.s3_read_retry_wait",
+    "hot_store.journal_batch_entries",
+    "hot_store.usage_refresh",
+    "hot_store.journal_page_size",
+    "hot_store.copy_rounds",
+    "hot_store.compare_range",
+    "hot_store.delete_rounds",
+    "hot_store.listing_heads",
+    "hot_store.upload_listing_calls",
+];
+
 /// Keys of the table the pages need not name.
 const UNDOCUMENTED_KEYS: &[&str] = &[];
 
@@ -501,6 +519,7 @@ fn code() -> Code {
         .iter()
         .flat_map(|(_, keys)| keys.iter().copied())
         .chain(interface)
+        .chain(FLAGLESS_KEYS.iter().copied())
         .map(str::to_owned)
         .collect();
     let mut source = String::new();
