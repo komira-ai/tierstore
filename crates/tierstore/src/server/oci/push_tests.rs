@@ -141,6 +141,12 @@ impl Rig {
         }
     }
 
+    /// The rig, its front reading stored chunks in ranges of at most `bytes`.
+    pub(super) fn with_stage_read(mut self, bytes: u64) -> Self {
+        self.front = self.front.with_stage_read(bytes);
+        self
+    }
+
     /// A request, as the full key unless the headers log in as another.
     pub(super) async fn ask(
         &self,

@@ -96,6 +96,7 @@ fn the_oci_flags_are_printed_as_the_oci_table() {
             "max_connections",
             "prefix",
             "require_auth",
+            "stage_read",
             "tls_cert_file",
             "tls_key_file"
         ]
@@ -106,6 +107,7 @@ fn the_oci_flags_are_printed_as_the_oci_table() {
         Some("/etc/tierstore/oci.crt")
     );
     assert_eq!(oci["connection_lifetime"].as_str(), Some("30m"));
+    assert_eq!(oci["stage_read"].as_integer(), Some(65536));
 
     let mut flags = dir_flags();
     flags.push("--oci-listen=127.0.0.1:5000");

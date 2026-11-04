@@ -71,6 +71,7 @@ prefix              = "images/"
 max_connections     = 16
 connection_lifetime = "30m"
 require_auth        = true
+stage_read          = 65536
 "#;
 
 /// The flags that say what `GOLDEN` says.
@@ -123,6 +124,7 @@ pub(crate) fn golden_flags() -> Vec<&'static str> {
         "--oci-max-connections=16",
         "--oci-connection-lifetime=30m",
         "--oci-require-auth",
+        "--oci-stage-read=65536",
     ]
 }
 

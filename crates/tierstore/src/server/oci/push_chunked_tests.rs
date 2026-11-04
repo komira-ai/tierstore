@@ -6,7 +6,7 @@ use std::time::Duration;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode};
 
-use super::push::STAGE_READ;
+use super::DEFAULT_STAGE_READ as STAGE_READ;
 use super::push_tests::{Rig, digest_of, front_over, full, lengthy, login, scripted, unsized_body};
 use crate::server::testing::Step;
 use crate::{Backend, Error, MemoryBackend, Op};
@@ -247,6 +247,31 @@ async fn the_chunks_of_an_upload_are_read_in_bounded_ranges() {
         ]
     );
     assert_eq!(rig.blob(&digest).await.as_deref(), Some(bytes.as_slice()));
+}
+
+/// Asserts that the size of a range read at the end of an upload is the one the front is given:
+/// a chunk of ten bytes with a range of four is read in ranges of 4, 4 and 2, a range of zero is
+/// taken as one byte, and the blob is the chunk's bytes either way.
+#[tokio::test]
+async fn the_range_of_a_read_of_a_chunk_is_the_one_the_front_is_given() {
+    for (given, want) in [
+        (4, vec![Some((0, 4)), Some((4, 4)), Some((8, 2))]),
+        (0, (0..10).map(|at| Some((at, 1))).collect()),
+    ] {
+        let rig = Rig::new().with_stage_read(given);
+        let id = rig.begin().await;
+        let session = Rig::session(&id);
+        let chunk = rig
+            .ask(Method::PATCH, &session, &[], full(b"0123456789"))
+            .await;
+        assert_eq!(chunk.status, StatusCode::ACCEPTED, "{}", chunk.text());
+        let digest = digest_of(b"0123456789");
+        let done = rig.send(Method::PUT, &end(&id, &digest)).await;
+        assert_eq!(done.status, StatusCode::CREATED, "{}", done.text());
+        assert_eq!(rig.faulty.get_ranges(), want, "range {given}");
+        let blob = rig.blob(&digest).await;
+        assert_eq!(blob.as_deref(), Some(&b"0123456789"[..]));
+    }
 }
 
 /// Asserts that a store that says the blob exists without reading the body (as a proxy whose cold

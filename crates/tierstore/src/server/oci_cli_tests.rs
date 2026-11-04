@@ -138,6 +138,23 @@ fn the_flags_make_the_front() {
     assert_eq!(setup.limits.lifetime, Duration::from_secs(90));
 }
 
+/// Asserts that the size of the reads at the end of a push is 1 MiB unless `--oci-stage-read`
+/// gives it, that the flag needs `--oci-listen`, and that zero is refused.
+#[test]
+fn the_stage_read_flag_sets_the_size_of_a_read() {
+    let rig = Rig::new("oci-flags-stage");
+    let setup = build(&rig.cli(&[])).expect("built").oci.expect("a front");
+    assert_eq!(setup.stage_read, 1 << 20);
+    let given = rig.cli(&["--oci-stage-read", "4096"]);
+    let setup = build(&given).expect("built").oci.expect("a front");
+    assert_eq!(setup.stage_read, 4096);
+    assert!(Cli::try_parse_from(rig.args(&["--oci-stage-read", "0"])).is_err());
+    let args = rig.args(&[]);
+    let mut off = args[..args.len() - 6].to_vec();
+    off.extend(["--oci-stage-read".to_owned(), "4096".to_owned()]);
+    assert!(Cli::try_parse_from(off).is_err());
+}
+
 /// Asserts the flags that need `--oci-listen` are refused without it, `--oci-listen` is accepted
 /// with a certificate and key or with neither (plain HTTP), one of the pair without the other is
 /// refused by the parser, and values that cannot be right are refused too.

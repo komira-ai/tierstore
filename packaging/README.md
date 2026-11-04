@@ -747,11 +747,12 @@ tls_key_file        = "/etc/tierstore/oci.key"
 prefix              = "oci/"
 max_connections     = 64
 connection_lifetime = "1h"
+stage_read          = 1048576
 ```
 
 The table has the rules of the `--oci-*` flags: `listen` is needed in it, and the other keys are
 refused without it; `tls_cert_file` and `tls_key_file` go together; `max_connections` is at least
-one; `connection_lifetime` is a duration as elsewhere. The certificate and the key are named by
+one; `connection_lifetime` is a duration as elsewhere; `stage_read` is a count of bytes, at least one. The certificate and the key are named by
 path, as every key file is, so the names end in `_file`.
 
 ### Which key each flag has
@@ -812,6 +813,7 @@ the flags of the binary against this table, so a flag added without a key fails 
 | `--oci-prefix` | `oci.prefix` | the key prefix the front reads, ending in `/` (`oci/` if left out) |
 | `--oci-max-connections` | `oci.max_connections` | the most connections the front has open at once (64 if left out; at least 1) |
 | `--oci-connection-lifetime` | `oci.connection_lifetime` | the longest a connection of the front lives (`1h` if left out) |
+| `--oci-stage-read` | `oci.stage_read` | the most bytes of a stored chunk the end of a push reads in one call (1048576 if left out; at least 1). On main, not in v0.0.41, which refuses the key |
 | `--oci-require-auth` | `oci.require_auth` | the front asks clients for an access key of the server (HTTP Basic); anonymous if left out |
 
 These stay flags, since they describe one run and not the data path: `--config`,
@@ -1031,7 +1033,8 @@ the front then reads through the node's local cache, not a proxy (see The regist
 | `--oci-prefix PREFIX` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/` or `_tiering/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `--oci-max-connections N` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `--oci-connection-lifetime D` | the longest a connection lives, 1h if not given; a request being answered is finished first |
-| `--oci-require-auth` | every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. The front serves no upload yet. Refused at start (exit 2) on plain HTTP off loopback |
+| `--oci-stage-read BYTES` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1 |
+| `--oci-require-auth` | every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Refused at start (exit 2) on plain HTTP off loopback |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
 minute) to send the head of a request, which is also how long an idle connection may wait for its

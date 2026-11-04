@@ -525,6 +525,7 @@ fn an_oci_table_makes_the_settings_its_flags_make() {
     assert_eq!(all.oci_max_connections, Some(16));
     assert_eq!(all.oci_connection_lifetime, Some(Duration::from_secs(1800)));
     assert!(all.oci_require_auth);
+    assert_eq!(all.oci_stage_read, Some(65536));
     assert_eq!(all, Cli::try_parse_from(golden_flags()).unwrap());
 
     let listen_only = from_text(&minimal_with_oci("listen = \"127.0.0.1:5000\""), DEFAULTS);
@@ -570,6 +571,11 @@ fn an_oci_table_is_refused_as_the_flags_are() {
             "require_auth = true".to_owned(),
             "oci.require_auth: it needs oci.listen",
         ),
+        (
+            "stage_read = 4096".to_owned(),
+            "oci.stage_read: it needs oci.listen",
+        ),
+        (format!("{listen}stage_read = 0"), "oci.stage_read"),
         (String::new(), "oci.listen: it is needed"),
         (
             format!("{listen}max_connections = 0"),
@@ -604,6 +610,19 @@ fn a_message_about_the_oci_flags_names_their_keys() {
         "oci.tls_cert_file and oci.tls_key_file go together; oci.listen, oci.prefix, \
          oci.max_connections, oci.connection_lifetime"
     );
+}
+
+/// Asserts that `oci.stage_read` makes the settings `--oci-stage-read` makes, and that a message
+/// about the flag names the key.
+#[test]
+fn the_oci_stage_read_key_is_the_flag() {
+    let text = minimal_with_oci("listen = \"127.0.0.1:5000\"\nstage_read = 4096");
+    let mut flags = MINIMAL_FLAGS.to_vec();
+    flags.extend(["--oci-listen=127.0.0.1:5000", "--oci-stage-read=4096"]);
+    let from_file = from_text(&text, DEFAULTS).unwrap();
+    assert_eq!(from_file.oci_stage_read, Some(4096));
+    assert_eq!(from_file, Cli::try_parse_from(flags).unwrap());
+    assert_eq!(keys_for_flags("--oci-stage-read"), "oci.stage_read");
 }
 
 /// Asserts that on a storage node a policy is read and checked and has no effect: the settings

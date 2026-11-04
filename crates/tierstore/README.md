@@ -230,7 +230,7 @@ same tiers. It runs in one of two modes:
 The start line and `/metricz` say which mode runs.
 
 In a file given with `--config`, the front is the optional `[oci]` table (`listen`, `tls_cert_file`,
-`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`), with the rules of the flags
+`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `stage_read`), with the rules of the flags
 (`listen` is needed in it, the certificate and the key go together, `max_connections` is at least
 1); the `--oci-*` flags are refused with the file, and `--print-config` writes them as the table.
 

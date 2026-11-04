@@ -18,6 +18,7 @@ pub(super) struct OciFlags {
     pub connection_lifetime: Option<Duration>,
     /// Whether the front asks its clients for an access key of the server.
     pub require_auth: bool,
+    pub stage_read: Option<u64>,
 }
 
 /// The flags `[oci]` stands for: none when the table is left out. A table without `listen` is
@@ -33,6 +34,7 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
             max_connections: None,
             connection_lifetime: None,
             require_auth: false,
+            stage_read: None,
         });
     };
     if table.listen.is_none() {
@@ -43,6 +45,7 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
             ("max_connections", table.max_connections.is_some()),
             ("connection_lifetime", table.connection_lifetime.is_some()),
             ("require_auth", table.require_auth.is_some()),
+            ("stage_read", table.stage_read.is_some()),
         ];
         refuse("oci", "it needs oci.listen", &others)?;
     }
@@ -63,6 +66,10 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
         Some(count) => Some(within("oci", "max_connections", count, 1, u32::MAX)?),
         None => None,
     };
+    let stage_read = match table.stage_read {
+        Some(bytes) => Some(within("oci", "stage_read", bytes, 1, u64::MAX)?),
+        None => None,
+    };
     Ok(OciFlags {
         listen,
         tls_cert: table.tls_cert_file,
@@ -71,5 +78,6 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
         max_connections,
         connection_lifetime: table.connection_lifetime.map(|dur| dur.0),
         require_auth: table.require_auth.unwrap_or(false),
+        stage_read,
     })
 }
