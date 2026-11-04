@@ -11,11 +11,12 @@
 //!   applies the journals until each one is applied to its end.
 //! - `drained`: written by the reconciler (and no one else) when it holds the lease, has seen
 //!   `drain` for the settle time, and every journal it knows is applied to its end. The settle time
-//!   lets every proxy read `drain` again; it does not wait for a write that a proxy admitted
-//!   earlier and is still running. Writes stay paused.
-//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts and the
-//!   completions of multipart uploads on the entries of their keys, and only while its heartbeat is
-//!   acknowledged; deletes still use the journal. It never pauses writes for it.
+//!   lets a proxy whose format reads succeed read `drain` again; a proxy whose reads fail keeps its
+//!   last answer, so `drained` does not show that every proxy has seen the pause. It does not wait
+//!   for a write that a proxy admitted earlier and is still running. Writes stay paused.
+//! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its puts, deletes and
+//!   the completions of multipart uploads on the entries of their keys, and only while its
+//!   heartbeat is acknowledged. It never pauses writes for it.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};

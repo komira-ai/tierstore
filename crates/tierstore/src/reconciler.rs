@@ -57,7 +57,9 @@ pub struct ReconcilerConfig {
     pub page_size: usize,
     /// How long the format object must have said `drain` (by the monotonic clock of the
     /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
-    /// (`ProxyConfig::format_refresh`), so that every proxy has read the format again.
+    /// (`ProxyConfig::format_refresh`), so that a proxy whose format reads succeed has read the
+    /// format again. A proxy whose reads fail keeps its last answer, so `drained` does not show
+    /// that every proxy has seen the pause.
     pub drain_settle: Duration,
     /// The time, for the retention and the usage object. It must agree with the times the hot
     /// tier gives its objects to within the retention. The lease does not use it.
