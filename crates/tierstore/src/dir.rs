@@ -803,8 +803,7 @@ impl Backend for DirBackend {
         mut body: PartBody<'_>,
         etag: &str,
     ) -> Result<String, Error> {
-        let located = self.locate(key).await;
-        located.map_err(|_| Error::NotFound(key.to_owned()))?;
+        self.locate(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = write_object_stream(&temp, &mut body).await?;

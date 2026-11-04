@@ -318,7 +318,7 @@ async fn a_delete_fails_where_the_subdirectory_is_read_only_and_a_read_where_it_
     let refused = backend.delete("_entries/e").await;
     let conditional = backend.delete_if_match("_entries/e", "tag").await;
     std::fs::set_permissions(&inside, Permissions::from_mode(0o700)).unwrap();
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
     assert!(matches!(conditional, Err(Error::PreconditionFailed(_))));
 
     let tag = backend.head("_entries/e").await.unwrap().tag;
@@ -377,7 +377,7 @@ async fn keys_that_make_no_file_name_are_replaced_in_place_where_the_previous_re
     assert!(keys(&backend, "").await.is_empty());
 
     for long in [format!("_entries/{}", "a".repeat(256)), "a".repeat(256)] {
-        assert!(matches!(backend.head(&long).await, Err(Error::Other(_))));
+        assert!(matches!(backend.head(&long).await, Err(Error::NotFound(_))));
     }
 }
 
@@ -387,11 +387,11 @@ async fn keys_that_make_no_file_name_are_replaced_in_place_where_the_previous_re
 async fn the_rest_of_an_entry_key_must_make_a_file_name() {
     let (_dir, backend) = backend();
     let refused = backend.put("_entries/", body("x")).await;
-    assert!(matches!(refused, Err(Error::Other(_))));
+    assert!(matches!(refused, Err(Error::InvalidKey(_))));
     let long = format!("_entries/{}", "a".repeat(256));
     assert!(matches!(
         backend.put(&long, body("x")).await,
-        Err(Error::Other(_))
+        Err(Error::InvalidKey(_))
     ));
     let longest = format!("_entries/{}", "a".repeat(255));
     backend.put(&longest, body("x")).await.unwrap();
