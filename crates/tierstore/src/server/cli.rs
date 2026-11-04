@@ -84,7 +84,6 @@
 use std::ffi::OsString;
 use std::future::Future;
 use std::net::SocketAddr;
-use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -105,6 +104,7 @@ use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, run, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config_tuning::{HotTuning, S3Client};
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, S3Tls, refuse, server_config};
@@ -132,13 +132,6 @@ pub(super) const DEFAULT_PUT_MIN_BYTES_PER_SEC: u64 = 1024;
 
 /// The signing region of an S3 tier whose region is not given.
 pub(super) const DEFAULT_REGION: &str = "us-east-1";
-
-/// How long a connection to an S3 tier may take to be opened.
-const S3_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The slowest rate, in bytes a second, at which the body of a write to an S3 tier is taken for
-/// granted to go: a write may take its request timeout plus its length at this rate.
-const S3_MIN_BODY_RATE: Option<NonZeroU64> = NonZeroU64::new(1 << 20);
 
 /// What `tierstore` is started with: the flags of one run. Everything that describes the data
 /// path is in the file `--config` names (see [`config`](super::config)); a flag that used to
@@ -235,6 +228,11 @@ pub struct Cli {
     /// of a multipart upload has a small body, so it may take this long in all, and a store may
     /// take minutes to put a large object together: set this longer than the longest.
     pub s3_request_timeout: Duration,
+    /// The connect timeout, body rate, idle-connection timeout and read retries of the client of
+    /// an S3 tier (the `server.s3_*` keys other than `s3_request_timeout`).
+    pub s3_client: S3Client,
+    /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
+    pub hot_tuning: HotTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
     pub hot_bytes: u64,
     /// The percent of `hot_store.budget` above which the oldest copied objects are evicted from the
@@ -544,9 +542,10 @@ pub(super) fn open_tier(
     spec: &str,
     s3: &S3Flags<'_>,
     timeout: Duration,
+    client: &S3Client,
 ) -> Result<Arc<dyn Backend>, String> {
     match spec.strip_prefix("s3:") {
-        Some(bucket) => s3_tier(flag, spec, bucket, s3, timeout),
+        Some(bucket) => s3_tier(flag, spec, bucket, s3, (timeout, client)),
         None if s3.given() => {
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
@@ -562,8 +561,9 @@ fn s3_tier(
     spec: &str,
     bucket: &str,
     s3: &S3Flags<'_>,
-    timeout: Duration,
+    limits: (Duration, &S3Client),
 ) -> Result<Arc<dyn Backend>, String> {
+    let (timeout, client) = limits;
     let fail = |why: String| format!("{flag} {spec:?}: {why}");
     let Some(endpoint) = s3.endpoint else {
         return Err(fail(format!("it needs {flag}-endpoint")));
@@ -579,11 +579,11 @@ fn s3_tier(
         bucket: bucket.to_owned(),
         credentials: Credentials::new(key_id, secret),
         capabilities: Capabilities::default(),
-        connect_timeout: S3_CONNECT_TIMEOUT,
+        connect_timeout: client.connect_timeout,
         request_timeout: timeout,
-        min_body_rate: S3_MIN_BODY_RATE,
+        min_body_rate: client.min_body_rate,
     };
-    let built = S3Backend::new(config);
+    let built = S3Backend::new_tuned(config, client.tuning);
     let backend = built.map_err(|why| fail(why.to_string()))?;
     Ok(Arc::new(backend))
 }
@@ -628,17 +628,26 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let mut server = server_config(&cli.front(), Arc::clone(&clock), true)?;
     server.usage_stale_after = cli.usage_stale_after;
     let timeout = cli.s3_request_timeout;
-    let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout)?;
-    let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout)?;
+    let hot = open_tier("--hot", &cli.hot, &cli.hot_s3(), timeout, &cli.s3_client)?;
+    let cold = open_tier("--cold", &cli.cold, &cli.cold_s3(), timeout, &cli.s3_client)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.critical = share(cli.critical);
     proxy.linger = cli.journal_linger;
+    let tuning = &cli.hot_tuning;
+    proxy.batch_entries = tuning.journal_batch_entries;
+    proxy.usage_refresh = tuning.usage_refresh;
+    proxy.delete_rounds = tuning.delete_rounds;
+    proxy.listing_heads = tuning.listing_heads;
+    proxy.upload_listing_calls = tuning.upload_listing_calls;
     let mut reconciler = ReconcilerConfig::new(&cli.proxy_id, cli.hot_bytes, clock);
     reconciler.high_water = share(cli.high_water);
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
+    reconciler.page_size = tuning.journal_page_size;
+    reconciler.copy_rounds = tuning.copy_rounds;
+    reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));

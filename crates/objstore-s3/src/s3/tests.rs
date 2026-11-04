@@ -45,7 +45,10 @@ fn the_timeout_grows_with_the_body_at_the_floor_rate() {
 /// request reuse a connection the server has already closed.
 #[test]
 fn pool_idle_timeout_is_30s() {
-    assert_eq!(POOL_IDLE_TIMEOUT, Duration::from_secs(30));
+    assert_eq!(
+        S3Tuning::default().pool_idle_timeout,
+        Duration::from_secs(30)
+    );
 }
 
 /// Catches: the builder not applying the idle timeout it is given (the default is
@@ -173,9 +176,12 @@ async fn a_connect_that_times_out_is_not_resent_but_a_refused_one_is() {
         let _ = futures::poll!(connecting.as_mut());
         fillers.push(connecting);
     }
-    let client = client_builder(Duration::from_millis(100), POOL_IDLE_TIMEOUT)
-        .build()
-        .unwrap();
+    let client = client_builder(
+        Duration::from_millis(100),
+        S3Tuning::default().pool_idle_timeout,
+    )
+    .build()
+    .unwrap();
     let e = client
         .get(format!("http://{addr}/"))
         .send()

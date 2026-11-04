@@ -36,6 +36,7 @@ mod sigv4;
 mod streamed;
 mod tagged;
 mod times;
+mod tuning;
 mod xml;
 
 pub use multipart::{
@@ -44,6 +45,7 @@ pub use multipart::{
 pub use parts::{OpenUpload, UploadsPage};
 pub use streamed::{ObjectBody, ObjectRead};
 pub use tagged::{ObjectHead, StampedObject, StampedPage};
+pub use tuning::{READ_RETRIES, S3Tuning};
 
 use std::fmt;
 use std::future::Future;
@@ -69,17 +71,6 @@ use streamed::{check_partial, too_long};
 
 /// How long [`S3Store::wait_answering`] waits between attempts.
 pub const WAIT_RETRY: Duration = Duration::from_millis(250);
-
-/// How many times a ranged read is sent again after its transport failed (not timed
-/// out by the store's caller or by a limit of the client): a connection the store, or the path to it,
-/// closed after the request went out ("connection closed before message completed")
-/// says nothing of the next one, a pooled connection closed while idle fails this way,
-/// and so does one the kernel gave up on after the request went out (`ETIMEDOUT`,
-/// "Connection timed out", mid-body). A read is idempotent. Three sends in all.
-pub const READ_RETRIES: u32 = 2;
-
-/// The wait before the first resend of a read; each resend waits twice the one before.
-const READ_RETRY_WAIT: Duration = Duration::from_millis(50);
 
 /// Whether a failed read may be sent again: it failed in transport and not by running
 /// out of time (a store that is `request_timeout` slow stays slow, and a resend would
@@ -235,6 +226,7 @@ struct Conn {
     capabilities: Capabilities,
     request_timeout: Duration,
     min_body_rate: Option<NonZeroU64>,
+    tuning: S3Tuning,
 }
 
 impl fmt::Debug for S3Store {
@@ -250,6 +242,12 @@ impl fmt::Debug for S3Store {
 impl S3Store {
     /// A store for `config.bucket`. Does no I/O.
     pub fn new(config: S3Config) -> Result<Self, S3ConfigError> {
+        Self::new_tuned(config, S3Tuning::default())
+    }
+
+    /// A store for `config.bucket` with the idle-connection and read-retry settings `tuning`
+    /// gives. Does no I/O.
+    pub fn new_tuned(config: S3Config, tuning: S3Tuning) -> Result<Self, S3ConfigError> {
         let bad = |why| S3ConfigError::Endpoint {
             endpoint: config.endpoint.clone(),
             why,
@@ -272,7 +270,7 @@ impl S3Store {
         if !valid_bucket(&config.bucket) {
             return Err(S3ConfigError::Bucket(config.bucket));
         }
-        let client = store_client_builder(config.connect_timeout)
+        let client = client_builder(config.connect_timeout, tuning.pool_idle_timeout)
             .build()
             .map_err(S3ConfigError::Client)?;
         let conn = Conn {
@@ -285,29 +283,12 @@ impl S3Store {
             capabilities: config.capabilities,
             request_timeout: config.request_timeout,
             min_body_rate: config.min_body_rate,
+            tuning,
         };
         Ok(Self {
             conn: Arc::new(conn),
         })
     }
-}
-
-/// How long an unused pooled connection is kept before the client drops it. reqwest's
-/// default is 90 s, longer than many servers and proxies keep an idle connection; a
-/// request sent on a connection the peer has already closed fails with "connection
-/// closed before message completed". Dropping idle connections after 30 s keeps the
-/// client's side shorter than common load-balancer and server idle closes (often 60 s;
-/// some paths close at about 20 s).
-const POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The HTTP client builder every `S3Store` uses: the configured limits plus
-/// `POOL_IDLE_TIMEOUT`. `S3Store::new` goes through this one function.
-///
-/// Test gap: reqwest cannot read the idle timeout back from a builder, so no test
-/// proves `S3Store::new` uses this function; the tests prove the constant and that
-/// `client_builder` applies the timeout it is given.
-fn store_client_builder(connect_timeout: Duration) -> reqwest::ClientBuilder {
-    client_builder(connect_timeout, POOL_IDLE_TIMEOUT)
 }
 
 /// A client builder with the given limits and idle pool timeout. `request_timeout` is
@@ -630,8 +611,8 @@ impl ObjectStore for S3Store {
         key: &ObjectKey,
         range: ByteRange,
     ) -> Result<Bytes, ObjectStoreError> {
-        let mut wait = READ_RETRY_WAIT;
-        for _ in 0..READ_RETRIES {
+        let mut wait = self.conn.tuning.read_retry_wait;
+        for _ in 0..self.conn.tuning.read_retries {
             match self.get_range_once(key, range).await {
                 Err(e) if is_retryable(&e) => {
                     tracing::debug!(%key, error = %e, "ranged read failed in transport; sending it again");
