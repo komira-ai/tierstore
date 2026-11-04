@@ -19,7 +19,7 @@ fn down() -> Error {
     Error::Unavailable("down".to_owned())
 }
 
-fn entry(op: JournalOp, key: &str, tag: Option<&str>) -> JournalEntry {
+pub(crate) fn entry(op: JournalOp, key: &str, tag: Option<&str>) -> JournalEntry {
     JournalEntry {
         op,
         key: key.to_owned(),
@@ -35,7 +35,7 @@ fn entry(op: JournalOp, key: &str, tag: Option<&str>) -> JournalEntry {
 
 /// A rig with proxy `p1` registered (so that the reconciler finds its journal), and `entries` as
 /// its journal object 1.
-async fn with_journal(entries: &[JournalEntry]) -> Rig {
+pub(crate) async fn with_journal(entries: &[JournalEntry]) -> Rig {
     let rig = Rig::new();
     let _proxy = rig.proxy("p1", 1000).await;
     let object = encode_journal(entries);
@@ -716,32 +716,4 @@ async fn a_mirrored_key_is_forgotten_after_the_retention() {
     let report = reconciler.pass().await;
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_absent(&*rig.cold_mem, "k").await;
-}
-
-/// Asserts that a mirror entry that names no tag deletes nothing: it owns no object, so the hot
-/// copy stays, and nothing is copied.
-#[tokio::test(start_paused = true)]
-async fn a_putmirror_entry_without_a_tag_leaves_the_hot_copy() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", None)]).await;
-    rig.hot_mem.put("k", body("hot!!")).await.unwrap();
-    let mut reconciler = rig.reconciler("r1", 1000);
-
-    let report = reconciler.pass().await;
-    assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(report.copied, 0);
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("hot!!"));
-    assert_absent(&*rig.cold_mem, "k").await;
-}
-
-/// Asserts that a mirror entry whose tag is not the hot object's leaves the hot object when the
-/// cold tier holds nothing: the object is not the mirror's.
-#[tokio::test(start_paused = true)]
-async fn a_putmirror_entry_does_not_delete_a_hot_object_of_another_tag() {
-    let rig = with_journal(&[entry(JournalOp::PutMirror, "k", Some("old"))]).await;
-    rig.hot_mem.put("k", body("hot!!")).await.unwrap();
-    let mut reconciler = rig.reconciler("r1", 1000);
-
-    let report = reconciler.pass().await;
-    assert_eq!(report.failed, Vec::<Error>::new());
-    assert_eq!(read(&*rig.hot_mem, "k").await, body("hot!!"));
 }

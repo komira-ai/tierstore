@@ -1,6 +1,12 @@
 //! The S3 store's conditional write, HEAD, whole-object read and stamped listing against a
 //! scripted HTTP server on loopback: what each request carries, and how each answer is read.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

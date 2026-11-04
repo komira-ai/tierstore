@@ -39,7 +39,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bytes::Bytes;
 use md5::{Digest, Md5};
@@ -50,7 +50,7 @@ use tokio::sync::Notify;
 mod dates;
 mod uploads;
 
-use self::dates::{http_date, iso_date};
+use self::dates::{http_date, iso_date, system_seconds};
 use self::uploads::list_uploads;
 use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store};
@@ -184,12 +184,6 @@ impl State {
     }
 }
 
-/// The second the system clock says.
-fn system_seconds() -> u64 {
-    let since = SystemTime::now().duration_since(UNIX_EPOCH);
-    since.map_or(0, |since| since.as_secs())
-}
-
 /// The entity tag S3 gives an object written by one PUT: the quoted hex MD5 of its bytes.
 fn etag_of(kept: &Kept) -> String {
     let digest = Md5::digest(kept.read(0, kept.len));
@@ -292,6 +286,10 @@ impl FakeS3 {
     ///
     /// # Panics
     /// No loopback port could be bound.
+    #[expect(
+        clippy::expect_used,
+        reason = "a test double: a port that cannot be bound is the failure the test reports, as documented under Panics"
+    )]
     pub async fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -327,6 +325,10 @@ impl FakeS3 {
     /// # Panics
     /// Never: the configuration is valid.
     #[must_use]
+    #[expect(
+        clippy::expect_used,
+        reason = "a test double: its configuration is valid, as documented under Panics"
+    )]
     pub fn store(&self, capabilities: Capabilities) -> S3Store {
         S3Store::new(S3Config {
             endpoint: self.endpoint.clone(),

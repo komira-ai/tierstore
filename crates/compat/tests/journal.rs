@@ -3,6 +3,12 @@
 //! (`tierstore_prev`), and its own decoder and encoder read and write the bytes, not a copy of
 //! its journal format.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use bytes::Bytes;
 use tierstore::{Backend, DirBackend, JournalEntry, JournalOp, decode_journal, encode_journal};
 use tierstore_prev::{

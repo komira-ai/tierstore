@@ -526,6 +526,10 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
 }
 
 /// The entry point of the `xtask` binary.
+#[expect(
+    clippy::disallowed_macros,
+    reason = "a command-line tool: the lines of a verb go to standard output and its error to standard error"
+)]
 pub fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(lines) => {

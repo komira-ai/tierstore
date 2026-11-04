@@ -128,9 +128,10 @@ Write each key file owned by `tierstore` with mode 0600 or 0400. [Keys and roles
 
 The values in the example file are examples: `192.0.2.10` is a documentation address, the endpoints are `s3-hot.example` and `s3-cold.example`. Edit the address of the `s3` interface, the proxy id, the bucket names, the tiers and `hot_store.budget` in `/etc/tierstore/tierstore.toml`. Keep the proxy id across restarts and give each process over the same tiers one of its own. [Configuration](configuration.md) lists every key. The unit gives only `--config` and the two flags of the drain.
 
-The unit has no `[Install]` section, so installing it starts nothing and `systemctl enable` has nothing to link; it is also skipped while `/etc/tierstore/access.key` does not exist. Start it by hand once the files are in place:
+The unit has no `[Install]` section, so installing it starts nothing and `systemctl enable` has nothing to link; it is also skipped while `/etc/tierstore/access.key` does not exist. If systemd already loaded the unit (the `daemon-reload` above does that), it keeps that copy until the next `daemon-reload` and warns that the unit changed on disk, so run it again after the edit to make the edit take effect. Start it by hand once the files are in place:
 
 ```sh
+systemctl daemon-reload
 systemctl start tierstore
 ```
 
