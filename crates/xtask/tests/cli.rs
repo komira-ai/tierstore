@@ -646,3 +646,101 @@ fn release_set_version_writes_the_version_into_the_manifest_and_the_lock_of_the_
     assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
     assert_eq!(read("Cargo.lock"), lock);
 }
+
+#[test]
+fn licenses_writes_the_notice_that_package_puts_in_the_tarball_and_a_refused_one_exits_1() {
+    // Catches: the flags of `licenses` (--metadata, --package, --out) and of `package
+    // --licenses` not reaching their functions, a tarball listing more or less than the binary
+    // and the notice, and a crate that declares no licence exiting 0.
+    let d = dir("licenses");
+    put(&d, "crates/x/LICENSE", "MIT text of x");
+    put(&d, "crates/y/README", "y declares no licence");
+    let manifest = |name: &str| d.join("crates").join(name).join("Cargo.toml");
+    let meta = |dep: &str| {
+        let package = |name: &str, source: &str| {
+            format!(
+                "{{\"id\":\"{name}\",\"name\":\"{name}\",\"version\":\"1.0.0\",\"source\":{source},\
+                 \"manifest_path\":{:?},\"license\":\"MIT\",\"license_file\":null,\"repository\":null}}",
+                manifest(name).display().to_string()
+            )
+        };
+        format!(
+            "{{\"packages\":[{},{}],\"resolve\":{{\"nodes\":[\
+             {{\"id\":\"app\",\"deps\":[{{\"pkg\":\"{dep}\",\"dep_kinds\":[{{\"kind\":null,\"target\":null}}]}}]}},\
+             {{\"id\":\"{dep}\",\"deps\":[]}}],\"root\":null}}}}",
+            package("app", "null"),
+            package(dep, "\"registry+crates.io\"")
+        )
+    };
+    put(&d, "x.json", &meta("x"));
+    put(
+        &d,
+        "y.json",
+        &meta("y").replace("\"license\":\"MIT\"", "\"license\":null"),
+    );
+    let o = run(
+        &d,
+        &[
+            "licenses",
+            "--metadata",
+            "x.json",
+            "--package",
+            "app",
+            "--out",
+            "NOTICE.txt",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert_eq!(stdout(&o), "wrote NOTICE.txt\n");
+    let notice = std::fs::read_to_string(d.join("NOTICE.txt")).expect("notice");
+    assert!(
+        notice.contains("--- LICENSE ---\nMIT text of x\n"),
+        "{notice}"
+    );
+    let o = run(
+        &d,
+        &[
+            "licenses",
+            "--metadata",
+            "y.json",
+            "--package",
+            "app",
+            "--out",
+            "REFUSED.txt",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("y 1.0.0: declares no licence"),
+        "{}",
+        stderr(&o)
+    );
+    assert!(!d.join("REFUSED.txt").exists());
+    put(&d, "tierstore", "the binary");
+    put(&d, "sbom.json", "{\"bomFormat\":\"CycloneDX\"}");
+    let o = run(
+        &d,
+        &[
+            "package",
+            "--binary",
+            "tierstore",
+            "--sbom",
+            "sbom.json",
+            "--licenses",
+            "NOTICE.txt",
+            "--platform",
+            "linux-x86_64",
+            "--commit",
+            COMMIT,
+            "--out",
+            "out",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let listed = Command::new("tar")
+        .arg("-tzf")
+        .arg(d.join(format!("out/tierstore-{COMMIT}-linux-x86_64.tar.gz")))
+        .output()
+        .expect("tar -t");
+    assert_eq!(stdout(&listed), "tierstore\nTHIRD-PARTY-LICENSES.txt\n");
+}

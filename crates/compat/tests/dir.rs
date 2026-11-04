@@ -90,7 +90,7 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_a_dir
         (head.reservation, head.tag.as_str()),
         (false, swapped.as_str())
     );
-    let marked = now.get_marked("held", None).await.unwrap();
+    let marked = now.get_tagged("held", None).await.unwrap();
     assert_eq!(marked, (real, false, swapped.clone()));
 
     before.delete("plain").await.unwrap();
@@ -136,7 +136,7 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_a_dir
         assert!(!seen.reservation, "{key}");
         let whole = before.get(key, None).await.unwrap();
         assert_eq!(now.get(key, None).await.unwrap(), whole, "{key}");
-        let marked = now.get_marked(key, None).await.unwrap();
+        let marked = now.get_tagged(key, None).await.unwrap();
         assert_eq!(marked, (whole.clone(), false, read.tag.clone()), "{key}");
         let part = now.get(key, Some(ByteRange::new(3, 20))).await.unwrap();
         assert_eq!(part, whole.slice(3..23), "{key}");
@@ -164,4 +164,170 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_a_dir
     let read = before.get("streamed", None).await.unwrap();
     assert_eq!(read, Bytes::from(patterned(9, CHUNK + 2)));
     assert_eq!(before.head("plain").await.unwrap().tag, replaced);
+}
+
+/// The keys of a listing.
+fn keys<T>(listed: Vec<T>, key: impl Fn(T) -> String) -> Vec<String> {
+    listed.into_iter().map(key).collect()
+}
+
+/// Asserts that the previous release, over a directory in which this branch wrote objects under
+/// `_entries/` (a create-only put and a replacement by the tag, which make the subdirectory
+/// `.entries/` and the lock file in it), lists the directory without an error and lists only the
+/// plain object, lists the prefix `_entries/` as empty, reads and puts plain keys as before, and
+/// does not find an entry key; and that this branch then lists the entries and the object the
+/// previous release put.
+#[tokio::test]
+async fn the_previous_release_lists_a_directory_that_has_an_entries_subdirectory() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-entries");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    now.put("plain", body(1, CHUNK + 5)).await.unwrap();
+    now.put("_entries/first", body(2, 40)).await.unwrap();
+    let tag = now
+        .put_tagged("_entries/second", body(3, 40))
+        .await
+        .unwrap();
+    now.put_if_match("_entries/second", body(4, 41), &tag)
+        .await
+        .unwrap();
+    assert!(dir.path().join(".entries").is_dir());
+
+    let seen = keys(before.list("").await.unwrap(), |object| object.key);
+    assert_eq!(seen, ["plain"]);
+    assert!(before.list("_entries/").await.unwrap().is_empty());
+    assert_eq!(
+        before.get("plain", None).await.unwrap(),
+        now.get("plain", None).await.unwrap()
+    );
+    let missing = before.head("_entries/first").await;
+    assert_eq!(
+        missing,
+        Err(PrevError::NotFound("_entries/first".to_owned()))
+    );
+    before.put("later", body(5, 9)).await.unwrap();
+
+    let seen = keys(now.list("").await.unwrap(), |object| object.key);
+    assert_eq!(
+        seen,
+        ["_entries/first", "_entries/second", "later", "plain"]
+    );
+    assert_eq!(now.get("later", None).await.unwrap(), body(5, 9));
+}
+
+/// Asserts that an ordinary object at the bare key `_entries` (outside the reserved prefix) and
+/// objects under `_entries/` coexist over one directory shared by both releases, whichever wrote
+/// first: the previous release writes `_entries` and this branch then writes entry keys beside it
+/// (reading the previous object back unchanged); and in a second directory this branch writes the
+/// entry keys first and the previous release then puts `_entries` and reads it back. Each release
+/// lists the plain object, and this branch also lists the entries.
+#[tokio::test]
+async fn an_object_at_the_key_entries_and_entry_objects_coexist_across_releases() {
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-bare-entries-old");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+    before.put("_entries", body(1, 30)).await.unwrap();
+    now.put("_entries/a", body(2, 40)).await.unwrap();
+    let tag = now.put_tagged("_entries/b", body(3, 40)).await.unwrap();
+    now.put_if_match("_entries/b", body(4, 41), &tag)
+        .await
+        .unwrap();
+    assert_eq!(now.get("_entries", None).await.unwrap(), body(1, 30));
+    assert_eq!(before.get("_entries", None).await.unwrap(), body(1, 30));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries", "_entries/a", "_entries/b"]
+    );
+    assert_eq!(
+        keys(before.list("").await.unwrap(), |object| object.key),
+        ["_entries"]
+    );
+
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-bare-entries-new");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+    now.put("_entries/a", body(5, 40)).await.unwrap();
+    before.put("_entries", body(6, 30)).await.unwrap();
+    assert_eq!(before.get("_entries", None).await.unwrap(), body(6, 30));
+    assert_eq!(now.get("_entries", None).await.unwrap(), body(6, 30));
+    assert_eq!(now.get("_entries/a", None).await.unwrap(), body(5, 40));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries", "_entries/a"]
+    );
+    assert_eq!(
+        keys(before.list("").await.unwrap(), |object| object.key),
+        ["_entries"]
+    );
+}
+
+/// Asserts that an object the previous release put under a key that starts with `_entries/`, a
+/// file of the root, stays that file for its whole life. The previous release puts `_entries/old`
+/// and `_entries/gone`; this branch heads and gets `_entries/old` (the size, the tag and the bytes
+/// the previous release gives it), lists it once among the plain keys, refuses a create-only put of
+/// the same key, replaces it by its tag (the previous release then reads the replacement body
+/// from the same file, and the subdirectory has no file for the key), and deletes it and the
+/// other key (the previous release then finds both not found), so that neither release lists them.
+#[tokio::test]
+async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_release_put() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-old-entry");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    before.put("plain", body(1, 20)).await.unwrap();
+    before.put("_entries/old", body(2, 40)).await.unwrap();
+    before.put("_entries/gone", body(3, 41)).await.unwrap();
+
+    let seen = before.head("_entries/old").await.unwrap();
+    let head = now.head("_entries/old").await.unwrap();
+    assert_eq!((head.size, &head.tag), (seen.size, &seen.tag));
+    assert_eq!(now.get("_entries/old", None).await.unwrap(), body(2, 40));
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old", "plain"]
+    );
+    assert_eq!(
+        keys(now.list("_entries/").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old"]
+    );
+
+    let taken = now.put("_entries/old", body(4, 10)).await;
+    assert_eq!(
+        taken,
+        Err(tierstore::Error::AlreadyExists("_entries/old".to_owned()))
+    );
+    let tag = now
+        .put_if_match("_entries/old", body(5, 42), &head.tag)
+        .await
+        .unwrap();
+    assert_eq!(now.get("_entries/old", None).await.unwrap(), body(5, 42));
+    assert!(!dir.path().join(".entries").join("old").exists());
+    assert_eq!(before.get("_entries/old", None).await.unwrap(), body(5, 42));
+    assert_eq!(before.head("_entries/old").await.unwrap().tag, tag);
+    assert_eq!(
+        keys(now.list("_entries/").await.unwrap(), |object| object.key),
+        ["_entries/gone", "_entries/old"]
+    );
+
+    now.delete_if_match("_entries/old", &tag).await.unwrap();
+    now.delete("_entries/gone").await.unwrap();
+    for key in ["_entries/old", "_entries/gone"] {
+        let missing = before.head(key).await;
+        assert_eq!(missing, Err(PrevError::NotFound(key.to_owned())));
+    }
+    assert!(now.list("_entries/").await.unwrap().is_empty());
+    assert!(before.list("_entries/").await.unwrap().is_empty());
+    assert_eq!(
+        keys(now.list("").await.unwrap(), |object| object.key),
+        ["plain"]
+    );
+    assert_eq!(
+        now.head("_entries/gone").await,
+        Err(tierstore::Error::NotFound("_entries/gone".to_owned()))
+    );
 }

@@ -14,9 +14,8 @@ use tokio::sync::oneshot;
 
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
-use super::{
-    NAME_LIMIT, classify, create_new, decode, encode, encode_legacy, failed, part_name, sha256,
-};
+use super::names::decode;
+use super::{NAME_LIMIT, classify, create_new, encode, failed, part_name};
 
 fn backend() -> (TestDir, DirBackend) {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-dir");
@@ -89,11 +88,6 @@ fn a_key_is_a_file_name_that_decodes_back() {
     assert_eq!(encode(".x"), "%2Ex");
     assert_eq!(encode("a~ b%"), "a%7E%20b%25");
     assert_eq!(encode("é"), "%C3%A9");
-    assert_eq!(encode("Foo"), "%46oo");
-    assert_eq!(decode("%46oo").as_deref(), Some("Foo"));
-    assert_eq!(encode_legacy("Foo/b"), "Foo~b");
-    assert_eq!(encode_legacy("a%"), "a%25");
-    assert_eq!(decode("Foo~b").as_deref(), Some("Foo/b"));
 }
 
 /// Asserts that a name that `encode` does not make is not a key: a `%` without two hex digits
@@ -645,7 +639,7 @@ async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
     let tag = backend.put_reservation("k", body("r")).await.unwrap();
     chmod(&dir.path().join("k"), 0o644);
     assert!(!backend.head("k").await.unwrap().reservation);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("r"), false, tag));
 }
 
@@ -776,7 +770,7 @@ async fn a_read_with_the_mark_gives_the_tag_of_the_file_it_read_when_the_key_goe
     let read_a = super::read_marked(opened_a, None).await.unwrap();
     assert_eq!(read_a, (body("alpha"), false, tag_a.clone()));
     assert_ne!(tag_a, tag_b);
-    let now = backend.get_marked("k", None).await.unwrap();
+    let now = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(now, (body("alpha"), false, tag_a));
 }
 
@@ -797,13 +791,13 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
     let absent = backend.put_stream_if_match("none", None, pieces(&["a"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
-    let kept = backend.get_marked("k", None).await.unwrap();
+    let kept = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(kept, (body("old"), true, old.clone()));
 
     let new = backend.put_stream_if_match("k", None, pieces(&["n", "ew"]), &old);
     let new = new.await.unwrap();
     assert_eq!(backend.head("k").await.unwrap().tag, new);
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("new"), false, new.clone()));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
 
@@ -831,111 +825,55 @@ async fn a_streamed_replace_that_is_dropped_half_way_leaves_the_object() {
     assert_eq!(backend.get("k", None).await.unwrap(), "old");
 }
 
-/// Asserts that two keys that differ only by case are stored under file names that differ in more
-/// than case, so that on a case-insensitive file system they are still two objects.
-#[tokio::test]
-async fn keys_that_differ_only_by_case_are_two_files() {
-    let (dir, backend) = backend();
-    backend.put("Foo", body("upper")).await.unwrap();
-    backend.put("foo", body("lower")).await.unwrap();
-    assert_eq!(backend.get("Foo", None).await.unwrap(), body("upper"));
-    assert_eq!(backend.get("foo", None).await.unwrap(), body("lower"));
-    assert_eq!(names(dir.path()), ["%46oo", ".uploads", "foo"]);
-    let folded: Vec<String> = names(dir.path())
-        .iter()
-        .map(|name| name.to_ascii_lowercase())
-        .collect();
-    let mut distinct = folded.clone();
-    distinct.sort();
-    distinct.dedup();
-    assert_eq!(folded.len(), distinct.len(), "{folded:?}");
+/// The permission bits of the file or directory at `path`.
+fn bits(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// Writes the file of an object as the releases before this one did: under `name`, which has
-/// its upper-case letters as they are.
-fn write_legacy(dir: &Path, name: &str, text: &str) {
-    let mut data = sha256(text.as_bytes()).to_vec();
-    data.extend_from_slice(text.as_bytes());
-    std::fs::write(dir.join(name), data).unwrap();
+/// Asserts that the directories a new tier makes (the root and its parents made with it, and the
+/// uploads directory) are open to their owner alone.
+#[test]
+fn a_new_tier_directory_is_open_to_its_owner_alone() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-private");
+    let nested = dir.path().join("a/b");
+    DirBackend::open(&nested).unwrap();
+    assert_eq!(bits(&dir.path().join("a")), 0o700);
+    assert_eq!(bits(&nested), 0o700);
+    assert_eq!(bits(&nested.join(".uploads")), 0o700);
 }
 
-/// Asserts that a directory written by the previous release, with upper-case letters in the
-/// file names, is read by this release: get, head, list, a replacement, a create-only put that
-/// finds the key taken, and a delete all act on the old file and make no second one.
+/// Asserts that the files of objects are readable and writable by their owner alone: a put, a
+/// streamed put and a replace make a 0600 file, and a reservation 0700.
 #[tokio::test]
-async fn this_release_reads_a_directory_the_previous_release_wrote() {
+async fn the_files_of_objects_are_open_to_their_owner_alone() {
     let (dir, backend) = backend();
-    write_legacy(dir.path(), "Foo", "old");
-    write_legacy(dir.path(), "a~B", "deep");
-    assert_eq!(encode_legacy("Foo"), "Foo");
-    assert_eq!(backend.get("Foo", None).await.unwrap(), body("old"));
-    assert_eq!(backend.get("a/B", None).await.unwrap(), body("deep"));
-    let head = backend.head("Foo").await.unwrap();
-    assert_eq!((head.size, head.tag), (3, hex::encode(sha256(b"old"))));
-    let keys: Vec<String> = backend
-        .list("")
+    backend.put("plain", body("x")).await.unwrap();
+    backend
+        .put_stream("streamed", None, pieces(&["x", "y"]))
         .await
-        .unwrap()
-        .into_iter()
-        .map(|listed| listed.key)
-        .collect();
-    assert_eq!(keys, ["Foo", "a/B"]);
-    let taken = backend.put("Foo", body("new")).await;
-    assert!(matches!(taken, Err(Error::AlreadyExists(_))), "{taken:?}");
-    let tag = hex::encode(sha256(b"old"));
-    let replaced = backend.put_if_match("Foo", body("newer"), &tag).await;
-    replaced.unwrap();
-    assert_eq!(backend.get("Foo", None).await.unwrap(), body("newer"));
-    assert_eq!(names(dir.path()), [".uploads", "Foo", "a~B"]);
-    backend.delete("Foo").await.unwrap();
-    backend.delete("a/B").await.unwrap();
-    assert_eq!(names(dir.path()), [".uploads"]);
-    backend.put("Foo", body("again")).await.unwrap();
-    assert_eq!(names(dir.path()), ["%46oo", ".uploads"]);
+        .unwrap();
+    let tag = backend.put_reservation("k", body("r")).await.unwrap();
+    assert_eq!(bits(&dir.path().join("plain")), 0o600);
+    assert_eq!(bits(&dir.path().join("streamed")), 0o600);
+    assert_eq!(bits(&dir.path().join("k")), 0o700);
+    backend.put_if_match("k", body("real"), &tag).await.unwrap();
+    assert_eq!(bits(&dir.path().join("k")), 0o600);
 }
 
-/// Asserts that the data this release writes is read by the previous release's rules where it
-/// can be: a key with no upper-case letter has the file name it always had, and the name of a
-/// key with one is `%XX`, which the previous release lists as that key. (The previous release
-/// looks a key with an upper-case letter up under its literal name, so it does not get such a
-/// key.)
+/// Asserts that an upload is kept where its owner alone reaches it: the directory of the upload is
+/// 0700, its key file 0600, and a completed part 0600.
 #[tokio::test]
-async fn the_previous_release_lists_what_this_release_writes() {
+async fn an_upload_and_its_parts_are_open_to_their_owner_alone() {
     let (dir, backend) = backend();
-    backend.put("cas/d/n1/00012", body("x")).await.unwrap();
-    backend.put("Up/Per", body("y")).await.unwrap();
-    assert_eq!(
-        names(dir.path()),
-        ["%55p~%50er", ".uploads", "cas~d~n1~00012"]
-    );
-    let keys: Vec<String> = backend
-        .list("")
+    let id = backend.create_upload("k").await.unwrap();
+    backend
+        .upload_part("k", &id, 1, pieces(&["x"]))
         .await
-        .unwrap()
-        .into_iter()
-        .map(|listed| listed.key)
-        .collect();
-    assert_eq!(keys, ["Up/Per", "cas/d/n1/00012"]);
-    for name in names(dir.path())
-        .iter()
-        .filter(|name| !name.starts_with('.'))
-    {
-        let key = decode(name).unwrap();
-        assert_eq!(&encode(&key), name);
+        .unwrap();
+    let upload = dir.path().join(".uploads").join(&id);
+    assert_eq!(bits(&upload), 0o700);
+    assert_eq!(bits(&upload.join("key")), 0o600);
+    for entry in std::fs::read_dir(&upload).unwrap() {
+        assert_eq!(bits(&entry.unwrap().path()) & 0o077, 0);
     }
-}
-
-/// Asserts that an upper-case key the previous release took, whose name is within 255 bytes with
-/// the letters as they are but over it with `%XX`, is still taken (under the old name), and that
-/// a key too long for both is refused.
-#[tokio::test]
-async fn an_upper_case_key_that_fits_only_under_the_old_name_is_kept() {
-    let (dir, backend) = backend();
-    let key = "A".repeat(100);
-    assert!(encode(&key).len() > NAME_LIMIT);
-    backend.put(&key, body("long")).await.unwrap();
-    assert_eq!(backend.get(&key, None).await.unwrap(), body("long"));
-    assert_eq!(names(dir.path()), [".uploads", key.as_str()]);
-    let refused = backend.put(&"A".repeat(NAME_LIMIT + 1), body("x")).await;
-    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
 }
