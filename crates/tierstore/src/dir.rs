@@ -13,7 +13,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
@@ -41,7 +41,7 @@ mod sync;
 #[path = "dir_tags.rs"]
 mod tags;
 
-use names::encode;
+use names::{encode, is_id_byte, parse_part, part_name, unique_nanos};
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
 
@@ -210,22 +210,6 @@ fn classify(
     } else {
         failed(path, why)
     }
-}
-
-/// Whether the byte can be in the id of an upload, which names a directory.
-fn is_id_byte(byte: u8) -> bool {
-    matches!(byte, b'0'..=b'9' | b'a'..=b'z' | b'-')
-}
-
-/// The name of the file of a part of an upload: its number and its content tag.
-fn part_name(number: u32, tag: &str) -> String {
-    format!("{number:05}-{tag}")
-}
-
-/// The number and the content tag a file name of a part has, if it is one.
-fn parse_part(name: &str) -> Option<(u32, &str)> {
-    let (number, tag) = name.split_once('-')?;
-    Some((number.parse().ok()?, tag))
 }
 
 /// A temporary file that is removed when the guard is dropped: when the call that made it ends or
@@ -489,8 +473,7 @@ impl DirBackend {
             .mode(DIR_MODE)
             .create(&uploads);
         made.map_err(io_error(&uploads))?;
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let opened = OPENED.fetch_add(1, Ordering::SeqCst);
         Ok(Self {
             root,
@@ -905,8 +888,7 @@ impl Backend for DirBackend {
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
         self.path(key)?;
         let number = self.counter.fetch_add(1, Ordering::SeqCst);
-        let since = SystemTime::now().duration_since(UNIX_EPOCH);
-        let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
+        let nanos = unique_nanos();
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
         let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;

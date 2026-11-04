@@ -2,6 +2,12 @@
 //! the loopback S3 service of `s3::fake`, which has to honour the conditions as S3 does for
 //! the tests of other crates to mean anything.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -20,6 +26,10 @@ fn key(name: &str) -> ObjectKey {
     ObjectKey::new(name).unwrap()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the fake service stamps objects with the machine's time, and the test compares with it"
+)]
 fn now_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

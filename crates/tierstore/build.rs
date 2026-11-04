@@ -13,6 +13,11 @@
 //!
 //! The build reads no environment variable of its own: neither value can be overridden.
 
+#![expect(
+    clippy::disallowed_macros,
+    reason = "cargo reads the directives of a build script from its standard output"
+)]
+
 use std::path::PathBuf;
 use std::process::Command;
 

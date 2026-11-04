@@ -93,6 +93,11 @@ unsafe_code = "deny"
 # The methods and types `clippy.toml` bans, each with the reason clippy prints.
 disallowed_methods = "deny"
 disallowed_types = "deny"
+disallowed_macros = "deny"
+# Production code does not panic on a `None` or an `Err` (AGENTS.md R3). Tests may: the
+# `allow-*-in-tests` keys of `clippy.toml` leave them out of these two.
+unwrap_used = "deny"
+expect_used = "deny"
 
 # Dev and test builds: a test binary with full debug info is ~0.5 GB and a target
 # directory holds thousands of them, plus incremental state. Line tables keep panic

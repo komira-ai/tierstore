@@ -241,7 +241,7 @@ cache  = true
     fn built(cli: &mut Cli) -> Built {
         let dir = TestDir::under(std::env::temp_dir(), "tierstore-tuning");
         let path = dir.path().join("key");
-        std::fs::write(&path, "AKID\nsecretsecretsecretsecret\n").unwrap();
+        std::fs::write(&path, "AKID\nsecret-0123456789\n").unwrap();
         std::fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
         cli.access_key_file = path;
         build(cli).unwrap()

@@ -3,6 +3,12 @@
 //! and against scripted servers that show what is on the wire: the headers of each request,
 //! the body of a part as it is sent, and the limits of a request that makes no progress.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
