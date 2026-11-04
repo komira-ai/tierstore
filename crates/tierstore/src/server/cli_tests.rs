@@ -9,7 +9,26 @@ use std::time::Duration;
 
 use tierstore_testkit::dir::TestDir;
 
+use super::super::cli_probe::probe_run_id;
+use super::super::cli_probe::probe_tiers;
+use super::super::cli_serve::cut_note;
+use super::InvalidFlags;
+use super::S3Flags;
+use super::SkippedCheck;
+use super::exit_status;
+use super::open_tier;
+use super::parse_skip;
+use super::read_key;
+use super::share;
 use super::{Cli, build, parse_duration, tier};
+use crate::Backend;
+use crate::Check;
+use crate::SelfTestError;
+use crate::SelfTestFailure;
+use crate::selftest_tests::Flaw;
+use crate::selftest_tests::Flawed;
+use crate::server::AccessKey;
+use crate::server::Drained;
 use clap::CommandFactory;
 use clap::Parser;
 use std::os::unix::fs::PermissionsExt;

@@ -13,7 +13,7 @@ use crate::Backend;
 pub(super) const BUDGET: u64 = 1 << 20;
 
 /// Every series of `/metricz` with its labels, as the text names it.
-const SERIES: [&str; 27] = [
+const SERIES: [&str; 22] = [
     "tierstore_hits_total{tier=\"hot\",op=\"get\"}",
     "tierstore_hits_total{tier=\"hot\",op=\"head\"}",
     "tierstore_hits_total{tier=\"cold\",op=\"get\"}",

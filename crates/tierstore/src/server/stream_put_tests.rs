@@ -330,7 +330,7 @@ impl Tiers {
         let cold_dir = TestDir::under(std::env::temp_dir(), "tierstore-stream-cold");
         let hot = Arc::new(DirBackend::open(hot_dir.path()).unwrap());
         let cold = Arc::new(DirBackend::open(cold_dir.path()).unwrap());
-        let mut proxy_config = ProxyConfig::new("p1", 1 << 40, clock.clone());
+        let proxy_config = ProxyConfig::new("p1", 1 << 40, clock.clone());
         let proxy = live_proxy(hot.clone(), cold.clone(), proxy_config).await;
         let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
         config.max_request_bytes = limit;

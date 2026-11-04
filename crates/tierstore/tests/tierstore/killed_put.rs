@@ -18,7 +18,7 @@ use tierstore::Backend;
 /// Two directories as the tiers of a proxy.
 struct Dirs {
     hot_dir: TestDir,
-    cold_dir: TestDir,
+    _cold_dir: TestDir,
     hot: Arc<DirBackend>,
     cold: Arc<DirBackend>,
 }
@@ -31,7 +31,7 @@ impl Dirs {
         let cold = Arc::new(DirBackend::open(cold_dir.path()).unwrap());
         Self {
             hot_dir,
-            cold_dir,
+            _cold_dir: cold_dir,
             hot,
             cold,
         }

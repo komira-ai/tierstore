@@ -2,6 +2,7 @@
 //! each.
 
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt;
 
 use super::drop_removed;
 

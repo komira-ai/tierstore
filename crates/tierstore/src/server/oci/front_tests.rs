@@ -47,7 +47,7 @@ impl Rig {
         let clock = Arc::new(TestClock::new());
         let memory = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
         let cold = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
-        let mut config = ProxyConfig::new("p1", 1 << 20, clock);
+        let config = ProxyConfig::new("p1", 1 << 20, clock);
         let proxy = crate::server::testing::live_proxy(memory.clone(), cold.clone(), config).await;
         let proxy = proxy.expect("a proxy");
         let faulty = Arc::new(FaultyBackend::new(memory.clone()));

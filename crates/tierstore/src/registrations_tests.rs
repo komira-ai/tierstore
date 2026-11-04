@@ -36,22 +36,25 @@ fn an_owner_has_departed_when_absent_or_unchanged_for_the_wait() {
     assert!(seen.departed("a", 700_000, WAIT));
 }
 
-/// Asserts that a registration seen again as it was keeps the time it was first seen, a changed
-/// one (another time of the last write, or another size) is first seen now, and the ids that are
-/// due are exactly those unchanged for the wait: at the wait itself, not a millisecond before.
+/// Asserts that a registration seen again as it was keeps the time it was first seen, and a changed
+/// one (another time of the last write, or another size) is first seen now: an owner has departed
+/// exactly when its registration has stood unchanged for the wait, at the wait itself and not a
+/// millisecond before.
 #[test]
 fn an_unchanged_registration_keeps_its_first_seen_time_and_a_changed_one_starts_again() {
     let mut seen = Registrations::default();
     seen.observe(1_000, &[listed("a", 10, 5), listed("b", 10, 5)]);
     seen.observe(300_000, &[listed("a", 10, 5), listed("b", 10, 6)]);
     let at_wait = 1_000 + 600_000;
-    assert_eq!(seen.due(at_wait - 1, WAIT), Vec::<String>::new());
-    assert_eq!(seen.due(at_wait, WAIT), ["a"]);
-    assert_eq!(seen.due(300_000 + 600_000, WAIT), ["a", "b"]);
+    assert!(!seen.departed("a", at_wait - 1, WAIT));
+    assert!(seen.departed("a", at_wait, WAIT));
+    assert!(!seen.departed("b", at_wait, WAIT));
+    assert!(seen.departed("b", 300_000 + 600_000, WAIT));
 
     seen.observe(at_wait, &[listed("a", 11, 5), listed("b", 10, 6)]);
-    assert_eq!(seen.due(at_wait, WAIT), Vec::<String>::new());
-    assert_eq!(seen.due(900_000, WAIT), ["b"]);
+    assert!(!seen.departed("a", at_wait, WAIT));
+    assert!(!seen.departed("a", 900_000, WAIT));
+    assert!(seen.departed("b", 900_000, WAIT));
 }
 
 /// Asserts that a registration that is no longer listed is forgotten, so that one that comes

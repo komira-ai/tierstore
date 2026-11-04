@@ -16,7 +16,7 @@ use tierstore::{
 use tierstore_testkit::dir::TestDir;
 
 use crate::conformance::{joined, reservation};
-use crate::support::{Rig, assert_absent, body, copy_back_asked, read, set_usage};
+use crate::support::{Rig, assert_absent, body, copy_back_asked, set_usage};
 
 /// The bytes the objects of these tests hold.
 const TEN: &str = "0123456789";

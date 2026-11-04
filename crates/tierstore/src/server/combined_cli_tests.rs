@@ -20,6 +20,7 @@ use super::config_combined::CombinedSettings;
 use super::local_cache::testing::{FakeDisk, Quirk};
 use super::local_cache::{Disk, LocalCache, Mode, SystemDisk};
 use crate::{Backend, Clock, DirBackend, Error as BackendError, MemoryBackend, SystemClock};
+use objstore_s3::ObjectStore;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 

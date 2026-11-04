@@ -22,8 +22,6 @@ async fn collect(mut body: PartBody<'_>) -> Result<Bytes, Error> {
 /// What [`Churn`] does to the object under the key of a conditional call, just before the call.
 #[derive(Clone, Debug)]
 pub enum Change {
-    /// Replaces it with a reservation of these bytes (a new tag, still a reservation).
-    Reservation(Bytes),
     /// Replaces it with a real object of these bytes.
     Object(Bytes),
     /// Removes it.
@@ -60,43 +58,6 @@ impl Churn {
         }
     }
 
-    /// A backend whose first plain read (`get`) is preceded by `change`.
-    pub fn before_a_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
-        let churn = Self::new(mem, Vec::new());
-        *churn.before_read.lock().unwrap() = Some(change);
-        churn
-    }
-
-    /// A backend whose first read with the mark is preceded by `change`.
-    pub fn before_a_marked_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
-        let churn = Self::new(mem, Vec::new());
-        *churn.before_marked_read.lock().unwrap() = Some(change);
-        churn
-    }
-
-    /// Applies the changes only before a conditional call on `key`: a call on another key (the
-    /// lease, a checkpoint) leaves them for the one that is meant.
-    pub fn on_key(mut self, key: &str) -> Self {
-        self.only = Some(key.to_owned());
-        self
-    }
-
-    /// A backend whose first read with the mark is followed by `change`.
-    pub fn after_a_read(mem: Arc<MemoryBackend>, change: Change) -> Self {
-        let churn = Self::new(mem, Vec::new());
-        *churn.after_read.lock().unwrap() = Some(change);
-        churn
-    }
-
-    /// A backend whose first read with the mark is preceded by `before` and followed by `after`:
-    /// the object read is the one `before` left, and `after` can put back the one that was there
-    /// first (a key that holds A, then B, then A again).
-    pub fn around_a_marked_read(mem: Arc<MemoryBackend>, before: Change, after: Change) -> Self {
-        let churn = Self::after_a_read(mem, after);
-        *churn.before_marked_read.lock().unwrap() = Some(before);
-        churn
-    }
-
     /// Applies the next change to the object under `key`, if one is left.
     async fn interfere(&self, key: &str) {
         if self.only.as_deref().is_some_and(|only| only != key) {
@@ -113,17 +74,8 @@ impl Churn {
         let tag = self.mem.head(key).await.map(|meta| meta.tag);
         match (change, tag) {
             (Change::Remove, _) => self.mem.delete(key).await.unwrap(),
-            (Change::Reservation(body), Ok(tag)) => {
-                self.mem
-                    .put_reservation_if_match(key, body, &tag)
-                    .await
-                    .unwrap();
-            }
             (Change::Object(body), Ok(tag)) => {
                 self.mem.put_if_match(key, body, &tag).await.unwrap();
-            }
-            (Change::Reservation(body), Err(_)) => {
-                self.mem.put_reservation(key, body).await.unwrap();
             }
             (Change::Object(body), Err(_)) => self.mem.put(key, body).await.unwrap(),
         }
@@ -265,102 +217,5 @@ impl Backend for Ghost {
             listed.sort();
         }
         Ok(listed)
-    }
-}
-
-/// A memory backend that fails the `n`th HEAD of one key (counting from one) with `Unavailable`,
-/// and, if told to, every `delete_if_match`; everything else is the memory backend's own. It tells
-/// the failure of the second look at a key from the failure of the first, which a fault injector
-/// that fails the next call of a kind cannot.
-pub struct Flaky {
-    mem: Arc<MemoryBackend>,
-    watched: String,
-    fail_head_at: u32,
-    fail_conditional_deletes: bool,
-    heads: AtomicU32,
-}
-
-impl Flaky {
-    /// A backend whose `n`th HEAD of `key` fails.
-    pub fn head_fails_at(mem: Arc<MemoryBackend>, key: &str, n: u32) -> Self {
-        Self {
-            mem,
-            watched: key.to_owned(),
-            fail_head_at: n,
-            fail_conditional_deletes: false,
-            heads: AtomicU32::new(0),
-        }
-    }
-
-    /// A backend whose conditional deletes fail.
-    pub fn conditional_delete_fails(mem: Arc<MemoryBackend>) -> Self {
-        Self {
-            fail_conditional_deletes: true,
-            ..Self::head_fails_at(mem, "", 0)
-        }
-    }
-
-    /// The error each failing call gives.
-    pub fn error() -> Error {
-        Error::Unavailable("flaky".to_owned())
-    }
-}
-
-#[async_trait]
-impl Backend for Flaky {
-    async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.mem.put(key, body).await
-    }
-
-    async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
-        self.mem.put_if_match(key, body, etag).await
-    }
-
-    async fn put_stream_if_match(
-        &self,
-        key: &str,
-        _len: Option<u64>,
-        body: PartBody<'_>,
-        etag: &str,
-    ) -> Result<String, Error> {
-        let whole = collect(body).await?;
-        self.mem.put_if_match(key, whole, etag).await
-    }
-
-    async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        self.mem.get(key, range).await
-    }
-
-    async fn get_tagged(
-        &self,
-        key: &str,
-        range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
-        self.mem.get_tagged(key, range).await
-    }
-
-    async fn head(&self, key: &str) -> Result<Meta, Error> {
-        if key == self.watched {
-            let nth = self.heads.fetch_add(1, Ordering::SeqCst) + 1;
-            if nth == self.fail_head_at {
-                return Err(Self::error());
-            }
-        }
-        self.mem.head(key).await
-    }
-
-    async fn delete(&self, key: &str) -> Result<(), Error> {
-        self.mem.delete(key).await
-    }
-
-    async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
-        if self.fail_conditional_deletes {
-            return Err(Self::error());
-        }
-        self.mem.delete_if_match(key, etag).await
-    }
-
-    async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        self.mem.list(prefix).await
     }
 }

@@ -1,9 +1,11 @@
 //! The format of a hot tier that is made at the start.
 
+use clap::Parser;
+
 use super::start_format;
 use crate::journal::FORMAT_KEY;
 use crate::server::cli::Cli;
-use crate::{Error, FaultyBackend, MemoryBackend, Op};
+use crate::{Backend, Error, FaultyBackend, MemoryBackend, Op};
 
 fn cli(hot: &str) -> Cli {
     let flags = [

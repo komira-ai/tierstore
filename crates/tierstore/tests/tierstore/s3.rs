@@ -23,7 +23,6 @@ use crate::support::{body, keys, page};
 use futures::StreamExt;
 use std::io::Read;
 use std::io::Write;
-use tierstore::Clock;
 
 pub fn config(endpoint: &str) -> S3Config {
     S3Config {

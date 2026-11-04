@@ -18,7 +18,7 @@ use tierstore::{
 
 use tokio::sync::Barrier;
 
-use crate::support::{Rig, assert_absent, body};
+use crate::support::{Rig, assert_absent};
 use futures::StreamExt;
 use http_body_util::BodyExt;
 use tierstore::Clock;
