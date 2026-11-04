@@ -40,20 +40,24 @@ pub(super) struct EntryLock {
 }
 
 /// Waits for the lock of the subdirectory `dir` and takes it, making `dir` first if it is not
-/// there. Gives the lock, and whether this call made `dir`, so that the caller syncs the root.
-/// The wait is on a thread of the blocking pool, so that it holds up no task.
-pub(super) async fn take(dir: PathBuf) -> Result<(EntryLock, bool), Error> {
-    let waiting = tokio::task::spawn_blocking(move || lock(&dir));
+/// there. The caller syncs the root, which a made directory is an entry of. `reached` is called
+/// once, on the blocking thread, just before the wait for the lock begins. The wait is on a
+/// thread of the blocking pool, so that it holds up no task.
+pub(super) async fn take(
+    dir: PathBuf,
+    reached: impl FnOnce() + Send + 'static,
+) -> Result<EntryLock, Error> {
+    let waiting = tokio::task::spawn_blocking(move || lock(&dir, reached));
     waiting.await.map_err(|why| Error::Other(why.to_string()))?
 }
 
 /// Makes `dir` if it is not there, opens its lock file and waits for the lock on it.
-fn lock(dir: &Path) -> Result<(EntryLock, bool), Error> {
-    let created = match std::fs::create_dir(dir) {
-        Ok(()) => true,
-        Err(why) if why.kind() == ErrorKind::AlreadyExists => false,
+fn lock(dir: &Path, reached: impl FnOnce()) -> Result<EntryLock, Error> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
         Err(why) => return Err(failed(dir, &why)),
-    };
+    }
     let path = dir.join(LOCK_FILE);
     let mut options = OpenOptions::new();
     options
@@ -62,6 +66,7 @@ fn lock(dir: &Path) -> Result<(EntryLock, bool), Error> {
         .write(true)
         .mode(PLAIN_MODE);
     let file = options.open(&path).map_err(io_error(&path))?;
+    reached();
     file.lock().map_err(io_error(&path))?;
-    Ok((EntryLock { _file: file }, created))
+    Ok(EntryLock { _file: file })
 }
