@@ -1,9 +1,10 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
 
 use std::io::{ErrorKind, SeekFrom};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -17,21 +18,41 @@ use tokio::sync::Mutex;
 
 use crate::backend::upload_page;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
+    UploadsAfter, Window,
 };
+
+#[path = "dir_entries.rs"]
+mod entries;
+#[path = "dir_list.rs"]
+mod listing;
+#[path = "dir_names.rs"]
+mod names;
+#[path = "dir_sync.rs"]
+mod sync;
+#[path = "dir_tags.rs"]
+mod tags;
+
+use names::encode;
+use sync::{FsyncDir, SyncDir};
+use tags::{finish, modified_of, sha256};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
 
-/// The mode of the file of an object that is not a reservation: read and write for everyone, less
-/// the umask, which no umask turns into one with the owner-execute bit.
-const PLAIN_MODE: u32 = 0o666;
+/// The mode of the file of an object that is not a reservation: read and write for its owner alone,
+/// so that no other local account reads what a scoped or read-only key is meant to reach.
+const PLAIN_MODE: u32 = 0o600;
 
 /// The owner-execute bit, which marks the file of a reservation.
 const MARK_BIT: u32 = 0o100;
 
 /// The mode of the file of a reservation: that of an object, with the mark.
-const MARKED_MODE: u32 = 0o744;
+const MARKED_MODE: u32 = 0o700;
+
+/// The mode of every directory this backend makes (the tier root, the uploads directory and the
+/// directory of an upload): open to its owner alone.
+const DIR_MODE: u32 = 0o700;
 
 /// The longest file name, in bytes, that a key may be encoded to.
 const NAME_LIMIT: usize = 255;
@@ -51,24 +72,6 @@ const KEY_FILE: &str = "key";
 
 /// The number of the backends opened in this process, which tells their temporary files apart.
 static OPENED: AtomicU64 = AtomicU64::new(0);
-
-/// Makes the changes to the entries of a directory durable. It is a seam so that a test can see
-/// when the backend syncs a directory, relative to the change and to the acknowledgement.
-#[async_trait]
-trait SyncDir: Send + Sync {
-    /// Returns once the entries of `dir` are on the disk.
-    async fn sync_dir(&self, dir: &Path) -> std::io::Result<()>;
-}
-
-/// Syncs a directory with `fsync` on it.
-struct FsyncDir;
-
-#[async_trait]
-impl SyncDir for FsyncDir {
-    async fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
-        File::open(dir).await?.sync_all().await
-    }
-}
 
 /// A bucket kept in a directory.
 ///
@@ -115,7 +118,7 @@ impl SyncDir for FsyncDir {
 /// - A streamed read ([`Backend::get_stream`]) opens the file once and reads the range in chunks of
 ///   at most 64 KiB as they are asked for, so that a reader holds one chunk and not the object;
 ///   a replacement or a delete of the name meanwhile leaves it on the file it opened. A read with
-///   the mark ([`Backend::get_marked`]) takes the bytes and the mark from the same open file.
+///   the mark ([`Backend::get_tagged`]) takes the bytes and the mark from the same open file.
 /// - A streamed replacement ([`Backend::put_stream_if_match`]) writes the chunks to a temporary
 ///   file as they arrive, outside the lock, and then, under the lock and the tag check of
 ///   [`Backend::put_if_match`], moves the file over the object and syncs the directory. A body
@@ -126,13 +129,21 @@ impl SyncDir for FsyncDir {
 ///   the upload. The uploads are files, so an upload outlives a restart of the process, and an
 ///   upload that is never completed or aborted stays until it is aborted.
 ///
+/// - The keys that start with `_entries/` are files of the subdirectory `.entries/` of the root
+///   (a name no key encodes to), which the first write of one makes, unless the previous release
+///   made the key a file of the root, named like any key: that file is the key for as long as it
+///   exists, and is read, listed, replaced and deleted in place, so that the previous release
+///   reads the current body (see the module `dir_entries`). Their create-only puts, replacements
+///   by the tag and deletes take an exclusive `flock` on `.entries/.lock`, so they are atomic
+///   between processes too.
+///
 /// The backend counts on being the only writer of its directory but for other backends over the
 /// same directory (several proxies over one cold directory are fine: every change is atomic and
 /// create-only, and the temporary files of two backends never have one name, since a name holds
 /// the process id, the time the backend was opened and its number in the process);
 /// [`Backend::put_if_match`] and [`Backend::delete_if_match`] are atomic among the calls of one
-/// backend only, and so is the replacement of a part by another of its number: the parts of one
-/// upload should be taken by one backend.
+/// backend only, but for the keys under `_entries/`, and so is the replacement of a part by
+/// another of its number: the parts of one upload should be taken by one backend.
 pub struct DirBackend {
     root: PathBuf,
     /// Tells the temporary files of this backend from those of any other backend over the same
@@ -149,38 +160,10 @@ pub struct DirBackend {
     /// that two overlapping uploads of one part number do not remove each other's file.
     placing: Mutex<()>,
     /// Syncs a directory after a call changed its entries.
-    syncer: Box<dyn SyncDir>,
-}
-
-/// The file name of a key.
-fn encode(key: &str) -> String {
-    let mut name = String::with_capacity(key.len());
-    for (at, byte) in key.bytes().enumerate() {
-        match byte {
-            b'/' => name.push('~'),
-            b'.' if at > 0 => name.push('.'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
-            _ => name.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    name
-}
-
-/// The key a file name stands for, if the name is one [`encode`] makes.
-fn decode(name: &str) -> Option<String> {
-    let mut bytes = Vec::with_capacity(name.len());
-    let mut rest = name.bytes();
-    while let Some(byte) = rest.next() {
-        match byte {
-            b'~' => bytes.push(b'/'),
-            b'%' => {
-                let pair = [rest.next()?, rest.next()?];
-                bytes.extend(hex::decode(pair).ok()?);
-            }
-            other => bytes.push(other),
-        }
-    }
-    String::from_utf8(bytes).ok()
+    syncer: Arc<dyn SyncDir>,
+    /// Set once a sync of the root has succeeded after the subdirectory of `_entries/` was known
+    /// to exist, so that the later entry writes do not sync the root again.
+    root_synced: AtomicBool,
 }
 
 /// The error of a failed call on the file `path`.
@@ -211,28 +194,6 @@ fn classify(
     } else {
         failed(path, why)
     }
-}
-
-/// The SHA-256 of `body`.
-fn sha256(body: &[u8]) -> [u8; TAG_LEN] {
-    finish(Sha256::new().chain_update(body))
-}
-
-/// The digest `hasher` has computed.
-fn finish(hasher: Sha256) -> [u8; TAG_LEN] {
-    let digest = hasher.finalize();
-    let mut tag = [0_u8; TAG_LEN];
-    tag.copy_from_slice(digest.as_ref());
-    tag
-}
-
-/// When the file was last written, in milliseconds since the Unix epoch.
-fn modified_of(meta: &std::fs::Metadata) -> u64 {
-    let since = meta
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok());
-    since.map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 /// Whether the byte can be in the id of an upload, which names a directory.
@@ -478,23 +439,39 @@ async fn stored_parts(dir: &Path) -> Result<Vec<StoredPart>, Error> {
     Ok(parts)
 }
 
+/// Removes each of `files`, one that is not there being no error, and gives those removed.
+async fn remove_files(files: &[PathBuf]) -> Result<Vec<PathBuf>, Error> {
+    let mut gone = Vec::new();
+    for file in files {
+        match fs::remove_file(file).await {
+            Ok(()) => gone.push(file.clone()),
+            Err(why) if why.kind() == ErrorKind::NotFound => {}
+            Err(why) => return Err(failed(file, &why)),
+        }
+    }
+    Ok(gone)
+}
+
 impl DirBackend {
     /// A bucket in the directory `root`, which is made if it does not exist.
     ///
     /// # Errors
     /// [`Error::Other`] if `root` is empty or the directory cannot be made.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, Error> {
-        Self::open_with(root.into(), Box::new(FsyncDir))
+        Self::open_with(root.into(), Arc::new(FsyncDir))
     }
 
     /// A bucket in the directory `root` that syncs directories with `syncer`.
-    fn open_with(root: PathBuf, syncer: Box<dyn SyncDir>) -> Result<Self, Error> {
+    fn open_with(root: PathBuf, syncer: Arc<dyn SyncDir>) -> Result<Self, Error> {
         if root.as_os_str().is_empty() {
             let text = "the directory of a tier has no name";
             return Err(Error::Other(text.to_owned()));
         }
         let uploads = root.join(UPLOADS);
-        let made = std::fs::create_dir_all(&uploads);
+        let made = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(DIR_MODE)
+            .create(&uploads);
         made.map_err(io_error(&uploads))?;
         let since = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
@@ -506,6 +483,7 @@ impl DirBackend {
             replacing: Mutex::new(()),
             placing: Mutex::new(()),
             syncer,
+            root_synced: AtomicBool::new(false),
         })
     }
 
@@ -517,12 +495,68 @@ impl DirBackend {
 
     /// The path of the file of the object `key`.
     fn path(&self, key: &str) -> Result<PathBuf, Error> {
-        let name = encode(key);
+        let (dir, rest) = match entries::rest(key) {
+            Some(rest) => (self.root.join(entries::DIR), rest),
+            None => (self.root.clone(), key),
+        };
+        let name = encode(rest);
         if !(1..=NAME_LIMIT).contains(&name.len()) {
             let text = format!("key {key:?} is empty or too long to be a file name");
             return Err(Error::Other(text));
         }
-        Ok(self.root.join(name))
+        Ok(dir.join(name))
+    }
+
+    /// The files the object `key` may be in: for a key under `_entries/`, the file the previous
+    /// release made in the root comes second (see the module `dir_entries`). A key that makes no
+    /// file name has none; an error unless the previous release could have a file for it.
+    fn files(&self, key: &str) -> Result<Vec<PathBuf>, Error> {
+        let legacy = entries::legacy(&self.root, key);
+        match self.path(key) {
+            Ok(path) => Ok(std::iter::once(path).chain(legacy).collect()),
+            Err(error) => legacy.map(|old| vec![old]).ok_or(error),
+        }
+    }
+
+    /// The file the object `key` is in or, if it has none, would be made in: the file the previous
+    /// release made in the root where there is one, which a key keeps for its whole life, else
+    /// the one a write makes now.
+    async fn locate(&self, key: &str) -> Result<PathBuf, Error> {
+        let legacy = entries::legacy(&self.root, key);
+        if let Some(old) = legacy
+            && fs::try_exists(&old).await.unwrap_or(false)
+        {
+            return Ok(old);
+        }
+        self.path(key)
+    }
+
+    /// Syncs the directory of each of the files `changed` calls removed or made.
+    async fn sync_parents(&self, changed: &[PathBuf]) -> Result<(), Error> {
+        for file in changed {
+            self.sync(file.parent().unwrap_or(&self.root)).await?;
+        }
+        Ok(())
+    }
+
+    /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
+    /// hold (none for any other key), making the subdirectory if it is not there. It is taken
+    /// before the `replacing` lock, always, so that no two calls wait for each other. The root is
+    /// synced, with the lock held, until one sync of it has succeeded: whichever call made the
+    /// subdirectory, and whether an earlier sync failed, no entry write returns before the
+    /// subdirectory is durable.
+    async fn entry_lock(&self, key: &str) -> Result<Option<entries::EntryLock>, Error> {
+        if entries::rest(key).is_none() {
+            return Ok(None);
+        }
+        let syncer = Arc::clone(&self.syncer);
+        let reached = move || syncer.lock_reached();
+        let lock = entries::take(self.root.join(entries::DIR), reached).await?;
+        if !self.root_synced.load(Ordering::SeqCst) {
+            self.sync(&self.root).await?;
+            self.root_synced.store(true, Ordering::SeqCst);
+        }
+        Ok(Some(lock))
     }
 
     /// A name for a temporary file in `dir`, which is not listed.
@@ -533,10 +567,9 @@ impl DirBackend {
 
     /// Opens the object `key`.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        let path = self.path(key)?;
+        let path = self.locate(key).await?;
         let opened = open_stored(&path).await;
-        let absent = ErrorKind::NotFound;
-        opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
+        opened.map_err(|why| classify(key, &path, &why, ErrorKind::NotFound, Error::NotFound))
     }
 
     /// Opens the object `key` if its content tag is `etag`. The caller holds the `replacing` lock,
@@ -550,29 +583,37 @@ impl DirBackend {
         }
     }
 
-    /// Moves the temporary file `temp` over the file of `current`, so that the name holds the
-    /// new body whole or the old one, and syncs the directory. The temporary file is gone either
+    /// Moves the temporary file `temp` over `path`, the file of the object (the name holds the
+    /// new body whole or the old one), and syncs the directory. The temporary file is gone either
     /// way. The caller holds the `replacing` lock.
-    async fn install(&self, temp: &Path, current: &Stored) -> Result<(), Error> {
-        let renamed = fs::rename(temp, &current.path).await;
+    async fn install(&self, temp: &Path, path: &Path) -> Result<(), Error> {
+        let renamed = fs::rename(temp, path).await;
         let _ = fs::remove_file(temp).await;
-        renamed.map_err(io_error(&current.path))?;
-        self.sync(&self.root).await
+        renamed.map_err(io_error(path))?;
+        self.sync(path.parent().unwrap_or(&self.root)).await
     }
 
-    /// Removes the file of the object `key` if its content tag is `etag`, with the lock that
+    /// Removes the files of the object `key` if its content tag is `etag`, with the lock that
     /// replacements and deletes take held from the check to the removal, so that no other call
-    /// of this backend replaces or deletes the object in between. The directory is not synced.
-    async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
+    /// of this backend replaces or deletes the object in between. Gives the files removed; the
+    /// directories are not synced.
+    async fn unlink_if_match(&self, key: &str, etag: &str) -> Result<Vec<PathBuf>, Error> {
+        let files = self.files(key)?;
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let current = self.matching(key, etag).await?;
         let path = current.path.clone();
         drop(current);
         // The lock keeps out every other call of this backend, so a file that is gone now was
         // taken by another process: the key has no object, as the trait says.
+        // The other file goes first: a failure leaves the object, not a stale file in its place.
+        let others: Vec<PathBuf> = files.into_iter().filter(|file| *file != path).collect();
+        let mut gone = remove_files(&others).await?;
         let removed = fs::remove_file(&path).await;
         let absent = ErrorKind::NotFound;
-        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
+        removed.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))?;
+        gone.push(path);
+        Ok(gone)
     }
 
     /// Writes the file of an object with this body to a new temporary file made with the mode
@@ -597,11 +638,23 @@ impl DirBackend {
     /// not left visible and a retry of the create-only put can succeed; if the name cannot be
     /// removed the error says that it may exist without being durable.
     async fn publish(&self, temp: &Path, path: &Path, key: &str) -> Result<(), Error> {
+        // Gone on every way out, the failure to take the lock and a call dropped while it waits
+        // included.
+        let _scratch = Scratch(temp.to_owned());
+        let _entry = self.entry_lock(key).await?;
+        // The key is taken where the previous release made it, though not under the name a write
+        // makes now.
+        if let Some(old) = entries::legacy(&self.root, key)
+            && fs::try_exists(&old).await.unwrap_or(false)
+        {
+            return Err(Error::AlreadyExists(key.to_owned()));
+        }
+        let dir = path.parent().unwrap_or(&self.root);
         let linked = fs::hard_link(temp, path).await;
         let _ = fs::remove_file(temp).await;
         let taken = ErrorKind::AlreadyExists;
         linked.map_err(|e| classify(key, path, &e, taken, Error::AlreadyExists))?;
-        let Err(synced) = self.sync(&self.root).await else {
+        let Err(synced) = self.sync(dir).await else {
             return Ok(());
         };
         // Under the lock of the replacements, so that the rollback is no exception to a check
@@ -612,7 +665,7 @@ impl DirBackend {
         };
         match rolled_back {
             Ok(()) => {
-                let _ = self.sync(&self.root).await;
+                let _ = self.sync(dir).await;
                 Err(synced)
             }
             Err(why) => {
@@ -634,10 +687,12 @@ impl DirBackend {
         etag: &str,
         mode: u32,
     ) -> Result<String, Error> {
+        self.locate(key).await?;
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
-        let current = self.matching(key, etag).await?;
+        let path = self.matching(key, etag).await?.path;
         let (temp, tag) = self.write_temp(body, mode).await?;
-        self.install(&temp, &current).await?;
+        self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
 
@@ -686,14 +741,26 @@ impl Backend for DirBackend {
     async fn put_stream(
         &self,
         key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+    ) -> Result<(), Error> {
+        self.put_stream_tagged(key, len, body).await.map(drop)
+    }
+
+    /// As [`Backend::put_stream`], and gives the tag of the file it published: the SHA-256 of the
+    /// bytes written.
+    async fn put_stream_tagged(
+        &self,
+        key: &str,
         _len: Option<u64>,
         mut body: PartBody<'_>,
-    ) -> Result<(), Error> {
+    ) -> Result<String, Error> {
         let path = self.path(key)?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
-        write_object_stream(&temp, &mut body).await?;
-        self.publish(&temp, &path, key).await
+        let tag = write_object_stream(&temp, &mut body).await?;
+        self.publish(&temp, &path, key).await?;
+        Ok(hex::encode(tag))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
@@ -721,20 +788,21 @@ impl Backend for DirBackend {
         mut body: PartBody<'_>,
         etag: &str,
     ) -> Result<String, Error> {
-        self.path(key)?;
+        self.locate(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = write_object_stream(&temp, &mut body).await?;
+        let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
-        let current = self.matching(key, etag).await?;
-        self.install(&temp, &current).await?;
+        let path = self.matching(key, etag).await?.path;
+        self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        Ok(self.get_marked(key, range).await?.0)
+        Ok(self.get_tagged(key, range).await?.0)
     }
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
@@ -752,6 +820,30 @@ impl Backend for DirBackend {
         Ok(chunks(stored, len))
     }
 
+    /// Opens the file once: the meta and the chunks are those of that file, as for
+    /// [`Backend::get_stream`], whose bounded chunks the body has.
+    async fn open_read(&self, key: &str, span: Option<Span>) -> Result<Opened, Error> {
+        let mut stored = self.stored(key).await?;
+        let meta = Meta {
+            size: stored.size,
+            tag: hex::encode(stored.tag),
+            modified: stored.modified,
+            reservation: stored.marked,
+        };
+        let window = Window::of(span, meta.size);
+        let (offset, len) = match window {
+            Window::Whole => (0, meta.size),
+            Window::Part(range) => (range.offset(), range.size()),
+            Window::Unsatisfiable => (0, 0),
+        };
+        stored.seek_body(offset).await?;
+        Ok(Opened {
+            meta,
+            window,
+            body: chunks(stored, len),
+        })
+    }
+
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         let stored = self.stored(key).await?;
         Ok(Meta {
@@ -763,51 +855,28 @@ impl Backend for DirBackend {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let path = self.path(key)?;
-        // Not held across the sync: the name is gone, and a replacement or a delete that
-        // follows needs nothing the sync would protect.
-        let removed = {
+        // The previous release's file goes first: a failure leaves the object, not a stale file.
+        let mut files = self.files(key)?;
+        files.reverse();
+        // Not held across the sync: a replacement or delete that follows needs nothing it protects.
+        let gone = {
+            let _entry = self.entry_lock(key).await?;
             let _replacing = self.replacing.lock().await;
-            fs::remove_file(&path).await
+            remove_files(&files).await?
         };
-        match removed {
-            Ok(()) => self.sync(&self.root).await,
-            Err(why) if why.kind() != ErrorKind::NotFound => Err(failed(&path, &why)),
-            Err(_) => Ok(()),
-        }
+        self.sync_parents(&gone).await
     }
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
-        self.unlink_if_match(key, etag).await?;
-        self.sync(&self.root).await
+        let gone = self.unlink_if_match(key, etag).await?;
+        self.sync_parents(&gone).await
     }
 
+    /// The root holds the keys that do not start with `_entries/`, and the files of the previous
+    /// release for those that do; the subdirectory holds the others, and is read only if
+    /// `prefix` can match one of them. A key in both is listed once, from the root.
     async fn list(&self, prefix: &str) -> Result<Vec<Listed>, Error> {
-        let fail = io_error(&self.root);
-        let mut entries = fs::read_dir(&self.root).await.map_err(&fail)?;
-        let mut found = Vec::new();
-        while let Some(entry) = entries.next_entry().await.map_err(&fail)? {
-            let name = entry.file_name();
-            let key = name
-                .to_str()
-                .filter(|name| !name.starts_with('.'))
-                .and_then(decode)
-                .filter(|key| key.starts_with(prefix));
-            let Some(key) = key else {
-                continue;
-            };
-            let meta = entry.metadata().await.ok();
-            let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
-                continue;
-            };
-            found.push(Listed {
-                key,
-                size: meta.len().saturating_sub(TAG_LEN as u64),
-                modified: modified_of(&meta),
-            });
-        }
-        found.sort();
-        Ok(found)
+        listing::list(&self.root, prefix).await
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
@@ -817,8 +886,8 @@ impl Backend for DirBackend {
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
         let id = format!("u-{nanos:x}-{:x}-{number:x}", std::process::id());
         let dir = self.root.join(UPLOADS).join(&id);
-        let made = fs::create_dir(&dir).await;
-        let named = fs::write(dir.join(KEY_FILE), key).await;
+        let made = fs::DirBuilder::new().mode(DIR_MODE).create(&dir).await;
+        let named = create_file(&dir.join(KEY_FILE), PLAIN_MODE, key.as_bytes()).await;
         made.and(named).map_err(io_error(&dir))?;
         Ok(id)
     }
@@ -918,3 +987,7 @@ mod tests;
 #[cfg(test)]
 #[path = "dir_sync_tests.rs"]
 mod sync_tests;
+
+#[cfg(test)]
+#[path = "dir_entries_tests.rs"]
+mod entries_tests;

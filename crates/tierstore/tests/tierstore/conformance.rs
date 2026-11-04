@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
-use tierstore::{Backend, ByteRange, Error};
+use tierstore::{Backend, ByteRange, Error, Opened, Span, Window};
 
 use crate::support::{body, broken, check_ranges, chunks, keys, page};
 
@@ -193,6 +193,37 @@ pub async fn a_streamed_put_of_an_existing_key_is_refused(backend: &dyn Backend)
     assert_eq!(keys(backend).await, ["k"]);
 }
 
+/// A tagged streamed put creates the object from its chunks, whose length is told or not, and
+/// gives the tag a head of it gives; a body that ends with an error leaves nothing, and a key that
+/// exists is refused with `AlreadyExists` and keeps its object.
+pub async fn a_streamed_tagged_put_gives_the_tag_of_its_object(backend: &dyn Backend) {
+    let told = chunks(&["streamed", " ", "body"]);
+    let first = backend.put_stream_tagged("told", Some(13), told).await;
+    let untold = chunks(&["streamed ", "body"]);
+    let second = backend.put_stream_tagged("untold", None, untold).await;
+    for (key, tag) in [("told", first.unwrap()), ("untold", second.unwrap())] {
+        assert_eq!(backend.get(key, None).await.unwrap(), body("streamed body"));
+        assert_eq!(backend.head(key).await.unwrap().tag, tag, "{key}");
+    }
+    let cut = Error::Other("cut".to_owned());
+    let failed = backend
+        .put_stream_tagged("cut", Some(9), broken(&["abc"], &cut))
+        .await;
+    assert_eq!(failed, Err(cut));
+    assert_eq!(
+        backend.head("cut").await.unwrap_err(),
+        Error::NotFound("cut".to_owned())
+    );
+    let again = backend
+        .put_stream_tagged("told", Some(3), chunks(&["two"]))
+        .await;
+    assert_eq!(again, Err(Error::AlreadyExists("told".to_owned())));
+    assert_eq!(
+        backend.get("told", None).await.unwrap(),
+        body("streamed body")
+    );
+}
+
 /// The body of reservation `n` in the checks below: 56 bytes, as a proxy's reservation is, and
 /// different for each `n`, so that two reservations of a key have two tags.
 pub fn reservation(n: u32) -> Bytes {
@@ -209,9 +240,9 @@ pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backen
     assert!(head.reservation);
     assert_eq!((head.size, head.tag.as_str()), (56, tag.as_str()));
     assert_eq!(backend.get("k", None).await.unwrap(), held);
-    let whole = backend.get_marked("k", None).await.unwrap();
+    let whole = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(whole, (held.clone(), true, tag.clone()));
-    let part = backend.get_marked("k", Some(ByteRange::new(4, 10))).await;
+    let part = backend.get_tagged("k", Some(ByteRange::new(4, 10))).await;
     assert_eq!(part.unwrap(), (held.slice(4..14), true, tag.clone()));
     let listed = backend.list("").await.unwrap();
     let rows: Vec<(&str, u64)> = listed.iter().map(|o| (o.key.as_str(), o.size)).collect();
@@ -219,14 +250,14 @@ pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backen
 
     let missing = Error::NotFound("absent".to_owned());
     assert_eq!(
-        backend.get_marked("absent", None).await,
+        backend.get_tagged("absent", None).await,
         Err(missing.clone())
     );
     let ranged = backend
-        .get_marked("absent", Some(ByteRange::new(0, 1)))
+        .get_tagged("absent", Some(ByteRange::new(0, 1)))
         .await;
     assert_eq!(ranged, Err(missing));
-    let past = backend.get_marked("k", Some(ByteRange::new(57, 1))).await;
+    let past = backend.get_tagged("k", Some(ByteRange::new(57, 1))).await;
     assert!(matches!(past, Err(Error::Other(_))), "{past:?}");
 }
 
@@ -248,7 +279,7 @@ pub async fn a_reservation_and_a_put_each_refuse_a_key_the_other_holds(backend: 
     assert_eq!(refused, Err(Error::AlreadyExists("real".to_owned())));
     let real = backend.head("real").await.unwrap().tag;
     assert_eq!(
-        backend.get_marked("real", None).await.unwrap(),
+        backend.get_tagged("real", None).await.unwrap(),
         (body("x"), false, real)
     );
 }
@@ -265,7 +296,7 @@ pub async fn a_plain_object_is_not_a_reservation(backend: &dyn Backend) {
         .unwrap();
     for key in ["empty", "same", "streamed"] {
         assert!(!backend.head(key).await.unwrap().reservation, "{key}");
-        let read = backend.get_marked(key, None).await.unwrap();
+        let read = backend.get_tagged(key, None).await.unwrap();
         assert!(!read.1, "{key}");
     }
     assert_eq!(backend.head("same").await.unwrap().size, 56);
@@ -282,7 +313,7 @@ pub async fn a_plain_replace_of_a_reservation_makes_a_real_object(backend: &dyn 
     let new = backend.put_if_match("k", body("real"), &tag).await.unwrap();
     let head = backend.head("k").await.unwrap();
     assert_eq!((head.reservation, head.tag), (false, new.clone()));
-    let read = backend.get_marked("k", None).await.unwrap();
+    let read = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(read, (body("real"), false, new));
 }
 
@@ -385,7 +416,7 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
         .put_stream_if_match("k", Some(8), failing, &old)
         .await;
     assert_eq!(failed, Err(cut));
-    let kept = backend.get_marked("k", None).await.unwrap();
+    let kept = backend.get_tagged("k", None).await.unwrap();
     assert_eq!(kept, (reservation(1), true, old.clone()));
     assert_eq!(backend.head("k").await.unwrap().tag, old);
 
@@ -409,4 +440,69 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
     let absent = backend.put_stream_if_match("none", Some(1), chunks(&["x"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(keys(backend).await, ["k"]);
+}
+
+/// The bytes of the body of an open read, joined.
+pub async fn joined(opened: Opened) -> Bytes {
+    let mut body = opened.body;
+    let mut whole = Vec::new();
+    while let Some(chunk) = body.next().await {
+        whole.extend_from_slice(&chunk.unwrap());
+    }
+    Bytes::from(whole)
+}
+
+/// An open read gives the meta a HEAD gives (the size, the tag, the time and the mark) and, as a
+/// body, the bytes of its span, with the window it resolved the span to: all of the object
+/// without a span; a range cut at the end of the object; the last bytes of it (all of it, if it
+/// is shorter than asked); no bytes and the unsatisfiable window for a span that starts at or
+/// past the end, for the last none of it and for any span of an empty object; the mark of a
+/// reservation; `NotFound` for an absent key.
+pub async fn an_open_read_gives_the_meta_and_the_bytes_of_its_span(backend: &dyn Backend) {
+    backend.put("k", body("0123456789")).await.unwrap();
+    let head = backend.head("k").await.unwrap();
+    let from = |first, last| Some(Span::From { first, last });
+    let part = |offset, len| Window::Part(ByteRange::new(offset, len));
+    let cases = [
+        (None, Window::Whole, "0123456789"),
+        (from(3, Some(5)), part(3, 3), "345"),
+        (from(0, Some(0)), part(0, 1), "0"),
+        (from(2, None), part(2, 8), "23456789"),
+        (from(8, Some(100)), part(8, 2), "89"),
+        (Some(Span::Suffix(4)), part(6, 4), "6789"),
+        (Some(Span::Suffix(40)), part(0, 10), "0123456789"),
+        (from(10, None), Window::Unsatisfiable, ""),
+        (from(u64::MAX, None), Window::Unsatisfiable, ""),
+        (Some(Span::Suffix(0)), Window::Unsatisfiable, ""),
+    ];
+    for (span, window, want) in cases {
+        let opened = backend.open_read("k", span).await.unwrap();
+        assert_eq!(opened.meta, head, "{span:?}");
+        assert_eq!(opened.window, window, "{span:?}");
+        assert_eq!(joined(opened).await, body(want), "{span:?}");
+    }
+
+    backend.put("empty", body("")).await.unwrap();
+    for span in [None, from(0, None), Some(Span::Suffix(1))] {
+        let opened = backend.open_read("empty", span).await.unwrap();
+        assert_eq!(opened.meta.size, 0, "{span:?}");
+        let window = if span.is_some() {
+            Window::Unsatisfiable
+        } else {
+            Window::Whole
+        };
+        assert_eq!(opened.window, window, "{span:?}");
+        assert_eq!(joined(opened).await, body(""), "{span:?}");
+    }
+
+    let tag = backend.put_reservation("r", reservation(1)).await.unwrap();
+    let marked = backend.open_read("r", None).await.unwrap();
+    assert_eq!(
+        (marked.meta.reservation, marked.meta.tag.as_str()),
+        (true, tag.as_str())
+    );
+    assert_eq!(joined(marked).await, reservation(1));
+
+    let absent = backend.open_read("absent", None).await;
+    assert_eq!(absent.err(), Some(Error::NotFound("absent".to_owned())));
 }

@@ -9,7 +9,8 @@ use std::time::Duration;
 use clap::Parser;
 use tierstore_testkit::dir::TestDir;
 
-use super::{Cli, Error, build, exit_status, oci_cut_note, run_serving};
+use super::super::stop_watcher::oci_cut_note;
+use super::{Cli, Error, build, exit_status, run_serving};
 use crate::server::oci::plain_warning;
 use crate::server::oci::test_pki::{Leaf, ca, dns, ip, leaf};
 
