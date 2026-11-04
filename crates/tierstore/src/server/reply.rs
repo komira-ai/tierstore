@@ -209,6 +209,8 @@ pub(crate) struct S3Error {
     status: StatusCode,
     code: &'static str,
     message: String,
+    /// What the store said, for the log of the server: never sent to the client.
+    detail: Option<String>,
     headers: Vec<(&'static str, String)>,
 }
 
@@ -218,6 +220,7 @@ impl S3Error {
             status,
             code,
             message: message.into(),
+            detail: None,
             headers: Vec::new(),
         }
     }
@@ -343,6 +346,12 @@ impl S3Error {
     pub(crate) fn message(&self) -> &str {
         &self.message
     }
+
+    /// What the store said when the client got a fixed text instead: it can hold a path of the
+    /// host or the address of a backend, so it goes to the log only.
+    pub(crate) fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
 }
 
 impl From<Error> for S3Error {
@@ -360,7 +369,21 @@ impl From<Error> for S3Error {
             Error::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable"),
             Error::Other(_) => (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"),
         };
-        let mut refusal = Self::new(status, code, error.to_string());
+        let generic = match &error {
+            Error::Full(_) => Some("The store has no room for this request."),
+            Error::Unsupported(_) => Some("The store does not do this call."),
+            Error::Unavailable(_) => Some("The store did not answer."),
+            Error::Other(_) => Some("We encountered an internal error."),
+            _ => None,
+        };
+        let mut refusal = match generic {
+            Some(text) => {
+                let mut hidden = Self::new(status, code, text);
+                hidden.detail = Some(error.to_string());
+                hidden
+            }
+            None => Self::new(status, code, error.to_string()),
+        };
         if matches!(error, Error::Full(_)) {
             refusal.headers.push(("retry-after", "1".to_owned()));
         }

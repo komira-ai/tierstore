@@ -89,7 +89,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
 </ol>
 
 <h2 id="clients">Using it from an S3 client</h2>
-<p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
+<p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned GET and PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
 <tbody>
