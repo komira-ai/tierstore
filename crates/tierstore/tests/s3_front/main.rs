@@ -19,6 +19,7 @@ mod config_file;
 mod drain;
 mod files;
 mod handoff;
+mod handoff_keys;
 mod idle;
 mod listeners;
 mod raw;

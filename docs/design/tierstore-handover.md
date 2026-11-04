@@ -17,7 +17,11 @@ is the hook, and what tierstore itself must change.
 ## 0. Live update by listening-socket hand-off (server side)
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook and the packaging move to it in a change that
-follows this one; until then both exist, and this section describes the library implementation (`server/handoff/`, entered through `run_handing`); the binary does not call it yet, and that integration comes in the following change.
+follows; until then both exist. This section describes the implementation (`server/handoff/`, entered through `run_handing`).
+The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
+(default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
+A build node and a storage node with `[local_cache]` refuse both keys. A build with it lists `handoff-socket-v1` in
+`tierstore --capabilities`, beside `handover-v1`, which stays until the hook no longer reads it.
 
 Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
 (`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
@@ -55,9 +59,9 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
   change them (`settings_that_name_other_addresses_take_nothing`).
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
 
-Not in this change: the `server.handoff_socket` and `server.handoff_wait` keys (the wait defaults to a number of seconds that
-is a config key from the start), the update hook's steps, the slot units and ports, and the proxy id that does not derive
-from a port. They are the change that follows.
+Not built yet: the update hook's steps that use the hand-off, the units and ports that replace the slots, and the proxy id
+that does not derive from a port. They are the change that follows. No package sets either key yet, and the macOS package
+is not to set `server.handoff_socket`: an update on a Mac is a restart.
 
 ## 1. Shape
 

@@ -205,6 +205,7 @@ mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
+mod config_handoff;
 mod config_interface;
 mod config_policy;
 mod config_syntax;

@@ -1,7 +1,7 @@
 //! The pages that describe the hook: the operator's page and the design of record.
 
 use super::HANDOVER_CAPABILITY;
-use crate::server::build_info::CAPABILITIES;
+use crate::server::build_info::{CAPABILITIES, HANDOFF_SOCKET_CAPABILITY};
 
 /// The operator's page of the hook.
 const PAGE: &str = include_str!("../../../docs/update-hook.md");
@@ -55,14 +55,18 @@ fn no_page_promises_the_holder_of_the_lock() {
     assert!(PAGE.contains("it does not name who holds the cache lock"));
 }
 
-/// Asserts that the build lists the capability the hook's `prepare` step looks for, and that
-/// neither page says it does not: the operator's page says `--capabilities` lists `handover-v1`,
-/// and the design no longer says the shipped `CAPABILITIES` are unchanged. It would catch the
+/// Asserts that the build lists the capability the hook's `prepare` step looks for, then
+/// `handoff-socket-v1`, and that neither page says it does not: the operator's page says
+/// `--capabilities` lists `handover-v1` and names `handoff-socket-v1` with the two keys it stands
+/// for, and the design no longer says the shipped `CAPABILITIES` are unchanged. It would catch the
 /// page telling an operator that no build hands over while every build does, and a build whose
 /// name for the capability is not the one the hook reads.
 #[test]
 fn the_pages_say_the_build_lists_handover_v1() {
-    assert_eq!(CAPABILITIES, [HANDOVER_CAPABILITY]);
+    assert_eq!(
+        CAPABILITIES,
+        [HANDOVER_CAPABILITY, HANDOFF_SOCKET_CAPABILITY]
+    );
     for (name, page, stale) in [
         ("update-hook.md", PAGE, "does not yet list `handover-v1`"),
         ("the design", DESIGN, "so `CAPABILITIES` is unchanged"),
@@ -70,4 +74,14 @@ fn the_pages_say_the_build_lists_handover_v1() {
         assert!(!page.contains(stale), "{name} still says {stale:?}");
     }
     assert!(PAGE.contains("`tierstore --capabilities` lists `handover-v1`, since the binary has"));
+    for needle in [
+        "`handoff-socket-v1`",
+        "`server.handoff_socket`",
+        "`server.handoff_wait`",
+    ] {
+        assert!(
+            PAGE.contains(needle),
+            "update-hook.md does not name {needle}"
+        );
+    }
 }

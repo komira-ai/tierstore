@@ -8,6 +8,8 @@ Two instances run side by side during an update. Each has its own private port a
 
 A release that lacks the capability `handover-v1` (see `tierstore --capabilities`), on either side of the update, is installed by a plain restart: the redirect is pointed at the new instance's port, the old instance is stopped, and then the new one is started, with a gap: new connections are refused from the moment the redirect moves, for the old instance's settle (`--drain-lb-wait`), its exit and the new one's start, while the old instance serves the connections it already has to the end of its drain. So is every update of a host whose params file says `mode = "restart"` (see [The params file](update-hook.md#the-params-file)).
 
+The binary also has a hand-off of its listening sockets that needs no redirect: with `server.handoff_socket` a new instance takes the sockets of the running one over that control socket, waiting at most `server.handoff_wait` for it (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)), and `tierstore --capabilities` lists `handoff-socket-v1`. The hook does not use it yet: its steps and units are the two slots and the redirect of this page, and the packages set neither key. On a Mac neither key is set.
+
 ## The command line
 
 ```text
