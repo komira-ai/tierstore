@@ -11,6 +11,7 @@ mod chain;
 mod churn;
 mod cold_stream;
 mod conformance;
+mod explorer;
 mod faults;
 mod format_drain;
 mod format_pause;
