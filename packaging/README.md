@@ -867,6 +867,7 @@ The registry front). The params of the entry:
 | `params.prefix` | the key prefix, ending in `/`, `oci/` if not given. A prefix inside `_journal/`, `_tiering/` or `_entries/`, or one that is not plain path segments, is refused at start (exit 2) |
 | `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
+| `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. The front serves no upload yet. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
 minute) to send the head of a request, which is also how long an idle connection may wait for its
@@ -888,7 +889,7 @@ so the handshake time does not apply; the other limits are the same.
   the traffic never leaves it. A connection to any address beyond loopback can be read and changed on
   its way: the process starts, prints one warning line on stderr, and a certificate and key are
   advised there. Loopback is reachable by every local process, and by containers that
-  share the host's network namespace; the front is anonymous in either mode.
+  share the host's network namespace; the front is anonymous in either mode unless `params.require_auth` is true.
 
 A container engine that pulls over plain HTTP has to be told it may:
 
@@ -949,7 +950,7 @@ which the specification allows, and falls back to splitting it. `If-Range`, `If-
 
 ### Anonymous reads
 
-The front never asks for a token: a request with an `Authorization` header is served as one without.
+Unless `params.require_auth` is true, the front never asks for a token: a request with an `Authorization` header is served as one without.
 Anyone who can connect can read any digest under the prefix, and nothing else. That is the intent:
 the images in it are public (a public registry's images are the first thing put there), and the
 network decides who can connect (the host's firewall rules). Do not put an image in
@@ -996,7 +997,7 @@ that client's own settings.
 `GET /metricz` on the S3 listener (unsigned, like `/healthz`; a bucket cannot be called `metricz`)
 shows, in the Prometheus text format, `tierstore_oci_requests_total{route,outcome}` (routes `ping`,
 `manifest`, `blob`, `other`; outcomes `ok`, `partial`, `not_found`, `invalid`, `not_allowed`,
-`range_not_satisfiable`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
+`range_not_satisfiable`, `unauthorized`, `denied`, `failed`), `tierstore_oci_bytes_served_total` (bytes of blobs read for
 responses), `tierstore_oci_digest_mismatches_total` and `tierstore_oci_front_info{mode="https"|"http"}` (1; the mode the front runs in). They are not on the registry listener,
 which serves nothing else. Without an `oci` interface the path says the front is not enabled.
 
