@@ -2,8 +2,10 @@
 //!
 //! A key is the name of one file, percent-encoded: every byte but an ASCII letter or digit
 //! (and a few marks) costs three bytes, so a key whose encoded name is empty or over 255 bytes
-//! (about 85 bytes of non-ASCII text) cannot be stored. A write of it is [`Error::InvalidKey`]
-//! (S3 answer 400 `KeyTooLongError`); a read, a head or a delete of it is [`Error::NotFound`],
+//! (about 85 bytes of non-ASCII text) cannot be stored. A write that validates the key itself (put, create of an upload, streamed
+//! puts, reservations) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`); a read, a
+//! head, a delete and the held-body conditional writes ([`Backend::put_if_match`] and
+//! `put_reservation_if_match`, which first look for the stored object) are [`Error::NotFound`],
 //! since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
@@ -82,7 +84,9 @@ impl SyncDir for FsyncDir {
 /// digits, `_`, `-` and a `.` (but not as the first byte) stay as they are, and every other
 /// byte is written as `%` and two hex digits. So no key can name a file outside the directory
 /// or a file the backend keeps for itself (their names start with `.`). A key whose name is
-/// empty or longer than 255 bytes is refused with [`Error::Other`]. The file holds the SHA-256
+/// empty or longer than 255 bytes is refused with [`Error::InvalidKey`] by the writes that
+/// validate the key, and is [`Error::NotFound`] for reads, deletes and the conditional writes
+/// that look for the stored object first (see the module doc). The file holds the SHA-256
 /// of the body, which is the content tag, and then the body, so that a head reads 32 bytes and
 /// not the object.
 ///
