@@ -523,7 +523,8 @@ async fn a_store_that_fails_is_not_answered_from_the_upstream() {
     let _quiet = quiet();
     let rig = Rig::new(always(200)).await;
     let digest = digest_of(MANIFEST.as_bytes());
-    rig.faulty.fail_next(Op::Get, 1);
+    // A tag is read by listing its versions.
+    rig.faulty.fail_next(Op::List, 1);
     let tag = rig.get("/v2/a/manifests/latest").await;
     tag.assert_error(StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE");
     rig.faulty.fail_next(Op::Head, 1);
