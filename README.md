@@ -172,3 +172,7 @@ machine. It is not in a release and has no configuration keys yet.
 ## Contributing
 
 The rules every change is written and reviewed against are in [AGENTS.md](AGENTS.md).
+
+## Security
+
+Report a vulnerability privately, as [SECURITY.md](SECURITY.md) describes. Do not open a public issue for it.

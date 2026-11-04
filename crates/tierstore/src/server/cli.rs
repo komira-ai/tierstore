@@ -17,22 +17,20 @@
 //! the multipart uploads in progress, in a directory of the local file system (see
 //! [`DirBackend`](crate::DirBackend)), so that they outlive a restart; the directory is made if
 //! it does not exist. A tier `s3:<bucket>` is a bucket of an S3-compatible store (see
-//! [`S3Backend`]), which the flags of the tier say how to reach, with the name of the tier as
-//! their prefix: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]`, required),
+//! [`S3Backend`]), which the keys of the tier say how to reach, in the table of the tier: `hot_store.endpoint` or `cold_store.endpoint` (`http://host[:port]`, required),
 //! `hot_store.region` or `cold_store.region` (the signing region, `us-east-1` if not given), and
 //! `hot_store.credentials_file` or `cold_store.credentials_file` (required: a file only its owner may
-//! read, in the form of `server.access_key_file` below; a secret on the command line would be
-//! world-readable). The two tiers have a key of their own, so they may be two stores. These
-//! flags are refused for a tier that is not an S3 bucket, since they would do nothing. A request
+//! read, in the form of `server.access_key_file` below; a secret in the config file would be
+//! readable by more users). The two tiers have a table of their own, so they may be two stores. These
+//! keys are refused for a tier that is not an S3 bucket, since they would do nothing. A request
 //! to an S3 tier is bounded by `server.s3_request_timeout`. The cold tier must do multipart uploads,
 //! which all three kinds do, and the proxy passes them to it.
 //!
 //! The clients of the S3 front sign with one of its access keys. `server.access_key_file` is the full
-//! key, which may do everything the front serves; each `server.read_only_key_files` (the flag may be
-//! given any number of times) is a key that may only read objects and list the bucket (see the
+//! key, which may do everything the front serves; `server.read_only_key_files` is an array of key-file paths, each a key that may only read objects and list the bucket (see the
 //! [`server`](super) docs), such as the key of the daemons that read blobs. The id of a key is
 //! what a request names it by, so the ids must all differ. The file of every key and credential
-//! flag holds the id and the secret either as JSON, `{"access_key_id": "...",
+//! key holds the id and the secret either as JSON, `{"access_key_id": "...",
 //! "secret_access_key": "..."}` (tierstore also refuses any other
 //! field and an empty value), or as two lines, the id and then the secret; it is JSON when its
 //! first byte that is not white space is `{`. Only its owner may read the file (mode 0600 or
@@ -44,7 +42,7 @@
 //! IP subjectAltName for the address and be valid now, and the key file must not be readable by
 //! every user; the start checks). With neither it is plain HTTP, at any address; off loopback
 //! the start prints one warning line on stderr, and a certificate is advised. One of the two
-//! flags without the other, and a certificate, key or prefix that cannot work, exit with status
+//! params without the other, and a certificate, key or prefix that cannot work, exit with status
 //! 2; a file that cannot be read
 //! with status 1. The start line gets ` oci-listen=<address> (http)` or ` (https)`.
 //! The start line ends with ` commit=<the commit the binary was built from>`.
@@ -60,9 +58,9 @@
 //! it serves for `--drain-lb-wait`, stops accepting and closes idle connections, waits for the
 //! requests in flight, the answers it is sending and the connections it closes for at most
 //! `--drain-deadline`, gives the reconciler's lease up and
-//! exits with status 0. A start that fails exits with status 1. Flags that are not valid exit
-//! with status 2: those the parser refuses, two keys that have one id, and a config file that is
-//! refused or given with flags that describe the data path.
+//! exits with status 0. A start that fails exits with status 1. Arguments that are not valid exit
+//! with status 2: those the parser refuses, a flag that went, two keys that have one id, and a
+//! config file that is refused.
 //!
 //! Before it opens the proxy or binds the address, the process asks each tier the questions its
 //! guarantees rest on (see [`self_test`](crate::self_test)) under a probe key in `_tiering/selftest/` that is
@@ -103,6 +101,7 @@ use crate::{
 use super::ServerConfig;
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
 use super::cache_cli::serve_cache_until_signalled;
+use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, run, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
@@ -279,21 +278,18 @@ pub struct Cli {
     /// `/`; all five required, the lists may be empty but not all three): a header-signed key that
     /// gets, heads and lists under its read prefixes, creates objects and multipart uploads under
     /// its write prefixes (create-only: no `If-Match`, no copy) and deletes objects under its
-    /// delete prefixes; it is refused on a presigned URL. Give the flag once for each such key;
-    /// all key ids must differ. Only its owner may read it (mode 0600).
+    /// delete prefixes; it also signs presigned GET URLs for objects under its read prefixes. List
+    /// each such key once; all key ids must differ. Only its owner may read it (mode 0600).
     pub scoped_key_file: Vec<PathBuf>,
-    /// A file that holds a grant key: the id and the secret, JSON of exactly `access_key_id` and
-    /// `secret_access_key` or two lines. The key signs no request. It is the key whose signature
-    /// on a read grant (the `x-tierstore-grant` header) the server accepts, and a request with a
-    /// grant that lists an object may get and head that object and nothing else. Give the flag
-    /// once for each such key; all key ids must differ. Only its owner may read it (mode 0600).
-    pub grant_key_file: Vec<PathBuf>,
     /// The longest `X-Amz-Expires` that a presigned URL may have, whatever the ceiling of its key
     /// says: a number and `ms`, `s`, `m` or `h`.
     pub presign_max_expires: Duration,
-    /// The longest a read grant may have left to live when the server checks it: a grant that
-    /// ends later than this from now is refused. A number and `ms`, `s`, `m` or `h`.
-    pub grant_max_lifetime: Duration,
+    /// Deprecated and ignored: the read grant was removed (use a presigned GET URL). The key
+    /// `server.grant_key_files` is accepted and its files are not read, so that a file that sets it
+    /// still starts; stderr says it is ignored.
+    pub grant_key_file: Vec<PathBuf>,
+    /// Deprecated, and ignored, like `server.grant_key_files`: `server.grant_max_lifetime`.
+    pub grant_max_lifetime: Option<Duration>,
     /// How long, after the drain began, the server goes on serving everything, so that the
     /// 503 of `/readyz` is seen: a number and `ms`, `s`, `m` or `h`.
     pub drain_lb_wait: Duration,
@@ -310,6 +306,9 @@ pub struct Cli {
     pub lease_ttl: Duration,
     /// How often the reconciler works: shorter than `hot_store.lease_ttl`.
     pub reconcile_interval: Duration,
+    /// The heartbeat of the proxy and the registration retention: `hot_store.heartbeat`,
+    /// `hot_store.departure`, `hot_store.deadline_margin` and `hot_store.registration_retention`.
+    pub heartbeat: HeartbeatFlags,
     /// The lock file of this node: an absolute path on a local file system, in a directory that
     /// nothing removes (not under `/run`), the same for every process of one node. The reconciler
     /// works only while this process holds an exclusive lock on the file; a process that finds
@@ -616,6 +615,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     if cli.s3_request_timeout.is_zero() {
         return Err("--s3-request-timeout must be longer than zero".into());
     }
+    cli.heartbeat.check()?;
     if let Some(path) = &cli.lock_file {
         check_lock_path(path).map_err(|why| format!("--lock-file {path:?} {why}"))?;
     }
@@ -634,6 +634,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.retention = cli.journal_retention;
+    cli.heartbeat.apply(&mut proxy, &mut reconciler);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
@@ -899,3 +900,7 @@ mod tests;
 #[cfg(test)]
 #[path = "oci_cli_tests.rs"]
 mod oci_tests;
+
+#[cfg(test)]
+#[path = "grant_cli_tests.rs"]
+mod grant_tests;

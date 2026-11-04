@@ -23,13 +23,18 @@
 //! `max_connections` and `connection_lifetime`, must agree on those five (one registry front has
 //! one certificate and one prefix); one that differs from the first is refused. An `s3`
 //! interface has no TLS params yet. At least one `s3` interface is needed.
+//!
+//! The keys of the release before stay readable: `server.listen` is an `s3` interface at those
+//! addresses and the `[oci]` table (`listen` and the same five params, with `listen` needed) is an
+//! `oci` interface, so a file written for that release starts as it did ([`with_legacy`]). The
+//! entries they make follow the ones the file lists, and every rule above holds for them too.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use super::config::{ConfigError, OciFlags, invalid, within};
+use super::config::{ConfigError, OciFlags, invalid, refuse, require, within};
 use super::config_units::Dur;
 use super::listen::Addrs;
 
@@ -50,6 +55,19 @@ pub(super) struct InterfaceTable {
 pub(super) struct Params {
     pub port: Option<u16>,
     pub addresses: Option<Addrs>,
+    pub tls_cert_file: Option<PathBuf>,
+    pub tls_key_file: Option<PathBuf>,
+    pub prefix: Option<String>,
+    pub max_connections: Option<u32>,
+    pub connection_lifetime: Option<Dur>,
+}
+
+/// `[oci]`, the table of the release before: the registry front, which is an `oci` interface.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OciTable {
+    /// One address, or a list of them; needed in the table.
+    pub listen: Option<Addrs>,
     pub tls_cert_file: Option<PathBuf>,
     pub tls_key_file: Option<PathBuf>,
     pub prefix: Option<String>,
@@ -145,6 +163,52 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
         ),
     ];
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
+}
+
+/// The entries of a file with the ones its `server.listen` and `[oci]` stand for after them.
+///
+/// # Errors
+/// An `[oci]` table without `listen`, naming the key that needs it if the table has one.
+pub(super) fn with_legacy(
+    mut tables: Vec<InterfaceTable>,
+    listen: Option<Addrs>,
+    oci: Option<OciTable>,
+) -> Result<Vec<InterfaceTable>, ConfigError> {
+    if let Some(addresses) = listen {
+        tables.push(InterfaceTable {
+            kind: "s3".to_owned(),
+            params: Params {
+                addresses: Some(addresses),
+                ..Params::default()
+            },
+        });
+    }
+    if let Some(table) = oci {
+        let others = [
+            ("tls_cert_file", table.tls_cert_file.is_some()),
+            ("tls_key_file", table.tls_key_file.is_some()),
+            ("prefix", table.prefix.is_some()),
+            ("max_connections", table.max_connections.is_some()),
+            ("connection_lifetime", table.connection_lifetime.is_some()),
+        ];
+        if table.listen.is_none() {
+            refuse("oci", "it needs oci.listen", &others)?;
+        }
+        let addresses = require("oci", "listen", table.listen)?;
+        tables.push(InterfaceTable {
+            kind: "oci".to_owned(),
+            params: Params {
+                addresses: Some(addresses),
+                tls_cert_file: table.tls_cert_file,
+                tls_key_file: table.tls_key_file,
+                prefix: table.prefix,
+                max_connections: table.max_connections,
+                connection_lifetime: table.connection_lifetime,
+                ..Params::default()
+            },
+        });
+    }
+    Ok(tables)
 }
 
 /// The interfaces the entries of a file stand for.

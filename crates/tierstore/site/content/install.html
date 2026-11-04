@@ -41,7 +41,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
   </li>
   <li>
     <h3>On macOS (Apple silicon) <span class="tag tag-ok">works today</span></h3>
-    <p>The macOS binary is <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This step covers taking and verifying it; running tierstore as a service on macOS is not described here, and the update hook is Linux only.</p>
+    <p>The macOS binary is <code>tierstore-&lt;commit&gt;-macos-arm64.tar.gz</code>, built and signed by the same workflow as the Linux ones and checked the same way. It is built on a macOS 15 runner on Apple silicon, which runs it before it is packaged and refuses it unless it reports the version and the commit of the release. This step covers taking and verifying it. A Mac runs it as a LaunchDaemon, one build node on loopback that the host updater updates by a plain restart through <code>tierstore update-hook</code>, with a brief gap in serving; the files and the layout are in <a href="https://github.com/komira-ai/tierstore/blob/main/crates/tierstore/docs/update-hook.md#on-a-mac">The update hook</a> and <code>packaging/macos</code>.</p>
     <p>Take the tarball, its bundle and <code>SHA256SUMS</code> from one release, with <code>gh</code> (Homebrew's <code>gh</code> has <code>gh attestation</code>) or with <code>curl</code>, and check its digest with <code>shasum</code>, which every Mac has; it prints <code>OK</code>:</p>
     <div class="code"><pre><span class="p">$</span> gh release download v&lt;X.Y.Z&gt; --repo komira-ai/tierstore \
     --pattern 'tierstore-*-macos-arm64.tar.gz*' --pattern SHA256SUMS
@@ -90,7 +90,7 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
 </ol>
 
 <h2 id="clients">Using it from an S3 client</h2>
-<p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
+<p>The front serves one bucket, path-style, over plain HTTP, and checks SigV4 in the <code>Authorization</code> header (and presigned GET and PUT URLs). An SDK with its defaults sends some things the front refuses, so a client needs these settings. The crate's tests drive the front with <code>aws-sdk-rust</code> set this way; the aws CLI and boto3 are not tested.</p>
 <div class="table-wrap"><table>
 <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
 <tbody>

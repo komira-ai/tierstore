@@ -278,3 +278,68 @@ fn a_port_of_zero_is_never_the_same_address() {
     assert_eq!(cli.listen.len(), 3);
     assert_eq!(cli.oci_listen.len(), 1);
 }
+
+/// `TIERS` with `listen` (the text of a TOML value) as `server.listen` and `oci` after it as a
+/// table of the release before.
+fn legacy(listen: &str, oci: &str) -> String {
+    let server = "[server]\n";
+    assert!(TIERS.contains(server));
+    TIERS.replacen(server, &format!("{server}listen          = {listen}\n"), 1) + oci
+}
+
+/// Asserts that a file written for the release before, with `server.listen` and the `[oci]`
+/// table, makes the same settings as the interfaces that stand for them; that the two ways may be
+/// mixed, the interfaces first; and that the file with neither `server.listen` nor an `s3`
+/// interface is refused as it is with no interface.
+#[test]
+fn the_listen_key_and_the_oci_table_of_the_release_before_make_the_interfaces_they_stand_for() {
+    let old = legacy(
+        "[\"127.0.0.1:9301\", \"[::1]:9301\"]",
+        "\n[oci]\nlisten = \"127.0.0.1:5001\"\nprefix = \"images/\"\nmax_connections = 7\n",
+    );
+    let from_old = from_text(&old, DEFAULTS).unwrap();
+    let new = made(&[
+        entry("s3", "addresses = [\"127.0.0.1:9301\", \"[::1]:9301\"]"),
+        entry(
+            "oci",
+            "addresses = \"127.0.0.1:5001\", prefix = \"images/\", max_connections = 7",
+        ),
+    ])
+    .unwrap();
+    assert_eq!(from_old, new);
+
+    let mixed = legacy("\"127.0.0.1:9302\"", "");
+    let mixed = format!("{}{mixed}", entry("s3", "port = 9300"));
+    let cli = from_text(&mixed, DEFAULTS).unwrap();
+    let wanted = ["0.0.0.0:9300", "127.0.0.1:9302"];
+    assert_eq!(cli.listen, wanted.map(|text| text.parse().unwrap()));
+    assert!(cli.oci_listen.is_empty());
+
+    assert_eq!(
+        made(&[]).unwrap_err(),
+        "interface: it needs at least one interface with type = \"s3\""
+    );
+}
+
+/// Asserts the refusals of the keys of the release before, by their exact messages: an `[oci]`
+/// table without `listen` (naming the key it has that needs it), an empty one, and an address that
+/// `server.listen` has along with an interface.
+#[test]
+fn the_keys_of_the_release_before_are_refused_as_they_were() {
+    let with_prefix = legacy("\"127.0.0.1:9301\"", "\n[oci]\nprefix = \"images/\"\n");
+    assert_eq!(
+        from_text(&with_prefix, DEFAULTS).unwrap_err().to_string(),
+        "oci.prefix: it needs oci.listen"
+    );
+    let empty = legacy("\"127.0.0.1:9301\"", "\n[oci]\n");
+    assert_eq!(
+        from_text(&empty, DEFAULTS).unwrap_err().to_string(),
+        "oci.listen: it is needed"
+    );
+    let twice = legacy("\"127.0.0.1:9300\"", "");
+    let twice = format!("{}{twice}", entry("s3", "addresses = \"127.0.0.1:9300\""));
+    assert_eq!(
+        from_text(&twice, DEFAULTS).unwrap_err().to_string(),
+        "interface[1].params: the address 127.0.0.1:9300 is already used by interface[0]"
+    );
+}
