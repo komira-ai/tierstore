@@ -206,18 +206,18 @@ async fn settle(
 }
 
 /// 409: another push moved the tag first.
-pub(super) fn conflict(tag: &str) -> Answer {
+pub(super) fn conflict(tag: &str, echo: usize) -> Answer {
     let message = "another push moved this tag first: the manifest is stored by its digest, \
                    push the tag again to move it";
-    let detail = json!({ "tag": echoed(tag) });
+    let detail = json!({ "tag": echoed(tag, echo) });
     let response = error(StatusCode::CONFLICT, "TAG_CONFLICT", message, detail);
     (Outcome::Conflict, response)
 }
 
 /// 400: `n` of a listing is not a number.
-fn bad_count(text: &str) -> Answer {
+fn bad_count(text: &str, echo: usize) -> Answer {
     let message = "n must be a whole number";
-    let detail = json!({ "n": echoed(text) });
+    let detail = json!({ "n": echoed(text, echo) });
     let response = error(
         StatusCode::BAD_REQUEST,
         "PAGINATION_NUMBER_INVALID",
@@ -260,7 +260,7 @@ impl OciFront {
     /// `GET` or `HEAD` of `/v2/<name>/tags/list`.
     pub(super) async fn tag_list(&self, head: bool, name: &str, query: Option<&str>) -> Answer {
         if !super::names::valid_name(name) {
-            return super::invalid_name(name);
+            return super::invalid_name(name, self.sizes.echo_bytes);
         }
         let pairs = query_pairs(query).unwrap_or_default();
         let find = |key: &str| {
@@ -270,7 +270,7 @@ impl OciFront {
         let limit = match find("n").map(str::parse::<usize>) {
             None => None,
             Some(Ok(count)) => Some(count),
-            Some(Err(_)) => return bad_count(find("n").unwrap_or_default()),
+            Some(Err(_)) => return bad_count(find("n").unwrap_or_default(), self.sizes.echo_bytes),
         };
         let after = find("last");
         let dir = self.tag_dir(name);

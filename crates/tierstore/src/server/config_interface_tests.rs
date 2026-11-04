@@ -239,13 +239,24 @@ fn oci_interfaces_must_agree_on_the_front() {
             "require_auth",
         ),
         ("stage_read = 4096", "stage_read = 8192", "stage_read"),
+        (
+            "max_manifest_bytes = 4096",
+            "max_manifest_bytes = 8192",
+            "max_manifest_bytes",
+        ),
+        (
+            "read_chunk_bytes = 4096",
+            "read_chunk_bytes = 8192",
+            "read_chunk_bytes",
+        ),
+        ("echo_bytes = 64", "echo_bytes = 128", "echo_bytes"),
     ];
     for (first, second, name) in cases {
         let first = entry("oci", &format!("port = 5000, {first}"));
         let second = entry("oci", &format!("port = 5001, {second}"));
         let why = refusal(&[s3.clone(), first, second]);
         let want = format!(
-            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read and upstream"
+            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read, max_manifest_bytes, read_chunk_bytes, echo_bytes and upstream"
         );
         assert_eq!(why, want);
     }
@@ -284,6 +295,33 @@ fn an_oci_interface_takes_the_size_of_a_stage_read() {
     );
     let why = refusal(&[s3.clone(), entry("oci", "port = 5000, stage_read = 0")]);
     assert!(why.contains("stage_read"), "{why}");
+}
+
+/// Asserts the three size params of an `oci` interface, `max_manifest_bytes`, `read_chunk_bytes`
+/// and `echo_bytes`: left out each is none (the front takes its default), given each is the
+/// size, zero is refused naming the param, and an `s3` interface refuses each.
+#[test]
+fn an_oci_interface_takes_the_manifest_limit_the_read_chunk_and_the_echo_length() {
+    let s3 = entry("s3", "port = 9300");
+    let with = |params: &str| made(&[s3.clone(), entry("oci", params)]).unwrap();
+    let plain = with("port = 5000");
+    assert_eq!(plain.oci_max_manifest_bytes, None);
+    assert_eq!(plain.oci_read_chunk_bytes, None);
+    assert_eq!(plain.oci_echo_bytes, None);
+    let given =
+        with("port = 5000, max_manifest_bytes = 1000, read_chunk_bytes = 2000, echo_bytes = 30");
+    assert_eq!(given.oci_max_manifest_bytes, Some(1000));
+    assert_eq!(given.oci_read_chunk_bytes, Some(2000));
+    assert_eq!(given.oci_echo_bytes, Some(30));
+    for name in ["max_manifest_bytes", "read_chunk_bytes", "echo_bytes"] {
+        let zero = refusal(&[
+            s3.clone(),
+            entry("oci", &format!("port = 5000, {name} = 0")),
+        ]);
+        assert!(zero.contains(&format!("params.{name}")), "{zero}");
+        let on_s3 = refusal(&[entry("s3", &format!("port = 9300, {name} = 5"))]);
+        assert!(on_s3.contains("not for type \"s3\""), "{on_s3}");
+    }
 }
 
 /// Asserts that an entry with a key the format does not have, and one without a `type`, are

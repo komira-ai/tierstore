@@ -301,6 +301,7 @@ async fn bind_oci_from(
     let front = OciFront::new(backend, setup.prefix, setup.metrics)
         .with_auth(setup.auth)
         .with_stage_read(setup.stage_read)
+        .with_sizes(setup.sizes)
         .with_upstream(setup.upstream);
     let front = Arc::new(front);
     let listener = match inherited {

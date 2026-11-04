@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 use tracing::Level;
 use tracing::subscriber::{DefaultGuard, set_default};
 
-use super::{MAX_MANIFEST_BYTES, OciFront, Upstream};
+use super::{DEFAULT_MANIFEST_BYTES, OciFront, Upstream};
 use crate::server::build_info::stderr_log::LineLog;
 use crate::server::oci::fake_upstream::{Ending, Fake, Registry, Seen};
 use crate::server::oci::{OciMetrics, OciPrefix, UpstreamSettings};
@@ -408,7 +408,7 @@ async fn an_answer_that_is_not_a_manifest_is_refused() {
 #[tokio::test]
 async fn a_manifest_over_the_limit_is_refused() {
     let _quiet = quiet();
-    let size = usize::try_from(MAX_MANIFEST_BYTES).expect("a size") + 1;
+    let size = usize::try_from(DEFAULT_MANIFEST_BYTES).expect("a size") + 1;
     let path = "/v2/a/manifests/latest".to_owned();
     let rig = Rig::new(files(vec![(path.clone(), Fake::ok(vec![b' '; size]))])).await;
     let answer = rig.get(&path).await;
@@ -534,4 +534,28 @@ async fn a_store_that_fails_is_not_answered_from_the_upstream() {
     let blob = rig.get(&format!("/v2/a/blobs/{digest}")).await;
     blob.assert_error(StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE");
     assert!(rig.registry.seen().is_empty());
+}
+
+/// Asserts `params.max_manifest_bytes` bounds a manifest pulled from the upstream: with it at
+/// 50, a manifest of 51 bytes is refused as the upstream's failure and one of 50 is stored.
+#[tokio::test]
+async fn a_lowered_manifest_limit_refuses_a_pulled_manifest_just_over_it() {
+    let _quiet = quiet();
+    let path = "/v2/a/manifests/latest".to_owned();
+    let make = |len: usize| {
+        let head = r#"{"schemaVersion":2,"config":{},"layers":[],"pad":""#;
+        format!("{head}{}\"}}", "a".repeat(len - head.len() - 2)).into_bytes()
+    };
+    let files = files(vec![(path.clone(), Fake::ok(make(80)))]);
+    let mut rig = Rig::new(files).await;
+    let sizes = |bytes| super::OciSizes {
+        manifest_bytes: bytes,
+        ..super::OciSizes::default()
+    };
+    rig.front = rig.front.with_sizes(sizes(79));
+    let refused = rig.get(&path).await;
+    refused.assert_error(StatusCode::BAD_GATEWAY, "UNAVAILABLE");
+    rig.front = rig.front.with_sizes(sizes(80));
+    let served = rig.get(&path).await;
+    assert_eq!(served.status, StatusCode::OK);
 }

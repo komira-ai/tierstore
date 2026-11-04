@@ -26,7 +26,7 @@
 //!   whole, whatever the size of the blob; there is no limit on it.
 //! - `DELETE <location>`: cancels the upload and deletes what it stored, 204.
 //! - `PUT /v2/<name>/manifests/<reference>`: a manifest or an index. It is read whole (at most
-//!   [`MAX_MANIFEST_BYTES`]), must be one (see `manifest`), must hash to the reference if that is
+//!   `params.max_manifest_bytes`), must be one (see `manifest`), must hash to the reference if that is
 //!   a digest, and must name only blobs the front has: each digest of its config, layers and
 //!   manifests is looked up first, and one that is not there is 400 `MANIFEST_BLOB_UNKNOWN`. It is
 //!   stored by its digest. A tag as the reference then points at it, by a new version of the
@@ -62,8 +62,8 @@ use super::metrics::Outcome;
 use super::names::{self, Digest};
 use super::tags;
 use super::{
-    CONTENT_DIGEST, MAX_MANIFEST_BYTES, OciFront, error, header_value, invalid_digest,
-    invalid_name, manifest, store_failed,
+    CONTENT_DIGEST, OciFront, error, header_value, invalid_digest, invalid_name, manifest,
+    store_failed,
 };
 use crate::server::ops::detached;
 use crate::server::request::query_pairs;
@@ -408,9 +408,9 @@ async fn discard(backend: &dyn Backend, keys: &[String]) {
     }
 }
 
-/// The bytes of the body of a manifest, at most [`MAX_MANIFEST_BYTES`].
-async fn manifest_bytes(body: OciBody, idle: Duration) -> Result<Bytes, Unread> {
-    let limit = usize::try_from(MAX_MANIFEST_BYTES).unwrap_or(usize::MAX);
+/// The bytes of the body of a manifest, at most `max` (`params.max_manifest_bytes`).
+async fn manifest_bytes(body: OciBody, idle: Duration, max: u64) -> Result<Bytes, Unread> {
+    let limit = usize::try_from(max).unwrap_or(usize::MAX);
     let mut pieces = Pieces::new(body, idle);
     let mut whole = BytesMut::new();
     while let Some(piece) = pieces.next().await? {
@@ -491,12 +491,12 @@ impl OciFront {
         idle: Duration,
     ) -> Answer {
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let pairs = query_pairs(query).unwrap_or_default();
         if let Some((_, text)) = pairs.iter().find(|(key, _)| key == "digest") {
             let Some(digest) = Digest::parse(text) else {
-                return invalid_digest(text);
+                return invalid_digest(text, self.sizes.echo_bytes);
             };
             let upload = Upload::default();
             return self.finish(name, upload, digest, body, idle).await;
@@ -519,7 +519,7 @@ impl OciFront {
         idle: Duration,
     ) -> Answer {
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let staged = match self.open(id).await {
             Ok(staged) => staged,
@@ -589,7 +589,7 @@ impl OciFront {
         idle: Duration,
     ) -> Answer {
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let staged = match self.open(id).await {
             Ok(staged) => staged,
@@ -601,7 +601,7 @@ impl OciFront {
             .find(|(key, _)| key == "digest")
             .map_or("", |(_, text)| text.as_str());
         let Some(digest) = Digest::parse(text) else {
-            return invalid_digest(text);
+            return invalid_digest(text, self.sizes.echo_bytes);
         };
         let size: u64 = staged.iter().map(|chunk| chunk.size).sum();
         if !in_order(headers, size, body.size_hint().exact()) {
@@ -694,7 +694,7 @@ impl OciFront {
     /// `DELETE <location>`: cancels an upload.
     pub(super) async fn cancel(&self, name: &str, id: &str) -> Answer {
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let staged = match self.open(id).await {
             Ok(staged) => staged,
@@ -715,14 +715,14 @@ impl OciFront {
         idle: Duration,
     ) -> Answer {
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let wanted = match Digest::parse(reference) {
             Some(digest) => Some(digest),
             None if names::is_tag(reference) => None,
-            None => return invalid_digest(reference),
+            None => return invalid_digest(reference, self.sizes.echo_bytes),
         };
-        let bytes = match manifest_bytes(body, idle).await {
+        let bytes = match manifest_bytes(body, idle, self.sizes.manifest_bytes).await {
             Ok(bytes) => bytes,
             Err(why) => {
                 let response = error(why.status, "MANIFEST_INVALID", &why.message, Value::Null);
@@ -782,7 +782,7 @@ impl OciFront {
         .await;
         match stored {
             Ok(()) => created(&format!("/v2/{name}/manifests/{}", digest.text()), &digest),
-            Err(Error::PreconditionFailed(_)) => tags::conflict(reference),
+            Err(Error::PreconditionFailed(_)) => tags::conflict(reference, self.sizes.echo_bytes),
             Err(failure) => store_failed(&failure, &digest.text(), "MANIFEST_UNKNOWN", Value::Null),
         }
     }

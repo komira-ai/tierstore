@@ -25,7 +25,7 @@
 //! - `timeout` bounds each step: connecting and getting the headers of an answer, and the wait for
 //!   each piece of a body. The time a whole body takes is not bounded.
 //!
-//! A body is not held whole unless it is a manifest or a token (at most [`MAX_MANIFEST_BYTES`]):
+//! A body is not held whole unless it is a manifest or a token (at most `params.max_manifest_bytes`):
 //! a blob is handed on as a stream.
 
 use std::net::IpAddr;
@@ -53,7 +53,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 
-use super::MAX_MANIFEST_BYTES;
+use super::DEFAULT_MANIFEST_BYTES;
 use super::tls::OciError;
 use crate::{Error, PartBody};
 
@@ -102,6 +102,8 @@ pub struct Upstream {
     tls: TlsConnector,
     timeout: Duration,
     max_redirects: u32,
+    /// The most bytes of a token read from a realm.
+    body_limit: u64,
 }
 
 /// The answer of the upstream to a request that it granted: the headers, and the body still to
@@ -290,7 +292,16 @@ impl Upstream {
             tls: connector(settings.ca_pem.as_deref())?,
             timeout: settings.timeout,
             max_redirects: settings.max_redirects,
+            body_limit: DEFAULT_MANIFEST_BYTES,
         })
+    }
+
+    /// The client, reading a token of at most `bytes` ([`DEFAULT_MANIFEST_BYTES`] if this is not
+    /// called); the front passes `params.max_manifest_bytes`.
+    #[must_use]
+    pub fn with_body_limit(mut self, bytes: u64) -> Self {
+        self.body_limit = bytes;
+        self
     }
 
     /// `GET path` (which starts with `/`), logged in as the upstream's challenge asks, with
@@ -371,7 +382,7 @@ impl Upstream {
         let auth = login.map(basic);
         let (reply, _) = self.follow(&url, "application/json", auth).await?;
         let reply = settle(reply, self.timeout)?;
-        let body = reply.bytes(MAX_MANIFEST_BYTES).await?;
+        let body = reply.bytes(self.body_limit).await?;
         let json: Value =
             serde_json::from_slice(&body).map_err(|_| failed("the token is not JSON"))?;
         let token = json.get("token").or_else(|| json.get("access_token"));
