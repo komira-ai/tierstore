@@ -77,8 +77,12 @@ impl SyncDir for FsyncDir {
 /// other byte, upper-case letters included, is written as `%` and two hex digits, so that two
 /// keys never differ only by case in a file name: on a case-insensitive file system (the
 /// default on macOS) `Foo` and `foo` would otherwise be one file. So no key can name a file
-/// outside the directory or a file the backend keeps for itself (their names start with `.`). A key whose name is
-/// empty or longer than 255 bytes is refused with [`Error::Other`]. The file holds the SHA-256
+/// outside the directory or a file the backend keeps for itself (their names start with `.`).
+/// Releases before this one wrote `A-Z` as they are; a directory they wrote stays readable: a
+/// file of that older name (`Foo`) is the object of its key for every call, is listed, and
+/// is not given a second name, and an upper-case key whose name of this release would be over
+/// 255 bytes but whose older name is not is still kept under the older name (it has the
+/// aliasing of that name). A key whose name is empty or too long is refused with [`Error::Other`]. The file holds the SHA-256
 /// of the body, which is the content tag, and then the body, so that a head reads 32 bytes and
 /// not the object.
 ///
@@ -156,26 +160,36 @@ pub struct DirBackend {
 
 /// The file name of a key.
 fn encode(key: &str) -> String {
+    encode_with(key, false)
+}
+
+/// The file name the releases before this one gave a key: as [`encode`], but with `A-Z` as they
+/// are. Files of such names are still read, listed, replaced and deleted.
+fn encode_legacy(key: &str) -> String {
+    encode_with(key, true)
+}
+
+/// The file name of a key, with `A-Z` as they are if `literal_upper`, else as `%XX`.
+fn encode_with(key: &str, literal_upper: bool) -> String {
     let mut name = String::with_capacity(key.len());
     for (at, byte) in key.bytes().enumerate() {
         match byte {
             b'/' => name.push('~'),
             b'.' if at > 0 => name.push('.'),
             b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
+            b'A'..=b'Z' if literal_upper => name.push(char::from(byte)),
             _ => name.push_str(&format!("%{byte:02X}")),
         }
     }
     name
 }
 
-/// The key a file name stands for, if the name is one [`encode`] makes: an upper-case letter
-/// is never written as it is, so a name that has one is not a key.
+/// The key a file name stands for, if the name is one [`encode`] or [`encode_legacy`] makes.
 fn decode(name: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(name.len());
     let mut rest = name.bytes();
     while let Some(byte) = rest.next() {
         match byte {
-            b'A'..=b'Z' => return None,
             b'~' => bytes.push(b'/'),
             b'%' => {
                 let pair = [rest.next()?, rest.next()?];
@@ -519,10 +533,21 @@ impl DirBackend {
         self.syncer.sync_dir(dir).await.map_err(io_error(dir))
     }
 
-    /// The path of the file of the object `key`.
-    fn path(&self, key: &str) -> Result<PathBuf, Error> {
+    /// The path of the file of the object `key`: the file of the name an earlier release gave
+    /// it if that file exists, or if the name of this release is too long and the earlier one is
+    /// not (so that a key an earlier release took is still taken), else the file of the name
+    /// of this release.
+    async fn path(&self, key: &str) -> Result<PathBuf, Error> {
         let name = encode(key);
-        if !(1..=NAME_LIMIT).contains(&name.len()) {
+        let old = encode_legacy(key);
+        let fits = |name: &str| (1..=NAME_LIMIT).contains(&name.len());
+        if old != name && fits(&old) {
+            let legacy = self.root.join(&old);
+            if !fits(&name) || fs::try_exists(&legacy).await.unwrap_or(false) {
+                return Ok(legacy);
+            }
+        }
+        if !fits(&name) {
             let text = format!("key {key:?} is empty or too long to be a file name");
             return Err(Error::Other(text));
         }
@@ -537,7 +562,7 @@ impl DirBackend {
 
     /// Opens the object `key`.
     async fn stored(&self, key: &str) -> Result<Stored, Error> {
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         let opened = open_stored(&path).await;
         let absent = ErrorKind::NotFound;
         opened.map_err(|why| classify(key, &path, &why, absent, Error::NotFound))
@@ -670,14 +695,14 @@ impl Backend for DirBackend {
 
     /// The tag is that of the file this call published: the SHA-256 of the bytes it wrote.
     async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         let (temp, tag) = self.write_temp(body, PLAIN_MODE).await?;
         self.publish(&temp, &path, key).await?;
         Ok(hex::encode(tag))
     }
 
     async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         let (temp, tag) = self.write_temp(body, MARKED_MODE).await?;
         self.publish(&temp, &path, key).await?;
         Ok(hex::encode(tag))
@@ -693,7 +718,7 @@ impl Backend for DirBackend {
         _len: Option<u64>,
         mut body: PartBody<'_>,
     ) -> Result<(), Error> {
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         write_object_stream(&temp, &mut body).await?;
@@ -725,7 +750,7 @@ impl Backend for DirBackend {
         mut body: PartBody<'_>,
         etag: &str,
     ) -> Result<String, Error> {
-        self.path(key)?;
+        self.path(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = write_object_stream(&temp, &mut body).await?;
@@ -767,7 +792,7 @@ impl Backend for DirBackend {
     }
 
     async fn delete(&self, key: &str) -> Result<(), Error> {
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         // Not held across the sync: the name is gone, and a replacement or a delete that
         // follows needs nothing the sync would protect.
         let removed = {
@@ -815,7 +840,7 @@ impl Backend for DirBackend {
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
-        self.path(key)?;
+        self.path(key).await?;
         let number = self.counter.fetch_add(1, Ordering::SeqCst);
         let since = SystemTime::now().duration_since(UNIX_EPOCH);
         let nanos = since.map_or(0, |elapsed| elapsed.as_nanos());
@@ -857,7 +882,7 @@ impl Backend for DirBackend {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         let dir = self.upload_dir(key, id).await?;
-        let path = self.path(key)?;
+        let path = self.path(key).await?;
         let stored = stored_parts(&dir).await?;
         let mut files = Vec::new();
         for (number, tag) in parts {

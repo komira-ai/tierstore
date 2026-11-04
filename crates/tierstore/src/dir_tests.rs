@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
-use super::{NAME_LIMIT, classify, create_new, decode, encode, failed, part_name};
+use super::{NAME_LIMIT, classify, create_new, decode, encode, encode_legacy, failed, part_name, sha256};
 
 fn backend() -> (TestDir, DirBackend) {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-dir");
@@ -89,6 +89,9 @@ fn a_key_is_a_file_name_that_decodes_back() {
     assert_eq!(encode("é"), "%C3%A9");
     assert_eq!(encode("Foo"), "%46oo");
     assert_eq!(decode("%46oo").as_deref(), Some("Foo"));
+    assert_eq!(encode_legacy("Foo/b"), "Foo~b");
+    assert_eq!(encode_legacy("a%"), "a%25");
+    assert_eq!(decode("Foo~b").as_deref(), Some("Foo/b"));
 }
 
 /// Asserts that a name that `encode` does not make is not a key: a `%` without two hex digits
@@ -96,7 +99,7 @@ fn a_key_is_a_file_name_that_decodes_back() {
 #[test]
 fn a_file_name_that_is_not_an_encoded_key_does_not_decode() {
     assert_eq!(decode("a~b").as_deref(), Some("a/b"));
-    for name in ["%", "%4", "%zz", "%FF", "a%+f", "Foo", "aB"] {
+    for name in ["%", "%4", "%zz", "%FF", "a%+f"] {
         assert_eq!(decode(name), None, "{name}");
     }
 }
@@ -827,8 +830,7 @@ async fn a_streamed_replace_that_is_dropped_half_way_leaves_the_object() {
 }
 
 /// Asserts that two keys that differ only by case are stored under file names that differ in more
-/// than case, so that on a case-insensitive file system they are still two objects, and that a
-/// file whose name has an upper-case letter is not listed as a key.
+/// than case, so that on a case-insensitive file system they are still two objects.
 #[tokio::test]
 async fn keys_that_differ_only_by_case_are_two_files() {
     let (dir, backend) = backend();
@@ -836,6 +838,7 @@ async fn keys_that_differ_only_by_case_are_two_files() {
     backend.put("foo", body("lower")).await.unwrap();
     assert_eq!(backend.get("Foo", None).await.unwrap(), body("upper"));
     assert_eq!(backend.get("foo", None).await.unwrap(), body("lower"));
+    assert_eq!(names(dir.path()), ["%46oo", "foo"]);
     let folded: Vec<String> = names(dir.path())
         .iter()
         .map(|name| name.to_ascii_lowercase())
@@ -844,14 +847,86 @@ async fn keys_that_differ_only_by_case_are_two_files() {
     distinct.sort();
     distinct.dedup();
     assert_eq!(folded.len(), distinct.len(), "{folded:?}");
-    std::fs::write(dir.path().join("Stray"), "not an object").unwrap();
-    let mut keys: Vec<String> = backend
+}
+
+/// Writes the file of an object as the releases before this one did: under `name`, which has
+/// its upper-case letters as they are.
+fn write_legacy(dir: &Path, name: &str, text: &str) {
+    let mut data = sha256(text.as_bytes()).to_vec();
+    data.extend_from_slice(text.as_bytes());
+    std::fs::write(dir.join(name), data).unwrap();
+}
+
+/// Asserts that a directory written by the previous release, with upper-case letters in the
+/// file names, is read by this release: get, head, list, a replacement, a create-only put that
+/// finds the key taken, and a delete all act on the old file and make no second one.
+#[tokio::test]
+async fn this_release_reads_a_directory_the_previous_release_wrote() {
+    let (dir, backend) = backend();
+    write_legacy(dir.path(), "Foo", "old");
+    write_legacy(dir.path(), "a~B", "deep");
+    assert_eq!(encode_legacy("Foo"), "Foo");
+    assert_eq!(backend.get("Foo", None).await.unwrap(), body("old"));
+    assert_eq!(backend.get("a/B", None).await.unwrap(), body("deep"));
+    let head = backend.head("Foo").await.unwrap();
+    assert_eq!((head.size, head.tag), (3, hex::encode(sha256(b"old"))));
+    let keys: Vec<String> = backend
         .list("")
         .await
         .unwrap()
         .into_iter()
         .map(|listed| listed.key)
         .collect();
-    keys.sort();
-    assert_eq!(keys, ["Foo", "foo"]);
+    assert_eq!(keys, ["Foo", "a/B"]);
+    let taken = backend.put("Foo", body("new")).await;
+    assert!(matches!(taken, Err(Error::AlreadyExists(_))), "{taken:?}");
+    let tag = hex::encode(sha256(b"old"));
+    backend.put_if_match("Foo", body("newer"), &tag).await.unwrap();
+    assert_eq!(backend.get("Foo", None).await.unwrap(), body("newer"));
+    assert_eq!(names(dir.path()), ["Foo", "a~B"]);
+    backend.delete("Foo").await.unwrap();
+    backend.delete("a/B").await.unwrap();
+    assert_eq!(names(dir.path()), Vec::<String>::new());
+    backend.put("Foo", body("again")).await.unwrap();
+    assert_eq!(names(dir.path()), ["%46oo"]);
+}
+
+/// Asserts that the data this release writes is read by the previous release's rules where it
+/// can be: a key with no upper-case letter has the file name it always had, and the name of a
+/// key with one is `%XX`, which the previous release lists as that key. (The previous release
+/// looks a key with an upper-case letter up under its literal name, so it does not get such a
+/// key.)
+#[tokio::test]
+async fn the_previous_release_lists_what_this_release_writes() {
+    let (dir, backend) = backend();
+    backend.put("cas/d/n1/00012", body("x")).await.unwrap();
+    backend.put("Up/Per", body("y")).await.unwrap();
+    assert_eq!(names(dir.path()), ["%55p~%50er", "cas~d~n1~00012"]);
+    let keys: Vec<String> = backend
+        .list("")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|listed| listed.key)
+        .collect();
+    assert_eq!(keys, ["Up/Per", "cas/d/n1/00012"]);
+    for name in names(dir.path()) {
+        let key = decode(&name).unwrap();
+        assert!(encode(&key) == name, "{name}");
+    }
+}
+
+/// Asserts that an upper-case key the previous release took, whose name is within 255 bytes with
+/// the letters as they are but over it with `%XX`, is still taken (under the old name), and that
+/// a key too long for both is refused.
+#[tokio::test]
+async fn an_upper_case_key_that_fits_only_under_the_old_name_is_kept() {
+    let (dir, backend) = backend();
+    let key = "A".repeat(100);
+    assert!(encode(&key).len() > NAME_LIMIT);
+    backend.put(&key, body("long")).await.unwrap();
+    assert_eq!(backend.get(&key, None).await.unwrap(), body("long"));
+    assert_eq!(names(dir.path()), [key.clone()]);
+    let refused = backend.put(&"A".repeat(NAME_LIMIT + 1), body("x")).await;
+    assert!(matches!(refused, Err(Error::Other(_))), "{refused:?}");
 }
