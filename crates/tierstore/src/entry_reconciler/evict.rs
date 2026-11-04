@@ -163,7 +163,7 @@ impl EntryReconciler {
         };
         let cold = match self.cold.head(key).await {
             Ok(cold) => cold,
-            Err(Error::NotFound(_)) => return self.adopt(key).await,
+            Err(Error::NotFound(_)) => return self.adopt_unreplicated(key).await,
             Err(error) => return Err(error),
         };
         if !self.remembered(key, &hot, &cold)
@@ -194,7 +194,7 @@ impl EntryReconciler {
 
     /// Gives a hot object that has no cold copy a pending put entry, so that the next step copies
     /// it. An entry that exists is left as it is.
-    async fn adopt(&self, key: &str) -> Result<Evicted, Error> {
+    async fn adopt_unreplicated(&self, key: &str) -> Result<Evicted, Error> {
         match self.entries.create(key, Take::Stray).await? {
             Created::Taken(_) => Ok(Evicted::Adopted),
             Created::Exists => Ok(Evicted::Kept),
