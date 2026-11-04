@@ -9,8 +9,9 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use crate::dir::{COPY_CHUNK, READ_CHUNK};
 use crate::reconciler::COMPARE_RANGE;
-use crate::s3::S3Tuning;
+use crate::s3::{CHUNKS_WAITING, S3Tuning};
 
 use super::config::{ConfigError, ServerTable, TierTable, duration, invalid, within};
 use super::config_units::{Dur, Size};
@@ -26,6 +27,13 @@ pub struct S3Client {
     pub min_body_rate: Option<NonZeroU64>,
     /// `server.s3_pool_idle_timeout`, `server.s3_read_retries` and `server.s3_read_retry_wait`.
     pub tuning: S3Tuning,
+    /// `server.s3_chunks_waiting`: how many chunks of a part an S3 tier holds between the body it
+    /// is given and the request that sends it.
+    pub chunks_waiting: usize,
+    /// `server.dir_copy_chunk` and `server.dir_read_chunk`: the bytes in which a `dir` tier joins
+    /// the parts of an upload and gives a streamed read.
+    pub dir_copy_chunk: usize,
+    pub dir_read_chunk: u64,
 }
 
 impl Default for S3Client {
@@ -34,6 +42,9 @@ impl Default for S3Client {
             connect_timeout: Duration::from_secs(5),
             min_body_rate: NonZeroU64::new(1 << 20),
             tuning: S3Tuning::default(),
+            chunks_waiting: CHUNKS_WAITING,
+            dir_copy_chunk: COPY_CHUNK,
+            dir_read_chunk: READ_CHUNK,
         }
     }
 }
@@ -62,7 +73,7 @@ impl Default for HotTuning {
 }
 
 /// The duration of `table.key`, or `default`, from `low` to `high`, both included.
-fn span(
+pub(super) fn span(
     place: (&str, &str),
     value: Option<Dur>,
     default: Duration,
@@ -129,7 +140,9 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
             pool_idle_timeout,
             read_retries,
             read_retry_wait,
+            ..old.tuning
         },
+        ..old
     })
 }
 

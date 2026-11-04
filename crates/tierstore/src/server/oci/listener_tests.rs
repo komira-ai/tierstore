@@ -66,6 +66,7 @@ async fn a_failed_accept_is_followed_by_another_ask() {
         write_idle: second,
         lifetime: second,
         drain_deadline: second,
+        listen: crate::server::ListenTuning::default(),
     };
     let asked = Arc::new(AtomicUsize::new(0));
     let incoming = Failing {
@@ -100,6 +101,7 @@ fn plain_front() -> (Arc<OciFront>, OciLimits) {
         write_idle: second,
         lifetime: second,
         drain_deadline: second,
+        listen: crate::server::ListenTuning::default(),
     };
     (front, limits)
 }
@@ -403,6 +405,7 @@ fn closing_loop(
         write_idle: minute,
         lifetime: minute,
         drain_deadline: minute,
+        listen: crate::server::ListenTuning::default(),
     };
     let (stop, stopped) = watch::channel(false);
     let shared = Shared::new(drain_of(&front, limits), limits.max_connections);

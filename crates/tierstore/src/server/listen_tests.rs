@@ -10,7 +10,10 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
-use super::{Addrs, LoopbackBind, bind, bind_all, bind_set, joined, local_addrs};
+use super::{
+    Addrs, ListenTuning, LoopbackBind, bind, bind_all, bind_all_with, bind_set, bind_with, joined,
+    local_addrs,
+};
 use crate::server::Drained;
 use crate::server::testing::Rig;
 
@@ -269,4 +272,37 @@ fn a_loopback_bind_error_names_loopback_the_port_and_the_reason() {
     assert!(text.contains("loopback"), "{text}");
     assert!(text.contains("127.0.0.1:9300"), "{text}");
     assert!(text.contains("address in use"), "{text}");
+}
+
+/// The length of the queue of connections that this namespace's table of TCP sockets shows for the
+/// listening socket at `port` (the `tx_queue` of a socket in the listen state).
+#[cfg(target_os = "linux")]
+fn backlog_of(port: u16) -> Option<u32> {
+    let table = std::fs::read_to_string("/proc/self/net/tcp").ok()?;
+    let local = format!(":{port:04X}");
+    table.lines().skip(1).find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let listening = fields.get(3).copied() == Some("0A");
+        let at = fields.get(1)?.ends_with(&local);
+        let queue = fields.get(4)?.split(':').next()?;
+        (listening && at).then(|| u32::from_str_radix(queue, 16).ok())?
+    })
+}
+
+/// Asserts that the backlog given to the bind is the length of the queue the socket listens with,
+/// for one socket and for each socket of a set, and that the default is the 1024 the code had.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn the_backlog_given_is_the_queue_the_socket_listens_with() {
+    for asked in [7, 9] {
+        let listener = bind_with(addr("127.0.0.1:0"), asked).expect("bound");
+        let port = listener.local_addr().expect("an address").port();
+        assert_eq!(backlog_of(port), Some(asked as u32), "{asked}");
+    }
+    let set = [addr("127.0.0.1:0"), addr("127.0.0.1:0")];
+    for listener in bind_all_with(&set, 11).expect("bound") {
+        let port = listener.local_addr().expect("an address").port();
+        assert_eq!(backlog_of(port), Some(11));
+    }
+    assert_eq!(ListenTuning::default().backlog, 1024);
 }

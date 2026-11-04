@@ -102,6 +102,7 @@ pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_servin
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
 use super::config_interface::UpstreamTable;
+use super::config_io::IoTuning;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
@@ -242,6 +243,8 @@ pub struct Cli {
     pub s3_client: S3Client,
     /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
     pub hot_tuning: HotTuning,
+    /// The sockets, the pauses and the piece queue that `[server]` tunes.
+    pub io_tuning: IoTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
     pub hot_bytes: u64,
     /// The percent of `hot_store.budget` above which the oldest copied objects are evicted from the
@@ -546,7 +549,7 @@ pub(super) fn open_tier(
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
         }
-        None => tier(flag, spec),
+        None => tier_tuned(flag, spec, client),
     }
 }
 
@@ -602,16 +605,25 @@ fn s3_tier(
     let backend = built.map_err(|why| fail(why.to_string()))?;
     // Off unless set: a read of the tag before the DELETE is right on every store. The store is
     // not asked whether it enforces `If-Match` on a DELETE; the setting says.
-    let backend = backend.with_conditional_delete(s3.conditional_delete.unwrap_or(false));
+    let backend = backend
+        .with_conditional_delete(s3.conditional_delete.unwrap_or(false))
+        .with_chunks_waiting(client.chunks_waiting);
     Ok(Arc::new(backend))
 }
 
 /// The tier a flag names, of the kinds that need no flags besides the tier's own.
 fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
+    tier_tuned(flag, spec, &S3Client::default())
+}
+
+/// [`tier`], a `dir:<path>` tier with the chunk sizes `client` gives.
+fn tier_tuned(flag: &str, spec: &str, client: &S3Client) -> Result<Arc<dyn Backend>, String> {
     match (spec, spec.strip_prefix("dir:")) {
         ("memory", _) => Ok(Arc::new(MemoryBackend::new())),
         (_, Some(path)) => match DirBackend::open(path) {
-            Ok(dir) => Ok(Arc::new(dir)),
+            Ok(dir) => Ok(Arc::new(
+                dir.with_chunks(client.dir_copy_chunk, client.dir_read_chunk),
+            )),
             Err(why) => Err(format!("{flag} {spec:?}: {why}")),
         },
         _ => {
@@ -689,9 +701,6 @@ const DEFAULT_OCI_CONNECTIONS: u32 = 64;
 /// The default of `params.connection_lifetime`.
 const DEFAULT_OCI_LIFETIME: Duration = Duration::from_secs(3600);
 
-/// How long a client has to finish the TLS handshake with the OCI front.
-const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
-
 /// Checks the OCI front's flags and files, and makes its TLS, if an `oci` interface is given. A prefix,
 /// certificate or key that cannot work is an `InvalidFlags` (exit 2, as a restart cannot mend it);
 /// a file that cannot be read is exit 1. `warn` says whether the warning for a plain-text listener
@@ -765,7 +774,8 @@ pub(super) fn oci_setup_of(
     let connections = flags.max_connections.unwrap_or(DEFAULT_OCI_CONNECTIONS);
     let limits = OciLimits {
         max_connections: connections as usize,
-        handshake_timeout: OCI_HANDSHAKE,
+        handshake_timeout: server.oci_handshake_timeout,
+        listen: server.listen,
         header_timeout: server.header_timeout,
         write_idle: server.body_idle_timeout,
         lifetime,

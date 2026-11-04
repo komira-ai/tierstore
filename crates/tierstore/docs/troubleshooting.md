@@ -98,7 +98,7 @@ tierstore: oci: <peer>: TLS handshake: <error>
 tierstore: oci: <peer>: TLS handshake took too long
 ```
 
-The first is a client that does not trust the certificate, speaks plain HTTP to an HTTPS front, or sends garbage: the `<error>` says which. The second is a connection that did not finish the handshake in 10 seconds (a port scan, a stalled client, or a path that drops packets); the connection is closed to free its slot. Neither needs a restart.
+The first is a client that does not trust the certificate, speaks plain HTTP to an HTTPS front, or sends garbage: the `<error>` says which. The second is a connection that did not finish the handshake in `server.oci_handshake_timeout` (10 seconds by default) (a port scan, a stalled client, or a path that drops packets); the connection is closed to free its slot. Neither needs a restart.
 
 ### Build-node cache
 

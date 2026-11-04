@@ -59,12 +59,14 @@ const DIR_MODE: u32 = 0o700;
 /// The longest file name, in bytes, that a key may be encoded to.
 const NAME_LIMIT: usize = 255;
 
-/// The size of the pieces in which the parts of an upload are joined.
-const COPY_CHUNK: usize = 1 << 20;
+/// The default of the size of the pieces in which the parts of an upload are joined
+/// ([`DirBackend::with_chunks`]).
+pub(crate) const COPY_CHUNK: usize = 1 << 20;
 
-/// The most bytes of an object that a streamed read ([`Backend::get_stream`]) holds at a time:
-/// each chunk it gives is this long, but for the last, which is what is left.
-const READ_CHUNK: u64 = 1 << 16;
+/// The default of the most bytes of an object that a streamed read ([`Backend::get_stream`])
+/// holds at a time: each chunk it gives is this long, but for the last, which is what is left
+/// ([`DirBackend::with_chunks`]).
+pub(crate) const READ_CHUNK: u64 = 1 << 16;
 
 /// The directory, inside the one of the backend, that holds the uploads in progress.
 const UPLOADS: &str = ".uploads";
@@ -166,6 +168,10 @@ pub struct DirBackend {
     /// Set once a sync of the root has succeeded after the subdirectory of `_entries/` was known
     /// to exist, so that the later entry writes do not sync the root again.
     root_synced: AtomicBool,
+    /// The size of the pieces in which the parts of an upload are joined.
+    copy_chunk: usize,
+    /// The size of the chunks of a streamed read.
+    read_chunk: u64,
 }
 
 /// The error of a failed call on the file `path`.
@@ -245,12 +251,12 @@ async fn write_stream(path: &Path, body: &mut PartBody<'_>) -> Result<[u8; TAG_L
 
 /// Writes the contents of `files`, one after the other, to a new file at `path` behind the
 /// content tag of the whole, which is written last, and gives the tag.
-async fn join_files(path: &Path, files: &[PathBuf]) -> Result<[u8; TAG_LEN], Error> {
+async fn join_files(path: &Path, files: &[PathBuf], chunk: usize) -> Result<[u8; TAG_LEN], Error> {
     let fail = io_error(path);
     let mut out = create_new(path).await.map_err(&fail)?;
     out.write_all(&[0_u8; TAG_LEN]).await.map_err(&fail)?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; COPY_CHUNK];
+    let mut buffer = vec![0_u8; chunk];
     for file in files {
         let mut input = File::open(file).await.map_err(io_error(file))?;
         loop {
@@ -344,14 +350,14 @@ async fn read_tagged(
 }
 
 /// The `left` bytes of the body that `stored` is positioned at, as chunks of at most
-/// [`READ_CHUNK`] bytes, each read when the chunk is asked for. A file that ends before the
+/// `chunk` bytes, each read when the chunk is asked for. A file that ends before the
 /// bytes do, or a read that fails, is the last chunk, as an error.
-fn chunks(stored: Stored, left: u64) -> ReadBody {
-    let next = |(mut stored, left): (Stored, u64)| async move {
+fn chunks(stored: Stored, left: u64, chunk: u64) -> ReadBody {
+    let next = move |(mut stored, left): (Stored, u64)| async move {
         if left == 0 {
             return None;
         }
-        let want = left.min(READ_CHUNK);
+        let want = left.min(chunk);
         let mut chunk = Vec::new();
         let read = (&mut stored.file).take(want).read_to_end(&mut chunk).await;
         let read = read.map_err(io_error(&stored.path));
@@ -461,7 +467,19 @@ impl DirBackend {
             placing: Mutex::new(()),
             syncer,
             root_synced: AtomicBool::new(false),
+            copy_chunk: COPY_CHUNK,
+            read_chunk: READ_CHUNK,
         })
+    }
+
+    /// This backend joining the parts of an upload in pieces of `copy` bytes and giving a
+    /// streamed read as chunks of `read` bytes ([`COPY_CHUNK`] and [`READ_CHUNK`] if this is not
+    /// called). A size of zero is taken as one.
+    #[must_use]
+    pub fn with_chunks(mut self, copy: usize, read: u64) -> Self {
+        self.copy_chunk = copy.max(1);
+        self.read_chunk = read.max(1);
+        self
     }
 
     /// Syncs `dir`, whose entries a call has just changed, so that the call does not return
@@ -775,7 +793,7 @@ impl Backend for DirBackend {
         let mut stored = self.stored(key).await?;
         let (offset, len) = window(stored.size, range)?;
         stored.seek_body(offset).await?;
-        Ok(chunks(stored, len))
+        Ok(chunks(stored, len, self.read_chunk))
     }
 
     /// Opens the file once: the meta and the chunks are those of that file, as for
@@ -797,7 +815,7 @@ impl Backend for DirBackend {
         Ok(Opened {
             meta,
             window,
-            body: chunks(stored, len),
+            body: chunks(stored, len, self.read_chunk),
         })
     }
 
@@ -893,7 +911,7 @@ impl Backend for DirBackend {
             return Err(Error::AlreadyExists(key.to_owned()));
         }
         let temp = self.temp(&self.root);
-        let tag = match join_files(&temp, &files).await {
+        let tag = match join_files(&temp, &files, self.copy_chunk).await {
             Ok(tag) => tag,
             Err(error) => {
                 let _ = fs::remove_file(&temp).await;

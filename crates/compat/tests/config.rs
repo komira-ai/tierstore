@@ -330,3 +330,23 @@ fn an_oci_interface_with_an_upstream_starts_on_this_branch_and_is_refused_by_the
     );
     assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
+
+/// Asserts that a file that sets the io keys of `[server]` (the header timeout, the listen backlog,
+/// the closing door's times, the multipart sizes and the rest) is read by this branch and refused
+/// by the pinned release before with status 2, which predates the warning for an unknown key
+/// (#141 on main: a release that has it ignores the keys with one warning each), and that the same
+/// file without them is loaded by both. So a host that may roll back to the pinned release leaves
+/// the keys out until every process has this branch.
+#[test]
+fn the_io_keys_are_read_here_and_refused_by_the_pinned_release_before() {
+    let node = Node::new("compat-config-io-keys");
+    let ok = status(ExitCode::SUCCESS);
+    let refused = status(ExitCode::from(2));
+    let keys = "header_timeout = \"61s\"\nlisten_backlog = 512\naccept_pause = \"150ms\"\n\
+                door_grace = \"4s\"\ndoor_look = \"20ms\"\nput_pieces_queued = 6\n\
+                oci_handshake_timeout = \"12s\"\ns3_part_bytes = \"32MiB\"\n\
+                s3_multipart_threshold = \"32MiB\"\ns3_chunks_waiting = 2\n\
+                dir_copy_chunk = \"2MiB\"\ndir_read_chunk = \"128KiB\"";
+    assert_eq!(both(&node.file(keys, "", "")), (ok.clone(), refused));
+    assert_eq!(both(&node.file("", "", "")), (ok.clone(), ok));
+}

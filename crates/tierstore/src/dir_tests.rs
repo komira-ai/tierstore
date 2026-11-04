@@ -843,3 +843,65 @@ async fn an_upload_and_its_parts_are_open_to_their_owner_alone() {
         assert_eq!(bits(&entry.unwrap().path()) & 0o077, 0);
     }
 }
+
+/// Asserts that `with_chunks` sets the size of the chunks of a streamed read: an object of 2500
+/// bytes is given as 1000, 1000 and 500 bytes by one set to 1000, the same bytes in 7-byte chunks
+/// by one set to 7, and a size of zero is taken as one.
+#[tokio::test]
+async fn a_streamed_read_gives_chunks_of_the_size_given_to_with_chunks() {
+    let held = patterned(2500);
+    for (asked, sizes) in [(1000, vec![1000, 1000, 500]), (2500, vec![2500])] {
+        let (_dir, backend) = backend();
+        let backend = backend.with_chunks(super::COPY_CHUNK, asked);
+        backend.put("k", held.clone()).await.unwrap();
+        let (got, bytes) = drained(backend.get_stream("k", None).await.unwrap()).await;
+        assert_eq!(got, sizes, "{asked}");
+        assert_eq!(bytes, held);
+    }
+    let (_dir, backend) = backend();
+    let backend = backend.with_chunks(0, 0);
+    backend.put("k", body("abc")).await.unwrap();
+    let (got, bytes) = drained(backend.get_stream("k", None).await.unwrap()).await;
+    assert_eq!(got, [1, 1, 1]);
+    assert_eq!(bytes, b"abc");
+}
+
+/// Asserts that parts longer than the copy chunk given to `with_chunks` (7 bytes, and 1 for a
+/// size of zero) are joined whole: the object is the parts in order, byte for byte, and its tag is
+/// that of a put of the same bytes.
+#[tokio::test]
+async fn parts_are_joined_whole_in_the_pieces_given_to_with_chunks() {
+    let (first, second) = (patterned(100), patterned(33));
+    let mut whole = first.to_vec();
+    whole.extend_from_slice(&second);
+    for copy in [7, 0] {
+        let (_dir, backend) = backend();
+        let backend = backend.with_chunks(copy, super::READ_CHUNK);
+        let id = backend.create_upload("k").await.unwrap();
+        let one = backend
+            .upload_part("k", &id, 1, one_piece(&first))
+            .await
+            .unwrap();
+        let two = backend
+            .upload_part("k", &id, 2, one_piece(&second))
+            .await
+            .unwrap();
+        backend
+            .complete_upload("k", &id, &[(1, one), (2, two)])
+            .await
+            .unwrap();
+        assert_eq!(backend.get("k", None).await.unwrap(), whole, "{copy}");
+        let (_dir, plain) = self::backend();
+        plain.put("k", Bytes::from(whole.clone())).await.unwrap();
+        let (joined, put) = (
+            backend.head("k").await.unwrap(),
+            plain.head("k").await.unwrap(),
+        );
+        assert_eq!(joined.tag, put.tag, "{copy}");
+    }
+}
+
+/// A body of the one piece `bytes`.
+fn one_piece(bytes: &Bytes) -> PartBody<'static> {
+    stream::once(std::future::ready(Ok(bytes.clone()))).boxed()
+}

@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use super::{MULTIPART_THRESHOLD, PART_BYTES};
+
 /// How many times a ranged read is sent again after its transport failed (not timed
 /// out by the store's caller or by a limit of the client): a connection the store, or the path to it,
 /// closed after the request went out ("connection closed before message completed")
@@ -34,6 +36,14 @@ pub struct S3Tuning {
     pub read_retries: u32,
     /// The wait before the first resend of a read; each resend waits twice the one before.
     pub read_retry_wait: Duration,
+    /// The part size of a multipart upload (a larger object gets larger parts, see
+    /// [`part_size_with`](super::part_size_with)), which is also what one part holds in memory
+    /// while it is sent. Between [`MIN_PART_BYTES`](super::MIN_PART_BYTES) and
+    /// [`MAX_PART_BYTES`](super::MAX_PART_BYTES).
+    pub part_bytes: u64,
+    /// The largest object written with one PUT; a larger one is a multipart upload. At most
+    /// `part_bytes`, so that a streamed write holds no more than a part of its body.
+    pub multipart_threshold: u64,
 }
 
 impl Default for S3Tuning {
@@ -42,6 +52,8 @@ impl Default for S3Tuning {
             pool_idle_timeout: POOL_IDLE_TIMEOUT,
             read_retries: READ_RETRIES,
             read_retry_wait: READ_RETRY_WAIT,
+            part_bytes: PART_BYTES,
+            multipart_threshold: MULTIPART_THRESHOLD,
         }
     }
 }
@@ -56,5 +68,7 @@ mod tests {
         assert_eq!(tuning.pool_idle_timeout, Duration::from_secs(30));
         assert_eq!(tuning.read_retries, 2);
         assert_eq!(tuning.read_retry_wait, Duration::from_millis(50));
+        assert_eq!(tuning.part_bytes, 16 << 20);
+        assert_eq!(tuning.multipart_threshold, 16 << 20);
     }
 }

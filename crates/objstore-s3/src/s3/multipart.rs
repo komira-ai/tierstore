@@ -33,22 +33,19 @@ pub const MAX_PART_BYTES: u64 = 5 << 30;
 /// The most parts one object may have.
 pub const MAX_PARTS: u64 = 10_000;
 
-/// The part size of any object that fits in [`MAX_PARTS`] of them (156.25 GiB):
-/// 16 MiB, what one part holds in memory while it is sent.
+/// The default part size ([`S3Tuning::part_bytes`](super::S3Tuning::part_bytes)): that of any
+/// object that fits in [`MAX_PARTS`] of them (156.25 GiB), 16 MiB, what one part holds in memory
+/// while it is sent.
 pub const PART_BYTES: u64 = 16 << 20;
 
-/// The largest object written with one PUT; a larger one is a multipart upload. One
+/// The default of [`S3Tuning::multipart_threshold`](super::S3Tuning::multipart_threshold): the
+/// largest object written with one PUT; a larger one is a multipart upload. One
 /// part's worth, so a streamed write of any size holds at most [`PART_BYTES`] (or
 /// [`part_size`] of a larger object) of its body at once. Below S3's 5 GiB limit for
 /// one PUT.
 pub const MULTIPART_THRESHOLD: u64 = PART_BYTES;
 
-/// [`PART_BYTES`] as a length in memory.
-pub(super) const PART_LEN: usize = 16 << 20;
-
 const MIB: u64 = 1 << 20;
-
-const _: () = assert!(PART_LEN as u64 == PART_BYTES);
 
 // One PUT carries at most what S3 takes in one.
 const _: () = assert!(MULTIPART_THRESHOLD <= MAX_PART_BYTES);
@@ -59,9 +56,22 @@ const _: () = assert!(MULTIPART_THRESHOLD <= MAX_PART_BYTES);
 /// object over 10,000 parts of 5 GiB, about 48.8 TiB).
 #[must_use]
 pub fn part_size(len: u64) -> Option<u64> {
+    part_size_with(len, PART_BYTES)
+}
+
+/// [`part_size`] with `base` in place of [`PART_BYTES`]: `base`, or for an object too large for
+/// [`MAX_PARTS`] parts of that size, the least whole number of MiB that fits it in
+/// [`MAX_PARTS`] parts; `None` when even [`MAX_PART_BYTES`] parts do not.
+#[must_use]
+pub fn part_size_with(len: u64, base: u64) -> Option<u64> {
     let least = len.div_ceil(MAX_PARTS).div_ceil(MIB).checked_mul(MIB)?;
-    let size = least.max(PART_BYTES);
+    let size = least.max(base);
     (size <= MAX_PART_BYTES).then_some(size)
+}
+
+/// A part of `bytes` as a length in memory.
+pub(super) fn part_len(bytes: u64) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX)
 }
 
 /// Writes `body`, `len` bytes, under `key` as a multipart upload: a new object, or, given the
@@ -74,7 +84,7 @@ pub(super) async fn put(
     body: BodyStream,
     matching: Option<&str>,
 ) -> Result<Option<String>, ObjectStoreError> {
-    let size = part_size(len).ok_or(ObjectStoreError::Unsupported(
+    let size = part_size_with(len, conn.tuning.part_bytes).ok_or(ObjectStoreError::Unsupported(
         "an object larger than 10,000 parts of 5 GiB",
     ))?;
     let upload = create(conn, key).await?;
@@ -84,7 +94,7 @@ pub(super) async fn put(
 
 /// Writes `first` and `rest`, a body of a length not known, as a multipart upload that replaces
 /// the object that has the entity tag `etag` (`If-Match` on the completion). Each part (of
-/// [`PART_LEN`] bytes, the last shorter) is sent as soon as it is full and the body has more, so
+/// `part_bytes` of the tuning, the last shorter) is sent as soon as it is full and the body has more, so
 /// at most one part and one piece of the body are held, and the object is replaced only by the
 /// completion, after the whole body was read. `first` is the first part, which the caller read
 /// to find that the body is longer than one part.
@@ -128,7 +138,7 @@ async fn send_unsized(
 ) -> Result<Option<String>, ObjectStoreError> {
     let mut etags = vec![upload_part(upload, 1, first).await?];
     while rest.more().await? {
-        let part = rest.next(PART_LEN).await?;
+        let part = rest.next(part_len(upload.conn.tuning.part_bytes)).await?;
         etags.push(upload_part(upload, etags.len() + 1, part).await?);
     }
     complete(upload, &etags, Some(etag)).await
@@ -389,5 +399,17 @@ mod tests {
             assert!((MIN_PART_BYTES..=MAX_PART_BYTES).contains(&size), "{len}");
             assert_eq!(size % MIB, 0, "{len}");
         }
+    }
+
+    /// A part size of the caller's is the least a part is, and an object too large for that many
+    /// parts still gets parts that fit it, up to the largest S3 takes.
+    #[test]
+    fn a_base_part_size_replaces_the_default_one() {
+        let base = MIN_PART_BYTES;
+        assert_eq!(part_size_with(1, base), Some(base));
+        assert_eq!(part_size_with(base * MAX_PARTS, base), Some(base));
+        assert_eq!(part_size_with(base * MAX_PARTS + 1, base), Some(base + MIB));
+        assert_eq!(part_size_with(u64::MAX, base), None);
+        assert_eq!(part_size_with(1, base * 4), Some(base * 4));
     }
 }

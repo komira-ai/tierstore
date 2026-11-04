@@ -51,7 +51,7 @@ use super::cli_serve::{bind_oci, bind_s3, cut_note};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
-use super::listen::{LoopbackBind, bind, bind_set, joined, local_addrs};
+use super::listen::{LoopbackBind, bind_set, bind_with, joined, local_addrs};
 use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
@@ -73,10 +73,11 @@ pub(super) const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 /// A configured address that cannot be bound (named), or a loopback socket that cannot ([`LoopbackBind`]).
 pub(super) fn bind_cache_s3(
     configured: &[std::net::SocketAddr],
+    backlog: i32,
 ) -> Result<Vec<tokio::net::TcpListener>, Error> {
-    let mut listeners = bind_s3(configured)?;
+    let mut listeners = bind_s3(configured, backlog)?;
     for addr in &bind_set(configured, true)[configured.len()..] {
-        let socket = bind(*addr).map_err(|why| LoopbackBind { addr: *addr, why })?;
+        let socket = bind_with(*addr, backlog).map_err(|why| LoopbackBind { addr: *addr, why })?;
         listeners.push(socket);
     }
     Ok(listeners)
@@ -235,10 +236,11 @@ pub(super) async fn serve_front(
     beside: impl Future<Output = ()>,
 ) -> Result<Drained, Error> {
     config.cache = Some(cache.clone());
+    let backlog = config.listen.backlog;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    let listeners = bind_cache_s3(fronts.listen)?;
+    let listeners = bind_cache_s3(fronts.listen, backlog)?;
     let oci = bind_oci(oci, backend).await?;
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     let oci_drain = oci.as_ref().map(OciListener::drain);

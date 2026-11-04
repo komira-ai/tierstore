@@ -41,6 +41,7 @@ mod xml;
 
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, MULTIPART_THRESHOLD, PART_BYTES, part_size,
+    part_size_with,
 };
 pub use parts::{OpenUpload, UploadsPage};
 pub use streamed::{ObjectBody, ObjectRead};
@@ -597,7 +598,7 @@ impl ObjectStore for S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<(), ObjectStoreError> {
-        if len <= MULTIPART_THRESHOLD {
+        if len <= self.conn.tuning.multipart_threshold {
             let bytes = crate::gather(body, len).await?;
             return self.put_new(key, bytes, None).await;
         }

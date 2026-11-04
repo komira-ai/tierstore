@@ -17,7 +17,7 @@ use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
 use super::first_beat::wait_first_beat;
 use super::handoff::{Front, Handoff, HandoffError, Inherited, Offer, Socket, Want, take};
-use super::listen::{bind_all, duplicates, local_addrs};
+use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
@@ -68,8 +68,8 @@ impl Addresses {
 ///
 /// # Errors
 /// An address cannot be bound; the message names it.
-pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
-    bind_all(addrs).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
+pub(super) fn bind_s3(addrs: &[SocketAddr], backlog: i32) -> Result<Vec<TcpListener>, Error> {
+    bind_all_with(addrs, backlog).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
 }
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
@@ -139,6 +139,7 @@ pub async fn run_handing(
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
+    let listen = built.server.listen;
     let server = Server::new(proxy, built.server);
     let oci_addrs = built
         .oci
@@ -159,11 +160,13 @@ pub async fn run_handing(
     };
     let (listeners, inherited_oci) = match taken {
         Some(Inherited { s3, oci }) => (s3, Some(oci)),
-        None => (bind_s3(&cli.listen)?, None),
+        None => (bind_s3(&cli.listen, listen.backlog)?, None),
     };
     let oci = bind_oci_from(built.oci, oci_backend, inherited_oci).await?;
     let offer = match handoff {
-        Some(handoff) => Some(offer_of(handoff, &listeners, oci.as_ref())?),
+        Some(handoff) => Some(
+            offer_of(handoff, &listeners, oci.as_ref())?.with_accept_pause(listen.accept_pause),
+        ),
         None => None,
     };
     let stop = stopped_by(stop, offer);

@@ -53,7 +53,7 @@ mod uploads;
 use self::dates::{http_date, iso_date, system_seconds};
 use self::uploads::list_uploads;
 use super::sigv4::{Request as Signed, Signer};
-use super::{Credentials, S3Config, S3Store};
+use super::{Credentials, S3Config, S3Store, S3Tuning};
 use crate::{Capabilities, ObjectKey};
 
 /// The runs bytes are cut into when kept: a run of all zeros is only counted.
@@ -321,6 +321,12 @@ impl FakeS3 {
     }
 
     /// A store for bucket `tierstore-fake` on this service, claiming `capabilities`.
+    #[must_use]
+    pub fn store(&self, capabilities: Capabilities) -> S3Store {
+        self.store_tuned(capabilities, S3Tuning::default())
+    }
+
+    /// As [`store`](Self::store), with the settings `tuning` gives.
     ///
     /// # Panics
     /// Never: the configuration is valid.
@@ -329,17 +335,20 @@ impl FakeS3 {
         clippy::expect_used,
         reason = "a test double: its configuration is valid, as documented under Panics"
     )]
-    pub fn store(&self, capabilities: Capabilities) -> S3Store {
-        S3Store::new(S3Config {
-            endpoint: self.endpoint.clone(),
-            region: "us-east-1".to_owned(),
-            bucket: "tierstore-fake".to_owned(),
-            credentials: Credentials::new("fake-key", "fake-secret"),
-            capabilities,
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(60),
-            min_body_rate: None,
-        })
+    pub fn store_tuned(&self, capabilities: Capabilities, tuning: S3Tuning) -> S3Store {
+        S3Store::new_tuned(
+            S3Config {
+                endpoint: self.endpoint.clone(),
+                region: "us-east-1".to_owned(),
+                bucket: "tierstore-fake".to_owned(),
+                credentials: Credentials::new("fake-key", "fake-secret"),
+                capabilities,
+                connect_timeout: Duration::from_secs(5),
+                request_timeout: Duration::from_secs(60),
+                min_body_rate: None,
+            },
+            tuning,
+        )
         .expect("a valid configuration")
     }
 

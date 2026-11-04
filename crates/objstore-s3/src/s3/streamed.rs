@@ -19,7 +19,7 @@ use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
 use super::tagged::{header, retrying};
-use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, times, transport};
+use super::{Conn, S3Store, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 
@@ -130,7 +130,7 @@ impl S3Store {
     /// with `len` bytes taken from `body` as they are sent, and gives the tag of the new object as
     /// the store sends it.
     ///
-    /// A body of at most [`MULTIPART_THRESHOLD`] bytes is gathered and sent as one PUT, as
+    /// A body of at most the `multipart_threshold` of the tuning ([`MULTIPART_THRESHOLD`](super::MULTIPART_THRESHOLD) by default) bytes is gathered and sent as one PUT, as
     /// [`put_stream`](crate::ObjectStore::put_stream) does; a longer one is a multipart upload
     /// whose completion carries `If-Match`, so the object is replaced only in the last request,
     /// after the whole body was read, and the upload is aborted on any failure. A body that fails
@@ -146,7 +146,7 @@ impl S3Store {
         body: BodyStream,
         etag: &str,
     ) -> Result<String, ObjectStoreError> {
-        if len <= MULTIPART_THRESHOLD {
+        if len <= self.conn.tuning.multipart_threshold {
             let bytes = crate::gather(body, len).await?;
             return self.put_if_match(key, bytes, etag).await;
         }
@@ -158,7 +158,7 @@ impl S3Store {
     /// as they are sent, and gives the tag of the new object as the store sends it (the `ETag` of
     /// the answer to the write that made it, as [`put_new_tagged`](Self::put_new_tagged) does).
     ///
-    /// A body of at most [`MULTIPART_THRESHOLD`] bytes is gathered and sent as one PUT with
+    /// A body of at most the `multipart_threshold` of the tuning ([`MULTIPART_THRESHOLD`](super::MULTIPART_THRESHOLD) by default) bytes is gathered and sent as one PUT with
     /// `If-None-Match: *`; a longer one is a multipart upload whose completion carries it, so the
     /// object appears only in the last request, after the whole body was read, and the upload is
     /// aborted on any failure. A body that fails or has another length than `len` creates
@@ -173,7 +173,7 @@ impl S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<String, ObjectStoreError> {
-        if len <= MULTIPART_THRESHOLD {
+        if len <= self.conn.tuning.multipart_threshold {
             let bytes = crate::gather(body, len).await?;
             return self.put_new_tagged(key, bytes).await;
         }
@@ -198,7 +198,9 @@ impl S3Store {
         etag: &str,
     ) -> Result<String, ObjectStoreError> {
         let mut rest = Unsized::new(body);
-        let first = rest.next(multipart::PART_LEN).await?;
+        let first = rest
+            .next(multipart::part_len(self.conn.tuning.part_bytes))
+            .await?;
         if !rest.more().await? {
             return self.put_if_match(key, first, etag).await;
         }

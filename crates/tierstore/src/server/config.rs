@@ -55,6 +55,7 @@ use super::config_combined::{CombinedSettings, combined};
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
+use super::config_io::io_tuning;
 use super::config_policy::{Policy, check_policies};
 use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
@@ -295,6 +296,19 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    // The keys of `config_io`.
+    pub header_timeout: Option<Dur>,
+    pub accept_pause: Option<Dur>,
+    pub listen_backlog: Option<i32>,
+    pub door_grace: Option<Dur>,
+    pub door_look: Option<Dur>,
+    pub put_pieces_queued: Option<u32>,
+    pub oci_handshake_timeout: Option<Dur>,
+    pub s3_part_bytes: Option<Size>,
+    pub s3_multipart_threshold: Option<Size>,
+    pub s3_chunks_waiting: Option<u32>,
+    pub dir_copy_chunk: Option<Size>,
+    pub dir_read_chunk: Option<Size>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
@@ -695,6 +709,7 @@ pub(super) fn storage(
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
         min_secret_bytes: front.min_secret_bytes,
+        io_tuning: front.io,
         skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
@@ -732,7 +747,8 @@ pub(super) fn front_of(
     listen: Vec<SocketAddr>,
     per_run: PerRun,
 ) -> Result<Shared, ConfigError> {
-    let s3_client = s3_client(&server)?;
+    let mut s3_client = s3_client(&server)?;
+    let io = io_tuning(&server, &mut s3_client)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -782,6 +798,7 @@ pub(super) fn front_of(
         min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,
+        io,
     };
     Ok(Shared {
         front,

@@ -129,6 +129,28 @@ fn the_params_make_the_front() {
     assert_eq!(setup.limits.lifetime, Duration::from_secs(90));
 }
 
+/// Asserts that the io keys of `[server]` are the limits of the registry front: the handshake
+/// time, the header timeout and the listen settings (backlog, accept pause and the closing door's
+/// times) of its listener are the file's.
+#[test]
+fn the_io_keys_of_the_server_table_are_the_limits_of_the_front() {
+    let rig = Rig::new("oci-interface-io-keys");
+    let params = rig.tls();
+    let text = rig.file(Some(("127.0.0.1:0", &params))).replacen(
+        "proxy_id = \"p1\"",
+        "proxy_id = \"p1\"\noci_handshake_timeout = \"17s\"\nheader_timeout = \"41s\"\nlisten_backlog = 99\naccept_pause = \"7ms\"\ndoor_grace = \"2s\"\ndoor_look = \"3ms\"",
+        1,
+    );
+    let cli = Cli::from_config_text(&text).expect("a file");
+    let setup = build(&cli).expect("built").oci.expect("a front");
+    assert_eq!(setup.limits.handshake_timeout, Duration::from_secs(17));
+    assert_eq!(setup.limits.header_timeout, Duration::from_secs(41));
+    assert_eq!(setup.limits.listen.backlog, 99);
+    assert_eq!(setup.limits.listen.accept_pause, Duration::from_millis(7));
+    assert_eq!(setup.limits.listen.door_grace, Duration::from_secs(2));
+    assert_eq!(setup.limits.listen.door_look, Duration::from_millis(3));
+}
+
 /// Asserts that the size of the reads at the end of a push is 1 MiB unless `params.stage_read`
 /// gives it.
 #[test]

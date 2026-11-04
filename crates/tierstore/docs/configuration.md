@@ -222,6 +222,18 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
 | `server.s3_read_retries` | count, 2 (0 to 8) | how many times a read of an `s3` tier that failed in transport (a connection closed after the request went out) is sent again; 0 sends it once. A read that timed out is never sent again |
 | `server.s3_read_retry_wait` | duration, `50ms` (1ms to 10s) | the wait before the first resend of a read; each resend waits twice the one before |
+| `server.header_timeout` | duration, `60s` (1ms to 1h) | how long a client has to send the head of a request, and so how long a connection may wait, idle, for its next request (S3 and OCI fronts); also how long the drain waits for a client to close a connection the server shut. Keep it above the time a client keeps an idle connection in its pool |
+| `server.listen_backlog` | count, 1024 (1 to 65535) | the length of the queue of connections the system keeps for a listening socket that is not yet accepted from; the system may cut it to its own limit (`net.core.somaxconn` on Linux) |
+| `server.accept_pause` | duration, `100ms` (1ms to 1m) | how long an accept loop (both fronts and the hand-off socket) waits after an accept that failed, so that a listener that keeps failing is not asked again at once |
+| `server.door_grace` | duration, `3s` (1ms to 1m) | the longest the closing door of a draining front takes connections whose handshake is still in flight, and how long a new connection has to send its first request after the settle |
+| `server.door_look` | duration, `10ms` (1ms to 10s, not over `door_grace`) | how far apart the two looks are that must both find no handshake in flight before the door closes |
+| `server.put_pieces_queued` | count, 4 (1 to 4096) | how many pieces of a streamed put's body wait for the backend to take them; with the piece in hand and the one the backend has, all a put holds between the client and the backend |
+| `server.oci_handshake_timeout` | duration, `10s` (1ms to 1h) | how long a client has to finish the TLS handshake with the OCI front before the connection is closed to free its slot |
+| `server.s3_part_bytes` | bytes, 16 MiB (5 MiB to 1 GiB) | the part size of a multipart upload to an `s3` tier (a larger object gets larger parts, to fit 10000), and the most one part holds in memory while it is sent |
+| `server.s3_multipart_threshold` | bytes, 16 MiB (1 to `s3_part_bytes`) | the largest object written to an `s3` tier with one PUT; a larger one is a multipart upload. Left out, it is 16 MiB or `s3_part_bytes` if that is smaller |
+| `server.s3_chunks_waiting` | count, 1 (1 to 1024) | how many chunks of a part wait for the request to an `s3` tier that sends them |
+| `server.dir_copy_chunk` | bytes, 1 MiB (1 to 1 GiB) | the size of the pieces in which a `dir` tier joins the parts of a multipart upload |
+| `server.dir_read_chunk` | bytes, 64 KiB (1 to 1 GiB) | the size of the chunks in which a `dir` tier gives a streamed read |
 
 ## `[hot_store]` and `[cold_store]`
 
@@ -329,7 +341,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 - the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
-These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
+These tuning values are fixed in this release and have no key: the intervals of the cache's passes and of the scrub, the sizes of the OCI front's buffers and limits, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 
