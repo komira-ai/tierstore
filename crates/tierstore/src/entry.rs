@@ -5,8 +5,9 @@
 //! read at (`If-Match`), and removed by the actor whose work it was (or by the reconciler, when
 //! the entry is sealed). That makes every change of an entry one atomic store call, and a call
 //! that lost a race fails instead of overwriting. This module is the entry's body, its
-//! transitions and the store calls that carry them out. Nothing else of the crate uses it yet: no
-//! request path reads or writes an entry.
+//! transitions and the store calls that carry them out. Only the entry reconciler
+//! ([`EntryReconciler`](crate::EntryReconciler)) uses it so far: no request path reads or writes an
+//! entry.
 //!
 //! - The body is JSON: `v` (1), `key`, `op` ([`EntryOp`]), `st` ([`EntryState`]), `owner` (the
 //!   id of the proxy or reconciler working on the key, or `null`), `nonce` (written afresh by
@@ -327,11 +328,19 @@ impl Entries {
     /// The backend's error for a failed head or get, and [`Error::Other`] for a body that is not
     /// an entry.
     pub async fn read(&self, key: &str) -> Result<Option<Seen>, Error> {
-        let path = entry_key(key);
-        let Some(meta) = found(self.hot.head(&path).await)? else {
+        self.read_path(&entry_key(key)).await
+    }
+
+    /// Reads the entry object at `path`, a name from [`Entries::list`]: its body and tag, or
+    /// `None` if there is none.
+    ///
+    /// # Errors
+    /// As [`Entries::read`].
+    pub async fn read_path(&self, path: &str) -> Result<Option<Seen>, Error> {
+        let Some(meta) = found(self.hot.head(path).await)? else {
             return Ok(None);
         };
-        let Some(body) = found(self.hot.get(&path, None).await)? else {
+        let Some(body) = found(self.hot.get(path, None).await)? else {
             return Ok(None);
         };
         let entry = decode_entry(&body)?;
@@ -339,6 +348,29 @@ impl Entries {
             entry,
             tag: meta.tag,
         }))
+    }
+
+    /// The names of the entries in the hot tier, in ascending order, listed `page_size` at a time
+    /// (at least one). An entry that is made or removed while the listing is read may or may not
+    /// be in it.
+    ///
+    /// # Errors
+    /// The backend's error for a failed listing.
+    pub async fn list(&self, page_size: usize) -> Result<Vec<String>, Error> {
+        let page_size = page_size.max(1);
+        let mut paths: Vec<String> = Vec::new();
+        loop {
+            let after = paths.last().cloned();
+            let page = self
+                .hot
+                .list_page(ENTRIES_PREFIX, after.as_deref(), page_size)
+                .await?;
+            let last = page.len() < page_size;
+            paths.extend(page.into_iter().map(|object| object.key));
+            if last {
+                return Ok(paths);
+            }
+        }
     }
 
     /// Creates the entry of `key` as `take` says, create-only.

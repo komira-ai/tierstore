@@ -78,7 +78,12 @@
 //! - [`Entries`] are the calls on the journal entry of one key, `_entries/<sha256 of the key>` in
 //!   the hot tier: a create-only create, a replace on the content tag for each [`Step`] of the
 //!   entry's life, a delete, and a read-back by nonce for a write whose answer was lost. The
-//!   body is an [`Entry`]. Nothing else of the crate calls them yet.
+//!   body is an [`Entry`]. Only the [`EntryReconciler`] calls them so far.
+//! - The [`EntryReconciler`] works on the entries in place of the journals: it holds the lease,
+//!   lists `_entries/`, copies each landed put to the cold tier after it has taken the entry,
+//!   finishes the deletes handed over to it, reaps the entries of owners that departed, and adopts
+//!   hot objects that have no entry and no cold object. It does nothing until `_tiering/format`
+//!   says `active`, and no binary starts it yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!
@@ -121,6 +126,7 @@ mod deadline;
 mod deadline_tests;
 mod dir;
 mod entry;
+mod entry_reconciler;
 #[cfg(test)]
 mod entry_tests;
 mod error;
@@ -174,6 +180,7 @@ pub use entry::{
     Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,
     encode_entry, entry_key,
 };
+pub use entry_reconciler::{EntryReconciler, EntryReconcilerConfig, StepReport};
 pub use error::Error;
 pub use faulty::{FaultyBackend, Op};
 pub use gate::{Gate, GateBackend, Phase};
