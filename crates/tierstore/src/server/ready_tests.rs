@@ -83,6 +83,7 @@ async fn usagez_is_503_while_the_usage_has_not_changed_for_longer_than_the_limit
 async fn readyz_stays_200_when_the_usage_is_stale_or_missing() {
     let rig = Rig::new(MEBIBYTE).await;
     publish(&rig, 1).await;
+    assert_eq!(usagez(&rig).await.status, StatusCode::OK);
     advance(&rig, 10 * LIMIT_MS);
     assert_eq!(usagez(&rig).await.status, StatusCode::SERVICE_UNAVAILABLE);
     let stale = readyz(&rig).await;
@@ -142,6 +143,7 @@ async fn the_drain_is_reported_by_readyz_and_an_unreadable_usage_counts_as_missi
 async fn a_stale_usage_does_not_refuse_puts() {
     let rig = Rig::new(MEBIBYTE).await;
     publish(&rig, 1).await;
+    assert_eq!(usagez(&rig).await.status, StatusCode::OK);
     advance(&rig, LIMIT_MS + 1_000);
     assert_eq!(usagez(&rig).await.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(rig.put("k", b"v").await.status, StatusCode::OK);
