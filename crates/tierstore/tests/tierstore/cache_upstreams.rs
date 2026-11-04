@@ -13,7 +13,7 @@ use std::sync::Arc;
 use tierstore::{Backend, ByteRange, Error, MemoryBackend, Proxy, ProxyConfig, TestClock};
 
 use crate::cache_over_proxy::cache_over;
-use crate::support::{assert_absent, body, chunks, read};
+use crate::support::{assert_absent, body, chunks, keys_under, read};
 
 /// An upstream and the store a test puts the objects it reads in: the store itself, or, behind
 /// the proxy, its cold tier (so that the proxy has to find the object there).
@@ -149,7 +149,8 @@ async fn reserved_keys_are_refused(up: Upstream) {
         .put_stream("_tiering/x", Some(1), chunks(&["x"]))
         .await;
     assert_eq!(refused, Err(Error::Reserved("_tiering/x".to_owned())));
-    assert_absent(&*up.upstream, "_tiering/x").await;
+    // The proxy answers a head of a reserved key as `Reserved`, so the store behind is listed.
+    assert!(keys_under(&*up.behind, "_tiering/x").await.is_empty());
 }
 
 /// An object larger than the whole-fill limit is read in windows and given in ranges.
