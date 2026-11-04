@@ -14,7 +14,9 @@ use tokio::sync::oneshot;
 
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
-use super::{NAME_LIMIT, classify, create_new, decode, encode, encode_legacy, failed, part_name, sha256};
+use super::{
+    NAME_LIMIT, classify, create_new, decode, encode, encode_legacy, failed, part_name, sha256,
+};
 
 fn backend() -> (TestDir, DirBackend) {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-dir");
@@ -881,7 +883,8 @@ async fn this_release_reads_a_directory_the_previous_release_wrote() {
     let taken = backend.put("Foo", body("new")).await;
     assert!(matches!(taken, Err(Error::AlreadyExists(_))), "{taken:?}");
     let tag = hex::encode(sha256(b"old"));
-    backend.put_if_match("Foo", body("newer"), &tag).await.unwrap();
+    let replaced = backend.put_if_match("Foo", body("newer"), &tag).await;
+    replaced.unwrap();
     assert_eq!(backend.get("Foo", None).await.unwrap(), body("newer"));
     assert_eq!(names(dir.path()), ["Foo", "a~B"]);
     backend.delete("Foo").await.unwrap();
