@@ -343,7 +343,7 @@ the cut requests are counted in `Drained.abandoned` (`cut_note`).
 | `cache_fills_total`, `cache_fills_skipped_total`, `cache_fills_skipped_busy_total`, `cache_fill_failures_total{reason}`, `cache_evictions_total{reason}`, `cache_pinned_skips_total`, `cache_staging_files` | stay 0 | v-current only |
 | `cache_discarded_at_start_total` | 0 (read-only open deletes nothing) | v-current's |
 | `cache_bytes`, `cache_objects` (a snapshot in v-next), `cache_fs_free_bytes` | start snapshot / live | **double-count** one directory and one file system |
-| `hits_total`, `misses_total`, `read_errors_total`, `reads_total`, `bytes_served_total`, `bytes_read_total` (`tier`, `op`), `promotions_*` (storage), `oci_requests_total`, `oci_bytes_served_total`, `oci_digest_mismatches_total`, `oci_front_info` | count | per process; the sum is right |
+| `hits_total`, `misses_total`, `read_errors_total`, `reads_total`, `bytes_served_total`, `bytes_read_total` (`tier`, `op`), `promotions_*` (storage), `oci_requests_total`, `oci_bytes_served_total`, `oci_digest_mismatches_total`, `oci_tag_recheck_failures_total`, `oci_front_info` | count | per process; the sum is right |
 
 Counters restart at 0 in a new process; a rate handles it; read the directory gauges from the lock holder. No family names
 a build, slot or mode today, and a scrape of 9300 does not say which instance answered. New: `tierstore_build_info

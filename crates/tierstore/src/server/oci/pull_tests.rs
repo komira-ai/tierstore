@@ -1,7 +1,7 @@
 //! The pull-through of the front, over an in-memory store and a registry in the process (see
 //! `fake_upstream`): no network.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -534,4 +534,257 @@ async fn a_store_that_fails_is_not_answered_from_the_upstream() {
     let blob = rig.get(&format!("/v2/a/blobs/{digest}")).await;
     blob.assert_error(StatusCode::SERVICE_UNAVAILABLE, "UNAVAILABLE");
     assert!(rig.registry.seen().is_empty());
+}
+
+const FIRST_VERSION: &str = "oci/tags/library~app/latest/18446744073709551615";
+const SECOND_VERSION: &str = "oci/tags/library~app/latest/18446744073709551614";
+const TAG_PATH: &str = "/v2/library/app/manifests/latest";
+
+/// What the registry of the re-check tests does now, changed by the test between pulls.
+struct Script {
+    /// The manifest the tag is at.
+    manifest: &'static str,
+    /// The status of a `HEAD` of the tag.
+    head_status: u16,
+    /// The `Docker-Content-Digest` of a `HEAD`: the digest of `manifest` if `None`.
+    head_digest: Option<String>,
+    /// The status of a `GET` of the tag.
+    get_status: u16,
+}
+
+type Control = Arc<Mutex<Script>>;
+
+fn script() -> Control {
+    Arc::new(Mutex::new(Script {
+        manifest: MANIFEST,
+        head_status: 200,
+        head_digest: None,
+        get_status: 200,
+    }))
+}
+
+fn change(control: &Control, edit: impl FnOnce(&mut Script)) {
+    edit(&mut control.lock().unwrap_or_else(PoisonError::into_inner));
+}
+
+/// A registry that has the tag `latest` of `library/app` as `control` says.
+async fn tag_rig(control: &Control) -> Rig {
+    let control = Arc::clone(control);
+    Rig::new(move |seen| {
+        let now = control.lock().unwrap_or_else(PoisonError::into_inner);
+        if seen.path != TAG_PATH {
+            return Fake::status(404);
+        }
+        if seen.method == "HEAD" {
+            let digest =
+                (now.head_digest.clone()).unwrap_or_else(|| digest_of(now.manifest.as_bytes()));
+            Fake::status(now.head_status).with("docker-content-digest", &digest)
+        } else if now.get_status == 200 {
+            Fake::ok(now.manifest)
+        } else {
+            Fake::status(now.get_status)
+        }
+    })
+    .await
+}
+
+fn methods(rig: &Rig) -> Vec<String> {
+    rig.registry.seen().into_iter().map(|s| s.method).collect()
+}
+
+/// Asserts the answer is 200 with `manifest` and its digest.
+fn assert_served(answer: &Answer, manifest: &str) {
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.body, manifest.as_bytes());
+    let digest = digest_of(manifest.as_bytes());
+    assert_eq!(answer.header("docker-content-digest"), digest);
+}
+
+/// Asserts a tag in the store whose digest the upstream still announces is served from the store
+/// with a `HEAD` only: a second pull by a `GET` and a third by a `HEAD` make no `GET` upstream,
+/// write no version, and count no failure.
+#[tokio::test]
+async fn an_unchanged_digest_serves_the_stored_manifest_without_a_get() {
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(methods(&rig), ["GET"]);
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    let head = rig.ask(Method::HEAD, TAG_PATH, &[]).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(
+        head.header("docker-content-digest"),
+        digest_of(MANIFEST.as_bytes())
+    );
+    assert_eq!(methods(&rig), ["GET", "HEAD", "HEAD"]);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+    assert_eq!(rig.metrics.recheck_failures(), 0);
+}
+
+/// Asserts a tag the upstream has moved is pulled again: the new manifest is stored by its
+/// digest, the next version of the tag points at it and is served, the old version and manifest
+/// stay, and the next pull finds the digest unchanged and makes no `GET`.
+#[tokio::test]
+async fn a_moved_digest_writes_a_new_version_and_serves_the_new_manifest() {
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.manifest = OTHER_MANIFEST);
+    assert_served(&rig.get(TAG_PATH).await, OTHER_MANIFEST);
+    assert_eq!(methods(&rig), ["GET", "HEAD", "GET"]);
+    assert_eq!(rig.tags_stored().await, [SECOND_VERSION, FIRST_VERSION]);
+    let newest = digest_of(OTHER_MANIFEST.as_bytes());
+    assert_eq!(
+        rig.stored(SECOND_VERSION).await.as_deref(),
+        Some(newest.as_bytes())
+    );
+    let first = digest_of(MANIFEST.as_bytes());
+    assert_eq!(
+        rig.stored(FIRST_VERSION).await.as_deref(),
+        Some(first.as_bytes())
+    );
+    assert!(rig.stored(&blob_key(MANIFEST.as_bytes())).await.is_some());
+    let stored = rig.stored(&blob_key(OTHER_MANIFEST.as_bytes())).await;
+    assert_eq!(stored.as_deref(), Some(OTHER_MANIFEST.as_bytes()));
+    assert_served(&rig.get(TAG_PATH).await, OTHER_MANIFEST);
+    assert_eq!(methods(&rig), ["GET", "HEAD", "GET", "HEAD"]);
+    assert_eq!(rig.metrics.recheck_failures(), 0);
+}
+
+/// Asserts a `HEAD` that fails (5xx, 429, a status that is not a digest answer) serves the stored
+/// tag, with no `GET`, no new version, and one failure counted for each pull.
+#[tokio::test]
+async fn an_upstream_that_fails_the_head_serves_the_stored_tag_and_counts_it() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.manifest = OTHER_MANIFEST);
+    for (status, count) in [500_u16, 429, 503, 401].into_iter().zip(1_u64..) {
+        change(&control, |now| now.head_status = status);
+        assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+        assert_eq!(rig.metrics.recheck_failures(), count);
+    }
+    assert!(!methods(&rig)[1..].contains(&"GET".to_owned()));
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+    let text = rig.metrics.render();
+    assert!(
+        text.contains("tierstore_oci_tag_recheck_failures_total 4\n"),
+        "{text}"
+    );
+}
+
+/// Asserts a `HEAD` answered 200 without a usable `Docker-Content-Digest` (none, another
+/// algorithm) is a failure to check, and the stored tag is served.
+#[tokio::test]
+async fn a_head_without_a_usable_digest_serves_the_stored_tag_and_counts_it() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.manifest = OTHER_MANIFEST);
+    for (bad, count) in ["", "sha512:abc"].into_iter().zip(1_u64..) {
+        change(&control, |now| now.head_digest = Some(bad.to_owned()));
+        assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+        assert_eq!(rig.metrics.recheck_failures(), count);
+    }
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+}
+
+/// Asserts a tag the upstream has moved whose manifest then cannot be pulled (404, 500) keeps the
+/// stored tag, counts a failure, and writes no version.
+#[tokio::test]
+async fn a_moved_tag_that_cannot_be_pulled_serves_the_stored_tag_and_counts_it() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.manifest = OTHER_MANIFEST);
+    for (status, count) in [404_u16, 500].into_iter().zip(1_u64..) {
+        change(&control, |now| now.get_status = status);
+        assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+        assert_eq!(rig.metrics.recheck_failures(), count);
+    }
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+}
+
+/// Asserts a tag that is back at the stored digest by the time it is pulled (the `HEAD` said it
+/// had moved, the `GET` sends the stored manifest) writes no version and counts no failure.
+#[tokio::test]
+async fn a_tag_back_at_the_stored_digest_when_pulled_writes_no_version() {
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    let moved = digest_of(OTHER_MANIFEST.as_bytes());
+    change(&control, |now| now.head_digest = Some(moved.clone()));
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(methods(&rig), ["GET", "HEAD", "GET"]);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+    assert_eq!(rig.metrics.recheck_failures(), 0);
+}
+
+/// Asserts a moved tag whose manifest or new version the store cannot write keeps the stored tag
+/// and counts a failure: a failed manifest put writes no version, and a failed version write
+/// leaves the tag as it was.
+#[tokio::test]
+async fn a_store_that_cannot_keep_the_moved_tag_serves_the_stored_tag_and_counts_it() {
+    let _quiet = quiet();
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    change(&control, |now| now.manifest = OTHER_MANIFEST);
+    rig.faulty.fail_next(Op::Put, 1);
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(rig.metrics.recheck_failures(), 1);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+    rig.faulty
+        .fail_next_on(Op::Put, "oci/tags/", Error::Other("full".to_owned()));
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    assert_eq!(rig.metrics.recheck_failures(), 2);
+    assert_eq!(rig.tags_stored().await, [FIRST_VERSION]);
+}
+
+/// Asserts a pull by digest never contacts the upstream once its object is stored, and a tag
+/// pull's manifest is served by digest for any name without a request upstream.
+#[tokio::test]
+async fn a_pull_by_digest_never_contacts_the_upstream() {
+    let control = script();
+    let rig = tag_rig(&control).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    let digest = digest_of(MANIFEST.as_bytes());
+    let by_digest = format!("/v2/library/app/manifests/{digest}");
+    assert_served(&rig.get(&by_digest).await, MANIFEST);
+    let head = rig.ask(Method::HEAD, &by_digest, &[]).await;
+    assert_eq!(head.status, StatusCode::OK);
+    assert_eq!(methods(&rig), ["GET"]);
+}
+
+/// Asserts a tag the store holds that the upstream does not have (a tag only pushed here) is
+/// served as it is, with no new version and no failure counted, and that a tag moved by a push
+/// to a digest the upstream does not hold is moved back to the upstream's by the next pull, as
+/// the next version.
+#[tokio::test]
+async fn a_pushed_tag_stands_unless_the_upstream_has_it_at_another_digest() {
+    let control = script();
+    let rig = tag_rig(&control).await;
+    let pushed = digest_of(OTHER_MANIFEST.as_bytes());
+    rig.put_under(
+        &blob_key(OTHER_MANIFEST.as_bytes()),
+        OTHER_MANIFEST.as_bytes(),
+    )
+    .await;
+    let only_here = "oci/tags/library~app/local/18446744073709551615";
+    rig.put_under(only_here, pushed.as_bytes()).await;
+    let local = rig.get("/v2/library/app/manifests/local").await;
+    assert_served(&local, OTHER_MANIFEST);
+    assert_eq!(rig.metrics.recheck_failures(), 0);
+    assert_eq!(methods(&rig), ["HEAD"]);
+    rig.put_under(FIRST_VERSION, pushed.as_bytes()).await;
+    assert_served(&rig.get(TAG_PATH).await, MANIFEST);
+    let upstream = digest_of(MANIFEST.as_bytes());
+    assert_eq!(
+        rig.stored(SECOND_VERSION).await.as_deref(),
+        Some(upstream.as_bytes())
+    );
+    assert_eq!(methods(&rig), ["HEAD", "HEAD", "GET"]);
 }
