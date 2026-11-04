@@ -52,7 +52,7 @@ Non-goals:
 - Scrubbing stored objects for bit rot.
 - Protection against clock skew between machines: no timestamp from another machine is compared with anything (section 6.3).
 - Per-write ids in object metadata (section 12).
-- TLS on the S3 listener (the OCI front has it).
+- Client certificates (mutual TLS) on either front, and certificate reload without a restart. TLS on the S3 listener is optional (`--tls-cert`, `--tls-key`, as on the OCI front).
 
 ## 3. The design in one picture
 

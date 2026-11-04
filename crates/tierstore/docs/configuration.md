@@ -156,6 +156,8 @@ The keys of each table are those of the storage node and of the build node. What
 | `server.bucket` | `--bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
 | `server.region` | `--region` | string, `us-east-1` | the region in the credential scope of a request's signature (not the tiers' regions) |
 | `server.access_key_file` | `--access-key-file` | path, required | the full key file |
+| `server.tls_cert_file` | `--tls-cert` | path, none | on main, not in v0.0.41. The certificate chain (PEM, leaf first) that makes the S3 front serve HTTPS; with neither this nor the key it serves plain HTTP, the default. Every socket of the front is HTTPS, a build node's added loopback socket included. The leaf must name the front: it needs a DNS subjectAltName (any, since the server cannot know which name a client dials) or else an IP subjectAltName for each `server.listen` address; it may have both. A leaf that is expired or not yet valid, or a certificate with no subjectAltName, is refused. Both this and the key, or neither. The files are read once, so a new certificate takes a restart. A tier's `endpoint` is still `http://` (TLS to a tier is not built yet), so a build node cannot use another node's HTTPS front as its upstream |
+| `server.tls_key_file` | `--tls-key` | path, none | on main, not in v0.0.41. The private key (PEM) of `server.tls_cert_file`. A file that any user can read is refused (mode 0640 or 0600); a key that is not the certificate's is refused. Plain HTTP off loopback prints one warning line on stderr at start, naming the addresses and advising these two keys |
 | `server.read_only_key_files` | `--read-only-key-file` | paths, none | read-only key files |
 | `server.presign_key_files` | `--presign-key-file` | paths, none | presigning key files |
 | `server.gc_key_files` | `--gc-key-file` | paths, none | GC key files |
@@ -279,7 +281,7 @@ These describe one run, not the data path, and have no key:
 |---|---|---|
 | `--config` | none | the file |
 | `--print-config` | off | print the file for the flags given, and exit |
-| `--check-config` | off | with `--config`: load the file, read the key files it names, and for an `[oci]` table check the prefix, the connection lifetime and the TLS files; then exit 0 and print nothing, or print the refusal and exit 2. It binds nothing and asks no store. What it does not check is listed below. Without `--config` it is a usage error |
+| `--check-config` | off | with `--config`: load the file, read the key files it names, the S3 front's certificate and key if it has them, and for an `[oci]` table check the prefix, the connection lifetime and the TLS files; then exit 0 and print nothing, or print the refusal and exit 2. It binds nothing and asks no store. What it does not check is listed below. Without `--config` it is a usage error |
 | `--capabilities` | off | on main, not in v0.0.41. print what this build can do, one capability to a line, and exit 0 (a build with none prints nothing). It needs none of the flags a start requires, and with any other argument it prints nothing on stdout, says `--capabilities takes no other flag` on stderr and exits 2 |
 | `--drain-lb-wait` | `10s` | on SIGTERM, the settle: how long `/readyz` says 503 while the server goes on accepting and serving |
 | `--drain-deadline` | `15m` | then how long it waits for requests in flight and for the connections it closes (on main, not in v0.0.41: a lingering close, see [operations](operations.md#drain-and-restart)) |
