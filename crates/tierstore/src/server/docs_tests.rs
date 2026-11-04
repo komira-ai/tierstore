@@ -520,12 +520,14 @@ fn code() -> Code {
         .filter_map(|arg| arg.get_long().map(|long| format!("--{long}")))
         .collect();
     // The keys of an `[[interface]]` that are in no flag: its `type` and `params`, and the two
-    // params that say where it listens.
+    // params that say where it listens, and `params.upstream` of an `oci` interface, which has no
+    // flag.
     let interface = [
         "interface.type",
         "interface.params",
         "params.port",
         "params.addresses",
+        "params.upstream",
     ];
     let keys = KEYS
         .iter()

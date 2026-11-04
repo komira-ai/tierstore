@@ -229,6 +229,7 @@ pub mod local_cache;
 mod lock;
 mod memory_format;
 pub mod oci;
+mod oci_upstream_setup;
 mod ops;
 pub mod presign;
 mod reply;

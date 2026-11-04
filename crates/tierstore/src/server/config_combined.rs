@@ -92,6 +92,7 @@ fn oci_flags(node: &Cli) -> OciFlags {
         connection_lifetime: node.oci_connection_lifetime,
         require_auth: node.oci_require_auth,
         stage_read: node.oci_stage_read,
+        upstream: node.oci_upstream.clone(),
     }
 }
 

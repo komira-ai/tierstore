@@ -12,7 +12,7 @@
 //! credentials it holds for the registry (`podman login`, `docker login`) with each request, and
 //! the front checks them against the keys the server already has. The price is that the secret
 //! travels with every request, so `params.require_auth` is refused on plain HTTP off loopback
-//! (see `oci_setup`): the front is then served over TLS, or only to its own host.
+//! (see `oci_setup_of`): the front is then served over TLS, or only to its own host.
 //!
 //! # Keys and rights
 //!
