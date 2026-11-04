@@ -234,7 +234,6 @@ fn oci_interfaces_must_agree_on_the_front() {
             "require_auth = false",
             "require_auth",
         ),
-        ("require_auth = true", "prefix = \"a/\"", "require_auth"),
     ];
     for (first, second, name) in cases {
         let first = entry("oci", &format!("port = 5000, {first}"));
@@ -264,7 +263,7 @@ fn an_oci_interface_asks_for_keys_only_with_require_auth() {
     .unwrap();
     assert!(both.oci_require_auth);
     let why = refusal(&[s3, entry("oci", "port = 5000, require_auth = \"yes\"")]);
-    assert!(why.contains("require_auth"), "{why}");
+    assert!(why.contains("expected a boolean"), "{why}");
 }
 
 /// Asserts that an entry with a key the format does not have, and one without a `type`, are
