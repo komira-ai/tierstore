@@ -333,8 +333,8 @@ impl S3Error {
         answer(self.status, &headers, Bytes::from(body))
     }
 
-    /// The status and the code, which the tests of other modules read.
-    #[cfg(test)]
+    /// The status and the code, which the OCI front's manifest push and the tests of other
+    /// modules read.
     pub(crate) fn kind(&self) -> (StatusCode, &'static str) {
         (self.status, self.code)
     }
