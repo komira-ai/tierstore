@@ -422,7 +422,6 @@ pub struct Cli {
     pub oci_require_auth: bool,
     /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
     /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
-    #[arg(long, value_name = "BYTES", requires = "oci_listen", value_parser = clap::value_parser!(u64).range(1..))]
     pub oci_stage_read: Option<u64>,
 }
 
