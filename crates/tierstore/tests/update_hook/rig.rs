@@ -36,14 +36,14 @@ pub const NEW_VERSION: &str = "2.0.0";
 /// The capability that lets a release be handed over to.
 pub const HANDOVER: &str = "handover-v1";
 
-/// `nft list table inet kbf_guard_tierstore`, as the fake logs it.
-pub const LIST_GUARD: &str = "nft list table inet kbf_guard_tierstore";
-/// `nft list table inet kbf_forward_tierstore`, as the fake logs it.
-pub const LIST_FORWARD: &str = "nft list table inet kbf_forward_tierstore";
+/// `nft list table inet tierstore_guard`, as the fake logs it.
+pub const LIST_GUARD: &str = "nft list table inet tierstore_guard";
+/// `nft list table inet tierstore_forward`, as the fake logs it.
+pub const LIST_FORWARD: &str = "nft list table inet tierstore_forward";
 /// `nft -f -`, a ruleset applied in one transaction.
 pub const APPLY: &str = "nft -f -";
-/// `nft delete table inet kbf_guard_tierstore`.
-pub const DELETE_GUARD: &str = "nft delete table inet kbf_guard_tierstore";
+/// `nft delete table inet tierstore_guard`.
+pub const DELETE_GUARD: &str = "nft delete table inet tierstore_guard";
 
 /// `systemctl start` of the slot unit of `port`, as the fake logs it.
 pub fn start(port: u16) -> String {

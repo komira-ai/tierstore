@@ -13,12 +13,17 @@
 //!   `<prefix>uploads/<id>/c<offset in 20 digits>`, as it arrives, with no hash and no copy in
 //!   memory. A `Content-Range` (`<first>-<last>`) must start where the upload is (the sum of the
 //!   chunks stored) and say as many bytes as the chunk has, or the answer is 416 and the upload is
-//!   as it was; with none the chunk is appended.
+//!   as it was (a chunk of unknown length is counted as it is read, and one that has more or
+//!   fewer bytes than the range says is stored as nothing); with none the chunk is appended. A
+//!   chunk with no byte is accepted and stored as nothing.
 //! - `PUT <location>?digest=<digest>`: the last chunk, if the body has bytes, and the end of the
 //!   upload, 201. The blob is made in one pass: the chunks stored, in order, and then the body, are
 //!   read, hashed and handed to the store's streamed put as they pass, and the put is ended with an
-//!   error, which stores nothing, if the hash is not the digest. The chunks and the session are
-//!   then deleted. Nothing is held whole, whatever the size of the blob; there is no limit on it.
+//!   error, which stores nothing, if the hash is not the digest. The chunks are read in ranges of
+//!   at most [`STAGE_READ`] bytes. A blob the store says it has already is not taken on that word:
+//!   the bytes are read to their end and must hash to the digest, or the answer is the refusal
+//!   and the upload is as it was. The chunks and the session are then deleted. Nothing is held
+//!   whole, whatever the size of the blob; there is no limit on it.
 //! - `DELETE <location>`: cancels the upload and deletes what it stored, 204.
 //! - `PUT /v2/<name>/manifests/<reference>`: a manifest or an index. It is read whole (at most
 //!   [`MAX_MANIFEST_BYTES`]), must be one (see `manifest`), must hash to the reference if that is
@@ -49,6 +54,7 @@ use hyper::{HeaderMap, Response, StatusCode};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
+use tokio::sync::Mutex as AsyncMutex;
 
 use super::body::{self, OciBody};
 use super::metrics::Outcome;
@@ -60,7 +66,7 @@ use super::{
 };
 use crate::server::ops::detached;
 use crate::server::request::query_pairs;
-use crate::{Backend, Error, Listed, PartBody};
+use crate::{Backend, ByteRange, Error, Listed, PartBody};
 
 pub(super) type Answer = (Outcome, Response<OciBody>);
 
@@ -69,12 +75,18 @@ const UPLOAD_UUID: HeaderName = HeaderName::from_static("docker-upload-uuid");
 /// The code of an upload that is not open.
 const UNKNOWN_UPLOAD: &str = "BLOB_UPLOAD_UNKNOWN";
 
+/// The most bytes of a stored chunk that the end of an upload reads in one call, so that a chunk of
+/// any size is held a piece at a time whatever the backend does with a read of a whole object.
+pub(super) const STAGE_READ: u64 = 1 << 20;
+
 /// Why a streamed body was refused, for the answer to send.
 pub(super) enum Refusal {
     /// The bytes hashed to `found` (hex), not to the digest that was given.
     Digest { found: String },
     /// The body could not be read as it should: it stalled, or was cut.
     Body(String),
+    /// The body has not as many bytes as its `Content-Range` says.
+    Range,
 }
 
 /// What a streamed body came to: the bytes that passed and, if the body was refused, why.
@@ -218,6 +230,43 @@ pub(super) fn counted(
     .boxed()
 }
 
+/// `source` that ends with an error, which a backend takes as a body to store nothing of, unless it
+/// gives exactly `want` bytes: a longer body is refused at the piece that passes the count, a
+/// shorter one at its end, and `tally` has the reason.
+pub(super) fn measured(
+    source: PartBody<'static>,
+    want: u64,
+    tally: Arc<Tally>,
+) -> PartBody<'static> {
+    stream::unfold(
+        (source, 0_u64, tally, false),
+        move |(mut source, seen, tally, done)| async move {
+            if done {
+                return None;
+            }
+            match source.next().await {
+                Some(Ok(piece)) => {
+                    let seen = seen + piece.len() as u64;
+                    if seen > want {
+                        tally.refuse(Refusal::Range);
+                        let failed = Error::Other("the chunk is longer than its range".to_owned());
+                        return Some((Err(failed), (source, seen, tally, true)));
+                    }
+                    Some((Ok(piece), (source, seen, tally, false)))
+                }
+                Some(Err(failure)) => Some((Err(failure), (source, seen, tally, true))),
+                None if seen == want => None,
+                None => {
+                    tally.refuse(Refusal::Range);
+                    let failed = Error::Other("the chunk is shorter than its range".to_owned());
+                    Some((Err(failed), (source, seen, tally, true)))
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
 /// An empty answer, with `status`.
 fn bare(status: StatusCode, outcome: Outcome) -> Answer {
     let mut response = Response::new(body::empty());
@@ -327,9 +376,17 @@ fn chunk_range(text: &str) -> Option<(u64, u64)> {
     (last >= first).then_some((first, last))
 }
 
+/// The number of bytes the `Content-Range` of a chunk says it has, if it has one that is a range.
+fn declared(headers: &HeaderMap) -> Option<u64> {
+    let value = headers.get(CONTENT_RANGE)?;
+    let (first, last) = value.to_str().ok().and_then(chunk_range)?;
+    (last - first).checked_add(1)
+}
+
 /// Whether a chunk of `len` bytes (if its length is known) with these headers is the next bytes
 /// of an upload that holds `size`: with a `Content-Range`, it starts at `size` and says as many
-/// bytes as the chunk has; with none, it is appended.
+/// bytes as the chunk has (a chunk of unknown length is held to them as it is read, see
+/// [`measured`]); with none, it is appended.
 fn in_order(headers: &HeaderMap, size: u64, len: Option<u64>) -> bool {
     let Some(value) = headers.get(CONTENT_RANGE) else {
         return true;
@@ -364,6 +421,16 @@ async fn manifest_bytes(body: OciBody, idle: Duration) -> Result<Bytes, Unread> 
     Ok(whole.freeze())
 }
 
+/// What an upload has when its blob is made: the chunks stored, the session they belong to (a
+/// monolithic upload has none), and the number of bytes the final body is to have if its
+/// `Content-Range` says.
+#[derive(Default)]
+struct Upload<'a> {
+    chunks: Vec<Listed>,
+    session: Option<&'a str>,
+    declared: Option<u64>,
+}
+
 impl OciFront {
     /// The directory of the objects of the upload `id`.
     fn upload_dir(&self, id: &str) -> String {
@@ -391,20 +458,23 @@ impl OciFront {
         Ok(chunks)
     }
 
-    /// The chunks stored as one stream, in order.
-    fn staged(&self, keys: Vec<String>) -> PartBody<'static> {
+    /// The chunks stored as one stream, in order, each read in ranges of at most [`STAGE_READ`]
+    /// bytes by the sizes the listing gave, so that no read holds a whole chunk.
+    fn staged(&self, chunks: Vec<Listed>) -> PartBody<'static> {
         let backend = Arc::clone(&self.backend);
-        stream::iter(keys)
-            .then(move |key| {
-                let backend = Arc::clone(&backend);
-                async move {
-                    match backend.get_stream(&key, None).await {
-                        Ok(read) => read,
-                        Err(failure) => stream::once(async move { Err(failure) }).boxed(),
-                    }
-                }
+        let reads = chunks.into_iter().flat_map(|chunk| {
+            let Listed { key, size, .. } = chunk;
+            (0..size.div_ceil(STAGE_READ)).map(move |at| {
+                let offset = at * STAGE_READ;
+                let range = ByteRange::new(offset, STAGE_READ.min(size - offset));
+                (key.clone(), range)
             })
-            .flatten()
+        });
+        stream::iter(reads)
+            .then(move |(key, range)| {
+                let backend = Arc::clone(&backend);
+                async move { backend.get(&key, Some(range)).await }
+            })
             .boxed()
     }
 
@@ -425,9 +495,8 @@ impl OciFront {
             let Some(digest) = Digest::parse(text) else {
                 return invalid_digest(text);
             };
-            return self
-                .finish(name, Vec::new(), None, digest, body, idle)
-                .await;
+            let upload = Upload::default();
+            return self.finish(name, upload, digest, body, idle).await;
         }
         let id = new_id();
         let dir = self.upload_dir(&id);
@@ -462,18 +531,41 @@ impl OciFront {
             return length_required();
         }
         let tally = Arc::new(Tally::default());
+        let want = declared(headers);
         let stored = if len == Some(0) {
             Ok(())
         } else {
-            let reader = Pieces::new(body, idle);
-            let source = pieces(reader, Arc::clone(&tally));
+            let mut reader = Pieces::new(body, idle);
+            // A body of unknown length that turns out to be empty stores no object: an empty
+            // chunk at this offset would take the place of the next one.
+            let first = loop {
+                match reader.next().await {
+                    Ok(Some(piece)) if piece.is_empty() => {}
+                    Ok(Some(piece)) => break Some(piece),
+                    Ok(None) => break None,
+                    Err(why) => return body_refused(&why.message),
+                }
+            };
+            let Some(first) = first else {
+                return match want {
+                    Some(_) => out_of_order(name, id, size),
+                    None => accepted(name, id, size),
+                };
+            };
+            let head = stream::once(std::future::ready(Ok::<Bytes, Error>(first)));
+            let mut source = head.chain(pieces(reader, Arc::clone(&tally))).boxed();
+            if let Some(want) = want {
+                source = measured(source, want, Arc::clone(&tally));
+            }
             let stream = counted(source, None, Arc::clone(&tally));
             let key = format!("{}c{size:020}", self.upload_dir(id));
             let backend = Arc::clone(&self.backend);
             detached(async move { backend.put_stream(&key, len, stream).await }).await
         };
-        if let Some(Refusal::Body(message)) = tally.take() {
-            return body_refused(&message);
+        match tally.take() {
+            Some(Refusal::Body(message)) => return body_refused(&message),
+            Some(Refusal::Range) => return out_of_order(name, id, size),
+            Some(Refusal::Digest { .. }) | None => {}
         }
         match stored {
             Ok(()) => accepted(name, id, size + tally.bytes()),
@@ -512,42 +604,72 @@ impl OciFront {
         if !in_order(headers, size, body.size_hint().exact()) {
             return out_of_order(name, id, size);
         }
-        self.finish(name, staged, Some(id), digest, body, idle)
-            .await
+        let upload = Upload {
+            chunks: staged,
+            session: Some(id),
+            declared: declared(headers),
+        };
+        self.finish(name, upload, digest, body, idle).await
     }
 
-    /// Makes the blob `digest` from the chunks `staged` (the upload `session`, if it is one, has
-    /// them) followed by the body, and then deletes the chunks and the session's object. See the
-    /// module docs for the one pass.
+    /// Makes the blob `digest` from the chunks of `upload` (the upload's session, if it has one,
+    /// has them) followed by the body, and then deletes the chunks and the session's object. See
+    /// the module docs for the one pass.
+    ///
+    /// The blob is stored, and the chunks deleted, only if the bytes were read to their end and hash
+    /// to `digest`: a store that answers that the blob exists without reading the body (a proxy
+    /// whose cold tier has it) has the rest of the stream read here, so that the same bytes are
+    /// required of a blob that is there already.
     async fn finish(
         &self,
         name: &str,
-        staged: Vec<Listed>,
-        session: Option<&str>,
+        upload: Upload<'_>,
         digest: Digest,
         body: OciBody,
         idle: Duration,
     ) -> Answer {
-        let held: u64 = staged.iter().map(|chunk| chunk.size).sum();
+        let Upload {
+            chunks,
+            session,
+            declared,
+        } = upload;
+        let held: u64 = chunks.iter().map(|chunk| chunk.size).sum();
         let len = body.size_hint().exact().map(|bytes| bytes + held);
         if len.is_none() && self.backend.needs_length() {
             return length_required();
         }
         let tally = Arc::new(Tally::default());
         let reader = Pieces::new(body, idle);
-        let keys: Vec<String> = staged.into_iter().map(|chunk| chunk.key).collect();
-        let mut doomed = keys.clone();
+        let mut doomed: Vec<String> = chunks.iter().map(|chunk| chunk.key.clone()).collect();
         doomed.extend(session.map(|id| format!("{}begin", self.upload_dir(id))));
-        let source = self
-            .staged(keys)
-            .chain(pieces(reader, Arc::clone(&tally)))
-            .boxed();
-        let stream = counted(source, Some(digest.clone()), Arc::clone(&tally));
+        let mut last = pieces(reader, Arc::clone(&tally));
+        if let Some(want) = declared {
+            last = measured(last, want, Arc::clone(&tally));
+        }
+        let source = self.staged(chunks).chain(last).boxed();
+        let whole = counted(source, Some(digest.clone()), Arc::clone(&tally));
+        let rest = Arc::new(AsyncMutex::new(whole.fuse()));
+        let feed = stream::unfold(Arc::clone(&rest), |rest| async move {
+            let next = rest.lock().await.next().await;
+            next.map(|piece| (piece, rest))
+        })
+        .boxed();
         let key = self.prefix.key(&digest);
         let backend = Arc::clone(&self.backend);
         let stored = detached(async move {
-            match backend.put_stream(&key, len, stream).await {
-                Ok(()) | Err(Error::AlreadyExists(_)) => {}
+            match backend.put_stream(&key, len, feed).await {
+                Ok(()) => {}
+                Err(Error::AlreadyExists(_)) => {
+                    // The blob is there: the bytes are still to be read and found to be it.
+                    loop {
+                        let next = rest.lock().await.next().await;
+                        match next {
+                            Some(Ok(_)) => {}
+                            Some(Err(failure)) => return Err(failure),
+                            None => break,
+                        }
+                    }
+                }
                 Err(failure) => return Err(failure),
             }
             discard(backend.as_ref(), &doomed).await;
@@ -557,6 +679,7 @@ impl OciFront {
         match tally.take() {
             Some(Refusal::Digest { found }) => return digest_refused(&found, &digest),
             Some(Refusal::Body(message)) => return body_refused(&message),
+            Some(Refusal::Range) => return out_of_order(name, session.unwrap_or(""), held),
             None => {}
         }
         match stored {
