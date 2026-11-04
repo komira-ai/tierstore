@@ -1,9 +1,10 @@
 //! The puts of a proxy whose format is active (`WriteMode::Entries`): every put, held or
 //! streamed, presigned or the completion of a multipart upload, is made on the journal entry of its
 //! key. The entry decides which of several puts of one key wins. The entry reconciler
-//! (`EntryReconciler`) copies the object to the cold tier, removes the entry, and reaps the ones
-//! left behind by a proxy that departed; no binary starts it yet, so until the activation wiring
-//! lands the entries a put leaves stay where they are.
+//! (`EntryReconciler`, implemented in the library) copies the object to the cold tier, removes the
+//! entry, and reaps the ones left behind by a proxy that departed. The binary does not start it
+//! yet, so until the activation wiring lands the entries a put leaves in a running server stay
+//! where they are.
 //!
 //! A put, in order:
 //!
