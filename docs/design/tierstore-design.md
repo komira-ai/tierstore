@@ -149,7 +149,8 @@ A delete takes the entry, removes the key from both tiers, and either finishes a
    - `(PUT, PENDING)` or `(CB, PENDING)`: **amend** it into `(DEL, HELD, this node)`. The leader has not started on it, and its own CAS to HELD (section 6.5) now fails, so no copy starts. This delete does not wait.
    - `(PUT, HELD, the leader)`: the leader's copy may be in flight. **Amend** it the same way; this delete **waits** (step 3).
    - `(DEL, PENDING)`: a delete handed over earlier, now retried (it may have been half done, with the leader's copy still running). **Claim** it the same way; this delete **waits**.
-   - Anything else (a client's HELD entry, SEALED, or the CAS lost three times): 503 SlowDown.
+   - `(CB, SEALED)`: the leader is landing a copy-back. Change nothing; **wait**, polling the entry as in step 3, until it is gone or is another op's, then take the entry afresh and go on. The waits of one delete share one budget. 503 SlowDown only at the request deadline.
+   - Anything else (a client's HELD entry, another SEALED entry, or the CAS lost three times): 503 SlowDown.
 2. **Delete cold, then hot.** `cold.delete(K)`, then `hot.delete(K)`, each bounded by its own timeout and by the node's `live_until` (section 6.3), neither retried. **Cold is always deleted at once by the delete itself**, whatever the entry said. Cold first, so a cold-served read cannot return what hot lost. A call that fails or times out: CAS the entry to `(DEL, PENDING)` and answer 503; the leader finishes the delete, and a retry claims it and waits.
 3. **Finish.**
    - A **fresh** entry (nothing was pending) is deleted by its owner and the answer is 204: nothing is left for the leader, and a delete followed by a re-put of the key never waits.

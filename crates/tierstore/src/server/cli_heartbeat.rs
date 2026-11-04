@@ -30,15 +30,14 @@ pub struct HeartbeatFlags {
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub heartbeat: Duration,
     /// How long a proxy that is not heard of stays live, less `--deadline-margin`: the value of
-    /// `Proxy::is_live`. Only the puts on journal entries (active format) read it, to
-    /// admit and to acknowledge; the journal path does not, and the removal of registrations uses `--registration-retention`. At least six times
+    /// `Proxy::is_live`. The puts and deletes made on entries read it; the
+    /// removal of registrations uses `--registration-retention`. At least six times
     /// `--heartbeat`.
     #[arg(long, default_value = "60s", value_parser = parse_duration)]
     pub departure: Duration,
     /// The time taken off `--departure` for `Proxy::is_live`, and the time that must be left
-    /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. Only the
-    /// puts on journal entries (active format) check that time; `Bounded` is used by the
-    /// heartbeat alone. Longer than zero, and at most a quarter of `--departure`.
+    /// before a call of the `Bounded` wrapper that destroys starts, which it is also cut at. The
+    /// puts and deletes made on entries use both. Longer than zero, and at most a quarter of `--departure`.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
     pub deadline_margin: Duration,
     /// How long the registration of a proxy that heartbeated must have stayed unchanged, as the
