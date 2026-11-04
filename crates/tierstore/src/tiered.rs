@@ -788,6 +788,15 @@ impl Backend for Proxy {
         self.inner.head_object(key).await
     }
 
+    /// The tag of an object is the tag of the tier that answers, and moves when the proxy copies
+    /// the object from one tier to the other, so versions are told apart by size alone: the proxy
+    /// never replaces an object. Limit: a key that is deleted and put again with a body of the
+    /// same size between two HEADs is not seen. A key named by its content (`cas/l/<digest>`) is
+    /// not affected, as its bytes are checked against the digest.
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        a.size == b.size
+    }
+
     async fn delete(&self, key: &str) -> Result<(), Error> {
         self.inner.delete_object(key).await
     }

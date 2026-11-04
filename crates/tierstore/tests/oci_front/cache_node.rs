@@ -88,9 +88,9 @@ fn listen_value(addresses: &[String]) -> String {
 
 /// How [`Node::launch`] starts a node.
 pub(crate) struct Launch {
-    /// The addresses of the S3 front, `listen` of `[server]`.
+    /// The addresses of the S3 front, `params.addresses` of its interface.
     pub listen: Vec<String>,
-    /// The addresses of the OCI front, `listen` of `[oci]`.
+    /// The addresses of the OCI front, `params.addresses` of its interface.
     pub oci_listen: Vec<String>,
     /// The cache directory: `None` for one of the node's own, `Some` to share another node's.
     pub cache: Option<PathBuf>,
@@ -151,7 +151,7 @@ impl<'a> Node<'a> {
     pub(crate) fn launch(fake: &'a FakeS3, name: &str, launch: &Launch) -> Self {
         fake.require_credentials("UPKEY", "up-secret");
         let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), name);
-        let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
+        let key = secret(&dir, "key", "AKIDCACHE\ncache-secret-0123456789\n");
         let upstream_key = secret(&dir, "upstream.key", "UPKEY\nup-secret\n");
         let cache_dir = launch
             .cache
@@ -159,8 +159,15 @@ impl<'a> Node<'a> {
             .unwrap_or_else(|| dir.path().join("cache"));
         let file = format!(
             r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = {listen} }}
+
+[[interface]]
+type   = "oci"
+params = {{ addresses = {oci_listen} }}
+
 [server]
-listen          = {listen}
 proxy_id        = "oci-cache"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -175,9 +182,6 @@ kind             = "s3"
 bucket           = "tierstore-fake"
 endpoint         = "{endpoint}"
 credentials_file = "{upstream_key}"
-
-[oci]
-listen = {oci_listen}
 
 [[policy]]
 prefix = "oci/"
@@ -512,13 +516,20 @@ async fn a_cached_blob_whose_file_is_removed_is_filled_again() {
 #[test]
 fn a_taken_oci_address_fails_the_start_of_the_process() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "oci-cache-taken");
-    let key = secret(&dir, "key", "AKIDCACHE\ncache-secret\n");
+    let key = secret(&dir, "key", "AKIDCACHE\ncache-secret-0123456789\n");
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("bound");
     let busy = taken.local_addr().expect("an address");
     let file = format!(
         r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[[interface]]
+type   = "oci"
+params = {{ addresses = ["{busy}"] }}
+
 [server]
-listen          = "127.0.0.1:0"
 proxy_id        = "oci-taken"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
@@ -529,9 +540,6 @@ budget = "1MiB"
 
 [cold_store]
 kind = "memory"
-
-[oci]
-listen = "{busy}"
 
 [[policy]]
 prefix = "oci/"

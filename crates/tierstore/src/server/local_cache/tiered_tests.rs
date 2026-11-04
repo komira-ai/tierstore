@@ -1,5 +1,6 @@
-//! A cache over an upstream of two tiers (`tiered_upstream`): how it tells versions of an object
-//! apart, how it sends a hot-only put, and that it still checks a create-only put with a HEAD.
+//! A cache over an upstream of two tiers (one whose `same_version` is by size, as the proxy's is):
+//! how it tells versions of an object apart, how it sends a hot-only put, and that it still checks
+//! a create-only put with a HEAD.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,10 +17,12 @@ use crate::{Backend, ByteRange, Error, Listed, Meta, Op, PartBody};
 /// An upstream over the rig's that counts the two kinds of streamed put, and, once a read has
 /// been made, tags every object differently: the way a proxy's tag moves when it copies an
 /// object from its cold tier to its hot one. With `resize` it also reports every object one byte
-/// larger after a read: an object replaced by another of a different size.
+/// larger after a read: an object replaced by another of a different size. A probe that stands
+/// for two tiers (`by_size`) tells versions apart by size alone, as the proxy does.
 struct Probe {
     inner: Arc<dyn Backend>,
     resize: bool,
+    by_size: bool,
     plain: AtomicUsize,
     hot_only: AtomicUsize,
     reads: AtomicUsize,
@@ -27,17 +30,22 @@ struct Probe {
 
 impl Probe {
     fn over(inner: Arc<dyn Backend>) -> Arc<Self> {
-        Self::made(inner, false)
+        Self::made(inner, false, false)
+    }
+
+    fn two_tiers(inner: Arc<dyn Backend>) -> Arc<Self> {
+        Self::made(inner, false, true)
     }
 
     fn resizing(inner: Arc<dyn Backend>) -> Arc<Self> {
-        Self::made(inner, true)
+        Self::made(inner, true, true)
     }
 
-    fn made(inner: Arc<dyn Backend>, resize: bool) -> Arc<Self> {
+    fn made(inner: Arc<dyn Backend>, resize: bool, by_size: bool) -> Arc<Self> {
         Arc::new(Self {
             inner,
             resize,
+            by_size,
             plain: AtomicUsize::new(0),
             hot_only: AtomicUsize::new(0),
             reads: AtomicUsize::new(0),
@@ -47,6 +55,14 @@ impl Probe {
 
 #[async_trait]
 impl Backend for Probe {
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        if self.by_size {
+            a.size == b.size
+        } else {
+            a.same_content(b)
+        }
+    }
+
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
         self.inner.put(key, body).await
     }
@@ -138,26 +154,35 @@ fn meta(size: u64, tag: &str) -> Meta {
     }
 }
 
-/// Asserts the two readings of "one version": the same size and tag by default, and the same
-/// size alone for a cache over two tiers, whose tags move with the tier.
+/// Asserts the two readings of "one version": the same size and tag for an upstream that does not
+/// say otherwise, and the same size alone for an upstream of two tiers, whose tags move with the
+/// tier; the cache gives the upstream's answer, and so does a cache over that cache.
 #[tokio::test]
-async fn versions_are_told_apart_by_tag_and_size_unless_the_upstream_has_two_tiers() {
+async fn versions_are_told_apart_as_the_upstream_says() {
     let rig = Rig::new("tscache-version");
     let by_tag = rig.cache.inner.same_version(&meta(3, "a"), &meta(3, "a"));
     assert!(by_tag);
     assert!(!rig.cache.inner.same_version(&meta(3, "a"), &meta(3, "b")));
     assert!(!rig.cache.inner.same_version(&meta(3, "a"), &meta(4, "a")));
 
-    let tiered = rig.reopen_with(|config| config.tiered_upstream = true);
+    let upstream: Arc<dyn Backend> = rig.upstream.clone();
+    let tiers = Probe::two_tiers(upstream);
+    let tiered = cache_over(&rig, &tiers, |_| {});
     assert!(tiered.inner.same_version(&meta(3, "a"), &meta(3, "a")));
     assert!(tiered.inner.same_version(&meta(3, "a"), &meta(3, "b")));
     assert!(!tiered.inner.same_version(&meta(3, "a"), &meta(4, "a")));
+
+    let exposed: &dyn Backend = &tiered;
+    assert!(exposed.same_version(&meta(3, "a"), &meta(3, "b")));
+    assert!(!exposed.same_version(&meta(3, "a"), &meta(4, "a")));
+    let plain: &dyn Backend = &rig.cache;
+    assert!(!plain.same_version(&meta(3, "a"), &meta(3, "b")));
 }
 
 /// Asserts that a read of an object whose tag moves between the HEAD and the read is answered
 /// from the upstream and kept nowhere by a cache of the default kind (its fill ends as changed,
 /// and each read goes to the upstream again), and filled and kept by one over two tiers, which
-/// then answers the next read from its directory. The first half is what the option removes.
+/// then answers the next read from its directory.
 #[tokio::test]
 async fn a_fill_of_an_object_whose_tag_moves_is_served_only_when_the_upstream_has_two_tiers() {
     let rig = Rig::new("tscache-moved");
@@ -173,10 +198,9 @@ async fn a_fill_of_an_object_whose_tag_moves_is_served_only_when_the_upstream_ha
     assert_eq!(unkept.get("cas/b/obj", None).await.unwrap(), data);
     assert!(plain.reads.load(Ordering::SeqCst) > reads);
 
-    let moving = Probe::over(upstream);
+    let moving = Probe::two_tiers(upstream);
     let cache = cache_over(&rig, &moving, |config| {
         config.path = config.path.with_file_name("tiered");
-        config.tiered_upstream = true;
     });
     assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
     assert_eq!(cache.held(), (3000, 1));
@@ -206,11 +230,10 @@ async fn a_windowed_read_of_an_object_whose_tag_moves_is_served_only_when_the_up
         .await;
     assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
 
-    let moving = Probe::over(upstream);
+    let moving = Probe::two_tiers(upstream);
     let cache = cache_over(&rig, &moving, |config| {
         small(config);
         config.path = config.path.with_file_name("tiered");
-        config.tiered_upstream = true;
     });
     assert_eq!(cache.get("cas/b/big", asked).await.unwrap(), &data[..20]);
 }
@@ -267,38 +290,33 @@ async fn a_hot_only_put_is_refused_by_a_read_cache_and_for_a_reserved_key() {
     assert_eq!(rig.calls(Op::Head), 0);
 }
 
-/// Asserts that a create-only put is checked with a HEAD of the key first, with and without the
-/// option: a key that is there is refused by the HEAD, no byte of the body is read and no put is
-/// sent, and the refusal is counted by the cache as one for an object that exists.
+/// Asserts that a create-only put is checked with a HEAD of the key first: a key that is there is
+/// refused by the HEAD, no byte of the body is read and no put is sent, and the refusal is counted
+/// by the cache as one for an object that exists.
 #[tokio::test]
-async fn a_put_over_two_tiers_is_still_checked_with_a_head_first() {
-    for tiered in [false, true] {
-        let rig = Rig::with("tscache-head", |config| {
-            config.write_through = true;
-            config.tiered_upstream = tiered;
-        });
-        rig.cache
-            .put_stream("other/a", Some(1), body(b"a"))
-            .await
-            .unwrap();
-        assert_eq!(rig.calls(Op::Head), 1);
-        let read = Arc::new(AtomicUsize::new(0));
-        let counted = Arc::clone(&read);
-        let unread = stream::once(async move {
-            let _ = counted.fetch_add(1, Ordering::SeqCst);
-            Ok(Bytes::from_static(b"b"))
-        })
-        .boxed();
-        let again = rig.cache.put_stream("other/a", Some(1), unread).await;
-        assert_eq!(again, Err(Error::AlreadyExists("other/a".to_owned())));
-        assert_eq!(rig.calls(Op::Head), 2);
-        assert_eq!(rig.calls(Op::Put), 1);
-        assert_eq!(read.load(Ordering::SeqCst), 0);
-    }
+async fn a_create_only_put_is_checked_with_a_head_first() {
+    let rig = Rig::with("tscache-head", |config| config.write_through = true);
+    rig.cache
+        .put_stream("other/a", Some(1), body(b"a"))
+        .await
+        .unwrap();
+    assert_eq!(rig.calls(Op::Head), 1);
+    let read = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&read);
+    let unread = stream::once(async move {
+        let _ = counted.fetch_add(1, Ordering::SeqCst);
+        Ok(Bytes::from_static(b"b"))
+    })
+    .boxed();
+    let again = rig.cache.put_stream("other/a", Some(1), unread).await;
+    assert_eq!(again, Err(Error::AlreadyExists("other/a".to_owned())));
+    assert_eq!(rig.calls(Op::Head), 2);
+    assert_eq!(rig.calls(Op::Put), 1);
+    assert_eq!(read.load(Ordering::SeqCst), 0);
 }
 
 /// Asserts that an object replaced by one of another size during a fill is refused as written
-/// over by a cache over two tiers, although it compares versions by size alone, and that the
+/// over by a cache over two tiers, although that compares versions by size alone, and that the
 /// cache keeps nothing of it.
 #[tokio::test]
 async fn a_fill_of_an_object_replaced_by_one_of_another_size_is_refused_as_written_over() {
@@ -307,7 +325,7 @@ async fn a_fill_of_an_object_replaced_by_one_of_another_size_is_refused_as_writt
     rig.put("cas/b/obj", &data).await;
     let upstream: Arc<dyn Backend> = rig.upstream.clone();
     let resized = Probe::resizing(upstream);
-    let cache = cache_over(&rig, &resized, |config| config.tiered_upstream = true);
+    let cache = cache_over(&rig, &resized, |_| {});
     let refused = cache.get("cas/b/obj", None).await;
     assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
     assert_eq!(cache.held(), (0, 0));

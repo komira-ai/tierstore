@@ -1,7 +1,7 @@
 //! HTTPS on the S3 front: the connection of a TLS listener, whose handshake runs as its first
 //! bytes are read, and the source of such connections.
 //!
-//! The certificate and key (`--tls-cert`, `--tls-key`) are read once at start, by
+//! The certificate and key (`server.tls_cert_file`, `server.tls_key_file`) are read once at start, by
 //! [`oci::s3_acceptor`](super::oci::s3_acceptor). A listener of the front that has an acceptor
 //! hands each connection to the server as a [`Handshaking`] stream, so that the server takes
 //! connections as it does without TLS: the handshake is part of the first read of the
