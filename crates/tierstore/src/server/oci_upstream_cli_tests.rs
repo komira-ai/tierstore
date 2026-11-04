@@ -19,7 +19,7 @@ use crate::server::config::Dur;
 use crate::server::config_oci::UpstreamTable;
 use crate::server::oci::fake_upstream::{Fake, Registry};
 use crate::server::oci::test_pki::ca;
-use crate::server::oci_setup::bind_oci;
+use crate::server::cli_serve::bind_oci;
 use crate::{Backend, MemoryBackend};
 
 /// The flags of a start with a plain OCI front on loopback and no upstream.

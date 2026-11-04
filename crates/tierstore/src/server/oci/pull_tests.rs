@@ -166,6 +166,12 @@ impl Rig {
         self.memory.get(key, None).await.ok()
     }
 
+    /// The keys of the tag versions the store holds.
+    async fn tags_stored(&self) -> Vec<String> {
+        let listed = self.memory.list("oci/tags/").await.expect("a listing");
+        listed.into_iter().map(|object| object.key).collect()
+    }
+
     async fn put_under(&self, key: &str, content: &[u8]) {
         let put = self.memory.put(key, Bytes::copy_from_slice(content)).await;
         put.expect("put");
@@ -213,7 +219,9 @@ async fn a_missing_tag_is_pulled_and_points_at_the_manifest_it_was_stored_as() {
     assert_eq!(answer.status, StatusCode::OK);
     assert_eq!(answer.body, MANIFEST.as_bytes());
     assert_eq!(answer.header("docker-content-digest"), digest);
-    let tag = rig.stored("oci/tags/library~app/latest").await;
+    let tag = rig
+        .stored("oci/tags/library~app/latest/18446744073709551615")
+        .await;
     assert_eq!(tag.as_deref(), Some(digest.as_bytes()));
     assert!(rig.stored(&blob_key(MANIFEST.as_bytes())).await.is_some());
     let by_tag = rig.get(&path).await;
@@ -315,7 +323,7 @@ async fn an_upstream_that_fails_is_a_502_and_stores_nothing() {
         );
     }
     assert!(rig.stored(&blob_key(MANIFEST.as_bytes())).await.is_none());
-    assert!(rig.stored("oci/tags/a/latest").await.is_none());
+    assert!(rig.tags_stored().await.is_empty());
     assert_eq!(rig.metrics.requests("manifest", "failed"), 2);
     assert_eq!(rig.metrics.requests("blob", "failed"), 1);
 }
@@ -393,7 +401,7 @@ async fn an_answer_that_is_not_a_manifest_is_refused() {
     answer.assert_error(StatusCode::BAD_GATEWAY, "UNAVAILABLE");
     assert_eq!(answer.message(), "the upstream's answer is not a manifest");
     assert!(rig.stored(&blob_key(b"not json")).await.is_none());
-    assert!(rig.stored("oci/tags/a/latest").await.is_none());
+    assert!(rig.tags_stored().await.is_empty());
 }
 
 /// Asserts a manifest longer than the limit is refused as the upstream's failure.
@@ -473,15 +481,38 @@ async fn an_object_stored_meanwhile_is_taken_as_pulled() {
     let answer = rig.get(&format!("/v2/a/blobs/{blob_digest}")).await;
     assert_eq!(answer.status, StatusCode::OK);
     assert_eq!(answer.body, content);
-    // The tag was made by another pull between the read of it and its creation here.
-    rig.put_under("oci/tags/a/latest", manifest_digest.as_bytes())
-        .await;
-    rig.faulty.fail_next_with(Op::Get, missed());
-    rig.faulty.fail_next_on(Op::Head, "oci/tags/", missed());
+    assert_eq!(rig.registry.seen().len(), 2);
+}
+
+/// Asserts a tag created between the read of it and the write of its first version is kept: the
+/// create-only write finds it, nothing is overwritten, and the request is answered with the
+/// manifest that tag points at, not the one the upstream sent. The first two listings of the tag
+/// are made to miss (the read, and the read once more that a miss gets), as they would if the other
+/// pull had not yet written it.
+#[tokio::test]
+async fn a_tag_created_meanwhile_with_another_digest_is_kept_and_answered() {
+    let _quiet = quiet();
+    let entries = vec![("/v2/a/manifests/latest".to_owned(), Fake::ok(MANIFEST))];
+    let rig = Rig::new(files(entries)).await;
+    let other = digest_of(OTHER_MANIFEST.as_bytes());
+    let version = "oci/tags/a/latest/18446744073709551615";
+    rig.put_under(
+        &blob_key(OTHER_MANIFEST.as_bytes()),
+        OTHER_MANIFEST.as_bytes(),
+    )
+    .await;
+    rig.put_under(version, other.as_bytes()).await;
+    for _ in 0..2 {
+        let missed = Error::NotFound("raced".to_owned());
+        rig.faulty.fail_next_on(Op::List, "oci/tags/", missed);
+    }
     let tagged = rig.get("/v2/a/manifests/latest").await;
     assert_eq!(tagged.status, StatusCode::OK);
-    assert_eq!(tagged.body, MANIFEST.as_bytes());
-    assert_eq!(rig.registry.seen().len(), 3);
+    assert_eq!(tagged.body, OTHER_MANIFEST.as_bytes());
+    assert_eq!(tagged.header("docker-content-digest"), other);
+    assert_eq!(rig.tags_stored().await, [version]);
+    assert_eq!(rig.stored(version).await.as_deref(), Some(other.as_bytes()));
+    assert_eq!(rig.registry.seen().len(), 1);
 }
 
 /// Asserts a store that fails is not answered by going to the upstream: a tag that cannot be read,

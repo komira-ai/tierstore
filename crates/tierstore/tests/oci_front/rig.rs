@@ -61,7 +61,7 @@ impl Rig {
     /// A TLS front that asks for the keys of `server`, as `--oci-require-auth` does.
     pub async fn start_with_keys(server: &ServerConfig) -> Self {
         let listen = "127.0.0.1:0".parse().expect("an address");
-        let auth = OciAuth::from_server(server, &OciPrefix::new(PREFIX).expect("a prefix"));
+        let auth = OciAuth::from_server(server);
         Self::build(false, listen, Some(auth), |_| {}).await
     }
 

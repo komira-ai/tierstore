@@ -87,7 +87,7 @@ fn switched(
         fails: Arc::clone(&switch),
         lock: lock.then(|| dir.path().to_owned()),
     };
-    let backend = DirBackend::open_with(dir.path().to_owned(), Box::new(recorder)).unwrap();
+    let backend = DirBackend::open_with(dir.path().to_owned(), Arc::new(recorder)).unwrap();
     (dir, backend, seen, switch)
 }
 
@@ -328,4 +328,106 @@ async fn the_real_sync_of_a_directory_succeeds_and_of_a_missing_one_fails() {
     super::FsyncDir.sync_dir(dir.path()).await.unwrap();
     let missing = dir.path().join("absent");
     assert!(super::FsyncDir.sync_dir(&missing).await.is_err());
+}
+
+/// The directories that were synced, in order.
+fn synced(seen: &Log) -> Vec<PathBuf> {
+    let seen = seen.lock().unwrap();
+    seen.iter().map(|seen| seen.dir.clone()).collect()
+}
+
+/// Asserts that a call that changes a key under `_entries/` syncs the subdirectory that holds its
+/// file and not the root, whether it is a put, a replacement, a conditional delete or a delete,
+/// and that the root is synced too, once, by the first write of an entry through this backend.
+#[tokio::test]
+async fn a_change_of_an_entry_syncs_the_subdirectory_and_the_root_once() {
+    let (dir, backend, seen) = recorded(None, false);
+    let inside = dir.path().join(".entries");
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    assert_eq!(synced(&seen), [dir.path().to_owned(), inside.clone()]);
+    let tag = backend.put_tagged("_entries/b", body("two")).await.unwrap();
+    let tag = backend.put_if_match("_entries/b", body("three"), &tag);
+    let tag = tag.await.unwrap();
+    backend.delete_if_match("_entries/b", &tag).await.unwrap();
+    backend.delete("_entries/a").await.unwrap();
+
+    let mut expected = vec![dir.path().to_owned()];
+    expected.extend(std::iter::repeat_n(inside, 5));
+    assert_eq!(synced(&seen), expected);
+}
+
+/// Asserts that a put that makes the subdirectory of `_entries/` fails, and leaves no object and
+/// no temporary file, when the sync of the root that makes the new subdirectory durable fails.
+#[tokio::test]
+async fn an_entry_put_fails_when_the_sync_of_the_new_subdirectory_fails() {
+    let (dir, backend, _seen) = recorded(None, true);
+    let refused = backend.put("_entries/a", body("one")).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    let listed = backend.list("_entries/").await.unwrap();
+    assert!(listed.is_empty());
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, [".entries", ".uploads"]);
+}
+
+/// Asserts that after a failed sync of the root, which leaves the subdirectory made, the retry of
+/// the put syncs the root again before it is acknowledged, and a later write does not.
+#[tokio::test]
+async fn a_retry_after_a_failed_root_sync_syncs_the_root_again() {
+    let (dir, backend, seen, switch) = switched(None, true, false);
+    let inside = dir.path().join(".entries");
+    let refused = backend.put("_entries/a", body("one")).await;
+    assert!(matches!(refused, Err(Error::Other(_))));
+    switch.store(false, Ordering::SeqCst);
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    backend.put("_entries/b", body("two")).await.unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root.clone(), root, inside.clone(), inside]);
+}
+
+/// Asserts that a backend that did not make the subdirectory (another process did) still syncs
+/// the root before it acknowledges its first entry write, and only that one.
+#[tokio::test]
+async fn a_writer_that_did_not_make_the_subdirectory_syncs_the_root_first() {
+    let (dir, backend, seen) = recorded(None, false);
+    let inside = dir.path().join(".entries");
+    std::fs::create_dir(&inside).unwrap();
+
+    backend.put("_entries/a", body("one")).await.unwrap();
+    backend.put("_entries/b", body("two")).await.unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root, inside.clone(), inside]);
+}
+
+/// Asserts that a replacement of a key the previous release made as a file of the root writes that
+/// file in place and syncs the root it is in (after the sync of the root that the first entry
+/// write of a backend makes), with the new body in the file, and makes no file in the subdirectory.
+#[tokio::test]
+async fn a_replacement_of_a_root_file_syncs_the_root_holding_the_new_body() {
+    let (dir, backend, seen) = recorded(Some("_entries~old"), false);
+    let tag = super::sha256(b"shipped");
+    let mut file = tag.to_vec();
+    file.extend_from_slice(b"shipped");
+    std::fs::write(dir.path().join("_entries~old"), file).unwrap();
+
+    let tag = hex::encode(tag);
+    backend
+        .put_if_match("_entries/old", body("newer"), &tag)
+        .await
+        .unwrap();
+
+    let root = dir.path().to_owned();
+    assert_eq!(synced(&seen), [root.clone(), root]);
+    let seen = seen.lock().unwrap();
+    let watched = seen[1].watched.as_ref().unwrap();
+    assert_eq!(watched.len(), TAG_LEN + 5);
+    assert!(watched.ends_with(b"newer"));
+    assert!(!seen[1].names.contains(&"old".to_owned()));
 }

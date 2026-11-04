@@ -6,6 +6,7 @@ use std::time::Duration;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode};
 
+use super::DEFAULT_STAGE_READ as STAGE_READ;
 use super::push_tests::{Rig, digest_of, front_over, full, lengthy, login, scripted, unsized_body};
 use crate::server::testing::Step;
 use crate::{Backend, Error, MemoryBackend, Op};
@@ -152,6 +153,157 @@ async fn a_chunk_range_that_is_wrong_is_416() {
     let accepted = rig.ask(Method::PATCH, &session, &headers, body).await;
     assert_eq!(accepted.status, StatusCode::ACCEPTED, "{}", accepted.text());
     assert_eq!(accepted.header("range"), "0-2");
+}
+
+/// Asserts that a `Content-Range` is held to the bytes of a chunk whose length is not known: a
+/// body of more or fewer bytes than the range says is 416, stored as nothing, and the upload is as
+/// it was; and that the same holds for the body of the `PUT` that ends the upload, which then ends
+/// it when the range is right.
+#[tokio::test]
+async fn a_range_is_held_to_the_bytes_of_a_body_of_unknown_length() {
+    let rig = Rig::new();
+    let id = rig.begin().await;
+    let session = Rig::session(&id);
+    let headers = [("content-range", "0-2")];
+    for body in [unsized_body(&[b"a", b"bcd"]), unsized_body(&[b"a", b"b"])] {
+        let answer = rig.ask(Method::PATCH, &session, &headers, body).await;
+        let (_, detail) =
+            answer.assert_error(StatusCode::RANGE_NOT_SATISFIABLE, "BLOB_UPLOAD_INVALID");
+        assert_eq!(detail["received"], 0);
+    }
+    let none = rig
+        .ask(Method::PATCH, &session, &headers, unsized_body(&[]))
+        .await;
+    none.assert_error(StatusCode::RANGE_NOT_SATISFIABLE, "BLOB_UPLOAD_INVALID");
+    assert_eq!(rig.staged().await.len(), 1);
+    let first = rig.ask(Method::PATCH, &session, &[], full(b"abc")).await;
+    assert_eq!(first.status, StatusCode::ACCEPTED, "{}", first.text());
+
+    let digest = digest_of(b"abcdef");
+    let target = end(&id, &digest);
+    let headers = [("content-range", "3-5")];
+    for body in [unsized_body(&[b"d", b"efg"]), unsized_body(&[b"d", b"e"])] {
+        let answer = rig.ask(Method::PUT, &target, &headers, body).await;
+        let (_, detail) =
+            answer.assert_error(StatusCode::RANGE_NOT_SATISFIABLE, "BLOB_UPLOAD_INVALID");
+        assert_eq!(detail["received"], 3);
+    }
+    assert_eq!(rig.staged().await.len(), 2);
+    assert_eq!(rig.blob(&digest).await, None);
+    let body = unsized_body(&[b"d", b"ef"]);
+    let done = rig.ask(Method::PUT, &target, &headers, body).await;
+    assert_eq!(done.status, StatusCode::CREATED, "{}", done.text());
+    assert_eq!(
+        rig.blob(&digest).await.as_deref(),
+        Some(b"abcdef".as_slice())
+    );
+    assert!(rig.staged().await.is_empty());
+}
+
+/// Asserts that an empty chunk whose length is not known stores nothing, as one of known length
+/// does: the next chunk is stored at the same offset and the upload ends with its bytes.
+#[tokio::test]
+async fn an_empty_chunk_of_unknown_length_stores_nothing() {
+    let rig = Rig::new();
+    let id = rig.begin().await;
+    let session = Rig::session(&id);
+    for body in [unsized_body(&[]), unsized_body(&[b""])] {
+        let answer = rig.ask(Method::PATCH, &session, &[], body).await;
+        assert_eq!(answer.status, StatusCode::ACCEPTED, "{}", answer.text());
+        assert_eq!(answer.header("range"), "0-0");
+    }
+    assert_eq!(rig.staged().await.len(), 1);
+    let next = rig.ask(Method::PATCH, &session, &[], full(b"ab")).await;
+    assert_eq!(next.status, StatusCode::ACCEPTED, "{}", next.text());
+    assert_eq!(next.header("range"), "0-1");
+    let digest = digest_of(b"ab");
+    let done = rig.send(Method::PUT, &end(&id, &digest)).await;
+    assert_eq!(done.status, StatusCode::CREATED, "{}", done.text());
+}
+
+/// Asserts that the end of an upload reads each stored chunk in ranges of at most `STAGE_READ`
+/// bytes, by the size the listing gave, and never a whole object: a chunk of two and a half times
+/// that is read in three ranges, and the blob is the chunks' bytes.
+#[tokio::test]
+async fn the_chunks_of_an_upload_are_read_in_bounded_ranges() {
+    let rig = Rig::new();
+    let id = rig.begin().await;
+    let session = Rig::session(&id);
+    let size = usize::try_from(STAGE_READ).expect("a size") * 5 / 2;
+    let bytes: Vec<u8> = (0..size).map(|at| (at % 251) as u8).collect();
+    let chunk = rig.ask(Method::PATCH, &session, &[], full(&bytes)).await;
+    assert_eq!(chunk.status, StatusCode::ACCEPTED, "{}", chunk.text());
+    let digest = digest_of(&bytes);
+    let done = rig.send(Method::PUT, &end(&id, &digest)).await;
+    assert_eq!(done.status, StatusCode::CREATED, "{}", done.text());
+    let ranges = rig.faulty.get_ranges();
+    let half = STAGE_READ / 2;
+    assert_eq!(
+        ranges,
+        [
+            Some((0, STAGE_READ)),
+            Some((STAGE_READ, STAGE_READ)),
+            Some((2 * STAGE_READ, half)),
+        ]
+    );
+    assert_eq!(rig.blob(&digest).await.as_deref(), Some(bytes.as_slice()));
+}
+
+/// Asserts that the size of a range read at the end of an upload is the one the front is given:
+/// a chunk of ten bytes with a range of four is read in ranges of 4, 4 and 2, a range of zero is
+/// taken as one byte, and the blob is the chunk's bytes either way.
+#[tokio::test]
+async fn the_range_of_a_read_of_a_chunk_is_the_one_the_front_is_given() {
+    for (given, want) in [
+        (4, vec![Some((0, 4)), Some((4, 4)), Some((8, 2))]),
+        (0, (0..10).map(|at| Some((at, 1))).collect()),
+    ] {
+        let rig = Rig::new().with_stage_read(given);
+        let id = rig.begin().await;
+        let session = Rig::session(&id);
+        let chunk = rig
+            .ask(Method::PATCH, &session, &[], full(b"0123456789"))
+            .await;
+        assert_eq!(chunk.status, StatusCode::ACCEPTED, "{}", chunk.text());
+        let digest = digest_of(b"0123456789");
+        let done = rig.send(Method::PUT, &end(&id, &digest)).await;
+        assert_eq!(done.status, StatusCode::CREATED, "{}", done.text());
+        assert_eq!(rig.faulty.get_ranges(), want, "range {given}");
+        let blob = rig.blob(&digest).await;
+        assert_eq!(blob.as_deref(), Some(&b"0123456789"[..]));
+    }
+}
+
+/// Asserts that a store that says the blob exists without reading the body (as a proxy whose cold
+/// tier has it does) does not make the push a success: the stored bytes and the body are read to
+/// their end and must hash to the digest. Wrong bytes are 400 `DIGEST_INVALID` and a cut body is
+/// 400 `BLOB_UPLOAD_INVALID`, each leaving the upload as it was; the right bytes are 201 and
+/// delete the upload.
+#[tokio::test]
+async fn a_blob_the_store_has_is_still_checked_against_the_body() {
+    let rig = Rig::new();
+    let id = rig.begin().await;
+    let session = Rig::session(&id);
+    rig.ask(Method::PATCH, &session, &[], full(b"abc")).await;
+    let digest = digest_of(b"abcdef");
+    let target = end(&id, &digest);
+
+    let exists = || Error::AlreadyExists("blob".to_owned());
+    rig.faulty.fail_next_with(Op::Put, exists());
+    let wrong = rig.ask(Method::PUT, &target, &[], full(b"xyz")).await;
+    wrong.assert_error(StatusCode::BAD_REQUEST, "DIGEST_INVALID");
+    assert_eq!(rig.staged().await.len(), 2);
+
+    rig.faulty.fail_next_with(Op::Put, exists());
+    let steps = vec![Step::Data(b"de"), Step::Fail];
+    let cut = rig.ask(Method::PUT, &target, &[], scripted(steps)).await;
+    cut.assert_error(StatusCode::BAD_REQUEST, "BLOB_UPLOAD_INVALID");
+    assert_eq!(rig.staged().await.len(), 2);
+
+    rig.faulty.fail_next_with(Op::Put, exists());
+    let right = rig.ask(Method::PUT, &target, &[], full(b"def")).await;
+    assert_eq!(right.status, StatusCode::CREATED, "{}", right.text());
+    assert!(rig.staged().await.is_empty());
 }
 
 /// Asserts that an empty chunk is accepted and stores nothing, so a second one is no conflict.

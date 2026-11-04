@@ -25,8 +25,8 @@ The settings that describe the data path are flags, or one TOML file given with 
 the same settings and run the same code. `--print-config`, given the flags of a start, prints the
 file that is equivalent to them. A file holds no secret, only the paths of key files, and refuses
 a key or a table it does not know. The format, the table of the key of each flag and the rules are
-in "The configuration file" in `packaging/README.md`; the flags stay accepted for one
-release along with the file.
+in "The configuration file" in `packaging/README.md`; the flags stay supported along with the
+file.
 
 ## When the puts are at their limit
 
@@ -47,12 +47,12 @@ What waiting costs, as the code does it:
   `--drain-deadline`.
 - A waiter does not notice that its client went away: the connection is looked at again when the
   body is first read, after a permit is given.
-- The client of kbf (`kbf-task`) retries the 503, and a connection that broke while it was still
-  sending the body of a refused PUT, with jittered waits (see its crate docs). It does not retry
-  429, 500, 502 or 504, deliberately.
+- A client should retry the 503, and a connection that broke while it was still
+  sending the body of a refused PUT, with jittered waits. A client should not retry
+  429, 500, 502 or 504, which do not mean a full put queue.
 - The 503 is sent before the body is read, so the front may close the connection under a client
   that is still sending a large body. A client that sees the reset instead of the 503 has to treat
-  it as one; `kbf-task` does.
+  it as one.
 
 ## A build node: a read cache
 
@@ -103,11 +103,10 @@ is the tier of the build node's cache), `op` is `get` or `head`.
 
 What the counts mean:
 
-- An S3 GET reaches the proxy as a head (for the size and the conditions) and then a get. A GET
-  that is answered at the head shows only under `op="head"`: a key that exists nowhere, a
-  conditional that answers 304 or 412, a range that cannot be satisfied. So `op="head"` is a
-  lookup rate: it mixes the client's HEADs with the heads that start every GET. `op="get"`
-  counts only the reads that go on to fetch data.
+- An S3 GET reaches the proxy as one open read (the object's meta and its body in one call),
+  counted under `op="get"` whatever its outcome: a key that exists nowhere, a conditional that
+  answers 304 or 412 and a range that cannot be satisfied are each a hit or a miss at `op="get"`,
+  and none is counted at `op="head"`. So `op="head"` counts the client's HEADs alone.
 - A hit or a miss is counted when the tier answers, an error when it fails with anything but
   "not found"; an error is neither a hit nor a miss, so a tier that is down does not lower its
   hit rate and shows in `read_errors_total`.
@@ -174,8 +173,8 @@ counterpart here.
 | full | `--access-key-file` | everything the front serves |
 | read-only | `--read-only-key-file` | get, head, list |
 | presigning | `--presign-key-file` | sign presigned PUT URLs for one object each under a prefix |
-| GC | `--gc-key-file` | a scoped key with list and delete on one prefix: list, head, delete and abort uploads there |
-| scoped | `--scoped-key-file` | read, list, create and delete under the prefixes of four lists |
+| GC | `--gc-key-file` | a scoped key with list, delete and abort on one prefix: list, head, delete and abort uploads there |
+| scoped | `--scoped-key-file` | read, create and delete under the prefixes of three lists |
 
 The full, read-only and scoped keys also sign presigned GET URLs (`server::presign_get`): a client
 that holds the URL and no key may GET or HEAD one object, with any `Range`, with the rights of the
@@ -186,8 +185,7 @@ is a bearer credential: use TLS where that matters. See "Presigned GET URLs" in
 ### Scoped keys
 
 A scoped key's file is JSON of exactly `access_key_id`, `secret_access_key`, `read_prefixes`,
-`write_prefixes` and `delete_prefixes`, and optionally `list_prefixes` (empty when absent, so a
-file of the release before loads as it did); the lists may be empty, but not all, and every prefix
+`write_prefixes` and `delete_prefixes`; the lists may be empty, but not all, and every prefix
 ends in `/`, is not, or under, or over `_journal/` or `_tiering/`, and has neither as a segment.
 
 A call whose key or listing `prefix` has `..` anywhere in it is refused, even inside a prefix.
@@ -196,10 +194,9 @@ is plain data); the command line does, and exits 2.
 
 - `read_prefixes`: GetObject, HeadObject, ListObjectsV2 and ListMultipartUploads (a listing's
   `prefix` parameter must be inside one);
-- `list_prefixes`: HeadObject, ListObjectsV2 and ListMultipartUploads, never GetObject;
 - `write_prefixes`: create-only PutObject (`If-None-Match: *` or no condition; `412` if the key
   exists) and the calls of a multipart upload (create, part, complete, abort);
-- `delete_prefixes`: DeleteObject and AbortMultipartUpload.
+- `delete_prefixes`: DeleteObject (not AbortMultipartUpload: a delete prefix cannot cancel an upload).
 
 A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`). Everything else is
 `403 AccessDenied`. Two uses:
@@ -207,9 +204,9 @@ A scoped key never replaces (`If-Match`) and never copies (`x-amz-copy-source`).
 - the frontend's pack store: `read_prefixes: ["cas/"]`, `write_prefixes: ["cas/f/<writer>/"]`,
   `delete_prefixes: []` (add the writer prefix to the delete list to let the frontend remove its
   self-test object and the object of a failed write);
-- build history, `--history-objects 's3://<bucket>/kbf-history?endpoint=...&conditional-put=true'`
+- an append-only history store, `--history-objects 's3://<bucket>/history?endpoint=...&conditional-put=true'`
   (without the last parameter a retried chunk gets `412` for good): `read_prefixes`
-  and `write_prefixes` of `["kbf-history/"]`, `delete_prefixes: []`.
+  and `write_prefixes` of `["history/"]`, `delete_prefixes: []`.
 
 See "Scoped keys" in `packaging/README.md` for the table of calls.
 
@@ -230,7 +227,7 @@ same tiers. It runs in one of two modes:
 The start line and `/metricz` say which mode runs.
 
 In a file given with `--config`, the front is the optional `[oci]` table (`listen`, `tls_cert_file`,
-`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`), with the rules of the flags
+`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `stage_read`), with the rules of the flags
 (`listen` is needed in it, the certificate and the key go together, `max_connections` is at least
 1); the `--oci-*` flags are refused with the file, and `--print-config` writes them as the table.
 

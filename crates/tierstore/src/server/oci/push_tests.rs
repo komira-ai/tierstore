@@ -53,7 +53,7 @@ fn server() -> ServerConfig {
 pub(super) fn front_over(backend: Arc<dyn Backend>) -> (OciFront, Arc<OciMetrics>) {
     let metrics = Arc::new(OciMetrics::default());
     let prefix = OciPrefix::new("oci/").expect("a prefix");
-    let auth = OciAuth::from_server(&server(), &prefix);
+    let auth = OciAuth::from_server(&server());
     let front = OciFront::new(backend, prefix, Arc::clone(&metrics)).with_auth(Some(auth));
     (front, metrics)
 }
@@ -139,6 +139,12 @@ impl Rig {
             front,
             metrics,
         }
+    }
+
+    /// The rig, its front reading stored chunks in ranges of at most `bytes`.
+    pub(super) fn with_stage_read(mut self, bytes: u64) -> Self {
+        self.front = self.front.with_stage_read(bytes);
+        self
     }
 
     /// A request, as the full key unless the headers log in as another.

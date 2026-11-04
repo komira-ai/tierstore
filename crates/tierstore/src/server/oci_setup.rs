@@ -13,10 +13,8 @@ use super::front::InvalidFlags;
 use super::keys::read_private_text;
 use super::listen::has_duplicate;
 use super::oci::{
-    self, OciAuth, OciError, OciFront, OciLimits, OciListener, OciMetrics, OciMode, OciPrefix,
-    Upstream, UpstreamSettings,
+    self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix, Upstream, UpstreamSettings,
 };
-use crate::Backend;
 
 /// The OCI front, as far as the flags and files go: the proxy it reads is not open yet.
 pub(super) struct OciSetup {
@@ -29,6 +27,8 @@ pub(super) struct OciSetup {
     pub(super) limits: OciLimits,
     /// The keys the front asks of a client, with `--oci-require-auth`; `None` serves anonymously.
     pub(super) auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of a push.
+    pub(super) stage_read: u64,
     /// The registry a missing manifest or blob is pulled from; `None` pulls nothing.
     pub(super) upstream: Option<Upstream>,
 }
@@ -68,6 +68,7 @@ pub(super) fn oci_setup(
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
+        stage_read: cli.oci_stage_read,
         upstream: cli.oci_upstream.clone(),
     };
     oci_setup_of(&flags, server, warn)
@@ -142,9 +143,8 @@ pub(super) fn oci_setup_of(
         prefix: prefix.clone(),
         metrics: Arc::new(OciMetrics::with_mode(mode)),
         limits,
-        auth: flags
-            .require_auth
-            .then(|| OciAuth::from_server(server, &prefix)),
+        auth: flags.require_auth.then(|| OciAuth::from_server(server)),
+        stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
         upstream,
     }))
 }
@@ -196,24 +196,4 @@ fn upstream_of(table: &UpstreamTable) -> Result<Upstream, Error> {
         max_redirects: table.max_redirects.unwrap_or(DEFAULT_UPSTREAM_REDIRECTS),
     };
     Upstream::new(settings).map_err(refused)
-}
-
-/// Binds the OCI front over `backend` as `setup` says: none when there is no setup. The backend
-/// is whatever the node reads from: the proxy of a storage node, the cache of a build node.
-///
-/// # Errors
-/// An address that cannot be bound.
-pub(super) async fn bind_oci(
-    setup: Option<OciSetup>,
-    backend: Arc<dyn Backend>,
-) -> Result<Option<OciListener>, Error> {
-    let Some(setup) = setup else {
-        return Ok(None);
-    };
-    let front = OciFront::new(backend, setup.prefix, setup.metrics)
-        .with_auth(setup.auth)
-        .with_upstream(setup.upstream);
-    let front = Arc::new(front);
-    let bound = OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await;
-    Ok(Some(bound?))
 }

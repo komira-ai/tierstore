@@ -12,11 +12,16 @@
 //!   configured user name and password. `Bearer` is answered with a token fetched from the
 //!   challenge's `realm` (with `service` and `scope`), logged in with the same user name and
 //!   password, or anonymously if none is configured. A token is used for one pull and not kept.
+//!   The login answers only a challenge that the configured address itself sent: a 401 that comes
+//!   after a redirect to another host or port is answered with the status 401 and no login. The
+//!   `realm` of a challenge from the configured address is trusted with the login, as the registry
+//!   token flow has it (the realm is often another host of the same operator).
 //! - A redirect (301, 302, 303, 307, 308) is followed, at most `max_redirects` times, and
 //!   carries no `Authorization`: a registry that sends blobs to a store redirects to a URL that
 //!   carries its own authorization.
 //! - The password is sent only over TLS or to a loopback address: a configuration that would send
-//!   it in the clear is refused at start, and so is a token request's `realm` that is neither.
+//!   it in the clear is refused at start. A token request's `realm` that is neither is not refused:
+//!   it is requested anonymously, without the login.
 //! - `timeout` bounds each step: connecting and getting the headers of an answer, and the wait for
 //!   each piece of a body. The time a whole body takes is not bounded.
 //!
@@ -304,16 +309,21 @@ impl Upstream {
         let url = format!("{scheme}://{authority}{path}")
             .parse::<Uri>()
             .map_err(|_| failed("the path is not valid"))?;
-        let first = self.follow(&url, accept, None).await?;
+        let (first, reached) = self.follow(&url, accept, None).await?;
         if first.status() != StatusCode::UNAUTHORIZED {
             return settle(first, self.timeout);
+        }
+        // Only the configured address may ask for the login: a challenge after a redirect to
+        // another origin is not answered.
+        if reached.authority() != self.base.authority() || reached.scheme() != self.base.scheme() {
+            return Err(UpstreamError::Status(401));
         }
         let asked = first.headers().get(WWW_AUTHENTICATE);
         let asked = asked
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         let auth = self.answer(challenge(asked)).await?;
-        let second = self.follow(&url, accept, Some(auth)).await?;
+        let (second, _) = self.follow(&url, accept, Some(auth)).await?;
         settle(second, self.timeout)
     }
 
@@ -359,7 +369,7 @@ impl Upstream {
         }
         let login = self.login.as_ref().filter(|_| may_carry_secret(&url));
         let auth = login.map(basic);
-        let reply = self.follow(&url, "application/json", auth).await?;
+        let (reply, _) = self.follow(&url, "application/json", auth).await?;
         let reply = settle(reply, self.timeout)?;
         let body = reply.bytes(MAX_MANIFEST_BYTES).await?;
         let json: Value =
@@ -371,19 +381,20 @@ impl Upstream {
         }
     }
 
-    /// `GET url` with `auth`, and the redirects it meets followed without it.
+    /// `GET url` with `auth`, and the redirects it meets followed without it. The answer comes
+    /// with the address it came from.
     async fn follow(
         &self,
         url: &Uri,
         accept: &str,
         auth: Option<HeaderValue>,
-    ) -> Result<hyper::Response<Incoming>, UpstreamError> {
+    ) -> Result<(hyper::Response<Incoming>, Uri), UpstreamError> {
         let mut url = url.clone();
         let mut auth = auth;
         for _ in 0..=self.max_redirects {
             let response = self.send(&url, accept, auth.as_ref()).await?;
             if !response.status().is_redirection() {
-                return Ok(response);
+                return Ok((response, url));
             }
             let location = response.headers().get(LOCATION);
             let location = location.and_then(|value| value.to_str().ok());

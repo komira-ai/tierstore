@@ -238,12 +238,64 @@ async fn a_store_that_fails_is_503_and_stores_no_manifest() {
 }
 
 /// Asserts the digests a manifest names: the config, the layers and the manifests, in that order;
-/// an entry with no digest, a body that is not JSON and a manifest that names nothing give none.
+/// a manifest that names nothing gives none, and a body that is not JSON, a `config` that is not a
+/// descriptor with a digest text, a list that is not a list and an entry with no digest text, or
+/// with a digest that is not text, are each an error.
 #[test]
 fn the_digests_a_manifest_names_are_its_config_layers_and_manifests() {
-    let both = br#"{"config":{"digest":"c"},"layers":[{"digest":"l1"},{"size":1},{"digest":"l2"}],"manifests":[{"digest":"m"}]}"#;
-    assert_eq!(references(both), ["c", "l1", "l2", "m"]);
-    assert!(references(b"not json").is_empty());
-    assert!(references(br#"{"config":{},"layers":[]}"#).is_empty());
-    assert!(references(br#"{"layers":"x","config":{"digest":1}}"#).is_empty());
+    let both = br#"{"config":{"digest":"c"},"layers":[{"digest":"l1"},{"digest":"l2"}],"manifests":[{"digest":"m"}]}"#;
+    assert_eq!(references(both).expect("digests"), ["c", "l1", "l2", "m"]);
+    assert!(references(br#"{"layers":[]}"#).expect("none").is_empty());
+    for bad in [
+        &b"not json"[..],
+        br#"{"config":{},"layers":[]}"#,
+        br#"{"config":{"digest":1},"layers":[]}"#,
+        br#"{"config":{"digest":"c"},"layers":"x"}"#,
+        br#"{"config":{"digest":"c"},"layers":[{"size":1}]}"#,
+        br#"{"manifests":[{"digest":null}]}"#,
+    ] {
+        assert!(references(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+    }
+}
+
+/// Asserts that a manifest with a descriptor whose digest is missing or not text, in its config, its
+/// layers or its manifests, is 400 `MANIFEST_INVALID` with nothing stored, and does not pass for a
+/// manifest that names no blob.
+#[tokio::test]
+async fn a_manifest_with_a_descriptor_that_has_no_digest_text_is_refused() {
+    let (rig, config, layer) = stocked().await;
+    let kept = rig
+        .memory
+        .list("oci/blobs/")
+        .await
+        .expect("a listing")
+        .len();
+    let bodies = [
+        r#"{"schemaVersion":2,"config":{"digest":1},"layers":[{}]}"#.to_owned(),
+        r#"{"schemaVersion":2,"config":{},"layers":[]}"#.to_owned(),
+        format!(
+            r#"{{"schemaVersion":2,"config":{{"digest":"{config}"}},"layers":[{{"size":1}}]}}"#
+        ),
+        format!(r#"{{"schemaVersion":2,"config":{{"digest":"{config}"}},"layers":"{layer}"}}"#),
+        r#"{"schemaVersion":2,"manifests":[{"digest":null}]}"#.to_owned(),
+    ];
+    for body in &bodies {
+        let put = rig
+            .ask(
+                Method::PUT,
+                "/v2/app/manifests/latest",
+                &[],
+                full(body.as_bytes()),
+            )
+            .await;
+        put.assert_error(StatusCode::BAD_REQUEST, "MANIFEST_INVALID");
+    }
+    assert_eq!(rig.metrics.requests("manifest", "invalid"), 5);
+    let now = rig
+        .memory
+        .list("oci/blobs/")
+        .await
+        .expect("a listing")
+        .len();
+    assert_eq!(now, kept);
 }

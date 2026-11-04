@@ -85,7 +85,7 @@ use hyper::http::request::Parts;
 use percent_encoding::utf8_percent_encode;
 use serde::Deserialize;
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX, is_reserved};
+use crate::journal::{RESERVED_PREFIXES, is_reserved};
 
 use super::ServerConfig;
 use super::auth::{
@@ -204,8 +204,11 @@ pub fn validate_prefix(prefix: &str) -> Result<(), PresignError> {
         return Err(PresignError::Name("starts with /"));
     }
     check_name(prefix)?;
-    let reserved = [JOURNAL_PREFIX, TIERING_PREFIX];
-    if is_reserved(prefix) || reserved.iter().any(|name| name.starts_with(prefix)) {
+    if is_reserved(prefix)
+        || RESERVED_PREFIXES
+            .iter()
+            .any(|name| name.starts_with(prefix))
+    {
         return Err(PresignError::Name("reserved"));
     }
     Ok(())

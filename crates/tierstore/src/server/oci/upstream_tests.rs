@@ -487,6 +487,28 @@ async fn redirects_are_followed_and_carry_no_login() {
     assert_eq!(seen, expected);
 }
 
+/// Asserts a challenge that comes after a redirect to another origin is not answered: the login
+/// is sent to no one but the configured address and the realms it names, so the other registry,
+/// which asks for a `Bearer` token, sees one request with no login and no token request is made.
+#[tokio::test]
+async fn a_challenge_after_a_redirect_to_another_origin_gets_no_login() {
+    let elsewhere = Registry::start(|seen| {
+        let host = &seen.host;
+        Fake::challenge(&format!(r#"Bearer realm="http://{host}/token""#))
+    })
+    .await;
+    let target = format!("{}/stolen", elsewhere.url());
+    let first = Registry::start(move |_| Fake::redirect(302, &target)).await;
+    let upstream = client(logged_in(&first.url()));
+    let refused = failure(upstream.get("/v2/x", "*/*").await);
+    assert!(matches!(refused, UpstreamError::Status(401)), "{refused}");
+    let seen = elsewhere.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].path, "/stolen");
+    assert_eq!(seen[0].authorization, None);
+    assert_eq!(first.seen().len(), 1);
+}
+
 /// Asserts a request follows at most the redirects it is allowed: with two, three requests are
 /// made and the failure says so; with none, one.
 #[tokio::test]
@@ -531,15 +553,23 @@ async fn an_upstream_that_never_answers_is_a_failure_after_the_timeout() {
     assert_eq!(refused.to_string(), "no answer within 50ms");
 }
 
-/// Asserts an upstream that cannot be connected to is a failure.
+/// Asserts an upstream that closes the connection without an answer is a failure. The listener
+/// stays bound for the whole test and closes each connection it accepts, so no port is freed for
+/// another test or process to take.
 #[tokio::test]
-async fn an_upstream_that_refuses_the_connection_is_a_failure() {
-    let gone = tokio::net::TcpListener::bind("127.0.0.1:0")
+async fn an_upstream_that_closes_the_connection_is_a_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("a port");
-    let url = format!("http://{}", gone.local_addr().expect("an address"));
-    drop(gone);
+    let url = format!("http://{}", listener.local_addr().expect("an address"));
+    let closing = tokio::spawn(async move {
+        loop {
+            let accepted = listener.accept().await;
+            drop(accepted);
+        }
+    });
     let refused = failure(client(settings(&url)).get("/x", "*/*").await);
+    closing.abort();
     assert!(matches!(refused, UpstreamError::Failed(_)), "{refused}");
 }
 

@@ -9,8 +9,9 @@
 //!   (at most [`MAX_MANIFEST_BYTES`]), must be a manifest (see `manifest`) and must hash to the
 //!   digest, and are stored by it.
 //! - A manifest by tag: the same request with the tag. The manifest is stored by the digest its
-//!   bytes hash to, and the tag is pointed at it (see `tags`) with the create-only write of a
-//!   push, so a tag that was made in the meantime is left as it is. A tag that is in the store is
+//!   bytes hash to, and the tag's first version is created (see `tags`) with the create-only
+//!   write and nothing else; a tag that was made in the meantime is left as it is, and the answer
+//!   is the manifest that tag points at, read back after the write. A tag that is in the store is
 //!   never asked of the upstream again: it keeps pointing at the manifest it first pointed at,
 //!   however the upstream moves it. A tag that is moved by a push is a push's to move.
 //! - A blob: `GET /v2/<name>/blobs/<digest>` upstream, handed to the store's streamed put as the
@@ -158,13 +159,15 @@ impl OciFront {
         let (body, digest) = self.fetch_manifest(upstream, name, tag, &detail).await?;
         let key = self.prefix.key(&digest);
         self.keep_manifest(&key, body, detail.clone()).await?;
-        let tag_key = self.tag_key(name, tag);
-        let text = Bytes::from(digest.text());
-        match tags::point(&*self.backend, &tag_key, text).await {
-            // A tag made in the meantime, by a push or by another pull, is left as it is.
-            Ok(()) | Err(Error::PreconditionFailed(_)) => Ok(digest),
-            Err(failure) => Err(store_failed(&failure, &tag_key, MANIFEST_UNKNOWN, detail)),
-        }
+        let prefix = self.tag_prefix(name, tag);
+        let failed =
+            |failure: Error| store_failed(&failure, &prefix, MANIFEST_UNKNOWN, detail.clone());
+        tags::create_first(&*self.backend, &prefix, &digest)
+            .await
+            .map_err(failed)?;
+        // The tag now holds what its newest version says: this pull's digest, or that of a tag
+        // made in the meantime, which is the one answered.
+        self.tagged(name, tag).await.map_err(failed)
     }
 
     /// Fills the blob `digest` from the upstream, in one pass: the bytes are hashed as they are

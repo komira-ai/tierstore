@@ -122,11 +122,15 @@ mod listener_tests;
 #[cfg(test)]
 mod parse_tests;
 #[cfg(test)]
+mod pull_tests;
+#[cfg(test)]
 mod push_chunked_tests;
 #[cfg(test)]
 mod push_manifest_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod tags_stores_tests;
 #[cfg(test)]
 mod tags_tests;
 #[cfg(test)]
@@ -146,7 +150,7 @@ use hyper::{HeaderMap, Method, Response, StatusCode};
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-use crate::journal::{JOURNAL_PREFIX, TIERING_PREFIX};
+use crate::journal::RESERVED_PREFIXES;
 use crate::{Backend, ByteRange, Error};
 
 pub use auth::OciAuth;
@@ -157,6 +161,8 @@ pub use metrics::OciMetrics;
 pub use tls::{OciError, OciMode, acceptor, acceptor_for, plain_warning};
 pub use upstream::{Reply, Upstream, UpstreamError, UpstreamSettings};
 
+pub(crate) use push::DEFAULT_STAGE_READ;
+
 use auth::{Need, Refused};
 use body::BlobRead;
 use metrics::{Outcome, RouteKind};
@@ -165,9 +171,6 @@ use range::Range;
 
 /// The largest manifest or index served.
 pub const MAX_MANIFEST_BYTES: u64 = 4 << 20;
-
-/// The prefixes the proxy keeps for itself, which the front's must not overlap.
-const RESERVED: [&str; 2] = [JOURNAL_PREFIX, TIERING_PREFIX];
 
 /// The longest piece of request text an error echoes back.
 const ECHO_BYTES: usize = 256;
@@ -201,7 +204,10 @@ impl OciPrefix {
                 "it must be segments of letters, digits, . _ and -, separated by single /",
             ));
         }
-        if RESERVED.iter().any(|reserved| text.starts_with(reserved)) {
+        if RESERVED_PREFIXES
+            .iter()
+            .any(|reserved| text.starts_with(reserved))
+        {
             return Err(refuse("it overlaps a prefix the store keeps for itself"));
         }
         Ok(Self(text.to_owned()))
@@ -226,6 +232,8 @@ pub struct OciFront {
     metrics: Arc<OciMetrics>,
     /// The keys clients must present; none serves anonymously.
     auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    stage_read: u64,
     /// The registry a manifest or blob the store lacks is pulled from; none pulls nothing.
     upstream: Option<Upstream>,
 }
@@ -239,6 +247,7 @@ impl OciFront {
             prefix,
             metrics,
             auth: None,
+            stage_read: DEFAULT_STAGE_READ,
             upstream: None,
         }
     }
@@ -251,11 +260,21 @@ impl OciFront {
         self
     }
 
+    /// The front, reading a stored chunk in ranges of at most `bytes` at the end of an upload
+    /// ([`DEFAULT_STAGE_READ`] if this is not called); zero is taken as one.
+    #[must_use]
+    pub fn with_stage_read(mut self, bytes: u64) -> Self {
+        self.stage_read = bytes.max(1);
+        self
+    }
+
     /// The front, asking each client for a key of `auth` (see the `Access` section of the module
-    /// docs); with none it is anonymous, as [`new`](Self::new) makes it.
+    /// docs); with none it is anonymous, as [`new`](Self::new) makes it. What each key may do is
+    /// worked out from this front's own prefix, so keys made for the server cannot reach objects
+    /// outside what their prefixes cover here.
     #[must_use]
     pub fn with_auth(mut self, auth: Option<OciAuth>) -> Self {
-        self.auth = auth;
+        self.auth = auth.map(|auth| auth.bound(&self.prefix));
         self
     }
 

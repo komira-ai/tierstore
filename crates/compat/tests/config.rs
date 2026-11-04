@@ -85,6 +85,43 @@ fn a_file_without_read_grant_keys_starts_on_the_release_before_and_on_this_branc
     assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
 }
 
+/// The file of `file` with an `[oci]` table, `extra` in it, on a loopback address.
+fn oci_file(dir: &TestDir, access: &str, extra: &str) -> String {
+    let text = std::fs::read_to_string(file(dir, access, "")).unwrap();
+    let text = format!("{text}\n[oci]\nlisten = \"127.0.0.1:0\"\n{extra}\n");
+    let path = dir.path().join("tierstore-oci.toml");
+    std::fs::write(&path, text).unwrap();
+    path.display().to_string()
+}
+
+/// Asserts that a file with an `[oci]` table and no `require_auth`, which is every such file the
+/// release before reads, starts on the release before and on this branch: the key is optional and
+/// off by default.
+#[test]
+fn an_oci_file_without_require_auth_starts_on_the_release_before_and_on_this_branch() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-config");
+    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let plain = oci_file(&dir, &access, "");
+    assert!(succeeded(tierstore_prev::server::cli::main(checking(
+        &plain
+    ))));
+    assert!(succeeded(tierstore::server::cli::main(checking(&plain))));
+}
+
+/// Asserts the other direction, for the one new key: a file with `oci.require_auth = true` starts
+/// on this branch, and the release before refuses it at start (an unknown key) rather than serve
+/// the front anonymously, so a rollback with the key set cannot open a front the file meant to lock.
+#[test]
+fn an_oci_file_with_require_auth_starts_on_this_branch_and_is_refused_by_the_release_before() {
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-compat-oci-auth-config");
+    let access = private(&dir, "access.key", "AKID\nsecret\n");
+    let locked = oci_file(&dir, &access, "require_auth = true");
+    assert!(succeeded(tierstore::server::cli::main(checking(&locked))));
+    assert!(!succeeded(tierstore_prev::server::cli::main(checking(
+        &locked
+    ))));
+}
+
 /// Asserts a file with an `[oci.upstream]` table, a table this branch adds, starts on this branch
 /// (the key files it names are read, and the pull-through is made, as `--check-config` does) and is
 /// refused by the release before, which does not know the table: a new optional table that only a

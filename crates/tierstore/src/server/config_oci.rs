@@ -6,34 +6,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::config::{ConfigError, Dur, addresses, invalid, refuse, require, within};
-use super::listen::Addrs;
-
-/// `[oci]`: the OCI front. The table is the front: `listen` is needed in it, and the other keys
-/// are refused without it, as the `--oci-*` flags are.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct OciTable {
-    /// One address, or a list of them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub listen: Option<Addrs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_cert_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tls_key_file: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prefix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_lifetime: Option<Dur>,
-    /// Whether clients must present an access key of the server (`--oci-require-auth`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub require_auth: Option<bool>,
-    /// The registry a miss is pulled from. It has no flag form.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub upstream: Option<UpstreamTable>,
-}
+use super::config::{ConfigError, Dur, OciTable, addresses, invalid, refuse, require, within};
 
 /// `[oci.upstream]`: the registry the front pulls an object from when its store has none (see
 /// `oci::upstream`). The password is in the file `password_file`, never in this one.
@@ -74,6 +47,7 @@ pub(super) struct OciFlags {
     pub connection_lifetime: Option<Duration>,
     /// Whether the front asks its clients for an access key of the server.
     pub require_auth: bool,
+    pub stage_read: Option<u64>,
     /// The registry a miss is pulled from, checked by `upstream`; none pulls nothing.
     pub upstream: Option<UpstreamTable>,
 }
@@ -91,6 +65,7 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
             max_connections: None,
             connection_lifetime: None,
             require_auth: false,
+            stage_read: None,
             upstream: None,
         });
     };
@@ -102,6 +77,7 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
             ("max_connections", table.max_connections.is_some()),
             ("connection_lifetime", table.connection_lifetime.is_some()),
             ("require_auth", table.require_auth.is_some()),
+            ("stage_read", table.stage_read.is_some()),
             ("upstream", table.upstream.is_some()),
         ];
         refuse("oci", "it needs oci.listen", &others)?;
@@ -123,6 +99,10 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
         Some(count) => Some(within("oci", "max_connections", count, 1, u32::MAX)?),
         None => None,
     };
+    let stage_read = match table.stage_read {
+        Some(bytes) => Some(within("oci", "stage_read", bytes, 1, u64::MAX)?),
+        None => None,
+    };
     Ok(OciFlags {
         listen,
         tls_cert: table.tls_cert_file,
@@ -131,6 +111,7 @@ pub(super) fn oci(table: Option<OciTable>) -> Result<OciFlags, ConfigError> {
         max_connections,
         connection_lifetime: table.connection_lifetime.map(|dur| dur.0),
         require_auth: table.require_auth.unwrap_or(false),
+        stage_read,
         upstream: table.upstream.map(upstream).transpose()?,
     })
 }

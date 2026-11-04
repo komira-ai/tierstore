@@ -38,7 +38,9 @@
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
-//! `_journal/` or `_tiering/` is refused with `AccessDenied`.
+//! `_journal/` or `_tiering/` is refused with `AccessDenied` by each supported call before the
+//! operation's own processing, including the parsing of the XML body of an upload completion; a
+//! request refused as unsupported (see above) is answered so first.
 //!
 //! A put, a delete or the completion of an upload is carried to its end on a task of its own
 //! when the client goes away before the answer, so that no object is left without the journal
@@ -96,7 +98,7 @@
 //! A credential that may write one object under a prefix, and expires, is a presigned PUT URL: see [`presign`], and
 //! [`ServerConfig::presign_keys`] for the keys that sign them (`--presign-key-file` in the binary).
 //! A key that lists, heads and deletes under one prefix, and does nothing else (no get, no put), is a
-//! GC key, which is a scoped key with a list and a delete right on its prefix: see [`gc`], and
+//! GC key, which is a scoped key with a list, a delete and an abort right on its prefix: see [`gc`], and
 //! [`ServerConfig::gc_keys`] (`--gc-key-file` in the binary). Its deletes are
 //! not create-only: they are the only way an object leaves a prefix that presigned PUTs write.
 //! A key that reads, lists, creates and deletes under the prefixes of the lists in its key file, and replaces and
@@ -120,7 +122,9 @@
 //!   base64 of a hash of the right length;
 //! - `x-amz-checksum-crc64nvme` is answered `NotImplemented` (the crate depends on no CRC-64
 //!   implementation), and so is a trailing checksum or a signed stream (`STREAMING-` payloads,
-//!   `aws-chunked`), which the clients of kbf do not use.
+//!   `aws-chunked`). The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
+//!   body for a streamed upload, so such a client is refused with 501 until it sends a
+//!   checksum only when an operation requires one (see `packaging/README.md`).
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
@@ -195,6 +199,10 @@ mod auth;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
+mod cli_heartbeat;
+mod cli_probe;
+mod cli_reconcile;
+mod cli_serve;
 mod combined_cli;
 mod config;
 mod config_cache;
@@ -202,6 +210,8 @@ mod config_combined;
 mod config_oci;
 mod config_policy;
 mod config_print;
+mod config_syntax;
+mod config_units;
 mod door;
 mod drain;
 mod front;
@@ -225,6 +235,7 @@ mod stop_watcher;
 mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod update_hook;
+mod verbs;
 mod xml;
 
 #[cfg(test)]
@@ -235,6 +246,8 @@ mod body_stall_tests;
 mod cache_cli_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+#[cfg(test)]
+mod cli_heartbeat_tests;
 #[cfg(test)]
 mod combined_cli_tests;
 #[cfg(test)]
@@ -264,6 +277,8 @@ mod metrics_race_tests;
 #[cfg(test)]
 mod metrics_tests;
 #[cfg(test)]
+mod one_call_get_tests;
+#[cfg(test)]
 mod ops_detached_tests;
 #[cfg(test)]
 mod ops_tests;
@@ -282,9 +297,11 @@ mod reply_tests;
 #[cfg(test)]
 mod request_tests;
 #[cfg(test)]
+mod reserved_tests;
+#[cfg(test)]
 mod role_tests;
 #[cfg(test)]
-mod scoped_list_tests;
+mod scoped_rights_tests;
 #[cfg(test)]
 mod scoped_server_tests;
 #[cfg(test)]
@@ -301,6 +318,8 @@ mod stream_wire_tests;
 mod testing;
 #[cfg(test)]
 mod time_tests;
+#[cfg(test)]
+mod unlistable_key_tests;
 #[cfg(test)]
 mod uploads_tests;
 #[cfg(test)]
@@ -821,6 +840,10 @@ impl Server {
             if error.is_timeout() {
                 self.log_stalled(&parts, &id, error.message());
             }
+            let detail = error.detail();
+            detail
+                .into_iter()
+                .for_each(|why| self.log_failed(&parts, &id, why));
             error.into_answer(path, &id)
         });
         let name = HeaderName::from_static("x-amz-request-id");
@@ -835,6 +858,12 @@ impl Server {
             response.body_mut().hold_wire(wire);
         }
         response
+    }
+
+    /// Logs what the store said about a request it failed: the client got a fixed text.
+    fn log_failed(&self, parts: &Parts, id: &str, detail: &str) {
+        let (method, path) = (&parts.method, parts.uri.path());
+        eprintln!("tierstore: request {id} ({method} {path}) failed: {detail}");
     }
 
     /// Logs a request that was ended because its body stalled.
