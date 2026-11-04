@@ -20,6 +20,10 @@ from one version to the next. The package holds nothing of a node's own: the con
 key files it names and the account (`tierstore`, `_tierstore` on a Mac) are placed on the node
 beforehand.
 
+The update hook of this tree still drives the slot units of `packaging/tierstore@.service`; the
+a/b instances, the hand-over through `server.handoff_socket` and the `[params]` the manifest names
+are its rewrite for hostkeeper, which has not landed. Until it has, no host runs this package.
+
 hostkeeper's manifest loader does not yet take a launchd plist as a unit file or a launchd label as
 a `run` entry, so it refuses the macOS package today; the test that loads it waits, ignored, until
 it does.

@@ -88,6 +88,7 @@ pub fn hk_platform(platform: Platform) -> hostkeeper_config::platform::Platform 
 /// root).
 pub fn unpack(dir: &Path, archive: &[u8], platform: Platform) -> Result<Unpacked, UnpackError> {
     let file = dir.join("package.tar.zst");
+    std::fs::create_dir_all(dir).expect("the scratch directory");
     std::fs::write(&file, archive).expect("write the package");
     let packages = dir.join("packages");
     std::fs::create_dir_all(&packages).expect("the packages directory");

@@ -3,6 +3,11 @@
 # manifest. hostkeeper links this file from the package into /etc/systemd/system and enables both
 # instances (the WantedBy= below); the update hook (`tierstore update-hook`) starts and stops them.
 #
+# This is the layout of the update hook's rewrite for hostkeeper, which this tree does not have yet:
+# the hook here still drives the slot units of packaging/tierstore@.service, and the configuration
+# key server.handoff_socket below is not read yet. Until both land, a host does not run this
+# package.
+#
 # Both instances serve the same port (9300) and run the same configuration file: an update starts
 # the idle instance, which takes the listening sockets from the live one through the hand-over
 # socket of the configuration (server.handoff_socket, under StateDirectory=), and the live one then

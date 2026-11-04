@@ -11,7 +11,8 @@
 #   alternates between, a hand-over of the listening sockets from one to the other; on macOS the
 #   one launchd job, by its label, which an update restarts (there is no hand-over on a Mac).
 # - `[params]`: `config_file`, the node's configuration file, and `service_manager`, `systemd`
-#   or `launchd`, which the update hook reads (with `launchd_label` on macOS).
+#   or `launchd` (with `launchd_label` on macOS), for the update hook. The hook of this tree does
+#   not read them yet, nor run the a/b instances: its rewrite for hostkeeper does.
 #
 # The bounds are the same on both systems. `cutover` (300 s) covers, on Linux, the start of the
 # idle instance and its readiness, and, on macOS, the stop of the job (ExitTimeOut, 90 s: the

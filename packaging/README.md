@@ -3,8 +3,10 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
-silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); there is
-no package and no container image. These files, for Linux hosts, go beside the binary.
+silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); no
+package and no container image is released (`cargo xtask release hostkeeper-package` builds a
+hostkeeper package from `hostkeeper/`, see its README, but no workflow runs it yet). These files,
+for Linux hosts, go beside the binary.
 
 | file | what |
 |---|---|

@@ -111,7 +111,14 @@ fn the_manifest_names_the_version_the_platform_and_the_platforms_units_and_param
     ] {
         assert!(linux.contains(line), "{line:?} not in {linux}");
     }
-    assert!(!linux.contains("launchd"), "{linux}");
+    // The template's comments name both systems; the values do not.
+    for other in [
+        "service_manager = \"launchd\"",
+        "launchd_label = ",
+        "run = [\"tierstore\"]",
+    ] {
+        assert!(!linux.contains(other), "{other} in {linux}");
+    }
     let mac = manifest(Platform::MacosArm64, VERSION, "0.2.0");
     for line in [
         "platform       = \"macos-arm64\"",
@@ -120,7 +127,13 @@ fn the_manifest_names_the_version_the_platform_and_the_platforms_units_and_param
     ] {
         assert!(mac.contains(line), "{line:?} not in {mac}");
     }
-    assert!(!mac.contains("systemd"), "{mac}");
+    for other in [
+        "service_manager = \"systemd\"",
+        "tierstore@a.service",
+        "/etc/tierstore/",
+    ] {
+        assert!(!mac.contains(other), "{other} in {mac}");
+    }
 }
 
 #[test]
