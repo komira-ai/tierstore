@@ -69,13 +69,11 @@ async fn listings(now: &S3Backend, before: &PrevS3) -> (Vec<(String, u64)>, Vec<
     (now, before)
 }
 
-/// Asserts that the previous release reads a bucket in which this branch wrote a plain object, two
-/// reservations (one renewed by the marked replace, both carrying the user metadata that marks
-/// them), an object replaced by a streamed conditional replacement and a streamed object: each has
-/// the size, the content tag, the bytes, a range of the bytes and the listing that this branch
-/// gives it, the previous release ignoring the mark; it replaces a reservation by the tag, and this
-/// branch then reads an object that is no reservation, and deletes an object, and this branch
-/// finds it gone.
+/// Asserts that the previous release reads a bucket in which this branch wrote two plain objects,
+/// an object replaced by a streamed conditional replacement and a streamed object: each has the
+/// size, the content tag, the bytes, a range of the bytes and the listing that this branch gives
+/// it; the previous release replaces an object by the tag, and this branch then reads the new
+/// object and its tag, and deletes an object, and this branch finds it gone.
 #[tokio::test]
 async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() {
     let s3 = FakeS3::start().await;
@@ -83,10 +81,7 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
 
     let body = |seed, len| Bytes::from(patterned(seed, len));
     now.put("plain", body(1, 3 * CHUNK + 5)).await.unwrap();
-    let held = now.put_reservation("held", body(2, 56)).await.unwrap();
-    let first = now.put_reservation("renewed", body(3, 56)).await.unwrap();
-    let marked = now.put_reservation_if_match("renewed", body(4, 56), &first);
-    marked.await.unwrap();
+    let held = now.put_tagged("held", body(2, 56)).await.unwrap();
     now.put("replaced", body(5, 10)).await.unwrap();
     let old = now.head("replaced").await.unwrap().tag;
     let len = Some(2 * CHUNK as u64 + 7);
@@ -97,7 +92,7 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
         .await
         .unwrap();
 
-    for key in ["plain", "held", "renewed", "replaced", "streamed"] {
+    for key in ["plain", "held", "replaced", "streamed"] {
         let seen = now.head(key).await.unwrap();
         let read = before.head(key).await.unwrap();
         assert_eq!((read.size, &read.tag), (seen.size, &seen.tag), "{key}");
@@ -108,9 +103,7 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
     }
     let (seen, read) = listings(&now, &before).await;
     assert_eq!(seen, read);
-    assert_eq!(seen.len(), 5);
-    assert!(now.head("held").await.unwrap().reservation);
-    assert!(now.head("renewed").await.unwrap().reservation);
+    assert_eq!(seen.len(), 4);
 
     let real = Bytes::from_static(b"a real object");
     let swapped = before
@@ -118,12 +111,9 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
         .await
         .unwrap();
     let head = now.head("held").await.unwrap();
-    assert_eq!(
-        (head.reservation, head.tag.as_str()),
-        (false, swapped.as_str())
-    );
-    let marked = now.get_marked("held", None).await.unwrap();
-    assert_eq!(marked, (real, false, swapped.clone()));
+    assert_eq!(head.tag, swapped);
+    let tagged = now.get_tagged("held", None).await.unwrap();
+    assert_eq!(tagged, (real, swapped.clone()));
 
     before.delete("plain").await.unwrap();
     let gone = now.head("plain").await;
@@ -133,7 +123,7 @@ async fn the_previous_release_reads_and_replaces_what_this_branch_wrote_to_s3() 
 /// Asserts that this branch reads a bucket in which the previous release wrote a plain object, a
 /// streamed object, an object it replaced by the tag and an object it made by a multipart upload:
 /// each has the size, the content tag, the bytes, a range of the bytes, a streamed read and the
-/// listing the previous release gives it, and none is a reservation; this branch replaces one of
+/// listing the previous release gives it; this branch replaces one of
 /// them by the tag, whole and streamed, and the previous release then reads the new bytes.
 #[tokio::test]
 async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_s3() {
@@ -160,13 +150,13 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_s3() 
         let read = before.head(key).await.unwrap();
         let seen = now.head(key).await.unwrap();
         assert_eq!((seen.size, &seen.tag), (read.size, &read.tag), "{key}");
-        assert!(!seen.reservation, "{key}");
         let whole = before.get(key, None).await.unwrap();
         assert_eq!(now.get(key, None).await.unwrap(), whole, "{key}");
-        let marked = now.get_marked(key, None).await.unwrap();
-        assert_eq!(marked, (whole.clone(), false, read.tag.clone()), "{key}");
+        let tagged = now.get_tagged(key, None).await.unwrap();
+        assert_eq!(tagged, (whole.clone(), read.tag.clone()), "{key}");
         let range = Some(ByteRange::new(3, 20));
-        assert!(!now.get_marked(key, range).await.unwrap().1, "{key}");
+        let ranged = now.get_tagged(key, range).await.unwrap();
+        assert_eq!(ranged, (whole.slice(3..23), read.tag.clone()), "{key}");
         let part = now.get(key, range).await.unwrap();
         assert_eq!(part, whole.slice(3..23), "{key}");
         let mut streaming = now.get_stream(key, None).await.unwrap();

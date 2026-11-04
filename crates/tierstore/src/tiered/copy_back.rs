@@ -21,7 +21,7 @@ impl Inner {
     /// (a failed journal entry here, the reconciler later). A write that gave no tag leaves no
     /// tag to delete by, and deletes nothing.
     ///
-    /// `tag` is the tag the cold tier's read gave with the bytes (`Backend::get_marked`), so it
+    /// `tag` is the tag the cold tier's read gave with the bytes (`Backend::get_tagged`), so it
     /// is the tag of the object the bytes were read from, and not of one that was in the key
     /// before or after the read, even one that has the same tag again after a change and a change
     /// back. No HEAD of the cold tier is made. If the key has changed since the read, the mirror names a tag that

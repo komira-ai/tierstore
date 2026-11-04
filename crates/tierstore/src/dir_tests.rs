@@ -606,52 +606,6 @@ async fn a_streamed_put_of_a_key_that_is_no_file_name_is_refused() {
     assert!(matches!(refused, Err(Error::Other(_))));
 }
 
-/// Asserts that the mark of a reservation is the owner-execute bit of its file: a reservation
-/// and a marked replace have it, a plain put has not, a plain replace clears it, and no temporary
-/// file is left behind.
-#[tokio::test]
-async fn the_mark_is_the_owner_execute_bit_and_a_plain_replace_clears_it() {
-    let (dir, backend) = backend();
-    let bit = |name: &str| {
-        let meta = std::fs::metadata(dir.path().join(name)).unwrap();
-        meta.permissions().mode() & 0o100
-    };
-    backend.put("plain", body("x")).await.unwrap();
-    let tag = backend.put_reservation("k", body("r")).await.unwrap();
-    assert_eq!((bit("plain"), bit("k")), (0, 0o100));
-    let kept = backend.put_reservation_if_match("k", body("s"), &tag);
-    let kept = kept.await.unwrap();
-    assert_eq!(bit("k"), 0o100);
-    backend
-        .put_if_match("k", body("real"), &kept)
-        .await
-        .unwrap();
-    assert_eq!(bit("k"), 0);
-    assert_eq!(names(dir.path()), [".uploads", "k", "plain"]);
-}
-
-/// Asserts that a reservation whose file lost its mode (a copy that drops modes) reads as a plain
-/// object: it heads unmarked, and a read says so.
-#[tokio::test]
-async fn a_reservation_whose_mode_was_dropped_reads_as_a_plain_object() {
-    let (dir, backend) = backend();
-    let tag = backend.put_reservation("k", body("r")).await.unwrap();
-    chmod(&dir.path().join("k"), 0o644);
-    assert!(!backend.head("k").await.unwrap().reservation);
-    let read = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(read, (body("r"), false, tag));
-}
-
-/// Asserts that a key that cannot be a file name is refused by a reservation, with nothing
-/// written.
-#[tokio::test]
-async fn a_key_that_cannot_be_a_file_name_is_refused_by_a_reservation() {
-    let (dir, backend) = backend();
-    let created = backend.put_reservation("", body("r")).await;
-    assert!(matches!(created, Err(Error::Other(_))), "{created:?}");
-    assert_eq!(names(dir.path()), [".uploads"]);
-}
-
 /// A body of `len` bytes that differ from place to place, so that a chunk read from the wrong
 /// place is not equal to the right one.
 fn patterned(len: u64) -> Bytes {
@@ -721,65 +675,63 @@ async fn a_streamed_read_takes_each_chunk_from_the_file_when_it_is_asked_for() {
     assert!(read.next().await.is_none());
 }
 
-/// Asserts that a read stays on the file it opened: the object is replaced, with a mark and then
-/// without, and deleted after the read opened it, and the read still gives the bytes and the mark
-/// of the object it opened, whole and by chunks.
+/// Asserts that a read stays on the file it opened: the object is replaced and then deleted after
+/// the read opened it, and the read still gives the bytes and the tag of the object it opened,
+/// whole and by chunks.
 #[tokio::test]
 async fn a_read_stays_on_the_file_it_opened_when_the_key_is_replaced() {
     let (_dir, backend) = backend();
     let chunk = super::READ_CHUNK;
     let held = patterned(chunk + 9);
-    let tag = backend.put_reservation("k", held.clone()).await.unwrap();
+    let tag = backend.put_tagged("k", held.clone()).await.unwrap();
     let opened = backend.stored("k").await.unwrap();
     let mut streaming = backend.get_stream("k", None).await.unwrap();
     let first = streaming.next().await.unwrap().unwrap();
     assert_eq!(first, held.slice(..chunk as usize));
 
-    let plain = backend.put_if_match("k", body("plain"), &tag);
-    let plain = plain.await.unwrap();
-    let restored = backend.put_reservation_if_match("k", body("again"), &plain);
-    restored.await.unwrap();
+    let replaced = backend.put_if_match("k", body("replaced"), &tag);
+    replaced.await.unwrap();
     backend.delete("k").await.unwrap();
 
-    let read = super::read_marked(opened, Some(ByteRange::new(2, 5))).await;
-    assert_eq!(read.unwrap(), (held.slice(2..7), true, tag));
+    let read = super::read_tagged(opened, Some(ByteRange::new(2, 5))).await;
+    assert_eq!(read.unwrap(), (held.slice(2..7), tag));
     let rest = streaming.next().await.unwrap().unwrap();
     assert_eq!(rest, held.slice(chunk as usize..));
     assert!(streaming.next().await.is_none());
 }
 
-/// Asserts that a read with the mark gives the content tag of the file it read, whatever the key
-/// holds afterwards: reads opened on plain A, then on marked B, then the key is made plain A again
-/// (the same bytes and tag as the first), and each read gives the bytes, the mark and the tag of
+/// Asserts that a read with its tag gives the content tag of the file it read, whatever the key
+/// holds afterwards: reads opened on A, then on B, then the key is made A again
+/// (the same bytes and tag as the first), and each read gives the bytes and the tag of
 /// its own file, the tags of A and B differ, and a read of the key now gives A's.
 #[tokio::test]
-async fn a_read_with_the_mark_gives_the_tag_of_the_file_it_read_when_the_key_goes_a_b_a() {
+async fn a_read_with_its_tag_gives_the_tag_of_the_file_it_read_when_the_key_goes_a_b_a() {
     let (_dir, backend) = backend();
     backend.put("k", body("alpha")).await.unwrap();
     let tag_a = backend.head("k").await.unwrap().tag;
     let opened_a = backend.stored("k").await.unwrap();
-    let to_b = backend.put_reservation_if_match("k", body("bravo"), &tag_a);
+    let to_b = backend.put_if_match("k", body("bravo"), &tag_a);
     let tag_b = to_b.await.unwrap();
     let opened_b = backend.stored("k").await.unwrap();
     let to_a = backend.put_if_match("k", body("alpha"), &tag_b);
     assert_eq!(to_a.await.unwrap(), tag_a);
 
-    let read_b = super::read_marked(opened_b, None).await.unwrap();
-    assert_eq!(read_b, (body("bravo"), true, tag_b.clone()));
-    let read_a = super::read_marked(opened_a, None).await.unwrap();
-    assert_eq!(read_a, (body("alpha"), false, tag_a.clone()));
+    let read_b = super::read_tagged(opened_b, None).await.unwrap();
+    assert_eq!(read_b, (body("bravo"), tag_b.clone()));
+    let read_a = super::read_tagged(opened_a, None).await.unwrap();
+    assert_eq!(read_a, (body("alpha"), tag_a.clone()));
     assert_ne!(tag_a, tag_b);
-    let now = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(now, (body("alpha"), false, tag_a));
+    let now = backend.get_tagged("k", None).await.unwrap();
+    assert_eq!(now, (body("alpha"), tag_a));
 }
 
 /// Asserts that a streamed replacement writes the chunks to a temporary file and replaces only
 /// the object with the tag: a tag that does not match, a body that fails and an absent key leave
-/// the object as it was and no temporary file; the right tag gives an unmarked object and its tag.
+/// the object as it was and no temporary file; the right tag gives the new object and its tag.
 #[tokio::test]
 async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
     let (dir, backend) = backend();
-    let old = backend.put_reservation("k", body("old")).await.unwrap();
+    let old = backend.put_tagged("k", body("old")).await.unwrap();
     let wrong = backend.put_stream_if_match("k", None, pieces(&["a", "b"]), "no");
     assert_eq!(wrong.await, Err(Error::PreconditionFailed("k".to_owned())));
     let cut = Error::Other("cut".to_owned());
@@ -790,14 +742,14 @@ async fn a_streamed_replace_leaves_no_temporary_file_and_takes_only_the_tag() {
     let absent = backend.put_stream_if_match("none", None, pieces(&["a"]), &old);
     assert_eq!(absent.await, Err(Error::NotFound("none".to_owned())));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
-    let kept = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(kept, (body("old"), true, old.clone()));
+    let kept = backend.get_tagged("k", None).await.unwrap();
+    assert_eq!(kept, (body("old"), old.clone()));
 
     let new = backend.put_stream_if_match("k", None, pieces(&["n", "ew"]), &old);
     let new = new.await.unwrap();
     assert_eq!(backend.head("k").await.unwrap().tag, new);
-    let read = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(read, (body("new"), false, new.clone()));
+    let read = backend.get_tagged("k", None).await.unwrap();
+    assert_eq!(read, (body("new"), new.clone()));
     assert_eq!(names(dir.path()), [".uploads", "k"]);
 
     let refused = backend.put_stream_if_match("", None, pieces(&["x"]), &new);

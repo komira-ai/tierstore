@@ -1,4 +1,4 @@
-//! A memory backend whose reads with the mark (the comparison of a takeover reads both tiers so)
+//! A memory backend whose reads with their tag (the comparison of a takeover reads both tiers so)
 //! can end short, end late or fail, and are counted, so that a test can tell how far a comparison
 //! read and can make two tiers that hold the same bytes disagree on a read.
 
@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tierstore::{Backend, ByteRange, Error, Listed, MemoryBackend, Meta};
 
-/// How a read with the mark of [`MarkedReads`] ends.
+/// How a read with its tag of [`TaggedReads`] ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ending {
     /// With the last byte.
@@ -22,14 +22,14 @@ pub enum Ending {
     Broken,
 }
 
-/// A memory backend (everything else is its own) whose reads with the mark end as `ending` says.
-pub struct MarkedReads {
+/// A memory backend (everything else is its own) whose reads with their tag end as `ending` says.
+pub struct TaggedReads {
     mem: Arc<MemoryBackend>,
     ending: Ending,
     reads: Arc<AtomicUsize>,
 }
 
-impl MarkedReads {
+impl TaggedReads {
     pub fn new(mem: Arc<MemoryBackend>, ending: Ending) -> Self {
         Self {
             mem,
@@ -38,14 +38,14 @@ impl MarkedReads {
         }
     }
 
-    /// How many reads with the mark this backend has served so far.
+    /// How many reads with their tag this backend has served so far.
     pub fn reads(&self) -> Arc<AtomicUsize> {
         self.reads.clone()
     }
 }
 
 #[async_trait]
-impl Backend for MarkedReads {
+impl Backend for TaggedReads {
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
         self.mem.put(key, body).await
     }
@@ -58,20 +58,20 @@ impl Backend for MarkedReads {
         self.mem.get(key, range).await
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         self.reads.fetch_add(1, Ordering::SeqCst);
-        let (mut bytes, reservation, tag) = self.mem.get_marked(key, range).await?;
+        let (mut bytes, tag) = self.mem.get_tagged(key, range).await?;
         match self.ending {
             Ending::Short => bytes.truncate(bytes.len().saturating_sub(1)),
             Ending::Long => bytes = Bytes::from([bytes.as_ref(), b"z"].concat()),
             Ending::Broken => return Err(Error::Unavailable("read broke".to_owned())),
             Ending::Whole => {}
         }
-        Ok((bytes, reservation, tag))
+        Ok((bytes, tag))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {

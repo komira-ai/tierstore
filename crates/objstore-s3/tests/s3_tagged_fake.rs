@@ -130,7 +130,6 @@ async fn a_head_gives_the_size_the_tag_of_the_bytes_and_the_time_of_last_write()
         size: 3,
         etag: tag.to_owned(),
         modified_millis: 1_255_369_830_000,
-        reservation: false,
     };
     assert_eq!(a, want);
     assert_eq!(store.head(&key("b")).await.unwrap(), a);
@@ -340,55 +339,8 @@ async fn a_failure_of_a_head_or_a_delete_hits_the_request_it_counts_to() {
     assert!(matches!(gone, Err(ObjectStoreError::NotFound(_))));
 }
 
-/// Asserts that the service keeps the reservation mark as S3 keeps metadata: a create-only
-/// marked write sets it, a HEAD and a whole read give it back, a second one is refused and leaves
-/// the object, a marked replace keeps it and a plain replace clears it, and a plain object never
-/// has it.
-#[tokio::test]
-async fn the_reservation_mark_is_what_the_last_write_sent() {
-    let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
-    let (k, plain) = (key("k"), key("plain"));
-    store.put_new(&plain, Bytes::new(), None).await.unwrap();
-    assert!(!store.head(&plain).await.unwrap().reservation);
-
-    let tag = store.put_new_marked(&k, Bytes::from("one")).await.unwrap();
-    let head = store.head(&k).await.unwrap();
-    assert_eq!((head.reservation, head.etag.as_str()), (true, tag.as_str()));
-    let read = store.get_all_marked(&k).await.unwrap();
-    assert_eq!(read, (Bytes::from("one"), true, Some(tag.clone())));
-
-    let again = store.put_new_marked(&k, Bytes::from("two")).await;
-    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
-    assert_eq!(store.get_all(&k).await.unwrap(), "one");
-    let over = store.put_new_marked(&plain, Bytes::from("two")).await;
-    assert!(matches!(over, Err(ObjectStoreError::AlreadyExists(_))));
-    assert!(!store.head(&plain).await.unwrap().reservation);
-
-    let kept = store
-        .put_if_match_marked(&k, Bytes::from("three"), &tag)
-        .await
-        .unwrap();
-    assert_ne!(kept, tag);
-    assert!(store.head(&k).await.unwrap().reservation);
-    let stale = store
-        .put_if_match_marked(&k, Bytes::from("four"), &tag)
-        .await
-        .unwrap_err();
-    assert_eq!(service(&stale).0, 412);
-    assert_eq!(store.get_all(&k).await.unwrap(), "three");
-
-    let five = store
-        .put_if_match(&k, Bytes::from("five"), &kept)
-        .await
-        .unwrap();
-    let cleared = store.get_all_marked(&k).await.unwrap();
-    assert_eq!(cleared, (Bytes::from("five"), false, Some(five)));
-    assert!(!store.head(&k).await.unwrap().reservation);
-}
-
 /// Asserts that a tagged create against the service gives the tag a HEAD of the new object
-/// gives, leaves the object unmarked, and is refused (`AlreadyExists`) where the key has an
+/// gives, and is refused (`AlreadyExists`) where the key has an
 /// object, which stays as it was.
 #[tokio::test]
 async fn a_tagged_create_gives_the_tag_of_the_object_it_wrote() {
@@ -397,44 +349,60 @@ async fn a_tagged_create_gives_the_tag_of_the_object_it_wrote() {
     let k = key("k");
     let tag = store.put_new_tagged(&k, Bytes::from("one")).await.unwrap();
     let head = store.head(&k).await.unwrap();
-    assert_eq!(
-        (head.reservation, head.etag.as_str()),
-        (false, tag.as_str())
-    );
+    assert_eq!(head.etag, tag);
     let again = store.put_new_tagged(&k, Bytes::from("two")).await;
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
     assert_eq!(store.get_all(&k).await.unwrap(), "one");
 }
 
-/// Asserts that a create-only marked write is refused without a request where the store does
-/// not claim conditional puts, since without the header it would replace the object.
+/// Asserts that a create-only write is refused without a request where the store does not claim
+/// conditional puts, since without the header it would replace the object.
 #[tokio::test]
-async fn a_marked_create_is_refused_where_conditional_puts_are_not_claimed() {
+async fn a_tagged_create_is_refused_where_conditional_puts_are_not_claimed() {
     let s3 = FakeS3::start().await;
     let store = s3.store(Capabilities::default());
     let err = store
-        .put_new_marked(&key("k"), Bytes::from("one"))
+        .put_new_tagged(&key("k"), Bytes::from("one"))
         .await
         .unwrap_err();
     assert!(matches!(err, ObjectStoreError::Unsupported(_)), "{err}");
     assert_eq!(s3.requests(), Vec::<String>::new());
 }
 
-/// Asserts that a marked replace of a key with no object is `NotFound`, and that a whole read
-/// of such a key is too.
+/// Asserts that a whole read with its tag gives the bytes and the tag of the object the answer
+/// came from: the tag the create gave, and after a replace the tag the replace gave.
 #[tokio::test]
-async fn a_marked_replace_and_a_marked_read_of_an_absent_key_are_not_found() {
+async fn a_tagged_whole_read_gives_the_bytes_and_the_tag_of_its_answer() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("k");
+    let tag = store.put_new_tagged(&k, Bytes::from("one")).await.unwrap();
+    let read = store.get_all_tagged(&k).await.unwrap();
+    assert_eq!(read, (Bytes::from("one"), Some(tag.clone())));
+
+    let two = store
+        .put_if_match(&k, Bytes::from("two"), &tag)
+        .await
+        .unwrap();
+    let read = store.get_all_tagged(&k).await.unwrap();
+    assert_eq!(read, (Bytes::from("two"), Some(two)));
+}
+
+/// Asserts that a replace of a key with no object is `NotFound`, and that a whole read with its
+/// tag of such a key is too.
+#[tokio::test]
+async fn a_replace_and_a_tagged_read_of_an_absent_key_are_not_found() {
     let s3 = FakeS3::start().await;
     let store = s3.store(CONDITIONAL);
     let k = key("absent");
     let replace = store
-        .put_if_match_marked(&k, Bytes::from("x"), "\"t\"")
+        .put_if_match(&k, Bytes::from("x"), "\"t\"")
         .await
         .unwrap_err();
     assert!(
         matches!(replace, ObjectStoreError::NotFound(_)),
         "{replace}"
     );
-    let read = store.get_all_marked(&k).await.unwrap_err();
+    let read = store.get_all_tagged(&k).await.unwrap_err();
     assert!(matches!(read, ObjectStoreError::NotFound(_)), "{read}");
 }

@@ -30,11 +30,6 @@
 //! largest request body ([`FakeS3::stats`]). A test can fail any step of an upload,
 //! or the nth HEAD or DELETE of an object, once ([`FakeS3::fail`]).
 //!
-//! It keeps one piece of user metadata, the reservation mark (`x-amz-meta-tierstore-reservation`),
-//! as S3 keeps metadata: an object has it if the request that wrote it sent it, a HEAD and a
-//! read of the whole object or of a range give it back, and a PUT that does not send it, an `If-Match` replace
-//! included, leaves the object without it.
-//!
 //! Bytes are kept compactly: a run of zeros is counted, not stored, so an object of
 //! many GiB of zeros costs the test nothing to hold. It checks no signature unless a test
 //! asks ([`FakeS3::require_credentials`]): then a request not signed with that key pair
@@ -52,7 +47,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
-mod meta;
 mod uploads;
 
 use self::uploads::list_uploads;
@@ -181,13 +175,12 @@ impl State {
 
     /// Keeps `kept` under `key`, stamped with the time of the service, with the entity tag
     /// `joined` if it is made of parts and the tag of its bytes if not.
-    fn store(&mut self, key: String, kept: Kept, joined: Option<String>, marked: bool) {
+    fn store(&mut self, key: String, kept: Kept, joined: Option<String>) {
         let modified = self.time.unwrap_or_else(system_seconds);
         let stored = Stored {
             kept,
             modified,
             joined,
-            marked,
         };
         self.objects.insert(key, stored);
     }
@@ -265,8 +258,6 @@ struct Stored {
     modified: u64,
     /// The entity tag of an object made of parts; none for an object of one PUT.
     joined: Option<String>,
-    /// Whether the request that wrote the object carried the reservation mark ([`meta`]).
-    marked: bool,
 }
 
 impl Stored {
@@ -729,7 +720,7 @@ fn put_object(state: &mut State, key: String, conditional: bool, request: &Reque
     }
     let kept = Kept::of(&request.body);
     let headers = vec![("etag", etag_of(&kept))];
-    state.store(key, kept, None, meta::sent(&request.headers));
+    state.store(key, kept, None);
     state.stats.single_puts += 1;
     answer("200 OK", &headers, b"")
 }
@@ -905,7 +896,7 @@ fn complete(
         return refused;
     }
     state.uploads.remove(id);
-    state.store(key.to_owned(), object, Some(joined.clone()), false);
+    state.store(key.to_owned(), object, Some(joined.clone()));
     state.stats.completed += 1;
     let done = format!(
         "<CompleteMultipartUploadResult><ETag>{joined}</ETag>\
@@ -919,11 +910,10 @@ fn head(state: &State, key: &str) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return answer("404 Not Found", &[], b"");
     };
-    let mut headers = vec![
+    let headers = [
         ("etag", stored.etag()),
         ("last-modified", http_date(stored.modified)),
     ];
-    headers.extend(meta::echoed(stored.marked));
     answer_sized("200 OK", stored.kept.len, &headers, b"")
 }
 
@@ -968,15 +958,14 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     answer("200 OK", &[], body.as_bytes())
 }
 
-/// A GET of the whole object, or of one `bytes=first-last` range; the answer carries the mark.
+/// A GET of the whole object, or of one `bytes=first-last` range.
 fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let Some(stored) = state.objects.get(key) else {
         return error("404 Not Found", "NoSuchKey");
     };
     let object = &stored.kept;
     let Some(range) = range else {
-        let mut headers = meta::echoed(stored.marked);
-        headers.push(("etag", stored.etag()));
+        let headers = [("etag", stored.etag())];
         return answer("200 OK", &headers, &object.read(0, object.len));
     };
     let parsed = range
@@ -989,8 +978,7 @@ fn get(state: &State, key: &str, range: Option<&String>) -> Vec<u8> {
     let end = (last + 1).min(object.len);
     let content_range = format!("bytes {first}-{}/{}", end - 1, object.len);
     let bytes = object.read(first, end);
-    let mut headers = meta::echoed(stored.marked);
-    headers.extend([("etag", stored.etag()), ("content-range", content_range)]);
+    let headers = [("etag", stored.etag()), ("content-range", content_range)];
     answer("206 Partial Content", &headers, &bytes)
 }
 

@@ -38,8 +38,8 @@ fn before_entry(op: PrevOp, key: &str, size: u64) -> PrevEntry {
 
 /// Asserts that the previous release reads a journal object that this branch wrote with every
 /// kind of entry: the plain puts and deletes are read as before, with their keys, sizes and times,
-/// and the reserved put and the mirror (ops it does not know, with the fields `cold_tag` and
-/// `hot_tag`, which it does not know) are read as entries it skips, with their keys.
+/// and the mirror (an op it does not know, with the fields `cold_tag` and
+/// `hot_tag`, which it does not know) is read as an entry it skips, with its key.
 #[tokio::test]
 async fn the_previous_release_reads_a_journal_object_this_branch_wrote() {
     let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-journal-new");
@@ -50,7 +50,6 @@ async fn the_previous_release_reads_a_journal_object_this_branch_wrote() {
     mirror.hot_tag = Some("hot-object-tag".to_owned());
     let entries = [
         now_entry(JournalOp::Put, "a", 1, None),
-        now_entry(JournalOp::PutReserved, "b", 2, Some("reservation-tag")),
         mirror,
         now_entry(JournalOp::Delete, "d", 0, None),
     ];
@@ -59,15 +58,7 @@ async fn the_previous_release_reads_a_journal_object_this_branch_wrote() {
     let bytes = before.get(OBJECT, None).await.unwrap();
     let read = prev_decode(&bytes).unwrap();
     let ops: Vec<PrevOp> = read.iter().map(|entry| entry.op).collect();
-    assert_eq!(
-        ops,
-        [
-            PrevOp::Put,
-            PrevOp::Unknown,
-            PrevOp::Unknown,
-            PrevOp::Delete
-        ]
-    );
+    assert_eq!(ops, [PrevOp::Put, PrevOp::Unknown, PrevOp::Delete]);
     let seen: Vec<(&str, u64, u64)> = read
         .iter()
         .map(|entry| (entry.key.as_str(), entry.size, entry.time))

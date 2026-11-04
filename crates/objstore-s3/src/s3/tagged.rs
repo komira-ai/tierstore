@@ -13,13 +13,7 @@
 //! [`put_new`](crate::ObjectStore::put_new) on a store that claims
 //! [`Capabilities::conditional_put`](crate::Capabilities::conditional_put).
 //!
-//! An object may be marked as a reservation: the write that makes it carries the user metadata
-//! `x-amz-meta-tierstore-reservation: 1` ([`put_new_marked`](S3Store::put_new_marked),
-//! [`put_if_match_marked`](S3Store::put_if_match_marked)), a HEAD reports it
-//! ([`ObjectHead::reservation`]) and so does a read of the whole object
-//! ([`get_all_marked`](S3Store::get_all_marked)). A write without the header, a replace
-//! included, leaves the object unmarked, since S3 takes the metadata of an object from the
-//! request that writes it. A conditional write is sent once, as the replace and the delete are:
+//! A conditional write is sent once, as the replace and the delete are:
 //! an answer of 409 `ConditionalRequestConflict` (two writers racing for one key, which the store
 //! does not rank) does not say which of them won, so the write may or may not have landed, and
 //! sending it again could be answered 412 to a writer that had won. The 409 is returned as it is
@@ -34,9 +28,6 @@ use reqwest::{Method, Response, StatusCode};
 use super::{READ_RETRIES, READ_RETRY_WAIT, S3Store, failure, is_retryable, times, transport, xml};
 use crate::{KeyPrefix, ListToken, ObjectKey, ObjectStoreError, PageSize};
 
-/// The user metadata header that marks an object as a reservation.
-pub(super) const RESERVATION_HEADER: &str = "x-amz-meta-tierstore-reservation";
-
 /// What a HEAD says about an object.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectHead {
@@ -48,8 +39,6 @@ pub struct ObjectHead {
     /// When the object was last written, in milliseconds since the Unix epoch. S3 keeps
     /// whole seconds, so the last three digits are zero.
     pub modified_millis: u64,
-    /// Whether the object was written with the reservation mark (see the module docs).
-    pub reservation: bool,
 }
 
 /// One object of [`S3Store::list_stamped`].
@@ -102,7 +91,7 @@ pub(super) fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
 
 impl S3Store {
     /// Replaces the object only if its entity tag is `etag` (`If-Match`, the tag sent as
-    /// it is), and gives the tag of the new object. The new object is not marked.
+    /// it is), and gives the tag of the new object.
     ///
     /// # Errors
     /// [`ObjectStoreError::NotFound`] if no object has the key. [`ObjectStoreError::Service`]
@@ -115,25 +104,13 @@ impl S3Store {
         etag: &str,
     ) -> Result<String, ObjectStoreError> {
         let condition = ("if-match", etag.to_owned());
-        self.conditional_write(key, body, condition, false).await
+        self.conditional_write(key, body, condition).await
     }
 
-    /// As [`put_if_match`](Self::put_if_match), and the new object is marked as a reservation.
-    ///
-    /// # Errors
-    /// As [`put_if_match`](Self::put_if_match).
-    pub async fn put_if_match_marked(
-        &self,
-        key: &ObjectKey,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, ObjectStoreError> {
-        let condition = ("if-match", etag.to_owned());
-        self.conditional_write(key, body, condition, true).await
-    }
-
-    /// Creates the object marked as a reservation, only if the key has none
-    /// (`If-None-Match: *`), and gives the tag of the new object as the store sends it.
+    /// Creates the object only if the key has none (`If-None-Match: *`), and gives
+    /// the tag of the new object as the store sends it: the `ETag` of the answer to this write,
+    /// so a caller that must own what it wrote holds the tag of its own object and not of
+    /// whatever a later HEAD would show.
     ///
     /// # Errors
     /// [`ObjectStoreError::Unsupported`] unless the store claims
@@ -141,27 +118,6 @@ impl S3Store {
     /// header the write would replace an object that exists.
     /// [`ObjectStoreError::AlreadyExists`] if the key has an object.
     /// [`ObjectStoreError::Protocol`] if the answer carries no `ETag`.
-    pub async fn put_new_marked(
-        &self,
-        key: &ObjectKey,
-        body: Bytes,
-    ) -> Result<String, ObjectStoreError> {
-        if !self.conn.capabilities.conditional_put {
-            return Err(ObjectStoreError::Unsupported(
-                "a create-only write on a store without conditional puts",
-            ));
-        }
-        let condition = ("if-none-match", "*".to_owned());
-        self.conditional_write(key, body, condition, true).await
-    }
-
-    /// Creates the object, unmarked, only if the key has none (`If-None-Match: *`), and gives
-    /// the tag of the new object as the store sends it: the `ETag` of the answer to this write,
-    /// so a caller that must own what it wrote holds the tag of its own object and not of
-    /// whatever a later HEAD would show.
-    ///
-    /// # Errors
-    /// As [`put_new_marked`](Self::put_new_marked).
     pub async fn put_new_tagged(
         &self,
         key: &ObjectKey,
@@ -173,24 +129,19 @@ impl S3Store {
             ));
         }
         let condition = ("if-none-match", "*".to_owned());
-        self.conditional_write(key, body, condition, false).await
+        self.conditional_write(key, body, condition).await
     }
 
-    /// A PUT that carries `condition` (`If-Match` or `If-None-Match`) and, if `marked`, the
-    /// reservation mark, sent once (a 409 leaves it unknown whether it was applied, see the module
-    /// docs). Gives the `ETag` of the answer.
+    /// A PUT that carries `condition` (`If-Match` or `If-None-Match`), sent once (a 409 leaves it
+    /// unknown whether it was applied, see the module docs). Gives the `ETag` of the answer.
     async fn conditional_write(
         &self,
         key: &ObjectKey,
         body: Bytes,
         condition: (&'static str, String),
-        marked: bool,
     ) -> Result<String, ObjectStoreError> {
         let (name, value) = condition;
-        let mut headers = vec![(name, value)];
-        if marked {
-            headers.push((RESERVATION_HEADER, "1".to_owned()));
-        }
+        let headers = vec![(name, value)];
         let resp = self
             .conn
             .send(Method::PUT, Some(key), &[], headers, body)
@@ -275,7 +226,6 @@ impl S3Store {
             size,
             etag: etag.to_owned(),
             modified_millis,
-            reservation: header(&resp, RESERVATION_HEADER) == Some("1"),
         })
     }
 
@@ -285,36 +235,35 @@ impl S3Store {
     /// [`ObjectStoreError::NotFound`] if no object has the key.
     pub async fn get_all(&self, key: &ObjectKey) -> Result<Bytes, ObjectStoreError> {
         let read = retrying(move || self.get_all_once(key)).await;
-        read.map(|(bytes, _, _)| bytes)
+        read.map(|(bytes, _)| bytes)
     }
 
-    /// The whole object, whether it carries the reservation mark, and its entity tag (quotes
+    /// The whole object and its entity tag (quotes
     /// included, if the answer has one), all from the one answer, so that they belong to one
     /// object whatever is written to the key meanwhile.
     ///
     /// # Errors
     /// [`ObjectStoreError::NotFound`] if no object has the key.
-    pub async fn get_all_marked(
+    pub async fn get_all_tagged(
         &self,
         key: &ObjectKey,
-    ) -> Result<(Bytes, bool, Option<String>), ObjectStoreError> {
+    ) -> Result<(Bytes, Option<String>), ObjectStoreError> {
         retrying(move || self.get_all_once(key)).await
     }
 
     async fn get_all_once(
         &self,
         key: &ObjectKey,
-    ) -> Result<(Bytes, bool, Option<String>), ObjectStoreError> {
+    ) -> Result<(Bytes, Option<String>), ObjectStoreError> {
         let resp = self
             .conn
             .send(Method::GET, Some(key), &[], Vec::new(), Bytes::new())
             .await?;
         match resp.status() {
             StatusCode::OK => {
-                let marked = header(&resp, RESERVATION_HEADER) == Some("1");
                 let etag = header(&resp, "etag").map(str::to_owned);
                 let bytes = resp.bytes().await.map_err(transport)?;
-                Ok((bytes, marked, etag))
+                Ok((bytes, etag))
             }
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
             _ => Err(failure(resp).await),

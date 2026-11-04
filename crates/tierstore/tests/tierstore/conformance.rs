@@ -193,142 +193,27 @@ pub async fn a_streamed_put_of_an_existing_key_is_refused(backend: &dyn Backend)
     assert_eq!(keys(backend).await, ["k"]);
 }
 
-/// The body of reservation `n` in the checks below: 56 bytes, as a proxy's reservation is, and
-/// different for each `n`, so that two reservations of a key have two tags.
-pub fn reservation(n: u32) -> Bytes {
-    body(&format!("{:<56}", format!("a reservation, number {n}")))
-}
-
-/// A reservation heads as one with its size and the tag the write gave, reads as its bytes
-/// whole and by range (with the mark, from one call), is listed with its size, and a read of an
-/// absent key or of a range past the end of the object is an error whatever the mark.
-pub async fn a_reservation_is_marked_and_reads_as_its_bytes(backend: &dyn Backend) {
-    let held = reservation(1);
-    let tag = backend.put_reservation("k", held.clone()).await.unwrap();
-    let head = backend.head("k").await.unwrap();
-    assert!(head.reservation);
-    assert_eq!((head.size, head.tag.as_str()), (56, tag.as_str()));
-    assert_eq!(backend.get("k", None).await.unwrap(), held);
-    let whole = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(whole, (held.clone(), true, tag.clone()));
-    let part = backend.get_marked("k", Some(ByteRange::new(4, 10))).await;
-    assert_eq!(part.unwrap(), (held.slice(4..14), true, tag.clone()));
-    let listed = backend.list("").await.unwrap();
-    let rows: Vec<(&str, u64)> = listed.iter().map(|o| (o.key.as_str(), o.size)).collect();
-    assert_eq!(rows, [("k", 56)]);
+/// A read with its tag gives the bytes and the tag a HEAD of the object gives, whole and by range
+/// (the tag is that of the whole object whatever the range), a read of an absent key is `NotFound`
+/// whole or by range, and a range that starts past the end of the object is an error.
+pub async fn a_tagged_read_gives_the_bytes_and_the_tag_of_one_object(backend: &dyn Backend) {
+    let held = body("0123456789");
+    let tag = backend.put_tagged("k", held.clone()).await.unwrap();
+    assert_eq!(backend.head("k").await.unwrap().tag, tag);
+    let whole = backend.get_tagged("k", None).await.unwrap();
+    assert_eq!(whole, (held.clone(), tag.clone()));
+    let part = backend.get_tagged("k", Some(ByteRange::new(4, 3))).await;
+    assert_eq!(part.unwrap(), (held.slice(4..7), tag));
 
     let missing = Error::NotFound("absent".to_owned());
-    assert_eq!(
-        backend.get_marked("absent", None).await,
-        Err(missing.clone())
-    );
+    let absent = backend.get_tagged("absent", None).await;
+    assert_eq!(absent, Err(missing.clone()));
     let ranged = backend
-        .get_marked("absent", Some(ByteRange::new(0, 1)))
+        .get_tagged("absent", Some(ByteRange::new(0, 1)))
         .await;
     assert_eq!(ranged, Err(missing));
-    let past = backend.get_marked("k", Some(ByteRange::new(57, 1))).await;
+    let past = backend.get_tagged("k", Some(ByteRange::new(11, 1))).await;
     assert!(matches!(past, Err(Error::Other(_))), "{past:?}");
-}
-
-/// A reservation of a key that has an object, a reservation or not, is refused with
-/// `AlreadyExists` and leaves the object; a put of a key that has a reservation is refused too.
-pub async fn a_reservation_and_a_put_each_refuse_a_key_the_other_holds(backend: &dyn Backend) {
-    let first = backend.put_reservation("k", reservation(1)).await.unwrap();
-    let taken = Err(Error::AlreadyExists("k".to_owned()));
-    assert_eq!(backend.put_reservation("k", reservation(2)).await, taken);
-    assert_eq!(
-        backend.put("k", body("real")).await,
-        taken.clone().map(|_| ())
-    );
-    let head = backend.head("k").await.unwrap();
-    assert_eq!((head.reservation, head.tag), (true, first));
-
-    backend.put("real", body("x")).await.unwrap();
-    let refused = backend.put_reservation("real", reservation(3)).await;
-    assert_eq!(refused, Err(Error::AlreadyExists("real".to_owned())));
-    let real = backend.head("real").await.unwrap().tag;
-    assert_eq!(
-        backend.get_marked("real", None).await.unwrap(),
-        (body("x"), false, real)
-    );
-}
-
-/// An object written any other way is not a reservation, whatever its bytes: an empty one, one
-/// with the bytes of a reservation, a streamed one.
-pub async fn a_plain_object_is_not_a_reservation(backend: &dyn Backend) {
-    backend.put("empty", body("")).await.unwrap();
-    backend.put("same", reservation(1)).await.unwrap();
-    let streamed = chunks(&["streamed"]);
-    backend
-        .put_stream("streamed", None, streamed)
-        .await
-        .unwrap();
-    for key in ["empty", "same", "streamed"] {
-        assert!(!backend.head(key).await.unwrap().reservation, "{key}");
-        let read = backend.get_marked(key, None).await.unwrap();
-        assert!(!read.1, "{key}");
-    }
-    assert_eq!(backend.head("same").await.unwrap().size, 56);
-}
-
-/// A replace with the reservation's tag makes a real object in one step: the mark is gone, the
-/// tag and the bytes are the new ones; a replace with another tag changes nothing.
-pub async fn a_plain_replace_of_a_reservation_makes_a_real_object(backend: &dyn Backend) {
-    let tag = backend.put_reservation("k", reservation(1)).await.unwrap();
-    let wrong = backend.put_if_match("k", body("x"), "not-the-tag").await;
-    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
-    assert!(backend.head("k").await.unwrap().reservation);
-
-    let new = backend.put_if_match("k", body("real"), &tag).await.unwrap();
-    let head = backend.head("k").await.unwrap();
-    assert_eq!((head.reservation, head.tag), (false, new.clone()));
-    let read = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(read, (body("real"), false, new));
-}
-
-/// A marked replace with the reservation's tag keeps it a reservation with the new bytes and
-/// tag; a stale tag is refused and changes nothing; an absent key is `NotFound`.
-pub async fn a_marked_replace_keeps_the_mark_and_takes_only_the_tag(backend: &dyn Backend) {
-    let old = backend.put_reservation("k", reservation(1)).await.unwrap();
-    let new = backend
-        .put_reservation_if_match("k", reservation(2), &old)
-        .await
-        .unwrap();
-    assert_ne!(new, old);
-    let head = backend.head("k").await.unwrap();
-    assert_eq!((head.reservation, head.tag.as_str()), (true, new.as_str()));
-    assert_eq!(backend.get("k", None).await.unwrap(), reservation(2));
-
-    let stale = backend
-        .put_reservation_if_match("k", reservation(3), &old)
-        .await;
-    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
-    assert_eq!(backend.head("k").await.unwrap().tag, new);
-
-    let absent = backend
-        .put_reservation_if_match("other", reservation(3), &old)
-        .await;
-    assert_eq!(absent, Err(Error::NotFound("other".to_owned())));
-}
-
-/// A conditional delete takes a reservation only on its tag: another tag, or the tag of the
-/// reservation it replaced, is refused and changes nothing; its own tag removes it and frees
-/// the key for another reservation.
-pub async fn a_conditional_delete_takes_a_reservation_only_on_its_tag(backend: &dyn Backend) {
-    let old = backend.put_reservation("k", reservation(1)).await.unwrap();
-    let wrong = backend.delete_if_match("k", "not-the-tag").await;
-    assert_eq!(wrong, Err(Error::PreconditionFailed("k".to_owned())));
-    let new = backend
-        .put_reservation_if_match("k", reservation(2), &old)
-        .await
-        .unwrap();
-    let stale = backend.delete_if_match("k", &old).await;
-    assert_eq!(stale, Err(Error::PreconditionFailed("k".to_owned())));
-    assert!(backend.head("k").await.unwrap().reservation);
-
-    backend.delete_if_match("k", &new).await.unwrap();
-    assert_eq!(keys(backend).await, Vec::<String>::new());
-    backend.put_reservation("k", reservation(3)).await.unwrap();
 }
 
 /// The bytes a streamed read of `range` of `key` gives, joined; the error of the call that opens
@@ -370,13 +255,14 @@ pub async fn a_streamed_read_gives_the_bytes_of_its_range(backend: &dyn Backend)
     assert_eq!(streamed(backend, "empty", None).await.unwrap(), body(""));
 }
 
-/// A streamed replacement of a reservation replaces it only if it has the tag and the body ended
-/// whole: another tag and a body that fails each leave the reservation as it was; the tag gives
-/// an object that is no reservation, with the tag the replacement returned, whether the length
+/// A streamed replacement replaces an object only if it has the tag and the body ended
+/// whole: another tag and a body that fails each leave the object as it was; the tag gives
+/// a new object, with the tag the replacement returned, whether the length
 /// is told or not; the old tag is then refused, an absent key is `NotFound`, and nothing else is
 /// left in the backend.
 pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Backend) {
-    let old = backend.put_reservation("k", reservation(1)).await.unwrap();
+    let first = body("original");
+    let old = backend.put_tagged("k", first.clone()).await.unwrap();
     let wrong = backend.put_stream_if_match("k", Some(8), chunks(&["abcd", "efgh"]), "not-the-tag");
     assert_eq!(wrong.await, Err(Error::PreconditionFailed("k".to_owned())));
     let cut = Error::Other("cut".to_owned());
@@ -385,17 +271,14 @@ pub async fn a_streamed_replace_takes_the_tag_and_a_whole_body(backend: &dyn Bac
         .put_stream_if_match("k", Some(8), failing, &old)
         .await;
     assert_eq!(failed, Err(cut));
-    let kept = backend.get_marked("k", None).await.unwrap();
-    assert_eq!(kept, (reservation(1), true, old.clone()));
+    let kept = backend.get_tagged("k", None).await.unwrap();
+    assert_eq!(kept, (first, old.clone()));
     assert_eq!(backend.head("k").await.unwrap().tag, old);
 
     let told = backend.put_stream_if_match("k", Some(8), chunks(&["abcd", "efgh"]), &old);
     let new = told.await.unwrap();
     let head = backend.head("k").await.unwrap();
-    assert_eq!(
-        (head.reservation, head.tag.as_str(), head.size),
-        (false, new.as_str(), 8)
-    );
+    assert_eq!((head.tag.as_str(), head.size), (new.as_str(), 8));
     assert_eq!(backend.get("k", None).await.unwrap(), body("abcdefgh"));
     let untold = backend.put_stream_if_match("k", None, chunks(&["12", "34"]), &new);
     let newer = untold.await.unwrap();

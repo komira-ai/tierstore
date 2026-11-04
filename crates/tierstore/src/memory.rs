@@ -49,11 +49,10 @@ impl Clock for TestClock {
     }
 }
 
-/// An object held in memory, with the time it was written and whether it is a reservation.
+/// An object held in memory, with the time it was written.
 struct Stored {
     body: Bytes,
     modified: u64,
-    marked: bool,
 }
 
 /// The content tag of a body: the hex of its SHA-256.
@@ -127,32 +126,28 @@ impl MemoryBackend {
         self.objects.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn object(&self, key: &str) -> Result<(Bytes, u64, bool), Error> {
+    fn object(&self, key: &str) -> Result<(Bytes, u64), Error> {
         let found = self
             .objects()
             .get(key)
-            .map(|stored| (stored.body.clone(), stored.modified, stored.marked));
+            .map(|stored| (stored.body.clone(), stored.modified));
         found.ok_or_else(|| Error::NotFound(key.to_owned()))
     }
 
-    /// Creates the object if the key has none, marked or not.
-    fn create(&self, key: &str, body: Bytes, marked: bool) -> Result<(), Error> {
+    /// Creates the object if the key has none.
+    fn create(&self, key: &str, body: Bytes) -> Result<(), Error> {
         let modified = self.clock.now();
         let mut objects = self.objects();
         if objects.contains_key(key) {
             return Err(Error::AlreadyExists(key.to_owned()));
         }
-        let stored = Stored {
-            body,
-            modified,
-            marked,
-        };
+        let stored = Stored { body, modified };
         objects.insert(key.to_owned(), stored);
         Ok(())
     }
 
-    /// Replaces the object if it has the tag `etag`, marked or not, and gives the new tag.
-    fn replace(&self, key: &str, body: Bytes, etag: &str, marked: bool) -> Result<String, Error> {
+    /// Replaces the object if it has the tag `etag`, and gives the new tag.
+    fn replace(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
         let modified = self.clock.now();
         let mut objects = self.objects();
         let current = objects
@@ -162,11 +157,7 @@ impl MemoryBackend {
             return Err(Error::PreconditionFailed(key.to_owned()));
         }
         let tag = tag_of(&body);
-        let stored = Stored {
-            body,
-            modified,
-            marked,
-        };
+        let stored = Stored { body, modified };
         objects.insert(key.to_owned(), stored);
         Ok(tag)
     }
@@ -192,32 +183,17 @@ impl MemoryBackend {
 #[async_trait]
 impl Backend for MemoryBackend {
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
-        self.create(key, body, false)
+        self.create(key, body)
     }
 
     async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let tag = tag_of(&body);
-        self.create(key, body, false)?;
-        Ok(tag)
-    }
-
-    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let tag = tag_of(&body);
-        self.create(key, body, true)?;
+        self.create(key, body)?;
         Ok(tag)
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {
-        self.replace(key, body, etag, false)
-    }
-
-    async fn put_reservation_if_match(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, Error> {
-        self.replace(key, body, etag, true)
+        self.replace(key, body, etag)
     }
 
     /// Collects the chunks, then replaces as [`Backend::put_if_match`] does: a body that fails
@@ -230,7 +206,7 @@ impl Backend for MemoryBackend {
         etag: &str,
     ) -> Result<String, Error> {
         let whole = collect(&mut body).await?;
-        self.replace(key, whole, etag, false)
+        self.replace(key, whole, etag)
     }
 
     async fn delete_if_match(&self, key: &str, etag: &str) -> Result<(), Error> {
@@ -246,34 +222,33 @@ impl Backend for MemoryBackend {
     }
 
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
-        let (body, _, _) = self.object(key)?;
+        let (body, _) = self.object(key)?;
         match range {
             Some(range) => range.slice(&body),
             None => Ok(body),
         }
     }
 
-    async fn get_marked(
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
-        let (body, _, marked) = self.object(key)?;
+    ) -> Result<(Bytes, String), Error> {
+        let (body, _) = self.object(key)?;
         let tag = tag_of(&body);
         let read = match range {
             Some(range) => range.slice(&body)?,
             None => body,
         };
-        Ok((read, marked, tag))
+        Ok((read, tag))
     }
 
     async fn head(&self, key: &str) -> Result<Meta, Error> {
-        let (body, modified, reservation) = self.object(key)?;
+        let (body, modified) = self.object(key)?;
         Ok(Meta {
             size: body.len() as u64,
             tag: tag_of(&body),
             modified,
-            reservation,
         })
     }
 

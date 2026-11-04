@@ -25,8 +25,8 @@ async fn a_streamed_read_gives_the_bytes_of_its_range() {
     conformance::a_streamed_read_gives_the_bytes_of_its_range(&backend).await;
 }
 
-/// Asserts that a streamed replacement of a reservation takes effect only on the tag and a body
-/// that ended whole, and then gives an object that is no reservation, over the S3 service.
+/// Asserts that a streamed replacement takes effect only on the tag and a body
+/// that ended whole, and then gives the new object, over the S3 service.
 #[tokio::test]
 async fn a_streamed_replace_takes_the_tag_and_a_whole_body() {
     let (_s3, backend) = backend().await;
