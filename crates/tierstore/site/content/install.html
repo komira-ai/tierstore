@@ -66,8 +66,10 @@ tierstore-0123456789abcdef0123456789abcdef01234567-macos-arm64.tar.gz</pre></div
     <div class="code"><pre><span class="p">$</span> install -m 0644 tierstore.conf /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> systemd-sysusers /etc/sysusers.d/tierstore.conf
 <span class="p">$</span> install -d -m 0750 -o root -g tierstore /etc/tierstore
+<span class="p">$</span> install -m 0640 -o root -g tierstore tierstore.toml /etc/tierstore/tierstore.toml
 <span class="p">$</span> install -m 0644 tierstore.service /etc/systemd/system/tierstore.service
 <span class="p">$</span> systemctl daemon-reload</pre></div>
+    <p>Edit the installed <code>/etc/tierstore/tierstore.toml</code> before you start the unit: the unit reads that file and no other.</p>
   </li>
   <li>
     <h3>Write the key files <span class="tag tag-ok">works today</span> <span class="tag tag-muted">Linux</span></h3>

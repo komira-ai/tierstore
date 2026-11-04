@@ -728,12 +728,12 @@ impl Cli {
     ///
     /// # Errors
     /// The refusal of a file that is not one of this format, or is the file of a build node.
-    pub fn from_config_text(text: &str) -> Result<Self, super::cli::Error> {
+    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
         let per_run = PerRun {
             drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
             drain_deadline: DEFAULT_DRAIN_DEADLINE,
         };
-        Ok(from_text(text, per_run)?)
+        from_text(text, per_run)
     }
 }
 

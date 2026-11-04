@@ -128,8 +128,10 @@ fn a_place_to_listen_is_needed_exactly_once() {
         "interface[0].params.addresses: it needs at least one address"
     );
     let past = refusal(&[entry("s3", "port = 65536")]);
-    assert!(past.contains("not a value this key takes"), "{past}");
-    assert!(!past.contains("65536"), "{past}");
+    assert_eq!(
+        past,
+        "line 3, column 19: params: not a value this key takes (it is not shown); expected u16"
+    );
 }
 
 /// Asserts that a file with no `s3` interface is refused, whether it has an `oci` one or none.

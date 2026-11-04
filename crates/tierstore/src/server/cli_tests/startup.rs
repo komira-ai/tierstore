@@ -49,8 +49,8 @@ fn only_the_multipart_check_can_be_skipped_and_with_a_reason() {
         assert!(why.contains(check.name()), "{value}: {why}");
         let refused = Cli::from_config_text(&with_skips(&format!("\"{value}\"")));
         let text = refused.unwrap_err().to_string();
-        assert!(text.contains("cold_store.skip_checks"), "{value}: {text}");
-        assert!(!text.contains("the store cannot do it"), "{value}: {text}");
+        let expected = "cold_store.skip_checks: each is CHECK=REASON; only multipart-conditional can be skipped, and it needs a reason";
+        assert_eq!(text, expected, "{value}");
     }
 }
 

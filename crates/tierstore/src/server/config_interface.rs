@@ -17,8 +17,8 @@
 //! of them. Both, or neither, are refused, and so is an address that two interfaces (or one
 //! interface twice) listen on, but for a port of 0, which asks the system for a port.
 //!
-//! The entries of a type are served together: one server, one drain, and for `oci` one limit on connections,
-//! per type, on every address of the entries of that type. So the `s3` entries take no other
+//! The entries of a type are served together: one server, one drain, and for `oci` one limit
+//! on connections, per type, on every address of the entries of that type. So the `s3` entries take no other
 //! param, and the `oci` entries, which also take `tls_cert_file`, `tls_key_file`, `prefix`,
 //! `max_connections` and `connection_lifetime`, must agree on those five (one registry front has
 //! one certificate and one prefix); one that differs from the first is refused. An `s3`

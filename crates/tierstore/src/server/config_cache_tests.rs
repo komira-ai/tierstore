@@ -841,3 +841,26 @@ fn an_interface_defect_is_named_before_a_local_cache_one() {
     let why = refusal(&format!("{broken}{}", oci_interface("127.0.0.1:5000", "")));
     assert!(why.contains("local_cache.max_concurrent_fills"), "{why}");
 }
+
+/// Asserts that the example in the header of `config_cache.rs` is a file the loader reads as a
+/// build node's, serving the one loopback S3 address the header names and the registry front.
+#[test]
+fn the_example_in_the_module_header_loads() {
+    let source = include_str!("config_cache.rs");
+    let example: String = source
+        .lines()
+        .skip_while(|line| *line != "//! ```toml")
+        .skip(1)
+        .take_while(|line| *line != "//! ```")
+        .map(|line| {
+            line.strip_prefix("//!")
+                .unwrap_or(line)
+                .trim_start_matches(' ')
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(example.contains("[[interface]]"), "{example}");
+    let cache = cache_of(&example);
+    assert_eq!(cache.front.listen, vec!["127.0.0.1:9400".parse().unwrap()]);
+    assert_eq!(cache.oci.listen, vec!["127.0.0.1:5000".parse().unwrap()]);
+}
