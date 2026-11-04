@@ -42,7 +42,7 @@ use super::cli::{
 };
 use super::config_combined::CombinedSettings;
 use super::listen::joined;
-use super::local_cache::Disk;
+use super::local_cache::{Disk, SystemDisk};
 
 /// Serves the node the settings describe, with its cache on `disk`, until `stop` resolves, and
 /// then drains. `ready` is called with the addresses the fronts are bound to, before the first
