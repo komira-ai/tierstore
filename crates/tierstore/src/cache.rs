@@ -171,6 +171,10 @@ impl Backend for CachedStore {
         self.inner.needs_length()
     }
 
+    fn same_version(&self, a: &Meta, b: &Meta) -> bool {
+        self.inner.same_version(a, b)
+    }
+
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
         self.inner.put(key, body).await
     }

@@ -134,7 +134,10 @@ fn the_plain_warning_is_for_non_loopback_addresses_only() {
             text.contains("serves plain HTTP on a non-loopback address"),
             "{text}"
         );
-        assert!(text.contains("--oci-tls-cert and --oci-tls-key"), "{text}");
+        assert!(
+            text.contains("params tls_cert_file and tls_key_file"),
+            "{text}"
+        );
     }
 }
 
