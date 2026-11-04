@@ -133,6 +133,18 @@ commit, not the version, and are unchanged.
 
 `v0.3.1` predates this: its binary reports `0.3.0+e7fd86844000`, the crate's version at the time.
 
+### The hostkeeper package
+
+`cargo xtask release hostkeeper-package --binary <path> --version <X.Y.Z+12 hex> --min-hostkeeper
+<x.y.z> --platform <platform> --out <dir>` assembles the package hostkeeper installs on a host,
+`tierstore-<version>-<platform>.tar.zst`, for linux-x86_64, linux-arm64 or macos-arm64, from a built
+binary: the manifest and the units of `packaging/hostkeeper/` (its README says what each holds) and
+the binary as `bin/tierstore`, byte for byte, so the macOS binary keeps the signature its build
+gave it. The verb never runs the binary, so it packages any platform's on any runner, but it
+refuses a `--version` that is not what `tierstore --version` prints after the name or that the
+binary does not hold. The same inputs give the same bytes. No workflow runs the verb yet, and the
+release files above are unchanged.
+
 ### Releasing by hand
 
 Run the `release` workflow from `main` ("Run workflow"), giving the tag (`vX.Y.Z`), the full SHA

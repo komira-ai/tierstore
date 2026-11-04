@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  tierstore (crates/tierstore) under hostkeeper on a Mac (macOS on Apple silicon): the one launchd
+  job of the macos-arm64 package, whose Label is the manifest's one `[units] run` entry and its
+  `[params] launchd_label`. hostkeeper links this file from the package into /Library/LaunchDaemons
+  and the update hook (`tierstore update-hook`) stops and starts the job with `launchctl bootout`
+  and `launchctl bootstrap system`. There is no hand-over of ports on a Mac: an update restarts the
+  job, with a gap in serving.
+
+  The Label is `tierstore`, the service name, not a reverse-DNS name: hostkeeper requires the name
+  of a package's unit file, and of each `run` entry, to start with the service name, so that one
+  package cannot claim another's unit.
+
+  The program is the package's, through hostkeeper's `current` link, never a version directory:
+  hostkeeper switches `current` before the hook's cutover, so the job started then runs the new
+  release. The binary is the one the macOS build signed; the package carries it byte for byte.
+
+  Configuration is the file and the two flags of the drain, nothing else; the file and its key
+  files are the node's, not the package's, and the account _tierstore is the node's too.
+
+  launchd sends SIGTERM on bootout. The process drains: /readyz says 503 for the settle of the
+  drain (drain-lb-wait, 1 s: on loopback there is no load balancer to wait for), then it stops
+  accepting and waits for requests in flight for at most the drain's deadline (drain-deadline,
+  60 s), and exits 0. ExitTimeOut (90 s) is the 1 s, the 60 s and a margin, so that launchd never
+  sends SIGKILL to a drain in progress; the manifest's cutover and rollback bounds (300 s and
+  600 s) cover it, the start and the wait for readiness. KeepAlive starts the process again
+  whenever it exits while the job is loaded, at most once in ThrottleInterval (30 s); a bootout
+  unloads the job, so a stop is a stop.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tierstore</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore</string>
+    <string>--config</string>
+    <string>/usr/local/tierstore/etc/tierstore.toml</string>
+    <string>--drain-lb-wait</string>
+    <string>1s</string>
+    <string>--drain-deadline</string>
+    <string>60s</string>
+  </array>
+  <key>UserName</key>
+  <string>_tierstore</string>
+  <key>GroupName</key>
+  <string>_tierstore</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/tierstore/log/tierstore.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/tierstore/log/tierstore.err.log</string>
+</dict>
+</plist>

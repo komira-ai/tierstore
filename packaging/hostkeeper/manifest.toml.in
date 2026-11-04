@@ -1,0 +1,53 @@
+# The manifest of the tierstore hostkeeper package, `manifest.toml` at the top of
+# `tierstore-<version>-<platform>.tar.zst`. `cargo xtask release hostkeeper-package` fills in each
+# `@NAME@` (crates/xtask/src/release/hostkeeper_package.rs) and writes nothing else: the keys
+# below are exactly the keys hostkeeper's manifest loader accepts, which refuses any other.
+#
+# - `version` is what the binary reports after its name in `tierstore --version`,
+#   `<X.Y.Z>+<12 hex digits of the commit>`, so the version hostkeeper installs is the version the
+#   build gauge names. `min_hostkeeper` is a plain `x.y.z`.
+# - `platform` is linux-x86_64, linux-arm64 or macos-arm64; there is one package per platform.
+# - `[units] run`: on Linux the two instances of `units/tierstore@.service` that the update hook
+#   alternates between, a hand-over of the listening sockets from one to the other; on macOS the
+#   one launchd job, by its label, which an update restarts (there is no hand-over on a Mac).
+# - `[params]`: `config_file`, the node's configuration file, and `service_manager`, `systemd`
+#   or `launchd`, which the update hook reads (with `launchd_label` on macOS).
+#
+# The bounds are the same on both systems. `cutover` (300 s) covers, on Linux, the start of the
+# idle instance and its readiness, and, on macOS, the stop of the job (ExitTimeOut, 90 s: the
+# 1 s settle and the 60 s drain deadline with a margin), its start and its readiness; `rollback`
+# (600 s) covers the same moves back. `cleanup` (1300 s) is above the stop timeout of a Linux
+# instance (TimeoutStopSec, 1100 s: the 70 s settle, the 15 min drain deadline and a margin),
+# since cleanup waits for the retired instance to exit. `prepare = 0` is unbounded: the drain has
+# no deadline of its own. `verify_deadline_secs` is at least `verify` and `rollback` together, as
+# the loader requires. There is no `install` bound: hostkeeper has no install step, and a first
+# install is an update with no previous release.
+schema         = 1
+name           = "tierstore"
+version        = "@VERSION@"
+platform       = "@PLATFORM@"
+min_hostkeeper = "@MIN_HOSTKEEPER@"
+
+[hook]
+command                = ["bin/tierstore", "update-hook"]
+boot                   = "restore"
+verify_deadline_secs   = 1600
+promotion_ceiling_secs = 3600
+cleanup_retries        = 3
+
+[hook.timeout_secs]
+prepare   = 0
+cutover   = 300
+verify    = 1000
+rollback  = 600
+cleanup   = 1300
+uninstall = 300
+
+[units]
+run = @RUN@
+
+[health]
+url = "http://127.0.0.1:9300/readyz"
+
+[params]
+@PARAMS@

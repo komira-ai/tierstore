@@ -1,0 +1,78 @@
+# tierstore (crates/tierstore) under hostkeeper on Linux: the template of the two instances
+# tierstore@a.service and tierstore@b.service, the `[units] run` entries of the package's
+# manifest. hostkeeper links this file from the package into /etc/systemd/system and enables both
+# instances (the WantedBy= below); the update hook (`tierstore update-hook`) starts and stops them.
+#
+# Both instances serve the same port (9300) and run the same configuration file: an update starts
+# the idle instance, which takes the listening sockets from the live one through the hand-over
+# socket of the configuration (server.handoff_socket, under StateDirectory=), and the live one then
+# drains and exits 0. The hook keeps which instance is live in its record.
+#
+# The binary is the package's, always through hostkeeper's `current` link, never a version
+# directory: hostkeeper switches `current` before the hook's cutover, so the instance started then
+# runs the new release, and the instance that keeps running keeps the binary it loaded.
+#
+# Both instances are enabled, so both are wanted at boot, and they must not race for the port: an
+# instance starts only while its marker file exists (ConditionPathExists=, a skipped condition is
+# not a failure). The hook creates the marker of the instance it is about to start and removes the
+# marker of the instance it retired once that one has exited, so at boot only the live instance
+# starts.
+#
+# The node's configuration and keys are not in the package: /etc/tierstore/config.toml and the key
+# files it names are the node's, owned by the account of User= (which the package does not
+# create), and the process reads no environment variable.
+[Unit]
+Description=tierstore instance %i, an S3 server over a hot and a cold tier
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/hostkeeper/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/tierstore/start-%i
+# A start that fails is tried again after 30 s, five times in an hour.
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tierstore
+# The hand-over socket, the markers and the lock of the node's reconciler, the same directory for
+# both instances.
+StateDirectory=tierstore
+StateDirectoryMode=0700
+ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore \
+  --config /etc/tierstore/config.toml \
+  --drain-lb-wait 70s \
+  --drain-deadline 15m
+# On SIGTERM the process drains: /readyz says 503 and it serves for --drain-lb-wait, then stops
+# accepting and waits for those in flight for at most --drain-deadline, gives up the reconciler's
+# lease (5 s at most) and exits 0. 1100 s is the 70 s, the 15 min and the 5 s with a margin, so that
+# systemd never sends SIGKILL to a drain in progress; the manifest's cleanup bound (1300 s) is
+# above it.
+KillSignal=SIGTERM
+TimeoutStopSec=1100
+# An exit 0 (the end of a hand-over or of a drain) is not restarted. Exit 2 (a refused command line)
+# and 3 (a cache directory whose file system failed the check of the cache) are not tried again.
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

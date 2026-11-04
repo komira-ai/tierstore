@@ -29,6 +29,8 @@ lzma-rs = "0.3.0"
 # The TLS client of `fetch`: the host's trusted roots and nothing else.
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
+# The one zstd frame of the hostkeeper package (`release hostkeeper-package`).
+ruzstd.workspace = true
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 tar = { version = "0.4.46", default-features = false }
@@ -36,6 +38,17 @@ thiserror = "2.0.21"
 ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-provider"] }
 
 [dev-dependencies]
+# The tests of the hostkeeper package (tests/hostkeeper_package) read it with hostkeeper's own
+# code: the unpacker and the manifest loader, and the placed-path lint with the loader it is built
+# on (the root `Cargo.toml` says which commits and why two).
+hostkeeper-config.workspace = true
+hostkeeper-config-main.workspace = true
+hostkeeper-placed.workspace = true
+hostkeeper-unpack.workspace = true
+# The launchd plist of the macOS package, read as XML.
+roxmltree.workspace = true
+# The manifest of the hostkeeper package, read as TOML.
+toml.workspace = true
 # The YAML parser the workflow lint (tests/workflows.rs) reads each workflow with.
 saphyr-parser = "0.1.0"
 # The scratch directories of the tests that read files (tests/banned_names.rs).
