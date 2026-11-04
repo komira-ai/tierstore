@@ -58,11 +58,11 @@ pub struct ReconcilerConfig {
     pub page_size: usize,
     /// The most bytes of the hot object that one read of a comparison holds.
     pub compare_range: NonZeroU64,
-    /// How long the format object must have said `drain` (by the monotonic clock of the
-    /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
+    /// The settle interval: how long the format object must have said `drain` (by the monotonic
+    /// clock of the reconciler) before it writes `drained`. Set it above the refresh interval
     /// (`ProxyConfig::format_refresh`), so that a proxy whose format reads succeed has read the
-    /// format again. A proxy whose reads fail keeps its last answer, so `drained` does not show
-    /// that every proxy has seen the pause.
+    /// format again. It is not an acknowledgement: a proxy whose reads fail keeps its last answer,
+    /// so `drained` does not show that every proxy has seen the pause.
     pub drain_settle: Duration,
     /// The time, for the retention and the usage object. It must agree with the times the hot
     /// tier gives its objects to within the retention. The lease does not use it.

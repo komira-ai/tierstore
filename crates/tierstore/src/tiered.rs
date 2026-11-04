@@ -72,10 +72,10 @@ pub struct ProxyConfig {
     /// The most calls to the cold tier that one listing of uploads makes to fill a page that the
     /// filter of reserved keys cut short.
     pub upload_listing_calls: u32,
-    /// How long the format object (`_tiering/format`) that was read is used before it is read
-    /// again. When the reads succeed, this is the most time between the operator pausing writes
-    /// and a proxy refusing them; a read that fails keeps the last answer, so writes can go on
-    /// longer.
+    /// The refresh interval: how long the format object (`_tiering/format`) that was read is used
+    /// before it is read again. Under successful reads a proxy reads a pause at the next write
+    /// after this interval; it is not a bound on how long a pause takes to reach a proxy, nor an
+    /// acknowledgement of it, because a read that fails keeps the last answer and writes go on.
     pub format_refresh: Duration,
     /// The time, for the entries.
     pub clock: Arc<dyn Clock>,
@@ -268,8 +268,8 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// streamed, presigned or the completion of a multipart upload) is made on the journal entry of its
 /// key, not in the journal above (`entry_put.rs`), and a read of a cold object asks for a copy-back
 /// on an entry (`copy_back.rs`). So is a delete (see `entry_delete.rs`): the cold tier's object is
-/// deleted at once, and a delete that meets a copy in flight waits for the reconciler to release
-/// the entry ([`DeleteWait`]).
+/// deleted at once, and a delete that meets a copy in flight deletes both tiers, hands the entry
+/// over and waits for the reconciler to release it before it is acknowledged ([`DeleteWait`]).
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
