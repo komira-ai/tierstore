@@ -132,9 +132,9 @@ fn a_handover_runs_its_steps_against_the_fakes_and_ends_on_the_new_slot() {
     assert_eq!(
         kinds(&rig.effects()),
         [
-            "set kbf_guard_tierstore",
+            "set tierstore_guard",
             format!("start tierstore@{b}.service").as_str(),
-            "set kbf_forward_tierstore",
+            "set tierstore_forward",
             format!("stop tierstore@{a}.service").as_str(),
         ]
     );
@@ -185,8 +185,8 @@ fn a_restart_moves_the_redirect_then_stops_the_old_unit_before_the_new_one_start
     assert_eq!(
         kinds(&rig.effects()),
         [
-            "set kbf_guard_tierstore",
-            "set kbf_forward_tierstore",
+            "set tierstore_guard",
+            "set tierstore_forward",
             format!("stop tierstore@{a}.service").as_str(),
             format!("start tierstore@{b}.service").as_str(),
         ]

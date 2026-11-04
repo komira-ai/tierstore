@@ -14,7 +14,7 @@ const EMPTY_SHA: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991
 async fn send(s3: &FakeS3, method: &str, headers: &[(&str, &str)], body: &str) -> (String, String) {
     let addr = s3.endpoint().trim_start_matches("http://").to_owned();
     let mut sock = TcpStream::connect(&addr).await.unwrap();
-    let mut request = format!("{method} /kbf-fake/obj HTTP/1.1\r\nhost: {addr}\r\n");
+    let mut request = format!("{method} /tierstore-fake/obj HTTP/1.1\r\nhost: {addr}\r\n");
     for (name, value) in headers {
         request.push_str(&format!("{name}: {value}\r\n"));
     }
