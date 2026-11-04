@@ -262,13 +262,13 @@ impl Backend for GateBackend {
         self.through(Op::Get, key, self.inner.get(key, range)).await
     }
 
-    /// A read with the mark is a call of kind [`Op::Get`].
-    async fn get_marked(
+    /// A read with the tag is a call of kind [`Op::Get`].
+    async fn get_tagged(
         &self,
         key: &str,
         range: Option<ByteRange>,
     ) -> Result<(Bytes, bool, String), Error> {
-        let call = self.inner.get_marked(key, range);
+        let call = self.inner.get_tagged(key, range);
         self.through(Op::Get, key, call).await
     }
 
