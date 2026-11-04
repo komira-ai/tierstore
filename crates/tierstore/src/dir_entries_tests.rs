@@ -202,7 +202,7 @@ async fn a_key_in_both_places_is_read_and_listed_from_the_root_file() {
 }
 
 /// Asserts that a create-only put of a key the previous release put as a file of the root is
-/// refused as taken, whether it is a put, a reservation, a streamed put or a completed multipart
+/// refused as taken, whether it is a put, a tagged put, a streamed put or a completed multipart
 /// upload, and that none of them makes a file for the key or leaves a temporary file.
 #[tokio::test]
 async fn a_create_only_put_of_a_key_the_previous_release_made_is_refused() {
@@ -212,8 +212,8 @@ async fn a_create_only_put_of_a_key_the_previous_release_made_is_refused() {
     let taken = Error::AlreadyExists(key.to_owned());
 
     assert_eq!(backend.put(key, body("new")).await, Err(taken.clone()));
-    let reserved = backend.put_reservation(key, body("new")).await;
-    assert_eq!(reserved, Err(taken.clone()));
+    let tagged = backend.put_tagged(key, body("new")).await;
+    assert_eq!(tagged, Err(taken.clone()));
     let streamed = backend.put_stream(key, None, part("new")).await;
     assert_eq!(streamed, Err(taken.clone()));
     let id = backend.create_upload(key).await.unwrap();
@@ -229,7 +229,7 @@ async fn a_create_only_put_of_a_key_the_previous_release_made_is_refused() {
 }
 
 /// Asserts that a replacement by the tag of a key the previous release put as a file of the root
-/// writes that file in place, for a replacement, a streamed replacement and a reservation, so that
+/// writes that file in place, for a replacement and a streamed replacement, so that
 /// no file is made in the subdirectory for the key; that a stale tag changes nothing; and that the
 /// key is listed once with the new body.
 #[tokio::test]
@@ -254,14 +254,9 @@ async fn a_replacement_of_a_key_the_previous_release_made_stays_in_the_root_file
     assert_eq!(keys(&backend, "").await, [key]);
 
     let streamed = backend.put_stream_if_match(key, None, part("three"), &second);
-    let third = streamed.await.unwrap();
+    streamed.await.unwrap();
     in_file("three");
     assert_eq!(backend.get(key, None).await.unwrap(), body("three"));
-
-    let marked = backend.put_reservation_if_match(key, body("four"), &third);
-    marked.await.unwrap();
-    in_file("four");
-    assert!(backend.head(key).await.unwrap().reservation);
     assert_eq!(names(dir.path()), [".entries", ".uploads", "_entries~old"]);
     assert_eq!(names(&inside), [".lock"]);
 }
@@ -462,15 +457,15 @@ async fn streamed_and_multipart_puts_of_entry_keys_land_in_the_subdirectory() {
 
 /// Asserts that a write of an entry fails, and does not panic, where the name `.entries` is a
 /// regular file, so the lock file cannot be opened, and that it leaves no temporary file behind,
-/// whether it is a put, a reservation or a streamed put.
+/// whether it is a put, a tagged put or a streamed put.
 #[tokio::test]
 async fn an_entry_write_fails_where_a_file_is_named_entries() {
     let (dir, backend) = backend();
     std::fs::write(dir.path().join(DIR), b"in the way").unwrap();
     let blocked = backend.put("_entries/e", body("x")).await;
     assert!(matches!(blocked, Err(Error::Other(_))));
-    let reserved = backend.put_reservation("_entries/e", body("x")).await;
-    assert!(matches!(reserved, Err(Error::Other(_))));
+    let tagged = backend.put_tagged("_entries/e", body("x")).await;
+    assert!(matches!(tagged, Err(Error::Other(_))));
     let streamed = backend.put_stream("_entries/e", None, part("x")).await;
     assert!(matches!(streamed, Err(Error::Other(_))));
     assert_eq!(names(dir.path()), [".entries", ".uploads"]);

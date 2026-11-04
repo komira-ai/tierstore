@@ -741,29 +741,22 @@ async fn a_piece_past_the_bytes_asked_for_ends_the_read_before_the_next_one() {
     assert_eq!(taken.load(Ordering::SeqCst), 3);
 }
 
-/// Asserts that a ranged read that fits one chunk, which the cache sends to the upstream whole
-/// without a HEAD first, does not give the bytes of a reservation (a marked object of the
-/// upstream, which is not an object): it is not found, for a key the cache does not keep and for a
-/// miss of a read-only cache, and a real object is read by the same paths.
+/// Asserts that a ranged read that fits one chunk is sent to the upstream without a HEAD first,
+/// for a key the cache does not keep and for a miss of a read-only cache: a real object gives the
+/// bytes of the range, and a key the upstream does not hold is not found.
 #[tokio::test]
-async fn a_short_ranged_read_of_a_reservation_is_not_found_on_every_path_to_the_upstream() {
-    let rig = Rig::writing("tsstream-reserved-short");
-    rig.tamper.marks.store(true, Ordering::SeqCst);
+async fn a_short_ranged_read_goes_to_the_upstream_without_a_head() {
+    let rig = Rig::writing("tsstream-short-no-head");
     let held = Bytes::from(pattern(56));
-    for key in ["plain/held", "cas/b/held"] {
-        let put = rig.tamper.memory.put_reservation(key, held.clone());
-        put.await.unwrap();
-    }
+    rig.tamper.memory.put("plain/real", held).await.unwrap();
     rig.put("cas/b/real", &pattern(56)).await;
     let holder = rig.locked();
     let reader = rig.locked();
     let range = Some(ByteRange::new(5, 10));
     let heads = rig.calls(Op::Head);
 
-    let kept_nothing = holder.get("plain/held", range).await;
-    assert_eq!(kept_nothing, Err(Error::NotFound("plain/held".to_owned())));
-    let missed = reader.get("cas/b/held", range).await;
-    assert_eq!(missed, Err(Error::NotFound("cas/b/held".to_owned())));
+    let kept_nothing = holder.get("plain/real", range).await.unwrap();
+    assert_eq!(kept_nothing, pattern(56)[5..15]);
     assert_eq!(
         reader.get("cas/b/real", range).await.unwrap(),
         pattern(56)[5..15]

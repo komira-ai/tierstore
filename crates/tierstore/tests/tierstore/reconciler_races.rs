@@ -12,7 +12,6 @@ use tierstore::{
     ReadBody, encode_journal,
 };
 
-use crate::conformance::reservation;
 use crate::support::{Rig, body, journal_key, read};
 
 fn down() -> Error {
@@ -158,18 +157,6 @@ impl Backend for Streamed {
         Err(Error::Other(format!("{key} was replaced whole")))
     }
 
-    async fn put_stream_if_match(
-        &self,
-        key: &str,
-        len: Option<u64>,
-        body: PartBody<'_>,
-        etag: &str,
-    ) -> Result<String, Error> {
-        let (whole, chunks) = Self::take(body).await?;
-        self.note("put_stream_if_match", len, chunks);
-        self.mem.put_if_match(key, whole, etag).await
-    }
-
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         self.mem.get(key, range).await
     }
@@ -193,25 +180,19 @@ impl Backend for Streamed {
 
 /// Asserts that the reconciler gives the cold tier the hot tier's object as a stream and never
 /// holds it whole: with a hot tier that refuses to give the bytes of an object whole (it gives
-/// three chunks) and a cold tier that refuses to take bytes held whole, a reservation named by its
-/// entry is replaced by the object (a streamed conditional write, told the length of the object,
-/// given the three chunks), and a plain put to an empty cold tier is copied by a streamed create
-/// (the same), and the reconciler counts both copied.
+/// three chunks) and a cold tier that refuses to take bytes held whole, plain puts to an empty
+/// cold tier are copied by a streamed create (told the length of the object, given the three
+/// chunks), and the reconciler counts both copied.
 #[tokio::test(start_paused = true)]
-async fn the_hot_object_goes_to_the_cold_tier_as_a_stream_whether_it_replaces_or_creates() {
+async fn the_hot_object_goes_to_the_cold_tier_as_a_stream() {
     let rig = Rig::new();
     let _proxy = rig.proxy("p1", 1000).await;
-    let tag = rig
-        .cold_mem
-        .put_reservation("k", reservation(1))
-        .await
-        .unwrap();
     add_journal(
         &rig,
         "p1",
         1,
         &[
-            entry(JournalOp::PutReserved, "k", 9, Some(&tag)),
+            entry(JournalOp::Put, "k", 9, None),
             entry(JournalOp::Put, "j", 9, None),
         ],
     )
@@ -232,12 +213,8 @@ async fn the_hot_object_goes_to_the_cold_tier_as_a_stream_whether_it_replaces_or
     assert_eq!(report.failed, Vec::<Error>::new());
     assert_eq!(report.copied, 2);
     assert_eq!(read(&*rig.cold_mem, "k").await, body("abcdefghi"));
-    assert!(!rig.cold_mem.head("k").await.unwrap().reservation);
     assert_eq!(read(&*rig.cold_mem, "j").await, body("jklmnopqr"));
-    let streamed = [
-        ("put_stream", Some(9), 3),
-        ("put_stream_if_match", Some(9), 3),
-    ];
+    let streamed = [("put_stream", Some(9), 3), ("put_stream", Some(9), 3)];
     assert_eq!(cold.seen(), streamed);
 }
 

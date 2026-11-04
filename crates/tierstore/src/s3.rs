@@ -30,25 +30,16 @@
 //!   headers arrived, and not after: valid headers followed by a failure before the first body
 //!   byte give the read, whose body then ends with the error.
 //! - `open_read` is the same GET whose answer also gives the object's meta: the size (the
-//!   `Content-Length`, or the total of the `Content-Range` of a ranged read), the `ETag`, the
-//!   `Last-Modified` and the mark. A range with an end, or none, is sent as it is; the last bytes
+//!   `Content-Length`, or the total of the `Content-Range` of a ranged read), the `ETag` and the
+//!   `Last-Modified`. A range with an end, or none, is sent as it is; the last bytes
 //!   of an object (a suffix) and a range the store answers 416 to are a HEAD and then a ranged
 //!   GET, as the size is needed to say what they cover. An answer without a `Content-Length`, a
 //!   `Last-Modified` or an `ETag` is an [`Error::Other`].
 //! - `head` is a HEAD: `Content-Length`, `ETag` (the content tag, without its quotes, as the
-//!   other backends give it and the S3 front, which quotes it, expects), `Last-Modified` and
-//!   whether the object carries the reservation mark.
-//! - `put_reservation` is a PUT with `If-None-Match: *` and the user metadata
-//!   `x-amz-meta-tierstore-reservation: 1`, and gives the `ETag` of the answer without its quotes;
-//!   a store that does not claim conditional puts is refused (the backend always claims them, see
-//!   [`S3Backend::new`]). `put_reservation_if_match` is a PUT with `If-Match` and the same
-//!   metadata. A write is sent once: one the store answers with 409 (see below) is
-//!   [`Error::Unavailable`], and the caller reads the key to see whether its write landed. A
-//!   `put_if_match` writes no metadata, so it turns a reservation into an object. `get_tagged` is
-//!   one GET, whole or ranged, and the mark and the content tag are the metadata header and the
-//!   `ETag` (without its quotes) of that answer, so the bytes, the mark and the tag are those of
-//!   one object whatever is written to the key meanwhile; an answer without an `ETag` is an
-//!   [`Error::Other`].
+//!   other backends give it and the S3 front, which quotes it, expects) and `Last-Modified`.
+//! - `get_tagged` is one GET, whole or ranged, and the content tag is the `ETag` (without its
+//!   quotes) of that answer, so the bytes and the tag are those of one object whatever is written to
+//!   the key meanwhile; an answer without an `ETag` is an [`Error::Other`].
 //! - `put_stream_if_match` is `put_if_match` for a body that arrives as chunks: a body of at most
 //!   16 MiB is gathered and sent as one PUT with `If-Match`, a longer one is a multipart upload
 //!   whose completion carries `If-Match`, aborted on any failure, so the object is replaced only
@@ -231,7 +222,7 @@ impl S3Backend {
         nothing.map(|_| Bytes::new())
     }
 
-    /// The read of `key`, or of `range` of it, as the chunks of the body of one GET and the mark
+    /// The read of `key`, or of `range` of it, as the chunks of the body of one GET and the tag
     /// of that answer.
     async fn open(&self, key: &str, range: Option<ByteRange>) -> Result<Answered, Error> {
         let object = object_key(key)?;
@@ -250,11 +241,11 @@ impl S3Backend {
         let body = read
             .body
             .map(move |piece| piece.map_err(|e| map_error(e, &name)));
-        Ok((body.boxed(), read.reservation, read.etag))
+        Ok((body.boxed(), read.etag))
     }
 
     /// The read of `range`, which is empty or which S3 answered 416 to: a HEAD says how long the
-    /// object is, and so whether the 416 was right. No bytes, and the mark of the HEAD, if the
+    /// object is, and so whether the 416 was right. No bytes, and the entity tag of the HEAD, if the
     /// range holds none of the object; an error if it holds some, or starts past the end.
     async fn nothing(
         &self,
@@ -278,7 +269,7 @@ impl S3Backend {
                 range.offset()
             )));
         }
-        Ok((stream::empty().boxed(), head.reservation, Some(head.etag)))
+        Ok((stream::empty().boxed(), Some(head.etag)))
     }
 
     /// At most `limit` of the objects under `prefix` that sort after `start_after`, in key
@@ -404,9 +395,9 @@ fn unquoted(etag: &str) -> String {
     etag.trim_matches('"').to_owned()
 }
 
-/// What a read opens: the chunks of its body, the mark and the entity tag (as the store sends it,
+/// What a read opens: the chunks of its body and the entity tag (as the store sends it,
 /// if it sends one) of the answer they come from.
-type Answered = (ReadBody, bool, Option<String>);
+type Answered = (ReadBody, Option<String>);
 
 /// The content tag of a read from the `ETag` of its answer, without its quotes. An answer that
 /// has none cannot tell which object was read, so a read that must say is an error.
@@ -583,26 +574,6 @@ impl Backend for S3Backend {
         Ok(unquoted(&tag))
     }
 
-    async fn put_reservation(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let object = object_key(key)?;
-        let put = self.store.put_new_marked(&object, body);
-        let tag = put.await.map_err(|e| map_error(e, key))?;
-        Ok(unquoted(&tag))
-    }
-
-    async fn put_reservation_if_match(
-        &self,
-        key: &str,
-        body: Bytes,
-        etag: &str,
-    ) -> Result<String, Error> {
-        let object = object_key(key)?;
-        let etag = quoted(etag);
-        let put = self.store.put_if_match_marked(&object, body, &etag);
-        let tag = put.await.map_err(|e| map_error(e, key))?;
-        Ok(unquoted(&tag))
-    }
-
     async fn get(&self, key: &str, range: Option<ByteRange>) -> Result<Bytes, Error> {
         let object = object_key(key)?;
         let Some(range) = range else {
@@ -616,15 +587,15 @@ impl Backend for S3Backend {
         &self,
         key: &str,
         range: Option<ByteRange>,
-    ) -> Result<(Bytes, bool, String), Error> {
+    ) -> Result<(Bytes, String), Error> {
         if range.is_some() {
-            let (body, reservation, etag) = self.open(key, range).await?;
-            return Ok((collect(body).await?, reservation, answered_tag(etag, key)?));
+            let (body, etag) = self.open(key, range).await?;
+            return Ok((collect(body).await?, answered_tag(etag, key)?));
         }
         let object = object_key(key)?;
-        let all = self.store.get_all_marked(&object);
-        let (bytes, reservation, etag) = all.await.map_err(|e| map_error(e, key))?;
-        Ok((bytes, reservation, answered_tag(etag, key)?))
+        let all = self.store.get_all_tagged(&object);
+        let (bytes, etag) = all.await.map_err(|e| map_error(e, key))?;
+        Ok((bytes, answered_tag(etag, key)?))
     }
 
     async fn get_stream(&self, key: &str, range: Option<ByteRange>) -> Result<ReadBody, Error> {
@@ -632,7 +603,7 @@ impl Backend for S3Backend {
     }
 
     /// One GET, whole or ranged, whose answer has the object's size (its `Content-Length`, or the
-    /// total of its `Content-Range`), tag, time of last write and mark, and whose body is given as
+    /// total of its `Content-Range`), tag and time of last write, and whose body is given as
     /// it arrives. A span that is the last bytes of the object (`Suffix`) cannot be sent without
     /// the size, so it is a HEAD and a ranged GET (see [`open_by_head`]), as is a span the store
     /// answers 416 to, which the HEAD turns into the unsatisfiable window with the object's meta.
@@ -666,7 +637,6 @@ impl Backend for S3Backend {
             size,
             tag: answered_tag(read.etag, key)?,
             modified,
-            reservation: read.reservation,
         };
         let name = key.to_owned();
         let body = read
@@ -687,7 +657,6 @@ impl Backend for S3Backend {
             size: head.size,
             tag: unquoted(&head.etag),
             modified: head.modified_millis,
-            reservation: head.reservation,
         })
     }
 

@@ -15,7 +15,7 @@ use tierstore::{
 };
 use tierstore_testkit::dir::TestDir;
 
-use crate::conformance::{joined, reservation};
+use crate::conformance::joined;
 use crate::support::{Rig, assert_absent, body, copied, read, set_usage};
 
 /// The bytes the objects of these tests hold.
@@ -357,28 +357,6 @@ async fn at_the_critical_mark_a_cold_read_copies_nothing_back() {
 
     let whole = proxy.open_read("k", None).await.unwrap();
     assert_eq!(joined(whole).await, body(TEN));
-    assert_absent(&*rig.hot_mem, "k").await;
-}
-
-/// Asserts that a reservation in the cold tier is no object to a read: `NotFound` for the open
-/// read of the whole and of a range at the critical mark, and nothing is copied back.
-#[tokio::test(start_paused = true)]
-async fn a_reservation_in_the_cold_tier_is_not_found() {
-    let rig = Rig::new();
-    rig.cold_mem
-        .put_reservation("k", reservation(1))
-        .await
-        .unwrap();
-    let proxy = rig.proxy("p1", 1000).await;
-    let missing = Error::NotFound("k".to_owned());
-
-    assert_eq!(
-        proxy.open_read("k", None).await.err(),
-        Some(missing.clone())
-    );
-    set_usage(&rig, 960, 0).await;
-    let span = Some(Span::Suffix(1));
-    assert_eq!(proxy.open_read("k", span).await.err(), Some(missing));
     assert_absent(&*rig.hot_mem, "k").await;
 }
 

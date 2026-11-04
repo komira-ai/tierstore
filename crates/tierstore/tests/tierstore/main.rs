@@ -17,6 +17,7 @@ mod capacity;
 #[cfg(feature = "s3")]
 mod chain;
 mod churn;
+mod cold_reads;
 mod cold_stream;
 mod conformance;
 mod faults;
@@ -29,30 +30,29 @@ mod lease;
 mod lease_takeover;
 mod list_uploads;
 mod list_uploads_reserved;
-mod marked_reads;
 mod mirror_tags;
 mod multipart;
 mod one_winner;
 mod open_read;
 mod recheck;
 mod reconciler;
+mod reconciler_copies;
 mod reconciler_faults;
 mod reconciler_mirror_entries;
 mod reconciler_races;
-mod reconciler_reservations;
 mod reconciler_takeover;
 mod registration_gc;
-mod reservation;
-mod reservation_reads;
 #[cfg(feature = "s3")]
 mod s3;
 #[cfg(feature = "s3")]
 mod s3_conditional_delete;
 #[cfg(feature = "s3")]
-mod s3_reservation;
-#[cfg(feature = "s3")]
 mod s3_streamed;
+#[cfg(feature = "s3")]
+mod s3_tagged;
 mod streamed;
 mod streaming;
 mod support;
+mod tagged_read;
+mod tagged_reads;
 mod tiered;

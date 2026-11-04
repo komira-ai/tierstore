@@ -154,10 +154,10 @@ async fn a_copy_whose_hot_read_fails_is_retried_by_the_next_pass() {
 /// Asserts that a copy whose look at the hot tier fails is reported, leaves the checkpoint
 /// before it, and is done by the next pass. (A delete entry makes looks of its own only if it is
 /// applied to the cold tier: the same journal object puts the key with a plain `Put`, or has no put
-/// of the key and the reconciler's books do not classify the key as one that a reserved put or a
+/// of the key and the reconciler's books do not classify the key as one that a
 /// mirror put, as a standalone delete of a plain key. Their failing looks are
 /// `each_failing_call_of_an_applied_delete_entry_fails_the_pass` and
-/// `a_delete_entry_alone_is_applied_to_a_plain_key_and_not_to_a_reserved_one`.)
+/// `a_delete_entry_alone_is_applied_to_a_plain_key_and_not_to_a_mirrored_one`.)
 #[tokio::test(start_paused = true)]
 async fn a_copy_whose_hot_check_fails_is_retried_by_the_next_pass() {
     let rig = Rig::new();

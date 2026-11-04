@@ -27,7 +27,7 @@ use tokio::sync::watch;
 
 use crate::{ByteRange, Error, Meta, ReadBody};
 
-use super::fill::{Filled, Live, Pending, as_object, tagged, written_over};
+use super::fill::{Filled, Live, Pending, tagged, written_over};
 use super::layout::{Name, data_path};
 use super::metrics::{add, bump};
 use super::{Inner, gone, locked, window};
@@ -398,8 +398,7 @@ impl Chunks {
         if self.expect.is_none() && self.left.is_some_and(|left| left <= chunk) {
             return Ok(());
         }
-        let head = self.inner.upstream.head(&self.key).await?;
-        let meta = as_object(&self.key, head)?;
+        let meta = self.inner.upstream.head(&self.key).await?;
         tagged(&self.key, &meta)?;
         if self
             .expect
@@ -427,20 +426,6 @@ impl Chunks {
         Err(written_over())
     }
 
-    /// The bytes of a read that fits one chunk and has no version to hold to, so that no HEAD
-    /// comes first: read with the mark, so that a reservation (a marked object, which is not an
-    /// object) is not found and its bytes are never given. An upstream that cannot give the mark
-    /// ([`Error::Unsupported`]) is read as a stream.
-    async fn unpinned(&self, range: ByteRange) -> Result<ReadBody, Error> {
-        let upstream = &self.inner.upstream;
-        match upstream.get_tagged(&self.key, Some(range)).await {
-            Ok((_, true, _)) => Err(Error::NotFound(self.key.clone())),
-            Ok((bytes, false, _)) => Ok(stream::once(std::future::ready(Ok(bytes))).boxed()),
-            Err(Error::Unsupported(_)) => upstream.get_stream(&self.key, Some(range)).await,
-            Err(error) => Err(error),
-        }
-    }
-
     async fn step(&mut self) -> Result<Option<Bytes>, Error> {
         if !self.started {
             self.started = true;
@@ -452,12 +437,8 @@ impl Chunks {
             return Ok(None);
         }
         let range = ByteRange::new(self.at, want);
-        let body = if self.pin.is_some() {
-            let upstream = &self.inner.upstream;
-            upstream.get_stream(&self.key, Some(range)).await?
-        } else {
-            self.unpinned(range).await?
-        };
+        let upstream = &self.inner.upstream;
+        let body = upstream.get_stream(&self.key, Some(range)).await?;
         let bytes = read_within(body, want).await?;
         let got = bytes.len() as u64;
         self.inner.served(Served::Upstream, got);

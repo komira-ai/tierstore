@@ -2,7 +2,7 @@
 
 use tierstore::{Backend, Error, JournalOp};
 
-use crate::reconciler_reservations::{entry, with_journal};
+use crate::reconciler_copies::{entry, with_journal};
 use crate::support::{assert_absent, body, read};
 
 /// Asserts that a mirror entry that names no tag deletes nothing: it owns no object, so the hot
