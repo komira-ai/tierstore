@@ -13,3 +13,8 @@ disallowed-methods = [
     { path = "std::env::set_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
     { path = "std::env::remove_var", reason = "a process does not change its own environment (AGENTS.md S2)" },
 ]
+
+# Tests may `unwrap` and `expect`: a failed one is the failure the test reports. The lints
+# `clippy::unwrap_used` and `clippy::expect_used` (AGENTS.md R3) then judge production code only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
