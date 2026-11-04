@@ -3,8 +3,9 @@
 use std::collections::BTreeSet;
 
 use crate::metrics::{
-    BYTES_READ_TOTAL, BYTES_SERVED_TOTAL, Counters, HITS_TOTAL, MISSES_TOTAL,
-    PROMOTED_BYTES_TOTAL, PROMOTIONS_SKIPPED_TOTAL, PROMOTIONS_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped, Tier,
+    BYTES_READ_TOTAL, BYTES_SERVED_TOTAL, Counters, HITS_TOTAL, MISSES_TOTAL, PROMOTED_BYTES_TOTAL,
+    PROMOTIONS_SKIPPED_TOTAL, PROMOTIONS_TOTAL, READ_ERRORS_TOTAL, READS_TOTAL, Read, Skipped,
+    Tier,
 };
 
 const FAMILIES: [&str; 9] = [
@@ -80,7 +81,9 @@ fn the_rendered_text_is_the_text_built_from_the_names() {
         ));
     }
     for label in ["full", "raced", "failed"] {
-        expected.push_str(&format!("{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} 0\n"));
+        expected.push_str(&format!(
+            "{PROMOTIONS_SKIPPED_TOTAL}{{reason=\"{label}\"}} 0\n"
+        ));
     }
     assert_eq!(counters.render(), expected);
 }
