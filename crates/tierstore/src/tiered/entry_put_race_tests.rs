@@ -120,6 +120,26 @@ async fn a_put_that_stops_being_live_before_its_acknowledgement_leaves_its_entry
     assert!(rig.hot_has("k").await);
 }
 
+/// Asserts that a put whose proxy stops being live while the replace of its entry is with the
+/// store is not acknowledged: the replace is parked after the store applied it, the monotonic
+/// clock is moved past `live_until`, and when the replace answers the put is `Unavailable`; the
+/// entry is pending (the store applied the replace) and the object is in the hot tier, for the
+/// reconciler.
+#[tokio::test]
+async fn a_put_that_stops_being_live_while_its_acknowledgement_is_written_is_unavailable() {
+    let rig = Rig::active().await;
+    let gate = rig.hot.gate(Op::PutIfMatch, &entry_key("k"), Phase::Post);
+    let proxy = rig.proxy.clone();
+    let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
+    gate.parked().await;
+    rig.stop_being_live();
+    assert!(gate.release());
+    let answer = put.await.unwrap();
+    assert!(is_unavailable(&answer), "{answer:?}");
+    assert_eq!(rig.shape("k").await, pending());
+    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("v"));
+}
+
 /// Asserts that a put whose entry was taken (reaped to pending by another actor) before its
 /// acknowledgement is answered `Unavailable` and does not touch the entry again.
 #[tokio::test]

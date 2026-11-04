@@ -262,7 +262,7 @@ impl Backend for GateBackend {
         self.through(Op::Get, key, self.inner.get(key, range)).await
     }
 
-    /// A read with its tag is a call of kind [`Op::Get`].
+    /// A read with the tag is a call of kind [`Op::Get`].
     async fn get_tagged(
         &self,
         key: &str,

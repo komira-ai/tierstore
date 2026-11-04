@@ -461,6 +461,37 @@ async fn reaping_a_put_aborts_the_uploads_of_its_key_and_no_others() {
     }
 }
 
+/// Asserts that a reap whose upload cleanup fails is done again from the start by the next step:
+/// the entry is still held by the departed owner after the failure, and once the retry delay has
+/// passed the uploads on both tiers are aborted and the entry is reaped.
+#[tokio::test]
+async fn a_reap_whose_upload_cleanup_failed_aborts_the_uploads_on_the_retry() {
+    let rig = Rig::new();
+    rig.activate().await;
+    for tier in [&rig.hot, &rig.cold] {
+        tier.create_upload("k").await.unwrap();
+    }
+    rig.plant("k", EntryOp::Put, EntryState::Held, Some("gone"))
+        .await;
+    let faulty = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let mut r = rig.over(rig.hot.clone(), faulty.clone(), "r1", |_| {});
+    faulty.fail_next_with(Op::ListUploads, Error::Unavailable("uploads".to_owned()));
+    assert_eq!(r.step().await.failed.len(), 1);
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Held, Some("gone".to_owned())))
+    );
+    rig.mono.advance(Duration::from_secs(1));
+    assert_eq!(r.step().await, report(1));
+    for tier in [&rig.hot, &rig.cold] {
+        assert!(tier.list_uploads("k", None, 10).await.unwrap().is_empty());
+    }
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Pending, None))
+    );
+}
+
 /// Asserts that every store call of a copy that fails fails the item and not the step: the failure
 /// is reported once, the entry stays held by the reconciler, and nothing reached the cold tier.
 #[tokio::test]
