@@ -18,14 +18,15 @@ impl EntryReconciler {
 
     /// Lists the hot tier and adopts each object older than the grace (by the time the hot tier
     /// gave it, against the wall clock of the settings) that has no cold object and no entry. The
-    /// cold tier is asked about one object per `1 / stray_rate` seconds, on the loop's own wait. A
-    /// failed call ends the sweep, which is due again at the next step.
+    /// cold tier is asked about one object per `1 / stray_rate` seconds (rounded up to a whole
+    /// microsecond), on the loop's own wait. A failed call ends the sweep, which is due again at
+    /// the next step.
     pub(super) async fn sweep(&mut self, now: u64, report: &mut StepReport) {
         let page_size = self.config.base.page_size.max(1);
         let grace = millis(self.config.stray_grace);
         let oldest = self.config.base.clock.now().saturating_sub(grace);
         let rate = u64::from(self.config.stray_rate.max(1));
-        let pause = Duration::from_millis(1000 / rate);
+        let pause = Duration::from_micros(1_000_000_u64.div_ceil(rate));
         let mut after: Option<String> = None;
         loop {
             let listing = self.hot.list_page("", after.as_deref(), page_size);

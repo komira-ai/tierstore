@@ -57,15 +57,16 @@ pub struct ReconcilerConfig {
     pub page_size: usize,
     /// How long the format object must have said `drain` (by the monotonic clock of the
     /// reconciler) before it writes `drained`: more than the time a proxy takes to read the format
-    /// (`ProxyConfig::format_refresh`), so that every proxy has stopped writing journals.
+    /// (`ProxyConfig::format_refresh`), so that every proxy has read the format again.
     pub drain_settle: Duration,
     /// The time, for the retention and the usage object. It must agree with the times the hot
     /// tier gives its objects to within the retention. The lease does not use it.
     pub clock: Arc<dyn Clock>,
-    /// The clock of the lease and of the registrations: when a lease object or a registration was
-    /// first seen unchanged, and until when the holder is valid. It is read only on this process,
-    /// and is never compared with another machine's, so it must not step back or follow the clock
-    /// of the machine ([`MonotonicClock`]).
+    /// The monotonic clock of this process. It times the lease (when a lease object was first
+    /// seen unchanged, and until when the holder is valid) and the time since a registration was
+    /// first seen as it is. It is read only on this process, and nothing that another machine
+    /// wrote is compared with it, so it must not step back or follow the clock of the machine
+    /// ([`MonotonicClock`]).
     pub mono: Arc<dyn Clock>,
     /// What the renewal timer waits on between two renewals.
     pub sleeper: Arc<dyn Sleeper>,
@@ -81,9 +82,9 @@ impl ReconcilerConfig {
     /// The settings for a reconciler `holder` and a hot tier of `hot_budget` bytes, with
     /// high and low water of 0.8 and 0.7, 16 parallel copies, a lease ttl of 30 seconds, a
     /// retention of an hour, listings of 100 journal objects, a renewal and a margin of a third
-    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime,
-    /// a drain settle time of 15 seconds, and no removal of registrations (a registration
-    /// retention of zero).
+    /// of the lease ttl, a [`MonotonicClock`] for the lease and the timer of the runtime, and no
+    /// removal of registrations (a registration retention of zero), and a drain settle time of 15
+    /// seconds.
     #[must_use]
     pub fn new(holder: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {

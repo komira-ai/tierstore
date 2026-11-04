@@ -2,9 +2,13 @@
 //! that makes a conditional write of one atomic between processes.
 //!
 //! The file of a key `_entries/<name>` is `<name>`, encoded as any key is, in the subdirectory
-//! `_entries/` of the root, which is made when the first of them is written. A listing of the
-//! root keeps only regular files, so a release that does not know the subdirectory does not see
-//! it. A listing of the prefix `_entries/` reads that subdirectory and no other directory.
+//! `.entries/` of the root, which is made when the first of them is written. The name of the
+//! subdirectory starts with `.`, and `encode` writes a `.` at the start of a key as `%2E`, so no
+//! key, in this release or the one before, has a file of that name: the ordinary key `_entries`
+//! (which is outside the prefix) keeps its own file beside the subdirectory. A listing of the root
+//! keeps only regular files whose name does not start with `.`, so a release that does not know
+//! the subdirectory does not see it. A listing of the prefix `_entries/` reads that subdirectory
+//! and no other directory.
 //!
 //! The lock is an exclusive `flock(2)` on the file `.lock` in the subdirectory. It is held by
 //! each create-only put, each replacement by the content tag and each delete of such a key, from
@@ -20,8 +24,9 @@ use std::path::{Path, PathBuf};
 
 use super::{Error, PLAIN_MODE, failed, io_error};
 
-/// The name of the subdirectory of the root that holds the files of these keys.
-pub(super) const DIR: &str = "_entries";
+/// The name of the subdirectory of the root that holds the files of these keys. It starts with
+/// `.`, which no encoded key does, so it is never the file of a key.
+pub(super) const DIR: &str = ".entries";
 
 /// The prefix of a key whose file is in the subdirectory.
 pub(super) const PREFIX: &str = "_entries/";
@@ -40,20 +45,24 @@ pub(super) struct EntryLock {
 }
 
 /// Waits for the lock of the subdirectory `dir` and takes it, making `dir` first if it is not
-/// there. Gives the lock, and whether this call made `dir`, so that the caller syncs the root.
-/// The wait is on a thread of the blocking pool, so that it holds up no task.
-pub(super) async fn take(dir: PathBuf) -> Result<(EntryLock, bool), Error> {
-    let waiting = tokio::task::spawn_blocking(move || lock(&dir));
+/// there. The caller syncs the root, which a made directory is an entry of. `reached` is called
+/// once, on the blocking thread, just before the wait for the lock begins. The wait is on a
+/// thread of the blocking pool, so that it holds up no task.
+pub(super) async fn take(
+    dir: PathBuf,
+    reached: impl FnOnce() + Send + 'static,
+) -> Result<EntryLock, Error> {
+    let waiting = tokio::task::spawn_blocking(move || lock(&dir, reached));
     waiting.await.map_err(|why| Error::Other(why.to_string()))?
 }
 
 /// Makes `dir` if it is not there, opens its lock file and waits for the lock on it.
-fn lock(dir: &Path) -> Result<(EntryLock, bool), Error> {
-    let created = match std::fs::create_dir(dir) {
-        Ok(()) => true,
-        Err(why) if why.kind() == ErrorKind::AlreadyExists => false,
+fn lock(dir: &Path, reached: impl FnOnce()) -> Result<EntryLock, Error> {
+    match std::fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(why) if why.kind() == ErrorKind::AlreadyExists => {}
         Err(why) => return Err(failed(dir, &why)),
-    };
+    }
     let path = dir.join(LOCK_FILE);
     let mut options = OpenOptions::new();
     options
@@ -62,6 +71,7 @@ fn lock(dir: &Path) -> Result<(EntryLock, bool), Error> {
         .write(true)
         .mode(PLAIN_MODE);
     let file = options.open(&path).map_err(io_error(&path))?;
+    reached();
     file.lock().map_err(io_error(&path))?;
-    Ok((EntryLock { _file: file }, created))
+    Ok(EntryLock { _file: file })
 }

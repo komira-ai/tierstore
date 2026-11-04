@@ -78,6 +78,10 @@ fn a_scoped_key_file_that_is_not_valid_is_refused() {
         "_tiering/x/",
         "cas/_journal/",
         "cas/_tiering/b/",
+        "_entries/",
+        "_entries/ab/",
+        "cas/_entries/",
+        "cas/_entries/b/",
     ];
     let mut cases = vec![
         ("empty", json("[]", "[]", "[]")),
@@ -169,6 +173,7 @@ fn a_scoped_key_made_in_code_is_checked_as_a_file_is() {
     };
     assert!(made("a", "s", &["x/"]).is_ok());
     assert!(made("a", "s", &["_journal_x/", "journal/"]).is_ok());
+    assert!(made("a", "s", &["_entries_x/", "entries/"]).is_ok());
     let reasons = [
         made("", "s", &["x/"]),
         made("a", "", &["x/"]),
@@ -176,6 +181,7 @@ fn a_scoped_key_made_in_code_is_checked_as_a_file_is() {
         made("a", "s", &[]),
         made("a", "s", &["x"]),
         made("a", "s", &["x/_journal/"]),
+        made("a", "s", &["x/", "y/_entries/z/"]),
     ]
     .map(|made| made.unwrap_err().to_string());
     assert_eq!(reasons[0], reasons[1], "{reasons:?}");
@@ -183,6 +189,8 @@ fn a_scoped_key_made_in_code_is_checked_as_a_file_is() {
     assert!(reasons[3].contains("all empty"), "{reasons:?}");
     assert!(reasons[4].contains("ending in /"), "{reasons:?}");
     assert!(reasons[5].contains("_journal/"), "{reasons:?}");
+    assert!(reasons[6].contains("_journal/"), "{reasons:?}");
+    assert_eq!(reasons[5], reasons[6], "{reasons:?}");
     assert_ne!(reasons[0], reasons[3], "{reasons:?}");
 }
 
