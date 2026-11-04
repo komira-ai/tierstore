@@ -116,7 +116,7 @@ pub(super) async fn serve_combined_until_signalled(
             let how = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({how})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     serve_combined(&settings, disk, stop, announce).await?;

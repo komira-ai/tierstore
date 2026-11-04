@@ -171,6 +171,10 @@ fn an_s3_interface_takes_no_oci_params() {
             "require_auth = true",
             "interface[0].params.require_auth: not for type \"s3\"",
         ),
+        (
+            "stage_read = 4096",
+            "interface[0].params.stage_read: not for type \"s3\"",
+        ),
     ];
     for (param, want) in cases {
         assert_eq!(
@@ -234,13 +238,14 @@ fn oci_interfaces_must_agree_on_the_front() {
             "require_auth = false",
             "require_auth",
         ),
+        ("stage_read = 4096", "stage_read = 8192", "stage_read"),
     ];
     for (first, second, name) in cases {
         let first = entry("oci", &format!("port = 5000, {first}"));
         let second = entry("oci", &format!("port = 5001, {second}"));
         let why = refusal(&[s3.clone(), first, second]);
         let want = format!(
-            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime and require_auth"
+            "interface[2].params.{name}: it differs from interface[1]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth and stage_read"
         );
         assert_eq!(why, want);
     }
@@ -264,6 +269,21 @@ fn an_oci_interface_asks_for_keys_only_with_require_auth() {
     assert!(both.oci_require_auth);
     let why = refusal(&[s3, entry("oci", "port = 5000, require_auth = \"yes\"")]);
     assert!(why.contains("expected a boolean"), "{why}");
+}
+
+/// Asserts the `stage_read` param of an `oci` interface: left out it is none (the front takes its
+/// default), given it is the size, and zero is refused naming the param.
+#[test]
+fn an_oci_interface_takes_the_size_of_a_stage_read() {
+    let s3 = entry("s3", "port = 9300");
+    let with = |params: &str| made(&[s3.clone(), entry("oci", params)]).unwrap();
+    assert_eq!(with("port = 5000").oci_stage_read, None);
+    assert_eq!(
+        with("port = 5000, stage_read = 4096").oci_stage_read,
+        Some(4096)
+    );
+    let why = refusal(&[s3.clone(), entry("oci", "port = 5000, stage_read = 0")]);
+    assert!(why.contains("stage_read"), "{why}");
 }
 
 /// Asserts that an entry with a key the format does not have, and one without a `type`, are

@@ -420,6 +420,9 @@ pub struct Cli {
     /// objects) may pull, and one that writes (the full key, a scoped key with such a write
     /// prefix) may push. Off by default: the front is anonymous. Needs TLS, or loopback only.
     pub oci_require_auth: bool,
+    /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
+    /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
+    pub oci_stage_read: Option<u64>,
 }
 
 /// A check of the self-test that the operator leaves out, and why.
@@ -503,6 +506,8 @@ pub(super) struct OciSetup {
     pub(super) limits: OciLimits,
     /// The keys the front asks of a client, with `params.require_auth`; `None` serves anonymously.
     pub(super) auth: Option<OciAuth>,
+    /// The most bytes of a stored chunk read in one call at the end of a push.
+    pub(super) stage_read: u64,
 }
 
 /// The flags that say how to reach a tier that is an S3 bucket.
@@ -703,6 +708,7 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         max_connections: cli.oci_max_connections,
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
+        stage_read: cli.oci_stage_read,
     };
     oci_setup_of(&flags, server, warn)
 }
@@ -743,7 +749,7 @@ pub(super) fn oci_setup_of(
         (None, None) => {
             let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
             for warning in warnings.filter(|_| warn) {
-                eprintln!("{warning}");
+                tracing::warn!("{warning}");
             }
             None
         }
@@ -773,6 +779,7 @@ pub(super) fn oci_setup_of(
         metrics: Arc::new(OciMetrics::with_mode(mode)),
         limits,
         auth: flags.require_auth.then(|| OciAuth::from_server(server)),
+        stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
     }))
 }
 
@@ -797,7 +804,7 @@ async fn serve_until_signalled(cli: Cli) -> Result<(), Error> {
             let mode = bound.oci_mode.unwrap_or_default().as_str();
             line.push_str(&format!(" oci-listen={} ({mode})", joined(&bound.oci_all)));
         }
-        println!("{line} commit={COMMIT}");
+        super::build_info::stderr_log::answer(&format!("{line} commit={COMMIT}\n"));
     };
     run_serving(&cli, stop, announce).await?;
     Ok(())
@@ -817,11 +824,11 @@ fn capabilities(args: &[OsString]) -> ExitCode {
     match args.iter().skip(1).find(|arg| *arg != "--capabilities") {
         Some(other) => {
             let other = other.to_string_lossy();
-            eprintln!("tierstore: --capabilities takes no other flag, got {other}");
+            tracing::error!("tierstore: --capabilities takes no other flag, got {other}");
             ExitCode::from(2)
         }
         None => {
-            print!("{}", capabilities_text(CAPABILITIES));
+            super::build_info::stderr_log::answer(&capabilities_text(CAPABILITIES));
             ExitCode::SUCCESS
         }
     }
@@ -848,7 +855,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(if usage.use_stderr() { 2 } else { 0 });
         }
         Err(Refused::Config(why)) => {
-            eprintln!("tierstore: {why}");
+            tracing::error!("tierstore: {why}");
             return ExitCode::from(2);
         }
     };
@@ -868,7 +875,7 @@ pub fn main(args: Vec<OsString>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
             // The messages of the checks name flags; the operator wrote keys.
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(exit_status(&why))
         }
     }
@@ -885,7 +892,7 @@ fn check_config(settings: &Settings) -> ExitCode {
     match checked(settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(why) => {
-            eprintln!("tierstore: {}", keys_for_flags(&why.to_string()));
+            tracing::error!("tierstore: {}", keys_for_flags(&why.to_string()));
             ExitCode::from(2)
         }
     }

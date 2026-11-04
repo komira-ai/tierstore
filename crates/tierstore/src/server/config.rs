@@ -130,6 +130,7 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-max-connections", &["params.max_connections"]),
     ("oci-connection-lifetime", &["params.connection_lifetime"]),
     ("oci-require-auth", &["params.require_auth"]),
+    ("oci-stage-read", &["params.stage_read"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -468,6 +469,8 @@ pub(super) struct OciFlags {
     pub connection_lifetime: Option<Duration>,
     /// Whether the front asks its clients for an access key of the server.
     pub require_auth: bool,
+    /// The most bytes of a stored chunk read in one call at the end of an upload.
+    pub stage_read: Option<u64>,
 }
 
 impl OciFlags {
@@ -481,6 +484,7 @@ impl OciFlags {
             max_connections: None,
             connection_lifetime: None,
             require_auth: false,
+            stage_read: None,
         }
     }
 }
@@ -704,6 +708,7 @@ pub(super) fn storage(
         oci_max_connections: oci.max_connections,
         oci_connection_lifetime: oci.connection_lifetime,
         oci_require_auth: oci.require_auth,
+        oci_stage_read: oci.stage_read,
     })
 }
 

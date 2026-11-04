@@ -49,18 +49,32 @@ pub(super) enum Route<'a> {
     Manifest { name: &'a str, reference: &'a str },
     /// `/v2/<name>/blobs/<digest>`.
     Blob { name: &'a str, digest: &'a str },
+    /// `/v2/<name>/blobs/uploads/`: where an upload begins.
+    Upload { name: &'a str },
+    /// `/v2/<name>/blobs/uploads/<id>`: an upload that has begun.
+    Session { name: &'a str, id: &'a str },
     /// Anything else.
     Other,
 }
 
 /// The route of `path`. The name is the part between `/v2/` and the last two segments, so a
-/// name may hold slashes, and a component of it may be called `blobs`.
+/// name may hold slashes, and a component of it may be called `blobs`. The paths of uploads
+/// (`.../blobs/uploads/` and `.../blobs/uploads/<id>`) are told first, as the distribution
+/// specification does, so a blob is never named `uploads`.
 pub(super) fn route(path: &str) -> Route<'_> {
     let Some(rest) = path.strip_prefix("/v2/") else {
         return Route::Other;
     };
     if rest.is_empty() {
         return Route::Ping;
+    }
+    if let Some(name) = rest.strip_suffix("/blobs/uploads/") {
+        return Route::Upload { name };
+    }
+    if let Some((head, id)) = rest.rsplit_once('/')
+        && let Some(name) = head.strip_suffix("/blobs/uploads")
+    {
+        return Route::Session { name, id };
     }
     let parts = rest
         .rsplit_once('/')
@@ -112,4 +126,10 @@ pub(super) fn is_tag(text: &str) -> bool {
     bytes.len() <= MAX_TAG_BYTES
         && bytes.first().copied().is_some_and(word)
         && bytes.iter().all(tail)
+}
+
+/// Whether `text` is the id of an upload this front makes: 32 lowercase hex digits. A key is
+/// built only from an id that is, so no request can name a key outside the front's uploads.
+pub(super) fn is_upload_id(text: &str) -> bool {
+    text.len() == 32 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }

@@ -3,6 +3,12 @@
 //! and prefix helpers a store builds on. The store here is a map in memory with a scripted
 //! `list`.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Mutex;
 use std::time::SystemTime;

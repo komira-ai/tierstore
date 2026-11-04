@@ -2,6 +2,11 @@
 //! the lint is shown to refuse each defect by planting it in a workflow that is otherwise
 //! clean.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
 #![allow(dead_code)]
 
 mod lint;

@@ -196,8 +196,8 @@ async fn only_keys_that_read_over_the_front_may_pull() {
 
 /// Asserts what each kind of key may do with `PUT`, `POST`, `PATCH` and `DELETE`: the full key and
 /// the scoped key with a write prefix over the front's objects may push, which the front answers
-/// 405 as it always has (it serves no upload); the read-only key, the read scoped key and the
-/// scoped key elsewhere are refused 403 `DENIED` before that.
+/// 405 on a blob path, where no push is served (pushes are on the upload and manifest paths); the
+/// read-only key, the read scoped key and the scoped key elsewhere are refused 403 `DENIED` first.
 #[tokio::test]
 async fn only_keys_that_write_over_the_front_may_push() {
     let rig = Rig::start_with_keys(&server()).await;

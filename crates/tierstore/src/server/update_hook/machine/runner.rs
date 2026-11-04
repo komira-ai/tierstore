@@ -179,6 +179,10 @@ pub(super) fn drain(pipe: Option<Box<dyn Read + Send>>) -> Receiver<Vec<u8>> {
 }
 
 /// What [`drain`] read, if its pipe reached the end by `deadline`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the deadline is on the machine's clock because it bounds a real child process; handing this module a clock is a follow-up (AGENTS.md T10)"
+)]
 pub(super) fn collect(drained: &Receiver<Vec<u8>>, deadline: Instant) -> io::Result<Vec<u8>> {
     drained
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -188,6 +192,10 @@ pub(super) fn collect(drained: &Receiver<Vec<u8>>, deadline: Instant) -> io::Res
         })
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the deadline is on the machine's clock because it bounds a real child process; handing this module a clock is a follow-up (AGENTS.md T10)"
+)]
 fn execute(call: &Call) -> io::Result<Output> {
     let mut command = Command::new(&call.program);
     command

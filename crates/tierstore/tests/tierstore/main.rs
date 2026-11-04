@@ -1,6 +1,12 @@
 //! Behaviour tests of the proxy and the reconciler, over in-memory backends behind fault
 //! injectors, and, with the `s3` feature, of the S3 backend over the loopback S3 service.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "an integration test: a failed unwrap or expect is the failure it reports"
+)]
+
 mod backends;
 mod cache;
 #[cfg(feature = "server")]
@@ -32,6 +38,7 @@ mod open_read;
 mod recheck;
 mod reconciler;
 mod reconciler_faults;
+mod reconciler_mirror_entries;
 mod reconciler_races;
 mod reconciler_reservations;
 mod reconciler_takeover;
