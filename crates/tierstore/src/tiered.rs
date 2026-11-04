@@ -108,10 +108,10 @@ impl ProxyConfig {
     /// critical share of 0.95, batches of at most 64 entries that
     /// wait 50 ms, a usage object that is read every second and ignored after 30 seconds, 3 looks
     /// at the cold object of a delete, 16 cold objects of a listing asked about at once, at
-    /// most 100 calls to the cold tier for one listing of uploads, a format object that is read
-    /// every 5 seconds, a heartbeat every 10 seconds, a departure time of 60 seconds and a margin
-    /// of 10 seconds, on a [`MonotonicClock`] that reads zero now, and 3 looks at an entry, and
-    /// the [`DeleteWait`] of [`DeleteWait::new`].
+    /// most 100 calls to the cold tier for one listing of uploads, a heartbeat every 10 seconds, a
+    /// departure time of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads
+    /// zero now, a format object that is read every 5 seconds, 3 looks at an entry, and the
+    /// [`DeleteWait`] of [`DeleteWait::new`].
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {

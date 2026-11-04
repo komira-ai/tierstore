@@ -49,6 +49,8 @@ pub(super) enum Route<'a> {
     Manifest { name: &'a str, reference: &'a str },
     /// `/v2/<name>/blobs/<digest>`.
     Blob { name: &'a str, digest: &'a str },
+    /// `/v2/<name>/tags/list`.
+    Tags { name: &'a str },
     /// `/v2/<name>/blobs/uploads/`: where an upload begins.
     Upload { name: &'a str },
     /// `/v2/<name>/blobs/uploads/<id>`: an upload that has begun.
@@ -75,6 +77,9 @@ pub(super) fn route(path: &str) -> Route<'_> {
         && let Some(name) = head.strip_suffix("/blobs/uploads")
     {
         return Route::Session { name, id };
+    }
+    if let Some(name) = rest.strip_suffix("/tags/list") {
+        return Route::Tags { name };
     }
     let parts = rest
         .rsplit_once('/')

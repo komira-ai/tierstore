@@ -175,7 +175,7 @@ fn a_combined_file_is_refused_when_it_cannot_be_run() {
         ),
         (
             NODE.replacen("[hot_store]\n", "[hot_store]\nskip_checks = [\"a=b\"]\n", 1) + CACHE,
-            "hot_store.skip_checks: only [cold_store] has it: the check it skips runs there",
+            "hot_store.skip_checks: only [cold_store] has it",
         ),
         (
             NODE.replacen("[cold_store]\n", "[cold_store]\nlease_ttl = \"10s\"\n", 1) + CACHE,
