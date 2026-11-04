@@ -212,7 +212,7 @@ async fn missing_and_malformed_requests_are_told_apart() {
         400,
         "NAME_INVALID",
     );
-    assert_error(&rig.get("/v2/a/tags/list").await, 404, "UNSUPPORTED");
+    assert_error(&rig.get("/v2/a/tags/lists").await, 404, "UNSUPPORTED");
     assert_error(&rig.get("/healthz").await, 404, "UNSUPPORTED");
     rig.stop().await;
 }

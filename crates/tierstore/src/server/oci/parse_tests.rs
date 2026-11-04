@@ -402,8 +402,8 @@ fn the_counters_count_and_render() {
         plain.contains("tierstore_oci_front_info{mode=\"http\"} 1\n"),
         "{plain}"
     );
-    // Five routes by twelve outcomes, five counters' type lines, three totals, the mode.
-    assert_eq!(text.lines().count(), 5 * 12 + 5 + 3 + 1);
+    // Six routes by thirteen outcomes, five counters' type lines, three totals, the mode.
+    assert_eq!(text.lines().count(), 6 * 13 + 5 + 3 + 1);
 }
 
 /// Asserts a header value that cannot be one is replaced by an empty value, not a panic.
