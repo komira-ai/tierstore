@@ -262,3 +262,17 @@ fn only_the_whole_socket_address_is_the_same_address() {
     assert_eq!(cli.listen.len(), 3);
     assert_eq!(cli.oci_listen.len(), 2);
 }
+
+/// Asserts that a port of 0, which asks the system for a port, is never the same address as
+/// another: any number of entries and addresses may have it.
+#[test]
+fn a_port_of_zero_is_never_the_same_address() {
+    let cli = made(&[
+        entry("s3", "addresses = [\"127.0.0.1:0\", \"127.0.0.1:0\"]"),
+        entry("s3", "addresses = \"127.0.0.1:0\""),
+        entry("oci", "addresses = \"127.0.0.1:0\""),
+    ])
+    .unwrap();
+    assert_eq!(cli.listen.len(), 3);
+    assert_eq!(cli.oci_listen.len(), 1);
+}

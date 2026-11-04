@@ -108,7 +108,7 @@ async fn every_address_is_served_and_drained_together() {
 fn an_address_given_twice_is_refused() {
     let files = Files::new("listeners-twice");
     let twice = Tables {
-        listen: vec!["127.0.0.1:0".to_owned(), "127.0.0.1:0".to_owned()],
+        listen: vec!["127.0.0.1:7".to_owned(), "127.0.0.1:7".to_owned()],
         ..Tables::default()
     };
     let oci_twice = Tables {
@@ -129,7 +129,7 @@ fn an_address_given_twice_is_refused() {
     let cases = [
         (
             twice,
-            "interface[0].params: the address 127.0.0.1:0 is listed twice",
+            "interface[0].params: the address 127.0.0.1:7 is listed twice",
         ),
         (
             oci_twice,
