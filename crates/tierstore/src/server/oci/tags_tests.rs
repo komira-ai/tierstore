@@ -607,7 +607,7 @@ async fn a_name_that_is_no_version_is_refused_and_the_last_version_cannot_be_mov
     let moved = rig.tag("app", "end", &second).await;
     moved.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
     let same = rig.tag("app", "end", &first).await;
-    assert_eq!(same.status, StatusCode::CREATED, "{}", same.text());
+    same.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
 }
 
 /// Asserts that a version that is listed and then not there (a read that answers not found) is
