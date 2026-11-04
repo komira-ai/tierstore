@@ -84,14 +84,16 @@ impl Inner {
     /// Whether writes are paused and whether they are made on entries, as of a read of the format
     /// object that is at most `format_refresh` old.
     async fn format_state(&self) -> (bool, bool) {
-        let now = Instant::now();
-        let (read, paused, entries) = {
-            let seen = locked(&self.pause);
-            (seen.read, seen.paused, seen.entries)
-        };
-        if read.is_some_and(|at| now.duration_since(at) < self.config.format_refresh) {
-            return (paused, entries);
+        if let Some(state) = self.fresh_format_state() {
+            return state;
         }
+        // One caller reads at a time, and the freshness is checked again once the gate is held, so
+        // a caller that waited uses the read of the caller before it.
+        let _gate = self.format_gate.lock().await;
+        if let Some(state) = self.fresh_format_state() {
+            return state;
+        }
+        let now = Instant::now();
         let found = read_format(self.hot.as_ref()).await;
         let mut seen = locked(&self.pause);
         seen.read = Some(now);
@@ -99,5 +101,13 @@ impl Inner {
             seen.keep(format.as_ref());
         }
         (seen.paused, seen.entries)
+    }
+
+    /// What the last read of the format object says, if it is at most `format_refresh` old.
+    fn fresh_format_state(&self) -> Option<(bool, bool)> {
+        let seen = locked(&self.pause);
+        seen.read
+            .is_some_and(|at| Instant::now().duration_since(at) < self.config.format_refresh)
+            .then_some((seen.paused, seen.entries))
     }
 }

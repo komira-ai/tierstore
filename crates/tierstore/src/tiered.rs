@@ -343,6 +343,9 @@ struct Inner {
     pause: Arc<Mutex<pause::Pause>>,
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
+    /// One caller reads the format object at a time, so that a caller that waited uses the read of
+    /// the caller before it.
+    format_gate: AsyncMutex<()>,
     counters: Counters,
     heartbeat: Heartbeat,
 }
@@ -385,6 +388,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
+            format_gate: AsyncMutex::default(),
             counters: Counters::default(),
             heartbeat,
         };
