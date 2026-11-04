@@ -80,8 +80,11 @@ fn put_started_before(history: &[Event], ended: usize, limit: usize) -> bool {
 /// - **Write-once.** Two acknowledged puts of the key have a delete that ended between them.
 /// - **No acknowledged put lost.** The last acknowledged put, if no delete ended after it, is what
 ///   a get answers and what the cold tier holds at the end.
-/// - **No acknowledged delete undone.** After an acknowledged delete, with every put ended before
-///   it and answered, neither tier holds the key and a get answers not found.
+/// - **No acknowledged delete undone.** After an acknowledged delete, neither tier holds the key
+///   and a get answers not found, unless a put overlapped the delete: an acknowledged put that
+///   ended after the delete was acknowledged, or a refused put that ended after the delete began
+///   (a refusal may still have landed its bytes). A refused put that ended before the delete began
+///   excuses nothing.
 /// - **No get of a deleted key.** A get that began after a delete was acknowledged never answers
 ///   the bytes of a put that the delete covered, unless a put of the same bytes that ended after
 ///   the delete had begun before the get was answered.
@@ -144,9 +147,21 @@ pub fn judge(history: &[Event], end: &End) -> Vec<String> {
 
     let last_acked_delete = delete_ends.iter().rev().find(|(_, acked)| *acked);
     if let Some(&(at, _)) = last_acked_delete {
-        let settled = put_ends
+        let began = history[..at]
             .iter()
-            .all(|(ended, _, acked)| *ended < at && *acked);
+            .rposition(|earlier| {
+                earlier.who == history[at].who && earlier.kind == Kind::DeleteStart
+            })
+            .unwrap_or(0);
+        // A put overlaps the delete when it ended after the delete began. An acknowledged put
+        // that ended before the delete was acknowledged is ordered by it; a refused put may have
+        // landed its bytes late, so only one that overlaps the delete is excused. A refused put
+        // that ended before the delete began leaves the delete's duty whole.
+        let settled = put_ends.iter().all(
+            |&(ended, _, acked)| {
+                if acked { ended < at } else { ended < began }
+            },
+        );
         let present = end.hot.is_some() || end.cold.is_some() || end.read != Ok(None);
         if settled && present {
             broken.push(format!(
@@ -331,6 +346,46 @@ mod tests {
             broken[0].starts_with("acknowledged delete undone"),
             "{broken:?}"
         );
+    }
+
+    /// Asserts that a refused put that ended before an acknowledged delete began does not excuse
+    /// bytes left in both tiers: an acknowledged put of "old", a refused put of "new", an
+    /// acknowledged delete, and an end that holds "old" is reported as an undone delete.
+    #[test]
+    fn a_refused_put_before_an_acknowledged_delete_does_not_excuse_resurrection() {
+        let mut history = put(0, "old", true);
+        history.extend(put(1, "new", false));
+        history.extend(delete(0, true));
+        history.extend(get(0, Some("old")));
+        let broken = judge(&history, &holding("old"));
+        assert!(
+            broken
+                .iter()
+                .any(|line| line.starts_with("acknowledged delete undone")),
+            "{broken:?}"
+        );
+    }
+
+    /// Asserts that a refused put that overlaps an acknowledged delete is excused: its bytes may
+    /// have landed after the delete.
+    #[test]
+    fn a_refused_put_overlapping_an_acknowledged_delete_is_excused() {
+        let mut history = put(SEED, "old", true);
+        history.push(ev(
+            1,
+            Kind::PutStart {
+                text: "new".to_owned(),
+            },
+        ));
+        history.extend(delete(0, true));
+        history.push(ev(
+            1,
+            Kind::PutDone {
+                text: "new".to_owned(),
+                acked: false,
+            },
+        ));
+        assert_eq!(judge(&history, &holding("new")), Vec::<String>::new());
     }
 
     /// Asserts that a delete that was not acknowledged does not oblige the key to be gone.
