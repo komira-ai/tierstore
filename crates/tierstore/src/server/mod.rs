@@ -254,7 +254,13 @@ mod body_stall_tests;
 #[cfg(test)]
 mod cache_cli_tests;
 #[cfg(test)]
+mod cache_handoff_lock_tests;
+#[cfg(test)]
+mod cache_handoff_sockets_tests;
+#[cfg(test)]
 mod cache_handoff_tests;
+#[cfg(test)]
+mod cache_handoff_traffic_tests;
 #[cfg(test)]
 mod cache_lock_tests;
 #[cfg(test)]
@@ -277,6 +283,8 @@ mod config_combined_tests;
 mod config_testing;
 #[cfg(test)]
 mod docs_tests;
+#[cfg(test)]
+mod drain_contract_tests;
 #[cfg(test)]
 mod drain_switch_tests;
 #[cfg(test)]
