@@ -3,6 +3,9 @@
 
 use hyper::StatusCode;
 
+use crate::Backend;
+use crate::journal::FORMAT_KEY;
+
 use super::Server;
 use super::reply::{Answer, S3Error, xml_answer};
 use super::request::{Query, Target};
@@ -140,6 +143,18 @@ const BUCKET_PARAMS: [&str; 5] = [
 /// The most buckets a page of ListBuckets may be asked to have (`max-buckets`, from 1 to this).
 const MAX_BUCKETS: usize = 10_000;
 
+/// When the bucket was made, for the `CreationDate` of ListBuckets: the time the store's
+/// `_tiering/format` object was last written, which for a store whose format change is done is
+/// the time the change was made active, and which the backend gives as the object's modified
+/// time; `fallback` where the store has no such object (a store never changed) or does not
+/// answer. It is read once, at the start, and nothing about it is stored.
+pub(super) async fn created_at(hot: &dyn Backend, fallback: u64) -> u64 {
+    match hot.head(FORMAT_KEY).await {
+        Ok(meta) => meta.modified,
+        Err(_) => fallback,
+    }
+}
+
 impl Server {
     /// ListBuckets: the one bucket the server serves, narrowed as S3 narrows a list: `prefix`
     /// keeps the bucket if its name starts with it, `bucket-region` if it is in that region.
@@ -169,7 +184,7 @@ impl Server {
             .is_none_or(|asked| asked == region);
         Ok(xml_answer(
             StatusCode::OK,
-            xml::buckets(bucket, region, named && placed),
+            xml::buckets(bucket, region, self.config.bucket_created, named && placed),
         ))
     }
 

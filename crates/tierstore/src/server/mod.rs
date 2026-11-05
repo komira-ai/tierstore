@@ -98,7 +98,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads and HeadBucket and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation
+//! and ListBuckets and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
@@ -413,6 +414,10 @@ pub struct ServerConfig {
     pub bucket: String,
     /// The region in the credential scope of a signature.
     pub region: String,
+    /// When the bucket was made, in milliseconds since the Unix epoch, for the `CreationDate` of
+    /// ListBuckets: the time [`ServerConfig::new`] was called at, and in the binary the time the
+    /// store's `_tiering/format` was written, where it has one.
+    pub bucket_created: u64,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -532,6 +537,7 @@ impl ServerConfig {
         Self {
             bucket: bucket.to_owned(),
             region: "us-east-1".to_owned(),
+            bucket_created: clock.now(),
             access_key_id: access_key_id.to_owned(),
             secret_access_key: secret_access_key.to_owned(),
             read_only_keys: Vec::new(),

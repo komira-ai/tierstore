@@ -7,7 +7,7 @@ A client signs each request with an access key (SigV4, in the `Authorization` he
 | Key | Key of the file | May do |
 |---|---|---|
 | full | `server.access_key_file` | everything the server serves: put, get, head, list, delete and multipart uploads; also signs presigned GET URLs |
-| read-only | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket; also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
+| read-only | `server.read_only_key_files` | get and head objects, list the bucket and its open uploads, head the bucket, read its region (GetBucketLocation) and list the buckets (ListBuckets); also signs presigned GET URLs. Any write, delete, CreateBucket or multipart call is 403 `AccessDenied`, before its body is read |
 | presigning | `server.presign_key_files` | sign presigned PUT URLs, each good for one object under the key's prefix, and nothing else |
 | GC | `server.gc_key_files` | a scoped key with a list, a delete and an abort right on one prefix: list, head, delete and abort uploads under it, and nothing else; it never reads a body |
 | scoped | `server.scoped_key_files` | read, create and delete under the prefixes its file lists, and nothing else; also signs presigned GET URLs for objects under its read prefixes |
