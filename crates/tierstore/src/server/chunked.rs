@@ -215,6 +215,15 @@ fn unframed(line: &[u8]) -> Result<&str, S3Error> {
     text.ok_or_else(|| malformed("a line is not text ended by CR LF"))
 }
 
+/// The text of a line of the trailer without its line end, which is `\r\n` but may be `\n`:
+/// minio-go (so `mc`) ends the checksum line of an unsigned trailer with `\n`, and S3 takes it.
+fn trailer_text(line: &[u8]) -> Result<&str, S3Error> {
+    let line = line.strip_suffix(b"\n").unwrap_or_default();
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let text = std::str::from_utf8(line).ok();
+    text.ok_or_else(|| malformed("a line of the trailer is not text"))
+}
+
 /// The size of a chunk, in hex digits only.
 fn chunk_size(text: &str) -> Result<u64, S3Error> {
     let digits = !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_hexdigit());
@@ -279,6 +288,10 @@ impl Decoder {
                 continue;
             }
             if matches!(self.phase, Phase::Done) {
+                // Line ends may follow the empty line (minio-go sends one more `\r\n`); nothing else.
+                if piece.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
+                    return Ok(());
+                }
                 return Err(malformed("bytes follow the end of the trailer"));
             }
             let end = piece.iter().position(|byte| *byte == b'\n');
@@ -327,7 +340,7 @@ impl Decoder {
                 Ok(())
             }
             Phase::DataEnd => Err(malformed("a chunk is not followed by CR LF")),
-            _ => self.read_trailer(unframed(line)?),
+            _ => self.read_trailer(trailer_text(line)?),
         }
     }
 

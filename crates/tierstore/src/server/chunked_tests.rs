@@ -396,3 +396,32 @@ fn a_signed_stream_with_no_means_to_check_it_is_not_implemented() {
         (StatusCode::NOT_IMPLEMENTED, "NotImplemented")
     );
 }
+
+/// Asserts that the body minio-go sends (and so `mc`) is taken as S3 takes it: the checksum line
+/// of the trailer ended by a line feed alone, then the empty line, then one more CR LF; in
+/// pieces of any size. Anything but line ends after the empty line is still refused, and so is
+/// a line of the trailer that is not text.
+#[test]
+fn the_trailer_minio_go_sends_is_decoded() {
+    let wire = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\n\r\n\r\n";
+    let got = framing(UNSIGNED_TRAILER, 5);
+    for size in [1, 2, 3, 11, wire.len()] {
+        let (data, trailer) = decode(&got, wire, size, 1024).unwrap();
+        assert_eq!(
+            (data, trailer.as_deref()),
+            (b"hello".to_vec(), Some("AAAAAA=="))
+        );
+    }
+    let more = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n\r\n\n";
+    assert!(decode(&got, more, 4, 1024).is_ok());
+    let junk = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:AAAAAA==\r\n\r\n\r\nx";
+    assert_eq!(
+        kind(decode(&got, junk, 4, 1024).unwrap_err()),
+        (400, "InvalidRequest")
+    );
+    let not_text = b"5\r\nhello\r\n0\r\nx-amz-checksum-crc32:\xff\xfe\r\n\r\n";
+    assert_eq!(
+        kind(decode(&got, not_text, 4, 1024).unwrap_err()),
+        (400, "InvalidRequest")
+    );
+}
