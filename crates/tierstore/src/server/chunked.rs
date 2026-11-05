@@ -190,6 +190,8 @@ impl Chain {
 pub(crate) struct Decoder {
     /// The checksum the trailer must carry, if the request announced one.
     trailer: Option<String>,
+    /// Whether the stream is signed, so that a chain is needed to check it.
+    signed: bool,
     max_line: usize,
     expected: u64,
     decoded: u64,
@@ -233,19 +235,11 @@ fn chunk_size(text: &str) -> Result<u64, S3Error> {
 
 impl Decoder {
     /// A decoder for a body with this `framing`, which holds a line of at most `max_line` bytes.
-    /// `stream` is what the signatures of a signed stream are made from.
-    ///
-    /// # Errors
-    /// `NotImplemented` if the stream is signed and the request gave nothing to check it by.
-    pub(crate) fn new(
-        framing: &Framing,
-        stream: Option<StreamAuth>,
-        max_line: usize,
-    ) -> Result<Self, S3Error> {
+    /// `stream` is what the signatures of a signed stream are made from. A signed stream with
+    /// none is refused by [`Decoder::feed`], since nothing can check it.
+    pub(crate) fn new(framing: &Framing, stream: Option<StreamAuth>, max_line: usize) -> Self {
         let chain = if framing.signed {
-            let auth =
-                stream.ok_or_else(|| S3Error::unsupported("this request cannot sign a stream"))?;
-            Some(Chain {
+            stream.map(|auth| Chain {
                 previous: auth.seed.clone(),
                 auth,
                 chunk: Sha256::new(),
@@ -254,7 +248,8 @@ impl Decoder {
         } else {
             None
         };
-        Ok(Self {
+        Self {
+            signed: framing.signed,
             trailer: framing.trailer.clone(),
             max_line,
             expected: framing.decoded,
@@ -265,12 +260,13 @@ impl Decoder {
             value: None,
             canonical: String::new(),
             trailer_signature: None,
-        })
+        }
     }
 
     /// Takes the next piece of the body, and puts the data in it on `out`, in order.
     ///
     /// # Errors
+    /// `NotImplemented` for a signed stream with nothing to check it by;
     /// `InvalidRequest` for a body that is not framed as it must be or has a line over the limit;
     /// `SignatureDoesNotMatch` for a chunk or a trailer whose signature is not the one that
     /// follows from the chain; `IncompleteBody` for more data than the request said.
@@ -279,6 +275,9 @@ impl Decoder {
         mut piece: Bytes,
         out: &mut VecDeque<Bytes>,
     ) -> Result<(), S3Error> {
+        if self.signed && self.chain.is_none() {
+            return Err(S3Error::unsupported("this request cannot sign a stream"));
+        }
         while !piece.is_empty() {
             if let Phase::Data(left) = self.phase {
                 let taken =

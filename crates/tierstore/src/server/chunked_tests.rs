@@ -123,7 +123,7 @@ fn decode(
     max_line: usize,
 ) -> Result<(Vec<u8>, Option<String>), S3Error> {
     let stream = framing.signed().then(auth);
-    let mut decoder = Decoder::new(framing, stream, max_line)?;
+    let mut decoder = Decoder::new(framing, stream, max_line);
     let mut out = VecDeque::new();
     for piece in wire.chunks(size) {
         decoder.feed(Bytes::copy_from_slice(piece), &mut out)?;
@@ -275,7 +275,7 @@ fn a_signed_stream_whose_chain_is_broken_is_refused() {
     }
     let mut other = auth();
     other.key = vec![8; 32];
-    let mut decoder = Decoder::new(&got, Some(other), 1024).unwrap();
+    let mut decoder = Decoder::new(&got, Some(other), 1024);
     let refused = decoder
         .feed(Bytes::from(good), &mut VecDeque::new())
         .unwrap_err();
@@ -355,6 +355,29 @@ fn a_body_that_is_not_framed_as_aws_chunked_is_refused() {
     assert_eq!(kind(refused), invalid);
 }
 
+/// Asserts that a signature of the trailer is taken only where the head announced a trailer and
+/// the stream is signed, and only once: one on a signed stream that announced no trailer, and a
+/// second one after the first, are 400 `InvalidRequest`.
+#[test]
+fn a_signature_of_a_trailer_that_was_not_announced_or_comes_twice_is_refused() {
+    let invalid = (400, "InvalidRequest");
+    let chunks: [&[u8]; 1] = [b"hello"];
+    let wire = signed_wire(&chunks, Some((CRC32, "AAAAAA==")));
+    let text = String::from_utf8(wire).unwrap();
+    let no_trailer = text.replacen("x-amz-checksum-crc32:AAAAAA==\r\n", "", 1);
+    let head = headers(&[("x-amz-decoded-content-length", "5")]);
+    let got = Framing::parse(SIGNED, &head).unwrap().unwrap();
+    let refused = decode(&got, no_trailer.as_bytes(), 4, 1024).unwrap_err();
+    assert_eq!(kind(refused), invalid);
+
+    let signature = text.split_once("signature:").unwrap().1[..64].to_owned();
+    let line = format!("x-amz-trailer-signature:{signature}\r\n");
+    let twice = text.replacen(&line, &format!("{line}{line}"), 1);
+    let got = framing(SIGNED_TRAILER, 5);
+    let refused = decode(&got, twice.as_bytes(), 4, 1024).unwrap_err();
+    assert_eq!(kind(refused), invalid);
+}
+
 fn refused_text(framing: &Framing, wire: &[u8], max_line: usize) -> String {
     decode(framing, wire, 4, max_line)
         .unwrap_err()
@@ -390,7 +413,10 @@ fn a_body_that_is_not_the_length_or_the_shape_it_announced_is_refused() {
 #[test]
 fn a_signed_stream_with_no_means_to_check_it_is_not_implemented() {
     let got = framing(SIGNED, 1);
-    let refused = Decoder::new(&got, None, 1024).err().unwrap();
+    let mut decoder = Decoder::new(&got, None, 1024);
+    let refused = decoder
+        .feed(Bytes::from_static(b"1"), &mut VecDeque::new())
+        .unwrap_err();
     assert_eq!(
         refused.kind(),
         (StatusCode::NOT_IMPLEMENTED, "NotImplemented")

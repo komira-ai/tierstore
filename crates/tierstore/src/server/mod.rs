@@ -931,8 +931,7 @@ impl Server {
             .and_then(|_| auth::stream(config, parts));
         let decoder = check
             .framing()
-            .map(|framing| Decoder::new(framing, stream, config.aws_chunked_max_line_bytes))
-            .transpose()?;
+            .map(|framing| Decoder::new(framing, stream, config.aws_chunked_max_line_bytes));
         let reader = Reader::new(body, limit, config.body_idle_timeout)
             .with_decoder(decoder)
             .with_floor(floor.0, floor.1, Arc::clone(&config.rate_clock));

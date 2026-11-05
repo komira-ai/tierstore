@@ -439,7 +439,7 @@ fn trailer_body(data: &[u8], name: &str, value: &str) -> Scripted {
 
 /// A reader of `body` that decodes it as the framing of `check` says.
 fn decoding(body: Scripted, check: &Check) -> Reader<Scripted> {
-    let decoder = Decoder::new(check.framing().unwrap(), None, 1024).unwrap();
+    let decoder = Decoder::new(check.framing().unwrap(), None, 1024);
     Reader::new(body, 1000, IDLE).with_decoder(Some(decoder))
 }
 
