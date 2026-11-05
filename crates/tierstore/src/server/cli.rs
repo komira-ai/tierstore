@@ -107,6 +107,7 @@ use super::deprecated;
 #[cfg(test)]
 use super::front::read_key;
 use super::front::{InvalidFlags, S3Tls, refuse, server_config};
+use super::handoff::Handoff;
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
@@ -317,6 +318,11 @@ pub struct Cli {
     /// it held serves reads and writes through its own proxy and tries the lock again every
     /// second. Without it the reconciler works as soon as the process starts.
     pub lock_file: Option<PathBuf>,
+    /// The hand-off of the listening sockets (`server.handoff_socket` and `server.handoff_wait`):
+    /// with one, [`run_serving`] takes the sockets of the instance that answers on the control
+    /// socket, or binds its own where none answers, and then offers them there itself. `None`, the
+    /// default, binds and makes no control socket.
+    pub handoff: Option<Handoff>,
     /// How old the usage the reconciler publishes may be before `/usagez` says 503 with the
     /// reason (`/readyz` does not look at it): a number and `ms`, `s`, `m` or `h`, longer than
     /// `hot_store.lease_ttl`, so that a reconciler that takes over the lease does not show. A usage that

@@ -117,8 +117,9 @@ async fn a_streamed_put_goes_straight_to_the_cold_tier_when_the_hot_tier_is_full
 }
 
 /// Asserts that a streamed put made while the usage is above the critical share takes exactly as
-/// much of the paused clock as one made under the share (the journal's linger and nothing more),
-/// and the object is in the hot tier. (Before, it slept a fixed back-pressure on top.)
+/// much of the paused clock as one made under the share, and that neither takes any (the
+/// acknowledgement of a put waits on no timer), and the object is in the hot tier. (Before, it
+/// slept a fixed back-pressure on top.)
 #[tokio::test(start_paused = true)]
 async fn a_streamed_put_above_the_critical_mark_goes_to_the_hot_tier_without_waiting() {
     let rig = Rig::new();
@@ -130,6 +131,7 @@ async fn a_streamed_put_above_the_critical_mark_goes_to_the_hot_tier_without_wai
     let start = tokio::time::Instant::now();
     proxy.put_stream("a", None, chunks(&["1"])).await.unwrap();
     let under = start.elapsed();
+    assert_eq!(under, std::time::Duration::ZERO);
 
     set_usage(&rig, 600, 0).await;
     let start = tokio::time::Instant::now();

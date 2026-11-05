@@ -144,7 +144,7 @@ prefix = "cas/b/"
 cache  = true
 ```
 
-The keys of each table are those of the storage node and of the build node. What differs: `local_cache.write_through` is true whether it is left out or given (the node owns the data and takes writes, which pass through the cache so that its entries stay right), and `false` is refused; the cache path (absolute, as the directory of a `dir` tier must be) may not be the directory of a `dir` tier, inside it or around it, nor around the lock file or the key files of an `oci` interface; `server.backend_check_wait`, `cold_store.skip_checks` and the reconciler's keys of `[hot_store]` keep their meaning (a build node refuses them). What the cache keeps, how a hand-over behaves and what to expect are in [operations](operations.md#a-storage-node-with-a-local-cache) and [limits](limits.md#a-storage-node-with-a-local-cache). The start line says `mode=storage-cache`.
+The keys of each table are those of the storage node and of the build node. What differs: `local_cache.write_through` is true whether it is left out or given (the node owns the data and takes writes, which pass through the cache so that its entries stay right), and `false` is refused; the cache path (absolute, as the directory of a `dir` tier must be) may not be the directory of a `dir` tier, inside it or around it, nor around the lock file, the key files of an `oci` interface or `server.handoff_socket`; `server.backend_check_wait`, `cold_store.skip_checks` and the reconciler's keys of `[hot_store]` keep their meaning (a build node refuses them). What the cache keeps, how a hand-over behaves and what to expect are in [operations](operations.md#a-storage-node-with-a-local-cache) and [limits](limits.md#a-storage-node-with-a-local-cache). The start line says `mode=storage-cache`.
 
 ## Types
 
@@ -199,7 +199,7 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | Key | Type, default | What |
 |---|---|---|
 | `server.proxy_id` | string, required | names this process's journal and lease in the hot tier; keep it across restarts and give each process over the same tiers its own |
-| `server.slot` | port, 1 to 65535, none | The private port this instance runs as: the port of its `s3` interface, which the hand-over's unit `tierstore@<port>` is given in its own file (see the packaging README). It is the `slot` label of `tierstore_build_info` on `/metricz`, which the update hook's probe through the public port reads to know which instance answered. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. `slot = 0` or a value that is not a port is refused (exit 2) |
+| `server.slot` | port, 1 to 65535, none | The private port this instance runs as: the port of its `s3` interface. It is added as the `slot` label of `tierstore_build_info` on `/metricz`; the update hook does not read it. It binds nothing, and it is the same on a storage node and a build node. Without it the gauge has no `slot` label. `slot = 0` or a value that is not a port is refused (exit 2) |
 | `server.bucket` | string, required | the one bucket clients see; not `healthz`, `readyz`, `usagez` or `metricz` |
 | `server.region` | string, `us-east-1` | the region in the credential scope of a request's signature (not the tiers' regions) |
 | `server.access_key_file` | path, required | the full key file |
@@ -225,6 +225,8 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
 | `server.s3_read_retries` | count, 2 (0 to 8) | how many times a read of an `s3` tier that failed in transport (a connection closed after the request went out) is sent again; 0 sends it once. A read that timed out is never sent again |
 | `server.s3_read_retry_wait` | duration, `50ms` (1ms to 10s) | the wait before the first resend of a read; each resend waits twice the one before |
+| `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself; without it, the default, a start binds its own sockets and makes no control socket. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
+| `server.handoff_wait` | duration, `10s` (1ms to 1h) | how long a start waits for the instance that answers on `server.handoff_socket` to hand its sockets over, from the connection to the end of the hand-off; a start that is not answered in that time fails (exit 1) and binds nothing. Refused without `server.handoff_socket` |
 
 ## `[hot_store]` and `[cold_store]`
 

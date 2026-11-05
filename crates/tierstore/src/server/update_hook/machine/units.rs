@@ -1,4 +1,4 @@
-//! The units, through `systemctl`.
+//! The units of the two instances, through `systemctl`.
 //!
 //! A unit whose `ConditionPathExists=` fails is skipped by `systemctl start`: systemd.unit(5)
 //! says a failing condition leaves the unit out of the `failed` state and the start "(mostly
@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use super::super::ports::{PortError, PortKind, Units};
+use super::super::ports::{Instance, PortError, PortKind, UnitState, Units};
 use super::runner::{Call, Runner, checked, run};
 
 /// Where the Debian and Ubuntu package puts `systemctl`.
@@ -20,22 +20,26 @@ pub struct SystemdUnits<'a> {
     runner: &'a dyn Runner,
     start_timeout: Duration,
     stop_timeout: Duration,
+    show_timeout: Duration,
     program: String,
 }
 
 impl<'a> SystemdUnits<'a> {
-    /// Calls `systemctl` through `runner`. A start that runs past `start_timeout` and a stop
-    /// (which waits for the drain) past `stop_timeout` are killed and fail.
+    /// Calls `systemctl` through `runner`. A start that runs past `start_timeout`, a stop
+    /// (which waits for the drain) past `stop_timeout` and a look at the state past
+    /// `show_timeout` are killed and fail.
     #[must_use]
     pub fn new(
         runner: &'a dyn Runner,
         start_timeout: Duration,
         stop_timeout: Duration,
+        show_timeout: Duration,
     ) -> SystemdUnits<'a> {
         SystemdUnits {
             runner,
             start_timeout,
             stop_timeout,
+            show_timeout,
             program: DEFAULT_PROGRAM.to_owned(),
         }
     }
@@ -48,36 +52,60 @@ impl<'a> SystemdUnits<'a> {
     }
 }
 
-/// Whether `unit` is a name the port will pass on: 1 to 255 characters of letters, digits and
-/// `: _ . @ -`, starting with a letter or digit. Anything else is refused before a program runs.
-fn check_unit(unit: &str) -> Result<(), PortError> {
-    let name = unit.len() <= 255
-        && unit
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_alphanumeric())
-        && unit
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || ":_.@-".contains(c));
-    if name {
-        return Ok(());
+/// The state `systemctl show --property=ActiveState --value` printed, or `None` for a word that
+/// is none of the states.
+fn state_of(text: &str) -> Option<UnitState> {
+    match text.trim() {
+        "active" | "reloading" => Some(UnitState::Active),
+        "activating" => Some(UnitState::Activating),
+        "deactivating" => Some(UnitState::Deactivating),
+        "inactive" => Some(UnitState::Inactive),
+        "failed" => Some(UnitState::Failed),
+        _ => None,
     }
-    Err(PortError::failed(
-        KIND,
-        format!("{unit:?} is not a unit name"),
-    ))
 }
 
 impl Units for SystemdUnits<'_> {
-    fn start(&self, unit: &str) -> Result<(), PortError> {
-        check_unit(unit)?;
-        let call = Call::new(&self.program, &["start", "--", unit], self.start_timeout);
+    fn start(&self, instance: Instance) -> Result<(), PortError> {
+        let unit = instance.unit();
+        let call = Call::new(
+            &self.program,
+            &["start", "--", unit.as_str()],
+            self.start_timeout,
+        );
         checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
     }
 
-    fn stop(&self, unit: &str) -> Result<(), PortError> {
-        check_unit(unit)?;
-        let call = Call::new(&self.program, &["stop", "--", unit], self.stop_timeout);
+    fn stop(&self, instance: Instance) -> Result<(), PortError> {
+        let unit = instance.unit();
+        let call = Call::new(
+            &self.program,
+            &["stop", "--", unit.as_str()],
+            self.stop_timeout,
+        );
         checked(run(self.runner, &call, KIND)?, &call, KIND).map(|_| ())
+    }
+
+    fn state(&self, instance: Instance) -> Result<UnitState, PortError> {
+        let unit = instance.unit();
+        let call = Call::new(
+            &self.program,
+            &[
+                "show",
+                "--property=ActiveState",
+                "--value",
+                "--",
+                unit.as_str(),
+            ],
+            self.show_timeout,
+        );
+        let output = checked(run(self.runner, &call, KIND)?, &call, KIND)?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        state_of(&text).ok_or_else(|| {
+            PortError::failed(
+                KIND,
+                format!("{}: unknown ActiveState {:?}", call.describe(), text.trim()),
+            )
+        })
     }
 }

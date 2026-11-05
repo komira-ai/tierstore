@@ -1,56 +1,45 @@
-//! The service of a macOS host under launchd, through `launchctl`, and the names the service and
-//! its packaging share: the label, the plist, the program and the directory of the release
-//! links.
+//! The launchd job of a macOS host, through `launchctl`.
 //!
 //! Nothing here depends on the system it is compiled on: the calls are argument vectors given to
 //! a [`Runner`], so the sequence is built and tested on any host; only the runner that executes
 //! them on a Mac is the machine's.
 //!
-//! - `stop`: `launchctl print system/<label>`; if the domain has the service,
-//!   `launchctl bootout system/<label>` (launchd sends SIGTERM, the process drains and exits),
-//!   then `print` again until the domain no longer has it.
-//! - `start`: `print`; if the domain does not have the service, `launchctl bootstrap system
-//!   <plist>` (the plist's `RunAtLoad` starts it), and otherwise `launchctl kickstart
-//!   system/<label>`, which starts it if it is not running and does nothing if it runs.
-//!
-//! `print` exits 0 for a service the domain has and 113 for one it does not; any other status,
-//! of any call, is a failure.
+//! - `loaded`: `launchctl print system/<label>`: exit 0 is a job the system domain has, 113 a job
+//!   it does not have, and any other status is a failure.
+//! - `bootstrap`: `launchctl bootstrap system <plist>` (the plist's `RunAtLoad` starts the job).
+//! - `bootout`: nothing when the job is not loaded; otherwise `launchctl bootout system/<label>`
+//!   (launchd sends SIGTERM, the process drains and exits), then `print` until the domain no
+//!   longer has the job. A `launchctl` call that fails is a failure, never a success.
 
+use std::path::Path;
 use std::time::Duration;
 
-use super::super::ports::{Clock, PortError, PortKind, Service};
+use super::super::params::is_label;
+use super::super::ports::{Clock, Launchd, PortError, PortKind};
 use super::runner::{Call, Output, Runner, checked, run};
 
-/// The label of the service's launchd job.
-pub const LAUNCHD_LABEL: &str = "com.komira.tierstore";
-/// The job's plist: a LaunchDaemon, run by the system domain.
-pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/com.komira.tierstore.plist";
 /// Where macOS has `launchctl`.
 pub const LAUNCHCTL_PROGRAM: &str = "/bin/launchctl";
-/// The directory of the release links, `current` and `previous`.
-pub const LAUNCHD_LINKS_DIR: &str = "/usr/local/tierstore";
-/// The program the plist runs: the binary of the release `current` points at.
-pub const LAUNCHD_PROGRAM: &str = "/usr/local/tierstore/current/tierstore";
 /// The launchd domain of a LaunchDaemon.
 pub const DOMAIN: &str = "system";
-/// `launchctl print`'s status for a service its domain does not have.
+/// `launchctl print`'s status for a job its domain does not have.
 pub const NOT_FOUND: i32 = 113;
 
-const KIND: PortKind = PortKind::Units;
+const KIND: PortKind = PortKind::Launchd;
 
-/// The service target of `label` in the system domain: `system/<label>`.
+/// The target of `label` in the system domain: `system/<label>`.
 #[must_use]
 pub fn service_target(label: &str) -> String {
     format!("{DOMAIN}/{label}")
 }
 
-/// `print system/<label>`: whether the domain has the service.
+/// `print system/<label>`: whether the domain has the job.
 #[must_use]
 pub fn print_args(label: &str) -> Vec<String> {
     vec!["print".to_owned(), service_target(label)]
 }
 
-/// `bootout system/<label>`: stops the service and removes it from the domain.
+/// `bootout system/<label>`: stops the job and removes it from the domain.
 #[must_use]
 pub fn bootout_args(label: &str) -> Vec<String> {
     vec!["bootout".to_owned(), service_target(label)]
@@ -62,48 +51,37 @@ pub fn bootstrap_args(plist: &str) -> Vec<String> {
     vec!["bootstrap".to_owned(), DOMAIN.to_owned(), plist.to_owned()]
 }
 
-/// `kickstart system/<label>`: starts a loaded service that is not running.
-#[must_use]
-pub fn kickstart_args(label: &str) -> Vec<String> {
-    vec!["kickstart".to_owned(), service_target(label)]
-}
-
-/// How long the calls of [`LaunchdService`] may take, and how long `stop` waits for the domain
-/// to let the service go.
+/// How long the calls of [`LaunchctlJobs`] may take, and how long `bootout` waits for the domain
+/// to let the job go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LaunchdTimes {
-    /// The longest `print`, `bootstrap` or `kickstart` may run.
+    /// The longest `print` or `bootstrap` may run.
     pub call: Duration,
     /// The longest `bootout` may run: it waits for the process to exit, the drain included.
     pub bootout: Duration,
-    /// How many looks `stop` takes, after `bootout`, for the domain to no longer have the
-    /// service.
+    /// How many looks `bootout` takes, after the call, for the domain to no longer have the job.
     pub gone_attempts: u32,
     /// The pause between two of those looks.
     pub poll: Duration,
 }
 
-/// The service `label` of the system domain, whose plist is `plist`, through `launchctl`.
-pub struct LaunchdService<'a> {
+/// The jobs of the system domain, through `launchctl`.
+pub struct LaunchctlJobs<'a> {
     runner: &'a dyn Runner,
     clock: &'a dyn Clock,
     program: String,
-    label: String,
-    plist: String,
     times: LaunchdTimes,
 }
 
-impl<'a> LaunchdService<'a> {
-    /// The service [`LAUNCHD_LABEL`] of [`LAUNCHD_PLIST`], through [`LAUNCHCTL_PROGRAM`] run by
-    /// `runner`; `clock` paces the wait of `stop`.
+impl<'a> LaunchctlJobs<'a> {
+    /// The system domain through [`LAUNCHCTL_PROGRAM`] run by `runner`; `clock` paces the wait
+    /// of `bootout`.
     #[must_use]
     pub fn new(runner: &'a dyn Runner, clock: &'a dyn Clock, times: LaunchdTimes) -> Self {
-        LaunchdService {
+        LaunchctlJobs {
             runner,
             clock,
             program: LAUNCHCTL_PROGRAM.to_owned(),
-            label: LAUNCHD_LABEL.to_owned(),
-            plist: LAUNCHD_PLIST.to_owned(),
             times,
         }
     }
@@ -120,16 +98,6 @@ impl<'a> LaunchdService<'a> {
         Call::new(&self.program, &args, timeout)
     }
 
-    /// Whether the system domain has the service.
-    fn loaded(&self) -> Result<bool, PortError> {
-        let call = self.call(&print_args(&self.label), self.times.call);
-        let output = run(self.runner, &call, KIND)?;
-        if output.code == Some(NOT_FOUND) {
-            return Ok(false);
-        }
-        checked(output, &call, KIND).map(|_| true)
-    }
-
     /// Runs `args` and requires exit 0.
     fn must(&self, args: &[String], timeout: Duration) -> Result<Output, PortError> {
         let call = self.call(args, timeout);
@@ -137,35 +105,50 @@ impl<'a> LaunchdService<'a> {
     }
 }
 
-impl Service for LaunchdService<'_> {
-    fn start(&self) -> Result<(), PortError> {
-        let args = if self.loaded()? {
-            kickstart_args(&self.label)
-        } else {
-            bootstrap_args(&self.plist)
-        };
-        self.must(&args, self.times.call).map(|_| ())
+/// `label` itself when it is one `launchctl` may be given.
+fn checked_label(label: &str) -> Result<&str, PortError> {
+    if is_label(label) {
+        Ok(label)
+    } else {
+        Err(PortError::failed(
+            KIND,
+            format!("{label:?} is not a launchd label"),
+        ))
+    }
+}
+
+impl Launchd for LaunchctlJobs<'_> {
+    fn loaded(&self, label: &str) -> Result<bool, PortError> {
+        let call = self.call(&print_args(checked_label(label)?), self.times.call);
+        let output = run(self.runner, &call, KIND)?;
+        if output.code == Some(NOT_FOUND) {
+            return Ok(false);
+        }
+        checked(output, &call, KIND).map(|_| true)
     }
 
-    fn stop(&self) -> Result<(), PortError> {
-        if !self.loaded()? {
+    fn bootstrap(&self, plist: &Path) -> Result<(), PortError> {
+        let plist = plist.to_string_lossy();
+        self.must(&bootstrap_args(&plist), self.times.call)
+            .map(|_| ())
+    }
+
+    fn bootout(&self, label: &str) -> Result<(), PortError> {
+        if !self.loaded(label)? {
             return Ok(());
         }
-        // A bootout that fails while the service is gone anyway (it exited on its own in
-        // between) has done what was asked; one that fails while it is still there is the error.
-        let bootout = self.must(&bootout_args(&self.label), self.times.bootout);
+        self.must(&bootout_args(label), self.times.bootout)?;
         for _ in 0..self.times.gone_attempts {
-            if !self.loaded()? {
+            if !self.loaded(label)? {
                 return Ok(());
             }
             self.clock.pause(self.times.poll);
         }
-        bootout?;
         Err(PortError::failed(
             KIND,
             format!(
                 "{} is still loaded after bootout and {} looks",
-                service_target(&self.label),
+                service_target(label),
                 self.times.gone_attempts
             ),
         ))

@@ -1,9 +1,7 @@
-//! The files of a Mac (`packaging/macos`) against the binary and the update hook: the launchd
-//! plist (`com.komira.tierstore.plist`) runs the binary of the release link `current` as
-//! `_tierstore`, kept alive and started at load, with the build-node file (`tierstore.toml`)
-//! that serves `[local_cache]` on loopback; the binary accepts that command line and that file;
-//! and the plist, the file, the declaration (`updater.d/tierstore.toml`) and the hook name the
-//! same job, program, account and port, so that none of them can drift from the others.
+//! The build-node file of a Mac (`packaging/macos/tierstore.toml`) against the binary and the
+//! launchd plist of hostkeeper's package (`packaging/hostkeeper/units/tierstore.plist`): the plist
+//! names the file and the two flags of the drain, the binary accepts that command line and that
+//! file, and the file serves `[local_cache]` on loopback only, on the port the update hook probes.
 
 #![allow(
     clippy::unwrap_used,
@@ -15,14 +13,11 @@ use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
 
-use tierstore::server::update_hook::machine::{
-    LAUNCHD_LABEL, LAUNCHD_LINKS_DIR, LAUNCHD_PLIST, LAUNCHD_PROGRAM,
-};
-use tierstore::server::update_hook::{LaunchdDeclaration, SingleRecord};
 use tierstore_testkit::dir::TestDir;
 
+/// The directory of the Mac's release links, configuration, cache and logs.
+const LAUNCHD_LINKS_DIR: &str = "/usr/local/tierstore";
 /// The words in the name of a flag or a key that say it holds a secret.
 const SECRET_WORDS: [&str; 5] = ["key", "secret", "credential", "token", "password"];
 
@@ -42,6 +37,13 @@ fn dir() -> PathBuf {
 
 fn read(file: &str) -> String {
     std::fs::read_to_string(dir().join(file)).unwrap_or_else(|e| panic!("{file}: {e}"))
+}
+
+/// The launchd plist of hostkeeper's package, which starts the job on a Mac.
+fn plist_text() -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packaging/hostkeeper/units/tierstore.plist");
+    std::fs::read_to_string(&file).unwrap_or_else(|e| panic!("{}: {e}", file.display()))
 }
 
 /// The value an XML element of a property list stands for.
@@ -77,7 +79,7 @@ fn value(node: roxmltree::Node<'_, '_>) -> Value {
 
 /// The plist's top-level dictionary.
 fn plist() -> BTreeMap<String, Value> {
-    let text = read("com.komira.tierstore.plist");
+    let text = plist_text();
     let options = roxmltree::ParsingOptions {
         allow_dtd: true,
         ..roxmltree::ParsingOptions::default()
@@ -92,20 +94,6 @@ fn plist() -> BTreeMap<String, Value> {
     };
     assert!(top.next().is_none());
     dict
-}
-
-fn text<'a>(dict: &'a BTreeMap<String, Value>, key: &str) -> &'a str {
-    match dict.get(key) {
-        Some(Value::Text(text)) => text,
-        other => panic!("{key} is {other:?}"),
-    }
-}
-
-fn integer(dict: &BTreeMap<String, Value>, key: &str) -> i64 {
-    match dict.get(key) {
-        Some(Value::Integer(n)) => *n,
-        other => panic!("{key} is {other:?}"),
-    }
 }
 
 /// The plist's `ProgramArguments`.
@@ -128,17 +116,6 @@ fn flag(flag: &str) -> String {
     let at: Vec<usize> = (0..words.len()).filter(|i| words[*i] == flag).collect();
     assert_eq!(at.len(), 1, "{flag} appears once: {words:?}");
     words[at[0] + 1].clone()
-}
-
-/// A duration of the binary's flags, whole seconds or minutes (`1s`, `60s`, `15m`).
-fn duration(word: &str) -> Duration {
-    let (number, unit) = word.split_at(word.len() - 1);
-    let number: u64 = number.parse().unwrap_or_else(|_| panic!("{word}"));
-    match unit {
-        "s" => Duration::from_secs(number),
-        "m" => Duration::from_secs(number * 60),
-        _ => panic!("{word} is not in seconds or minutes"),
-    }
 }
 
 /// The build-node file.
@@ -164,44 +141,11 @@ fn table<'a>(table: &'a toml::Table, key: &str) -> &'a toml::Table {
     table[key].as_table().unwrap_or_else(|| panic!("[{key}]"))
 }
 
-fn declaration() -> LaunchdDeclaration {
-    LaunchdDeclaration::parse(&read("updater.d/tierstore.toml")).expect("the declaration")
-}
-
-/// Asserts that the plist is a LaunchDaemon of the job the hook stops and starts: its label is
-/// the hook's, it runs as `_tierstore` (the account the declaration names) in that account's
-/// group, launchd starts it at load and keeps it alive, its program is the binary of the release
-/// `current` names, its output goes to the log directory, and it sets no environment variable.
-/// It would catch a plist that runs as root, one that launchd does not restart, and one that
-/// hands the process configuration in its environment.
-#[test]
-fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
-    let dict = plist();
-    assert_eq!(text(&dict, "Label"), LAUNCHD_LABEL);
-    assert_eq!(text(&dict, "UserName"), "_tierstore");
-    assert_eq!(text(&dict, "UserName"), declaration().service);
-    assert_eq!(text(&dict, "GroupName"), "_tierstore");
-    assert_eq!(dict.get("RunAtLoad"), Some(&Value::Bool(true)));
-    assert_eq!(dict.get("KeepAlive"), Some(&Value::Bool(true)));
-    assert_eq!(arguments()[0], LAUNCHD_PROGRAM);
-    for key in ["StandardOutPath", "StandardErrorPath"] {
-        let log = Path::new(text(&dict, key));
-        assert!(
-            log.starts_with(Path::new(LAUNCHD_LINKS_DIR).join("log")),
-            "{key}: {log:?}"
-        );
-    }
-    for key in dict.keys() {
-        assert!(!key.contains("Environment"), "{key}");
-    }
-    assert_eq!(integer(&dict, "Umask"), 0o077);
-}
-
 /// Asserts that the plist's command line is `--config` with the file's place and the two flags
 /// of the drain, each once and nothing else (a start refuses any other flag beside a file; the
 /// test below runs the binary on it), and that no key of the file holds a secret (each names a
 /// file); and that the file is a build node that serves on loopback only: `[local_cache]` and `[cold_store]` and no
-/// `[hot_store]`, one `s3` interface at exactly `127.0.0.1:9300`, and `slot` the same port. It would catch a
+/// `[hot_store]`, one `s3` interface at exactly `127.0.0.1:9300`, and `slot` the same port (the port the update hook probes; it does not read `slot`). It would catch a
 /// Mac that serves the network, or that runs a storage node instead of a cache.
 #[test]
 fn the_plist_runs_a_local_cache_on_loopback_from_its_file() {
@@ -283,72 +227,4 @@ fn the_binary_accepts_the_plists_command_line_and_file() {
         ),
         (Some(0), String::new(), String::new())
     );
-}
-
-/// Asserts that the plist, the declaration, the file and the hook cannot drift: the plist is
-/// installed under the name the hook bootstraps (`LAUNCHD_PLIST`), its label is the one the
-/// declaration's `hook.service` must name (the hook's own parser takes the declaration), its
-/// program is the binary of the link the hook swaps, and the one port of the declaration, which
-/// the hook probes, is the port the file listens on and the slot label it reports. It would catch
-/// a hook that restarts a job the plist does not define, or probes a port nothing serves.
-#[test]
-fn the_plist_the_declaration_the_file_and_the_hook_name_one_job() {
-    let installed = Path::new(LAUNCHD_PLIST);
-    assert_eq!(
-        installed.file_name().unwrap(),
-        "com.komira.tierstore.plist",
-        "the file in packaging/macos"
-    );
-    assert!(dir().join(installed.file_name().unwrap()).is_file());
-    assert_eq!(
-        installed.parent(),
-        Some(Path::new("/Library/LaunchDaemons"))
-    );
-    let decl = read("updater.d/tierstore.toml");
-    assert!(decl.contains(&format!("service = \"{LAUNCHD_LABEL}\"")));
-    assert_eq!(text(&plist(), "Label"), LAUNCHD_LABEL);
-    assert_eq!(arguments()[0], LAUNCHD_PROGRAM);
-    let port = declaration().port;
-    let file = config();
-    let server = table(&file, "server");
-    assert_eq!(interface_addresses(&file), [format!("127.0.0.1:{port}")]);
-    assert_eq!(server["slot"].as_integer(), Some(i64::from(port)));
-}
-
-/// Asserts that launchd lets the drain finish before it kills the process: `ExitTimeOut` is at
-/// least the plist's `--drain-lb-wait` plus `--drain-deadline` plus the 5 s a lease release may
-/// take, and the declaration keeps the Mac on a plain restart. The declaration's step timeouts
-/// against every bound of the hook (the calls, the requests, the rollback) are checked where those
-/// bounds are, in `src/server/update_hook/launchd_system_tests.rs`. It would catch a SIGKILL of a
-/// drain in progress.
-#[test]
-fn launchd_and_the_updater_wait_for_the_drain() {
-    let drain = duration(&flag("--drain-lb-wait"))
-        + duration(&flag("--drain-deadline"))
-        + Duration::from_secs(5);
-    let exit = Duration::from_secs(integer(&plist(), "ExitTimeOut").try_into().unwrap());
-    assert!(exit >= drain, "{exit:?} is less than {drain:?}");
-    let decl: toml::Table = read("updater.d/tierstore.toml").parse().unwrap();
-    assert_eq!(
-        table(&decl, "hook")["params"]["mode"].as_str(),
-        Some("restart")
-    );
-}
-
-/// Asserts that the record the first install of a Mac lays down, as the install guide shows it,
-/// is one the hook's steps take: an idle single-instance record. It would catch a guide whose
-/// first record every step refuses.
-#[test]
-fn the_first_install_record_of_a_mac_is_one_the_hook_takes() {
-    let guide =
-        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/update-hook.md"))
-            .unwrap();
-    let line = guide
-        .lines()
-        .map(str::trim)
-        .find(|line| line.starts_with("{\"schema\":1,\"kind\":\"single\""))
-        .expect("the record of the first install of a Mac");
-    let record = SingleRecord::decode(line.as_bytes()).expect("a record");
-    assert_eq!(record, SingleRecord::idle());
-    assert_eq!(record.check(), Ok(()));
 }

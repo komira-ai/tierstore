@@ -1,13 +1,12 @@
 //! `handover-v1`, the capability `tierstore --capabilities` lists, against the three behaviours it
-//! promises the host updater (docs/design/tierstore-handover.md, sections 1, 4, 5 and 7): the
+//! promises the host updater (docs/design/tierstore-handover.md, sections 5 and 7): the
 //! lock-based read-only mode, the wildcard listeners of both fronts, and the drain of both fronts
 //! with `Connection: close` and a lingering close. The updater's `prepare` step reads the list to
 //! choose a hand-over over a restart, so the list must not name it while any of the three is gone.
 //!
 //! The test runs the real binary as the new instance of a hand-over runs: a second build node on
 //! a cache directory whose lock the first holds, listening on the wildcard of both families on one
-//! port for each front. It needs no privilege; the hand-over itself, with the hook and nftables,
-//! is T1 (tests/handover).
+//! port for each front. It needs no privilege.
 
 use std::collections::BTreeMap;
 use std::fs;

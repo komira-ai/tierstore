@@ -35,7 +35,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub(crate) use offer::{Offer, Socket};
+pub(crate) use offer::{Offer, Socket, check_control_path};
+
+/// The most listening sockets one instance can hand over: what one message carries.
+pub(crate) const MAX_SOCKETS: usize = wire::MAX_FDS;
 pub(crate) use take::{Inherited, Want, take};
 
 /// What an instance is told to do about a hand-off: where the control socket is, and how long a
@@ -112,6 +115,19 @@ pub enum HandoffError {
     /// More listening sockets than a message can carry.
     #[error("hand-off: {0} sockets are more than a message can carry")]
     TooMany(usize),
+    /// The directory of the control socket is missing, is not a directory, or may not be
+    /// written by this user, so the control socket could not be made there.
+    #[error("hand-off: the directory of the control socket {}: {source}", .dir.display())]
+    ControlDirectory {
+        /// The directory.
+        dir: PathBuf,
+        /// What the system said.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The path of the control socket is a directory, which the control socket cannot replace.
+    #[error("hand-off: the control socket {}: is a directory, not a socket", .0.display())]
+    ControlIsDirectory(PathBuf),
 }
 
 impl HandoffError {
@@ -129,4 +145,4 @@ pub(super) fn line(front: Front, addr: SocketAddr) -> String {
 #[cfg(test)]
 mod live_tests;
 #[cfg(test)]
-mod testing;
+pub(crate) mod testing;

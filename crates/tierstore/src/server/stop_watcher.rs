@@ -37,6 +37,7 @@ pub(super) fn stop_watcher(
 /// first, so that an answer of either front that comes after `/readyz` said 503 says
 /// `Connection: close`.
 fn begin_drains(server: &Server, oci: Option<&OciDrain>) {
+    tracing::debug!("tierstore: drain begun");
     if let Some(oci) = oci {
         oci.begin();
     }

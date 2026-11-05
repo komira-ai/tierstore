@@ -35,9 +35,10 @@
 //!
 //! What it refuses, besides what every file does: the refusals of a storage node's file, those of
 //! a build node's `[local_cache]` table, `write_through = false`, and a cache directory that is
-//! the directory of a `dir` tier, inside it or around it, or around the lock file or a key file of
-//! the `oci` interface (the tier would list the cache's files as objects), and a relative lock file
-//! or `oci` key file (a relative path leads from the working directory of the process, which
+//! the directory of a `dir` tier, inside it or around it (the tier would list the cache's files
+//! as objects), or around the lock file, a key file of the `oci` interface or
+//! `server.handoff_socket` (the offer of a hand-off replaces the file at its path, which could be
+//! the cache's `.lock`), and a relative lock file or `oci` key file (a relative path leads from the working directory of the process, which
 //! the file does not name, so it cannot be compared with the cache directory). The paths are
 //! compared by component, `.` and `..` resolved by text, not through links.
 
@@ -101,7 +102,7 @@ fn oci_flags(node: &Cli) -> OciFlags {
 
 /// The absolute `path` with its `.` and `..` components resolved by text (no symlink is
 /// followed), or none for a relative path.
-fn normalised(path: &Path) -> Option<PathBuf> {
+pub(super) fn normalised(path: &Path) -> Option<PathBuf> {
     if !path.is_absolute() {
         return None;
     }
@@ -122,7 +123,7 @@ fn normalised(path: &Path) -> Option<PathBuf> {
 }
 
 /// Refuses a cache directory that is, is inside, or holds the directory of a `dir` tier, and one
-/// that holds the lock file or a key file of the OCI front. Paths are compared by component
+/// that holds the lock file, a key file of the OCI front or the control socket of the hand-off. Paths are compared by component
 /// after `.` and `..` are resolved by text, so the cache path, the directory of a `dir` tier, the
 /// lock file and the key files of the `oci` interface must be absolute: a relative path cannot be
 /// compared with another.
@@ -155,6 +156,12 @@ fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
         (
             "oci interface params.tls_key_file",
             node.oci_tls_key.as_deref(),
+        ),
+        (
+            "server.handoff_socket",
+            node.handoff
+                .as_ref()
+                .map(|handoff| handoff.socket.as_path()),
         ),
     ];
     for (name, file) in files {
