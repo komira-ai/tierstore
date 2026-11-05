@@ -6,7 +6,7 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package, writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
@@ -33,7 +33,17 @@ For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux
 - `tierstore-<commit>-<platform>.cdx.json`: its CycloneDX SBOM;
 - `tierstore-<commit>-<platform>.tar.gz.sigstore.json`: the bundle of the tarball's own provenance
   attestation, for an offline check;
-- `SHA256SUMS`: the SHA-256 of the tarballs and SBOMs.
+- `tierstore-<version>-<platform>.tar.zst`: the hostkeeper package of the same binary (see "The
+  hostkeeper package" below), where `<version>` is what `tierstore --version` prints after the
+  name, `X.Y.Z+<12 hex>`;
+- `tierstore-<version>-<platform>.tar.zst.sigstore.json`: the bundle of the package's own
+  provenance attestation, which hostkeeper verifies the package with, offline;
+- `index.json`: the release index of the three hostkeeper packages, hostkeeper's format: for each
+  platform its file, size and SHA-256;
+- `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages and `index.json`.
+
+The release assets are what an operator copies into hostkeeper's release channel, as
+`tierstore/<version>/index.json` and the packages and bundles beside it.
 
 The signer of every attestation is `.github/workflows/artifacts.yml` on `refs/heads/main`: do not
 rename or move that file. Verify a file with:
@@ -128,8 +138,9 @@ commit (`cargo xtask build-commit --version`) by the job that builds it, on a ru
 platform, and a release needs that run of `artifacts.yml` to be green. That build-time check is
 the version proof of the macOS binary. The two computations differ only when a tag
 appears between the build and the release (another release published in that time); the release is
-then refused, and the next push is built and released under the new number. File names carry the
-commit, not the version, and are unchanged.
+then refused, and the next push is built and released under the new number. The names of the
+tarballs and SBOMs carry the commit, not the version, and are unchanged; the hostkeeper packages
+are named by the version the binary reports, which holds both.
 
 `v0.3.1` predates this: its binary reports `0.3.0+e7fd86844000`, the crate's version at the time.
 
@@ -142,8 +153,33 @@ binary: the manifest and the units of `packaging/hostkeeper/` (its README says w
 the binary as `bin/tierstore`, byte for byte, so the macOS binary keeps the signature its build
 gave it. The verb never runs the binary, so it packages any platform's on any runner, but it
 refuses a `--version` that is not what `tierstore --version` prints after the name or that the
-binary does not hold. The same inputs give the same bytes. No workflow runs the verb yet, and the
-release files above are unchanged.
+binary does not hold. The same inputs give the same bytes. It appends the package's line to
+`<out>/SHA256SUMS.<platform>`, beside the tarball's and the SBOM's.
+
+In `artifacts.yml` each build job packages its binary after the tarball, with `--min-hostkeeper
+0.1.0`, and unpacks the package with hostkeeper's own unpacker into a scratch directory (`cargo
+xtask verify-assets hostkeeper-package`): the archive keeps every rule hostkeeper's unpacker holds
+it to, carries no extended attribute (no pax record of one, no AppleDouble `._` entry), is at most
+the `max_package_bytes` of hostkeeper's sample daemon config, and its manifest names tierstore, the
+version and the platform. The macOS job then checks the code signature of the binary it unpacked
+(`codesign --verify --strict`; the linker's ad-hoc signature is enough). Then:
+
+- the `sums` job writes `index.json` (`cargo xtask release hostkeeper-index`) with hostkeeper's
+  own writer: schema 1, keys sorted, packages sorted by platform, at most one per platform, the
+  same bytes for the same packages. A release's index lists all three platforms, because
+  hostkeeper refuses a host whose platform its release lacks (`no_package_for_platform`): on a push
+  or a run by hand the job refuses a run without the macOS package. For a pull request, which has
+  no macOS job, it checks the two Linux packages are there and writes no index;
+- the `attest` job signs each package as its own subject, as it does each tarball, and names the
+  bundle `<package>.sigstore.json`; the provenance of the sums covers the packages and the index;
+- the `verify` job (and `release.yml`'s `verify` and `publish`) makes the index again from the
+  packages, which must give the bytes the sums list, verifies each package's bundle offline as it
+  does each tarball's, and takes each package as a host does (`cargo xtask verify-assets
+  hostkeeper-index`): the index is read with hostkeeper's strict reader, lists a package for every
+  platform, each with the size and SHA-256 of its file, and each unpacks as above.
+
+A commit built before the hostkeeper packages were added has none, and `release check` refuses to
+release it.
 
 ### Releasing by hand
 
