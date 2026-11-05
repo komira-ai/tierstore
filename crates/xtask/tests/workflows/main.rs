@@ -9,6 +9,8 @@
 )]
 #![allow(dead_code)]
 
+mod hostkeeper;
+mod hostkeeper_tests;
 mod lint;
 mod platforms;
 mod platforms_tests;

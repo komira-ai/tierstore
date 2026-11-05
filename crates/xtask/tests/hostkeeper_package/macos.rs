@@ -1,14 +1,12 @@
 //! The macOS package, on the Linux runner: its manifest and plist read as data, the placed-path
 //! rule of a plist's program, its manifest and plist loaded by hostkeeper main's loader, which
-//! reads launchd jobs, and its archive through the unpacker of komira-ai/hostkeeper#23.
+//! reads launchd jobs, and its archive through the unpacker of komira-ai/hostkeeper#23 as merged,
+//! whose loader reads both the manifest's `platform` key and launchd jobs.
 
 use std::path::Path;
 
-use hostkeeper_config::manifest::ManifestRefusal;
-use hostkeeper_config::names::UnitError;
 use hostkeeper_config_main::manifest::{Manifest as MainManifest, ManifestRefusal as MainRefusal};
 use hostkeeper_placed::lint::{LintError, check_unit_text};
-use hostkeeper_unpack::UnpackError;
 use xtask::package::Platform;
 use xtask::release::hostkeeper_package::{BINARY, LAUNCHD_LABEL};
 
@@ -186,26 +184,6 @@ fn the_macos_package_has_one_job_no_service_file_and_the_linux_ones_no_plist() {
     );
 }
 
-#[test]
-fn the_macos_package_keeps_every_archive_rule_of_hostkeepers_unpacker() {
-    // Catches: a macOS archive that breaks one of hostkeeper's archive rules. The unpacker reads
-    // and writes every entry before it loads the manifest, so a refusal by the loader means every
-    // archive rule held. The unpacker here is komira-ai/hostkeeper#23's, the one that knows the
-    // manifest's `platform` key; its loader predates launchd plists (komira-ai/hostkeeper#32), so
-    // the plist is the refusal. When #23 carries #32, this test fails and the ignored one below
-    // takes its place.
-    let scratch = Scratch::new("hostkeeper-package-mac-archive");
-    let refused = unpack(scratch.path(), &mac(), Platform::MacosArm64).unwrap_err();
-    assert!(
-        matches!(
-            &refused,
-            UnpackError::Manifest(ManifestRefusal::UnitFile { file, why: UnitError::NotAUnit })
-                if file == "tierstore.plist"
-        ),
-        "{refused:?}"
-    );
-}
-
 /// The macOS package's files below `root`, as a host keeps the version, its manifest through
 /// `edit` first, loaded with hostkeeper main's manifest loader. Main's loader predates the
 /// manifest's `platform` key, so that one line is left out for it.
@@ -284,10 +262,10 @@ fn the_macos_manifest_and_its_plist_load_with_hostkeepers_launchd_loader() {
 }
 
 #[test]
-#[ignore = "waits for komira-ai/hostkeeper#23 to carry komira-ai/hostkeeper#32: its unpacker knows the platform key, and its loader does not yet take a launchd plist and label"]
 fn the_macos_package_unpacks_with_hostkeeper_and_its_manifest_loads() {
-    // Catches: a macOS package hostkeeper's unpacker refuses once one commit of hostkeeper has
-    // both the manifest's `platform` key and launchd jobs.
+    // Catches: a macOS package hostkeeper's unpacker refuses: an archive rule broken, or a
+    // manifest or launchd job its loader, which knows both the manifest's `platform` key and
+    // launchd jobs (komira-ai/hostkeeper#23 as merged), does not take.
     let scratch = Scratch::new("hostkeeper-package-mac-unpack");
     let unpacked = unpack(scratch.path(), &mac(), Platform::MacosArm64).expect("unpacked");
     let manifest = &unpacked.manifest;
