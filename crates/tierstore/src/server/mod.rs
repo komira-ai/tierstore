@@ -405,7 +405,6 @@ use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
 use drain::SETTLED;
-use handover::PIECES_QUEUED;
 use idle::Watched;
 use linger::Lingering;
 pub use listen::ListenTuning;
