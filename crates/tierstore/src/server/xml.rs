@@ -37,11 +37,19 @@ pub(crate) fn error_body(code: &str, message: &str, resource: &str, request_id: 
     )
 }
 
+/// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy
+/// has no accounts: it serves one bucket to every caller it lets in, so every object has the
+/// same owner, named for the proxy.
+pub(crate) const OWNER: &str =
+    "<Owner><ID>tierstore</ID><DisplayName>tierstore</DisplayName></Owner>";
+
 /// One page of a ListObjectsV2 answer.
 pub(crate) struct Listing<'a> {
     pub(crate) bucket: &'a str,
     pub(crate) prefix: &'a str,
     pub(crate) max_keys: usize,
+    /// Whether the request asked for `fetch-owner=true`: each object then has an `Owner`.
+    pub(crate) owner: bool,
     pub(crate) objects: &'a [Listed],
     /// The continuation token of the next page, if the listing goes on.
     pub(crate) next: Option<String>,
@@ -60,12 +68,13 @@ impl Listing<'_> {
         ));
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
         xml.push_str(&next_token(self.next.as_deref()));
+        let owner = if self.owner { OWNER } else { "" };
         for object in self.objects {
             let key = escape(&object.key);
             let (size, modified) = (object.size, iso8601(object.modified));
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
-                 <Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>"
+                 <Size>{size}</Size>{owner}<StorageClass>STANDARD</StorageClass></Contents>"
             ));
         }
         xml.push_str("</ListBucketResult>");

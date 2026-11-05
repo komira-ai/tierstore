@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" width="960" height="440" role="img" aria-label="Three layers. Front adapters (s3, oci, gcs, fs, ops) decode a wire API into the canonical operations. The proxy core runs tiers, entries and the reconciler in canonical operations only. Store adapters (s3, dir, memory, gcs) encode canonical operations into the store's API, using shared emulation helpers for staged multipart, key codec and version token.">
+<title>API converter: front adapter, core, store adapter, joined by one canonical operation set</title>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:2}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+</style>
+<rect x="0" y="0" width="960" height="440" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Front decode, canonical operations, store encode: N decoders and M encoders, never N x M converters</text>
+<text x="30" y="62" class="t-m">Front adapter (trait Interface)</text>
+<rect x="30" y="72" width="200" height="38" rx="5" class="box-b"/><text x="130" y="96" class="b" text-anchor="middle">s3 (built)</text>
+<rect x="30" y="118" width="200" height="38" rx="5" class="box-b"/><text x="130" y="142" class="b" text-anchor="middle">oci (built)</text>
+<rect x="30" y="164" width="200" height="38" rx="5" class="box-o"/><text x="130" y="188" class="b" text-anchor="middle">gcs (later)</text>
+<rect x="30" y="210" width="200" height="38" rx="5" class="box-o"/><text x="130" y="234" class="b" text-anchor="middle">fs, no port (later)</text>
+<rect x="30" y="256" width="200" height="38" rx="5" class="box-b"/><text x="130" y="280" class="b" text-anchor="middle">ops (split out)</text>
+<text x="470" y="62" class="t-m" text-anchor="middle">Core (Proxy)</text>
+<rect x="330" y="72" width="280" height="222" rx="5" class="box"/>
+<text x="470" y="100" class="b" text-anchor="middle">Canonical operations only</text>
+<text x="470" y="126" class="t-m" text-anchor="middle">tiers, entries, reconciler, cache</text>
+<text x="470" y="146" class="t-m" text-anchor="middle">reserved prefixes filtered here</text>
+<text x="470" y="166" class="t-m" text-anchor="middle">shared listing walk</text>
+<text x="470" y="196" class="t-m" text-anchor="middle">put, put-if-match, ranged read, head,</text>
+<text x="470" y="212" class="t-m" text-anchor="middle">delete, paged list, multipart,</text>
+<text x="470" y="228" class="t-m" text-anchor="middle">opaque version token</text>
+<text x="470" y="262" class="t-m" text-anchor="middle">= the Backend trait, complete:</text>
+<text x="470" y="278" class="t-m" text-anchor="middle">the union of what any front needs</text>
+<text x="710" y="62" class="t-m">Store adapter (trait Backend)</text>
+<rect x="710" y="72" width="220" height="38" rx="5" class="box"/><text x="820" y="96" class="b" text-anchor="middle">s3 (built)</text>
+<rect x="710" y="118" width="220" height="38" rx="5" class="box"/><text x="820" y="142" class="b" text-anchor="middle">dir, memory (built)</text>
+<rect x="710" y="164" width="220" height="38" rx="5" class="box-o"/><text x="820" y="188" class="b" text-anchor="middle">gcs (later)</text>
+<rect x="710" y="210" width="220" height="84" rx="5" class="box-p"/>
+<text x="820" y="230" class="t-m" text-anchor="middle">shared emulation helpers</text>
+<text x="820" y="250" class="t-m" text-anchor="middle">staged multipart (compose or copy)</text>
+<text x="820" y="266" class="t-m" text-anchor="middle">reversible key codec</text>
+<text x="820" y="282" class="t-m" text-anchor="middle">opaque version token</text>
+<line x1="230" y1="91" x2="330" y2="130" class="ln"/><line x1="230" y1="137" x2="330" y2="150" class="ln"/><line x1="230" y1="183" x2="330" y2="180" class="ln"/><line x1="230" y1="229" x2="330" y2="210" class="ln"/>
+<line x1="610" y1="100" x2="710" y2="91" class="ln"/><line x1="610" y1="140" x2="710" y2="137" class="ln"/><line x1="610" y1="180" x2="710" y2="183" class="ln"/>
+<rect x="30" y="316" width="900" height="104" rx="5" class="box-p"/>
+<text x="40" y="336" class="t-m">A front speaking the S3 API supports the S3 API in full. The store adapter converts the calls to what its store can do:</text>
+<text x="40" y="354" class="t-m">S3 multipart on a gcs store is staged parts in a hidden namespace and a compose; a key GCS cannot name is stored under a reversible encoding.</text>
+<text x="40" y="372" class="t-m">The one thing that cannot be converted is an atomic conditional write (create-only, if-match): a documented store requirement, never probed.</text>
+<text x="40" y="390" class="t-m">An s3 front over a gcs cold tier, an fs front over an s3 hot tier, and one store behind two fronts all work: only the core is shared.</text>
+<text x="40" y="408" class="t-m">Chaining (local_cache over a hot+cold proxy) is another store adapter, in the process or across processes.</text>
+</svg>

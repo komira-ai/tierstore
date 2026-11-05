@@ -415,4 +415,60 @@ mod linux {
         assert_eq!(drained.expect("a start"), Drained { abandoned: 0 });
         assert!(!socket.exists());
     }
+
+    /// The file of a build node over a memory upstream, with its cache in `cache_dir` and the
+    /// control socket at `socket`.
+    fn build_node_file(files: &Files, cache_dir: &Path, socket: &Path) -> String {
+        let text = format!(
+            r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "bin-cache"
+bucket          = "tier-bucket"
+access_key_file = "{key}"
+handoff_socket  = "{socket}"
+
+[local_cache]
+path   = "{cache}"
+budget = "1MiB"
+
+[cold_store]
+kind = "memory"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+            key = files.key.display(),
+            cache = cache_dir.display(),
+            socket = socket.display(),
+        );
+        files.secret("node.toml", &text).display().to_string()
+    }
+
+    /// Asserts that the binary started from the file of a build node with `server.handoff_socket`
+    /// starts (it is not refused with status 2), serves `/healthz`, makes the control socket
+    /// while it runs, removes it on SIGTERM and exits with status 0. Catches a build node that
+    /// refuses the key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_build_node_binary_with_the_socket_key_makes_the_control_socket() {
+        use rustix::process::Signal;
+        let files = Files::new("handoff-keys-binary");
+        let (dir, socket) = state();
+        let cache_dir = dir.path().join("cache");
+        let config = build_node_file(&files, &cache_dir, &socket);
+        let args = ["--config", config.as_str(), "--drain-lb-wait", "50ms"]
+            .map(str::to_owned)
+            .to_vec();
+        let mut running = crate::binary::start(&args);
+        let answer = healthz(running.addr().parse().expect("an address")).await;
+        assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+        assert_control_socket(&socket);
+        running.signal(Signal::TERM);
+        assert_eq!(running.exit_code().await, Some(0));
+        assert!(!socket.exists());
+    }
 }

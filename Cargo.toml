@@ -49,6 +49,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 reqwest = { version = "0.13.5", default-features = false }
 ring = "0.17.14"
 roxmltree = "0.21.1"
+# The zstd encoder of the hostkeeper package (`cargo xtask release hostkeeper-package`): pure Rust,
+# the crate hostkeeper's unpacker decodes the package with, its frames with a content checksum
+# (`hash`). MIT.
+ruzstd = { version = "0.9.1", default-features = false, features = ["hash", "std"] }
 rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8.4"
 # Directory-relative, no-follow file access, the effective uid and the free space of a file system.
@@ -78,6 +82,20 @@ tierstore-testkit = { path = "crates/tierstore-testkit" }
 # dev-dependencies of `crates/compat`. When a release is made, move both to the new release's
 # commit: the tests then hold this branch to the release before.
 tierstore_prev = { package = "tierstore", git = "https://github.com/komira-ai/tierstore", rev = "6b60319efd148fba3d7fc0f7e6217d64b097642e" }
+
+# hostkeeper's own readers of its package (dev-dependencies of `crates/xtask` only), taken from
+# hostkeeper's public repository at pinned commits, so the tests of the hostkeeper package unpack
+# it and load its manifest with the code a host runs. The manifest loader and the unpacker are those
+# of komira-ai/hostkeeper#23 (not merged yet: it adds the manifest's `platform` key, which the
+# package writes), at that pull request's head commit. The placed-path lint is main's, with main's
+# loader, renamed `hostkeeper-config-main`: main's loader predates `platform`, and it takes a
+# launchd plist as a unit file and a launchd label as a `run` entry (komira-ai/hostkeeper#32),
+# which #23 predates. When #23 is merged, all four move to one commit of main and
+# `hostkeeper-config-main` goes.
+hostkeeper-config = { git = "https://github.com/komira-ai/hostkeeper", rev = "4edb2405c191e64a98096310df6acbba7248e883" }
+hostkeeper-unpack = { git = "https://github.com/komira-ai/hostkeeper", rev = "4edb2405c191e64a98096310df6acbba7248e883" }
+hostkeeper-placed = { git = "https://github.com/komira-ai/hostkeeper", rev = "c3b777cd40e400676c43debeb7e4ae5de848083c" }
+hostkeeper-config-main = { package = "hostkeeper-config", git = "https://github.com/komira-ai/hostkeeper", rev = "c3b777cd40e400676c43debeb7e4ae5de848083c" }
 
 [workspace.lints.rust]
 # `coverage` is set by cargo-llvm-cov.

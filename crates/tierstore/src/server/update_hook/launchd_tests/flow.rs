@@ -106,6 +106,29 @@ fn prepare_succeeds_when_the_configuration_names_no_handoff_socket() {
     assert_eq!(fake.record(), in_flight(false));
 }
 
+/// Asserts (T23) that `prepare` of a node whose configuration has `[server] handoff_socket` and a
+/// `[local_cache]` table succeeds as a restart: no release is asked for its capabilities or to
+/// check the configuration (the fake fails any such call), the log is the read of the
+/// configuration and the save, and the record has no mode. Catches a launchd `prepare` that picks
+/// a hand-over for a cache shape, or asks a release.
+#[test]
+fn prepare_of_a_cache_shape_with_a_handoff_socket_is_a_restart_and_asks_no_release() {
+    let fake = Fake::new();
+    fake.set_config(
+        super::fake::CONFIG,
+        Some(
+            "[server]\nhandoff_socket = \"/var/lib/tierstore/handoff.sock\"\n\n\
+             [local_cache]\npath = \"/var/lib/tierstore/cache\"\n",
+        ),
+    );
+    let done = fake.run(Prepare);
+    assert_ok(&done);
+    assert_eq!(fake.record(), in_flight(false));
+    assert!(!fake.log().iter().any(|line| {
+        line.starts_with("host.capabilities") || line.starts_with("host.check_config")
+    }));
+}
+
 /// Asserts that `prepare` after a finished update starts a new one: the record at rest, with its
 /// three markers, is replaced by an update in flight with none. Catches a `prepare` that treats
 /// the commit of the last update as an update past its cutover.
