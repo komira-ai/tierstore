@@ -6,7 +6,7 @@
 //! system lets it take the IPv4 packets too and the second bind is refused.
 //!
 //! [`Addrs`] is what the `addresses` params of the interfaces are read into (one address, or a list), and
-//! [`bind_all`] and [`Listeners`] are the sockets of a front: one server, one drain and one limit
+//! [`bind_all_with`] and [`Listeners`] are the sockets of a front: one server, one drain and one limit
 //! on connections serve them all.
 
 use std::fmt;
@@ -14,6 +14,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::AsFd;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use rustix::io::{FdFlags, fcntl_setfd};
 use rustix::net::{AddressFamily, SocketType, bind as bind_socket, listen, socket, sockopt};
@@ -21,7 +22,8 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::{Incoming, door};
+use super::door::{GRACE, LOOK};
+use super::{ACCEPT_PAUSE, Incoming, door};
 
 /// The value of an `addresses` param of an interface: one address, or a list of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,9 +63,36 @@ fn address<E: de::Error>(text: &str) -> Result<SocketAddr, E> {
         .map_err(|_| E::custom("invalid socket address syntax"))
 }
 
-/// The length of the queue of connections the system keeps for a socket that is not yet
-/// accepted from.
+/// The default length of the queue of connections the system keeps for a socket that is not yet
+/// accepted from ([`ListenTuning::backlog`]).
 const BACKLOG: i32 = 1024;
+
+/// The settings of the listening sockets of a front and of the loops that take their
+/// connections, which `[server]` gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListenTuning {
+    /// The length of the queue of connections the system keeps for a socket that is not yet
+    /// accepted from (`server.listen_backlog`).
+    pub backlog: i32,
+    /// How long an accept loop waits after an accept that failed (`server.accept_pause`).
+    pub accept_pause: Duration,
+    /// How long a new connection has, from the end of the settle, to finish its handshake and to
+    /// send its first request (`server.door_grace`).
+    pub door_grace: Duration,
+    /// How far apart the two looks of the closing door are (`server.door_look`).
+    pub door_look: Duration,
+}
+
+impl Default for ListenTuning {
+    fn default() -> Self {
+        Self {
+            backlog: BACKLOG,
+            accept_pause: ACCEPT_PAUSE,
+            door_grace: GRACE,
+            door_look: LOOK,
+        }
+    }
+}
 
 /// A listener on `addr`, which must be made inside the runtime. An IPv6 address is bound for
 /// IPv6 only (`IPV6_V6ONLY`, set explicitly: the system's default is not the same everywhere),
@@ -71,7 +100,7 @@ const BACKLOG: i32 = 1024;
 ///
 /// # Errors
 /// The address cannot be bound.
-pub(crate) fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+pub(crate) fn bind_with(addr: SocketAddr, backlog: i32) -> io::Result<TcpListener> {
     let family = match addr {
         SocketAddr::V4(_) => AddressFamily::INET,
         SocketAddr::V6(_) => AddressFamily::INET6,
@@ -86,7 +115,7 @@ pub(crate) fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
         sockopt::set_ipv6_v6only(&socket, true)?;
     }
     bind_socket(&socket, &addr)?;
-    listen(&socket, BACKLOG)?;
+    listen(&socket, backlog)?;
     let listener = std::net::TcpListener::from(socket);
     listener.set_nonblocking(true)?;
     TcpListener::from_std(listener)
@@ -97,12 +126,27 @@ pub(crate) fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 ///
 /// # Errors
 /// The address that cannot be bound, and why.
-pub(crate) fn bind_all(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, (SocketAddr, io::Error)> {
+pub(crate) fn bind_all_with(
+    addrs: &[SocketAddr],
+    backlog: i32,
+) -> Result<Vec<TcpListener>, (SocketAddr, io::Error)> {
     let mut bound = Vec::new();
     for addr in addrs {
-        bound.push(bind(*addr).map_err(|why| (*addr, why))?);
+        bound.push(bind_with(*addr, backlog).map_err(|why| (*addr, why))?);
     }
     Ok(bound)
+}
+
+/// [`bind_with`] with the default backlog, for the tests.
+#[cfg(test)]
+pub(crate) fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
+    bind_with(addr, BACKLOG)
+}
+
+/// [`bind_all_with`] with the default backlog, for the tests.
+#[cfg(test)]
+pub(crate) fn bind_all(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, (SocketAddr, io::Error)> {
+    bind_all_with(addrs, BACKLOG)
 }
 
 /// The addresses a front with a local cache binds: `configured`, then, when `local_cache` is set,

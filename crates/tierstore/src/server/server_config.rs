@@ -4,7 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{AccessKey, GcKey, LocalCache, PresignKey, ScopedKey, oci};
+use super::handover::PIECES_QUEUED;
+use super::{
+    AccessKey, GcKey, ListenTuning, LocalCache, OCI_HANDSHAKE, PresignKey, ScopedKey, oci,
+};
 use crate::{Clock, MonotonicClock, Proxy};
 
 /// The settings of a [`Server`].
@@ -14,6 +17,10 @@ pub struct ServerConfig {
     pub bucket: String,
     /// The region in the credential scope of a signature.
     pub region: String,
+    /// When the bucket was made, in milliseconds since the Unix epoch, for the `CreationDate` of
+    /// ListBuckets: the time [`ServerConfig::new`] was called at, and in the binary the time the
+    /// store's `_tiering/format` was written, where it has one.
+    pub bucket_created: u64,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -76,6 +83,12 @@ pub struct ServerConfig {
     /// keeps an idle connection in its pool, and how long the drain waits for a client to close
     /// a connection that the server has shut for writing.
     pub header_timeout: Duration,
+    /// The listening sockets and the pauses of the accept loop and of the closing door.
+    pub listen: ListenTuning,
+    /// How many pieces of a streamed put's body wait for the backend to take them.
+    pub put_pieces_queued: usize,
+    /// How long a client has to finish the TLS handshake with the OCI front.
+    pub oci_handshake_timeout: Duration,
     /// The settle: how long the server goes on accepting and serving after the drain began and
     /// `/readyz` said 503.
     pub drain_lb_wait: Duration,
@@ -135,6 +148,7 @@ impl ServerConfig {
         Self {
             bucket: bucket.to_owned(),
             region: "us-east-1".to_owned(),
+            bucket_created: clock.now(),
             access_key_id: access_key_id.to_owned(),
             secret_access_key: secret_access_key.to_owned(),
             read_only_keys: Vec::new(),
@@ -150,6 +164,9 @@ impl ServerConfig {
             put_min_bytes_per_sec: 1024,
             put_rate_grace: Duration::from_secs(30),
             header_timeout: Duration::from_secs(60),
+            listen: ListenTuning::default(),
+            put_pieces_queued: PIECES_QUEUED,
+            oci_handshake_timeout: OCI_HANDSHAKE,
             drain_lb_wait: Duration::from_secs(10),
             drain_deadline: Duration::from_secs(900),
             proxy: None,
