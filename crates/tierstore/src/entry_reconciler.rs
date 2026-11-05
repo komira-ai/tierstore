@@ -162,8 +162,8 @@ pub struct EntryReconcilerConfig {
 impl EntryReconcilerConfig {
     /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
     /// a retry delay of 1 to 60 seconds, comparisons in ranges of `base.compare_range` (1 MiB), a stray grace of 10
-    /// minutes, a sweep every 24 hours at up to 100 lookups a second that also aborts the uploads
-    /// of the hot tier left open for 7 days, copy-backs kept for 10
+    /// minutes, a sweep every 24 hours at up to 100 lookups a second (which aborts no upload of the
+    /// hot tier unless `abandoned_upload_after` is set), copy-backs kept for 10
     /// minutes and at most 1000 of them, the usage published every 10 seconds and measured by a
     /// listing every 24 hours, 100 pages of a listing a step, 10000 candidates of the eviction,
     /// 100000 remembered tags, and a [`TokioSleeper`].

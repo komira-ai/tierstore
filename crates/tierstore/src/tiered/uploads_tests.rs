@@ -410,7 +410,8 @@ fn sweeper(rig: &Rig, tweak: impl FnOnce(&mut EntryReconcilerConfig)) -> EntryRe
 
 /// Asserts that the sweep aborts the uploads of the hot tier that have stood open longer than
 /// `abandoned_upload_after` and no others: a young upload, an upload of the cold tier and an
-/// upload of a reserved key are left, and a setting of zero turns the abort off.
+/// upload of a reserved key are left, and the default setting, zero, aborts none (as S3 keeps an
+/// incomplete upload until its client or a lifecycle rule aborts it).
 #[tokio::test(start_paused = true)]
 async fn the_sweep_aborts_hot_uploads_left_open_past_the_limit_only() {
     let rig = Rig::active().await;
@@ -422,16 +423,17 @@ async fn the_sweep_aborts_hot_uploads_left_open_past_the_limit_only() {
     let cold = rig.cold_mem.create_upload("cold").await.unwrap();
     rig.clock.advance(1);
 
-    let mut off = sweeper(&rig, |config| {
-        config.abandoned_upload_after = std::time::Duration::ZERO;
-    });
+    let mut off = sweeper(&rig, |_| {});
     assert_eq!(off.step().await.uploads_aborted, 0);
     assert_eq!(
         rig.hot_mem.list_uploads("", None, 10).await.unwrap().len(),
         3
     );
     off.stop().await;
-    let mut paged = sweeper(&rig, |config| config.base.page_size = 1);
+    let mut paged = sweeper(&rig, |config| {
+        config.base.page_size = 1;
+        config.abandoned_upload_after = std::time::Duration::from_secs(7 * 24 * 3600);
+    });
     let report = paged.step().await;
     assert_eq!(report.uploads_aborted, 1);
     assert!(report.failed.is_empty(), "{:?}", report.failed);
@@ -457,7 +459,9 @@ async fn the_sweep_reports_a_failed_call_and_ignores_a_vanished_upload() {
     rig.clock.advance(1000);
     rig.hot_mem.create_upload("old").await.unwrap();
     rig.clock.advance(7 * 24 * 3600 * 1000 + 1);
-    let mut sweeper = sweeper(&rig, |_| {});
+    let mut sweeper = sweeper(&rig, |config| {
+        config.abandoned_upload_after = std::time::Duration::from_secs(7 * 24 * 3600);
+    });
 
     let down = Error::Unavailable("abort".to_owned());
     rig.hot_faults.fail_next_with(Op::AbortUpload, down.clone());
@@ -483,7 +487,11 @@ async fn the_sweep_of_a_hot_tier_without_uploads_is_not_a_failure() {
     let rig = Rig::active().await;
     let none = Error::Unsupported("no uploads".to_owned());
     rig.hot_faults.fail_next_with(Op::ListUploads, none);
-    let report = sweeper(&rig, |_| {}).step().await;
+    let report = sweeper(&rig, |config| {
+        config.abandoned_upload_after = std::time::Duration::from_secs(7 * 24 * 3600);
+    })
+    .step()
+    .await;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert_eq!(report.uploads_aborted, 0);
 }

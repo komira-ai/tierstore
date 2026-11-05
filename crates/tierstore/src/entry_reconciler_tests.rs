@@ -872,6 +872,6 @@ fn the_settings_default_to_the_values_the_design_names() {
     assert_eq!(config.stray_grace, secs(600));
     assert_eq!(config.stray_interval, secs(24 * 3600));
     assert_eq!(config.stray_rate, 100);
-    assert_eq!(config.abandoned_upload_after, secs(7 * 24 * 3600));
+    assert_eq!(config.abandoned_upload_after, secs(0));
     assert_eq!(config.base.parallel, 16);
 }

@@ -60,7 +60,7 @@ impl Default for HotTuning {
             usage_refresh: Duration::from_secs(1),
             compare_range: COMPARE_RANGE,
             upload_listing_calls: 100,
-            abandoned_upload_after: Duration::from_secs(7 * 24 * 3600),
+            abandoned_upload_after: Duration::ZERO,
         }
     }
 }
@@ -249,14 +249,13 @@ cache  = true
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
         assert_eq!(hot.compare_range.get(), 1 << 20);
         assert_eq!(hot.upload_listing_calls, 100);
-        assert_eq!(hot.abandoned_upload_after, Duration::from_secs(7 * 86_400));
+        assert_eq!(hot.abandoned_upload_after, Duration::ZERO);
         assert_eq!(hot, HotTuning::default());
         let built = built(&mut cli);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
         assert_eq!(built.proxy.upload_listing_calls, 100);
         assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
-        let week = Duration::from_secs(7 * 86_400);
-        assert_eq!(built.reconciler.abandoned_upload_after, week);
+        assert_eq!(built.reconciler.abandoned_upload_after, Duration::ZERO);
     }
 
     /// Every key of `[server]` and `[hot_store]` of this change parses, and a value that is not
@@ -288,8 +287,8 @@ cache  = true
         assert_eq!(built.reconciler.abandoned_upload_after, day_and_half);
     }
 
-    /// `hot_store.abandoned_upload_after = "0s"` is accepted and reaches the reconciler as zero,
-    /// which turns the abort of abandoned uploads off; a year is the longest.
+    /// `hot_store.abandoned_upload_after = "0s"` (also the default) is accepted and reaches the
+    /// reconciler as zero, which turns the abort of abandoned uploads off; a year is the longest.
     #[test]
     fn an_abandoned_upload_limit_of_zero_turns_the_abort_off() {
         let zero = with_hot("abandoned_upload_after = \"0s\"");

@@ -43,7 +43,8 @@ pub struct ReconcilerConfig {
     /// the [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
     pub compare_range: NonZeroU64,
     /// How long a multipart upload may stand open in the hot tier before the stray sweep aborts
-    /// it (7 days); zero turns the abort off. The
+    /// it; zero, the default, never aborts one, as S3 keeps an incomplete upload until its client
+    /// aborts it or a lifecycle rule does. The
     /// [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
     pub abandoned_upload_after: Duration,
     /// The time, for the usage object and the age of the objects of the hot tier. It must agree
@@ -77,7 +78,7 @@ impl ReconcilerConfig {
             lease_margin: None,
             page_size: 100,
             compare_range: COMPARE_RANGE,
-            abandoned_upload_after: Duration::from_secs(7 * 24 * 3600),
+            abandoned_upload_after: Duration::ZERO,
             clock,
             mono: Arc::new(MonotonicClock::new()),
             sleeper: Arc::new(TokioSleeper),
