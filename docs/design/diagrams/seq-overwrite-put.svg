@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 770" width="960" height="770" role="img" aria-label="Sequence diagram of a put over an existing key: Client, Node, Hot tier, Cold tier. The node takes the entry of the key, reads both tiers, evaluates If-None-Match and If-Match against the tags of the current version, declares the replacement on the entry, replaces the hot object atomically on its tag, then moves the entry to PENDING with a compare-and-swap, which is the acknowledgement point. The leader later replaces the cold copy.">
+<title>An overwrite: take the entry, find the key, check the condition, replace in hot, then acknowledge</title>
+<defs><marker id="seq-overwrite-put-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-overwrite-put-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="770" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">An overwrite: take the entry, find the key, check the condition, replace in hot, then acknowledge</text>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="110" y="65" class="b" text-anchor="middle">Client</text>
+<rect x="285" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="340" y="65" class="b" text-anchor="middle">Node</text>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="110" y1="76" x2="110" y2="638" class="ln-d"/>
+<line x1="340" y1="76" x2="340" y2="638" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="638" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="638" class="ln-d"/>
+<text x="225" y="112" class="t-m lbl" text-anchor="middle">0  PUT key (streamed body)</text>
+<text x="225" y="128" class="t-m lbl" text-anchor="middle">optional If-None-Match: * or If-Match: "tag"</text>
+<line x1="110" y1="140" x2="340" y2="140" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="166" class="t-m lbl" text-anchor="middle">1  create _entries/&lt;sha256(key)&gt;, create-only</text>
+<text x="470" y="182" class="t-m lbl" text-anchor="middle">the entry (PUT, HELD, this node); on EXISTS see the take table</text>
+<line x1="340" y1="194" x2="600" y2="194" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="220" class="t-m lbl" text-anchor="middle">created</text>
+<line x1="600" y1="232" x2="340" y2="232" class="ln-d" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="258" class="t-m lbl" text-anchor="middle">2a  hot HEAD key (under the entry)</text>
+<line x1="340" y1="270" x2="600" y2="270" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="590" y="296" class="t-m lbl" text-anchor="middle">2b  cold HEAD key: the key exists in one tier or both</text>
+<line x1="340" y1="308" x2="840" y2="308" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<rect x="30" y="334" width="900" height="64" rx="5" fill="#FFFFFF"/>
+<rect x="30" y="334" width="900" height="64" rx="5" class="box-p"/>
+<text x="40" y="354" class="t-m">3  Conditions, decided here, under the entry. Key absent in both tiers: If-Match is 404 NoSuchKey, else this is a new-key put (the put diagram).</text>
+<text x="40" y="370" class="t-m">Key present: If-None-Match: * is 412 and the entry is freed. If-Match is 412 unless the tag is one of the tags of the current version (section 4).</text>
+<text x="40" y="386" class="t-m">A cold tier that cannot be asked: free the entry, 503 (fails closed, as for a new key).</text>
+<text x="470" y="412" class="t-m lbl" text-anchor="middle">4  CAS the entry, If-Match: (PUT,HELD) to (PUT,HELD,replace)</text>
+<text x="470" y="428" class="t-m lbl" text-anchor="middle">declares that the cold copy, if any, is the older version</text>
+<line x1="340" y1="440" x2="600" y2="440" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="466" class="t-m lbl" text-anchor="middle">5  replace key in hot, If-Match on the tag from 2a, streamed</text>
+<text x="470" y="482" class="t-m lbl" text-anchor="middle">(object absent in hot: create-only; hot Full: the cold path)</text>
+<line x1="340" y1="494" x2="600" y2="494" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="520" class="t-m lbl" text-anchor="middle">durable: readers see the old object or the new one, whole</text>
+<line x1="600" y1="532" x2="340" y2="532" class="ln-d" marker-end="url(#seq-overwrite-put-ak)"/>
+<text x="470" y="558" class="t-m lbl" text-anchor="middle">6  CAS the entry: (PUT,HELD,replace) to (PUT,PENDING,replace)</text>
+<text x="470" y="574" class="t-m lbl" text-anchor="middle">the CAS is the acknowledgement point</text>
+<line x1="340" y1="586" x2="600" y2="586" class="ln-o" marker-end="url(#seq-overwrite-put-ao)"/>
+<text x="225" y="612" class="t-m lbl" text-anchor="middle">7  200 with the ETag of the new object: ACK POINT</text>
+<line x1="340" y1="624" x2="110" y2="624" class="ln-o" marker-end="url(#seq-overwrite-put-ao)"/>
+<rect x="30" y="650" width="900" height="96" rx="5" class="box-o"/>
+<text x="40" y="670" class="t-m">After the ack, hot holds the new version and a PENDING replace entry; cold still holds the old version (or nothing). Every read finds the new</text>
+<text x="40" y="686" class="t-m">version in hot. The leader finds the entry by LIST, copies hot over cold with If-Match on the cold tag (or create-only if cold has none), seals</text>
+<text x="40" y="702" class="t-m">and removes the entry (entry lifecycle). Eviction takes no key that has an entry, so the old cold version is never served after the ack. If step</text>
+<text x="40" y="718" class="t-m">4, 5 or 6 does not finish, the entry is reaped to PENDING and the leader copies whatever hot holds over cold. A 503 after step 5 is an unknown</text>
+<text x="40" y="734" class="t-m">outcome: the key may hold either version.</text>
+</svg>
