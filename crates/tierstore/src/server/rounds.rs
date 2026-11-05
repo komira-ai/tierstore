@@ -88,8 +88,13 @@ impl Rounds {
     }
 
     /// Gives the lease up, if it is held.
+    ///
+    /// It waits for the release no longer than the reconciler's `stop_wait`
+    /// (`hot_store.stop_wait`): a hot tier that does not answer does not keep the process from
+    /// leaving.
     pub(crate) async fn stop(&mut self) {
-        self.reconciler.stop().await;
+        let wait = self.reconciler.stop_wait();
+        let _ = tokio::time::timeout(wait, self.reconciler.stop()).await;
     }
 }
 
