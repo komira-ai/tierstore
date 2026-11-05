@@ -159,8 +159,8 @@ async fn requests_that_are_not_properly_signed_are_refused() {
 }
 
 /// Asserts that the health and readiness probes need no signature, and that a bucket the server
-/// does not serve, a parameter it does not know (`versionId`, and `versions` on a listing) are refused with
-/// 404 and 501.
+/// does not serve, a parameter it does not know (`acl` on an object, and `tagging` on a listing)
+/// are refused with 404 and 501.
 #[tokio::test]
 async fn the_probes_are_open_and_the_unknown_is_refused() {
     let h = Harness::start_fixed(|_| {}).await;
@@ -173,10 +173,10 @@ async fn the_probes_are_open_and_the_unknown_is_refused() {
     let other = send(&h, "GET", "/other/k", &[], &signed, b"").await;
     assert_eq!(other.status(), 404);
     assert!(text(other).await.contains("<Code>NoSuchBucket</Code>"));
-    let versioned = call(&h, "GET", "k", &[("versionId", "1")], &[], b"").await;
-    assert_eq!(versioned.status(), 501);
+    let tagged = call(&h, "GET", "k", &[("acl", "")], &[], b"").await;
+    assert_eq!(tagged.status(), 501);
     let path = format!("/{BUCKET}");
-    let query = [("list-type", "2"), ("versions", "")];
+    let query = [("list-type", "2"), ("tagging", "")];
     let signed = h.signed("GET", &path, &query, &[], b"");
     let unknown = send(&h, "GET", &path, &query, &signed, b"").await;
     assert_eq!(unknown.status(), 501);

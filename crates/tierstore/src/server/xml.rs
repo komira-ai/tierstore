@@ -113,27 +113,98 @@ impl Listing<'_> {
         }
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
         let owner = if self.owner { OWNER } else { "" };
-        for object in self.objects {
-            let key = text(&object.key);
-            let (size, modified) = (object.size, iso8601(object.modified));
-            // The tag in quotes, as the `ETag` header of a HEAD of the object has it.
-            let etag = escape(&format!("\"{}\"", object.tag));
-            xml.push_str(&format!(
-                "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
-                 <ETag>{etag}</ETag><Size>{size}</Size>{owner}\
-                 <StorageClass>STANDARD</StorageClass></Contents>"
-            ));
-        }
-        for prefix in self.prefixes {
-            let prefix = text(prefix);
-            xml.push_str(&format!(
-                "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
-            ));
-        }
+        xml.push_str(&entries(self.objects, "Contents", "", owner, self.url));
+        xml.push_str(&common_prefixes(self.prefixes, self.url));
         if self.url {
             xml.push_str(&element("EncodingType", "url"));
         }
         xml.push_str("</ListBucketResult>");
+        xml
+    }
+}
+
+/// The entries of the objects of a page, each an element `tag` that has the `Key`, then `after_key`
+/// (the text of elements), the `LastModified`, `ETag` and `Size` of the object, `owner` (the
+/// text of an `Owner` element, or nothing) and the `StorageClass`.
+fn entries(objects: &[Listed], tag: &str, after_key: &str, owner: &str, url: bool) -> String {
+    let mut xml = String::new();
+    for object in objects {
+        let key = name_text(&object.key, url);
+        let (size, modified) = (object.size, iso8601(object.modified));
+        // The tag in quotes, as the `ETag` header of a HEAD of the object has it.
+        let etag = escape(&format!("\"{}\"", object.tag));
+        xml.push_str(&format!(
+            "<{tag}><Key>{key}</Key>{after_key}<LastModified>{modified}</LastModified>\
+             <ETag>{etag}</ETag><Size>{size}</Size>{owner}\
+             <StorageClass>STANDARD</StorageClass></{tag}>"
+        ));
+    }
+    xml
+}
+
+/// The `CommonPrefixes` of a page.
+fn common_prefixes(prefixes: &[String], url: bool) -> String {
+    let mut xml = String::new();
+    for prefix in prefixes {
+        let prefix = name_text(prefix, url);
+        xml.push_str(&format!(
+            "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
+        ));
+    }
+    xml
+}
+
+/// The id of the one version every object of this server has, as S3 names the version of an
+/// object in a bucket that is not versioned.
+pub(crate) const NULL_VERSION: &str = "null";
+
+/// One page of a ListObjectVersions answer, for a bucket that is not versioned: each object is
+/// its one version, `null`, and the latest.
+pub(crate) struct VersionListing<'a> {
+    pub(crate) bucket: &'a str,
+    pub(crate) prefix: &'a str,
+    /// The `delimiter` of the request, if it had one that is not empty.
+    pub(crate) delimiter: Option<&'a str>,
+    /// Whether the request asked for `encoding-type=url`.
+    pub(crate) url: bool,
+    /// The `key-marker` and the `version-id-marker` of the request, as they were sent.
+    pub(crate) key_marker: &'a str,
+    pub(crate) id_marker: &'a str,
+    pub(crate) max_keys: usize,
+    pub(crate) objects: &'a [Listed],
+    /// The common prefixes of the page (none without a delimiter).
+    pub(crate) prefixes: &'a [String],
+    /// The key and the version id (empty after a common prefix) that start the next page, if the
+    /// listing goes on.
+    pub(crate) next: Option<(&'a str, &'a str)>,
+}
+
+impl VersionListing<'_> {
+    pub(crate) fn to_xml(&self) -> String {
+        let text = |name: &str| name_text(name, self.url);
+        let mut xml = format!("{PROLOG}<ListVersionsResult xmlns=\"{NAMESPACE}\">");
+        xml.push_str(&element("Name", &escape(self.bucket)));
+        xml.push_str(&element("Prefix", &text(self.prefix)));
+        xml.push_str(&element("KeyMarker", &text(self.key_marker)));
+        xml.push_str(&element("VersionIdMarker", &escape(self.id_marker)));
+        if let Some((key, id)) = self.next {
+            xml.push_str(&element("NextKeyMarker", &text(key)));
+            xml.push_str(&element("NextVersionIdMarker", &escape(id)));
+        }
+        let max_keys = self.max_keys;
+        xml.push_str(&format!("<MaxKeys>{max_keys}</MaxKeys>"));
+        if let Some(delimiter) = self.delimiter {
+            xml.push_str(&element("Delimiter", &text(delimiter)));
+        }
+        let truncated = self.next.is_some();
+        xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+        let latest = format!("<VersionId>{NULL_VERSION}</VersionId><IsLatest>true</IsLatest>");
+        xml.push_str(&entries(self.objects, "Version", &latest, OWNER, self.url));
+        xml.push_str(&common_prefixes(self.prefixes, self.url));
+        if self.url {
+            xml.push_str(&element("EncodingType", "url"));
+        }
+        xml.push_str("</ListVersionsResult>");
         xml
     }
 }

@@ -45,10 +45,19 @@
 //!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
+//! - ListObjectVersions (`GET /<bucket>?versions`) with `prefix`, `delimiter`, `max-keys`,
+//!   `encoding-type=url`, `key-marker` and `version-id-marker`, for a bucket that is not
+//!   versioned, as S3 answers it: every object is one `Version` whose `VersionId` is `null` and
+//!   `IsLatest` is `true`, and there is no `DeleteMarker`. It walks the keys as a listing of
+//!   objects does; the markers of a page are its last key and `null`, or a common prefix and no
+//!   id. A `version-id-marker` needs a `key-marker` and can only be `null` (`InvalidArgument`
+//!   otherwise). `versionId=null` on a GetObject, HeadObject or DeleteObject is the call without
+//!   it; any other id is `NoSuchVersion` (404), and `versionId` on another call is
+//!   `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know (`versionId`), is answered `NotImplemented`.
+//! know, is answered `NotImplemented`.
 //! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
@@ -301,6 +310,8 @@ mod list_delimiter_tests;
 mod list_options_tests;
 #[cfg(test)]
 mod list_uploads_delimiter_tests;
+#[cfg(test)]
+mod list_versions_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
