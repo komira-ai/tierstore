@@ -8,8 +8,10 @@
 //!
 //! - GetObject (whole, `bytes=a-b`, `bytes=a-` or `bytes=-n`; the object is asked for its size
 //!   first, so a ranged read costs a head) and HeadObject, with `If-Match` (another content tag
-//!   is `PreconditionFailed`) and `If-None-Match` (the content tag is a 304); the conditions on
-//!   the time are `NotImplemented`;
+//!   is `PreconditionFailed`), `If-None-Match` (the content tag is a 304), `If-Unmodified-Since`
+//!   (a time before the object's is `PreconditionFailed`) and `If-Modified-Since` (a time not
+//!   before the object's is a 304), in the order of RFC 7232 and to the second; a date that is
+//!   not an HTTP date is ignored, as S3 does;
 //! - PutObject, which only ever creates: `If-None-Match: *` is what a client sends, and a put
 //!   without it is create-only too, because the proxy keeps objects immutable. A key that
 //!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
@@ -273,6 +275,8 @@ mod combined_handoff_tests;
 mod combined_order_tests;
 #[cfg(test)]
 mod completion_tests;
+#[cfg(test)]
+mod conditional_date_tests;
 #[cfg(test)]
 mod conditional_delete_tests;
 #[cfg(test)]
