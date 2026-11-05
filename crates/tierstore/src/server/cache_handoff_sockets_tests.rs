@@ -71,7 +71,7 @@ impl Shape {
 
 /// The settings of a node of one of the shapes.
 enum Config {
-    Plain(Cli),
+    Plain(Box<Cli>),
     Build(CacheSettings),
     Combined(Box<CombinedSettings>),
 }
@@ -166,7 +166,7 @@ kind = "memory"
                 key = key.display()
             );
             let settings = settings_from_text(&text, QUICK).unwrap();
-            return Config::Plain(settings.into_storage().unwrap());
+            return Config::Plain(Box::new(settings.into_storage().unwrap()));
         }
         let any = "\"127.0.0.1:0\"";
         if let Some(node) = &self.build {
@@ -192,7 +192,7 @@ async fn start(
 ) -> Result<Drained, Error> {
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     match config {
-        Config::Plain(cli) => run_serving(cli, stop, ready).await,
+        Config::Plain(cli) => run_serving(&cli, stop, ready).await,
         Config::Build(settings) => {
             let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
             serve_cache(settings, upstream, disk, stop, ready).await
