@@ -169,7 +169,73 @@ impl Listing<'_> {
         }
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
         let owner = if self.owner { OWNER } else { "" };
-        xml.push_str(&entries(self.objects, "Contents", "", owner, self.url));
+        xml.push_str(&contents(self.objects, owner, self.url));
+        xml.push_str(&common_prefixes(self.prefixes, self.url));
+        if self.url {
+            xml.push_str(&element("EncodingType", "url"));
+        }
+        xml.push_str("</ListBucketResult>");
+        xml
+    }
+}
+
+/// The `Contents` of the objects of a page, each with `owner` (the text of an `Owner` element, or
+/// nothing).
+fn contents(objects: &[Listed], owner: &str, url: bool) -> String {
+    entries(objects, "Contents", "", owner, url)
+}
+
+/// The `CommonPrefixes` of a page.
+fn common_prefixes(prefixes: &[String], url: bool) -> String {
+    let mut xml = String::new();
+    for prefix in prefixes {
+        let prefix = name_text(prefix, url);
+        xml.push_str(&format!(
+            "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
+        ));
+    }
+    xml
+}
+
+/// One page of a ListObjects (version 1) answer.
+pub(crate) struct ListingV1<'a> {
+    pub(crate) bucket: &'a str,
+    pub(crate) prefix: &'a str,
+    /// The `delimiter` of the request, if it had one that is not empty.
+    pub(crate) delimiter: Option<&'a str>,
+    /// Whether the request asked for `encoding-type=url`.
+    pub(crate) url: bool,
+    /// The `marker` of the request, as it was sent (empty if it had none).
+    pub(crate) marker: &'a str,
+    pub(crate) max_keys: usize,
+    pub(crate) objects: &'a [Listed],
+    /// The common prefixes of the page (none without a delimiter).
+    pub(crate) prefixes: &'a [String],
+    /// The key or common prefix the next page starts after, if the listing goes on.
+    pub(crate) next: Option<&'a str>,
+}
+
+impl ListingV1<'_> {
+    /// The answer. `NextMarker` is there only for a truncated page of a request with a
+    /// delimiter, as for S3; without a delimiter the client takes the last `Key`. (A page of
+    /// version 1 always has the `Owner` of each object.)
+    pub(crate) fn to_xml(&self) -> String {
+        let text = |name: &str| name_text(name, self.url);
+        let max_keys = self.max_keys;
+        let mut xml = format!("{PROLOG}<ListBucketResult xmlns=\"{NAMESPACE}\">");
+        xml.push_str(&element("Name", &escape(self.bucket)));
+        xml.push_str(&element("Prefix", &text(self.prefix)));
+        xml.push_str(&element("Marker", &text(self.marker)));
+        if let (Some(next), Some(_)) = (self.next, self.delimiter) {
+            xml.push_str(&element("NextMarker", &text(next)));
+        }
+        xml.push_str(&format!("<MaxKeys>{max_keys}</MaxKeys>"));
+        if let Some(delimiter) = self.delimiter {
+            xml.push_str(&element("Delimiter", &text(delimiter)));
+        }
+        let truncated = self.next.is_some();
+        xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+        xml.push_str(&contents(self.objects, OWNER, self.url));
         xml.push_str(&common_prefixes(self.prefixes, self.url));
         if self.url {
             xml.push_str(&element("EncodingType", "url"));
@@ -193,18 +259,6 @@ fn entries(objects: &[Listed], tag: &str, after_key: &str, owner: &str, url: boo
             "<{tag}><Key>{key}</Key>{after_key}<LastModified>{modified}</LastModified>\
              <ETag>{etag}</ETag><Size>{size}</Size>{owner}\
              <StorageClass>STANDARD</StorageClass></{tag}>"
-        ));
-    }
-    xml
-}
-
-/// The `CommonPrefixes` of a page.
-fn common_prefixes(prefixes: &[String], url: bool) -> String {
-    let mut xml = String::new();
-    for prefix in prefixes {
-        let prefix = name_text(prefix, url);
-        xml.push_str(&format!(
-            "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
         ));
     }
     xml

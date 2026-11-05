@@ -299,12 +299,6 @@ async fn a_listing_with_a_bad_argument_is_refused() {
     }
     let unsupported = rig.list("unheard-of").await;
     assert_eq!(unsupported.status, StatusCode::NOT_IMPLEMENTED);
-    let bucket = format!("/{BUCKET}");
-    let old = rig.send("GET", &bucket, &[], b"").await;
-    assert_eq!(old.status, StatusCode::NOT_IMPLEMENTED);
-    let version_one = format!("/{BUCKET}?list-type=1");
-    let other = rig.send("GET", &version_one, &[], b"").await;
-    assert_eq!(other.status, StatusCode::NOT_IMPLEMENTED);
 }
 
 /// Asserts that creating and heading the served bucket succeed, another bucket is
