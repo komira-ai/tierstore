@@ -6,6 +6,7 @@ use crate::fetch::Sha256;
 use crate::testdir::TestDir;
 
 const TARBALL: &str = "tierstore-0123456789abcdef0123456789abcdef01234567-linux-x86_64.tar.gz";
+const PACKAGE: &str = "tierstore-0.4.0+0123456789ab-linux-x86_64.tar.zst";
 const SBOM: &str = "tierstore-0123456789abcdef0123456789abcdef01234567-linux-x86_64.cdx.json";
 
 /// The digest the tarball of a test is listed with.
@@ -327,6 +328,54 @@ fn the_pairing_is_one_bundle_per_listed_tarball_and_nothing_else() {
             "{TARBALL}: no provenance bundle {}",
             name_of(TARBALL)
         )]
+    );
+}
+
+#[test]
+fn a_tarball_and_a_hostkeeper_package_need_a_bundle_and_nothing_else_does() {
+    // Catches: a package listed without a provenance bundle because only `.tar.gz` was taken
+    // for a subject, or an SBOM or the release index demanding a bundle nobody makes.
+    for yes in [TARBALL, PACKAGE, "x.tar.gz", "x.tar.zst"] {
+        assert!(needs_bundle(yes), "{yes}");
+    }
+    for no in [
+        SBOM,
+        "index.json",
+        "notes.json",
+        "x.tar",
+        "x.zst",
+        "tar.zst.txt",
+    ] {
+        assert!(!needs_bundle(no), "{no}");
+    }
+}
+
+#[test]
+fn a_hostkeeper_package_is_paired_with_its_own_bundle_and_the_index_has_none() {
+    // Catches: a package passed without a bundle, a package paired with another file's bundle,
+    // and a bundle of the release index taken for a tarball's.
+    let dir = scratch("pairing-package");
+    let index = line("index.json");
+    let package = line(PACKAGE);
+    let lines = [index.clone(), package.clone(), line(TARBALL)];
+    std::fs::write(dir.join(name_of(TARBALL)), good(&digest())).expect("tarball bundle");
+    assert_eq!(
+        pairing(&dir, &lines).expect("pairing"),
+        vec![format!(
+            "{PACKAGE}: no provenance bundle {}",
+            name_of(PACKAGE)
+        )]
+    );
+    std::fs::write(dir.join(name_of(PACKAGE)), good(&package.sha256)).expect("package bundle");
+    assert_eq!(
+        pairing(&dir, &lines).expect("pairing"),
+        Vec::<String>::new()
+    );
+    let stray = name_of("index.json");
+    std::fs::write(dir.join(&stray), good(&index.sha256)).expect("index bundle");
+    assert_eq!(
+        pairing(&dir, &lines).expect("pairing"),
+        vec![format!("{stray}: not the bundle of a listed tarball")]
     );
 }
 

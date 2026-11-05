@@ -1,5 +1,6 @@
 //! The two Linux packages, read with hostkeeper's own code: the unpacker and the manifest loader
-//! of komira-ai/hostkeeper#23, and the placed-path lint of hostkeeper's main with main's loader.
+//! of komira-ai/hostkeeper#23 as merged, and the placed-path lint of an earlier commit of
+//! hostkeeper's main with that commit's loader.
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU64;
