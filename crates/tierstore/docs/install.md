@@ -151,38 +151,18 @@ The unit restarts a failed start after 30 seconds. It does not restart exit stat
 
 `TimeoutStopSec=` in the unit is above the sum of `--drain-lb-wait`, `--drain-deadline` and the reconciler's lease wait, so systemd does not kill a drain in progress. If you raise `--drain-deadline`, raise it too.
 
-## Updates through the host updater
+## Updates through hostkeeper
 
-A host can instead run tierstore as two slot units that the host updater updates through `tierstore update-hook` ([The update hook](update-hook.md)), by a hand-over without a gap once both releases of an update can hand over (below). The files are in `packaging` of the repository, each placed owned by root with mode 0644:
+A host can instead let hostkeeper update tierstore through `tierstore update-hook` ([The update hook](update-hook.md)). hostkeeper's package of tierstore places the files that are in `packaging/hostkeeper/units` of the repository, and the release is reached through the link `current` of the package, which hostkeeper switches and the hook never moves:
 
-| file | placed as |
+| file | for |
 |---|---|
-| `updater.d/tierstore.toml`, the declaration | `/etc/updater.d/tierstore.toml` |
-| `tierstore@.service`, the slot unit template | `/etc/systemd/system/tierstore@.service` |
-| `tierstore-9301.toml` and `tierstore-9302.toml`, the configuration of each slot | `/etc/tierstore/tierstore-9301.toml` and `/etc/tierstore/tierstore-9302.toml` |
-| `tierstore-update.conf`, the hook's account | `/etc/sysusers.d/tierstore-update.conf` |
-| `tmpfiles.d/tierstore-update.conf`, the hook's state directory | `/etc/tmpfiles.d/tierstore-update.conf` |
-| `polkit/50-tierstore-update.rules`, the hook's right to start and stop the two slots | `/etc/polkit-1/rules.d/50-tierstore-update.rules` |
+| `tierstore@.service`, the instance template | Linux: the units `tierstore@a` and `tierstore@b`, both run `current/bin/tierstore` and both serve port 9300 |
+| `tierstore.plist` | macOS: the one LaunchDaemon `/Library/LaunchDaemons/tierstore.plist` |
 
-The hook runs as `tierstore-update`, not as root and not as `tierstore`. Its state directory, `/var/lib/updater/hooks/tierstore`, is mode 0750 with owner and group `tierstore-update`; `tierstore` is a member of the group, so the service can run the binary a slot link points at and can change nothing there. The slot units have no `[Install]` section: at boot the updater runs `tierstore update-hook restore`, which starts the one slot the hook's record names.
+On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists: the hook writes the marker before it starts the instance and removes it when it retires it, and at boot only the instance the hook's record names starts. The hook's record and its lock are in `/var/lib/tierstore-hook`. Both units are enabled; a standby instance is inactive by design. On a Mac the update is a restart with a gap.
 
-### First install
+### What this does not do yet
 
-A host that runs `tierstore.service` moves to the slot units once, in this order ([packaging/README.md](https://github.com/komira-ai/tierstore/blob/main/packaging/README.md#first-install) has each step in full):
-
-1. Create the account and the state directory: place the sysusers.d and tmpfiles.d entries and have `systemd-sysusers` and `systemd-tmpfiles` create what they list.
-2. Place the declaration, the slot unit and the two slot files (with the edits of the host's `tierstore.service` and its drop-ins and of its configuration file; the two slot files differ only in the port, the proxy id and `server.slot`) and the polkit rule, and run `systemctl daemon-reload`.
-3. Place the binary as slot 9301: the release's `tierstore` in a directory that root owns, `slots/9301` a link to it, and the record `{"schema":1,"serving":9301,"mode":"handover","markers":[]}` as `state.json`, owned by `tierstore-update`, mode 0600, so that the redirect points at 9301.
-4. Load the hook's guard table, `tierstore_guard`, as root, with the text the README gives (exactly what `restore` loads): it drops every connection to 9301 and 9302, IPv4 and IPv6, that neither comes over loopback nor was redirected from 9300. The slot unit listens on the wildcard of both families, so the guard comes before any slot runs.
-5. Start the slot unit `tierstore@9301` by hand and wait until `/readyz` on `127.0.0.1:9301` answers 200 `ready`. Port 9300 is still the old unit's.
-6. Have the updater run `tierstore update-hook restore`, its boot entry: it points the redirect of port 9300 at 9301 and starts `tierstore@9301`, which already runs. `restore` moves the redirect before it starts the unit and does not wait for the slot to answer, which is why step 5 comes first.
-7. Check that port 9300 is answered by slot 9301 (the `slot` label of `tierstore_build_info` on `/metricz`). If it is not, or `restore` failed, `nft delete table inet tierstore_forward` hands port 9300 back to the old unit, which never stopped; then stop slot 9301, mend it and go back to step 5.
-8. Last, stop and disable `tierstore.service`.
-
-The old unit and slot 9301 run side by side between steps 5 and 8, which is safe over S3 tiers. A host with a `dir:` hot tier, or a build node, stops the old unit before step 5 and accepts the gap.
-
-### What these files do not do yet
-
-- An update is a hand-over only when both releases list `handover-v1` in `tierstore --capabilities`; otherwise it is a plain restart, with a gap. A release built before the capability was added does not list it, so the first update of a host from such a release is a restart, and only the updates after it hand over.
-- The host updater reads the declaration placed under `/etc/updater.d` and does not yet take it from a release: it is placed, and replaced, by hand.
-- A slot stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease), but the hook waits at most 300 s for `systemctl stop`, and `rollback` has 600 s. A drain past 300 s makes `cleanup` fail while systemd goes on stopping the unit; `cleanup` run again waits for that stop and finishes. Until the hook waits as long as the unit allows, a host that needs every step to succeed the first time keeps `--drain-deadline` at most 220s.
+- An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` and the configuration names a `handoff_socket`; otherwise it is a restart, with a gap. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one ([the hand-over socket](update-hook.md#the-hand-over-socket)).
+- An instance stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.

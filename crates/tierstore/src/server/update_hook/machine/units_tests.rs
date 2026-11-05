@@ -2,15 +2,16 @@
 
 use std::time::Duration;
 
-use super::super::ports::{PortError, PortKind, Units};
+use super::super::ports::{Instance, PortError, PortKind, UnitState, Units};
 use super::testing::{FakeRunner, exit, signalled};
 use super::{Call, RunError, SystemdUnits};
 
 const START: Duration = Duration::from_secs(11);
 const STOP: Duration = Duration::from_secs(22);
+const SHOW: Duration = Duration::from_secs(33);
 
 fn units(runner: &FakeRunner) -> SystemdUnits<'_> {
-    SystemdUnits::new(runner, START, STOP)
+    SystemdUnits::new(runner, START, STOP, SHOW)
 }
 
 fn message(error: PortError) -> String {
@@ -23,25 +24,41 @@ fn message(error: PortError) -> String {
     }
 }
 
-/// Asserts the argument vectors, and that a start is given the start time limit and a stop the
-/// stop's (the drain makes it long). It would catch a stop killed at the start's limit.
+/// Asserts the argument vectors, and that a start is given the start time limit, a stop the
+/// stop's (the drain makes it long) and a look at the state the short one of `show`.
 #[test]
-fn start_and_stop_run_systemctl_with_their_own_time_limits() {
-    let runner = FakeRunner::replying(vec![exit(0, "", ""), exit(0, "", "")]);
-    units(&runner).start("tierstore@9302.service").unwrap();
-    units(&runner).stop("tierstore@9301.service").unwrap();
+fn start_stop_and_state_run_systemctl_with_their_own_time_limits() {
+    let runner = FakeRunner::replying(vec![
+        exit(0, "", ""),
+        exit(0, "", ""),
+        exit(0, "active\n", ""),
+    ]);
+    units(&runner).start(Instance::B).unwrap();
+    units(&runner).stop(Instance::A).unwrap();
+    units(&runner).state(Instance::A).unwrap();
     assert_eq!(
         runner.calls(),
         vec![
             Call::new(
                 "/usr/bin/systemctl",
-                &["start", "--", "tierstore@9302.service"],
-                START,
+                &["start", "--", "tierstore@b.service"],
+                START
             ),
             Call::new(
                 "/usr/bin/systemctl",
-                &["stop", "--", "tierstore@9301.service"],
-                STOP,
+                &["stop", "--", "tierstore@a.service"],
+                STOP
+            ),
+            Call::new(
+                "/usr/bin/systemctl",
+                &[
+                    "show",
+                    "--property=ActiveState",
+                    "--value",
+                    "--",
+                    "tierstore@a.service"
+                ],
+                SHOW
             ),
         ]
     );
@@ -53,7 +70,7 @@ fn start_and_stop_run_systemctl_with_their_own_time_limits() {
 #[test]
 fn a_start_that_exits_zero_is_ok_even_if_the_condition_skipped_the_unit() {
     let runner = FakeRunner::replying(vec![exit(0, "", "")]);
-    assert!(units(&runner).start("tierstore@9301.service").is_ok());
+    assert!(units(&runner).start(Instance::A).is_ok());
 }
 
 /// Asserts that a non-zero exit of a start and of a stop are failures of the units port that
@@ -61,22 +78,25 @@ fn a_start_that_exits_zero_is_ok_even_if_the_condition_skipped_the_unit() {
 #[test]
 fn a_non_zero_exit_is_a_failure() {
     let runner = FakeRunner::replying(vec![
-        exit(1, "", "Job for tierstore@9302.service failed.\n"),
+        exit(1, "", "Job for tierstore@b.service failed.\n"),
         exit(5, "", "Unit x not loaded.\n"),
         signalled(),
     ]);
-    let text = message(units(&runner).start("tierstore@9302.service").unwrap_err());
+    let text = message(units(&runner).start(Instance::B).unwrap_err());
     assert_eq!(
         text,
-        "/usr/bin/systemctl start -- tierstore@9302.service: exited 1: Job for tierstore@9302.service failed."
+        "/usr/bin/systemctl start -- tierstore@b.service: exited 1: Job for tierstore@b.service failed."
     );
-    let text = message(units(&runner).stop("x").unwrap_err());
+    let text = message(units(&runner).stop(Instance::A).unwrap_err());
     assert_eq!(
         text,
-        "/usr/bin/systemctl stop -- x: exited 5: Unit x not loaded."
+        "/usr/bin/systemctl stop -- tierstore@a.service: exited 5: Unit x not loaded."
     );
-    let text = message(units(&runner).stop("x").unwrap_err());
-    assert_eq!(text, "/usr/bin/systemctl stop -- x: ended by a signal: ");
+    let text = message(units(&runner).state(Instance::A).unwrap_err());
+    assert_eq!(
+        text,
+        "/usr/bin/systemctl show --property=ActiveState --value -- tierstore@a.service: ended by a signal: "
+    );
 }
 
 /// Asserts that a timeout is a failure of the start and of the stop.
@@ -86,45 +106,44 @@ fn a_timeout_is_a_failure() {
         Err(RunError::Timeout(START)),
         Err(RunError::Timeout(STOP)),
     ]);
-    assert!(units(&runner).start("u").is_err());
-    let text = message(units(&runner).stop("u").unwrap_err());
+    assert!(units(&runner).start(Instance::A).is_err());
+    let text = message(units(&runner).stop(Instance::A).unwrap_err());
     assert_eq!(
         text,
-        "/usr/bin/systemctl stop -- u: no end after 22s, killed"
+        "/usr/bin/systemctl stop -- tierstore@a.service: no end after 22s, killed"
     );
 }
 
-/// Asserts that a unit name outside the alphabet (empty, a leading dash, a space, a semicolon, a
-/// slash, a line break, longer than 255 characters) is refused by start and by stop before any
-/// program runs.
+/// Asserts that every `ActiveState` word systemd has is read as its state: `active` and
+/// `reloading` as active, and the rest as themselves, with the line break trimmed.
 #[test]
-fn a_unit_name_outside_the_alphabet_is_refused_before_any_call() {
-    let runner = FakeRunner::replying(vec![]);
-    let long = "u".repeat(256);
-    for name in [
-        "",
-        "-x",
-        "--now",
-        "a b",
-        "a;b",
-        "../x",
-        "x\n",
-        long.as_str(),
-    ] {
-        let text = message(units(&runner).start(name).unwrap_err());
-        assert!(text.ends_with("is not a unit name"), "{text}");
-        assert!(units(&runner).stop(name).is_err());
+fn every_active_state_is_read() {
+    let words = [
+        ("active\n", UnitState::Active),
+        ("reloading\n", UnitState::Active),
+        ("activating\n", UnitState::Activating),
+        ("deactivating\n", UnitState::Deactivating),
+        ("inactive\n", UnitState::Inactive),
+        ("failed\n", UnitState::Failed),
+    ];
+    let runner = FakeRunner::replying(words.iter().map(|(text, _)| exit(0, text, "")).collect());
+    for (_, want) in words {
+        assert_eq!(units(&runner).state(Instance::B).unwrap(), want);
     }
-    assert!(runner.calls().is_empty());
 }
 
-/// Asserts that the names of the slot units, a template instance and a name of the longest
-/// length are passed on.
+/// Asserts that a word that is no state, and an empty answer, are failures that name the word
+/// and not a guess.
 #[test]
-fn a_unit_name_inside_the_alphabet_is_passed_on() {
-    let runner = FakeRunner::replying(vec![exit(0, "", ""), exit(0, "", "")]);
-    assert!(units(&runner).start("tierstore@9301.service").is_ok());
-    assert!(units(&runner).stop(&"u".repeat(255)).is_ok());
+fn an_unknown_active_state_is_a_failure() {
+    let runner = FakeRunner::replying(vec![exit(0, "maintenance\n", ""), exit(0, "", "")]);
+    let text = message(units(&runner).state(Instance::A).unwrap_err());
+    assert!(
+        text.ends_with("unknown ActiveState \"maintenance\""),
+        "{text}"
+    );
+    let text = message(units(&runner).state(Instance::A).unwrap_err());
+    assert!(text.ends_with("unknown ActiveState \"\""), "{text}");
 }
 
 /// Asserts that the program can be named by the caller.
@@ -133,7 +152,7 @@ fn the_program_can_be_named() {
     let runner = FakeRunner::replying(vec![exit(0, "", "")]);
     units(&runner)
         .with_program("/opt/systemctl")
-        .start("u")
+        .start(Instance::A)
         .unwrap();
     assert_eq!(runner.calls()[0].program, "/opt/systemctl");
 }

@@ -1,38 +1,37 @@
-//! `tierstore update-hook`: tierstore's side of the host updater's hook contract (Linux and
-//! macOS).
+//! `tierstore update-hook`: tierstore's side of hostkeeper's hook contract, on Linux (systemd)
+//! and on macOS (launchd).
 //!
 //! ```text
-//! tierstore update-hook <prepare|cutover|verify|rollback|cleanup> [<artifact>] --params <file>
-//! tierstore update-hook restore
+//! tierstore update-hook prepare <staged release> --params <file>
+//! tierstore update-hook <cutover|verify|rollback|cleanup|uninstall|restore> --params <file>
 //! ```
 //!
-//! The updater runs one step per process and reads two things: the exit status and the last line
-//! of standard output, a JSON object ([`Report`]). Exit 0 is success, 1 failure and 75 deferred
-//! (the host is not ready, nothing was done, try later). The verb is answered before the
-//! server's flags are parsed: a hook is a short-lived process of the updater, not a server.
+//! hostkeeper runs one step per process, as root, and reads two things: the exit status and the
+//! last line of standard output, a JSON object ([`Report`]). Exit 0 is success, 1 failure and 75
+//! deferred (not now; the step is run again later). The verb is answered before the server's
+//! flags are parsed: a hook is a short-lived process of hostkeeper, not a server.
 //!
-//! Two instances run side by side during an update, on the private ports of the two slots
-//! (`tierstore@9301`, `tierstore@9302`); the public port 9300 is redirected to the serving slot
-//! by one nftables rule. The steps keep a record ([`Record`]), set state rather than do things
-//! once, and reach the machine only through the ports of [`Ports`]. [`Machine::system`] builds
-//! those ports from the machine's implementations ([`machine`]): the declaration it reads gives
-//! the state directory and the slot links, and the step runs over them.
+//! The params file names the service manager (`service_manager`, [`ServiceManager`]):
 //!
-//! On macOS one instance runs, under launchd (the job [`machine::LAUNCHD_LABEL`]), on one port
-//! of loopback, and an update is a plain restart with a gap in serving: the steps of
-//! [`single`](SingleRecord) stop the service, point the release link `current` at the staged
-//! release and start it again, through the ports of [`SinglePorts`] (the service, the release
-//! links, the instance, the host, the clock and the state directory: no nftables, no slot). The
-//! declaration is [`LAUNCHD_DECLARATION_PATH`] ([`LaunchdDeclaration`]). The steps, the launchd
-//! calls and the declaration are built and tested on Linux too; what is built on one system
-//! alone is the wiring to the real machine (`system` on Linux, the last function of
-//! `launchd_system` on macOS) and the `nft` and `systemctl` ports, which only Linux has.
+//! - **systemd** ([`systemd`]): the package ships one template, `tierstore@.service`, and the hook
+//!   alternates between its two instances, `tierstore@a` and `tierstore@b`. Both run
+//!   `current/bin/tierstore` and serve port 9300. In `cutover` the idle one is started and takes
+//!   the listening sockets of the live one over the hand-over socket (`server.handoff_socket`),
+//!   and the live one drains and exits on its own. Each instance starts only when its marker file
+//!   ([`MARKER_DIR`]) is there, so at boot only the recorded one does.
+//! - **launchd** ([`launchd`]): one job, the label in `launchd_label`, and an update is a restart
+//!   with a gap: `bootout`, then `bootstrap` of the linked plist ([`LAUNCHD_PLIST`]).
+//!
+//! hostkeeper switches the release link `current` before `cutover` and back before `rollback`;
+//! the hook never moves it. The steps keep a [`Record`] in [`STATE_DIR`], set state rather than do
+//! things once, and reach the machine only through the ports of [`SystemdPorts`] and
+//! [`LaunchdPorts`]. [`Machine::system`] builds those ports from the machine's implementations
+//! ([`machine`]). Both arms are built and tested on every system: the arm is chosen by the
+//! params, not by the system the hook was built for.
 
 mod args;
-mod declaration;
-#[cfg(all(target_os = "linux", feature = "hook-conformance"))]
-pub mod fake;
-mod launchd_system;
+mod launchd;
+mod look;
 pub mod machine;
 mod params;
 mod plain;
@@ -40,60 +39,69 @@ mod ports;
 mod probe;
 mod record;
 mod report;
-mod ruleset;
-mod single;
-mod steps;
-#[cfg(target_os = "linux")]
 mod system;
-mod validate;
+mod systemd;
 
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-pub use args::{ArgsError, HostArgs, Invocation, ROOT_UID, Step};
-pub use declaration::{
-    DECLARATION_PATH, Declaration, DeclarationError, LAUNCHD_DECLARATION_PATH, LaunchdDeclaration,
-    PUBLIC_PORT, unit_name,
-};
+pub use args::{ArgsError, Invocation, Step};
+pub use look::{POLL_INTERVAL, PROBE_ATTEMPTS, PROBE_HITS, READY_ATTEMPTS};
 pub use params::{
-    CONNTRACK_PERCENT_KEY, DEFER_RETRY_KEY, MODE_KEY, PROMOTION_BOUND_KEY, PROMOTION_CEILING_KEY,
-    Params, ParamsError, RESTART_MODE, STAGED_RELEASE_KEY, TARGET_VERSION_KEY,
+    CONFIG_FILE_KEY, LAUNCHD, LAUNCHD_LABEL_KEY, MODE_KEY, PREVIOUS_RELEASE_KEY,
+    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, Params, ParamsError, Previous, RESTART_MODE,
+    SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, SYSTEMD, ServiceManager, TARGET_VERSION_KEY,
 };
 pub use ports::{
-    Clock, Conntrack, Host, Instances, Link, Lock, Nft, PortError, PortKind, Ports, Releases,
-    Reply, Service, SinglePorts, Slots, StateDir, Units,
+    Clock, Host, Instance, Instances, Launchd, LaunchdPorts, Lock, Markers, PortError, PortKind,
+    Reply, StateDir, SystemdPorts, UnitState, Units,
 };
 pub use probe::{Build, CacheMode, build_of, readiness};
-pub use record::{Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
+pub use record::{Invalid, Kind, Marker, Mode, RECORD_MAX, Record, RecordError, SCHEMA};
 pub use report::{Class, Done, MAX_REASON_LEN, Outcome, Reason, Report, is_reason_token};
-pub use ruleset::{FORWARD_TABLE, GUARD_TABLE, guard_ruleset, redirect_ruleset, redirect_target};
-pub use single::{
-    Kind as SingleKind, SKIPPED_CLEANUP, SKIPPED_CUTOVER, SKIPPED_PREPARE, SingleRecord,
-    run_step as run_single_step,
-};
-pub use steps::{HANDOVER_CAPABILITY, run_step};
-pub use validate::{Invalid, check_params, validate};
 
 /// The first argument that selects the verb.
 pub const VERB: &str = "update-hook";
 
+/// The port the service serves on, through both instances and the launchd job alike.
+pub const PUBLIC_PORT: u16 = 9300;
+/// The hook's own state directory: the record and its lock. root's alone (mode 0700); the hook
+/// makes it when it is absent. hostkeeper does not remove it, and nor does `uninstall`.
+pub const STATE_DIR: &str = "/var/lib/tierstore-hook";
+/// The directory of the start markers of the systemd instances: the template's
+/// `StateDirectory=` (`/var/lib/tierstore`), which also holds the hand-over socket.
+pub const MARKER_DIR: &str = "/var/lib/tierstore";
+/// The start marker of `instance`, in [`MARKER_DIR`]: the path the template's
+/// `ConditionPathExists=` names with `%i`.
+#[must_use]
+pub fn marker_path(instance: Instance) -> PathBuf {
+    PathBuf::from(MARKER_DIR).join(format!("run-{}", instance.letter()))
+}
+/// The binary of a release, under its version directory (hostkeeper's package layout).
+pub const RELEASE_BINARY: &str = "bin/tierstore";
+/// The plist of the launchd job, as hostkeeper links it from the package's `units/`.
+pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
+/// The capability (`tierstore --capabilities`) of a release that offers and takes listening
+/// sockets over `server.handoff_socket`. Both releases need it for a hand-over.
+pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_CAPABILITY;
+/// The configuration key of the hand-over socket, in the `[server]` table.
+pub const HANDOFF_SOCKET_KEY: &str = "handoff_socket";
+
 /// What the verb takes from the machine it runs on: the body of the steps.
 pub struct Machine<'a> {
-    /// Runs the step `invocation` names, with the params already read (`None` for `restore`).
-    pub step: &'a dyn Fn(&Invocation, Option<&Params>) -> Done,
+    /// Runs the step `invocation` names, with the params already read.
+    pub step: &'a dyn Fn(&Invocation, &Params) -> Done,
 }
 
 impl Machine<'static> {
-    /// This machine: the two slots of Linux, or the one launchd service of macOS.
+    /// This machine: its programs, files and loopback port.
     #[must_use]
     pub fn system() -> Self {
-        #[cfg(target_os = "linux")]
-        let step = &system::on_this_machine;
-        #[cfg(target_os = "macos")]
-        let step = &launchd_system::on_this_machine;
-        Self { step }
+        Self {
+            step: &system::on_this_machine,
+        }
     }
 }
 
@@ -111,7 +119,7 @@ enum Refusal {
 }
 
 impl Refusal {
-    /// The failure the updater is told of: nothing was done.
+    /// The failure hostkeeper is told of: nothing was done.
     fn done(&self) -> Done {
         let reason = match self {
             Refusal::Args(_) | Refusal::Artifact { .. } => Reason::BadArgs,
@@ -124,14 +132,9 @@ impl Refusal {
 /// Reads the command line and the params file and runs the step they name.
 fn step_of(args: &[OsString], machine: &Machine<'_>) -> Result<Done, Refusal> {
     let invocation = Invocation::parse(args.iter().skip(2).cloned()).map_err(Refusal::Args)?;
-    let params = invocation
-        .params
-        .as_deref()
-        .map(Params::read)
-        .transpose()
-        .map_err(Refusal::Params)?;
+    let params = Params::read(&invocation.params).map_err(Refusal::Params)?;
     // `prepare` is given the staged tree twice, by argument and by the table; they must agree.
-    if let (Some(given), Some(params)) = (&invocation.artifact, &params)
+    if let Some(given) = &invocation.artifact
         && given.as_os_str() != params.staged_release.as_os_str()
     {
         return Err(Refusal::Artifact {
@@ -139,7 +142,7 @@ fn step_of(args: &[OsString], machine: &Machine<'_>) -> Result<Done, Refusal> {
             staged: params.staged_release.clone(),
         });
     }
-    Ok((machine.step)(&invocation, params.as_ref()))
+    Ok((machine.step)(&invocation, &params))
 }
 
 /// Runs the verb on `args` (the program name and the verb first): the last line goes to `out`,
@@ -173,16 +176,11 @@ pub fn main(args: &[OsString]) -> ExitCode {
 #[cfg(test)]
 mod args_tests;
 #[cfg(test)]
-mod declaration_tests;
-#[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
-#[cfg(all(target_os = "linux", feature = "hook-conformance"))]
-mod fake_tests;
+mod launchd_tests;
 #[cfg(test)]
-mod launchd_declaration_tests;
-#[cfg(test)]
-mod launchd_system_tests;
+mod look_tests;
 #[cfg(test)]
 mod params_tests;
 #[cfg(test)]
@@ -192,37 +190,8 @@ mod record_tests;
 #[cfg(test)]
 mod report_tests;
 #[cfg(test)]
-mod ruleset_tests;
-#[cfg(test)]
-mod single_crash_tests;
-#[cfg(test)]
-mod single_record_tests;
-#[cfg(test)]
-mod single_testing;
-#[cfg(test)]
-mod single_tests;
-#[cfg(test)]
-mod steps_cleanup_tests;
-#[cfg(test)]
-mod steps_crash_tests;
-#[cfg(test)]
-mod steps_cutover_tests;
-#[cfg(test)]
-mod steps_forged_tests;
-#[cfg(test)]
-mod steps_prepare_tests;
-#[cfg(test)]
-mod steps_restore_tests;
-#[cfg(test)]
-mod steps_rollback_tests;
-#[cfg(test)]
-mod steps_verify_tests;
-#[cfg(test)]
-#[cfg(target_os = "linux")]
 mod system_tests;
 #[cfg(test)]
-mod testing;
-#[cfg(test)]
-mod validate_tests;
+mod systemd_tests;
 #[cfg(test)]
 mod verb_tests;

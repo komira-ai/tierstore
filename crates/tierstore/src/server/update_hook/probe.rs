@@ -34,20 +34,20 @@ pub struct Build {
     pub version: String,
     /// The `commit` label, when there is one.
     pub commit: Option<String>,
-    /// The `slot` label: the private port of the instance, when the build says it.
+    /// The `slot` label, when the build says it; the hook does not read it.
     pub slot: Option<u16>,
 }
 
 impl Build {
-    /// Whether this is the instance on `slot` running `version`. `version` is the crate version
-    /// the gauge names, or that, `+` and the commit. A build that names no slot is no instance.
+    /// Whether this build runs `version`: the crate version the gauge names, or that, `+` and
+    /// the commit (the form hostkeeper's versions take).
     #[must_use]
-    pub fn is(&self, slot: u16, version: &str) -> bool {
+    pub fn is(&self, version: &str) -> bool {
         let full = self
             .commit
             .as_ref()
             .map(|c| format!("{}+{c}", self.version));
-        self.slot == Some(slot) && (self.version == version || full.as_deref() == Some(version))
+        self.version == version || full.as_deref() == Some(version)
     }
 }
 

@@ -29,16 +29,15 @@ pub const RELEASE_VERSION: &str = concat!(
 ///
 /// `handover-v1` says the release has the lock-based read-only mode, the lingering close in the
 /// drain of both fronts and the wildcard listeners of both fronts, and this build has all three.
-/// The host updater's `prepare` step reads it to choose a hand-over over a plain restart, so a
-/// release that named it without all three would be handed over to and fail; the test
-/// `handover_v1_is_listed_with_the_three_behaviours_it_promises` (tests/oci_front) runs the
-/// binary against each of them. The hook looks for the same name as
-/// `update_hook::HANDOVER_CAPABILITY`, and `the_pages_say_the_build_lists_handover_v1` holds the
-/// two equal.
+/// The test `handover_v1_is_listed_with_the_three_behaviours_it_promises` (tests/oci_front) runs
+/// the binary against each of them, so a release that named it without all three would fail it.
+/// The update hook no longer reads it.
 ///
 /// [`HANDOFF_SOCKET_CAPABILITY`] says the binary serves through the hand-off of its listening
-/// sockets when `server.handoff_socket` is set (see `server::handoff`). This list is all
-/// `--capabilities` prints.
+/// sockets when `server.handoff_socket` is set (see `server::handoff`). The update hook's
+/// `prepare` step reads the list of the staged and of the previous release for it
+/// (`update_hook::HANDOFF_CAPABILITY`, the same constant) and records a hand-over only when both
+/// list it. This list is all `--capabilities` prints.
 pub const CAPABILITIES: &[&str] = &["handover-v1", HANDOFF_SOCKET_CAPABILITY];
 
 /// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
@@ -58,7 +57,7 @@ pub fn capabilities_text(names: &[&str]) -> String {
 /// names) when there is one. Without a slot the text has no `slot` label at all, so that a node
 /// that is not a slot renders what it always did. None of them can hold a quote or a backslash:
 /// one is a Cargo version, the other hex digits or `unknown`, the third a number. The hook's
-/// probe reads the slot back with `update_hook::build_of`.
+/// probe reads the version and the commit back with `update_hook::build_of`.
 #[must_use]
 pub fn gauge(version: &str, commit: &str, slot: Option<u16>) -> String {
     let slot = slot.map_or_else(String::new, |port| format!(",slot=\"{port}\""));

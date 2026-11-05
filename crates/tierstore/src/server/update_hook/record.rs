@@ -1,38 +1,46 @@
-//! The record: `state.json` in the hook's state directory.
+//! The record: `state.json` in the hook's state directory ([`super::STATE_DIR`]).
 //!
 //! ```json
-//! {"schema":1,"serving":9302,"previous":9301,"mode":"handover","markers":["swapped"]}
+//! {"schema":1,"kind":"single","updating":true,"markers":["swapped"],
+//!  "from":"/var/lib/hostkeeper/packages/tierstore/0.4.0","to":"/var/lib/hostkeeper/packages/tierstore/0.5.0",
+//!  "version":"0.5.0","live":"a","next":"b","mode":"handover"}
 //! ```
 //!
-//! - `serving`: the private port that serves once the update is through. `prepare` sets it to the
-//!   idle port, so while an update is in flight it names v-next; with no update in flight it
-//!   names the one instance the redirect points at.
-//! - `previous`: the port of v-current while an update is in flight, else absent. It differs
-//!   from `serving`.
-//! - `mode`: `handover` (two instances side by side) or `restart` (a plain restart with a gap,
-//!   when either release lacks the `handover-v1` capability).
-//! - `boot_id`: the boot of the host at the last successful `verify`; `guard_placed`: this update
-//!   placed the guard table.
-//! - `markers`: `swapped` (the redirect names v-next and v-next answers through the public
-//!   port), `verified` (a `verify` succeeded), `stopping` (`cleanup` has begun to retire
-//!   v-current: the commit; nothing is reversible from here). Each needs the one before it. After
-//!   `cleanup` has finished, `previous` is gone and the three markers stay, so that the later
-//!   `verify` knows it is watching a promotion; the next `prepare` starts them afresh.
+//! One record for both service managers: the launchd arm writes the keys of the previous
+//! release's single-instance record and nothing else, and the systemd arm adds three optional
+//! keys. A key this hook does not know is ignored, as the previous release ignored them, so a
+//! record of this hook is read by the previous release's hook and the other way round (the
+//! design's rule that a hook's record is readable one version back).
 //!
-//! Each marker is written relative to its act as follows. `swapped` follows its act (the swap and
-//! the probe have happened; a crash before it re-runs `cutover`, which only re-applies). `verified`
-//! follows its act (the observations passed), together with `boot_id`. `stopping` precedes its act
-//! (it is written, synced, and only then is the link removed and the unit stopped), so a crash at
-//! any later point leaves the commit on record. `guard_placed` follows the loading of the guard
-//! (a crash between leaves a guard that nothing removes, which is the safe way round).
+//! - `kind`: always `single`, the tag the previous release gave this record.
+//! - `updating`: an update is in flight: `prepare` recorded it. `rollback` and the end of
+//!   `cleanup` clear it.
+//! - `from`: while an update is in flight, the release the host ran before
+//!   (`updater.previous_release`); absent on a first install.
+//! - `to` and `version`: the staged release and the version it must report. Every later step
+//!   refuses params that name another release or version. They stay after the commit, for the
+//!   `verify` that watches the promotion.
+//! - `markers`: `swapped` (the new release serves on the public port), `verified` (a `verify`
+//!   succeeded), `stopping` (`cleanup` has begun: the commit). Each needs the one before it.
+//!   After `cleanup` has finished, `updating` is false and the three markers stay; the next
+//!   `prepare` starts them afresh. `swapped` and `verified` follow their acts, `stopping`
+//!   precedes its act.
+//! - `live` (systemd only): the instance that serves when no update is in flight; while one is,
+//!   the instance that served before it (absent when none did: a first install).
+//! - `next` (systemd only, while an update is in flight): the instance `cutover` starts.
+//! - `mode` (systemd only, while an update is in flight): `handover` (the new instance takes the
+//!   listening sockets of the old) or `restart` (the old one is stopped first: a gap).
 //!
-//! The record is written whole, atomically, by the [`StateDir`](super::StateDir) port. It is
-//! read through [`validate`](super::validate) before anything else is done.
+//! An absent `live` with no update in flight means no instance is known to serve: launchd's one
+//! job has no letter, and a systemd host that was never installed has none.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::json;
+
+use super::ports::Instance;
 
 /// The schema this hook writes and reads.
 pub const SCHEMA: u32 = 1;
@@ -40,13 +48,21 @@ pub const SCHEMA: u32 = 1;
 /// The most bytes of a record that are read. A real record is under a kilobyte.
 pub const RECORD_MAX: usize = 64 * 1024;
 
-/// How the new release takes over.
+/// The one kind of record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// The tag of the record, as the previous release wrote it.
+    Single,
+}
+
+/// How the new release of the systemd arm takes over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
-    /// Both instances run; the redirect moves; the old one is stopped after the gate.
+    /// The new instance takes the old one's listening sockets; no gap.
     Handover,
-    /// The old instance is stopped, the new one started: a gap.
+    /// The old instance is stopped, then the new one started: a gap.
     Restart,
 }
 
@@ -65,11 +81,11 @@ impl Mode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Marker {
-    /// The redirect names v-next and v-next answered through the public port.
+    /// The new release answered on the public port.
     Swapped,
     /// A `verify` succeeded.
     Verified,
-    /// `cleanup` has begun to retire v-current: the commit.
+    /// `cleanup` has begun: the commit.
     Stopping,
 }
 
@@ -108,6 +124,25 @@ pub enum RecordError {
     },
 }
 
+/// The rule a record broke.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Invalid {
+    /// A key is set without the one it follows from.
+    #[error("{mark} is set but {needs} is not")]
+    Marks {
+        /// What is set.
+        mark: &'static str,
+        /// What it needs.
+        needs: &'static str,
+    },
+    /// Markers with no update in flight and no commit.
+    #[error("markers are set with no update in flight")]
+    Orphan,
+    /// `live` and `next` name the same instance.
+    #[error("live and next are the same instance")]
+    Same,
+}
+
 /// Only the schema of a record, read before the rest is trusted.
 #[derive(Deserialize)]
 struct Header {
@@ -116,40 +151,51 @@ struct Header {
 
 /// The hook record.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Record {
     /// The format; see [`SCHEMA`].
     pub schema: u32,
-    /// The port that serves once the update is through.
-    pub serving: u16,
-    /// The port of v-current while an update is in flight.
-    pub previous: Option<u16>,
-    /// How the new release takes over.
-    pub mode: Mode,
+    /// Always [`Kind::Single`].
+    pub kind: Kind,
+    /// Whether an update is in flight.
+    pub updating: bool,
     /// What has been done.
     pub markers: BTreeSet<Marker>,
-    /// The boot of the host when `verify` last observed the new instance: `cleanup` commits only
-    /// in the same boot, since a reboot sends `restore` to the previous slot.
+    /// The release the host ran before the update in flight; `None` on a first install.
     #[serde(default)]
-    pub boot_id: Option<String>,
-    /// Whether this update placed the guard table (it was not there before): `rollback` and a
-    /// deferred `prepare` remove what they placed, and leave what was there.
+    pub from: Option<PathBuf>,
+    /// The staged release `prepare` recorded.
     #[serde(default)]
-    pub guard_placed: bool,
+    pub to: Option<PathBuf>,
+    /// The version `to` must report.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// systemd: the instance that serves at rest, or that served before the update in flight.
+    #[serde(default)]
+    pub live: Option<Instance>,
+    /// systemd: the instance the update in flight starts.
+    #[serde(default)]
+    pub next: Option<Instance>,
+    /// systemd: how the update in flight takes over.
+    #[serde(default)]
+    pub mode: Option<Mode>,
 }
 
 impl Record {
-    /// The record of a host with no update in flight, serving on `serving`.
+    /// The record of a host with no update in flight, `live` serving (`None` for launchd's one
+    /// job, or for a systemd host nothing serves on).
     #[must_use]
-    pub fn idle(serving: u16) -> Record {
+    pub fn idle(live: Option<Instance>) -> Record {
         Record {
             schema: SCHEMA,
-            serving,
-            previous: None,
-            mode: Mode::Handover,
+            kind: Kind::Single,
+            updating: false,
             markers: BTreeSet::new(),
-            boot_id: None,
-            guard_placed: false,
+            from: None,
+            to: None,
+            version: None,
+            live,
+            next: None,
+            mode: None,
         }
     }
 
@@ -159,58 +205,114 @@ impl Record {
         self.markers.contains(&Marker::Stopping)
     }
 
-    /// The port of v-current: `previous` while an update is in flight, else `serving`.
+    /// Whether `marker` is set.
     #[must_use]
-    pub fn current(&self) -> u16 {
-        self.previous.unwrap_or(self.serving)
+    pub fn has(&self, marker: Marker) -> bool {
+        self.markers.contains(&marker)
     }
 
-    /// The bytes to store: pretty JSON and a newline.
+    /// The same record with `marker` set.
+    #[must_use]
+    pub fn with(&self, marker: Marker) -> Record {
+        let mut next = self.clone();
+        next.markers.insert(marker);
+        next
+    }
+
+    /// The bytes to store: pretty JSON and a newline. An absent optional key is left out, so a
+    /// record of the launchd arm is byte for byte the previous release's single-instance record.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let markers: Vec<&str> = self.markers.iter().map(|m| m.as_str()).collect();
-        let value = json!({
+        let mut value = json!({
             "schema": self.schema,
-            "serving": self.serving,
-            "previous": self.previous,
-            "mode": self.mode.as_str(),
+            "kind": "single",
+            "updating": self.updating,
             "markers": markers,
-            "boot_id": self.boot_id,
-            "guard_placed": self.guard_placed,
         });
+        for (key, path) in [("from", &self.from), ("to", &self.to)] {
+            if let Some(path) = path {
+                value[key] = json!(path.to_string_lossy());
+            }
+        }
+        if let Some(version) = &self.version {
+            value["version"] = json!(version);
+        }
+        for (key, instance) in [("live", self.live), ("next", self.next)] {
+            if let Some(instance) = instance {
+                value[key] = json!(instance.letter());
+            }
+        }
+        if let Some(mode) = self.mode {
+            value["mode"] = json!(mode.as_str());
+        }
         let mut text = format!("{value:#}");
         text.push('\n');
         text.into_bytes()
     }
 
-    /// Reads stored bytes.
+    /// Reads stored bytes: the size and the schema first, the rest only then.
     ///
     /// # Errors
     /// [`RecordError`]: too big, not a record, or of another schema.
     pub fn decode(bytes: &[u8]) -> Result<Record, RecordError> {
-        decode_schema(bytes)
+        if bytes.len() > RECORD_MAX {
+            return Err(RecordError::TooBig);
+        }
+        let header: Header =
+            serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))?;
+        if header.schema > SCHEMA {
+            return Err(RecordError::Newer {
+                found: header.schema,
+            });
+        }
+        if header.schema < SCHEMA {
+            return Err(RecordError::Older {
+                found: header.schema,
+            });
+        }
+        serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))
     }
-}
 
-/// Reads stored bytes as a record of schema [`SCHEMA`] of type `T`: the size and the schema
-/// first, the rest only then.
-pub(super) fn decode_schema<T: serde::de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, RecordError> {
-    if bytes.len() > RECORD_MAX {
-        return Err(RecordError::TooBig);
+    /// Holds the record to the order of its markers and to what it must name: an update in
+    /// flight names `to` and `version`; a committed one too; a record at rest names neither,
+    /// nor `from`, `next` or `mode`.
+    ///
+    /// # Errors
+    /// The first [`Invalid`] rule the record breaks.
+    pub fn check(&self) -> Result<(), Invalid> {
+        let marks = |mark, needs| Err(Invalid::Marks { mark, needs });
+        if self.has(Marker::Verified) && !self.has(Marker::Swapped) {
+            return marks("verified", "swapped");
+        }
+        if self.has(Marker::Stopping) && !self.has(Marker::Verified) {
+            return marks("stopping", "verified");
+        }
+        if !self.updating && !self.markers.is_empty() && !self.committed() {
+            return Err(Invalid::Orphan);
+        }
+        let named = self.to.is_some() && self.version.is_some();
+        if self.updating && !named {
+            return marks("updating", "to and version");
+        }
+        if self.committed() && !named {
+            return marks("stopping", "to and version");
+        }
+        if !self.updating && self.from.is_some() {
+            return marks("from", "updating");
+        }
+        if !self.updating && self.next.is_some() {
+            return marks("next", "updating");
+        }
+        if !self.updating && self.mode.is_some() {
+            return marks("mode", "updating");
+        }
+        if !self.updating && !self.committed() && (self.to.is_some() || self.version.is_some()) {
+            return marks("to or version", "updating or stopping");
+        }
+        if self.live.is_some() && self.live == self.next {
+            return Err(Invalid::Same);
+        }
+        Ok(())
     }
-    let header: Header =
-        serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))?;
-    if header.schema > SCHEMA {
-        return Err(RecordError::Newer {
-            found: header.schema,
-        });
-    }
-    if header.schema < SCHEMA {
-        return Err(RecordError::Older {
-            found: header.schema,
-        });
-    }
-    serde_json::from_slice(bytes).map_err(|e| RecordError::Corrupt(e.to_string()))
 }
