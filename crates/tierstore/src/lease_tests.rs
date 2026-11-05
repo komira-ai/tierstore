@@ -653,3 +653,63 @@ async fn work_that_ends_during_a_renewal_waits_for_its_answer_and_the_holder_kee
     assert!(holder.still_held().await.unwrap());
     assert_eq!(count(&hot).await, "2");
 }
+
+/// Asserts `ensure_margin` for a lease that is held: with the margin left (10 s of the 20 s) it
+/// writes nothing; with a millisecond less it renews with one `If-Match` put, answers true, and
+/// the margin is left again.
+#[tokio::test]
+async fn ensure_margin_renews_a_held_lease_that_is_short_of_the_margin() {
+    let pair = pair();
+    assert!(pair.holder.ensure().await);
+    pair.holder_mono.advance(ms(RENEW));
+    assert!(pair.holder.ensure_margin().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 0);
+
+    pair.holder_mono.advance(ms(1));
+    assert!(pair.holder.ensure_margin().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 1);
+    assert!(pair.holder.margin_ok());
+    assert_eq!(count(&pair.hot).await, "2");
+}
+
+/// Asserts that `ensure_margin` does not take a lease: one never taken answers false and writes
+/// nothing; one whose own clock is a millisecond short of the end of the ttl (30 s) is renewed,
+/// and at the end of the ttl it answers false without a write.
+#[tokio::test]
+async fn ensure_margin_does_not_take_a_lease_or_renew_one_past_the_ttl() {
+    let pair = pair();
+    assert!(!pair.holder.ensure_margin().await);
+    assert_eq!(pair.counted.calls(Op::Put), 0);
+
+    assert!(pair.holder.ensure().await);
+    pair.holder_mono.advance(ms(TTL - 1));
+    assert!(pair.holder.ensure_margin().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 1);
+
+    let lone = Lease::new(
+        pair.counted.clone(),
+        pair.holder_mono.clone(),
+        "lone",
+        TTL,
+        RENEW,
+        MARGIN,
+    );
+    pair.holder.release().await;
+    assert!(lone.ensure().await);
+    pair.holder_mono.advance(ms(TTL));
+    assert!(!lone.ensure_margin().await);
+    assert_eq!(pair.counted.calls(Op::PutIfMatch), 1);
+}
+
+/// Asserts that `ensure_margin` answers false for a lease another holder took over, and the holder
+/// then counts the lease as lost (`margin_ok` is false) and leaves the other's object alone.
+#[tokio::test]
+async fn ensure_margin_answers_false_for_a_lease_that_was_taken_over() {
+    let (hot, clock, a, _b) = taken_over().await;
+    let current = tag(&hot).await;
+    clock.set(30_001);
+
+    assert!(!a.ensure_margin().await);
+    assert!(!a.margin_ok());
+    assert_eq!(tag(&hot).await, current);
+}

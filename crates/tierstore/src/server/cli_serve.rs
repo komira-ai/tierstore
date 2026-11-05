@@ -204,7 +204,13 @@ pub async fn run_handing(
         halting.notify_one();
         ended
     };
-    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
+    let reconciler = Rounds::tuned(
+        built.hot,
+        built.cold,
+        built.reconciler,
+        departure,
+        &built.entry,
+    );
     let reconciling = async move {
         match gate {
             Some(gate) => reconcile_gated(reconciler, halt, gate).await,
@@ -298,6 +304,7 @@ fn oci_front(setup: &mut OciSetup, backend: Arc<dyn Backend>) -> Arc<OciFront> {
     let front = OciFront::new(backend, setup.prefix.clone(), Arc::clone(&setup.metrics))
         .with_auth(setup.auth.take())
         .with_stage_read(setup.stage_read)
+        .with_sizes(setup.sizes)
         .with_upstream(setup.upstream.take());
     Arc::new(front)
 }

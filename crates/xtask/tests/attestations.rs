@@ -28,6 +28,13 @@ const REPO: &str = "example/tierstore";
 const SIGNER: &str = "example/tierstore/.github/workflows/artifacts.yml";
 const PROVENANCE: &str = "https://slsa.dev/provenance/v1";
 const SBOM: &str = "https://cyclonedx.org/bom";
+const VERSION: &str = "0.4.0+0123456789ab";
+const PLATFORMS: [&str; 3] = ["linux-arm64", "linux-x86_64", "macos-arm64"];
+
+/// The file name of the hostkeeper package of `platform`.
+fn package_name(platform: &str) -> String {
+    format!("tierstore-{VERSION}-{platform}.tar.zst")
+}
 
 fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
@@ -105,6 +112,38 @@ impl Release {
         }
         std::fs::write(dir.join("SHA256SUMS"), sums).expect("sums");
         Release { dir, ledger }
+    }
+
+    /// The good release that also holds the hostkeeper package of each platform, each with its
+    /// own bundle (provenance online, and the bundle bound to the commit; no SBOM), and the
+    /// release index (provenance online only, no bundle), all listed in the sums.
+    fn with_hostkeeper(name: &str) -> Release {
+        let mut release = Release::good(name);
+        let mut sums = std::fs::read_to_string(release.dir.join("SHA256SUMS")).expect("sums");
+        let mut files: Vec<(String, Vec<u8>)> = PLATFORMS
+            .iter()
+            .map(|p| (package_name(p), format!("package of {p}").into_bytes()))
+            .collect();
+        files.push(("index.json".to_owned(), b"the release index".to_vec()));
+        for (file, bytes) in &files {
+            let digest = sha(bytes);
+            std::fs::write(release.dir.join(file), bytes).expect("file");
+            sums.push_str(&format!("{digest}  {file}\n"));
+            release
+                .ledger
+                .push(format!("{digest}|{SIGNER}|{PROVENANCE}|-|-"));
+            if file.ends_with(".tar.zst") {
+                let own = bundle(&digest);
+                std::fs::write(release.dir.join(format!("{file}.sigstore.json")), &own)
+                    .expect("bundle");
+                release.ledger.push(format!(
+                    "{digest}|{SIGNER}|{PROVENANCE}|{}|{COMMIT}",
+                    sha(own.as_bytes())
+                ));
+            }
+        }
+        std::fs::write(release.dir.join("SHA256SUMS"), sums).expect("sums");
+        release
     }
 
     /// The release with `keep` applied to its ledger.
@@ -472,7 +511,107 @@ fn a_sums_file_that_lists_neither_a_tarball_nor_an_sbom_is_refused() {
     text.push_str(&format!("{}  NOTES\n", release.digest_of("NOTES")));
     std::fs::write(&sums, text).expect("sums");
     let failed = failure(release.verify());
-    assert!(failed.contains("neither a tarball nor an SBOM"), "{failed}");
+    assert!(
+        failed.contains(
+            "SHA256SUMS lists NOTES, which is neither a tarball, an SBOM, a hostkeeper package nor the release index"
+        ),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_release_with_hostkeeper_packages_and_an_index_verifies() {
+    // Catches: a package or the index passing unchecked or refused as an unknown kind: each
+    // package is verified for provenance and its own bundle, the index for provenance alone,
+    // and the printed lines say so.
+    let release = Release::with_hostkeeper("hostkeeper-good");
+    let printed = release.verify().expect("verify");
+    for platform in PLATFORMS {
+        let line = format!("verified: {} (provenance, bundle)", package_name(platform));
+        assert!(printed.contains(&line), "{printed:?}");
+    }
+    let index = "verified: index.json (provenance)".to_owned();
+    assert!(printed.contains(&index), "{printed:?}");
+    assert_eq!(printed.len(), 7 + 4, "{printed:?}");
+}
+
+#[test]
+fn a_hostkeeper_package_without_its_bundle_is_refused_before_gh_is_run() {
+    // Catches: a package with no bundle passing, because only tarballs were paired with bundles.
+    let mut release = Release::with_hostkeeper("hostkeeper-no-bundle");
+    release.ledger.clear();
+    let name = package_name("macos-arm64");
+    std::fs::remove_file(release.dir.join(format!("{name}.sigstore.json"))).expect("rm");
+    assert_eq!(
+        failure(release.verify()),
+        format!("{name}: no provenance bundle {name}.sigstore.json")
+    );
+}
+
+#[test]
+fn a_hostkeeper_package_whose_bundle_was_signed_by_another_workflow_is_refused() {
+    // Catches: the bundle of a package not being verified against the signer workflow.
+    let good = Release::with_hostkeeper("hostkeeper-bundle-signer");
+    let name = package_name("linux-x86_64");
+    let digest = good.digest_of(&name);
+    let other = "example/tierstore/.github/workflows/ci.yml";
+    let failed = failure(
+        good.changed(|l| {
+            if l.starts_with(&digest) && l.ends_with(COMMIT) {
+                l.replace(SIGNER, other)
+            } else {
+                l.to_owned()
+            }
+        })
+        .verify(),
+    );
+    assert!(
+        failed.contains(&format!(
+            "{name}: its bundle {name}.sigstore.json does not verify"
+        )),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_hostkeeper_package_or_the_index_with_no_online_provenance_is_refused() {
+    // Catches: the provenance of a package, or of the index, going unchecked.
+    let good = Release::with_hostkeeper("hostkeeper-no-provenance");
+    let name = package_name("linux-arm64");
+    let digest = good.digest_of(&name);
+    let failed = failure(
+        good.filtered(|l| !(l.starts_with(&digest) && l.ends_with("|-|-")))
+            .verify(),
+    );
+    assert!(
+        failed.contains("no build provenance attestation signed by"),
+        "{failed}"
+    );
+
+    let digest = good.digest_of("index.json");
+    let failed = failure(good.filtered(|l| !l.starts_with(&digest)).verify());
+    assert!(
+        failed.contains("no build provenance attestation signed by"),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_bundle_file_for_the_release_index_is_refused_as_the_bundle_of_nothing_listed() {
+    // Catches: the index being given a bundle that nothing checks: only tarballs and packages
+    // have one.
+    let mut release = Release::with_hostkeeper("hostkeeper-index-bundle");
+    release.ledger.clear();
+    let digest = release.digest_of("index.json");
+    std::fs::write(
+        release.dir.join("index.json.sigstore.json"),
+        bundle(&digest),
+    )
+    .expect("bundle");
+    assert!(
+        failure(release.verify())
+            .contains("index.json.sigstore.json: not the bundle of a listed tarball")
+    );
 }
 
 #[test]

@@ -16,17 +16,28 @@
 //!   appends it to `--output` (on Actions, `GITHUB_OUTPUT`). So a commit that failed its tests
 //!   is never released, though the signing does not wait for them.
 //! - `release check <dir> --commit <sha>` ([`check`]): `<dir>` passes `verify-assets sums`,
-//!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`]) and no other,
-//!   and each tarball has exactly one provenance bundle whose one subject is that
-//!   tarball's digest ([`crate::bundles`]), and no bundle is there for anything else.
+//!   `SHA256SUMS` lists exactly the assets of that commit ([`expected_assets`] and
+//!   [`hostkeeper_assets`] of the one version of its hostkeeper packages) and no other,
+//!   and each tarball and package has exactly one provenance bundle whose one subject is
+//!   that file's digest ([`crate::bundles`]), and no bundle is there for anything else.
 //! - `release publish <dir> --repo <owner/repo> --tag <tag> --commit <sha> --run-id <id>
 //!   --notes-file <file> [--note <text>]... [--gh <program>]` ([`publish`]): `check`, then
 //!   creates release `<tag>` at `<sha>` as a draft with every file of `<dir>`, reads the
 //!   draft's assets back and refuses unless they are exactly those files, and only then
 //!   publishes it (which is when GitHub creates the tag). A tag or a published release that
 //!   exists is refused; a draft a failed run left is replaced.
+//!
+//! Beside them, the hostkeeper packages, which `artifacts.yml` makes and checks:
+//! `release hostkeeper-package` ([`hostkeeper_package`]) assembles the package of one platform's
+//! built binary, `tierstore-<version>-<platform>.tar.zst`; `release hostkeeper-index`
+//! ([`hostkeeper_index`]) writes the release index of the three, `index.json`; and
+//! `verify-assets hostkeeper-package` and `verify-assets hostkeeper-index`
+//! ([`hostkeeper_verify`]) check them as a host does. See those modules.
 
 mod binary;
+pub mod hostkeeper_index;
+pub mod hostkeeper_package;
+pub mod hostkeeper_verify;
 mod plan;
 mod publish;
 mod set_version;
@@ -64,7 +75,7 @@ pub const CI_WORKFLOW: &str = "ci.yml";
 
 /// The artifacts a push run of [`BUILD_WORKFLOW`] leaves, all of which a release needs: the
 /// files of each platform (`assets-<platform>`, one per [`Platform::ALL`]), the sums, and the
-/// provenance bundles of every platform's tarball.
+/// provenance bundles of every platform's tarball and hostkeeper package.
 pub const ARTIFACTS: [&str; 5] = [
     "assets-linux-x86_64",
     "assets-linux-arm64",
@@ -73,8 +84,8 @@ pub const ARTIFACTS: [&str; 5] = [
     "bundles",
 ];
 
-/// The files `SHA256SUMS` lists for `commit`, sorted: for each platform the tarball and the
-/// SBOM of [`BINARY`].
+/// The files `SHA256SUMS` lists for `commit` besides its hostkeeper packages, sorted: for each
+/// platform the tarball and the SBOM of [`BINARY`].
 pub fn expected_assets(commit: &str) -> Vec<String> {
     let mut names = Vec::new();
     for platform in Platform::ALL {
@@ -86,6 +97,42 @@ pub fn expected_assets(commit: &str) -> Vec<String> {
     names
 }
 
+/// The hostkeeper files `SHA256SUMS` lists for the package version `version`, sorted: the
+/// release index and the package of each platform.
+pub fn hostkeeper_assets(version: &str) -> Vec<String> {
+    let mut names: Vec<String> = Platform::ALL
+        .iter()
+        .map(|p| hostkeeper_package::file_name(version, *p))
+        .collect();
+    names.push(hostkeeper_index::INDEX.to_owned());
+    names.sort();
+    names
+}
+
+/// The one version of the hostkeeper packages of `commit` that `listed` names (by their names,
+/// `tierstore-<version>-<platform>.tar.zst`, the version ending `+<the first 12 digits>`), or
+/// the problem.
+fn package_version(listed: &[&str], commit: &str) -> Result<String, String> {
+    let short = &commit[..12];
+    let mut versions: Vec<&str> = listed
+        .iter()
+        .filter_map(|name| hostkeeper_index::parse_name(name))
+        .map(|(version, _)| version)
+        .filter(|version| version.ends_with(&format!("+{short}")))
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    match versions.as_slice() {
+        [one] => Ok((*one).to_owned()),
+        [] => Err(format!("{SUMS} lists no hostkeeper package of {commit}")),
+        many => Err(format!(
+            "{SUMS} lists hostkeeper packages of {} versions of {commit}: {}",
+            many.len(),
+            many.join(", ")
+        )),
+    }
+}
+
 /// The `release check` verb: the lines to print.
 pub fn check(dir: &Path, commit: &str) -> Result<Vec<String>, Error> {
     full_commit("--commit", commit)?;
@@ -93,7 +140,11 @@ pub fn check(dir: &Path, commit: &str) -> Result<Vec<String>, Error> {
     let lines = sums::read_sums(&dir.join(SUMS))?;
     let mut problems = Vec::new();
     let listed: Vec<&str> = lines.iter().map(|l| l.name.as_str()).collect();
-    let expected = expected_assets(commit);
+    let mut expected = expected_assets(commit);
+    match package_version(&listed, commit) {
+        Ok(version) => expected.extend(hostkeeper_assets(&version)),
+        Err(problem) => problems.push(problem),
+    }
     for name in &expected {
         if !listed.contains(&name.as_str()) {
             problems.push(format!("{SUMS} does not list {name}"));
@@ -111,7 +162,7 @@ pub fn check(dir: &Path, commit: &str) -> Result<Vec<String>, Error> {
         return Err(Error::Refused(problems));
     }
     printed.push(format!(
-        "release check: {} files, the assets of {commit}, each tarball with its bundle",
+        "release check: {} files, the assets of {commit}, each tarball and package with its bundle",
         lines.len()
     ));
     Ok(printed)

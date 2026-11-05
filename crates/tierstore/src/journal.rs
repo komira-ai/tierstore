@@ -38,6 +38,11 @@ pub(crate) const USAGE_KEY: &str = "_tiering/usage";
 pub(crate) const LEASE_KEY: &str = "_tiering/lease";
 
 /// Every prefix that the proxy keeps for itself: no client names a key under one.
+///
+/// These are carved out of the key space of the users, and a store may already hold a user's key
+/// under any other top-level name. So every internal object that is added later (for example the
+/// staged parts of a multipart upload) lives under `_tiering/`, and never under a new top-level
+/// name. Widening this set is a deliberate change of format, not a convenience.
 pub(crate) const RESERVED_PREFIXES: [&str; 3] = [JOURNAL_PREFIX, TIERING_PREFIX, ENTRIES_PREFIX];
 
 /// Whether a key is under a prefix that the proxy keeps for itself.
