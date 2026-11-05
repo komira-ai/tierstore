@@ -360,6 +360,14 @@ pub struct Cli {
     /// more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
     /// directory tiers.
     pub max_concurrent_puts: u32,
+    /// The domains of virtual-hosted-style addressing (`server.domains`): a request whose `Host`
+    /// is `<bucket>.<domain>` for one of them reads the bucket from the host and takes the whole
+    /// path as the key, as S3 does. A host under none of them (an IP address, the bare domain, a
+    /// load balancer's name), and every request when the list is empty (the default), is
+    /// path-style, `/<bucket>/<key>`. Lower case is kept; an entry is a domain name, not a URL. The
+    /// names must resolve to the server (a wildcard record) and, behind TLS, the certificate must
+    /// cover `*.<domain>`.
+    pub domains: Vec<String>,
     /// The most keys of one DeleteObjects call (`POST /<bucket>?delete`, up to 1000 keys) that are
     /// deleted at once, each by the same path as a single DeleteObject. The call as a whole is not
     /// limited by this, only how many of its deletes run together, so that one call cannot take

@@ -103,6 +103,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.first_beat_poll",
     "server.handoff_socket",
     "server.handoff_wait",
+    "server.domains",
     "server.delete_concurrency",
     "hot_store.usage_refresh",
     "hot_store.compare_range",
