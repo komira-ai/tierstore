@@ -1,29 +1,30 @@
-//! What the steps do to the machine, as ports: the nftables rules, the units, the slot links,
-//! the instances' HTTP answers, what the host says of itself, the clock and the state
-//! directory; and, for a host that runs one instance under its service manager (launchd on
-//! macOS), the service and the release links of [`SinglePorts`].
+//! What the steps do to the machine, as ports: the two systemd instances and their start
+//! markers, the launchd job, the instances' HTTP answers, what the host says of itself, the
+//! clock and the state directory.
 //!
-//! Each port is a small trait; the steps take a [`Ports`] and never reach for the machine
-//! themselves. Tests keep the machine's world in a fake. Nothing here reads an environment
-//! variable. The machine's implementations come in a later change.
+//! Each port is a small trait; the steps take a [`SystemdPorts`] or a [`LaunchdPorts`] and never
+//! reach for the machine themselves. Tests keep the machine's world in a fake. Nothing here reads
+//! an environment variable. [`super::machine`] has the machine's implementations.
 //!
-//! A port that changes something is idempotent: stopping a stopped unit, removing an absent
-//! link and applying a ruleset twice are not errors.
+//! A port that changes something is idempotent: starting a running instance, stopping a stopped
+//! one, removing an absent marker and booting out a job that is not loaded are not errors.
 
 use std::any::Any;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
+
+use serde::Deserialize;
 
 /// Which port failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PortKind {
-    /// The nftables rules.
-    Nft,
-    /// The units.
+    /// The systemd units.
     Units,
-    /// The slot links.
-    Slots,
+    /// The start markers of the instances.
+    Markers,
+    /// The launchd job.
+    Launchd,
     /// The instances' HTTP answers.
     Instances,
     /// What the host says of itself.
@@ -35,9 +36,9 @@ pub enum PortKind {
 impl fmt::Display for PortKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            PortKind::Nft => "nft",
             PortKind::Units => "units",
-            PortKind::Slots => "slots",
+            PortKind::Markers => "markers",
+            PortKind::Launchd => "launchd",
             PortKind::Instances => "instances",
             PortKind::Host => "host",
             PortKind::State => "state",
@@ -72,62 +73,144 @@ impl PortError {
     }
 }
 
-/// The nftables rules.
-pub trait Nft {
-    /// Applies `ruleset` in one transaction (`nft -f -`, the text on standard input).
-    ///
-    /// # Errors
-    /// The program failed; the rules are then as they were.
-    fn apply(&self, ruleset: &str) -> Result<(), PortError>;
-
-    /// The listing of the table `table` of the `inet` family; `None` when there is no such table.
-    ///
-    /// # Errors
-    /// The program failed.
-    fn list_table(&self, table: &str) -> Result<Option<String>, PortError>;
-
-    /// Deletes the table `table` of the `inet` family; an absent table is fine.
-    ///
-    /// # Errors
-    /// The program failed.
-    fn delete_table(&self, table: &str) -> Result<(), PortError>;
+/// One of the two instances of the systemd template `tierstore@.service`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Instance {
+    /// `tierstore@a.service`.
+    A,
+    /// `tierstore@b.service`.
+    B,
 }
 
-/// The unit manager.
+impl Instance {
+    /// Both instances.
+    pub const ALL: [Instance; 2] = [Instance::A, Instance::B];
+
+    /// The instance name, `%i` of the template: `a` or `b`.
+    #[must_use]
+    pub const fn letter(self) -> &'static str {
+        match self {
+            Instance::A => "a",
+            Instance::B => "b",
+        }
+    }
+
+    /// The other instance.
+    #[must_use]
+    pub const fn other(self) -> Instance {
+        match self {
+            Instance::A => Instance::B,
+            Instance::B => Instance::A,
+        }
+    }
+
+    /// The unit's name: `tierstore@a.service` or `tierstore@b.service`.
+    #[must_use]
+    pub fn unit(self) -> String {
+        format!("tierstore@{}.service", self.letter())
+    }
+}
+
+impl fmt::Display for Instance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.letter())
+    }
+}
+
+/// What systemd says of a unit (`ActiveState`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnitState {
+    /// `active` (or `reloading`): its process runs.
+    Active,
+    /// `activating`: it is starting, or waiting to be started again (`Restart=`).
+    Activating,
+    /// `deactivating`: it is stopping.
+    Deactivating,
+    /// `inactive`: no process; a start whose condition failed leaves it so.
+    Inactive,
+    /// `failed`: no process; it ended badly.
+    Failed,
+}
+
+impl UnitState {
+    /// Whether a process of the unit may run: active, activating or deactivating.
+    #[must_use]
+    pub const fn running(self) -> bool {
+        matches!(
+            self,
+            UnitState::Active | UnitState::Activating | UnitState::Deactivating
+        )
+    }
+}
+
+/// The systemd units of the two instances.
 pub trait Units {
-    /// Starts `unit` and returns when the manager has started it. A unit that cannot start
-    /// because its condition fails (no link) is not an error: it is not active.
+    /// Starts the instance's unit and returns when systemd has started it. A start whose
+    /// `ConditionPathExists=` fails (no marker) is not an error: the unit stays inactive.
     ///
     /// # Errors
     /// The program failed.
-    fn start(&self, unit: &str) -> Result<(), PortError>;
+    fn start(&self, instance: Instance) -> Result<(), PortError>;
 
-    /// Stops `unit` and returns when its process has exited (the drain included).
+    /// Stops the instance's unit and returns when its process has exited (the drain included).
     ///
     /// # Errors
     /// The program failed.
-    fn stop(&self, unit: &str) -> Result<(), PortError>;
+    fn stop(&self, instance: Instance) -> Result<(), PortError>;
+
+    /// What systemd says of the instance's unit.
+    ///
+    /// # Errors
+    /// The program failed, or said a state that is none of [`UnitState`].
+    fn state(&self, instance: Instance) -> Result<UnitState, PortError>;
 }
 
-/// The slot links: `<state_dir>/slots/<port>` points at a staged release, or is absent.
-pub trait Slots {
-    /// Where the link of `port` points; `None` when there is none.
+/// The start markers: a file per instance in the service's state directory, whose presence the
+/// template's `ConditionPathExists=` requires. An instance without its marker does not start,
+/// at boot or on any start.
+pub trait Markers {
+    /// Whether the instance's marker is there.
     ///
     /// # Errors
-    /// The path exists and is not a readable link.
-    fn target(&self, port: u16) -> Result<Option<PathBuf>, PortError>;
+    /// It cannot be looked at, or the path is not a regular file.
+    fn present(&self, instance: Instance) -> Result<bool, PortError>;
 
-    /// Points the link of `port` at `release`, atomically (a new link renamed over the old).
+    /// Lays the instance's marker down (and the directory, when it is absent); a marker already
+    /// there is fine.
     ///
     /// # Errors
-    /// The link could not be made; it is then what it was.
-    fn point(&self, port: u16, release: &Path) -> Result<(), PortError>;
+    /// It could not be made.
+    fn set(&self, instance: Instance) -> Result<(), PortError>;
 
-    /// Removes the link of `port`; an absent link is fine.
+    /// Removes the instance's marker; an absent one is fine.
     ///
     /// # Errors
-    /// The link could not be removed.
-    fn remove(&self, port: u16) -> Result<(), PortError>;
+    /// It could not be removed.
+    fn clear(&self, instance: Instance) -> Result<(), PortError>;
+}
+
+/// The launchd system domain, for the one job of the service.
+pub trait Launchd {
+    /// Whether the system domain has the job `label`.
+    ///
+    /// # Errors
+    /// `launchctl` failed.
+    fn loaded(&self, label: &str) -> Result<bool, PortError>;
+
+    /// Loads the job of the plist `plist` into the system domain, which starts it (`RunAtLoad`).
+    ///
+    /// # Errors
+    /// `launchctl` failed.
+    fn bootstrap(&self, plist: &Path) -> Result<(), PortError>;
+
+    /// Stops the job `label` and removes it from the domain, and returns when the domain no
+    /// longer has it (its process has exited, the drain included). A job that is not loaded is
+    /// not an error.
+    ///
+    /// # Errors
+    /// `launchctl` failed, or the domain still has the job when its time is up.
+    fn bootout(&self, label: &str) -> Result<(), PortError>;
 }
 
 /// An answer to a GET.
@@ -141,51 +224,36 @@ pub struct Reply {
 
 /// The instances' HTTP answers, on `127.0.0.1`.
 pub trait Instances {
-    /// `GET path` on `127.0.0.1:port`. The public port is asked too: the answer says which
-    /// instance the redirect sends a client to.
+    /// `GET path` on `127.0.0.1:port`.
     ///
     /// # Errors
     /// No answer (refused, reset, timed out). A status other than 200 is a [`Reply`].
     fn get(&self, port: u16, path: &str) -> Result<Reply, PortError>;
 }
 
-/// What the host says of its connection tracking.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Conntrack {
-    /// `nf_conntrack_tcp_timeout_established`, in seconds.
-    pub tcp_timeout_established_secs: u64,
-    /// `nf_conntrack_count`.
-    pub count: u64,
-    /// `nf_conntrack_max`.
-    pub max: u64,
-}
-
 /// What the host says of itself.
 pub trait Host {
-    /// The text of the declaration (`/etc/updater.d/tierstore.toml`).
+    /// The text of the node's configuration file `path`; `None` when there is no such file.
     ///
     /// # Errors
-    /// The file cannot be read.
-    fn declaration(&self) -> Result<String, PortError>;
+    /// The path exists and cannot be read.
+    fn config(&self, path: &Path) -> Result<Option<String>, PortError>;
 
-    /// The identifier of this boot of the host (`/proc/sys/kernel/random/boot_id`).
-    ///
-    /// # Errors
-    /// It cannot be read.
-    fn boot_id(&self) -> Result<String, PortError>;
-
-    /// The connection tracking limits and fill.
-    ///
-    /// # Errors
-    /// A value cannot be read.
-    fn conntrack(&self) -> Result<Conntrack, PortError>;
-
-    /// The capabilities (`tierstore --capabilities`) of the release in `release`. A release
+    /// The capabilities (`bin/tierstore --capabilities`) of the release in `release`. A release
     /// that does not know the flag has none.
     ///
     /// # Errors
-    /// The release's binary cannot be run at all.
+    /// The release's binary is missing, is not one to run, or cannot be run at all.
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError>;
+
+    /// Has the release in `release` check the node's configuration file `config`
+    /// (`bin/tierstore --config <config> --check-config`), as the service account would start it.
+    /// `None` is a configuration the release accepts; `Some` is the line it refuses it with.
+    ///
+    /// # Errors
+    /// The release's binary is missing, is not one to run, cannot be run at all, or ended any way
+    /// but accepting or refusing; or the service account is not known to the host.
+    fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError>;
 }
 
 /// Time, and waiting for it to pass.
@@ -213,8 +281,8 @@ impl Lock {
 
 /// The state directory: the record, and the lock that keeps two steps apart.
 pub trait StateDir {
-    /// Checks the directory (owner, mode, not a link, not writable by the service) and takes the
-    /// exclusive lock without waiting.
+    /// Checks the directory (root's alone, mode 0700, not a link), making it when it is absent,
+    /// and takes the exclusive lock without waiting.
     ///
     /// # Errors
     /// [`PortError::Busy`] when another step holds the lock; another error when the directory is
@@ -235,105 +303,12 @@ pub trait StateDir {
     fn save(&self, bytes: &[u8]) -> Result<(), PortError>;
 }
 
-/// The one service of a host that runs a single instance, under its service manager (launchd on
-/// macOS). Both calls set state: starting a running service and stopping a stopped one are not
-/// errors.
-pub trait Service {
-    /// Starts the service if it is not running, and returns when the manager has started it.
-    ///
-    /// # Errors
-    /// The manager refused or failed. Reported as [`PortKind::Units`].
-    fn start(&self) -> Result<(), PortError>;
-
-    /// Stops the service if it runs, and returns when the manager no longer has it (its process
-    /// has exited, the drain included).
-    ///
-    /// # Errors
-    /// The manager refused or failed, or still has the service when its time is up. Reported as
-    /// [`PortKind::Units`].
-    fn stop(&self) -> Result<(), PortError>;
-}
-
-/// One of the two release links of a single-instance host.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Link {
-    /// `current`: the release the service runs (the service's program is `current/tierstore`).
-    Current,
-    /// `previous`: the release that ran before an update, while the update is in flight.
-    Previous,
-}
-
-impl Link {
-    /// The name of the link in its directory.
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Link::Current => "current",
-            Link::Previous => "previous",
-        }
-    }
-}
-
-/// The release links of a single-instance host: each points at a staged release, or is absent.
-pub trait Releases {
-    /// Where `link` points; `None` when there is none.
-    ///
-    /// # Errors
-    /// The path exists and is not a readable link. Reported as [`PortKind::Slots`].
-    fn target(&self, link: Link) -> Result<Option<PathBuf>, PortError>;
-
-    /// Points `link` at `release`, atomically (a new link renamed over the old).
-    ///
-    /// # Errors
-    /// The link could not be made; it is then what it was.
-    fn point(&self, link: Link, release: &Path) -> Result<(), PortError>;
-
-    /// Removes `link`; an absent link is fine.
-    ///
-    /// # Errors
-    /// The link could not be removed.
-    fn remove(&self, link: Link) -> Result<(), PortError>;
-
-    /// Checks that `release` is one the service may be pointed at: reached from the host's root
-    /// through directories only (no symbolic link on the way, so no alias of `current` or
-    /// `previous`, no relative, dangling or cyclic path), each owned by the release owner (root)
-    /// and writable by no group or others, and holding the binary as a regular file of that
-    /// owner that no group or others can write. Nothing is run: the hook never executes a
-    /// release.
-    ///
-    /// # Errors
-    /// The release is not one to trust, or cannot be read. Reported as [`PortKind::Host`].
-    fn check(&self, release: &Path) -> Result<(), PortError>;
-}
-
-/// Everything a step of a single-instance host may touch: no nftables, no slot and no second
-/// unit, since the one instance serves on its own port.
-pub struct SinglePorts<'a> {
-    /// The service.
-    pub service: &'a dyn Service,
-    /// The release links.
-    pub releases: &'a dyn Releases,
-    /// The instance's answers.
-    pub instances: &'a dyn Instances,
-    /// The host (its declaration).
-    pub host: &'a dyn Host,
-    /// Time.
-    pub clock: &'a dyn Clock,
-    /// The state directory.
-    pub state: &'a dyn StateDir,
-    /// The record directory `state` was opened for: the step refuses a declaration, read again
-    /// under the lock, that names another.
-    pub state_dir: &'a Path,
-}
-
-/// Everything a step may touch.
-pub struct Ports<'a> {
-    /// The nftables rules.
-    pub nft: &'a dyn Nft,
-    /// The units.
+/// Everything a step of the systemd arm may touch.
+pub struct SystemdPorts<'a> {
+    /// The two instances' units.
     pub units: &'a dyn Units,
-    /// The slot links.
-    pub slots: &'a dyn Slots,
+    /// Their start markers.
+    pub markers: &'a dyn Markers,
     /// The instances' answers.
     pub instances: &'a dyn Instances,
     /// The host.
@@ -342,8 +317,18 @@ pub struct Ports<'a> {
     pub clock: &'a dyn Clock,
     /// The state directory.
     pub state: &'a dyn StateDir,
-    /// The public port the redirect sends to the serving slot ([`PUBLIC_PORT`] on a host).
-    ///
-    /// [`PUBLIC_PORT`]: super::PUBLIC_PORT
-    pub public_port: u16,
+}
+
+/// Everything a step of the launchd arm may touch: no second instance, no marker.
+pub struct LaunchdPorts<'a> {
+    /// The launchd domain.
+    pub launchd: &'a dyn Launchd,
+    /// The instance's answers.
+    pub instances: &'a dyn Instances,
+    /// The host.
+    pub host: &'a dyn Host,
+    /// Time.
+    pub clock: &'a dyn Clock,
+    /// The state directory.
+    pub state: &'a dyn StateDir,
 }

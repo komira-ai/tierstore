@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 686" width="960" height="686" role="img" aria-label="Sequence diagram of reads around an overwrite: Writer, Reader, Hot tier, Cold tier. A read before the replace gets the old object from hot. A read after the replace and before the acknowledgement gets the old or the new object, whole. A read after the acknowledgement always gets the new object from hot. Where the old object was only in cold, a read before the acknowledgement is served from cold and its copy-back request does nothing because the entry exists; after the acknowledgement hot holds the new object.">
+<title>A get during an overwrite: every response is one whole version; after the ack it is the new one</title>
+<defs><marker id="seq-overwrite-get-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-overwrite-get-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="686" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A get during an overwrite: every response is one whole version; after the ack it is the new one</text>
+<rect x="45" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="100" y="65" class="b" text-anchor="middle">Writer</text>
+<rect x="275" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="330" y="65" class="b" text-anchor="middle">Reader</text>
+<rect x="545" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="600" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="785" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="840" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="100" y1="76" x2="100" y2="570" class="ln-d"/>
+<line x1="330" y1="76" x2="330" y2="570" class="ln-d"/>
+<line x1="600" y1="76" x2="600" y2="570" class="ln-d"/>
+<line x1="840" y1="76" x2="840" y2="570" class="ln-d"/>
+<text x="338" y="112" class="t-m lbl">hot holds v1 and cold holds v1 (the steady state, no entry)</text>
+<text x="465" y="138" class="t-m lbl" text-anchor="middle">R1  open_read key: one hot call</text>
+<line x1="330" y1="150" x2="600" y2="150" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="465" y="176" class="t-m lbl" text-anchor="middle">v1, whole (a body in flight when the replace lands stays v1)</text>
+<line x1="600" y1="188" x2="330" y2="188" class="ln-d" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="350" y="214" class="t-m lbl" text-anchor="middle">W1  overwrite: take entry, replace hot on its tag (diagram: overwrite put)</text>
+<line x1="100" y1="226" x2="600" y2="226" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="465" y="252" class="t-m lbl" text-anchor="middle">R2  open_read key, after the replace, before the ack</text>
+<line x1="330" y1="264" x2="600" y2="264" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="465" y="290" class="t-m lbl" text-anchor="middle">v2 whole (v1 was equally allowed: the put is not acknowledged yet)</text>
+<line x1="600" y1="302" x2="330" y2="302" class="ln-d" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="350" y="328" class="t-m lbl" text-anchor="middle">W2  CAS entry to (PUT,PENDING,replace): ACK POINT</text>
+<line x1="100" y1="340" x2="600" y2="340" class="ln-o" marker-end="url(#seq-overwrite-get-ao)"/>
+<text x="465" y="366" class="t-m lbl" text-anchor="middle">R3  open_read key, after the ack: hot is never the old version</text>
+<line x1="330" y1="378" x2="600" y2="378" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="465" y="404" class="t-m lbl" text-anchor="middle">v2, whole</text>
+<line x1="600" y1="416" x2="330" y2="416" class="ln-d" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="338" y="442" class="t-m lbl">the old object was only in cold (evicted), the overwrite is in flight</text>
+<text x="465" y="468" class="t-m lbl" text-anchor="middle">R4  open_read key: hot miss</text>
+<line x1="330" y1="480" x2="600" y2="480" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="585" y="506" class="t-m lbl" text-anchor="middle">R5  cold open_read key: v1, whole (the request began before the ack)</text>
+<line x1="330" y1="518" x2="840" y2="518" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<text x="465" y="544" class="t-m lbl" text-anchor="middle">R6  ask copy-back: create-only entry, EXISTS (the overwrite holds it): nothing</text>
+<line x1="330" y1="556" x2="600" y2="556" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
+<rect x="30" y="582" width="900" height="80" rx="5" class="box-o"/>
+<text x="40" y="602" class="t-m">Each response is one call to one tier and one object, so it is one version; a client that reads a large object in ranges sends If-Match with the</text>
+<text x="40" y="618" class="t-m">ETag of its first response and gets 412 if the object changed (section 4: the match accepts the tag of either tier that holds the version). Hot is</text>
+<text x="40" y="634" class="t-m">replaced atomically (a rename on dir:, one PUT on S3). After the ack, hot holds the new version until it is evicted, and it is evicted only after</text>
+<text x="40" y="650" class="t-m">the leader has made cold hold the same bytes, so a hot miss after the ack finds the new version in cold. A get never reads an entry on a hit.</text>
+</svg>

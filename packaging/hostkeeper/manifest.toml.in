@@ -11,18 +11,20 @@
 #   alternates between, a hand-over of the listening sockets from one to the other; on macOS the
 #   one launchd job, by its label, which an update restarts (there is no hand-over on a Mac).
 # - `[params]`: `config_file`, the node's configuration file, and `service_manager`, `systemd`
-#   or `launchd` (with `launchd_label` on macOS), for the update hook. The hook of this tree does
-#   not read them yet, nor run the a/b instances: its rewrite for hostkeeper does.
+#   or `launchd` (with `launchd_label` on macOS), as the update hook reads them
+#   (crates/tierstore/docs/update-hook.md, "The params file"). There is no `mode`, so an update
+#   on Linux is a hand-over when both releases can do it and a restart when they cannot, and the
+#   node's configuration must name `server.handoff_socket` ("The hand-over socket" there).
 #
 # The bounds are the same on both systems. `cutover` (300 s) covers, on Linux, the start of the
-# idle instance and its readiness, and, on macOS, the stop of the job (ExitTimeOut, 90 s: the
-# 1 s settle and the 60 s drain deadline with a margin), its start and its readiness; `rollback`
-# (600 s) covers the same moves back. `cleanup` (1300 s) is above the stop timeout of a Linux
-# instance (TimeoutStopSec, 1100 s: the 70 s settle, the 15 min drain deadline and a margin),
-# since cleanup waits for the retired instance to exit. `prepare = 0` is unbounded: the drain has
-# no deadline of its own. `verify_deadline_secs` is at least `verify` and `rollback` together, as
-# the loader requires. There is no `install` bound: hostkeeper has no install step, and a first
-# install is an update with no previous release.
+# idle instance and the hook's wait for readiness and for the build gauge, and, on macOS, the
+# bootout of the job (ExitTimeOut, 90 s: the 1 s settle and the 60 s drain deadline with a
+# margin), its bootstrap and the same wait; `rollback` (600 s) covers the same moves back.
+# `cleanup` (1300 s) is above the stop timeout of a Linux instance (TimeoutStopSec, 960 s: the
+# 10 s settle, the 15 min drain deadline and a margin). `prepare = 0` is unbounded.
+# `verify_deadline_secs` is at least `verify` and `rollback` together, as the loader requires.
+# There is no `install` bound: hostkeeper has no install step, and a first install is an update
+# with no previous release.
 schema         = 1
 name           = "tierstore"
 version        = "@VERSION@"

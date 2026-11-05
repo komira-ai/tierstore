@@ -206,17 +206,20 @@ fn text_without_a_banned_word_has_no_finding() {
     assert_eq!(findings("f.md", text, &test_deny()), Vec::<String>::new());
 }
 
-/// Asserts that the real deny list holds the name it is for, found in a hyphenated name and
-/// in capitals and built here from parts so this file does not hold it, and that it does not
-/// hold `hostkeeper`, the name of a public project whose package this repository builds.
+/// Asserts that the real deny list holds the name it is for, found in a hyphenated name and in
+/// capitals, and no longer holds the updater's name, a public project's that its unit files must
+/// carry. Both are built here from parts so this file does not hold the banned one.
 #[test]
-fn the_real_deny_list_finds_the_name_it_is_for() {
-    let name = ["k", "b", "f"].concat();
-    let text = format!("x {}-fake and {}\n", name, name.to_uppercase());
-    assert_eq!(findings("f", &text, &real_deny()).len(), 2, "{name}");
+fn the_real_deny_list_finds_the_names_it_is_for() {
+    let banned = ["k", "b", "f"].concat();
+    let text = format!("x {}-fake and {}\n", banned, banned.to_uppercase());
+    assert_eq!(findings("f", &text, &real_deny()).len(), 2, "{banned}");
+    let public = ["host", "keeper"].concat();
+    let text = format!("x {}-fake and {}\n", public, public.to_uppercase());
     assert_eq!(
-        findings("f", "x hostkeeper-package and HOSTKEEPER\n", &real_deny()),
-        Vec::<String>::new()
+        findings("f", &text, &real_deny()),
+        Vec::<String>::new(),
+        "{public}"
     );
 }
 

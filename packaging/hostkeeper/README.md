@@ -20,9 +20,9 @@ from one version to the next. The package holds nothing of a node's own: the con
 key files it names and the account (`tierstore`, `_tierstore` on a Mac) are placed on the node
 beforehand.
 
-The update hook of this tree still drives the slot units of `packaging/tierstore@.service`; the
-a/b instances, the hand-over through `server.handoff_socket` and the `[params]` the manifest names
-are its rewrite for hostkeeper, which has not landed. Until it has, no host runs this package.
+The units are the update hook's (`crates/tierstore/docs/update-hook.md`), which
+`crates/tierstore/tests/packaging_hostkeeper.rs` checks against the hook and the binary; the
+tests here check the package that carries them.
 
 hostkeeper's main manifest loader takes a launchd plist as a unit file and a launchd label as a
 `run` entry, and the tests load the macOS manifest and plist with it. Its unpacker on main does not

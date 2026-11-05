@@ -244,7 +244,7 @@ fn the_unit_runs_the_binary_of_current_as_tierstore_and_its_stop_covers_the_drai
         assert_eq!(wanted_by(&unit), ["multi-user.target"]);
         assert_eq!(
             unit_value(&unit, "[Unit]", "ConditionPathExists"),
-            "/var/lib/tierstore/start-%i"
+            "/var/lib/tierstore/run-%i"
         );
         assert_eq!(
             check_unit_text(

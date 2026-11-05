@@ -13,23 +13,20 @@ for Linux hosts, go beside the binary.
 | `tierstore.service` | the unit: the binary as `tierstore` run with the file, an account that is not root, a stop that waits for the drain, and the hardening of the other example units |
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
 | `tierstore.toml` | the configuration file of `tierstore.service`: one `s3` interface, the keys, and an S3 bucket for each tier |
-| `tierstore-9301.toml`, `tierstore-9302.toml` | the configuration file of each slot of the hand-over: the same settings, with the slot's own port, proxy id and `slot` |
-| `tierstore@.service` | the slot unit template of the update hook's hand-over: `tierstore@9301.service` and `tierstore@9302.service`, each running the binary its slot link points at, on its own port and proxy id ([Moving to the update hook](#moving-to-the-update-hook)) |
-| `updater.d/tierstore.toml` | the declaration the host updater reads: the hook, its account and rights, the two slot units, the state directory and the boot entry |
-| `tierstore-update.conf` | the sysusers.d entry of the hook's own account, `tierstore-update`, with `tierstore` listed in its group |
-| `tmpfiles.d/tierstore-update.conf` | the tmpfiles.d entry of the hook's state directory, `/var/lib/updater/hooks/tierstore`, and its `slots` directory: mode 0750, owner and group `tierstore-update` |
-| `polkit/50-tierstore-update.rules` | the polkit rule that lets `tierstore-update` start and stop the two slot units, and nothing else |
+| `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
+| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
-sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads these files and
-checks that the command line parses as the binary parses it and names a file that the binary's loader takes, that no secret is on it or in the file (every key
-and credential names a file), that the stop timeout covers the drain, and that nothing
-starts the unit by itself. It also checks the files of the update hook: that the hook's own
-parser takes the declaration and that it names the ports, units, state directory and account the
-slot unit is built on, that the hook holds `CAP_NET_ADMIN` hook-wide, that the slot unit parses
-for both slots and covers its drain, that the hook's account is its own, that the state
-directory is 0750 with no group write bit, and that the polkit rule names exactly the two slot
-units and grants no right over unit files.
+sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
+and its files and checks that the command line parses as the binary parses it and names a file
+that the binary's loader takes, that no secret is on it or in the file (every key and credential
+names a file), that the stop timeout covers the drain, and that nothing starts the unit by itself.
+`crates/tierstore/tests/packaging_hostkeeper.rs` reads the files of `hostkeeper/units` and checks
+that the template and the plist run the binary of the release link with flags the binary parses,
+that the template's start condition is the marker file the hook writes, that it is enabled at
+boot, that both wait for the drain, that no secret is on the command line, and that the plist is
+the file the hook bootstraps.
+
 
 ## Placing the binary
 
@@ -41,7 +38,7 @@ tarball is verified (`docs/ci-and-release.md`). The release also carries
 and the install guide (`crates/tierstore/docs/install.md`) covers taking and verifying the macOS
 binary.
 The tarball holds the binary under its own name and `THIRD-PARTY-LICENSES.txt`, the licences of
-the crates linked into it (the declaration is not in it yet: place it from this directory, below;
+the crates linked into it (the units are not in it: place them from `hostkeeper/units`, below;
 extracting `tierstore` by name leaves the notice in the tarball):
 
 ```sh
@@ -51,8 +48,8 @@ install -m 0755 -o root -g root tierstore /usr/libexec/tierstore/tierstore
 ```
 
 With `tierstore.service`, nothing updates it afterwards: whoever runs the setup places the next
-binary the same way and restarts the unit. A host that runs the two slot units instead is
-updated by the host updater through `tierstore update-hook`
+binary the same way and restarts the unit. A host that runs the instance units of hostkeeper's
+package instead is updated by hostkeeper through `tierstore update-hook`
 ([Moving to the update hook](#moving-to-the-update-hook)).
 
 ## Placing the unit
@@ -111,137 +108,31 @@ A write limited to one object under a prefix is a presigned PUT URL (below).
 
 ## Moving to the update hook
 
-The host updater puts a new release in place through `tierstore update-hook`
-(`crates/tierstore/docs/update-hook.md`): two slot units, `tierstore@9301` and `tierstore@9302`,
-run side by side during a hand-over, and an nftables redirect that the hook owns sends the public
-port 9300 to the one that serves. These files go on the host, each owned by root:
+hostkeeper puts a new release of tierstore in place through `tierstore update-hook`
+(`crates/tierstore/docs/update-hook.md`). The files of `hostkeeper/units` are the units of
+hostkeeper's package of tierstore, and hostkeeper installs and links them; nothing here is placed
+by hand. There are no slots, no nftables redirect, no polkit rule, no account of the hook's own and
+no declaration file: the hook runs as root, as hostkeeper's step, and reaches the machine through
+`systemctl` or `launchctl` only.
 
-| file | placed as | mode |
-|---|---|---|
-| `updater.d/tierstore.toml` | `/etc/updater.d/tierstore.toml` (the directory owned by root, no group or other write bit) | 0644 |
-| `tierstore@.service` | `/etc/systemd/system/tierstore@.service` | 0644 |
-| `tierstore-9301.toml`, `tierstore-9302.toml` | `/etc/tierstore/tierstore-9301.toml`, `/etc/tierstore/tierstore-9302.toml` (owner root, group `tierstore`) | 0640 |
-| `tierstore-update.conf` | `/etc/sysusers.d/tierstore-update.conf` | 0644 |
-| `tmpfiles.d/tierstore-update.conf` | `/etc/tmpfiles.d/tierstore-update.conf` | 0644 |
-| `polkit/50-tierstore-update.rules` | `/etc/polkit-1/rules.d/50-tierstore-update.rules` | 0644 |
+On Linux the package has one template, `tierstore@.service`, and the hook alternates between its
+two instances, `tierstore@a` and `tierstore@b`. Both run `current/bin/tierstore` and serve port
+9300. An update starts the idle instance, which takes the listening sockets of the live one over
+the hand-over socket (`server.handoff_socket` in `/etc/tierstore/config.toml`, for example
+`/var/lib/tierstore/handoff.sock`), and the live one drains and exits 0. An instance starts only
+when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists, so that at boot, with both
+units enabled, only the one the hook's record names starts. A host whose releases (a node with `[local_cache]` needs `handoff-cache-v1` as well as `handoff-socket-v1`) or whose hot
+tier cannot hand over (a `dir:` hot tier, say) sets `mode = "restart"` in the package's params:
+the update then stops the live instance and starts the other, with a gap in serving.
 
-The hook runs as `tierstore-update`, an account of its own: it owns the state directory (the
-record `state.json`, the lock and the slot links), and the service, which runs as `tierstore`,
-can traverse that directory through the group and write nothing in it. The hook is never root:
-the updater gives it `CAP_NET_ADMIN` for the redirect, and the polkit rule lets it start and stop
-the two slot units. A slot link, `/var/lib/updater/hooks/tierstore/slots/<port>`, points at a
-directory that holds a release's `tierstore`, owned by root and not writable by anyone else; the
-slot unit runs that binary, and does not start while its slot has no link. Nothing enables a slot
-unit: at boot the updater runs `tierstore update-hook restore` (the declaration's
-`boot = "restore"`), which applies the redirect and starts the one slot the record names.
+On a Mac the package has one job, `tierstore.plist` (label `tierstore`, installed as
+`/Library/LaunchDaemons/tierstore.plist`), and an update is a restart with a gap: `launchctl
+bootout`, then `launchctl bootstrap`.
 
-The slot unit takes the file of its slot, `/etc/tierstore/tierstore-%i.toml`, and a 70 s
-`--drain-lb-wait`, with a `TimeoutStopSec=` of 1100. The two files, `tierstore-9301.toml` and
-`tierstore-9302.toml`, differ in the port of the `s3` interface (the wildcard of both families),
-`server.proxy_id` and `server.slot`, and in nothing else; `hot_store.lock_file` is the same
-file in both. Copy the edits of the host's `tierstore.toml` (the bucket, the tiers, the endpoints,
-`hot_store.budget`) into both, and those of `ReadWritePaths=` into `tierstore@.service`, or into a
-drop-in of the template (`/etc/systemd/system/tierstore@.service.d/`), which applies to both slots.
-
-The declaration has no `min_version` yet: the first release that carries the hook sets it.
-
-### First install
-
-A host that runs the single `tierstore.service` (with its drop-ins) moves to the slot units once,
-in this order. It is the first-install path of the host updater: no update is in flight, and the
-hook starts from a record that names one slot. The steps place files, start the new slot and run
-the updater's boot entry; none of them stops the running unit until the last, and the public port
-moves only once the new slot answers.
-
-1. **The account and the state directory.** Place `tierstore-update.conf` and
-   `tmpfiles.d/tierstore-update.conf`, then run `systemd-sysusers` and `systemd-tmpfiles --create`
-   for them. Check that `/etc/group` lists `tierstore` in the group `tierstore-update`, and that
-   `/var/lib/updater/hooks/tierstore` and its `slots` are mode 0750, owner and group
-   `tierstore-update`: the hook refuses any other.
-2. **The declaration, the slot unit, the slot files and the polkit rule.** Place the files as the
-   table above says, copy the host's edits into the slot unit and the two slot files, and run
-   `systemctl daemon-reload`.
-   polkit reads its rules directory by itself.
-3. **The binary as slot 9301, and the record.** Place the verified release's `tierstore` in a
-   directory of its own that root owns and nobody else can write (the updater keeps releases under
-   `/var/lib/updater/releases/tierstore/<digest>/`), and make `slots/9301` a symbolic link to that
-   directory, owned by `tierstore-update`. Then write the record that names 9301 as the slot that
-   serves, `state.json` in the state directory, owned by `tierstore-update`, mode 0600:
-
-   ```json
-   {"schema":1,"serving":9301,"mode":"handover","markers":[]}
-   ```
-
-   With no record the boot entry has nothing to restore and does nothing; with this one it points
-   the redirect at 9301.
-4. **The guard, before any slot runs.** The slot unit listens on the wildcard of both families,
-   so load the hook's guard table first; it drops every connection to 9301 and 9302, IPv4 and
-   IPv6, that neither comes over loopback nor was redirected from 9300, and changes nothing
-   for port 9300. As root, give this text to `nft -f -`; it is exactly the table `restore`
-   loads, so `restore` later finds it in place and leaves it as it is:
-
-   ```nft
-   add table inet tierstore_guard
-   flush table inet tierstore_guard
-   add chain inet tierstore_guard in { type filter hook input priority filter; policy accept; }
-   add rule inet tierstore_guard in iifname "lo" tcp dport { 9301, 9302 } accept
-   add rule inet tierstore_guard in tcp dport { 9301, 9302 } ct status dnat ct original proto-dst 9300 accept
-   add rule inet tierstore_guard in tcp dport { 9301, 9302 } drop
-   ```
-
-   Check that `nft list table inet tierstore_guard` shows it.
-5. **Slot 9301, started by hand and ready.** Run `systemctl start tierstore@9301` and wait until
-   a `GET` of `/readyz` on `127.0.0.1:9301` answers 200 with a body that starts with `ready`.
-   Nothing has moved yet: port 9300 is still the old unit's. If the slot never answers, run
-   `systemctl stop tierstore@9301`, read its journal, mend what it says and start it again; the
-   old unit served throughout.
-6. **`restore`, through the updater.** Have the updater run the declaration's boot entry, as it
-   does at its own start: `tierstore update-hook restore` as `tierstore-update`, with
-   `CAP_NET_ADMIN`. It loads the guard table (already there: no change), points the redirect of port 9300 at 9301 and starts
-   `tierstore@9301.service`, which already runs, so the start changes nothing. `restore` does not
-   wait for the slot to answer: it moves the public port first and starts the unit after, and a
-   start that fails leaves port 9300 pointing at a slot that does not answer. That is why step 5
-   comes first.
-7. **Check through the public port.** A request to port 9300 must be answered by slot 9301: the
-   `slot` label of `tierstore_build_info` on `/metricz` says 9301. If it is not, or `restore`
-   failed, hand port 9300 back to the old unit, which never stopped, by deleting the redirect:
-   `nft delete table inet tierstore_forward`. The guard table can stay: it drops only
-   connections to 9301 and 9302 that neither come over loopback nor were redirected from 9300.
-   Then stop slot 9301, mend it, and go back to step 5. A host that gives up the move deletes
-   the guard too, `nft delete table inet tierstore_guard`, once no slot runs.
-8. **The old unit, last.** Stop `tierstore.service`, which drains, and disable it if it was
-   enabled (`systemctl disable tierstore`, and remove its drop-ins and the `[Install]` drop-in
-   that enabled it). From now on the slot units are the only ones, and the updater updates them.
-
-Until step 8 the old unit and slot 9301 run side by side over the same tiers, each with a proxy
-id of its own and one reconciler at a time under the lease. That holds for S3 tiers. A host whose
-hot tier is a directory (`dir:`), or a build node whose cache directory the old unit writes, must
-not run two instances: stop the old unit before step 5, and accept the gap.
-
-### What these files do not do yet
-
-These files put the slot units and the hook's rights in place; they do not by themselves give
-updates without a gap. Two things outside them must hold first:
-
-- **The releases.** `prepare` hands over only when both the running release and the new one list
-  `handover-v1` in `tierstore --capabilities`; otherwise the update is a plain restart: the
-  redirect moves to the new slot, the old slot is stopped, and the new one is started, with a gap.
-  Builds from the commit that added the capability on list it; a release built before it does
-  not, so the first update of a host from such a release is a restart, and only the updates after
-  it hand over.
-- **The updater.** The host updater must run the steps and the boot entry from this declaration.
-  It does not yet fetch the declaration from a release: it reads the copy placed under
-  `/etc/updater.d`, so the file is placed by hand as above, and replaced by hand when it changes.
-
-**Stop budgets.** A slot stops in at most 975 s: the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the
-lease, under the unit's `TimeoutStopSec=` of 1100 and the declaration's `cleanup` timeout of
-1300 s. The hook itself waits at most 300 s for `systemctl stop`
-([update-hook.md](../crates/tierstore/docs/update-hook.md#on-the-machine)), and `rollback` has
-600 s. So a drain that runs past 300 s makes `cleanup` fail with `unit_failed` while systemd goes on
-stopping the unit, and `cleanup` run again (the updater retries it) waits for that same stop and
-finishes; a `rollback` that stops a slot still draining can fail the same way. Until the hook
-waits for a stop as long as the unit allows, a host that needs every step to succeed the first
-time keeps `--drain-deadline` at most 220s, which brings the stop within 295 s.
+The edits of the host's `tierstore.toml` (the bucket, the tiers, the endpoints, `hot_store.budget`)
+go into `/etc/tierstore/config.toml` on Linux and `/usr/local/tierstore/etc/tierstore.toml` on a
+Mac, the files the two units name. `packaging/macos/tierstore.toml` is the example of that
+file for a Mac (a build node on loopback); the declaration and plist that directory held for the earlier update path are removed.
 
 ## Presigned PUT URLs
 

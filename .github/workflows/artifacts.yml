@@ -293,10 +293,8 @@ jobs:
       - name: Install cargo-cyclonedx (pinned version and checksum)
         run: cargo xtask fetch --url "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-$CYCLONEDX_VERSION/cargo-cyclonedx-$TARGET.tar.xz" --sha256 "$CYCLONEDX_SHA256_AARCH64_MACOS" --out "$HOME/.cargo/bin/cargo-cyclonedx" --extract tar.xz --member "cargo-cyclonedx-$TARGET/cargo-cyclonedx"
       - run: cargo cyclonedx --version
-      # Every test of the crates the binary is made of, on macOS. They include the update hook's:
-      # its launchd steps, the macOS declaration and packaging/macos (tests/packaging_macos.rs);
-      # the two-slot conformance test and the nft and systemctl ports are Linux only and compiled
-      # out here.
+      # Every test of the crates the binary is made of, on macOS. They include the update hook's
+      # launchd steps and packaging/macos (tests/packaging_macos.rs).
       - name: The tests, on macOS
         run: cargo test --locked -p tierstore -p objstore-s3 -p tierstore-testkit --features tierstore/s3 --no-fail-fast
       # The crate's version is the release's: the binary reports the version of `Cargo.toml`.

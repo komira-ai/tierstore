@@ -1,61 +1,47 @@
-# tierstore (crates/tierstore) under hostkeeper on Linux: the template of the two instances
-# tierstore@a.service and tierstore@b.service, the `[units] run` entries of the package's
-# manifest. hostkeeper links this file from the package into /etc/systemd/system and enables both
-# instances (the WantedBy= below); the update hook (`tierstore update-hook`) starts and stops them.
+# tierstore (crates/tierstore) as one of the two instances of the update hook on Linux: the
+# template of tierstore@a.service and tierstore@b.service, installed by hostkeeper's package of
+# tierstore. %i is the instance's letter. Both run the binary of the release link `current`, both
+# serve port 9300, and the update hook (`tierstore update-hook`, crates/tierstore/docs/update-hook.md)
+# alternates between them: an update starts the idle one, which takes the listening sockets of the
+# live one over the hand-over socket, and the live one drains and exits 0, which this unit does
+# not restart (Restart=on-failure).
 #
-# This is the layout of the update hook's rewrite for hostkeeper, which this tree does not have yet:
-# the hook here still drives the slot units of packaging/tierstore@.service, and the configuration
-# key server.handoff_socket below is not read yet. Until both land, a host does not run this
-# package.
+# An instance starts only when its marker file, /var/lib/tierstore/run-%i, exists
+# (ConditionPathExists= below). The hook writes the marker before it starts the instance and
+# removes it when it retires the instance, so at boot, when both units are enabled, only the one
+# the hook's record names starts. A skipped condition is not a failure: the unit stays inactive.
 #
-# Both instances serve the same port (9300) and run the same configuration file: an update starts
-# the idle instance, which takes the listening sockets from the live one through the hand-over
-# socket of the configuration (server.handoff_socket, under StateDirectory=), and the live one then
-# drains and exits 0. The hook keeps which instance is live in its record.
+# The hand-over socket lives in the StateDirectory: `server.handoff_socket` in
+# /etc/tierstore/config.toml names it, for example /var/lib/tierstore/handoff.sock. Without it
+# (or with `mode = "restart"` in the package's params) an update stops the live instance before it
+# starts the other, with a gap in serving.
 #
-# The binary is the package's, always through hostkeeper's `current` link, never a version
-# directory: hostkeeper switches `current` before the hook's cutover, so the instance started then
-# runs the new release, and the instance that keeps running keeps the binary it loaded.
+# hostkeeper's own Force, which starts every `run` unit and waits for all of them, finds the
+# standby instance inactive by design and reports it; the service is up all the same.
 #
-# Both instances are enabled, so both are wanted at boot, and they must not race for the port: an
-# instance starts only while its marker file exists (ConditionPathExists=, a skipped condition is
-# not a failure). The hook creates the marker of the instance it is about to start and removes the
-# marker of the instance it retired once that one has exited, so at boot only the live instance
-# starts.
-#
-# The node's configuration and keys are not in the package: /etc/tierstore/config.toml and the key
-# files it names are the node's, owned by the account of User= (which the package does not
-# create), and the process reads no environment variable.
+# /etc/tierstore/config.toml is edited before use, as tierstore.toml for tierstore.service; its
+# key files are owned by the account of User=, mode 0600, and the keys of the file that name them
+# are the only way the process is given a secret (it reads no environment variable).
 [Unit]
 Description=tierstore instance %i, an S3 server over a hot and a cold tier
-Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/hostkeeper/README.md
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
 After=network-online.target
 Wants=network-online.target
-ConditionPathExists=/var/lib/tierstore/start-%i
-# A start that fails is tried again after 30 s, five times in an hour.
+ConditionPathExists=/var/lib/tierstore/run-%i
 StartLimitIntervalSec=1h
 StartLimitBurst=5
 
 [Service]
 Type=simple
 User=tierstore
-# The hand-over socket, the markers and the lock of the node's reconciler, the same directory for
-# both instances.
 StateDirectory=tierstore
 StateDirectoryMode=0700
 ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore \
   --config /etc/tierstore/config.toml \
-  --drain-lb-wait 70s \
+  --drain-lb-wait 10s \
   --drain-deadline 15m
-# On SIGTERM the process drains: /readyz says 503 and it serves for --drain-lb-wait, then stops
-# accepting and waits for those in flight for at most --drain-deadline, gives up the reconciler's
-# lease (5 s at most) and exits 0. 1100 s is the 70 s, the 15 min and the 5 s with a margin, so that
-# systemd never sends SIGKILL to a drain in progress; the manifest's cleanup bound (1300 s) is
-# above it.
 KillSignal=SIGTERM
-TimeoutStopSec=1100
-# An exit 0 (the end of a hand-over or of a drain) is not restarted. Exit 2 (a refused command line)
-# and 3 (a cache directory whose file system failed the check of the cache) are not tried again.
+TimeoutStopSec=960
 Restart=on-failure
 RestartSec=30
 RestartPreventExitStatus=2 3
