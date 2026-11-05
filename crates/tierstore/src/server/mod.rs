@@ -53,7 +53,15 @@
 //!   with one are the prefix and no upload id): the open uploads of the backend (for the
 //!   [`Proxy`](crate::Proxy), those of both its tiers), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
-//!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
+//!   a reserved key are not listed;
+//! - ListParts (`GET /<key>?uploadId=`) with `max-parts` and `part-number-marker`: the parts
+//!   stored in the open upload (for the [`Proxy`](crate::Proxy), those of the tier the upload id names), in ascending
+//!   order of number, each with its `ETag` (the one its UploadPart answered), `Size` and
+//!   `LastModified`, and the `Initiator`, `Owner` and `StorageClass` of the upload. A part sent
+//!   again with a number is there once. A page that is cut says so and gives
+//!   `NextPartNumberMarker`; `max-parts` is at most 1000 and `0` is an empty page; an upload
+//!   that is not open (never given, of another key, aborted, completed) is `NoSuchUpload`. A
+//!   full key, a read-only key and a scoped key with a write prefix over the key may list parts;
 //! - HeadBucket of the served bucket, with `x-amz-bucket-region`; CreateBucket of it, which
 //!   exists, so it is answered as S3 answers a create of a bucket one owns (200 in `us-east-1`,
 //!   409 `BucketAlreadyOwnedByYou` elsewhere; a `LocationConstraint` other than the server's
@@ -363,6 +371,8 @@ mod key_rules_tests;
 mod list_delimiter_tests;
 #[cfg(test)]
 mod list_options_tests;
+#[cfg(test)]
+mod list_parts_tests;
 #[cfg(test)]
 mod list_uploads_delimiter_tests;
 #[cfg(test)]

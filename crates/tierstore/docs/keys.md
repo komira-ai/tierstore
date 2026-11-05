@@ -74,7 +74,7 @@ The three rights, each on the prefixes of its list:
 | right | list | the key may |
 |---|---|---|
 | read | `read_prefixes` | GetObject, HeadObject, ListObjectsV2 and ListMultipartUploads (a listing's `prefix` inside the list); sign presigned GET URLs |
-| write | `write_prefixes` | create-only PutObject and the calls of a multipart upload, abort included |
+| write | `write_prefixes` | create-only PutObject and the calls of a multipart upload, abort and ListParts included |
 | delete | `delete_prefixes` | DeleteObject (not AbortMultipartUpload: a key that deletes an object cannot cancel another client's upload) |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote, and a read prefix does not let it write. A put by a scoped key is create-only (no `If-Match`, no copy), and a delete needs a delete prefix. A call outside the prefixes of the right it needs is 403 `AccessDenied`.

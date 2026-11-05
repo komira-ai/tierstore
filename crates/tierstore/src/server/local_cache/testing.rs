@@ -20,7 +20,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     Backend, ByteRange, Error, FaultyBackend, Listed, MemoryBackend, Meta, Op, OpenUpload,
-    PartBody, ReadBody, TestClock, UploadsAfter,
+    PartBody, ReadBody, TestClock, UploadedPart, UploadsAfter,
 };
 
 use super::layout::{data_path, name_of};
@@ -446,6 +446,16 @@ impl Backend for Tamper {
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
         self.memory.list_uploads(prefix, after, max_uploads).await
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        self.memory.list_parts(key, id, after, max_parts).await
     }
 }
 
