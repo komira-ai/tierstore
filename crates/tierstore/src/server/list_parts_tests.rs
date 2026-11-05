@@ -37,7 +37,7 @@ async fn stocked(rig: &Rig, key: &str) -> (String, [String; 3]) {
 /// Asserts the answer for an upload whose parts were stored out of order: `ListPartsResult` with
 /// the `Bucket`, `Key` and `UploadId`; the parts in ascending order of number, each with its
 /// `ETag` (equal to the `ETag` its UploadPart answered, quotes included), `Size` and
-/// `LastModified` (the time of the cold tier's clock); the `Initiator`, the `Owner` and the
+/// `LastModified` (the time of the clock of the tier that holds the upload); the `Initiator`, the `Owner` and the
 /// `StorageClass`; and `PartNumberMarker` 0, `MaxParts` 1000, `IsTruncated` false and no
 /// `NextPartNumberMarker`.
 #[tokio::test(start_paused = true)]
@@ -63,8 +63,9 @@ async fn the_parts_of_an_upload_are_listed_in_ascending_order_with_their_etags()
     assert_eq!(texts(&reply.body, "StorageClass"), ["STANDARD"]);
     assert_eq!(texts(&reply.body, "ID"), ["tierstore"; 2]);
     assert_eq!(texts(&reply.body, "DisplayName"), ["tierstore"; 2]);
-    assert_eq!(rig.hot.calls(Op::ListParts), 0);
-    assert_eq!(rig.cold.calls(Op::ListParts), 1);
+    // The upload was made with room in the hot tier, so its id names that tier and it is asked.
+    assert_eq!(rig.hot.calls(Op::ListParts), 1);
+    assert_eq!(rig.cold.calls(Op::ListParts), 0);
 }
 
 /// Asserts that a part sent again with a number replaces the earlier one: the listing has the
@@ -200,7 +201,7 @@ async fn the_keys_of_the_proxy_are_refused_and_a_key_is_escaped() {
         let reply = list(&rig, key, "u", "").await;
         assert_eq!(reply.code(), "AccessDenied", "{key}");
     }
-    assert_eq!(rig.cold.calls(Op::ListParts), 0);
+    assert_eq!(rig.hot.calls(Op::ListParts) + rig.cold.calls(Op::ListParts), 0);
     let id = start(&rig, "a&b").await;
     upload(&rig, "a&b", &id, 1, b"x").await;
     let reply = list(&rig, "a%26b", &id, "").await;
@@ -208,13 +209,14 @@ async fn the_keys_of_the_proxy_are_refused_and_a_key_is_escaped() {
     assert_eq!(numbers(&reply), ["1"]);
 }
 
-/// Asserts that a failure of the cold tier is the answer of the listing (503 for an unavailable
-/// tier), and that the listing is a read: it changes no part.
+/// Asserts that a failure of the tier that holds the upload (the hot tier, which has room here) is
+/// the answer of the listing (503 for an unavailable tier), and that the listing is a read: it
+/// changes no part.
 #[tokio::test(start_paused = true)]
-async fn a_failure_of_the_cold_tier_is_the_answer() {
+async fn a_failure_of_the_tier_that_holds_the_upload_is_the_answer() {
     let rig = Rig::new(1 << 20).await;
     let (id, _) = stocked(&rig, "k").await;
-    rig.cold.fail_next(Op::ListParts, 1);
+    rig.hot.fail_next(Op::ListParts, 1);
     let down = list(&rig, "k", &id, "").await;
     assert_eq!(down.status, StatusCode::SERVICE_UNAVAILABLE);
     let up = list(&rig, "k", &id, "").await;
