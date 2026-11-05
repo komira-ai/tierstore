@@ -46,18 +46,14 @@ pub(crate) fn location(region: &str) -> String {
 /// it acts for the one owner, so the id and the display name are fixed, and say what holds it.
 pub(crate) const OWNER: &str = "tierstore";
 
-/// The creation date of the bucket in a listing of buckets, in milliseconds since the Unix
-/// epoch. The bucket is made by configuration, not by a call, and the server keeps no record of
-/// when, so it is the epoch, which a client can tell is not a date it was made on.
-const CREATED_MS: u64 = 0;
-
-/// The answer of ListBuckets: the owner, and the bucket (with its region) if `listed`, which is
-/// false when a filter of the call left it out.
-pub(crate) fn buckets(bucket: &str, region: &str, listed: bool) -> String {
+/// The answer of ListBuckets: the owner, and the bucket (with its region and the time it was
+/// made, `created_ms` since the Unix epoch) if `listed`, which is false when a filter of the call
+/// left it out.
+pub(crate) fn buckets(bucket: &str, region: &str, created_ms: u64, listed: bool) -> String {
     let owner = format!("<Owner><ID>{OWNER}</ID><DisplayName>{OWNER}</DisplayName></Owner>");
     let found = if listed {
         let (name, region) = (escape(bucket), escape(region));
-        let created = iso8601(CREATED_MS);
+        let created = iso8601(created_ms);
         format!(
             "<Bucket><Name>{name}</Name><CreationDate>{created}</CreationDate>\
              <BucketRegion>{region}</BucketRegion></Bucket>"

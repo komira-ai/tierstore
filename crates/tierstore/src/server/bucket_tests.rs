@@ -1,18 +1,58 @@
 //! The calls on the bucket itself, through `Server::handle`.
 
+use std::sync::Arc;
+
+use crate::journal::FORMAT_KEY;
+use crate::{Backend, MemoryBackend, TestClock};
 use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::{Request, StatusCode};
 
+use super::bucket::created_at;
 use super::presign::tests::{SECRET as PRESIGN_SECRET, grant, request};
 use super::presign::{PresignKey, PresignRequest, presign_url};
 use super::testing::{BUCKET, KEY_ID, NOW, Reply, Rig, SECRET, texts};
-use super::{AccessKey, Prefixes, ScopedKey};
+use super::{AccessKey, GcKey, Prefixes, ScopedKey};
 
 const MEBIBYTE: u64 = 1 << 20;
 
 /// The id and the secret of a read-only key.
 const READER: (&str, &str) = ("AKIDREADER", "reader-secret-0123456789");
+
+/// The id and the secret of a scoped key, and of a GC key.
+const SCOPED: (&str, &str) = ("AKIDSCOPED", "scoped-secret-0123456789");
+const GC: (&str, &str) = ("AKIDGC", "gc-secret-0123456789");
+
+/// A rig with one key of each role: the full key (the rig's own), a read-only key, a scoped key
+/// and a GC key.
+async fn rig_with_every_role() -> Rig {
+    Rig::with(MEBIBYTE, |config| {
+        config.read_only_keys = vec![AccessKey::new(READER.0, READER.1)];
+        let prefixes = Prefixes {
+            read: &["r/"],
+            write: &["w/"],
+            delete: &["d/"],
+        };
+        config.scoped_keys = vec![ScopedKey::new(SCOPED.0, SCOPED.1, &prefixes).unwrap()];
+        config.gc_keys = vec![GcKey::new(GC.0, GC.1, "cas/b/").unwrap()];
+    })
+    .await
+}
+
+/// The status of a call on `uri`, signed by the key of each role, in the order full, read-only,
+/// scoped, GC.
+async fn statuses(rig: &Rig, method: &str, uri: &str) -> [u16; 4] {
+    let full = rig.send(method, uri, &[], b"").await.status.as_u16();
+    let mut out = [full, 0, 0, 0];
+    for (slot, key) in out[1..].iter_mut().zip([READER, SCOPED, GC]) {
+        *slot = rig
+            .send_as(key, method, uri, &[], b"")
+            .await
+            .status
+            .as_u16();
+    }
+    out
+}
 
 /// A rig whose server is in the region `region`.
 async fn rig_in(region: &'static str) -> Rig {
@@ -77,11 +117,11 @@ async fn location_is_for_signed_requests_on_the_bucket_only() {
     assert_eq!(put.status, StatusCode::NOT_IMPLEMENTED);
 }
 
-/// The document the service root answers in `eu-west-1`.
+/// The document the service root answers in `eu-west-1`, with the creation date of the rig's clock.
 const LISTING: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
 <ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
 <Owner><ID>tierstore</ID><DisplayName>tierstore</DisplayName></Owner>\
-<Buckets><Bucket><Name>tier-bucket</Name><CreationDate>1970-01-01T00:00:00.000Z</CreationDate>\
+<Buckets><Bucket><Name>tier-bucket</Name><CreationDate>2027-01-15T08:00:00.000Z</CreationDate>\
 <BucketRegion>eu-west-1</BucketRegion></Bucket></Buckets></ListAllMyBucketsResult>";
 
 /// A `GET` of the service root with the query `query`.
@@ -90,7 +130,7 @@ async fn service(rig: &Rig, query: &str) -> Reply {
 }
 
 /// Asserts the whole answer of ListBuckets, by exact equality: the one bucket the server serves,
-/// with its creation date (the epoch: the server does not know when the bucket was made), its
+/// with its creation date (the time the config was made at, the clock of the rig), its
 /// region and the owner, in the S3 namespace.
 #[tokio::test(start_paused = true)]
 async fn listing_the_buckets_gives_the_one_bucket_the_server_serves() {
@@ -217,4 +257,55 @@ async fn only_the_full_and_read_only_keys_list_the_buckets() {
     );
     let bare = Request::get("/").body(Empty::<Bytes>::new()).unwrap();
     assert_eq!(rig.send_raw(bare).await.status, StatusCode::FORBIDDEN);
+}
+
+/// Asserts which role may make GetBucketLocation: the full key and a read-only key do (200), a
+/// scoped key and a GC key are `403 AccessDenied`, as they are for every call on the bucket
+/// itself.
+#[tokio::test(start_paused = true)]
+async fn only_the_full_and_the_read_only_key_may_get_the_location() {
+    let rig = rig_with_every_role().await;
+    let uri = format!("/{BUCKET}?location");
+    assert_eq!(statuses(&rig, "GET", &uri).await, [200, 200, 403, 403]);
+}
+
+/// Asserts that the creation date of the listed bucket is the `bucket_created` of the config, to
+/// the millisecond, in S3's `Z` form.
+#[tokio::test(start_paused = true)]
+async fn the_listed_bucket_has_the_creation_date_of_the_config() {
+    let rig = Rig::with(MEBIBYTE, |config| {
+        config.bucket_created = 1_369_353_600_123;
+    })
+    .await;
+    let reply = rig.send("GET", "/", &[], b"").await;
+    assert_eq!(
+        texts(&reply.body, "CreationDate"),
+        ["2013-05-24T00:00:00.123Z"]
+    );
+}
+
+/// Asserts the source of the creation date: the time the `_tiering/format` object of the hot tier
+/// was written when there is one, and the fallback (the time the config was made at) where the
+/// store has none.
+#[tokio::test(start_paused = true)]
+async fn the_bucket_was_made_when_the_format_object_was_written() {
+    let fallback = 1_000;
+    let bare = MemoryBackend::new();
+    assert_eq!(created_at(&bare, fallback).await, fallback);
+    let written = 1_369_353_600_123;
+    let clock = Arc::new(TestClock::new());
+    clock.set(written);
+    let formatted = MemoryBackend::with_clock(Arc::clone(&clock));
+    let body = Bytes::from_static(b"{\"epoch\":2,\"phase\":\"active\"}");
+    formatted.put(FORMAT_KEY, body).await.unwrap();
+    clock.set(written + 5_000);
+    assert_eq!(created_at(&formatted, fallback).await, written);
+}
+
+/// Asserts which role may list the buckets, for all four roles: the full key and a read-only key
+/// do (200), a scoped key and a GC key are `403 AccessDenied`.
+#[tokio::test(start_paused = true)]
+async fn only_the_full_and_the_read_only_key_may_list_the_buckets_of_every_role() {
+    let rig = rig_with_every_role().await;
+    assert_eq!(statuses(&rig, "GET", "/").await, [200, 200, 403, 403]);
 }
