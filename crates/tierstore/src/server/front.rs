@@ -11,6 +11,7 @@ use crate::Clock;
 
 use super::ServerConfig;
 use super::cli::{Cli, Error};
+use super::config_io::IoTuning;
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
 use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
 use super::listen::joined;
@@ -102,6 +103,7 @@ pub(super) struct FrontSettings {
     pub grant_max_lifetime: Option<Duration>,
     pub max_request_bytes: u64,
     pub max_concurrent_puts: u32,
+    pub delete_concurrency: u32,
     pub put_permit_wait: Duration,
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
@@ -110,6 +112,8 @@ pub(super) struct FrontSettings {
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
     pub tls: S3Tls,
+    /// The sockets, the pauses and the piece queue that `[server]` tunes.
+    pub io: IoTuning,
 }
 
 impl Cli {
@@ -131,6 +135,7 @@ impl Cli {
             grant_max_lifetime: self.grant_max_lifetime,
             max_request_bytes: self.max_request_bytes,
             max_concurrent_puts: self.max_concurrent_puts,
+            delete_concurrency: self.delete_concurrency,
             put_permit_wait: self.put_permit_wait,
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
@@ -139,6 +144,7 @@ impl Cli {
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
             tls: self.tls.clone(),
+            io: self.io_tuning,
         }
     }
 }
@@ -231,11 +237,13 @@ pub(super) fn server_config(
     server.max_request_bytes = usize::try_from(front.max_request_bytes).unwrap_or(usize::MAX);
     server.body_idle_timeout = front.body_idle_timeout;
     server.max_concurrent_puts = front.max_concurrent_puts as usize;
+    server.delete_concurrency = front.delete_concurrency as usize;
     server.put_permit_wait = front.put_permit_wait;
     server.put_min_bytes_per_sec = front.put_min_bytes_per_sec;
     server.put_rate_grace = front.put_rate_grace;
     server.drain_lb_wait = front.drain_lb_wait;
     server.drain_deadline = front.drain_deadline;
+    front.io.apply(&mut server);
     Ok(server)
 }
 

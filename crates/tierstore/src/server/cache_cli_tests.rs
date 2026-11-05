@@ -15,7 +15,9 @@ use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 
 use super::Drained;
-use super::cache_cli::{run_cache, serve_cache, size_of_file_system, unjudged_warning};
+use super::cache_cli::{
+    bind_cache_s3, run_cache, serve_cache, size_of_file_system, unjudged_warning,
+};
 use super::cli::Error;
 use super::cli::{checked, exit_status};
 use super::config::{PerRun, Settings, settings_from_text};
@@ -23,7 +25,8 @@ use super::config_cache::CacheSettings;
 use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
-use super::local_cache::{Disk, SystemDisk};
+use super::local_cache::{CacheConfig, Disk, SystemDisk};
+use super::testing::established_unaccepted;
 use crate::{
     Backend, ByteRange as TierRange, Error as BackendError, FaultyBackend, Listed, MemoryBackend,
     Meta, Op,
@@ -814,4 +817,77 @@ async fn a_taken_loopback_port_stops_the_start_of_a_build_node() {
         std::net::TcpListener::bind(configured).is_ok(),
         "still held"
     );
+}
+
+/// Asserts the times of the loops beside a cache's server: a cache at the defaults has the passes
+/// every 10 s, the lock every second, the scrub reading its rate each second and rounds counted
+/// in seconds; and a cache with other intervals has them, with the scrub's bytes a tick the rate
+/// for the tick's length (a rate of 100 B/s and a tick of 2.5 s are 250 B), the rounds counted
+/// in ticks, and no scrub staying none.
+#[test]
+fn the_loops_have_the_times_of_the_settings() {
+    use super::cache_cli::Loops;
+    let config = CacheConfig::new("/c", 1000, Vec::new());
+    let hour = Duration::from_secs(3600);
+    let secs = Duration::from_secs;
+    let loops = Loops::of(&config, Some(100), hour);
+    let expected = Loops {
+        pass: secs(10),
+        lock: secs(1),
+        tick: secs(1),
+        per_tick: Some(100),
+        min_round: 3600,
+    };
+    assert_eq!(loops, expected);
+    let mut config = config;
+    config.pass_interval = secs(30);
+    config.lock_interval = Duration::from_millis(250);
+    config.scrub_tick = Duration::from_millis(2500);
+    let loops = Loops::of(&config, Some(100), hour);
+    assert_eq!(loops.pass, secs(30));
+    assert_eq!(loops.lock, Duration::from_millis(250));
+    assert_eq!(loops.tick, Duration::from_millis(2500));
+    assert_eq!(loops.per_tick, Some(250));
+    assert_eq!(loops.min_round, 1440);
+    assert_eq!(Loops::of(&config, None, Duration::ZERO).per_tick, None);
+    assert_eq!(Loops::of(&config, None, Duration::ZERO).min_round, 0);
+    // A rate too small for the tick still reads a byte a tick, and a minimum between rounds that
+    // is not a whole number of ticks is rounded up to the next tick.
+    config.scrub_tick = Duration::from_millis(1);
+    assert_eq!(Loops::of(&config, Some(100), hour).per_tick, Some(1));
+    assert_eq!(Loops::of(&config, Some(1500), hour).per_tick, Some(2));
+    config.scrub_tick = secs(1);
+    assert_eq!(
+        Loops::of(&config, None, Duration::from_millis(1500)).min_round,
+        2
+    );
+    // A tick of no length is read as a millisecond, and a rate that overflows is the most.
+    config.scrub_tick = Duration::ZERO;
+    assert_eq!(Loops::of(&config, Some(1_000), hour).per_tick, Some(1));
+    config.scrub_tick = Duration::from_secs(u64::MAX);
+    assert_eq!(
+        Loops::of(&config, Some(u64::MAX), hour).per_tick,
+        Some(u64::MAX)
+    );
+}
+
+/// Asserts that the backlog given to the bind of a node with a local cache is the one every one
+/// of its sockets listens with, the configured address and the loopback socket added for the
+/// cache: with a backlog of 1, of six connections no more than the queue and the one the kernel
+/// lets over it are established while nothing accepts; with a larger one more than that are.
+#[tokio::test]
+async fn the_cache_bind_listens_with_the_backlog_given_on_every_socket() {
+    let configured = ["127.0.0.2:0".parse().expect("an address")];
+    let small = bind_cache_s3(&configured, 1).expect("bound");
+    assert_eq!(small.len(), 2);
+    for listener in &small {
+        let at = listener.local_addr().expect("an address");
+        let held = established_unaccepted(at, 6).await;
+        assert!((1..=3).contains(&held), "{held} established on {at}");
+    }
+    let large = bind_cache_s3(&configured, 1024).expect("bound");
+    for listener in &large {
+        let at = listener.local_addr().expect("an address");
+        assert!(established_unaccepted(at, 6).await > 3, "{at}");
+    }
 }

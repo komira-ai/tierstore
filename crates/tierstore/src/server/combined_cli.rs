@@ -34,6 +34,7 @@ use tokio::sync::Notify;
 use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 
 use super::Drained;
+use super::bucket::created_at;
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{Fronts, open, serve_front};
 use super::cli::{Addresses, Error, build, probe_run_id, signals};
@@ -63,13 +64,14 @@ pub(super) async fn serve_combined(
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
     start_format(cli, built.hot.as_ref()).await?;
+    built.server.bucket_created = created_at(built.hot.as_ref(), built.server.bucket_created).await;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let heartbeat = built.proxy.heartbeat;
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| format!("opening the proxy: {why}"))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
-    wait_first_beat(&proxy, heartbeat).await;
+    wait_first_beat(&proxy, heartbeat, cli.reconcile_tuning.first_beat_poll).await;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let upstream: Arc<dyn Backend> = proxy;

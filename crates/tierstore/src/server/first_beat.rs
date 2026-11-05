@@ -10,14 +10,12 @@ use std::time::Duration;
 
 use crate::Proxy;
 
-/// How long the wait looks again at the proxy after it found it not live.
-const POLL: Duration = Duration::from_millis(1);
-
-/// Waits until `proxy` is live, or `limit` has passed. Gives whether it is live.
-pub(super) async fn wait_first_beat(proxy: &Proxy, limit: Duration) -> bool {
+/// Waits until `proxy` is live, or `limit` has passed, looking again at the proxy every `poll`
+/// (`hot_store.first_beat_poll`) after it found it not live. Gives whether it is live.
+pub(super) async fn wait_first_beat(proxy: &Proxy, limit: Duration, poll: Duration) -> bool {
     let live = async {
         while !proxy.is_live() {
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(poll).await;
         }
     };
     tokio::time::timeout(limit, live).await.is_ok()

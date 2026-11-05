@@ -311,6 +311,51 @@ async fn a_large_body_is_streamed_through_a_bounded_queue() {
     );
 }
 
+/// Asserts that `put_pieces_queued` of the settings is how many pieces of a streamed put wait for
+/// the backend: with a queue of 1 the body is never more than the queue and the two pieces in hand
+/// ahead of the backend, and with a queue of 24 it gets further ahead than the default queue
+/// allows, for a body of 256 pieces.
+#[tokio::test(start_paused = true)]
+async fn the_queue_of_a_streamed_put_is_the_one_in_the_settings() {
+    const PIECES: usize = 256;
+    let total = (PIECES * PIECE) as u64;
+    let mut ahead_of = Vec::new();
+    for queued in [1, 24] {
+        let made = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let probe = Probe {
+            made: Arc::clone(&made),
+            seen: Arc::clone(&seen),
+            stall: None,
+        };
+        let clock = Arc::new(TestClock::new());
+        clock.set(NOW);
+        let mut config = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
+        config.max_request_bytes = total as usize;
+        config.put_pieces_queued = queued;
+        let server = Server::new(Arc::new(probe), config.clone());
+        let (claim, _) = truth(PIECES);
+        let length = total.to_string();
+        let told = [("content-length", length.as_str())];
+        let body = Generated::new(PIECES, &made);
+        let put = answer(&server, put_request(&config, "k", &claim, &told, body)).await;
+        assert_eq!(put.status, StatusCode::OK, "{queued}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.pieces, PIECES, "{queued}");
+        ahead_of.push(seen.ahead);
+    }
+    assert!(
+        ahead_of[0] <= 1 + 2,
+        "{} pieces ahead of a queue of 1",
+        ahead_of[0]
+    );
+    assert!(
+        ahead_of[1] > PIECES_QUEUED + 2,
+        "{} pieces ahead of a queue of 24",
+        ahead_of[1]
+    );
+}
+
 /// Two directories as the tiers of a proxy, and the server over it.
 struct Tiers {
     hot_dir: TestDir,
