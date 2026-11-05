@@ -17,7 +17,7 @@ use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 use super::Server;
 use super::handover::hand_over;
 use super::list_token;
-use super::listing;
+use super::listing::{self, UploadsNext};
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
@@ -25,10 +25,9 @@ use super::time::http_date;
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
-/// `delimiter` and `encoding-type` are parameters of ListObjectsV2 (ListMultipartUploads refuses
-/// a `delimiter` with text: [`refuse_delimiter`]), and `fetch-owner` is accepted and ignored:
-/// the listing has no owner to give, and S3 itself only adds an `Owner` to the entries of a
-/// listing when it is asked to.
+/// `delimiter` and `encoding-type` are parameters of ListObjectsV2 and of ListMultipartUploads,
+/// and with `fetch-owner=true` the objects of a listing carry the `Owner` that S3 adds then
+/// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
 const SUPPORTED: [&str; 15] = [
@@ -168,15 +167,6 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
     }
     if header(&parts.headers, "x-amz-copy-source").is_some() {
         return Err(S3Error::unsupported("copying an object is not supported"));
-    }
-    Ok(())
-}
-
-/// A listing of uploads that names a `delimiter` is not supported; an empty one is no
-/// delimiter, as it is for S3.
-fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
-    if query.get("delimiter").is_some_and(|text| !text.is_empty()) {
-        return Err(S3Error::unsupported("a delimiter is not supported"));
     }
     Ok(())
 }
@@ -532,27 +522,39 @@ impl Server {
     /// (and `upload-id-marker`, which S3 ignores without a key marker), at most `max-uploads`.
     /// The uploads of a key under the proxy's reserved prefixes are never listed.
     async fn list_uploads(&self, query: &Query) -> Result<Answer, S3Error> {
-        refuse_delimiter(query)?;
         let prefix = query.get("prefix").unwrap_or_default();
+        let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
+        let url = encoded(query)?;
         let max_uploads = page_size(query, "max-uploads", "max-uploads")?;
         let key_marker = query.get("key-marker").unwrap_or_default();
         let id_marker = query.get("upload-id-marker").filter(|id| !id.is_empty());
-        let after = (!key_marker.is_empty()).then_some((key_marker, id_marker));
-        let backend = &self.backend;
-        let listed = match max_uploads {
-            0 => Ok(Vec::new()),
-            _ => backend.list_uploads(prefix, after, max_uploads + 1).await,
+        let start =
+            (!key_marker.is_empty()).then(|| (key_marker.to_owned(), id_marker.map(str::to_owned)));
+        // As for objects: without a delimiter every upload is an entry and one read is enough.
+        let batch = if delimiter.is_some() {
+            PAGE_LIMIT + 1
+        } else {
+            max_uploads + 1
         };
-        let listed = listed.map_err(S3Error::from)?;
-        let page = &listed[..listed.len().min(max_uploads)];
-        let next = (listed.len() > max_uploads).then(|| &page[max_uploads - 1]);
+        let backend = self.backend.as_ref();
+        let page = listing::uploads_page(backend, prefix, delimiter, start, max_uploads, batch);
+        let page = page.await?;
+        // After an upload the next page starts after its id; after a common prefix, after the
+        // prefix and so after all that is under it, and there is no id.
+        let next = page.next.as_ref().map(|next| match next {
+            UploadsNext::After(key, id) => (key.as_str(), id.as_str()),
+            UploadsNext::PastPrefix(common) => (common.as_str(), ""),
+        });
         let listing = UploadListing {
             bucket: &self.config.bucket,
             prefix,
+            delimiter,
+            url,
             key_marker,
             id_marker: id_marker.unwrap_or_default(),
             max_uploads,
-            uploads: page,
+            uploads: &page.uploads,
+            prefixes: &page.prefixes,
             next,
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))

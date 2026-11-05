@@ -22,9 +22,10 @@
 //!   prefix are folded into `CommonPrefixes`, and a prefix counts against `max-keys` as an
 //!   object does, so a page ends between whole prefixes and the token of a prefix starts the
 //!   next page after every key under it (the walk reads the keys of a prefix a page at a time to
-//!   pass them). `encoding-type=url` percent-encodes the names in the answer (`Key`, `Prefix`,
-//!   `Delimiter`, `StartAfter`, the `Prefix` of a common prefix), a space as `+` and `/` as it
-//!   is; any other `encoding-type` is `InvalidArgument`;
+//!   pass them); a common prefix that does not sort after `start-after` is left out, as for S3.
+//!   `encoding-type=url` percent-encodes the names in the answer (`Key`, `Prefix`, `Delimiter`,
+//!   `StartAfter`, the `Prefix` of a common prefix), a space as `+`, `/` and `*` as they are
+//!   and `~` as `%7E`; any other `encoding-type` is `InvalidArgument`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
 //!   the backend does (the [`Proxy`](crate::Proxy) passes them to its cold tier). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
@@ -36,15 +37,16 @@
 //!   is the content tag the backend gives it, and that of the completion is the content tag of
 //!   the object;
 //! - ListMultipartUploads (`GET /<bucket>?uploads`) with `prefix`, `max-uploads`, `key-marker`
-//!   and `upload-id-marker`, without a `delimiter` (an empty one is none): the open uploads of
-//!   the backend (for the [`Proxy`](crate::Proxy), those of its cold tier), by key and then by
-//!   id, paged by the two
+//!   and `upload-id-marker`, and with `delimiter` and `encoding-type=url` as ListObjectsV2 has
+//!   them (a common prefix counts against `max-uploads`, and the markers of a page that ends
+//!   with one are the prefix and no upload id): the open uploads of the backend (for the
+//!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know (`versionId`), and a `delimiter` on ListMultipartUploads, is answered `NotImplemented`.
+//! know (`versionId`), is answered `NotImplemented`.
 //! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
@@ -295,6 +297,8 @@ mod idle_tests;
 mod list_delimiter_tests;
 #[cfg(test)]
 mod list_options_tests;
+#[cfg(test)]
+mod list_uploads_delimiter_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]

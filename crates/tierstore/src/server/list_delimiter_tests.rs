@@ -201,33 +201,66 @@ async fn a_token_past_a_prefix_skips_every_key_of_a_large_prefix() {
     assert!(!truncated(&second));
 }
 
-/// Asserts that `start-after` is only a lower bound on keys, as for S3: after `a/1` the key `a/2`
-/// is still listed and folds to the prefix `a/` again, the start key is echoed in `StartAfter`,
-/// and after `a/2` only `b` is left.
+/// Asserts what the S3 reference says of `delimiter`: "`CommonPrefixes` is filtered out from
+/// results if it is not lexicographically greater than the `StartAfter` value" (MinIO measured
+/// the same). A `start-after` inside `a/`, before or after its last key, or `a/` itself, leaves
+/// `a/` out and everything under it; one before it (`a`) lists it; one outside the prefix of the
+/// request is a plain bound; and a start inside `x/y/` under `prefix=x/` leaves out `x/y/` only.
+/// The start key is echoed in `StartAfter`. This replaces the earlier expectation that a start
+/// inside a prefix listed the prefix again.
 #[tokio::test(start_paused = true)]
-async fn start_after_inside_a_prefix_lists_the_prefix_again() {
-    let rig = rig_with(&["a/1", "a/2", "b"]).await;
-    let reply = rig.list("delimiter=%2F&start-after=a%2F1").await;
-    assert_eq!(prefixes(&reply), ["a/"]);
-    assert_eq!(keys(&reply), ["b"]);
-    assert_eq!(texts(&reply.body, "StartAfter"), ["a/1"]);
-    let past = rig.list("delimiter=%2F&start-after=a%2F2").await;
-    assert!(prefixes(&past).is_empty());
-    assert_eq!(keys(&past), ["b"]);
+async fn a_prefix_that_does_not_sort_after_start_after_is_left_out() {
+    let rig = rig_with(&["a/1", "a/2", "b", "c/1", "x/y/1", "x/y/2", "x/z"]).await;
+    for start in ["a%2F1", "a%2F2", "a%2F", "a%2F0"] {
+        let reply = rig
+            .list(&format!("delimiter=%2F&start-after={start}"))
+            .await;
+        assert_eq!(prefixes(&reply), ["c/", "x/"], "{start}");
+        assert_eq!(keys(&reply), ["b"], "{start}");
+    }
+    let echoed = rig.list("delimiter=%2F&start-after=a%2F1").await;
+    assert_eq!(texts(&echoed.body, "StartAfter"), ["a/1"]);
+    let before = rig.list("delimiter=%2F&start-after=a").await;
+    assert_eq!(prefixes(&before), ["a/", "c/", "x/"]);
+    let inside = rig
+        .list("delimiter=%2F&prefix=x%2F&start-after=x%2Fy%2F1")
+        .await;
+    assert!(prefixes(&inside).is_empty());
+    assert_eq!(keys(&inside), ["x/z"]);
+    let outside = rig
+        .list("delimiter=%2F&prefix=x%2F&start-after=a%2F1")
+        .await;
+    assert_eq!(prefixes(&outside), ["x/y/"]);
+    assert_eq!(keys(&outside), ["x/z"]);
+    let paged = rig.list("delimiter=%2F&start-after=a%2F1&max-keys=1").await;
+    assert_eq!(keys(&paged), ["b"]);
+    assert!(truncated(&paged));
+    let next = format!(
+        "delimiter=%2F&max-keys=1&continuation-token={}",
+        token(&paged)
+    );
+    let rest = rig.list(&next).await;
+    assert_eq!(prefixes(&rest), ["c/"]);
 }
 
-/// Asserts that a continuation token of the common-prefix kind that is not one the server gave
-/// is `InvalidArgument`: not hexadecimal, hexadecimal of bytes that are not text, and the mark
-/// alone, which stands for no prefix.
+/// Asserts that a continuation token that is not one the server gave is `InvalidArgument` with
+/// the words S3 uses (measured on MinIO): not hexadecimal, hexadecimal of bytes that are not text,
+/// and, of the common-prefix kind, the same two and the mark alone, which stands for no prefix.
 #[tokio::test(start_paused = true)]
-async fn a_bad_token_of_a_prefix_is_refused() {
+async fn a_bad_token_is_refused_in_the_words_of_s3() {
     let rig = rig_with(&["a/1"]).await;
-    for token in ["pzz", "pff", "p"] {
+    for token in ["zz", "ff", "pzz", "pff", "p"] {
         let reply = rig
             .list(&format!("delimiter=%2F&continuation-token={token}"))
             .await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{token}");
         assert_eq!(reply.code(), "InvalidArgument", "{token}");
+        let message = texts(&reply.body, "Message");
+        assert_eq!(
+            message,
+            ["The continuation token provided is incorrect"],
+            "{token}"
+        );
     }
 }
 

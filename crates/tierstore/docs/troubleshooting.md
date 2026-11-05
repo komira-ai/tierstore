@@ -134,7 +134,7 @@ Both exit 3 and the unit does not restart. The first is a probe that could not b
 | 400 `RequestTimeout` | a body that stalled for `server.body_idle_timeout` or came slower than `server.put_min_bytes_per_sec`; nothing is stored |
 | 503 `SlowDown` | more than `server.max_concurrent_puts` bodies at once for longer than `server.put_permit_wait`, or a put that met a full tier; retry |
 | 503 `ServiceUnavailable` | a write while the format object does not say `active` at epoch 2 (the text names `tierstore format-epoch --activate`; a store is activated once, see [operations](operations.md#rolling-out-the-entry-protocol)), or while it says `drain` or `drained` (writes are paused); a put or delete that met a put, delete or copy of the same key in flight (retry); a delete that waited for the reconciler's release of the key and did not get it before the request deadline; a tier could not be reached; a drain answers no request 503 (see "A connection ends during a restart") |
-| 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or a `delimiter` on ListMultipartUploads, or a query parameter the front does not know; set the SDK's checksum calculation to "when required" |
+| 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or a query parameter the front does not know; set the SDK's checksum calculation to "when required" |
 
 ## The hot tier keeps filling
 

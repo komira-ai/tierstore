@@ -170,17 +170,69 @@ fn a_body_that_is_not_a_completion_is_refused() {
     assert_eq!(parse_complete(no_etag.as_bytes()), None);
 }
 
-/// Asserts the encoding of `encoding-type=url`: letters, digits, `-`, `.`, `_`, `~` and `/` stay,
+/// Asserts the encoding of `encoding-type=url`: letters, digits, `-`, `.`, `_`, `*` and `/` stay,
 /// a space is `+`, and every other byte is `%` and two capital hexadecimal digits (a character
-/// outside ASCII as the bytes of its UTF-8, `+` and `%` themselves as `%2B` and `%25`).
+/// outside ASCII as the bytes of its UTF-8, `+` and `%` themselves as `%2B` and `%25`, `~` as
+/// `%7E`, and the parentheses of the S3 reference's own example `test_file(3).png` as `%28` and
+/// `%29`). The set is the one a listing of MinIO showed; `~` and `*` are where it differs from
+/// RFC 3986.
 #[test]
-fn url_encoding_keeps_unreserved_characters_and_slashes_only() {
-    assert_eq!(url_encode("Az09-._~/"), "Az09-._~/");
+fn url_encoding_keeps_letters_digits_and_a_few_marks_only() {
+    assert_eq!(url_encode("Az09-._*/"), "Az09-._*/");
+    assert_eq!(url_encode("~"), "%7E");
+    assert_eq!(url_encode("test_file(3).png"), "test_file%283%29.png");
+    assert_eq!(url_encode("@#$;:=,!'&"), "%40%23%24%3B%3A%3D%2C%21%27%26");
     assert_eq!(url_encode("a b"), "a+b");
     assert_eq!(url_encode("a+b%c"), "a%2Bb%25c");
     assert_eq!(url_encode("caf\u{e9}"), "caf%C3%A9");
     assert_eq!(url_encode("a&b<c>\"'\u{1}"), "a%26b%3Cc%3E%22%27%01");
     assert_eq!(url_encode(""), "");
+}
+
+/// Asserts the order of the elements of a page that has all of them, which is the order of the
+/// examples of the S3 reference (and of a listing of MinIO): `Name`, `Prefix`, `StartAfter`,
+/// `ContinuationToken`, `NextContinuationToken`, `KeyCount`, `MaxKeys`, `Delimiter`,
+/// `IsTruncated`, the objects, the common prefixes and `EncodingType` last.
+#[test]
+fn the_elements_of_a_page_come_in_the_order_of_the_s3_reference() {
+    let objects = [listed("a", 1, 0)];
+    let prefixes = ["b/".to_owned()];
+    let listing = Listing {
+        bucket: "bkt",
+        prefix: "",
+        delimiter: Some("/"),
+        url: true,
+        start_after: Some("0"),
+        continuation_token: Some("61"),
+        max_keys: 2,
+        owner: false,
+        objects: &objects,
+        prefixes: &prefixes,
+        next: Some("70".to_owned()),
+    };
+    let xml = listing.to_xml();
+    let doc = roxmltree::Document::parse(&xml).unwrap();
+    let names: Vec<_> = doc
+        .root_element()
+        .children()
+        .filter(|node| node.is_element())
+        .map(|node| node.tag_name().name().to_owned())
+        .collect();
+    let want = [
+        "Name",
+        "Prefix",
+        "StartAfter",
+        "ContinuationToken",
+        "NextContinuationToken",
+        "KeyCount",
+        "MaxKeys",
+        "Delimiter",
+        "IsTruncated",
+        "Contents",
+        "CommonPrefixes",
+        "EncodingType",
+    ];
+    assert_eq!(names, want);
 }
 
 /// Asserts that a page with common prefixes writes them after the objects, counts them in

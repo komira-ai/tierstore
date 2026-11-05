@@ -21,7 +21,7 @@ pub(super) fn token(start: &Start) -> String {
 
 /// Where the page a token stands for starts.
 fn untoken(token: &str) -> Result<Start, S3Error> {
-    let bad = || S3Error::invalid("the continuation token is not one this server gave");
+    let bad = || S3Error::invalid("The continuation token provided is incorrect");
     let (hexed, prefix) = match token.strip_prefix(PREFIX_MARK) {
         Some(rest) => (rest, true),
         None => (token, false),

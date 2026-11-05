@@ -326,6 +326,52 @@ async fn sdk_multipart_upload_completes() {
     );
 }
 
+/// Asserts what the SDK gets of a ListMultipartUploads with a `delimiter` and `encoding_type(Url)`:
+/// over open uploads of `u/a b/1`, `u/a b/2` and `u/top`, the delimiter `/` under `u/` gives the
+/// upload `u/top` and the common prefix `u/a b/`; with the encoding the names come back
+/// percent-encoded (`u/top`, `u/a+b/`) and `EncodingType` is `url`.
+#[tokio::test]
+async fn sdk_list_uploads_with_a_delimiter_and_url_encoding_is_served() {
+    let h = serving().await;
+    let sdk = client(&h);
+    for key in ["u/a b/1", "u/a b/2", "u/top"] {
+        sdk.create_multipart_upload()
+            .bucket(BUCKET)
+            .key(key)
+            .send()
+            .await
+            .unwrap();
+    }
+    let list = || {
+        sdk.list_multipart_uploads()
+            .bucket(BUCKET)
+            .prefix("u/")
+            .delimiter("/")
+    };
+    let plain = list().send().await.unwrap();
+    let keys: Vec<_> = plain.uploads().iter().filter_map(|u| u.key()).collect();
+    assert_eq!(keys, ["u/top"]);
+    let common: Vec<_> = plain
+        .common_prefixes()
+        .iter()
+        .filter_map(|p| p.prefix())
+        .collect();
+    assert_eq!(common, ["u/a b/"]);
+    assert_eq!(plain.delimiter(), Some("/"));
+    let encoded = list()
+        .encoding_type(EncodingType::Url)
+        .send()
+        .await
+        .unwrap();
+    let common: Vec<_> = encoded
+        .common_prefixes()
+        .iter()
+        .filter_map(|p| p.prefix())
+        .collect();
+    assert_eq!(common, ["u/a+b/"]);
+    assert_eq!(encoded.encoding_type(), Some(&EncodingType::Url));
+}
+
 /// Asserts what the settings stand on: a client whose region is not the server's is refused with
 /// 403 `InvalidAccessKeyId`, because the region is part of what the signature covers. (This test
 /// also pinned a listing with `encoding-type=url` as 501 `NotImplemented`; the front now serves
