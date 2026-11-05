@@ -195,9 +195,9 @@ async fn start(
         Config::Plain(cli) => run_serving(cli, stop, ready).await,
         Config::Build(settings) => {
             let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
-            serve_cache(&settings, upstream, disk, stop, ready).await
+            serve_cache(settings, upstream, disk, stop, ready).await
         }
-        Config::Combined(settings) => serve_combined(&settings, disk, stop, ready).await,
+        Config::Combined(settings) => serve_combined(settings, disk, stop, ready).await,
     }
 }
 
