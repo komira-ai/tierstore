@@ -31,16 +31,57 @@ async fn an_empty_delimiter_lists_as_if_there_were_none() {
     assert_eq!(uploads.status, StatusCode::OK);
 }
 
-/// Asserts that `fetch-owner` is accepted and ignored with either value: the listing is the
-/// same as without it and has no `Owner`.
+/// Asserts that `fetch-owner=true` gives each object an `Owner` with an `ID` and a
+/// `DisplayName`, as S3 does, and that `fetch-owner=false` and no `fetch-owner` list the same
+/// keys without one.
 #[tokio::test(start_paused = true)]
-async fn fetch_owner_is_accepted_and_changes_nothing() {
+async fn fetch_owner_adds_an_owner_to_each_object() {
     let rig = stocked().await;
-    for query in ["fetch-owner=true", "fetch-owner=false"] {
+    let asked = rig.list("fetch-owner=true").await;
+    assert_eq!(asked.status, StatusCode::OK);
+    assert_eq!(texts(&asked.body, "Key"), ["a/1", "a/2", "b"]);
+    assert_eq!(texts(&asked.body, "ID"), ["tierstore"; 3]);
+    assert_eq!(texts(&asked.body, "DisplayName"), ["tierstore"; 3]);
+    for query in ["fetch-owner=false", ""] {
         let reply = rig.list(query).await;
         assert_eq!(reply.status, StatusCode::OK, "{query}");
         assert_eq!(texts(&reply.body, "Key"), ["a/1", "a/2", "b"], "{query}");
         assert!(texts(&reply.body, "Owner").is_empty(), "{query}");
+    }
+}
+
+/// Asserts that `max-keys=0` is an empty, untruncated page with `KeyCount` 0 and `MaxKeys` 0
+/// (as S3 answers it, measured on MinIO), though keys are there, and that `max-uploads=0` is the
+/// same for the uploads. A size that is negative, not a number or above 2147483647 is 400
+/// `InvalidArgument` with the words S3 uses.
+#[tokio::test(start_paused = true)]
+async fn a_page_size_of_zero_is_an_empty_page() {
+    let rig = stocked().await;
+    let zero = rig.list("max-keys=0").await;
+    assert_eq!(zero.status, StatusCode::OK);
+    assert!(texts(&zero.body, "Key").is_empty());
+    assert_eq!(texts(&zero.body, "KeyCount"), ["0"]);
+    assert_eq!(texts(&zero.body, "MaxKeys"), ["0"]);
+    assert_eq!(texts(&zero.body, "IsTruncated"), ["false"]);
+    assert!(texts(&zero.body, "NextContinuationToken").is_empty());
+    let path = format!("/{BUCKET}?uploads&max-uploads=0");
+    let uploads = rig.send("GET", &path, &[], b"").await;
+    assert_eq!(uploads.status, StatusCode::OK);
+    assert_eq!(texts(&uploads.body, "MaxUploads"), ["0"]);
+    assert_eq!(texts(&uploads.body, "IsTruncated"), ["false"]);
+    for bad in ["-1", "many", "2147483648"] {
+        let reply = rig.list(&format!("max-keys={bad}")).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+        assert_eq!(reply.code(), "InvalidArgument", "{bad}");
+        assert_eq!(
+            texts(&reply.body, "Message"),
+            ["Argument maxKeys must be an integer between 0 and 2147483647"],
+            "{bad}"
+        );
+        let path = format!("/{BUCKET}?uploads&max-uploads={bad}");
+        let reply = rig.send("GET", &path, &[], b"").await;
+        let message = "Argument max-uploads must be an integer between 0 and 2147483647";
+        assert_eq!(texts(&reply.body, "Message"), [message], "{bad}");
     }
 }
 

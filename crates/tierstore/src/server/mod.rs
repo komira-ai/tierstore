@@ -17,8 +17,8 @@
 //!   replaced);
 //! - DeleteObject, which succeeds for a key that is not there;
 //! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`; an empty
-//!   `delimiter` is no delimiter and `fetch-owner` is accepted and ignored, but a `delimiter`
-//!   with text is `NotImplemented`;
+//!   `delimiter` is no delimiter and `fetch-owner=true` adds an `Owner` to each object, but a
+//!   `delimiter` with text is `NotImplemented`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
 //!   the backend does (the [`Proxy`](crate::Proxy) passes them to its cold tier). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
