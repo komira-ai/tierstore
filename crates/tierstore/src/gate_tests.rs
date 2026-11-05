@@ -301,6 +301,8 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     held(gated, Op::Put, gated.put_stream("n3", Some(1), chunks("3"))).await;
     let hot_only = gated.put_stream_hot_only("n4", None, chunks("4"));
     held(gated, Op::Put, hot_only).await;
+    let answered = gated.put_stream_answered("n5", Some(1), chunks("5"), false);
+    assert_eq!(held(gated, Op::Put, answered).await, None);
 
     let replaced = gated.put_if_match("o", bytes("abd"), &tag);
     let tag = held(gated, Op::PutIfMatch, replaced).await;
@@ -318,7 +320,7 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     assert_eq!(held(gated, Op::Head, gated.head("o")).await.size, 3);
 
     let listed = held(gated, Op::List, gated.list("n")).await;
-    assert_eq!(listed.len(), 4);
+    assert_eq!(listed.len(), 5);
     let page = held(gated, Op::List, gated.list_page("n", None, 2)).await;
     assert_eq!(page.len(), 2);
 
@@ -397,6 +399,7 @@ impl Backend for Overrides {
             key: "from-list-page".to_owned(),
             size: 0,
             modified: 0,
+            tag: String::new(),
         };
         Ok(vec![page])
     }

@@ -396,9 +396,9 @@ impl Server {
         // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
         // not parameters of the call.
         let method = parts.method.as_str();
-        let location = bucket::asks_location(method, &target, query);
+        let setting = bucket::asks_setting(method, &target, query);
         let buckets = bucket::asks_buckets(method, &target);
-        if !location && !buckets {
+        if setting.is_none() && !buckets {
             refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         }
         let deleting = deletes_many(&parts.method, &target, query);
@@ -420,8 +420,8 @@ impl Server {
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;
-        if location {
-            return Ok(self.location());
+        if let Some(setting) = &setting {
+            return self.setting(setting);
         }
         if buckets {
             return self.list_buckets(query);

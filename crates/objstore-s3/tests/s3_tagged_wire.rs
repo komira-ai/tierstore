@@ -278,7 +278,7 @@ async fn reads_are_sent_again_after_a_transport_failure_and_a_replace_is_not() {
 
     let page = "<ListBucketResult><IsTruncated>false</IsTruncated>\
                 <Contents><Key>p/a</Key><Size>1</Size>\
-                <LastModified>2009-10-12T17:50:30.000Z</LastModified></Contents>\
+                <LastModified>2009-10-12T17:50:30.000Z</LastModified><ETag>\"e1\"</ETag></Contents>\
                 </ListBucketResult>";
     let page = answer("200 OK", &[], page);
     let (endpoint, seen) = script(vec![String::new(), page]).await;
@@ -330,7 +330,7 @@ async fn a_whole_object_read_sends_no_range_and_is_typed_when_it_fails() {
 async fn a_stamped_listing_sends_a_list_request_and_reads_the_times() {
     let page = "<ListBucketResult><IsTruncated>false</IsTruncated>\
                 <Contents><Key>p/a</Key><Size>1</Size>\
-                <LastModified>2009-10-12T17:50:30.000Z</LastModified></Contents>\
+                <LastModified>2009-10-12T17:50:30.000Z</LastModified><ETag>\"e1\"</ETag></Contents>\
                 </ListBucketResult>";
     let untimed = "<ListBucketResult><IsTruncated>false</IsTruncated>\
                    <Contents><Key>p/a</Key><Size>1</Size></Contents></ListBucketResult>";
@@ -348,6 +348,7 @@ async fn a_stamped_listing_sends_a_list_request_and_reads_the_times() {
     assert_eq!(listed.objects[0].key.as_str(), "p/a");
     assert_eq!(listed.objects[0].size, 1);
     assert_eq!(listed.objects[0].modified_millis, 1_255_369_830_000);
+    assert_eq!(listed.objects[0].etag, "\"e1\"");
 
     let err = s.list_stamped(&prefix, None, size).await.unwrap_err();
     assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");

@@ -5,9 +5,12 @@
 //! answered, so the node reads what it wrote without a fill:
 //!
 //! 1. the upstream's put acknowledges the object;
-//! 2. a HEAD of the key gives the tag and the time the upstream gave it (the put answers
-//!    nothing, and the tag of an object made of parts is not the MD5 of its bytes, so it cannot
-//!    be worked out here);
+//! 2. the tag and the time of the object are the upstream's answer to the put, if it gives a tag
+//!    (S3's answer to a PUT, or to the completion of a multipart upload, has the `ETag`, which is
+//!    what a HEAD gives; it has no `Last-Modified`, so the time is that of the cache's clock when
+//!    the answer arrived, within the length of the put of the time the store gives). An upstream
+//!    whose answer carries no tag is asked with a HEAD of the key, as before (the tag of an
+//!    object made of parts is not the MD5 of its bytes, so it cannot be worked out here);
 //! 3. the sidecar is renamed into place, the data file is linked, and the object is put in the
 //!    index (the steps of a fill, shared with it: `reserve`, `Staged` and `publish`);
 //! 4. the put is answered.
@@ -30,7 +33,8 @@
 //! waits for that event, whether the put waited for the keep or not.
 //!
 //! The copy is best effort. A put that finds every keep running, no room in the budget, a stage
-//! directory that cannot be written, a disk that falls behind the body, a HEAD that fails, or a
+//! directory that cannot be written, a disk that falls behind the body, a HEAD that fails (when
+//! the answer to the put gave no tag), or a
 //! key that a fill is running for, is answered as if the cache kept nothing: the stage file is
 //! removed, the skip is counted in `write_keep_skipped_total{reason}` and the put succeeds. The
 //! keeps have a limit of their own (`max_concurrent_keeps`), apart from the fills.
@@ -83,7 +87,7 @@ use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::{Error, PartBody};
+use crate::{Error, Meta, PartBody, PutAnswer};
 
 use super::fill::{Filled, Flight, Pending, Published, Reserved, Staged};
 use super::layout::{Name, Sidecar};
@@ -225,6 +229,9 @@ pub(super) struct Keeping {
     finished: bool,
     /// The hex SHA-256 of the whole body, once it is finished.
     digest: String,
+    /// What the upstream's answer to the put said of the object, and the time of the cache's
+    /// clock when it arrived; none if the answer gave no tag.
+    answer: Option<(PutAnswer, u64)>,
 }
 
 impl Keeping {
@@ -247,6 +254,7 @@ impl Keeping {
             len,
             finished: false,
             digest: String::new(),
+            answer: None,
         }
     }
 
@@ -329,12 +337,12 @@ impl Inner {
         len: Option<u64>,
         body: PartBody<'_>,
         hot_only: bool,
-    ) -> Result<(), Error> {
-        if hot_only {
-            self.upstream.put_stream_hot_only(key, len, body).await
-        } else {
-            self.upstream.put_stream(key, len, body).await
-        }
+    ) -> Result<Option<(PutAnswer, u64)>, Error> {
+        let answer = self
+            .upstream
+            .put_stream_answered(key, len, body, hot_only)
+            .await?;
+        Ok(answer.map(|answer| (answer, self.clock.now())))
     }
 
     /// A create-only put of a body that arrives as chunks; `hot_only` as for
@@ -374,7 +382,11 @@ impl Inner {
             None => self.send_put(key, len, body, hot_only).await,
         };
         match sent {
-            Ok(()) => {}
+            Ok(answer) => {
+                if let Some(keeping) = &mut keeping {
+                    keeping.answer = answer;
+                }
+            }
             Err(Error::AlreadyExists(exists)) => {
                 bump(&self.counters.write_exists);
                 return Err(Error::AlreadyExists(exists));
@@ -451,7 +463,10 @@ impl Inner {
             return;
         };
         let written = (keeping.seen, keeping.digest);
-        if let Err(why) = self.publish_put(key, name, stage, written).await {
+        if let Err(why) = self
+            .publish_put(key, name, stage, written, keeping.answer)
+            .await
+        {
             self.counters.keep_skipped(why);
             self.forget(key);
         }
@@ -506,12 +521,22 @@ impl Inner {
         name: &Name,
         mut stage: Stage,
         written: (u64, String),
+        answer: Option<(PutAnswer, u64)>,
     ) -> Result<(), SkippedKeep> {
         let (size, digest) = written;
         let deadline = Instant::now() + self.config.keep_deadline;
-        let meta = match Self::before(deadline, self.upstream.head(key)).await? {
-            Ok(meta) if meta.size == size => meta,
-            _ => return Err(SkippedKeep::Head),
+        let meta = match answer {
+            // The put was create-only and the upstream's answer names the object it made: no
+            // second trip. The time is the store's if the answer gave one, else the arrival.
+            Some((answer, arrived)) => Meta {
+                size,
+                tag: answer.tag,
+                modified: answer.modified.unwrap_or(arrived),
+            },
+            None => match Self::before(deadline, self.upstream.head(key)).await? {
+                Ok(meta) if meta.size == size => meta,
+                _ => return Err(SkippedKeep::Head),
+            },
         };
         let generation = stage.generation;
         let ended = Self::before(deadline, stage.writer.finish()).await?;

@@ -78,6 +78,23 @@ pub async fn a_listing_holds_the_keys_under_a_prefix_in_order(backend: &dyn Back
     assert_eq!(names, ["b/1", "b/2"]);
 }
 
+/// The tag of an object in a listing, whole or in a page, is the tag a HEAD of it gives, and
+/// differs between objects of different bytes: the front writes it as the `ETag` of the listing.
+pub async fn a_listing_gives_the_tag_a_head_gives(backend: &dyn Backend) {
+    backend.put("a/1", body("one")).await.unwrap();
+    backend.put("a/2", body("two")).await.unwrap();
+    let listed = backend.list("a/").await.unwrap();
+    let paged = backend.list_page("a/", None, 10).await.unwrap();
+    assert_eq!(listed, paged);
+    assert_eq!(listed.len(), 2);
+    for object in &listed {
+        let head = backend.head(&object.key).await.unwrap();
+        assert_eq!(object.tag, head.tag, "{}", object.key);
+        assert!(!object.tag.is_empty());
+    }
+    assert_ne!(listed[0].tag, listed[1].tag);
+}
+
 /// A page of a listing holds at most `max_keys` keys that sort after the start-after key, in
 /// key order, and a page shorter than `max_keys` is the last; a page of none asks for none.
 pub async fn a_page_starts_after_a_key_and_is_cut_at_max_keys(backend: &dyn Backend) {

@@ -297,3 +297,31 @@ async fn the_wrappers_of_a_backend_forward_its_reading_of_a_version() {
         assert!(!wrapper.same_version(&meta(3, "hot"), &meta(4, "hot")));
     }
 }
+
+/// Asserts that the tag a listing, whole or in a page, gives for an object is the tag a HEAD of
+/// it gives through the same proxy: for an object only the hot tier holds, one only the cold
+/// tier holds, and one both hold with other bytes, where both the HEAD and the listing are the
+/// hot tier's.
+#[tokio::test(start_paused = true)]
+async fn a_listed_tag_is_the_tag_a_head_gives_in_either_tier() {
+    let rig = Rig::new();
+    let proxy = rig.proxy("p1", 1000).await;
+    proxy.put("hot-only", body("h")).await.unwrap();
+    rig.cold_mem.put("cold-only", body("c")).await.unwrap();
+    proxy.put("both", body("in-hot")).await.unwrap();
+    rig.cold_mem.put("both", body("in-cold")).await.unwrap();
+
+    let listed = proxy.list("").await.unwrap();
+    let paged = proxy.list_page("", None, 10).await.unwrap();
+    assert_eq!(listed, paged);
+    let names: Vec<&str> = listed.iter().map(|object| object.key.as_str()).collect();
+    assert_eq!(names, ["both", "cold-only", "hot-only"]);
+    for object in &listed {
+        let head = proxy.head(&object.key).await.unwrap();
+        assert_eq!(object.tag, head.tag, "{}", object.key);
+    }
+    let hot = rig.hot_mem.head("both").await.unwrap().tag;
+    let cold = rig.cold_mem.head("both").await.unwrap().tag;
+    assert_ne!(hot, cold);
+    assert_eq!(listed[0].tag, hot);
+}

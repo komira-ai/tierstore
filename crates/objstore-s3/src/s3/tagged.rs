@@ -52,6 +52,9 @@ pub struct StampedObject {
     /// states it: S3 sends whole seconds, and another store may send milliseconds. It need not
     /// equal [`ObjectHead::modified_millis`] of the same object.
     pub modified_millis: u64,
+    /// The object's entity tag as the listing states it, with its quotes if the store sends
+    /// them (as [`ObjectHead::etag`] does).
+    pub etag: String,
 }
 
 /// One page of [`S3Store::list_stamped`], in ascending key order.
@@ -90,6 +93,16 @@ where
 pub(super) fn header<'a>(resp: &'a Response, name: &str) -> Option<&'a str> {
     let value = resp.headers().get(name)?.to_str().ok()?;
     (!value.is_empty()).then_some(value)
+}
+
+/// What the answer to a PUT says of the object it made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutAnswer {
+    /// The `ETag` of the answer, quotes included, if it has one.
+    pub etag: Option<String>,
+    /// The `Last-Modified` of the answer in milliseconds since the Unix epoch (whole seconds, as
+    /// the header has them), if it has one that is a date.
+    pub modified_millis: Option<u64>,
 }
 
 impl S3Store {
@@ -135,6 +148,28 @@ impl S3Store {
         self.conditional_write(key, body, condition).await
     }
 
+    /// [`put_new_tagged`](Self::put_new_tagged) for a caller that can do without the tag: the
+    /// answer of the write as it is, with the `ETag` and the `Last-Modified` it carries, each
+    /// `None` if the answer has none (S3's answer to a PUT has an `ETag` and no `Last-Modified`).
+    /// An answer with no `ETag` is not an error here: the object is made.
+    ///
+    /// # Errors
+    /// As [`put_new_tagged`](Self::put_new_tagged), except that no `ETag` is not a
+    /// [`ObjectStoreError::Protocol`].
+    pub async fn put_new_answered(
+        &self,
+        key: &ObjectKey,
+        body: Bytes,
+    ) -> Result<PutAnswer, ObjectStoreError> {
+        if !self.conn.capabilities.conditional_put {
+            return Err(ObjectStoreError::Unsupported(
+                "a create-only write on a store without conditional puts",
+            ));
+        }
+        let condition = ("if-none-match", "*".to_owned());
+        self.conditional_answer(key, body, condition).await
+    }
+
     /// A PUT that carries `condition` (`If-Match` or `If-None-Match`), sent once (a 409 leaves it
     /// unknown whether it was applied, see the module docs). Gives the `ETag` of the answer.
     async fn conditional_write(
@@ -143,18 +178,30 @@ impl S3Store {
         body: Bytes,
         condition: (&'static str, String),
     ) -> Result<String, ObjectStoreError> {
+        let answer = self.conditional_answer(key, body, condition).await?;
+        answer
+            .etag
+            .ok_or_else(|| ObjectStoreError::Protocol(format!("PUT of {key}: no ETag")))
+    }
+
+    /// As [`conditional_write`](Self::conditional_write), giving the answer's details.
+    async fn conditional_answer(
+        &self,
+        key: &ObjectKey,
+        body: Bytes,
+        condition: (&'static str, String),
+    ) -> Result<PutAnswer, ObjectStoreError> {
         let (name, value) = condition;
         let headers = vec![(name, value)];
         let resp = self
             .conn
             .send(Method::PUT, Some(key), &[], headers, body)
             .await?;
-        let bad = |what: &str| ObjectStoreError::Protocol(format!("PUT of {key}: {what}"));
         match resp.status() {
-            StatusCode::OK => {
-                let tag = header(&resp, "etag");
-                tag.map(str::to_owned).ok_or_else(|| bad("no ETag"))
-            }
+            StatusCode::OK => Ok(PutAnswer {
+                etag: header(&resp, "etag").map(str::to_owned),
+                modified_millis: header(&resp, "last-modified").and_then(times::http_date_millis),
+            }),
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
             StatusCode::PRECONDITION_FAILED if name == "if-none-match" => {
                 Err(ObjectStoreError::AlreadyExists(key.clone()))

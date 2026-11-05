@@ -297,6 +297,34 @@ async fn sdk_lists_the_one_bucket() {
     }
 }
 
+/// Asserts that the settings the SDK reads of a bucket (versioning, object lock, ACL, policy,
+/// tags) come back as S3's answers for a bucket with none set: versioning with no status, the
+/// owner's full control, and the 404 codes of S3 that tools read as "not configured".
+#[tokio::test]
+async fn sdk_reads_the_settings_of_a_bucket_with_none_set() {
+    let h = serving().await;
+    let sdk = client(&h);
+    let versioning = sdk.get_bucket_versioning().bucket(BUCKET).send().await;
+    assert_eq!(versioning.unwrap().status(), None);
+    let acl = sdk.get_bucket_acl().bucket(BUCKET).send().await.unwrap();
+    let permissions: Vec<_> = acl
+        .grants()
+        .iter()
+        .filter_map(|grant| grant.permission().map(|p| p.as_str()))
+        .collect();
+    assert_eq!(permissions, ["FULL_CONTROL"]);
+    let lock = sdk.get_object_lock_configuration().bucket(BUCKET).send();
+    let want = (404, "ObjectLockConfigurationNotFoundError".to_owned());
+    assert_eq!(refusal(lock.await), want);
+    let policy = sdk.get_bucket_policy().bucket(BUCKET).send();
+    assert_eq!(
+        refusal(policy.await),
+        (404, "NoSuchBucketPolicy".to_owned())
+    );
+    let tags = sdk.get_bucket_tagging().bucket(BUCKET).send();
+    assert_eq!(refusal(tags.await), (404, "NoSuchTagSet".to_owned()));
+}
+
 /// Asserts that the multipart flow of the SDK (create, two parts, complete) makes one object
 /// that reads back whole, by a range across the join of the parts, and with its size, and that an
 /// upload that is aborted is accepted: the way an output too big for one put goes up.
@@ -626,4 +654,85 @@ async fn a_url_from_the_stock_presigner_is_accepted_once() {
         kept.body.collect().await.unwrap().into_bytes().as_ref(),
         b"pack"
     );
+}
+
+/// Asserts that the `ETag` the SDK reads from each object of a ListObjectsV2 (plain, with
+/// `encoding-type=url` and `fetch-owner`, and by pages) is the one it reads from a HEAD and a
+/// GET of that object, quotes and all, for keys that need encoding, and that different bytes
+/// have different tags.
+#[tokio::test]
+async fn sdk_lists_the_etag_that_a_head_and_a_get_give() {
+    let h = serving().await;
+    let sdk = client(&h);
+    for (name, body) in [
+        ("t/a b", &b"one"[..]),
+        ("t/c&d", b"two"),
+        ("t/plain", b"three"),
+    ] {
+        put(&sdk, name, body).await.unwrap();
+    }
+    let listings = [
+        sdk.list_objects_v2().bucket(BUCKET).prefix("t/"),
+        sdk.list_objects_v2()
+            .bucket(BUCKET)
+            .prefix("t/")
+            .encoding_type(EncodingType::Url)
+            .fetch_owner(true),
+    ];
+    let names = ["t/a b", "t/c&d", "t/plain"];
+    let mut tags = Vec::new();
+    for request in listings {
+        let out = request.send().await.unwrap();
+        // The SDK does not decode the keys of `encoding-type=url`; the order is the same.
+        let listed: Vec<&str> = out
+            .contents()
+            .iter()
+            .map(|o| o.e_tag().expect("a tag"))
+            .collect();
+        assert_eq!(listed.len(), 3);
+        for (name, tag) in names.iter().zip(&listed) {
+            let head = sdk
+                .head_object()
+                .bucket(BUCKET)
+                .key(*name)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(head.e_tag(), Some(*tag), "{name}");
+            let got = sdk
+                .get_object()
+                .bucket(BUCKET)
+                .key(*name)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(got.e_tag(), Some(*tag), "{name}");
+            assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+        }
+        assert_ne!(listed[0], listed[1]);
+        tags.push(listed.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>());
+    }
+    assert_eq!(tags[0], tags[1]);
+    let first = page(&sdk, "t/", 1, None).await;
+    let second = sdk
+        .list_objects_v2()
+        .bucket(BUCKET)
+        .prefix("t/")
+        .max_keys(1)
+        .set_continuation_token(first.2)
+        .send()
+        .await
+        .unwrap();
+    let (key, tag) = (
+        second.contents()[0].key().unwrap(),
+        second.contents()[0].e_tag(),
+    );
+    let head = sdk
+        .head_object()
+        .bucket(BUCKET)
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.e_tag(), tag);
 }

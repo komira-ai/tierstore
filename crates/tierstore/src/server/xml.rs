@@ -63,6 +63,31 @@ pub(crate) fn location(region: &str) -> String {
     format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
+/// The answer to a read of a setting that S3 answers with an empty document when it is not set.
+pub(crate) fn empty_setting(root: &str) -> String {
+    format!("{PROLOG}<{root} xmlns=\"{NAMESPACE}\"/>")
+}
+
+/// The answer of GetBucketRequestPayment: the bucket owner pays.
+pub(crate) fn payer() -> String {
+    format!(
+        "{PROLOG}<RequestPaymentConfiguration xmlns=\"{NAMESPACE}\">\
+         <Payer>BucketOwner</Payer></RequestPaymentConfiguration>"
+    )
+}
+
+/// The answer of GetBucketAcl: the owner, with full control, and no other grant.
+pub(crate) fn acl() -> String {
+    let who = "<ID>tierstore</ID><DisplayName>tierstore</DisplayName>";
+    let schema = "http://www.w3.org/2001/XMLSchema-instance";
+    format!(
+        "{PROLOG}<AccessControlPolicy xmlns=\"{NAMESPACE}\"><Owner>{who}</Owner>\
+         <AccessControlList><Grant><Grantee xmlns:xsi=\"{schema}\" xsi:type=\"CanonicalUser\">\
+         {who}</Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList>\
+         </AccessControlPolicy>"
+    )
+}
+
 /// The answer of ListBuckets: the owner, and the bucket (with its region and the time it was
 /// made, `created_ms` since the Unix epoch) if `listed`, which is false when a filter of the call
 /// left it out.
@@ -147,9 +172,12 @@ impl Listing<'_> {
         for object in self.objects {
             let key = text(&object.key);
             let (size, modified) = (object.size, iso8601(object.modified));
+            // The tag in quotes, as the `ETag` header of a HEAD of the object has it.
+            let etag = escape(&format!("\"{}\"", object.tag));
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
-                 <Size>{size}</Size>{owner}<StorageClass>STANDARD</StorageClass></Contents>"
+                 <ETag>{etag}</ETag><Size>{size}</Size>{owner}\
+                 <StorageClass>STANDARD</StorageClass></Contents>"
             ));
         }
         for prefix in self.prefixes {
