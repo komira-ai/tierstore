@@ -6,7 +6,8 @@
 //! the only code of the process that dials out for the registry front.
 //!
 //! - One connection for each request: nothing is pooled, so no state is shared between pulls.
-//! - `GET` only, over HTTP/1.1, plain or over TLS. TLS trusts the system's CA certificates and,
+//! - `GET`, and `HEAD` of a manifest to learn the digest a tag points at now, over HTTP/1.1,
+//!   plain or over TLS. TLS trusts the system's CA certificates and,
 //!   with `ca_file`, the certificates in that file.
 //! - Login follows the challenge the upstream sends with its 401. `Basic` is answered with the
 //!   configured user name and password. `Bearer` is answered with a token fetched from the
@@ -24,6 +25,8 @@
 //!   it is requested anonymously, without the login.
 //! - `timeout` bounds each step: connecting and getting the headers of an answer, and the wait for
 //!   each piece of a body. The time a whole body takes is not bounded.
+//! - `recheck_timeout` bounds the re-check of a stored tag as a whole (see `pull`), whatever the
+//!   number of requests it makes.
 //!
 //! A body is not held whole unless it is a manifest or a token (at most [`MAX_MANIFEST_BYTES`]):
 //! a blob is handed on as a stream.
@@ -69,6 +72,8 @@ pub struct UpstreamSettings {
     pub timeout: Duration,
     /// The most redirects one request follows.
     pub max_redirects: u32,
+    /// How long the whole re-check of a stored tag may take, all its requests together.
+    pub recheck_timeout: Duration,
 }
 
 /// Why a pull from the upstream failed.
@@ -102,6 +107,7 @@ pub struct Upstream {
     tls: TlsConnector,
     timeout: Duration,
     max_redirects: u32,
+    recheck_timeout: Duration,
 }
 
 /// The answer of the upstream to a request that it granted: the headers, and the body still to
@@ -113,6 +119,12 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// The text of the header `name` of the answer, if it has one.
+    #[must_use]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name)?.to_str().ok()
+    }
+
     /// The `Content-Length` the upstream announced, if it did.
     #[must_use]
     pub fn length(&self) -> Option<u64> {
@@ -290,7 +302,14 @@ impl Upstream {
             tls: connector(settings.ca_pem.as_deref())?,
             timeout: settings.timeout,
             max_redirects: settings.max_redirects,
+            recheck_timeout: settings.recheck_timeout,
         })
+    }
+
+    /// How long the whole re-check of a stored tag may take.
+    #[must_use]
+    pub fn recheck_timeout(&self) -> Duration {
+        self.recheck_timeout
     }
 
     /// `GET path` (which starts with `/`), logged in as the upstream's challenge asks, with
@@ -301,6 +320,24 @@ impl Upstream {
     /// that is not 200, and [`UpstreamError::Failed`] for a failure to reach the upstream or to
     /// log in to it.
     pub async fn get(&self, path: &str, accept: &str) -> Result<Reply, UpstreamError> {
+        self.request(Method::GET, path, accept).await
+    }
+
+    /// `HEAD path`, with the login, timeout and redirects of [`get`](Self::get): the headers of
+    /// the answer, and no body.
+    ///
+    /// # Errors
+    /// As [`get`](Self::get).
+    pub async fn head(&self, path: &str, accept: &str) -> Result<Reply, UpstreamError> {
+        self.request(Method::HEAD, path, accept).await
+    }
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        accept: &str,
+    ) -> Result<Reply, UpstreamError> {
         let authority = self
             .base
             .authority()
@@ -309,7 +346,7 @@ impl Upstream {
         let url = format!("{scheme}://{authority}{path}")
             .parse::<Uri>()
             .map_err(|_| failed("the path is not valid"))?;
-        let (first, reached) = self.follow(&url, accept, None).await?;
+        let (first, reached) = self.follow(&method, &url, accept, None).await?;
         if first.status() != StatusCode::UNAUTHORIZED {
             return settle(first, self.timeout);
         }
@@ -323,7 +360,7 @@ impl Upstream {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         let auth = self.answer(challenge(asked)).await?;
-        let (second, _) = self.follow(&url, accept, Some(auth)).await?;
+        let (second, _) = self.follow(&method, &url, accept, Some(auth)).await?;
         settle(second, self.timeout)
     }
 
@@ -369,7 +406,9 @@ impl Upstream {
         }
         let login = self.login.as_ref().filter(|_| may_carry_secret(&url));
         let auth = login.map(basic);
-        let (reply, _) = self.follow(&url, "application/json", auth).await?;
+        let (reply, _) = self
+            .follow(&Method::GET, &url, "application/json", auth)
+            .await?;
         let reply = settle(reply, self.timeout)?;
         let body = reply.bytes(MAX_MANIFEST_BYTES).await?;
         let json: Value =
@@ -381,10 +420,11 @@ impl Upstream {
         }
     }
 
-    /// `GET url` with `auth`, and the redirects it meets followed without it. The answer comes
+    /// `method url` with `auth`, and the redirects it meets followed without it. The answer comes
     /// with the address it came from.
     async fn follow(
         &self,
+        method: &Method,
         url: &Uri,
         accept: &str,
         auth: Option<HeaderValue>,
@@ -392,7 +432,7 @@ impl Upstream {
         let mut url = url.clone();
         let mut auth = auth;
         for _ in 0..=self.max_redirects {
-            let response = self.send(&url, accept, auth.as_ref()).await?;
+            let response = self.send(method, &url, accept, auth.as_ref()).await?;
             if !response.status().is_redirection() {
                 return Ok((response, url));
             }
@@ -407,6 +447,7 @@ impl Upstream {
     /// One request, on a connection of its own.
     async fn send(
         &self,
+        method: &Method,
         url: &Uri,
         accept: &str,
         auth: Option<&HeaderValue>,
@@ -420,7 +461,7 @@ impl Upstream {
             None => url.path().to_owned(),
         };
         let mut request = Request::builder()
-            .method(Method::GET)
+            .method(method)
             .uri(target)
             .header(HOST, authority)
             .header(ACCEPT, accept)

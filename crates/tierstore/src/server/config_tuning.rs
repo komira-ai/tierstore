@@ -90,12 +90,12 @@ fn count(key: &str, value: Option<u32>, default: u32, high: u32) -> Result<u32, 
     within("hot_store", key, value.unwrap_or(default), 1, high)
 }
 
-const MS: Duration = Duration::from_millis(1);
+pub(super) const MS: Duration = Duration::from_millis(1);
 const MIB: u64 = 1 << 20;
 /// The largest part a key may ask for: a part is held in memory while it is sent, so the key stops
 /// at 1 GiB, not at the 5 GiB that S3 takes.
 const MAX_PART_BYTES_HELD: u64 = 1 << 30;
-const HOUR: Duration = Duration::from_secs(3600);
+pub(super) const HOUR: Duration = Duration::from_secs(3600);
 
 /// The client settings `[server]` gives, or the defaults of those it leaves out.
 pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {

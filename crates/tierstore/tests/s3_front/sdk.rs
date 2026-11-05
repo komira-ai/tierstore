@@ -253,6 +253,24 @@ async fn sdk_read_only_key_reads_and_is_refused_writes() {
     assert!(new.unwrap_err().into_service_error().is_not_found());
 }
 
+/// Asserts that the SDK's GetBucketLocation, which minio-go and s3cmd send before most calls,
+/// is answered: the SDK reads the `LocationConstraint` of a server in `us-east-1` as the empty
+/// name S3 gives that region, and the same call by a read-only key succeeds.
+#[tokio::test]
+async fn sdk_gets_the_location_of_the_bucket() {
+    let h = serving().await;
+    for sdk in [client(&h), reader(&h)] {
+        let found = sdk
+            .get_bucket_location()
+            .bucket(BUCKET)
+            .send()
+            .await
+            .unwrap();
+        let constraint = found.location_constraint().map(|region| region.as_str());
+        assert_eq!(constraint, Some(""));
+    }
+}
+
 /// Asserts that the multipart flow of the SDK (create, two parts, complete) makes one object
 /// that reads back whole, by a range across the join of the parts, and with its size, and that an
 /// upload that is aborted is accepted: the way an output too big for one put goes up.
@@ -344,6 +362,39 @@ async fn sdk_region_and_encoding_type_are_what_the_front_refuses() {
         .send()
         .await;
     assert_eq!(refusal(encoded), (501, "NotImplemented".to_owned()));
+}
+
+/// Asserts that the options an SDK's listing may carry without meaning anything are served: an
+/// empty `delimiter` and `fetch_owner(true)` list all the keys of a prefix (each with its
+/// `Owner`), and a `delimiter`
+/// with text is still 501 `NotImplemented`.
+#[tokio::test]
+async fn sdk_list_with_an_empty_delimiter_and_fetch_owner_is_served() {
+    let h = serving().await;
+    let sdk = client(&h);
+    for name in ["out/a", "out/b"] {
+        put(&sdk, name, b"x").await.unwrap();
+    }
+    let listed = sdk
+        .list_objects_v2()
+        .bucket(BUCKET)
+        .prefix("out/")
+        .delimiter("")
+        .fetch_owner(true)
+        .send()
+        .await
+        .unwrap();
+    let keys: Vec<_> = listed.contents().iter().filter_map(|o| o.key()).collect();
+    assert_eq!(keys, ["out/a", "out/b"]);
+    assert_eq!(listed.key_count(), Some(2));
+    let owners: Vec<_> = listed
+        .contents()
+        .iter()
+        .filter_map(|o| o.owner().and_then(|owner| owner.id()))
+        .collect();
+    assert_eq!(owners, ["tierstore", "tierstore"]);
+    let delimited = sdk.list_objects_v2().bucket(BUCKET).delimiter("/").send();
+    assert_eq!(refusal(delimited.await), (501, "NotImplemented".to_owned()));
 }
 
 /// Asserts that `x-id` is the one name the front's list of query parameters gained: a put with

@@ -29,8 +29,9 @@
 //!      [`EntryReconcilerConfig::copy_back_ttl`] ago on this process's monotonic clock, or more than
 //!      [`EntryReconcilerConfig::copy_back_max`] copy-backs are open and it is among the newest, it
 //!      is sealed and removed without a copy. Otherwise it is sealed, and then, under the seal (a
-//!      delete cannot amend a sealed entry, so none can run beside the copy, unless this process has lost the lease while the write runs: the successor releases a sealed entry at once and nothing fences the write still in flight), the cold object the
-//!      key holds now is streamed into the hot tier, create-only, if the hot tier has none; then
+//!      delete cannot amend a sealed entry, so none can run beside the copy, and the write stops,
+//!      landing nothing, at the first chunk it asks for once the margin of the lease is gone: the
+//!      entry then stays sealed for the successor), the cold object the key holds now is streamed into the hot tier, create-only, if the hot tier has none; then
 //!      the entry is removed. A cold object that is gone, a hot object that is there, or a hot
 //!      tier that answers full is nothing to copy, and the entry is removed all the same.
 //!    - `(PUT|CB|EVICT, SEALED)`: removed (a copy-back that was sealed is not copied again: a later
@@ -54,9 +55,10 @@
 //!    hot object older than [`EntryReconcilerConfig::stray_grace`] with no cold object and no entry
 //!    gets a `(PUT, PENDING)` entry, which the next step copies.
 //!
-//! An item that fails (a store call that fails, or less than the lease margin left) is tried again
-//! after a delay that starts at [`EntryReconcilerConfig::retry_min`] and doubles to
-//! [`EntryReconcilerConfig::retry_max`], so that a cold tier that is down is not asked about every
+//! An item that fails (a store call that fails, or less than the lease margin left that a renewal
+//! at once does not restore) is tried again after a delay that starts at
+//! [`EntryReconcilerConfig::retry_min`] and doubles to [`EntryReconcilerConfig::retry_max`], so
+//! that a cold tier that is down is not asked about every
 //! entry at every step.
 //!
 //! [`EntryReconciler::run`] steps without waiting while a step makes progress, waits
