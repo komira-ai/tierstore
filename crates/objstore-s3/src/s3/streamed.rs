@@ -18,7 +18,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
-use super::tagged::{header, retrying};
+use super::tagged::{PutAnswer, header, retrying};
 use super::{Conn, S3Store, SINGLE_PUT_MAX, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
@@ -208,6 +208,19 @@ impl S3Store {
         body: BodyStream,
         condition: Option<(&'static str, String)>,
     ) -> Result<Option<String>, ObjectStoreError> {
+        let answer = self.put_whole_answered(key, len, body, condition).await?;
+        Ok(answer.etag)
+    }
+
+    /// [`put_whole`](Self::put_whole), giving what the answer says of the object: its `ETag` and
+    /// its `Last-Modified`, each if the answer has it.
+    pub(super) async fn put_whole_answered(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        condition: Option<(&'static str, String)>,
+    ) -> Result<PutAnswer, ObjectStoreError> {
         let create_only = condition
             .as_ref()
             .is_some_and(|(name, _)| *name == "if-none-match");
@@ -217,13 +230,47 @@ impl S3Store {
             .send_streamed(key, &[], headers, len, body)
             .await?;
         match resp.status() {
-            StatusCode::OK => Ok(header(&resp, "etag").map(str::to_owned)),
+            StatusCode::OK => Ok(PutAnswer {
+                etag: header(&resp, "etag").map(str::to_owned),
+                modified_millis: header(&resp, "last-modified").and_then(times::http_date_millis),
+            }),
             StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
             StatusCode::PRECONDITION_FAILED if create_only => {
                 Err(ObjectStoreError::AlreadyExists(key.clone()))
             }
             _ => Err(self.conn.within(failure(resp)).await?),
         }
+    }
+
+    /// [`put_stream_new_tagged`](Self::put_stream_new_tagged) for a caller that can do without the
+    /// tag: gives what the answer to the write that made the object says (a PUT's answer, or the
+    /// completion of the multipart upload, whose answer has an `ETag` and no `Last-Modified`),
+    /// and an answer with no `ETag` is not an error (the object is made).
+    ///
+    /// # Errors
+    /// As [`put_stream_new_tagged`](Self::put_stream_new_tagged), except that no `ETag` is not a
+    /// [`ObjectStoreError::Protocol`].
+    pub async fn put_stream_new_answered(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+    ) -> Result<PutAnswer, ObjectStoreError> {
+        if !self.conn.capabilities.conditional_put {
+            return Err(ObjectStoreError::Unsupported(
+                "a create-only write on a store without conditional puts",
+            ));
+        }
+        if self.sends_whole(len) {
+            return self
+                .put_whole_answered(key, len, body, self.create_only())
+                .await;
+        }
+        let etag = multipart::put(&self.conn, key, len, body, None).await?;
+        Ok(PutAnswer {
+            etag,
+            modified_millis: None,
+        })
     }
 
     /// [`put_stream_if_match`](Self::put_stream_if_match) for a body whose length is not known,

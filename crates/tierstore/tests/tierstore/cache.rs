@@ -292,6 +292,30 @@ async fn a_streamed_put_is_passed_to_the_inner_store_unread() {
     assert!(!f.cached.needs_length());
 }
 
+/// Asserts that the cache passes a put that asks for the answer to the inner store as it is: the
+/// object is made there, the answer is the inner store's (none, for a store that gives none), and a
+/// failure of the inner store is the cache's.
+#[tokio::test]
+async fn a_put_that_asks_for_the_answer_is_passed_to_the_inner_store() {
+    let f = fixture(100);
+    f.backend.fail_next(Op::Put, 1);
+    let chunks = crate::support::chunks(&["01", "23"]);
+    let failed = f
+        .cached
+        .put_stream_answered("k", Some(4), chunks, false)
+        .await;
+    assert!(matches!(failed, Err(Error::Unavailable(_))));
+    assert_absent(&*f.backend, "k").await;
+
+    let chunks = crate::support::chunks(&["01", "23"]);
+    let made = f
+        .cached
+        .put_stream_answered("k", Some(4), chunks, true)
+        .await;
+    assert_eq!(made, Ok(None));
+    assert_eq!(f.cached.get("k", None).await.unwrap(), body("0123"));
+}
+
 /// Asserts that the cache does not take a conditional delete: it holds copies of what it read, so
 /// a delete that did not drop them would serve a deleted object. The call is `Unsupported`, does
 /// not reach the backend and leaves the object and its cached copy as they were.

@@ -9,8 +9,8 @@ use bytes::Bytes;
 use tokio::sync::{oneshot, watch};
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, Op, OpenUpload, PartBody, ReadBody, UploadedPart,
-    UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, Op, OpenUpload, PartBody, PutAnswer, ReadBody,
+    UploadedPart, UploadsAfter,
 };
 
 /// Where in a call a [`Gate`] parks it.
@@ -211,6 +211,18 @@ impl Backend for GateBackend {
         body: PartBody<'_>,
     ) -> Result<(), Error> {
         let call = self.inner.put_stream(key, len, body);
+        self.through(Op::Put, key, call).await
+    }
+
+    /// As `put_stream`, a call of kind [`Op::Put`].
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let call = self.inner.put_stream_answered(key, len, body, hot_only);
         self.through(Op::Put, key, call).await
     }
 
