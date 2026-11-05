@@ -637,9 +637,26 @@ while the server goes on accepting and serving (the settle), and `--drain-deadli
 then waits for requests in flight and for the connections it closes. `tierstore --help` lists the
 flags of a run.
 
+## Virtual-hosted-style addressing
+
+By default every request is path-style: the bucket is the first segment of the path. With
+`server.domains = ["s3.example.com"]` (a list; names are kept in lower case) a request whose `Host`
+is `<bucket>.s3.example.com` (any case, with a port or a trailing dot) is virtual-hosted-style: the
+bucket is read from the host, the whole path is the key, and `/` is the bucket (`GET /?list-type=2`
+lists it, `PUT /` and `HEAD /` are CreateBucket and HeadBucket, `GET /?uploads` lists the open
+uploads). A bucket name may hold dots; the longest listed domain the host is under decides. A host
+under no listed domain (an IP address, a load balancer's name, the bare domain) is path-style as
+before, so both forms work at once. A label that is not the served bucket is `404 NoSuchBucket` with
+the name. The signature covers the `Host` header the client sent, so a request signed for one
+bucket's host and sent to another is `SignatureDoesNotMatch`; a presigned URL for a bucket's host
+is signed over that host and the path `/<key>`. tierstore does not make the DNS names or the
+certificate: a wildcard record for `*.s3.example.com` must point to the server, and a TLS listener
+needs a certificate that covers `*.s3.example.com`. On a bucket's host `/healthz`, `/readyz`,
+`/usagez` and `/metricz` are keys; the probes are answered on the other hosts.
+
 ## Using a stock SDK
 
-The front serves one bucket, path-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
+The front serves one bucket, path-style or (with `server.domains`) virtual-hosted-style, over plain HTTP (over HTTPS when the file has `server.tls_cert_file` and `server.tls_key_file`), and checks SigV4 in the `Authorization`
 header only. An SDK with its defaults sends some things the front refuses, so a client needs these
 settings. `crates/tierstore/tests/s3_front/sdk.rs` drives the front with aws-sdk-rust (the
 `aws-sdk-s3` crate, version 1.96.0, in this repository's tests only) set this way, and that test is
@@ -648,7 +665,7 @@ what "tested" means below.
 | setting | value | why |
 |---|---|---|
 | endpoint | `http://<host>:<port>` of the `s3` interface (`https://` when the file has `server.tls_cert_file` and `server.tls_key_file`) | without a certificate the front has no TLS, and an `https://` endpoint fails |
-| addressing | path-style (`force_path_style`) | the bucket is in the path, `/<bucket>/<key>`; virtual-host addressing (`<bucket>.<host>`) is not served |
+| addressing | path-style (`force_path_style`), or the default of the SDK if `server.domains` lists the domain of the endpoint | the bucket is in the path, `/<bucket>/<key>`. With `server.domains = ["s3.example.com"]` a request to `<bucket>.s3.example.com` takes the bucket from the host and the whole path as the key, as S3 does (see Virtual-hosted-style addressing); a host under no listed domain, an IP address included, is path-style |
 | bucket | the `server.bucket` name | there is one; other names are not served |
 | region | tierstore's own `server.region` (not `hot_store.region` or `cold_store.region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |

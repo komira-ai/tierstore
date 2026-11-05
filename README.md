@@ -71,7 +71,7 @@ The process asks each tier the questions its guarantees rest on, then prints `ti
 
 ### 4. Put and get an object
 
-The front serves one bucket, path-style, over plain HTTP, and refuses the checksum trailer that recent AWS clients send by
+The front serves one bucket, path-style (or virtual-hosted-style for `server.domains`), over plain HTTP, and refuses the checksum trailer that recent AWS clients send by
 default, so tell the `aws` CLI to send checksums only when required:
 
 ```sh

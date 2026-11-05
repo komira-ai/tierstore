@@ -345,6 +345,14 @@ pub struct Cli {
     /// more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
     /// directory tiers.
     pub max_concurrent_puts: u32,
+    /// The domains of virtual-hosted-style addressing (`server.domains`): a request whose `Host`
+    /// is `<bucket>.<domain>` for one of them reads the bucket from the host and takes the whole
+    /// path as the key, as S3 does. A host under none of them (an IP address, the bare domain, a
+    /// load balancer's name), and every request when the list is empty (the default), is
+    /// path-style, `/<bucket>/<key>`. Lower case is kept; an entry is a domain name, not a URL. The
+    /// names must resolve to the server (a wildcard record) and, behind TLS, the certificate must
+    /// cover `*.<domain>`.
+    pub domains: Vec<String>,
     /// How long a put body or upload part that arrives when `server.max_concurrent_puts` bodies are
     /// already being taken waits for one of them to end: a number and `ms`, `s`, `m` or `h`. If a
     /// slot is free in that time the body is taken; if not, it is answered 503 `SlowDown` with

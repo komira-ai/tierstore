@@ -23,6 +23,7 @@ fn the_settings_are_made_from_the_flags() {
     cli.drain_lb_wait = Duration::from_secs(7);
     cli.drain_deadline = Duration::from_secs(11);
     cli.put_permit_wait = Duration::from_secs(4);
+    cli.domains = vec!["s3.example.com".to_owned()];
     let lines = key_file(
         &dir,
         "reader-lines",
@@ -38,6 +39,7 @@ fn the_settings_are_made_from_the_flags() {
     ];
     assert_eq!(built.server.read_only_keys, readers);
     assert_eq!(built.server.bucket, "tier-bucket");
+    assert_eq!(built.server.domains, ["s3.example.com"]);
     assert_eq!(built.server.region, "eu-west-1");
     assert_eq!(built.server.access_key_id, "AKID");
     assert_eq!(built.server.secret_access_key, "secret-0123456789");

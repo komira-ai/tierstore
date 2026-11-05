@@ -83,6 +83,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.s3_read_retry_wait",
     "server.handoff_socket",
     "server.handoff_wait",
+    "server.domains",
     "hot_store.usage_refresh",
     "hot_store.compare_range",
     "hot_store.listing_heads",

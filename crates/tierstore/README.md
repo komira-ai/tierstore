@@ -13,7 +13,7 @@ other crate of this workspace unless the `s3` feature is on.
   binary that runs a proxy, that front and an entry reconciler in one process.
   `packaging/README.md` has the keys and the unit.
 
-An S3 front over a hot and a cold tier. It serves one bucket, path-style, and checks SigV4 in the
+An S3 front over a hot and a cold tier. It serves one bucket, path-style or (with `server.domains`) virtual-hosted-style, and checks SigV4 in the
 `Authorization` header (and presigned GET and PUT URLs). The packaging notes and the key files
 are in `packaging/README.md`; the roles of a key are in `src/server/keys.rs`.
 

@@ -2,7 +2,8 @@
 //! a [`Backend`], which is a [`Proxy`](crate::Proxy) in the `tierstore` binary, and the pieces
 //! of that binary ([`cli`]).
 //!
-//! Path-style addressing of one bucket, and these calls, with the S3 error documents and status
+//! Path-style (`/<bucket>/<key>`) and, with `server.domains`, virtual-hosted-style
+//! (`<bucket>.<domain>/<key>`) addressing of one bucket, and these calls, with the S3 error documents and status
 //! codes (`NoSuchKey` 404, `PreconditionFailed` 412, `SlowDown` 503 where the backend has no
 //! room, and so on):
 //!
@@ -222,6 +223,7 @@ mod front;
 pub mod gc;
 pub mod handoff;
 mod handover;
+mod hosted;
 mod idle;
 mod keys;
 mod launch;
@@ -293,6 +295,8 @@ mod drain_tests;
 mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
+#[cfg(test)]
+mod hosted_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
@@ -381,6 +385,7 @@ use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
 use drain::SETTLED;
+use hosted::{hosted_bucket, resolve_hosted};
 use idle::Watched;
 use linger::Lingering;
 use listen::Listeners;
@@ -396,6 +401,10 @@ pub struct ServerConfig {
     pub bucket: String,
     /// The region in the credential scope of a signature.
     pub region: String,
+    /// The domains of virtual-hosted-style addressing (`server.domains`): a request to
+    /// `<bucket>.<domain>` names the bucket in its host and the key in its path. None by default,
+    /// and then every request is path-style.
+    pub domains: Vec<String>,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -515,6 +524,7 @@ impl ServerConfig {
         Self {
             bucket: bucket.to_owned(),
             region: "us-east-1".to_owned(),
+            domains: Vec::new(),
             access_key_id: access_key_id.to_owned(),
             secret_access_key: secret_access_key.to_owned(),
             read_only_keys: Vec::new(),
@@ -879,7 +889,12 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        if let Some(answer) = self.probe(parts).await {
+        // The probes are on the paths of the host that is not a bucket's: on a bucket's host a key
+        // may be called `healthz`.
+        let hosted = hosted_bucket(parts, &self.config.domains);
+        if hosted.is_none()
+            && let Some(answer) = self.probe(parts).await
+        {
             return Ok(answer);
         }
         let signed = auth::verify(&self.config, parts)?;
@@ -888,7 +903,10 @@ impl Server {
             return Err(S3Error::read_cache());
         }
         signed.role.permit(&parts.method)?;
-        let target = resolve(&self.config.bucket, parts.uri.path())?;
+        let target = match &hosted {
+            Some(label) => resolve_hosted(&self.config.bucket, label, parts.uri.path())?,
+            None => resolve(&self.config.bucket, parts.uri.path())?,
+        };
         let query = Query::parse(parts.uri.query())?;
         if let Some(grant) = &signed.presign {
             grant.permit(parts, &target, &query)?;

@@ -327,6 +327,28 @@ pub(crate) fn sign_claiming(
     payload: &str,
     body: &[u8],
 ) -> hyper::Request<http_body_util::Full<bytes::Bytes>> {
+    sign_on(
+        "tier.test",
+        config,
+        key,
+        (method, uri),
+        extra,
+        payload,
+        body,
+    )
+}
+
+/// [`sign_claiming`] for a request to the host `host`, which the signature covers.
+#[cfg(test)]
+pub(crate) fn sign_on(
+    host: &str,
+    config: &ServerConfig,
+    key: (&str, &str),
+    (method, uri): (&str, &str),
+    extra: &[(&str, &str)],
+    payload: &str,
+    body: &[u8],
+) -> hyper::Request<http_body_util::Full<bytes::Bytes>> {
     use bytes::Bytes;
     use http_body_util::Full;
     use hyper::Request;
@@ -338,7 +360,7 @@ pub(crate) fn sign_claiming(
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("host", "tier.test")
+        .header("host", host)
         .header("x-amz-content-sha256", payload)
         .header("x-amz-date", &stamp);
     for (name, value) in extra {
