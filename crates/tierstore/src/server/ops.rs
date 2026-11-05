@@ -452,18 +452,12 @@ impl Server {
             return self.list_buckets(query);
         }
         match (method, target, multipart) {
-<<<<<<< HEAD
-            ("PUT" | "HEAD", Target::Bucket, false) => {
-                Ok(answer(StatusCode::OK, &[], Bytes::new()))
-            }
-            ("GET", Target::Bucket, false) if query.has("versions") => {
-                self.list_versions(query).await
-            }
-=======
             ("PUT", Target::Bucket, false) => self.create_bucket(&body),
             ("HEAD", Target::Bucket, false) => Ok(self.head_bucket()),
             ("DELETE", Target::Bucket, false) => self.delete_bucket().await,
->>>>>>> origin/main
+            ("GET", Target::Bucket, false) if query.has("versions") => {
+                self.list_versions(query).await
+            }
             ("GET", Target::Bucket, false) => self.list_objects(query).await,
             ("GET", Target::Bucket, true) if query.has("uploads") => self.list_uploads(query).await,
             ("GET", Target::Object(key), true) if query.has("uploadId") => {
