@@ -204,6 +204,19 @@ async fn more_sockets_than_a_message_can_carry_are_refused() {
     );
 }
 
+/// Asserts that the pause after a failed accept is the default when `with_accept_pause` is not
+/// called, and the one given when it is.
+#[tokio::test]
+async fn the_accept_pause_is_the_default_until_one_is_given() {
+    let (_dir, path) = scratch();
+    let offer = Offer::bind(&path, Vec::new()).unwrap();
+    assert_eq!(offer.accept_pause, crate::server::ACCEPT_PAUSE);
+    let pause = std::time::Duration::from_millis(321);
+    assert_ne!(pause, crate::server::ACCEPT_PAUSE);
+    let offer = offer.with_accept_pause(pause);
+    assert_eq!(offer.accept_pause, pause);
+}
+
 /// The inode of the file at `path`.
 fn inode(path: &std::path::Path) -> u64 {
     use std::os::unix::fs::MetadataExt as _;

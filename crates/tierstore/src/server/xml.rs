@@ -63,6 +63,26 @@ pub(crate) fn location(region: &str) -> String {
     format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
+/// The answer of ListBuckets: the owner, and the bucket (with its region and the time it was
+/// made, `created_ms` since the Unix epoch) if `listed`, which is false when a filter of the call
+/// left it out.
+pub(crate) fn buckets(bucket: &str, region: &str, created_ms: u64, listed: bool) -> String {
+    let found = if listed {
+        let (name, region) = (escape(bucket), escape(region));
+        let created = iso8601(created_ms);
+        format!(
+            "<Bucket><Name>{name}</Name><CreationDate>{created}</CreationDate>\
+             <BucketRegion>{region}</BucketRegion></Bucket>"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{PROLOG}<ListAllMyBucketsResult xmlns=\"{NAMESPACE}\">{OWNER}\
+         <Buckets>{found}</Buckets></ListAllMyBucketsResult>"
+    )
+}
+
 /// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy
 /// has no accounts: it serves one bucket to every caller it lets in, so every object has the
 /// same owner, named for the proxy.

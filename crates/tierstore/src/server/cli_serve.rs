@@ -12,6 +12,7 @@ use tokio::sync::Notify;
 
 use crate::{Backend, Proxy, TokioSleeper};
 
+use super::bucket::created_at;
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
@@ -20,7 +21,7 @@ use super::handoff::{
     Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Socket, Want, check_control_path,
     take,
 };
-use super::listen::{bind_all, duplicates, local_addrs};
+use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
@@ -89,8 +90,8 @@ impl Addresses {
 ///
 /// # Errors
 /// An address cannot be bound; the message names it.
-pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
-    bind_all(addrs).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
+pub(super) fn bind_s3(addrs: &[SocketAddr], backlog: i32) -> Result<Vec<TcpListener>, Error> {
+    bind_all_with(addrs, backlog).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
 }
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
@@ -158,6 +159,7 @@ pub async fn run_handing(
     let mut built = build(cli)?;
     let gate = open_gate(cli).map_err(Error::from)?;
     start_format(cli, built.hot.as_ref()).await?;
+    built.server.bucket_created = created_at(built.hot.as_ref(), built.server.bucket_created).await;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let heartbeat = built.proxy.heartbeat;
@@ -168,6 +170,7 @@ pub async fn run_handing(
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
+    let listen = built.server.listen;
     let server = Server::new(proxy, built.server);
     let Bound {
         s3: listeners,
@@ -177,11 +180,12 @@ pub async fn run_handing(
     } = bind_fronts(
         handoff,
         &cli.listen,
-        || bind_s3(&cli.listen),
+        || bind_s3(&cli.listen, listen.backlog),
         built.oci,
         oci_backend,
     )
     .await?;
+    let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
     let stop = stopped_by(stop, offer);
     ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);

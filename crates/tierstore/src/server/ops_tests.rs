@@ -308,10 +308,10 @@ async fn a_listing_with_a_bad_argument_is_refused() {
 }
 
 /// Asserts that creating and heading the served bucket succeed, another bucket is
-/// `NoSuchBucket`, and the calls this server does not do are `NotImplemented`: the service
-/// root, another method, a subresource of an object, a multipart parameter on a plain read,
-/// a listing of the bucket that names an upload id and not `uploads`, a post with no upload, a post with a part number and no upload id, and a delete of the
-/// bucket.
+/// `NoSuchBucket`, and the calls this server does not do are `NotImplemented`: another method,
+/// a subresource of an object, a multipart parameter on a plain read, a listing of the bucket
+/// that names an upload id and not `uploads`, a post with no upload, a post with a part number
+/// and no upload id, and a delete of the bucket.
 #[tokio::test(start_paused = true)]
 async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -325,7 +325,6 @@ async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     assert_eq!(other.code(), "NoSuchBucket");
     let patch = format!("{bucket}/k");
     let not_done = [
-        rig.send("GET", "/", &[], b"").await,
         rig.send("PATCH", &patch, &[], b"").await,
         rig.call("GET", "k?acl", b"").await,
         rig.call("GET", "k?partNumber=1", b"").await,
