@@ -35,9 +35,10 @@
 //!
 //! What it refuses, besides what every file does: the refusals of a storage node's file, those of
 //! a build node's `[local_cache]` table, `write_through = false`, and a cache directory that is
-//! the directory of a `dir` tier, inside it or around it, or around the lock file, a key file of
-//! the `oci` interface or `server.handoff_socket` (the tier would list the cache's files as objects), and a relative lock file
-//! or `oci` key file (a relative path leads from the working directory of the process, which
+//! the directory of a `dir` tier, inside it or around it (the tier would list the cache's files
+//! as objects), or around the lock file, a key file of the `oci` interface or
+//! `server.handoff_socket` (the offer of a hand-off replaces the file at its path, which could be
+//! the cache's `.lock`), and a relative lock file or `oci` key file (a relative path leads from the working directory of the process, which
 //! the file does not name, so it cannot be compared with the cache directory). The paths are
 //! compared by component, `.` and `..` resolved by text, not through links.
 

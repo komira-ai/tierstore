@@ -144,7 +144,7 @@ fn a_cache_shape_without_the_hand_over_socket_is_not_configured() {
 }
 
 /// Asserts that `mode = "restart"` in the params gives a restart for a cache shape that both
-/// releases could hand over, and a restart without the staged release listing the cache word.
+/// releases could hand over.
 #[test]
 fn a_restart_mode_in_the_params_restarts_a_cache_shape() {
     let fake = SystemdFake::installed();
