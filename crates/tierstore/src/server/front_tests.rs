@@ -224,3 +224,34 @@ fn a_file_with_one_tls_key_is_refused_naming_both_keys() {
         );
     }
 }
+
+/// Asserts that the io keys of a file reach the settings of the server that serves the front: the
+/// header timeout, the listen settings, the queue of a streamed put and the handshake time of the
+/// OCI front are the file's, and a file without them gives the defaults of `ServerConfig::new`.
+#[test]
+fn the_io_keys_of_a_file_reach_the_server_settings() {
+    let dir = TestDir::under(std::env::temp_dir(), "front-io-keys");
+    let keys = "header_timeout = \"91s\"\nlisten_backlog = 77\naccept_pause = \"250ms\"\n\
+                door_grace = \"4s\"\ndoor_look = \"30ms\"\nput_pieces_queued = 6\n\
+                oci_handshake_timeout = \"17s\"\n";
+    let set = server_config(&front(&dir, keys), Arc::new(SystemClock), false).expect("settings");
+    assert_eq!(set.header_timeout, std::time::Duration::from_secs(91));
+    assert_eq!(set.listen.backlog, 77);
+    assert_eq!(
+        set.listen.accept_pause,
+        std::time::Duration::from_millis(250)
+    );
+    assert_eq!(set.listen.door_grace, std::time::Duration::from_secs(4));
+    assert_eq!(set.listen.door_look, std::time::Duration::from_millis(30));
+    assert_eq!(set.put_pieces_queued, 6);
+    assert_eq!(
+        set.oci_handshake_timeout,
+        std::time::Duration::from_secs(17)
+    );
+    let plain = server_config(&front(&dir, ""), Arc::new(SystemClock), false).expect("settings");
+    let fresh = crate::server::ServerConfig::new("b", "k", "s", Arc::new(SystemClock));
+    assert_eq!(plain.header_timeout, fresh.header_timeout);
+    assert_eq!(plain.listen, fresh.listen);
+    assert_eq!(plain.put_pieces_queued, fresh.put_pieces_queued);
+    assert_eq!(plain.oci_handshake_timeout, fresh.oci_handshake_timeout);
+}

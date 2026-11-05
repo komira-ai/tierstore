@@ -29,6 +29,7 @@ access_key_file       = "/etc/tierstore-cache/access.key"
 read_only_key_files   = ["/etc/tierstore-cache/clients.key"]
 presign_max_expires   = "10m"
 max_concurrent_puts   = 8
+delete_concurrency    = 4
 put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
@@ -184,6 +185,7 @@ fn a_build_node_file_makes_a_cache() {
     );
     assert_eq!(front.presign_max_expires, Duration::from_secs(600));
     assert_eq!(front.max_concurrent_puts, 8);
+    assert_eq!(front.delete_concurrency, 4);
     assert_eq!(front.put_permit_wait, Duration::from_secs(25));
     assert_eq!(front.put_min_bytes_per_sec, 2048);
     assert_eq!(front.put_rate_grace, Duration::from_secs(45));
@@ -271,6 +273,7 @@ fn a_build_node_file_has_the_defaults_of_the_flags_and_of_the_cache() {
     assert_eq!(cache.front.region, "us-east-1");
     assert_eq!(cache.front.max_request_bytes, 256 << 20);
     assert_eq!(cache.front.max_concurrent_puts, 32);
+    assert_eq!(cache.front.delete_concurrency, 16);
     assert_eq!(cache.front.put_permit_wait, Duration::from_secs(15));
     assert_eq!(cache.s3_request_timeout, Duration::from_secs(60));
     assert_eq!(cache.scrub_rate, Some(SCRUB_RATE));
@@ -770,7 +773,7 @@ fn the_whole_fill_limit_is_a_size_between_one_byte_and_the_budget() {
 }
 
 /// The keys of `[local_cache]`, which the README of the packaging must document each in a row.
-const LOCAL_CACHE_KEYS: [&str; 16] = [
+const LOCAL_CACHE_KEYS: [&str; 23] = [
     "path",
     "layout",
     "budget",
@@ -787,6 +790,13 @@ const LOCAL_CACHE_KEYS: [&str; 16] = [
     "cache",
     "scrub_rate",
     "scrub_min_round",
+    "pass_interval",
+    "lock_interval",
+    "scrub_tick",
+    "listing_calls",
+    "forget_limit",
+    "fill_chunk",
+    "keep_queue_bytes",
 ];
 
 /// Asserts that the README of the packaging documents the build-node shape: its example loads,

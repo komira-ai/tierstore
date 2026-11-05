@@ -10,9 +10,14 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
-use super::{Addrs, LoopbackBind, bind, bind_all, bind_set, joined, local_addrs};
+use super::{
+    Addrs, ListenTuning, Listeners, LoopbackBind, bind, bind_all, bind_all_with, bind_set,
+    bind_with, joined, local_addrs, note_nodelay,
+};
 use crate::server::Drained;
-use crate::server::testing::Rig;
+use crate::server::Incoming as _;
+use crate::server::cli_serve::bind_s3;
+use crate::server::testing::{Rig, established_unaccepted};
 
 fn addr(text: &str) -> SocketAddr {
     text.parse().expect("an address")
@@ -269,4 +274,70 @@ fn a_loopback_bind_error_names_loopback_the_port_and_the_reason() {
     assert!(text.contains("loopback"), "{text}");
     assert!(text.contains("127.0.0.1:9300"), "{text}");
     assert!(text.contains("address in use"), "{text}");
+}
+
+/// Asserts that a connection taken from either of two sockets of `Listeners` has `TCP_NODELAY`
+/// set, and that a client's own socket (which this code does not touch) does not.
+/// It would catch an accept that returns the stream as the kernel made it, with Nagle's
+/// algorithm on: the response head and a small body would then be two segments, the second held
+/// until the client's delayed ACK.
+#[tokio::test]
+async fn accepted_connections_have_nodelay() {
+    let sockets = vec![
+        bind(addr("127.0.0.1:0")).expect("bound"),
+        bind(addr("127.0.0.1:0")).expect("bound"),
+    ];
+    let mut listeners = Listeners::new(sockets);
+    for at in listeners.local_addrs().expect("addresses") {
+        let client = std::net::TcpStream::connect(at).expect("connected");
+        let (stream, _) = std::future::poll_fn(|cx| listeners.poll_incoming(cx))
+            .await
+            .expect("accepted");
+        assert!(stream.nodelay().expect("option read"));
+        assert!(!client.nodelay().expect("option read"));
+    }
+}
+
+/// Asserts that a failed `TCP_NODELAY` is only noted, and a successful one is too: neither
+/// panics, so the connection is served either way.
+#[test]
+fn a_failed_nodelay_is_not_fatal() {
+    note_nodelay(Ok(()));
+    note_nodelay(Err(std::io::Error::other("refused")));
+}
+
+/// Asserts that the backlog given to the bind makes a listening socket that takes connections, for
+/// one socket and for each socket of a set, and that the default is the 1024 the code had. (The
+/// length of the queue is the kernel's to keep; that it is the one given is checked at the
+/// settings, in `front_tests` and `oci_cli_tests`.)
+#[tokio::test]
+async fn a_socket_bound_with_a_backlog_takes_connections() {
+    let listener = bind_with(addr("127.0.0.1:0"), 1).expect("bound");
+    let at = listener.local_addr().expect("an address");
+    let client = TcpStream::connect(at).await.expect("connected");
+    let (_taken, from) = listener.accept().await.expect("accepted");
+    assert_eq!(Some(from), client.local_addr().ok());
+    let set = [addr("127.0.0.1:0"), addr("127.0.0.1:0")];
+    assert_eq!(bind_all_with(&set, 11).expect("bound").len(), 2);
+    assert_eq!(ListenTuning::default().backlog, 1024);
+}
+
+/// Asserts that the backlog given to the S3 bind of the server (`bind_s3`) is the one the sockets
+/// listen with: with a backlog of 1, of six connections no more than the queue and the one the
+/// kernel lets over it are established while nothing accepts, for each address; with the default
+/// backlog more than that are.
+#[tokio::test]
+async fn the_s3_bind_listens_with_the_backlog_given() {
+    let wanted = [addr("127.0.0.1:0"), addr("127.0.0.1:0")];
+    let small = bind_s3(&wanted, 1).expect("bound");
+    for listener in &small {
+        let at = listener.local_addr().expect("an address");
+        let held = established_unaccepted(at, 6).await;
+        assert!((1..=3).contains(&held), "{held} established on {at}");
+    }
+    let large = bind_s3(&wanted, ListenTuning::default().backlog).expect("bound");
+    for listener in &large {
+        let at = listener.local_addr().expect("an address");
+        assert!(established_unaccepted(at, 6).await > 3, "{at}");
+    }
 }

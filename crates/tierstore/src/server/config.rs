@@ -46,8 +46,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::cli::{
-    Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
+    Cli, DEFAULT_DELETE_CONCURRENCY, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_PUT_MIN_BYTES_PER_SEC, DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
@@ -57,7 +57,9 @@ use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
+use super::config_io::io_tuning;
 use super::config_policy::{Policy, check_policies};
+use super::config_reconcile::reconcile_tuning;
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
@@ -283,6 +285,7 @@ pub(super) struct ServerTable {
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
+    pub delete_concurrency: Option<u32>,
     pub put_permit_wait: Option<Dur>,
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
@@ -298,6 +301,17 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    // The keys of `config_io`.
+    pub header_timeout: Option<Dur>,
+    pub accept_pause: Option<Dur>,
+    pub listen_backlog: Option<i32>,
+    pub door_grace: Option<Dur>,
+    pub door_look: Option<Dur>,
+    pub put_pieces_queued: Option<u32>,
+    pub oci_handshake_timeout: Option<Dur>,
+    pub s3_chunks_waiting: Option<u32>,
+    pub dir_copy_chunk: Option<Size>,
+    pub dir_read_chunk: Option<Size>,
     pub s3_single_put_max: Option<Size>,
     pub s3_part_bytes: Option<Size>,
     // The keys of `config_handoff`.
@@ -344,6 +358,22 @@ pub(super) struct TierTable {
     pub reconcile_interval: Option<Dur>,
     #[serde(default)]
     pub lock_file: Option<PathBuf>,
+    #[serde(default)]
+    pub idle_min: Option<Dur>,
+    #[serde(default)]
+    pub idle_max: Option<Dur>,
+    #[serde(default)]
+    pub lease_renew: Option<Dur>,
+    #[serde(default)]
+    pub lease_margin: Option<Dur>,
+    #[serde(default)]
+    pub listing_page_size: Option<u32>,
+    #[serde(default)]
+    pub stop_wait: Option<Dur>,
+    #[serde(default)]
+    pub lock_retry: Option<Dur>,
+    #[serde(default)]
+    pub first_beat_poll: Option<Dur>,
     #[serde(default)]
     pub usage_stale_after: Option<Dur>,
     #[serde(default)]
@@ -579,6 +609,14 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
             "registration_retention",
             cold.registration_retention.is_some(),
         ),
+        ("idle_min", cold.idle_min.is_some()),
+        ("idle_max", cold.idle_max.is_some()),
+        ("lease_renew", cold.lease_renew.is_some()),
+        ("lease_margin", cold.lease_margin.is_some()),
+        ("listing_page_size", cold.listing_page_size.is_some()),
+        ("stop_wait", cold.stop_wait.is_some()),
+        ("lock_retry", cold.lock_retry.is_some()),
+        ("first_beat_poll", cold.first_beat_poll.is_some()),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -728,6 +766,8 @@ pub(super) fn storage(
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
+    let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
+    let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
@@ -768,18 +808,21 @@ pub(super) fn storage(
         drain_deadline: front.drain_deadline,
         tls: front.tls,
         copy_parallel,
-        lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
+        lease_ttl,
         lock_file,
+        reconcile_tuning,
         handoff,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
+        delete_concurrency: front.delete_concurrency,
         put_permit_wait: front.put_permit_wait,
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
         min_secret_bytes: front.min_secret_bytes,
+        io_tuning: front.io,
         skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
@@ -820,7 +863,8 @@ pub(super) fn front_of(
     listen: Vec<SocketAddr>,
     per_run: PerRun,
 ) -> Result<Shared, ConfigError> {
-    let s3_client = s3_client(&server)?;
+    let mut s3_client = s3_client(&server)?;
+    let io = io_tuning(&server, &mut s3_client)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -838,6 +882,16 @@ pub(super) fn front_of(
         "server",
         "max_concurrent_puts",
         max_concurrent_puts,
+        1,
+        u32::MAX,
+    )?;
+    let delete_concurrency = server
+        .delete_concurrency
+        .unwrap_or(DEFAULT_DELETE_CONCURRENCY);
+    let delete_concurrency = within(
+        "server",
+        "delete_concurrency",
+        delete_concurrency,
         1,
         u32::MAX,
     )?;
@@ -861,6 +915,7 @@ pub(super) fn front_of(
         grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
+        delete_concurrency,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
         put_min_bytes_per_sec: server
             .put_min_bytes_per_sec
@@ -870,6 +925,7 @@ pub(super) fn front_of(
         min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,
+        io,
     };
     Ok(Shared {
         front,

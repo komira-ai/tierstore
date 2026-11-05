@@ -20,7 +20,8 @@ use crate::{Error, Listed, OpenUpload, UploadsAfter};
 
 use super::Inner;
 
-/// The most pages of the upstream one listing reads to make up for the names it leaves out.
+/// The default of `local_cache.listing_calls`: the most pages of the upstream one listing reads to
+/// make up for the names it leaves out.
 pub(super) const LISTING_CALLS: u32 = 100;
 
 /// The key to continue a listing after, when the last key the upstream gave is `last`: the end of
@@ -78,10 +79,11 @@ impl Inner {
         }
         let mut after = start_after.map(str::to_owned);
         let mut calls = 0;
+        let limit = self.config.listing_calls.max(1);
         while found.len() < max_keys {
             calls += 1;
-            if calls > LISTING_CALLS {
-                let text = format!("the upstream's listing took over {LISTING_CALLS} calls");
+            if calls > limit {
+                let text = format!("the upstream's listing took over {limit} calls");
                 return Err(Error::Unavailable(text));
             }
             let want = max_keys - found.len();
@@ -114,11 +116,11 @@ impl Inner {
         }
         let mut after = after.map(|(key, id)| (key.to_owned(), id.map(str::to_owned)));
         let mut calls = 0;
+        let limit = self.config.listing_calls.max(1);
         while found.len() < max_uploads {
             calls += 1;
-            if calls > LISTING_CALLS {
-                let text =
-                    format!("the upstream's listing of uploads took over {LISTING_CALLS} calls");
+            if calls > limit {
+                let text = format!("the upstream's listing of uploads took over {limit} calls");
                 return Err(Error::Unavailable(text));
             }
             let want = max_uploads - found.len();

@@ -60,20 +60,55 @@ use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
 use super::handoff::Handoff;
-use super::listen::{LoopbackBind, bind, bind_set, joined};
-use super::local_cache::{
-    CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
-};
+use super::listen::{LoopbackBind, bind_set, bind_with, joined};
+use super::local_cache::{CacheConfig, Disk, Every, LocalCache, Mode, SystemDisk, check_local};
 use super::oci::OciListener;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server, ServerConfig};
 
-/// How often the eviction pass runs beside the server.
-pub(super) const PASS_INTERVAL: Duration = Duration::from_secs(10);
+/// The times of the loops that run beside the server of a cache, from its settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Loops {
+    /// How often the eviction pass runs (`local_cache.pass_interval`).
+    pub(super) pass: Duration,
+    /// How often a cache that does not hold the lock of its directory tries it again, and one that
+    /// holds it checks that the lock file is still the file at the path
+    /// (`local_cache.lock_interval`).
+    pub(super) lock: Duration,
+    /// The time between two ticks of the scrub (`local_cache.scrub_tick`).
+    pub(super) tick: Duration,
+    /// The bytes the scrub reads at each tick, or `None` for no scrub.
+    pub(super) per_tick: Option<u64>,
+    /// The fewest ticks between the starts of two rounds of the scrub: `scrub_min_round` rounded up
+    /// to whole ticks, so a round never starts sooner than configured.
+    pub(super) min_round: u64,
+}
 
-/// How often a cache that does not hold the lock of its directory tries it again, and one that
-/// holds it checks that the lock file is still the file at the path.
-pub(super) const LOCK_INTERVAL: Duration = Duration::from_secs(1);
+impl Loops {
+    /// The loops of a cache with `config`, whose scrub reads `rate` bytes a second (none for no
+    /// scrub) and starts a round at most every `min_round`.
+    pub(super) fn of(config: &CacheConfig, rate: Option<u64>, min_round: Duration) -> Self {
+        let tick = config.scrub_tick;
+        let millis = tick.as_millis().max(1);
+        let per_tick = |rate: u64| {
+            // Rounded up, and at least a byte, so that a small rate on a short tick still moves.
+            u64::try_from(
+                u128::from(rate)
+                    .saturating_mul(millis)
+                    .div_ceil(1000)
+                    .max(1),
+            )
+            .unwrap_or(u64::MAX)
+        };
+        Self {
+            pass: config.pass_interval,
+            lock: config.lock_interval,
+            tick,
+            per_tick: rate.map(per_tick),
+            min_round: u64::try_from(min_round.as_millis().div_ceil(millis)).unwrap_or(u64::MAX),
+        }
+    }
+}
 
 /// Binds the S3 front of a node with a local cache: every configured address, then the loopback sockets that
 /// [`bind_set`] adds because a local cache is defined.
@@ -82,10 +117,11 @@ pub(super) const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 /// A configured address that cannot be bound (named), or a loopback socket that cannot ([`LoopbackBind`]).
 pub(super) fn bind_cache_s3(
     configured: &[std::net::SocketAddr],
+    backlog: i32,
 ) -> Result<Vec<tokio::net::TcpListener>, Error> {
-    let mut listeners = bind_s3(configured)?;
+    let mut listeners = bind_s3(configured, backlog)?;
     for addr in &bind_set(configured, true)[configured.len()..] {
-        let socket = bind(*addr).map_err(|why| LoopbackBind { addr: *addr, why })?;
+        let socket = bind_with(*addr, backlog).map_err(|why| LoopbackBind { addr: *addr, why })?;
         listeners.push(socket);
     }
     Ok(listeners)
@@ -216,7 +252,7 @@ pub(super) struct Fronts<'a> {
     pub(super) listen: &'a [std::net::SocketAddr],
     /// How long the drain waits for the load balancer to notice.
     pub(super) lb_wait: Duration,
-    /// The bytes the scrub reads at each tick, or `None` for no scrub.
+    /// The bytes the scrub reads a second, or `None` for no scrub.
     pub(super) scrub_rate: Option<u64>,
     /// The shortest time one round of the scrub takes.
     pub(super) scrub_min_round: Duration,
@@ -255,6 +291,7 @@ pub(super) async fn serve_front(
     beside: impl Future<Output = ()>,
 ) -> Result<Drained, Error> {
     config.cache = Some(cache.clone());
+    let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
@@ -266,12 +303,13 @@ pub(super) async fn serve_front(
     } = bind_fronts(
         fronts.handoff,
         &bind_set(fronts.listen, true),
-        || bind_cache_s3(fronts.listen),
+        || bind_cache_s3(fronts.listen, listen.backlog),
         oci,
         backend,
     )
     .await
     .map_err(super::cli::HandingError::into_boxed)?;
+    let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
     let stop = stopped_by(stop, offer);
     ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
@@ -305,19 +343,19 @@ pub(super) async fn serve_front(
         }
         ended
     };
+    let loops = Loops::of(cache.config(), fronts.scrub_rate, fronts.scrub_min_round);
     let maintaining = async {
-        cache.maintain(PASS_INTERVAL, halt).await;
+        cache.maintain(loops.pass, halt).await;
         tracing::debug!("tierstore: maintain ended");
     };
     let holding = async {
-        cache.hold(LOCK_INTERVAL, lock_halt).await;
+        cache.hold(loops.lock, lock_halt).await;
         tracing::debug!("tierstore: hold ended");
     };
-    let min_round = fronts.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
     let scrubbing = async {
-        let every = Every::new(SCRUB_TICK);
+        let every = Every::new(loops.tick);
         cache
-            .scrub(fronts.scrub_rate, min_round, every, scrub_halt)
+            .scrub(loops.per_tick, loops.min_round, every, scrub_halt)
             .await;
         tracing::debug!("tierstore: scrub ended");
     };
