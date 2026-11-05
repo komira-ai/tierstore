@@ -72,7 +72,7 @@ impl Shape {
 /// The settings of a node of one of the shapes.
 enum Config {
     Plain(Box<Cli>),
-    Build(CacheSettings),
+    Build(Box<CacheSettings>),
     Combined(Box<CombinedSettings>),
 }
 
@@ -172,7 +172,7 @@ kind = "memory"
         if let Some(node) = &self.build {
             let text = node.text(&server, "").replace(any, &quoted);
             let settings = settings_from_text(&text, QUICK).unwrap();
-            return Config::Build(settings.into_cache().unwrap());
+            return Config::Build(Box::new(settings.into_cache().unwrap()));
         }
         let node = self.combined.as_ref().expect("a node");
         let lock = self.hot_lock().expect("a lock file");
@@ -192,10 +192,10 @@ async fn start(
 ) -> Result<Drained, Error> {
     let disk: Arc<dyn Disk> = Arc::new(SystemDisk);
     match config {
-        Config::Plain(cli) => run_serving(&cli, stop, ready).await,
+        Config::Plain(cli) => run_serving(cli, stop, ready).await,
         Config::Build(settings) => {
             let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
-            serve_cache(settings, upstream, disk, stop, ready).await
+            serve_cache(&settings, upstream, disk, stop, ready).await
         }
         Config::Combined(settings) => serve_combined(&settings, disk, stop, ready).await,
     }
