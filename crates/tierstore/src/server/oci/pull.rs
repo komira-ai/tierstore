@@ -239,7 +239,7 @@ impl OciFront {
         if announced == *stored {
             return Ok(announced);
         }
-        let detail = json!({ "tag": echoed(tag) });
+        let detail = json!({ "tag": echoed(tag, self.sizes.echo_bytes) });
         let fetched = self.fetch_manifest(upstream, name, tag, &detail).await;
         let (body, digest) = fetched.map_err(|_| format!("pulling {path} failed"))?;
         if digest == *stored {
