@@ -32,12 +32,9 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use tierstore_testkit::dir::TestDir;
 
-/// Lowercase hex SHA-256 of each banned word, lowercased. The longest banned word has 10
+/// Lowercase hex SHA-256 of each banned word, lowercased. The longest banned word has 3
 /// letters; `MAX_WORD` is above it.
-const BANNED: &[&str] = &[
-    "26d3db7618fdeda8526fe5d7a332a43a3eddf62f42f8cced23e9ac6dfa9fe96d",
-    "3900342427d1a2ba2a845b221daab609b2dcd0fe0fd8929da5777fc6f2d1fe02",
-];
+const BANNED: &[&str] = &["26d3db7618fdeda8526fe5d7a332a43a3eddf62f42f8cced23e9ac6dfa9fe96d"];
 
 /// No banned word is longer than this, so a longer word is not hashed.
 const MAX_WORD: usize = 16;
@@ -209,15 +206,18 @@ fn text_without_a_banned_word_has_no_finding() {
     assert_eq!(findings("f.md", text, &test_deny()), Vec::<String>::new());
 }
 
-/// Asserts that the real deny list holds the two names it is for: each is found in a
-/// hyphenated name and in capitals, built here from parts so this file does not hold them.
+/// Asserts that the real deny list holds the name it is for, found in a hyphenated name and
+/// in capitals and built here from parts so this file does not hold it, and that it does not
+/// hold `hostkeeper`, the name of a public project whose package this repository builds.
 #[test]
-fn the_real_deny_list_finds_the_names_it_is_for() {
-    let names = [["k", "b", "f"].concat(), ["host", "keeper"].concat()];
-    for name in names {
-        let text = format!("x {}-fake and {}\n", name, name.to_uppercase());
-        assert_eq!(findings("f", &text, &real_deny()).len(), 2, "{name}");
-    }
+fn the_real_deny_list_finds_the_name_it_is_for() {
+    let name = ["k", "b", "f"].concat();
+    let text = format!("x {}-fake and {}\n", name, name.to_uppercase());
+    assert_eq!(findings("f", &text, &real_deny()).len(), 2, "{name}");
+    assert_eq!(
+        findings("f", "x hostkeeper-package and HOSTKEEPER\n", &real_deny()),
+        Vec::<String>::new()
+    );
 }
 
 /// Asserts that a banned word in a file name or a directory name is not printed: the finding
