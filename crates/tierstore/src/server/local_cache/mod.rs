@@ -152,11 +152,15 @@ mod listing_tests;
 #[cfg(test)]
 mod lost_tests;
 #[cfg(test)]
+mod read_only_tasks_tests;
+#[cfg(test)]
 mod read_only_tests;
 #[cfg(test)]
 mod scrub_tests;
 #[cfg(test)]
 mod selfcheck_tests;
+#[cfg(test)]
+mod stale_index_tests;
 #[cfg(test)]
 mod start_tests;
 #[cfg(test)]
@@ -595,6 +599,24 @@ impl Inner {
         locked(&self.index).get(&name.hex).map(index::Entry::meta)
     }
 
+    /// Whether the object the index holds is the one on the disk. A read-only cache's index is
+    /// its scan, and the holder may have put the object again since, so the sidecar is read; a
+    /// read-write cache, and a key named by its content, need no check.
+    async fn unchanged(&self, name: &Name, meta: &Meta) -> bool {
+        if self.read_write() || name.content.is_some() {
+            return true;
+        }
+        let believed = stream::Believed {
+            size: meta.size,
+            tag: meta.tag.clone(),
+        };
+        let (root, hex) = (self.config.path.clone(), name.hex.clone());
+        let reading = tokio::task::spawn_blocking(move || {
+            stream::same_version_on_disk(&root, &hex, &believed)
+        });
+        reading.await.unwrap_or(false)
+    }
+
     /// Removes the object from the index and, if this cache may write to its directory, from the
     /// disk. A read-only cache forgets the object and leaves its files: they are the holder's.
     /// It notes the name, and removes the files when it takes the lock (see `hold`), so that the
@@ -746,10 +768,11 @@ impl Backend for LocalCache {
     async fn head(&self, key: &str) -> Result<Meta, Error> {
         refuse_reserved(key)?;
         let inner = &self.inner;
-        let kept = inner.cacheable(key).and_then(|name| inner.kept(&name));
-        match kept {
-            Some(meta) => Ok(meta),
-            None => inner.upstream.head(key).await,
+        let name = inner.cacheable(key);
+        let kept = name.as_ref().and_then(|name| inner.kept(name));
+        match (kept, name) {
+            (Some(meta), Some(name)) if inner.unchanged(&name, &meta).await => Ok(meta),
+            _ => inner.upstream.head(key).await,
         }
     }
 

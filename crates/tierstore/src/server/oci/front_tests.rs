@@ -9,7 +9,7 @@ use hyper::{Method, StatusCode};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
-use super::{MAX_MANIFEST_BYTES, OciFront, OciMetrics, OciPrefix};
+use super::{DEFAULT_MANIFEST_BYTES, OciFront, OciMetrics, OciPrefix, OciSizes};
 use crate::Backend;
 use crate::{Error, FaultyBackend, MemoryBackend, Op, ProxyConfig, TestClock};
 
@@ -39,6 +39,12 @@ impl Rig {
             front,
             metrics,
         }
+    }
+
+    /// The rig, its front holding to `sizes`.
+    fn with_sizes(mut self, sizes: OciSizes) -> Self {
+        self.front = self.front.with_sizes(sizes);
+        self
     }
 
     /// A front over a proxy whose tiers are in memory (the rig's `memory` is its hot tier), and
@@ -379,22 +385,22 @@ async fn a_manifest_over_the_limit_is_not_served() {
     let rig = Rig::new();
     let head = r#"{"schemaVersion":2,"config":{},"layers":[],"pad":""#;
     let fill = |extra: usize| {
-        let pad = "a".repeat(MAX_MANIFEST_BYTES as usize + extra - head.len() - 2);
+        let pad = "a".repeat(DEFAULT_MANIFEST_BYTES as usize + extra - head.len() - 2);
         format!("{head}{pad}\"}}")
     };
     let exact = fill(0);
-    assert_eq!(exact.len() as u64, MAX_MANIFEST_BYTES);
+    assert_eq!(exact.len() as u64, DEFAULT_MANIFEST_BYTES);
     let digest = rig.seed(exact.as_bytes()).await;
     let served = rig.get(&format!("/v2/a/manifests/{digest}")).await;
     assert_eq!(served.status, StatusCode::OK);
-    assert_eq!(served.body.len() as u64, MAX_MANIFEST_BYTES);
+    assert_eq!(served.body.len() as u64, DEFAULT_MANIFEST_BYTES);
     let over = fill(1);
     let digest = rig.seed(over.as_bytes()).await;
     let reads = rig.faulty.calls(Op::Get);
     let refused = rig.get(&format!("/v2/a/manifests/{digest}")).await;
     let (message, _) = refused.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
     assert!(
-        message.contains(&MAX_MANIFEST_BYTES.to_string()),
+        message.contains(&DEFAULT_MANIFEST_BYTES.to_string()),
         "{message}"
     );
     // Found out from the size alone: the object is not read.
@@ -659,4 +665,77 @@ async fn a_front_over_a_proxy_names_only_the_blobs_of_its_prefix() {
         );
         assert_eq!(answer.error(), expected, "{reserved}");
     }
+}
+
+/// Asserts `params.max_manifest_bytes` sets the manifest limit: with it lowered to 100, a
+/// manifest of 100 bytes is served and one of 101 is 404 `MANIFEST_UNKNOWN` naming 100 and not
+/// read, while the same 101 bytes are served at the default.
+#[tokio::test]
+async fn a_lowered_manifest_limit_refuses_a_manifest_just_over_it() {
+    let head = r#"{"schemaVersion":2,"config":{},"layers":[],"pad":""#;
+    let fill = |len: usize| format!("{head}{}\"}}", "a".repeat(len - head.len() - 2));
+    let sizes = OciSizes {
+        manifest_bytes: 100,
+        ..OciSizes::default()
+    };
+    let rig = Rig::new().with_sizes(sizes);
+    let exact = fill(100);
+    assert_eq!(exact.len(), 100);
+    let digest = rig.seed(exact.as_bytes()).await;
+    let served = rig.get(&format!("/v2/a/manifests/{digest}")).await;
+    assert_eq!(served.status, StatusCode::OK);
+    let over = fill(101);
+    let digest = rig.seed(over.as_bytes()).await;
+    let reads = rig.faulty.calls(Op::Get);
+    let refused = rig.get(&format!("/v2/a/manifests/{digest}")).await;
+    let (message, _) = refused.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
+    assert_eq!(
+        message,
+        "the object is over the 100-byte limit of a manifest"
+    );
+    assert_eq!(rig.faulty.calls(Op::Get), reads);
+    let default = Rig::new();
+    let digest = default.seed(over.as_bytes()).await;
+    let served = default.get(&format!("/v2/a/manifests/{digest}")).await;
+    assert_eq!(served.status, StatusCode::OK);
+}
+
+/// Asserts `params.echo_bytes` sets how much of the request an error repeats: with it at 10 the
+/// digest in the detail is the first 10 bytes of what was sent.
+#[tokio::test]
+async fn a_lowered_echo_length_shortens_what_an_error_repeats() {
+    let sizes = OciSizes {
+        echo_bytes: 10,
+        ..OciSizes::default()
+    };
+    let rig = Rig::new().with_sizes(sizes);
+    let answer = rig.get("/v2/a/blobs/abcdefghijklmnopqrstuvwxyz").await;
+    let (_, detail) = answer.assert_error(StatusCode::BAD_REQUEST, "DIGEST_INVALID");
+    assert_eq!(detail["digest"], "abcdefghij");
+    let answer = rig.get("/v2/A/blobs/sha256:x").await;
+    let (_, detail) = answer.assert_error(StatusCode::BAD_REQUEST, "NAME_INVALID");
+    assert_eq!(detail["name"], "A");
+}
+
+/// Asserts `params.read_chunk_bytes` sets how much is asked of the store at once for a blob:
+/// a blob of 10 bytes is read in one call at the default and in five with a chunk of 2, and
+/// comes out whole either way.
+#[tokio::test]
+async fn a_lowered_read_chunk_reads_a_blob_in_more_calls() {
+    let content = b"0123456789";
+    let path = format!("/v2/a/blobs/sha256:{}", hex_of(content));
+    let default = Rig::new();
+    default.seed(content).await;
+    let whole = default.get(&path).await;
+    assert_eq!(whole.body, content);
+    let default_reads = default.faulty.calls(Op::Get);
+    let sizes = OciSizes {
+        chunk_bytes: 2,
+        ..OciSizes::default()
+    };
+    let rig = Rig::new().with_sizes(sizes);
+    rig.seed(content).await;
+    let pieces = rig.get(&path).await;
+    assert_eq!(pieces.body, content);
+    assert_eq!(rig.faulty.calls(Op::Get), default_reads + 4);
 }

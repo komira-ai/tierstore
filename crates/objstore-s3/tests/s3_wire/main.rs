@@ -475,13 +475,13 @@ async fn a_listing_resumed_after_a_key_lists_only_the_rest_over_s3() {
 /// Catches: a listing failure mapped to the wrong error, or to an empty page (a rebuild
 /// would take an unreadable bucket for an empty one): an S3 error is `Service` with its
 /// status and code; an answer that is not a ListObjectsV2 result, or that lists a key
-/// the crate cannot name (non-ASCII here: an object it did not write), is `Protocol`.
+/// the crate cannot name (a `..` segment here: an object it did not write), is `Protocol`.
 #[tokio::test]
 async fn listing_failures_are_typed() {
     let denied = "<Error><Code>AccessDenied</Code><Message>no</Message></Error>";
     let missing = "<Error><Code>NoSuchBucket</Code><Message>gone</Message></Error>";
     let foreign = "<ListBucketResult><IsTruncated>false</IsTruncated>\
-                   <Contents><Key>p/caf\u{e9}</Key><Size>1</Size></Contents></ListBucketResult>";
+                   <Contents><Key>p/a/../x</Key><Size>1</Size></Contents></ListBucketResult>";
     let (endpoint, _) = script(vec![
         answer("403 Forbidden", &[], denied),
         answer("404 Not Found", &[], missing),
@@ -511,7 +511,7 @@ async fn listing_failures_are_typed() {
         answers[2]
     );
     assert!(
-        matches!(&answers[3], ObjectStoreError::Protocol(why) if why.contains("listed key") && why.contains('\u{e9}')),
+        matches!(&answers[3], ObjectStoreError::Protocol(why) if why.contains("listed key") && why.contains("p/a/../x")),
         "{:?}",
         answers[3]
     );

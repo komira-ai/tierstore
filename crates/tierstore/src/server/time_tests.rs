@@ -1,6 +1,6 @@
 //! The calendar forms of S3.
 
-use super::time::{amz_date, http_date, iso8601};
+use super::time::{amz_date, http_date, iso8601, parse_http_date};
 
 /// Asserts that an HTTP date has the right weekday, month and time at the epoch, at a date of
 /// the SigV4 documentation, on a leap day of a century year, and on the day after the February
@@ -70,5 +70,54 @@ fn an_amz_date_is_read_back() {
         "19600101T000000Z",
     ] {
         assert_eq!(parse_amz_date(text), None, "{text:?}");
+    }
+}
+
+/// Asserts that an HTTP date is read in the three forms of RFC 7231 (the example of the RFC in
+/// each), that a two-digit year is read on either side of 1970, and that the date `http_date`
+/// writes is read back.
+#[test]
+fn an_http_date_is_read_in_the_three_forms() {
+    let time = 784_111_777_000;
+    assert_eq!(parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT"), Some(time));
+    assert_eq!(
+        parse_http_date("Sunday, 06-Nov-94 08:49:37 GMT"),
+        Some(time)
+    );
+    assert_eq!(parse_http_date("Sun Nov  6 08:49:37 1994"), Some(time));
+    let later = parse_http_date("Sunday, 06-Nov-26 00:00:00 GMT");
+    assert_eq!(later, parse_http_date("Fri, 06 Nov 2026 00:00:00 GMT"));
+    assert_eq!(later, Some(1_793_923_200_000));
+    let written = http_date(951_868_799_000);
+    assert_eq!(parse_http_date(&written), Some(951_868_799_000));
+}
+
+/// Asserts that text which is no HTTP date is not read: a wrong number of words, a month, a
+/// year, a clock or a day that is not one, a clock with a field too many, and a day before 1970.
+#[test]
+fn text_that_is_no_http_date_is_not_read() {
+    let bad = [
+        "",
+        "yesterday",
+        "Sun, 06 Nov 1994 08:49:37",
+        "Sun, 06 Nov 1994 08:49:37 UTC",
+        "Sun, 06 Jol 1994 08:49:37 GMT",
+        "Sun, 06 J 1994 08:49:37 GMT",
+        "Sun, xx Nov 1994 08:49:37 GMT",
+        "Sun, 06 Nov 994 08:49:37 GMT",
+        "Sun, 06 Nov 19x4 08:49:37 GMT",
+        "Sun, 06 Nov xx 08:49:37 GMT",
+        "Sun, 06 Nov 1994 08:49 GMT",
+        "Sun, 06 Nov 1994 08:49:37:00 GMT",
+        "Sun, 06 Nov 1994 08:xx:37 GMT",
+        "Sun, 06 Nov 1994 24:00:00 GMT",
+        "Sun, 06 Nov 1994 08:60:00 GMT",
+        "Sun, 06 Nov 1994 08:00:60 GMT",
+        "Sun, 31 Feb 2000 00:00:00 GMT",
+        "Sun, 00 Feb 2000 00:00:00 GMT",
+        "Sun, 01 Jan 1960 00:00:00 GMT",
+    ];
+    for text in bad {
+        assert_eq!(parse_http_date(text), None, "{text:?}");
     }
 }

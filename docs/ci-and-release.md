@@ -6,15 +6,17 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM and as a hostkeeper package, writes the release index of the hostkeeper packages, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
+| `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
 `pull_request_target`, and `id-token`, `attestations`, `contents` and `issues` written only by the
-one job that needs each (and for `id-token` and `attestations`, only on a push to `main`).
+one job that needs each, under the exact `if:` the lint lists for it (`attestations`, and the
+`id-token` of the signing job, only on a push to `main`).
 
 ## The release files
 
@@ -33,7 +35,17 @@ For a commit `<commit>` (the full SHA) and each platform (`linux-x86_64`, `linux
 - `tierstore-<commit>-<platform>.cdx.json`: its CycloneDX SBOM;
 - `tierstore-<commit>-<platform>.tar.gz.sigstore.json`: the bundle of the tarball's own provenance
   attestation, for an offline check;
-- `SHA256SUMS`: the SHA-256 of the tarballs and SBOMs.
+- `tierstore-<version>-<platform>.tar.zst`: the hostkeeper package of the same binary (see "The
+  hostkeeper package" below), where `<version>` is what `tierstore --version` prints after the
+  name, `X.Y.Z+<12 hex>`;
+- `tierstore-<version>-<platform>.tar.zst.sigstore.json`: the bundle of the package's own
+  provenance attestation, which hostkeeper verifies the package with, offline;
+- `index.json`: the release index of the three hostkeeper packages, hostkeeper's format: for each
+  platform its file, size and SHA-256;
+- `SHA256SUMS`: the SHA-256 of the tarballs, SBOMs, hostkeeper packages and `index.json`.
+
+The release assets are what an operator copies into hostkeeper's release channel, as
+`tierstore/<version>/index.json` and the packages and bundles beside it.
 
 The signer of every attestation is `.github/workflows/artifacts.yml` on `refs/heads/main`: do not
 rename or move that file. Verify a file with:
@@ -128,10 +140,48 @@ commit (`cargo xtask build-commit --version`) by the job that builds it, on a ru
 platform, and a release needs that run of `artifacts.yml` to be green. That build-time check is
 the version proof of the macOS binary. The two computations differ only when a tag
 appears between the build and the release (another release published in that time); the release is
-then refused, and the next push is built and released under the new number. File names carry the
-commit, not the version, and are unchanged.
+then refused, and the next push is built and released under the new number. The names of the
+tarballs and SBOMs carry the commit, not the version, and are unchanged; the hostkeeper packages
+are named by the version the binary reports, which holds both.
 
 `v0.3.1` predates this: its binary reports `0.3.0+e7fd86844000`, the crate's version at the time.
+
+### The hostkeeper package
+
+`cargo xtask release hostkeeper-package --binary <path> --version <X.Y.Z+12 hex> --min-hostkeeper
+<x.y.z> --platform <platform> --out <dir>` assembles the package hostkeeper installs on a host,
+`tierstore-<version>-<platform>.tar.zst`, for linux-x86_64, linux-arm64 or macos-arm64, from a built
+binary: the manifest and the units of `packaging/hostkeeper/` (its README says what each holds) and
+the binary as `bin/tierstore`, byte for byte, so the macOS binary keeps the signature its build
+gave it. The verb never runs the binary, so it packages any platform's on any runner, but it
+refuses a `--version` that is not what `tierstore --version` prints after the name or that the
+binary does not hold. The same inputs give the same bytes. It appends the package's line to
+`<out>/SHA256SUMS.<platform>`, beside the tarball's and the SBOM's.
+
+In `artifacts.yml` each build job packages its binary after the tarball, with `--min-hostkeeper
+0.1.0`, and unpacks the package with hostkeeper's own unpacker into a scratch directory (`cargo
+xtask verify-assets hostkeeper-package`): the archive keeps every rule hostkeeper's unpacker holds
+it to, carries no extended attribute (no pax record of one, no AppleDouble `._` entry), is at most
+the `max_package_bytes` of hostkeeper's sample daemon config, and its manifest names tierstore, the
+version and the platform. The macOS job then checks the code signature of the binary it unpacked
+(`codesign --verify --strict`; the linker's ad-hoc signature is enough). Then:
+
+- the `sums` job writes `index.json` (`cargo xtask release hostkeeper-index`) with hostkeeper's
+  own writer: schema 1, keys sorted, packages sorted by platform, at most one per platform, the
+  same bytes for the same packages. A release's index lists all three platforms, because
+  hostkeeper refuses a host whose platform its release lacks (`no_package_for_platform`): on a push
+  or a run by hand the job refuses a run without the macOS package. For a pull request, which has
+  no macOS job, it checks the two Linux packages are there and writes no index;
+- the `attest` job signs each package as its own subject, as it does each tarball, and names the
+  bundle `<package>.sigstore.json`; the provenance of the sums covers the packages and the index;
+- the `verify` job (and `release.yml`'s `verify` and `publish`) makes the index again from the
+  packages, which must give the bytes the sums list, verifies each package's bundle offline as it
+  does each tarball's, and takes each package as a host does (`cargo xtask verify-assets
+  hostkeeper-index`): the index is read with hostkeeper's strict reader, lists a package for every
+  platform, each with the size and SHA-256 of its file, and each unpacks as above.
+
+A commit built before the hostkeeper packages were added has none, and `release check` refuses to
+release it.
 
 ### Releasing by hand
 
@@ -144,6 +194,47 @@ release as a draft at the commit, reads its assets back and publishes it, which 
 A tag or release that exists is refused, and so is a commit that the highest release tag already
 covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
+
+## Setting the desired version on the hostkeeper coordinator
+
+Hosts take tierstore through hostkeeper: the coordinator holds the version each service should
+run, and every host's daemon fetches that version from the release channel
+(`{release_channel}/tierstore/<version>/`) and installs the package of its own platform.
+`hostkeeper-desired.yml` sets that version for a published release. It is run by hand, from
+`main` ("Run workflow"), with the release's version `X.Y.Z`; nothing else starts it, release.yml
+included.
+
+Before you run it, the release must be in the release channel: stage it with hostkeeper's
+`cargo xtask release channel-stage` (komira-ai/hostkeeper, `docs/deploy/release-channel.md`).
+Nothing in CI publishes into the channel, and a version the channel does not hold leaves every host
+failing its fetch.
+
+Its `check` job (`cargo xtask release desired`, no token that writes) refuses the run unless the
+release `vX.Y.Z` is published, its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own
+reader reads it as the index of tierstore `X.Y.Z+<the first 12 digits of the release's commit>`,
+and it lists a package for each of linux-x86_64, linux-arm64 and macos-arm64 that is an asset of
+the release at the size the index gives. The coordinator orders a service and a version and never
+a platform, so a host whose platform the index lacks is refused the version
+(`no_package_for_platform`) while the others take it; a release made before the hostkeeper
+packages has no index and is refused too. Only then does the `set-desired` job call hostkeeper's
+reusable workflow (`set-desired.yml` of komira-ai/hostkeeper, pinned to a commit with the
+hostkeeper release whose program makes the calls), which proves that release, sets the version
+with the job's OIDC token, and reads the convergence every 10 seconds. Each change is printed as
+one line with the hosts of each role at the version, updating, failed and down, and the job fails
+unless every live host reaches the version. The version the coordinator is given is the packages'
+(`X.Y.Z+<12 hex>`), and the digest is the SHA-256 of `index.json`, which pins every platform's
+package.
+
+The workflow is off until a maintainer sets it up once:
+
+1. The coordinator's allow-list entry for this repository: its id, `refs/heads/main`, the event
+   `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service `tierstore`, and the
+   `job_workflow_ref` `komira-ai/hostkeeper/.github/workflows/set-desired.yml@<the pinned commit>`.
+   A new pin in the workflow needs a new `job_workflow_ref` in the entry.
+2. The repository variable `HOSTKEEPER_COORDINATOR_CA`: the PEM certificates of the CA the
+   coordinator's private listener chains to.
+3. The repository variable `HOSTKEEPER_COORDINATOR_URL`: that listener, `https://<host>[:<port>]`.
+   While it is empty both jobs are skipped.
 
 ## The compatibility check against the release before
 

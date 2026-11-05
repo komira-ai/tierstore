@@ -12,9 +12,12 @@ const NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 
 const PROLOG: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
-/// `text` with the characters XML gives meaning to escaped.
+/// `text` with the characters XML gives meaning to escaped. A carriage return is written as a
+/// character reference, since a parser reads a bare one as a line feed (a tab and a line feed
+/// are read as they are written).
 pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
+        .replace('\r', "&#13;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -50,6 +53,14 @@ pub(crate) fn url_encode(text: &str) -> String {
         }
     }
     out
+}
+
+/// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
+/// empty for `us-east-1`.
+pub(crate) fn location(region: &str) -> String {
+    let named = if region == "us-east-1" { "" } else { region };
+    let text = escape(named);
+    format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
 /// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy

@@ -1,6 +1,6 @@
 //! ListMultipartUploads of the fake service.
 
-use super::{Request, State, Upload, answer, iso_date, unescape};
+use super::{Request, State, Upload, answer, iso_date, unescape, xml_text};
 
 /// ListMultipartUploads: the uploads under `prefix`, by key and then by id, after the
 /// markers, at most `max-uploads` of them, with the markers of the next page if there is one.
@@ -31,16 +31,18 @@ pub(super) fn list_uploads(state: &State, request: &Request) -> Vec<u8> {
     let mut body = String::from("<ListMultipartUploadsResult>");
     for (key, id, upload) in page {
         body.push_str(&format!(
-            "<Upload><Key>{key}</Key><UploadId>{id}</UploadId>\
+            "<Upload><Key>{}</Key><UploadId>{id}</UploadId>\
              <Initiated>{}</Initiated></Upload>",
+            xml_text(key),
             iso_date(upload.initiated)
         ));
     }
     let more = page.last().filter(|_| matching.len() > page.len());
     let tail = match more {
         Some((key, id, _)) => format!(
-            "<IsTruncated>true</IsTruncated><NextKeyMarker>{key}</NextKeyMarker>\
-             <NextUploadIdMarker>{id}</NextUploadIdMarker>"
+            "<IsTruncated>true</IsTruncated><NextKeyMarker>{}</NextKeyMarker>\
+             <NextUploadIdMarker>{id}</NextUploadIdMarker>",
+            xml_text(key)
         ),
         None => "<IsTruncated>false</IsTruncated>".to_owned(),
     };

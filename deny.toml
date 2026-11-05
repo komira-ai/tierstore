@@ -39,4 +39,9 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Every crate comes from crates.io or this workspace, but one: the release before this one, the
 # `tierstore_prev` workspace dependency (a dev-dependency of crates/compat), taken from this repository's own public URL at
 # a pinned commit, which is what lets the compatibility tests run the previous release's code.
-allow-git = ["https://github.com/komira-ai/tierstore"]
+#
+# And hostkeeper's own code for its package, from hostkeeper's public repository at pinned commits:
+# dependencies of crates/xtask, which writes the release index and unpacks and loads each package
+# with them, and dev-dependencies its tests read the package with (the root `Cargo.toml` names the
+# commits).
+allow-git = ["https://github.com/komira-ai/tierstore", "https://github.com/komira-ai/hostkeeper"]

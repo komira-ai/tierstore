@@ -1,10 +1,10 @@
 //! The pages that describe the hook: the operator's page and the design of record.
 
 use super::{
-    CONFIG_FILE_KEY, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, LAUNCHD_LABEL_KEY, LAUNCHD_PLIST,
-    MARKER_DIR, MODE_KEY, PREVIOUS_RELEASE_KEY, PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY,
-    RESTART_MODE, Reason, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, STATE_DIR, Step,
-    TARGET_VERSION_KEY,
+    CACHE_HANDOFF_CAPABILITY, CONFIG_FILE_KEY, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY,
+    LAUNCHD_LABEL_KEY, LAUNCHD_PLIST, MARKER_DIR, MODE_KEY, PREVIOUS_RELEASE_KEY,
+    PREVIOUS_VERSION_KEY, PROMOTION_CEILING_KEY, RESTART_MODE, Reason, SERVICE_MANAGER_KEY,
+    STAGED_RELEASE_KEY, STATE_DIR, Step, TARGET_VERSION_KEY,
 };
 use crate::server::build_info::CAPABILITIES;
 
@@ -103,15 +103,22 @@ fn the_design_marks_the_redirect_sections_superseded() {
     assert!(DESIGN.contains("`crates/tierstore/docs/update-hook.md`"));
 }
 
-/// Asserts that the build lists `handover-v1` and then the capability the hook's `prepare` step
-/// looks for, and that the page names it with the two configuration keys of the hand-off and no
-/// longer says the binary lacks it. It would catch a build whose name for the capability is not
-/// the one the hook reads, and a page telling an operator that every update is a restart.
+/// Asserts that the build lists `handover-v1`, the capability the hook's `prepare` step looks for
+/// and the one it looks for besides when the configuration has `[local_cache]`, and that the page
+/// names both with the two configuration keys of the hand-off, no longer says the binary lacks it
+/// and no longer says a build node cannot hand off. It would catch a build whose name for a
+/// capability is not the one the hook reads, and a page telling an operator that every update of
+/// a cache shape is a restart.
 #[test]
 fn the_page_says_the_build_lists_the_hand_off() {
-    assert_eq!(CAPABILITIES, ["handover-v1", HANDOFF_CAPABILITY]);
+    assert_eq!(
+        CAPABILITIES,
+        ["handover-v1", HANDOFF_CAPABILITY, CACHE_HANDOFF_CAPABILITY]
+    );
     for needle in [
         "`handoff-socket-v1`",
+        "`handoff-cache-v1`",
+        "`[local_cache]`",
         "`server.handoff_socket`",
         "`server.handoff_wait`",
     ] {
@@ -123,7 +130,32 @@ fn the_page_says_the_build_lists_the_hand_off() {
     for stale in [
         "does not yet implement the hand-over socket",
         "does not use it yet",
+        "refuses `handoff_socket`",
     ] {
         assert!(!PAGE.contains(stale), "update-hook.md still says {stale:?}");
     }
+}
+
+/// Asserts (T23, T24) that the page states the order of releases: the first release that accepts
+/// the key goes in by `mode = "restart"`, the key is added only after it is live, and the next
+/// release is the first hand-over; and that it names `config_refused` and the check it comes
+/// from. Catches a page that tells operators to add the key before the live release accepts it.
+#[test]
+fn the_page_states_the_order_of_releases_and_the_configuration_check() {
+    let start = PAGE
+        .find("### The order of releases")
+        .expect("update-hook.md has the order of releases");
+    let order = &PAGE[start..];
+    let order = &order[..order.find("\n## ").unwrap_or(order.len())];
+    for needle in [
+        "`mode = \"restart\"`",
+        "`server.handoff_socket` added",
+        "`config_refused`",
+        "first hand-over",
+        CACHE_HANDOFF_CAPABILITY,
+    ] {
+        assert!(order.contains(needle), "the order lacks {needle}");
+    }
+    assert!(PAGE.contains("--check-config"));
+    assert!(PAGE.contains("A Mac never hands over"));
 }

@@ -32,6 +32,8 @@ pub struct Call {
     pub stdin: Option<Vec<u8>>,
     /// How long it may run before it is killed.
     pub timeout: Duration,
+    /// The user and group ids it runs as; none is the user the caller runs as.
+    pub run_as: Option<(u32, u32)>,
 }
 
 impl Call {
@@ -43,7 +45,15 @@ impl Call {
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             stdin: None,
             timeout,
+            run_as: None,
         }
+    }
+
+    /// The same call, run as user `uid` and group `gid`.
+    #[must_use]
+    pub fn running_as(mut self, uid: u32, gid: u32) -> Call {
+        self.run_as = Some((uid, gid));
+        self
     }
 
     /// The same call, with `bytes` on standard input.
@@ -206,6 +216,9 @@ fn execute(call: &Call) -> io::Result<Output> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some((uid, gid)) = call.run_as {
+        command.uid(uid).gid(gid);
+    }
     let mut group = Group::spawn(&mut command)?;
     // The input goes in from a thread too, and the pipe closes after it: the program sees the
     // end of its input. A program that exits without reading it all makes the write fail,

@@ -1,11 +1,15 @@
 //! `prepare`: can the node take the update, and which way; the record of the update. Nothing is
 //! started.
 
+use std::path::Path;
+
 use super::super::params::{CONFIG_FILE_KEY, Params};
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
-use super::super::{HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY};
+use super::super::{
+    CACHE_HANDOFF_CAPABILITY, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, LOCAL_CACHE_TABLE,
+};
 use super::{Ctx, unit_name};
 
 /// How long hostkeeper waits before it asks again when both instances run.
@@ -26,8 +30,10 @@ pub(super) fn prepare(
         ));
     }
     let update = params.previous.as_ref();
-    if update.is_some() && !params.declared_restart {
-        check_handoff_socket(c, params)?;
+    // A node with a local cache hands over only between releases whose cache shapes do.
+    let mut needed = vec![HANDOFF_CAPABILITY];
+    if update.is_some() && !params.declared_restart && check_handoff_socket(c, params)? {
+        needed.push(CACHE_HANDOFF_CAPABILITY);
     }
     // The staged binary is asked on a first install too: it proves `bin/tierstore` is there and
     // runs.
@@ -37,7 +43,11 @@ pub(super) fn prepare(
         Some(_) if params.declared_restart => Some(Mode::Restart),
         Some(previous) => {
             let before = c.ports.host.capabilities(&previous.release)?;
-            let can = |list: &[String]| list.iter().any(|word| word == HANDOFF_CAPABILITY);
+            let can = |list: &[String]| {
+                needed
+                    .iter()
+                    .all(|need| list.iter().any(|word| word == need))
+            };
             Some(if can(&staged) && can(&before) {
                 Mode::Handover
             } else {
@@ -45,6 +55,14 @@ pub(super) fn prepare(
             })
         }
     };
+    // Before anything is recorded or stopped, each release that will run the configuration says
+    // whether it accepts it: a refusal found later leaves a unit that exits 2 and is not retried.
+    if let Some(config) = &params.config_file {
+        check_config(c, "staged", &params.staged_release, config)?;
+        if let Some(previous) = update {
+            check_config(c, "previous", &previous.release, config)?;
+        }
+    }
     // A run again keeps the instances an earlier run chose: nothing has been started since.
     let kept = record.filter(|record| record.updating);
     let live = match kept {
@@ -71,6 +89,21 @@ pub(super) fn prepare(
     )))
 }
 
+/// Has `release` check `config`; a release that refuses it fails `prepare` with the line it said.
+fn check_config(c: &Ctx<'_, '_>, which: &str, release: &Path, config: &Path) -> Result<(), Done> {
+    match c.ports.host.check_config(release, config)? {
+        None => Ok(()),
+        Some(line) => Err(Done::fail(
+            Reason::ConfigRefused,
+            format!(
+                "the {which} release {} refuses {}: {line}",
+                release.display(),
+                config.display()
+            ),
+        )),
+    }
+}
+
 /// The instance that serves now. Both running is not a state to start an update from: the old
 /// instance of an earlier update still drains.
 fn serving(
@@ -94,8 +127,9 @@ fn serving(
 }
 
 /// Holds the node's configuration to naming the hand-over socket: without it the new instance
-/// could not take the old one's listening sockets.
-fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<(), Done> {
+/// could not take the old one's listening sockets. Says whether the configuration has a
+/// `[local_cache]` table (a build node, or a storage node with a cache).
+fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<bool, Done> {
     let path = params.config_file.as_deref().ok_or_else(|| {
         Done::fail(
             Reason::BadParams,
@@ -121,7 +155,7 @@ fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<(), Done> {
         .and_then(toml::Value::as_str)
         .is_some_and(|socket| !socket.is_empty());
     if named {
-        return Ok(());
+        return Ok(table.contains_key(LOCAL_CACHE_TABLE));
     }
     Err(Done::fail(
         Reason::HandoffNotConfigured,
