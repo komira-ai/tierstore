@@ -143,11 +143,12 @@ async fn the_directory_backend_lists_the_parts_of_an_open_upload() {
     assert_eq!(again, listed);
 }
 
-/// Asserts that the proxy lists the parts of the cold tier's upload and asks the hot tier
-/// nothing, also for an upload another writer started in the cold tier, and that it refuses the
-/// keys it keeps for itself without asking the cold tier.
+/// Asserts that the proxy lists the parts of an upload from the tier its id names: the hot tier
+/// for an upload made through it with room there, the cold tier for one another writer started in
+/// the cold tier, each asking only that tier, and that it refuses the keys it keeps for itself
+/// without asking either.
 #[tokio::test]
-async fn the_proxy_lists_the_parts_of_the_cold_tiers_upload() {
+async fn the_proxy_lists_the_parts_of_the_upload_from_the_tier_its_id_names() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
     let through = proxy.create_upload("jobs/a").await.unwrap();
@@ -163,15 +164,20 @@ async fn the_proxy_lists_the_parts_of_the_cold_tiers_upload() {
     assert_eq!(first[0].tag, tag);
     let second = proxy.list_parts("jobs/b", &direct, None, 10).await.unwrap();
     assert_eq!(shape(&second), [(2, 2)]);
-    assert_eq!(rig.hot.calls(Op::ListParts), 0);
-    assert_eq!(rig.cold.calls(Op::ListParts), 2);
+    // The upload made through the proxy has room in the hot tier and is there; the other is the
+    // cold tier's own. Each is asked of the tier its id names, and of that one only.
+    assert_eq!(rig.hot.calls(Op::ListParts), 1);
+    assert_eq!(rig.cold.calls(Op::ListParts), 1);
 
-    let before = rig.cold.calls(Op::ListParts);
+    let before = (rig.hot.calls(Op::ListParts), rig.cold.calls(Op::ListParts));
     for key in ["_journal/p1/0", "_tiering/lease", "_entries/x"] {
         let refused = proxy.list_parts(key, &through, None, 10).await;
         assert!(matches!(refused, Err(Error::Reserved(_))), "{key}");
     }
-    assert_eq!(rig.cold.calls(Op::ListParts), before);
+    assert_eq!(
+        (rig.hot.calls(Op::ListParts), rig.cold.calls(Op::ListParts)),
+        before
+    );
     let unknown = proxy.list_parts("jobs/a", "nope", None, 10).await;
     assert!(matches!(unknown, Err(Error::NotFound(_))));
 }

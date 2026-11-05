@@ -970,8 +970,7 @@ impl Backend for DirBackend {
         let dir = self.upload_dir(key, id).await?;
         let mut stored = Vec::new();
         for part in stored_parts(&dir).await? {
-            // A part replaced or an upload completed while this is read has no file (any more):
-            // it is not in the listing.
+            // A part replaced or an upload completed while this is read has no file: left out.
             let Ok(meta) = fs::metadata(dir.join(&part.name)).await else {
                 continue;
             };

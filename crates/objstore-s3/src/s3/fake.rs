@@ -53,7 +53,7 @@ mod escape;
 mod uploads;
 
 use self::dates::{http_date, iso_date, system_seconds};
-use self::escape::xml_text;
+use self::escape::{unescape, xml_text};
 use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store, S3Tuning};
@@ -808,31 +808,6 @@ fn signed_with(request: &Request, access_key_id: &str, secret_access_key: &str) 
         date,
     );
     expected == authorization
-}
-
-/// `text` with its `%XX` escapes decoded (an escape that is not one stays as it is).
-fn unescape(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        let escaped = bytes
-            .get(at + 1..at + 3)
-            .and_then(|hex| std::str::from_utf8(hex).ok())
-            .filter(|_| bytes[at] == b'%')
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        match escaped {
-            Some(byte) => {
-                out.push(byte);
-                at += 3;
-            }
-            None => {
-                out.push(bytes[at]);
-                at += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The object an upload's completion names, and its entity tag: its parts, in the order the
