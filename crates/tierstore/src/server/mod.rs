@@ -98,7 +98,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads and HeadBucket and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation,
+//! ListBuckets and the reads of the settings of the bucket, and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
@@ -252,6 +253,7 @@ mod request;
 mod rounds;
 mod s3_tls;
 pub mod scoped;
+mod server_config;
 mod stop_watcher;
 mod time;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -387,7 +389,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, Semaphore};
 
-use crate::{Backend, Clock, MonotonicClock, Proxy};
+use crate::{Backend, Clock, Proxy};
 
 pub use gc::GcKey;
 pub use keys::AccessKey;
@@ -415,6 +417,10 @@ pub struct ServerConfig {
     pub bucket: String,
     /// The region in the credential scope of a signature.
     pub region: String,
+    /// When the bucket was made, in milliseconds since the Unix epoch, for the `CreationDate` of
+    /// ListBuckets: the time [`ServerConfig::new`] was called at, and in the binary the time the
+    /// store's `_tiering/format` was written, where it has one.
+    pub bucket_created: u64,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -517,50 +523,6 @@ pub struct ServerConfig {
     /// The TLS of the listeners: `Some` serves every connection of [`Server::serve_all`] over
     /// HTTPS, and `None` (the default) serves plain HTTP.
     pub tls: Option<tokio_rustls::TlsAcceptor>,
-}
-
-impl ServerConfig {
-    /// The settings for `bucket` and a full access key, in region `us-east-1`, with bodies of at
-    /// most 256 MiB, 30 seconds of idle time for a body or an answer, a minute for a request
-    /// head (and for an idle connection to send its next request), a drain that waits 10
-    /// seconds with `/readyz` at 503 and then at most 15 minutes for the requests in flight.
-    #[must_use]
-    pub fn new(
-        bucket: &str,
-        access_key_id: &str,
-        secret_access_key: &str,
-        clock: Arc<dyn Clock>,
-    ) -> Self {
-        Self {
-            bucket: bucket.to_owned(),
-            region: "us-east-1".to_owned(),
-            access_key_id: access_key_id.to_owned(),
-            secret_access_key: secret_access_key.to_owned(),
-            read_only_keys: Vec::new(),
-            presign_keys: Vec::new(),
-            gc_keys: Vec::new(),
-            scoped_keys: Vec::new(),
-            presign_max_expires: Duration::from_secs(900),
-            max_request_bytes: 256 << 20,
-            body_idle_timeout: Duration::from_secs(30),
-            max_concurrent_puts: 32,
-            put_permit_wait: Duration::from_secs(15),
-            put_min_bytes_per_sec: 1024,
-            put_rate_grace: Duration::from_secs(30),
-            header_timeout: Duration::from_secs(60),
-            drain_lb_wait: Duration::from_secs(10),
-            drain_deadline: Duration::from_secs(900),
-            proxy: None,
-            cache: None,
-            cache_writes: false,
-            usage_stale_after: Duration::from_secs(120),
-            oci_metrics: None,
-            slot: None,
-            clock,
-            rate_clock: Arc::new(MonotonicClock::new()),
-            tls: None,
-        }
-    }
 }
 
 /// How a drain ended.
