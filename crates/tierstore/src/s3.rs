@@ -91,6 +91,10 @@
 //!
 //! Notes on the mapping:
 //!
+//! - A key is the client's [`ObjectKey`], which follows S3's rules (`objstore_s3::key_rules`):
+//!   any text of 1 to 1024 bytes, space, `+`, `%`, `&`, `<`, `?`, `#` and non-ASCII text
+//!   included, escaped by the client; a key or a prefix the rules refuse (over 1024 bytes, or a
+//!   `.` or `..` segment) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`).
 //! - S3 answers 416 to a range that starts at or past the end of the object, and a range of
 //!   length zero is no request at all. The trait wants no bytes for a range starting at the
 //!   end and an [`Error::Other`] for one starting past it, so a HEAD decides both, and finds
@@ -280,7 +284,7 @@ impl S3Backend {
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Listed>, Error> {
-        let under = KeyPrefix::new(prefix).map_err(|e| Error::Other(e.to_string()))?;
+        let under = KeyPrefix::new(prefix).map_err(|_| Error::InvalidKey(prefix.to_owned()))?;
         let after = start_after.map(object_key).transpose()?;
         let mut after = after.map(|key| ListToken::after(&key));
         let mut listed = Vec::new();
@@ -311,9 +315,10 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     objstore_s3::ByteRange::new(range.offset(), len)
 }
 
-/// The key as the client names it, or [`Error::Other`] if it cannot be named.
+/// The key as the client names it, or [`Error::InvalidKey`] if S3's rules refuse it (see
+/// `objstore_s3::key_rules`: empty, over 1024 bytes, or a `.` or `..` segment).
 fn object_key(key: &str) -> Result<ObjectKey, Error> {
-    ObjectKey::new(key).map_err(|e| Error::Other(e.to_string()))
+    ObjectKey::new(key).map_err(|_| Error::InvalidKey(key.to_owned()))
 }
 
 /// An object of a listing of the client as one of this crate.
@@ -756,7 +761,7 @@ impl Backend for S3Backend {
         after: Option<UploadsAfter<'_>>,
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
-        let under = KeyPrefix::new(prefix).map_err(|e| Error::Other(e.to_string()))?;
+        let under = KeyPrefix::new(prefix).map_err(|_| Error::InvalidKey(prefix.to_owned()))?;
         let mut marker = match after {
             Some((key, id)) => Some((object_key(key)?, id.map(str::to_owned))),
             None => None,

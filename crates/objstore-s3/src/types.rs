@@ -3,21 +3,18 @@
 
 use std::fmt;
 
-/// Longest key S3 accepts, in bytes.
-const MAX_KEY_BYTES: usize = 1024;
+use crate::key_rules;
 
 /// The key of one object inside one bucket.
 ///
-/// The caller names every key itself, so keys are restricted to characters that need no
-/// escaping anywhere: ASCII letters, digits, `-`, `_`, `.`, `~` and `/` as a separator.
-/// Segments may not be empty, `.` or `..`, so no URL normalisation between the caller and the
-/// store can turn one key into another. That rules out a whole class of signing and
-/// encoding mismatches with S3 servers.
+/// A key follows S3's rules ([`key_rules::s3_client_key`]): any UTF-8 text of 1 to 1024 bytes, except
+/// that a segment may not be `.` or `..` (the HTTP client would rewrite the path). The store
+/// escapes the key wherever it travels.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ObjectKey(String);
 
-/// A key prefix for [`ObjectStore::list`](crate::ObjectStore::list): empty, or the
-/// characters of a key (see [`ObjectKey`]), optionally ending in `/`.
+/// A key prefix for [`ObjectStore::list`](crate::ObjectStore::list): any text of up to 1024
+/// bytes ([`key_rules::s3_prefix`]), the empty prefix included.
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyPrefix(String);
 
@@ -30,16 +27,8 @@ pub enum KeyError {
     /// The key is longer than S3 allows.
     #[error("object key has {0} bytes; at most 1024 are allowed")]
     TooLong(usize),
-    /// The key holds a character outside `A-Z a-z 0-9 - _ . ~ /`.
-    #[error("object key {key:?} has {ch:?}; only A-Z a-z 0-9 - _ . ~ / are allowed")]
-    Character {
-        /// The refused key.
-        key: String,
-        /// The first refused character.
-        ch: char,
-    },
-    /// A `/`-separated segment is empty, `.` or `..`.
-    #[error("object key {0:?} has an empty, `.` or `..` segment")]
+    /// A `/`-separated segment is `.` or `..`, which the HTTP client would rewrite.
+    #[error("object key {0:?} has a `.` or `..` segment")]
     Segment(String),
 }
 
@@ -47,16 +36,7 @@ impl ObjectKey {
     /// Checks and wraps a key.
     pub fn new(key: impl Into<String>) -> Result<Self, KeyError> {
         let key = key.into();
-        if key.is_empty() {
-            return Err(KeyError::Empty);
-        }
-        check_chars(&key)?;
-        if key
-            .split('/')
-            .any(|s| s.is_empty() || s == "." || s == "..")
-        {
-            return Err(KeyError::Segment(key));
-        }
+        key_rules::s3_client_key(&key)?;
         Ok(Self(key))
     }
 
@@ -77,12 +57,7 @@ impl KeyPrefix {
     /// Checks and wraps a prefix. The empty prefix lists the whole bucket.
     pub fn new(prefix: impl Into<String>) -> Result<Self, KeyError> {
         let prefix = prefix.into();
-        if prefix.is_empty() {
-            return Ok(Self(prefix));
-        }
-        // A prefix ending in `/` is a key with a trailing separator; check the rest as
-        // a key so that any key the prefix can produce is itself valid.
-        ObjectKey::new(prefix.strip_suffix('/').unwrap_or(&prefix))?;
+        key_rules::s3_prefix(&prefix)?;
         Ok(Self(prefix))
     }
 
@@ -107,22 +82,6 @@ impl KeyPrefix {
     pub fn matches(&self, key: &ObjectKey) -> bool {
         key.0.starts_with(&self.0)
     }
-}
-
-fn check_chars(key: &str) -> Result<(), KeyError> {
-    if key.len() > MAX_KEY_BYTES {
-        return Err(KeyError::TooLong(key.len()));
-    }
-    if let Some(ch) = key
-        .chars()
-        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '/')))
-    {
-        return Err(KeyError::Character {
-            key: key.to_owned(),
-            ch,
-        });
-    }
-    Ok(())
 }
 
 /// A byte range to read: `len` bytes from `offset`.
@@ -362,24 +321,38 @@ impl fmt::Display for Causes<'_> {
 mod tests {
     use super::*;
 
-    /// Catches: a key check that lets through a character needing URL escaping, an
-    /// empty or dot segment, or an over-long key; any of these lets the caller's key and the
-    /// key the store signs or stores drift apart.
+    /// Asserts S3's key rules: every text of 1 to 1024 bytes is a key (space, `+`, `%`, `&`, `<`,
+    /// `?`, `#`, parentheses, non-ASCII, control characters, `//`, a leading and a trailing `/`),
+    /// the empty key and a 1025-byte key are refused (by count of UTF-8 bytes, not characters),
+    /// and so is a `.` or `..` segment, which the HTTP client would rewrite, but not a name that
+    /// merely contains dots. Replaces the test that pinned the old narrow character set.
     #[test]
-    fn keys_refuse_what_needs_escaping_or_normalising() {
-        for good in ["a", "cas/ab/cd.seg", "x-y_z.~1", "a/b/c"] {
-            assert!(ObjectKey::new(good).is_ok(), "{good}");
+    fn keys_follow_s3_rules() {
+        for good in [
+            "a",
+            "cas/ab/cd.seg",
+            "a b",
+            "a+b",
+            "a%2f",
+            "a&b<c>",
+            "f(x)",
+            "caf\u{e9}/\u{65e5}\u{672c}",
+            "a?b#c",
+            "tab\there\nnewline",
+            "/a",
+            "a/",
+            "a//b",
+            "...",
+            "a/.b/..c/d..",
+            "a/..b",
+        ] {
+            assert!(ObjectKey::new(good).is_ok(), "{good:?}");
         }
         assert_eq!(ObjectKey::new(""), Err(KeyError::Empty));
-        for bad in ["a b", "a%2f", "a+b", "é", "a?b", "a#b"] {
-            assert!(
-                matches!(ObjectKey::new(bad), Err(KeyError::Character { .. })),
-                "{bad}"
-            );
-        }
-        for bad in ["/a", "a/", "a//b", "a/./b", "a/../b", ".", ".."] {
-            assert!(
-                matches!(ObjectKey::new(bad), Err(KeyError::Segment(_))),
+        for bad in ["a/./b", "a/../b", ".", "..", "./a", "a/..", "a/."] {
+            assert_eq!(
+                ObjectKey::new(bad),
+                Err(KeyError::Segment(bad.to_owned())),
                 "{bad}"
             );
         }
@@ -388,19 +361,34 @@ mod tests {
             Err(KeyError::TooLong(1025))
         );
         assert!(ObjectKey::new("a".repeat(1024)).is_ok());
+        // 512 two-byte characters are 1024 bytes; one more byte is too many.
+        assert!(ObjectKey::new("\u{e9}".repeat(512)).is_ok());
+        assert_eq!(
+            ObjectKey::new(format!("{}a", "\u{e9}".repeat(512))),
+            Err(KeyError::TooLong(1025))
+        );
     }
 
-    /// Catches: a prefix that can produce invalid keys, or `matches` testing something
-    /// other than a string prefix (a prefix `p/` must not match `p-other`).
+    /// Asserts that a prefix is any text of up to 1024 bytes (the empty prefix, `/`, `a//`, text
+    /// with `.` segments or characters a key may hold), that a longer one is refused, that
+    /// `matches` is a string prefix test (`p/` does not match `p-other`), and that `key` and
+    /// `child` check what they build.
     #[test]
     fn prefixes_join_and_match() {
         let p = KeyPrefix::new("run/1/").unwrap();
         assert_eq!(p.key("x").unwrap().as_str(), "run/1/x");
         assert!(p.matches(&ObjectKey::new("run/1/x").unwrap()));
         assert!(!p.matches(&ObjectKey::new("run/10").unwrap()));
-        assert!(KeyPrefix::new("").is_ok());
-        assert!(KeyPrefix::new("/").is_err());
-        assert!(KeyPrefix::new("a//").is_err());
+        for ok in ["", "/", "a//", "a/../", "caf\u{e9} (1)/", "a+b%"] {
+            assert!(KeyPrefix::new(ok).is_ok(), "{ok:?}");
+        }
+        assert_eq!(
+            KeyPrefix::new("a".repeat(1025)),
+            Err(KeyError::TooLong(1025))
+        );
+        assert_eq!(p.key("../x"), Err(KeyError::Segment("run/1/../x".into())));
+        assert_eq!(p.child("a b/").unwrap().as_str(), "run/1/a b/");
+        assert_eq!(p.child(&"a".repeat(1024)), Err(KeyError::TooLong(1030)));
     }
 
     /// Catches a transport failure whose text drops its cause, or the cause's own

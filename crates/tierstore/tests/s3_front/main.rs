@@ -21,6 +21,7 @@ mod files;
 mod handoff;
 mod handoff_keys;
 mod idle;
+mod keys;
 mod listeners;
 mod raw;
 mod roles;

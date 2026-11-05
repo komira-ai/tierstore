@@ -282,6 +282,8 @@ mod gc_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
+mod key_rules_tests;
+#[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
 mod metrics_tests;
