@@ -33,19 +33,19 @@
 //!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
-//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
+//! - HeadBucket of the served bucket, with `x-amz-bucket-region`; CreateBucket of it, which
+//!   exists, so it is answered as S3 answers a create of a bucket one owns (200 in `us-east-1`,
+//!   409 `BucketAlreadyOwnedByYou` elsewhere; a `LocationConstraint` other than the server's
+//!   region is `IllegalLocationConstraintException`); and DeleteBucket, `BucketNotEmpty` if it
+//!   has an object and `AccessDenied` if not, since a call does not remove a bucket the
+//!   configuration sets up. A bucket of another name is `NoSuchBucket` for each;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
 //!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
-//! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
-//!   filters and `max-buckets` checked; it has the epoch for a creation date, since the server
-//!   does not know when the bucket was made, and `tierstore` for the owner;
-//! - the reads of the settings of the bucket (`GET /<bucket>?versioning`, `object-lock`, `acl`,
-//!   `policy`, `lifecycle`, `cors`, `encryption`, `tagging`, `replication`, `website`,
-//!   `notification`, `accelerate`, `logging`, `requestPayment`, `ownershipControls`,
-//!   `publicAccessBlock`, `policyStatus`), each answered as S3 answers a bucket on which that
-//!   is not set: an empty document, the owner's `FULL_CONTROL` for the ACL, or the 404 code S3
-//!   gives (`NoSuchBucketPolicy`, `ObjectLockConfigurationNotFoundError`, ...). The writes of
-//!   them are `NotImplemented`.
+//! - ListBuckets (`GET /`): the one bucket, with `prefix` and `bucket-region` as filters and
+//!   `max-buckets` checked; its creation date is the epoch (not known) and its owner `tierstore`;
+//! - the reads of the settings of the bucket (`?versioning`, `?object-lock`, `?acl`, `?policy`
+//!   and the rest of the table in `bucket`), each as S3 answers a bucket with none set: an empty
+//!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
@@ -266,6 +266,8 @@ mod auth_tests;
 mod body_stall_tests;
 #[cfg(test)]
 mod bucket_config_tests;
+#[cfg(test)]
+mod bucket_life_tests;
 #[cfg(test)]
 mod bucket_tests;
 #[cfg(test)]

@@ -12,7 +12,10 @@ use aws_sdk_s3::config::{
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, EncodingType};
+use aws_sdk_s3::types::{
+    BucketLocationConstraint, CompletedMultipartUpload, CompletedPart, CreateBucketConfiguration,
+    EncodingType,
+};
 use aws_sdk_s3::{Client, Config};
 use tierstore::server::{AccessKey, Grant, PresignKey};
 
@@ -317,6 +320,36 @@ async fn sdk_reads_the_settings_of_a_bucket_with_none_set() {
     );
     let tags = sdk.get_bucket_tagging().bucket(BUCKET).send();
     assert_eq!(refusal(tags.await), (404, "NoSuchTagSet".to_owned()));
+}
+
+/// Asserts what the SDK's bucket calls get: HeadBucket carries the region, CreateBucket of the
+/// bucket is accepted in `us-east-1` (S3's answer for a bucket one owns there), CreateBucket with
+/// a constraint of another region is `IllegalLocationConstraintException`, and DeleteBucket is
+/// `BucketNotEmpty` with an object and `AccessDenied` without, leaving the object.
+#[tokio::test]
+async fn sdk_heads_creates_and_deletes_the_bucket() {
+    let h = serving().await;
+    let sdk = client(&h);
+    let head = sdk.head_bucket().bucket(BUCKET).send().await.unwrap();
+    assert_eq!(head.bucket_region(), Some("us-east-1"));
+    sdk.create_bucket().bucket(BUCKET).send().await.unwrap();
+    let elsewhere = BucketLocationConstraint::EuWest1;
+    let config = CreateBucketConfiguration::builder()
+        .location_constraint(elsewhere)
+        .build();
+    let made = sdk
+        .create_bucket()
+        .bucket(BUCKET)
+        .create_bucket_configuration(config)
+        .send();
+    let code = "IllegalLocationConstraintException".to_owned();
+    assert_eq!(refusal(made.await), (400, code));
+    let empty = sdk.delete_bucket().bucket(BUCKET).send();
+    assert_eq!(refusal(empty.await), (403, "AccessDenied".to_owned()));
+    put(&sdk, "out/kept", b"kept").await.unwrap();
+    let full = sdk.delete_bucket().bucket(BUCKET).send();
+    assert_eq!(refusal(full.await), (409, "BucketNotEmpty".to_owned()));
+    assert_eq!(get(&sdk, "out/kept", None).await, b"kept");
 }
 
 /// Asserts that the multipart flow of the SDK (create, two parts, complete) makes one object
