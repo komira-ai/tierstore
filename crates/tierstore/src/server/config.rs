@@ -65,6 +65,7 @@ pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
 use super::front::{FrontSettings, S3Tls};
+use super::hosted::valid_domain;
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
 use super::lock::check_lock_path;
@@ -290,6 +291,8 @@ pub(super) struct ServerTable {
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
+    #[serde(default)]
+    pub domains: Vec<String>,
     pub delete_concurrency: Option<u32>,
     pub put_permit_wait: Option<Dur>,
     pub put_min_bytes_per_sec: Option<u64>,
@@ -822,6 +825,7 @@ pub(super) fn storage(
         heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
+        domains: front.domains,
         delete_concurrency: front.delete_concurrency,
         put_permit_wait: front.put_permit_wait,
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
@@ -864,6 +868,21 @@ fn slot_of(slot: Option<u16>) -> Result<Option<u16>, ConfigError> {
     }
 }
 
+/// The `server.domains` key: each entry a domain name (see `valid_domain`), kept in lower case.
+fn domains_of(domains: &[String]) -> Result<Vec<String>, ConfigError> {
+    let kept = domains.iter().enumerate().map(|(at, text)| {
+        valid_domain(text).ok_or_else(|| {
+            let place = at + 1;
+            let why = format!(
+                "entry {place} is not a domain name such as s3.example.com (labels of letters, \
+                 digits and hyphens, separated by dots; no scheme, port or path)"
+            );
+            invalid("server.domains", why)
+        })
+    });
+    kept.collect()
+}
+
 /// The settings `[server]` makes: a key that is left out has the default of its flag.
 pub(super) fn front_of(
     server: ServerTable,
@@ -892,6 +911,7 @@ pub(super) fn front_of(
         1,
         u32::MAX,
     )?;
+    let domains = domains_of(&server.domains)?;
     let delete_concurrency = server
         .delete_concurrency
         .unwrap_or(DEFAULT_DELETE_CONCURRENCY);
@@ -922,6 +942,7 @@ pub(super) fn front_of(
         grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
+        domains,
         delete_concurrency,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
         put_min_bytes_per_sec: server

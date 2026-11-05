@@ -71,7 +71,7 @@ The process asks each tier the questions its guarantees rest on, then prints `ti
 
 ### 4. Put and get an object
 
-The front serves one bucket, path-style, over plain HTTP. The `aws` CLI works on its default settings, including the
+The front serves one bucket, path-style (or virtual-hosted-style for `server.domains`), over plain HTTP. The `aws` CLI works on its default settings, including the
 CRC-64/NVMe checksum it sends and the `aws-chunked` body it streams a large file in:
 
 ```sh
