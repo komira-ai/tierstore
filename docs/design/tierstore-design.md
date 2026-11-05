@@ -663,6 +663,8 @@ An interface is a front over the same proxy. `port` is the IPv4 wildcard at that
 
 **(e) Format versioning and the compatibility test.** What: a version in each stored format, or the written additive-only rule enforced by a test that reads the previous release's objects, run in both directions. Why: the entry body carries `v` from the start, but the older formats do not, and the rollout depends on the rule. Touches: the stored-format fixtures and a compatibility test per format.
 
+**(f) Object metadata, digests, and the S3 forms of ETag and checksums (designed, not built).** What: a per-object record that keeps an extensible set of content digests and the client's headers, user metadata and tags, computed in the one pass over the data and moved with the object between tiers; the S3 front renders from it the MD5 ETag (`md5-N` for multipart), the `x-amz-checksum-*` headers including CRC-64/NVME, the content headers, `x-amz-meta-*` and tags, and CopyObject is built on the same record. Why: a client must use tierstore as it uses S3, and today the headers are dropped, the ETag is not an MD5 and the AWS CLI's default checksum is refused. The design, the place of the record in each kind of tier, the one-way doors and the ordered pull requests are in [object-metadata.md](object-metadata.md). Touches: `backend.rs`, the tiers, `server/request.rs` and `server/ops.rs`, `objstore-s3`, the local cache sidecar, and [stored-formats.md](../stored-formats.md).
+
 ## 15. Decisions
 
 The decisions of 2026-11-03, taken by the CEO on the design as drafted (1 to 7, and 8 to 12, the answers to the questions the first list left open). They state what the design is; the sections above describe it accordingly.
