@@ -27,7 +27,7 @@ use crate::{
     Sleeper, TestClock,
 };
 
-use super::auth::{sign, sign_as};
+use super::auth::{sign, sign_as, sign_on};
 use super::request::BoxError;
 use super::{Server, ServerConfig};
 use http_body_util::BodyExt;
@@ -227,6 +227,33 @@ impl Rig {
         body: &[u8],
     ) -> Reply {
         let request = sign(&self.config, method, uri, extra, body);
+        self.send_raw(request).await
+    }
+
+    /// Sends a request signed for the host `host` (the `Host` header, which the signature covers)
+    /// and reads the answer.
+    pub(super) async fn send_on(
+        &self,
+        host: &str,
+        method: &str,
+        uri: &str,
+        extra: &[(&str, &str)],
+        body: &[u8],
+    ) -> Reply {
+        let key = (
+            self.config.access_key_id.as_str(),
+            self.config.secret_access_key.as_str(),
+        );
+        let payload = hex::encode(Sha256::digest(body));
+        let request = sign_on(
+            host,
+            &self.config,
+            key,
+            (method, uri),
+            extra,
+            &payload,
+            body,
+        );
         self.send_raw(request).await
     }
 

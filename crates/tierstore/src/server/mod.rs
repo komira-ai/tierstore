@@ -2,7 +2,8 @@
 //! a [`Backend`], which is a [`Proxy`](crate::Proxy) in the `tierstore` binary, and the pieces
 //! of that binary ([`cli`]).
 //!
-//! Path-style addressing of one bucket, and these calls, with the S3 error documents and status
+//! Path-style (`/<bucket>/<key>`) and, with `server.domains`, virtual-hosted-style
+//! (`<bucket>.<domain>/<key>`) addressing of one bucket, and these calls, with the S3 error documents and status
 //! codes (`NoSuchKey` 404, `PreconditionFailed` 412, `SlowDown` 503 where the backend has no
 //! room, and so on):
 //!
@@ -267,6 +268,7 @@ mod front;
 pub mod gc;
 pub mod handoff;
 mod handover;
+mod hosted;
 mod idle;
 mod keys;
 mod launch;
@@ -351,6 +353,8 @@ mod drain_tests;
 mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
+#[cfg(test)]
+mod hosted_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
@@ -450,6 +454,7 @@ use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
 use drain::SETTLED;
+use hosted::{hosted_bucket, resolve_hosted};
 use idle::Watched;
 use linger::Lingering;
 pub use listen::ListenTuning;
@@ -799,7 +804,12 @@ impl Server {
         B::Data: Send,
         B::Error: Into<BoxError>,
     {
-        if let Some(answer) = self.probe(parts).await {
+        // The probes are on the paths of the host that is not a bucket's: on a bucket's host a key
+        // may be called `healthz`.
+        let hosted = hosted_bucket(parts, &self.config.domains);
+        if hosted.is_none()
+            && let Some(answer) = self.probe(parts).await
+        {
             return Ok(answer);
         }
         if matches!(parts.method, Method::GET | Method::HEAD) {
@@ -811,7 +821,10 @@ impl Server {
             return Err(S3Error::read_cache());
         }
         signed.role.permit(&parts.method)?;
-        let target = resolve(&self.config.bucket, parts.uri.path())?;
+        let target = match &hosted {
+            Some(label) => resolve_hosted(&self.config.bucket, label, parts.uri.path())?,
+            None => resolve(&self.config.bucket, parts.uri.path())?,
+        };
         let query = Query::parse(parts.uri.query())?;
         if let Some(grant) = &signed.presign {
             grant.permit(parts, &target, &query)?;
