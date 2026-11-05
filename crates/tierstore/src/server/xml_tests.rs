@@ -15,11 +15,13 @@ fn listed(key: &str, size: u64, modified: u64) -> Listed {
     }
 }
 
-/// Asserts that the five characters XML gives meaning to are escaped, and no other is.
+/// Asserts that the five characters XML gives meaning to are escaped, a carriage return is
+/// written as a character reference (a parser reads a bare one as a line feed), and no other is.
 #[test]
 fn text_is_escaped() {
     assert_eq!(escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
     assert_eq!(escape("plain/key-1_2.3~"), "plain/key-1_2.3~");
+    assert_eq!(escape("a\rb\tc\nd"), "a&#13;b\tc\nd");
 }
 
 /// Asserts that an error body is a well-formed document with the code, the escaped message and

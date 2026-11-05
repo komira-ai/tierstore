@@ -226,6 +226,8 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
 | `server.s3_read_retries` | count, 2 (0 to 8) | how many times a read of an `s3` tier that failed in transport (a connection closed after the request went out) is sent again; 0 sends it once. A read that timed out is never sent again |
 | `server.s3_read_retry_wait` | duration, `50ms` (1ms to 10s) | the wait before the first resend of a read; each resend waits twice the one before |
+| `server.s3_single_put_max` | size, `5GiB` (1MiB to 5GiB) | the longest object of known length that an `s3` tier (both tiers, or the upstream of a cache) is written with one PUT, whose body is streamed and never held whole; a longer one, and a body of unknown length, is a multipart upload. 5GiB is the most S3 takes in one PUT. Lower it for a store or a proxy that takes a long PUT worse than several short ones |
+| `server.s3_part_bytes` | size, `16MiB` (5MiB to 1GiB) | the size of a part of a multipart upload to an `s3` tier. One part is held in memory while it is sent, so a write holds this much; an object too large for 10,000 parts of this size gets larger parts |
 | `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself; without it, the default, a start binds its own sockets and makes no control socket. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
 | `server.handoff_wait` | duration, `10s` (1ms to 1h) | how long a start waits for the instance that answers on `server.handoff_socket` to hand its sockets over, from the connection to the end of the hand-off; a start that is not answered in that time fails (exit 1) and binds nothing. Refused without `server.handoff_socket` |
 
@@ -236,7 +238,7 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | Key | Type, default | What |
 |---|---|---|
 | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | required | the hot tier |
-| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go straight to it, so it must do them (all three kinds do) |
+| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go to it when the hot tier is full, and it is where the reconciler copies them, so it must do them (all three kinds do) |
 | `hot_store.endpoint` | `http://host[:port]`, required for `s3` | the hot tier's store. No path; TLS is not built yet |
 | `hot_store.region` | string, `us-east-1` | the signing region of the hot tier's store |
 | `hot_store.credentials_file` | path, required for `s3` | the key file of the hot tier's store |
@@ -261,7 +263,8 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
-| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
+| `hot_store.abandoned_upload_after` | duration, `0s` (0s to 8760h) | how long a multipart upload may stand open in the hot tier before the reconciler's stray sweep (at takeover and daily) aborts it, by the start time the tier gives. The default `0s` aborts none: as in S3, an incomplete upload is kept, and its parts hold hot-tier space, until its client aborts it. Set it, for example `"168h"`, to opt in, as an S3 bucket owner does with an `AbortIncompleteMultipartUpload` lifecycle rule. Uploads are made in the hot tier when it has room (see [Multipart uploads](operations.md#multipart-uploads)) |
+| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to one tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.retry_min` | duration, `1s` (1ms to 1h) | the delay before the reconciler tries again an entry whose item failed once; it doubles for each failure after the first |
 | `hot_store.retry_max` | duration, `60s` (1ms to 1h) | the longest delay of a failing item; not below `retry_min` |
 | `hot_store.stray_grace` | duration, `10m` (1ms to 8760h) | how old a hot object with no entry and no cold object must be before the stray sweep adopts it |
@@ -354,7 +357,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 - the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
-These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
+These tuning values are fixed in this release and have no key: the intervals of the cache's passes and of the scrub, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 
