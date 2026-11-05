@@ -233,9 +233,10 @@ image by digest from the same tiers. It runs in one of two modes:
 The start line and `/metricz` say which mode runs.
 
 The params of an `oci` interface are `port` or `addresses` (where it listens), `tls_cert_file`,
-`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth` and `stage_read`
-(the most bytes of a stored chunk a push reads in one call): the certificate and the key go together
-and `max_connections` and `stage_read` are at least 1. Several `oci` interfaces make one front on
+`tls_key_file`, `prefix`, `max_connections`, `connection_lifetime`, `require_auth`, `stage_read`
+(the most bytes of a stored chunk a push reads in one call), `max_manifest_bytes` (4 MiB), `read_chunk_bytes`
+(4 MiB) and `echo_bytes` (256), `upstream`: the certificate and the key go together
+and `max_connections`, `stage_read` and the three sizes are at least 1. Several `oci` interfaces make one front on
 every address of theirs and must agree on all but the addresses.
 
 The front runs on both shapes of the file. On a storage node it reads through the proxy. On a
