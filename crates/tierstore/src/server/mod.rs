@@ -28,6 +28,12 @@
 //!   `encoding-type=url` percent-encodes the names in the answer (`Key`, `Prefix`, `Delimiter`,
 //!   `StartAfter`, the `Prefix` of a common prefix), a space as `+`, `/` and `*` as they are
 //!   and `~` as `%7E`; any other `encoding-type` is `InvalidArgument`;
+//! - ListObjects, version 1 (a `GET` of the bucket with no `list-type=2`): `prefix`, `marker`,
+//!   `max-keys`, `delimiter` and `encoding-type=url` as above, over the same walk, with an
+//!   `Owner` for each object. The next page starts after `marker`, a key that need not exist
+//!   (a marker inside a common prefix passes the prefix, as `start-after` does). A truncated
+//!   page has `NextMarker` only when the request has a delimiter, as for S3: the last key of the
+//!   page, or the common prefix that ends it;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
 //!   the backend does (the [`Proxy`](crate::Proxy) passes them to its cold tier). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
@@ -297,6 +303,8 @@ mod gc_tests;
 mod idle_tests;
 #[cfg(test)]
 mod list_delimiter_tests;
+#[cfg(test)]
+mod list_objects_v1_tests;
 #[cfg(test)]
 mod list_options_tests;
 #[cfg(test)]
