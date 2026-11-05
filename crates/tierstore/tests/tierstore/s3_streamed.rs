@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
 use crate::conformance;
-use crate::s3::{backend, config};
+use crate::s3::{backend, backend_cut_at_a_part, config};
 use crate::support::body;
 
 /// Asserts that a streamed read gives the bytes of the object or the range, with an empty range and
@@ -70,7 +70,7 @@ const OVER_ONE_PUT: u64 = (16 << 20) + 1;
 /// HEAD gives too.
 #[tokio::test]
 async fn a_streamed_replace_of_more_than_one_put_is_completed_with_the_tag() {
-    let (s3, backend) = backend().await;
+    let (s3, backend) = backend_cut_at_a_part().await;
     backend.put("k", body("old")).await.unwrap();
     let tag = backend.head("k").await.unwrap().tag;
 
@@ -228,7 +228,7 @@ async fn an_open_read_whose_answer_lacks_part_of_the_meta_is_an_error() {
 /// that a key that exists is refused with no upload left open.
 #[tokio::test]
 async fn a_tagged_streamed_put_of_more_than_one_put_is_completed_with_its_tag() {
-    let (s3, backend) = backend().await;
+    let (s3, backend) = backend_cut_at_a_part().await;
     let cut = Error::Other("cut".to_owned());
     let failing = over_one_put(Some(&cut));
     let failed = backend.put_stream_tagged("k", Some(OVER_ONE_PUT), failing);

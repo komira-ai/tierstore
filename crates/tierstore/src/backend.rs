@@ -431,8 +431,8 @@ pub trait Backend: Send + Sync {
     ///
     /// As for [`Backend::put_stream`], the object becomes visible only after `body` has ended
     /// without an error, and a body that ends with an error, or a call that is dropped half way,
-    /// leaves nothing. The directory and S3 backends do not hold the body whole (S3 gathers a
-    /// body of at most 16 MiB for one PUT, and sends a longer one as a multipart upload).
+    /// leaves nothing. The directory and S3 backends do not hold the body whole (S3 streams a
+    /// body of at most `server.s3_single_put_max` as one PUT, and sends a longer one as a multipart upload).
     ///
     /// The provided implementation collects the chunks and calls [`Backend::put_tagged`]; it
     /// serves a backend that holds its objects in memory anyway, and the wrappers of other
@@ -470,7 +470,7 @@ pub trait Backend: Send + Sync {
     /// match, leaves the object as it was and leaves nothing behind. The directory backend writes
     /// the chunks to a temporary file and replaces the object under the lock and the tag check of
     /// [`Backend::put_if_match`]; the S3 backend sends one PUT with `If-Match` for a body of at
-    /// most 16 MiB and a multipart upload whose completion carries `If-Match` for a longer one,
+    /// most `server.s3_single_put_max` and a multipart upload whose completion carries `If-Match` for a longer one,
     /// aborted on any failure. A store that must know the length of a request before it is sent
     /// (S3 does) holds the body first when given `None`. The in-memory backend collects the body.
     ///

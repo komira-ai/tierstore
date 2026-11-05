@@ -204,7 +204,9 @@ impl S3Store {
             ("partNumber", number.to_string()),
             ("uploadId", upload_id.to_owned()),
         ];
-        let resp = self.conn.send_streamed(key, &query, len, body).await?;
+        let resp = (self.conn)
+            .send_streamed(key, &query, Vec::new(), len, body)
+            .await?;
         if resp.status() != StatusCode::OK {
             return Err(self.conn.within(failure(resp)).await?);
         }
@@ -260,20 +262,22 @@ impl S3Store {
 }
 
 impl Conn {
-    /// Signs and sends a PUT of `len` bytes read from `source`, and gives the store's answer.
+    /// Signs and sends a PUT of `len` bytes read from `source`, with `headers` besides the
+    /// signed ones, and gives the store's answer.
     /// The request is cut short, as `Stalled`, when it makes no progress for `request_timeout`
     /// (see the module docs).
-    async fn send_streamed(
+    pub(super) async fn send_streamed(
         &self,
         key: &ObjectKey,
         query: &[(&str, String)],
+        headers: Vec<(&'static str, String)>,
         len: u64,
         source: BodyStream,
     ) -> Result<Response, ObjectStoreError> {
         let pulse = Arc::new(Pulse::default());
         let body = Streamed::new(source, len, Arc::clone(&pulse));
         let request = self
-            .signed_payload(Method::PUT, Some(key), query, Vec::new(), UNSIGNED_PAYLOAD)
+            .signed_payload(Method::PUT, Some(key), query, headers, UNSIGNED_PAYLOAD)
             .header(CONTENT_LENGTH, len)
             .body(reqwest::Body::wrap(body));
         let mut sending = Box::pin(request.send());
