@@ -300,12 +300,27 @@ AccessDenied` before any body is read:
 | a scoped key's URL for an object outside its read prefixes | 403 |
 | PUT, POST or DELETE of anything (parts too) with the URL of a key that reads | 403 |
 | a listing, a call on the bucket or the root | 403 |
-| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above and `x-id` | 403 |
+| GET or HEAD with `response-content-type`, `-disposition`, `-encoding`, `-language`, `-cache-control` or `-expires` signed into the URL | served, with that header set (see Response headers of a GET) |
+| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above, `x-id` and the six `response-*` ones | 403 |
 | a URL that is expired, has `X-Amz-Expires` of zero or over the cap, is malformed, is signed with another secret, names a key id the server does not have, or was edited after it was signed | 403 |
 
 A program in Rust that links the `tierstore` library with its `server` feature makes the URL with
 `tierstore::server::presign_get(&key, &request)`, as `presign_put` makes a PUT URL (see Presigned
 PUT URLs); any SDK presigner makes the same URL.
+
+### Response headers of a GET
+
+A GET or HEAD of an object, signed in the header or in a presigned URL, may carry `response-content-type`,
+`response-content-disposition`, `response-content-encoding`, `response-content-language`,
+`response-cache-control` and `response-expires` in its query, and the answer (200 or 206, and the
+HEAD) carries that header with the value given, in place of the object's own (the content type of an
+object is `application/octet-stream`), as S3 answers. The value is sent as it was given; a value that
+is not a header value (a line feed, a NUL) is `400 InvalidArgument`, and a parameter with an empty value
+is not applied. A 304, a 412 and every error answer carry none of them. A presigned URL signs the
+parameters with the rest of its query, so one added after the URL was made is `SignatureDoesNotMatch`.
+A GET or HEAD with one of the parameters and no signature at all (no `Authorization` header and no SigV4
+parameter in the query) is `400 InvalidRequest` ("Request specific response headers cannot be used for
+anonymous GET requests."), as S3 answers, and not the `403` of an unsigned request without them.
 
 ## The configuration file
 

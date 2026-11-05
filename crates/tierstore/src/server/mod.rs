@@ -7,7 +7,10 @@
 //! room, and so on):
 //!
 //! - GetObject (whole, `bytes=a-b`, `bytes=a-` or `bytes=-n`; the object is asked for its size
-//!   first, so a ranged read costs a head) and HeadObject, with `If-Match` (another content tag
+//!   first, so a ranged read costs a head) and HeadObject, with the `response-content-type`,
+//!   `-disposition`, `-encoding`, `-language`, `-cache-control` and `-expires` parameters of a
+//!   signed request or a presigned URL, which set the header of the answer (a request with one
+//!   and no signature is 400 `InvalidRequest`), and with `If-Match` (another content tag
 //!   is `PreconditionFailed`), `If-None-Match` (the content tag is a 304), `If-Unmodified-Since`
 //!   (a time before the object's is `PreconditionFailed`) and `If-Modified-Since` (a time not
 //!   before the object's is a 304), in the order of RFC 7232 and to the second; a date that is
@@ -334,6 +337,8 @@ mod reply_tests;
 mod request_tests;
 #[cfg(test)]
 mod reserved_tests;
+#[cfg(test)]
+mod response_override_tests;
 #[cfg(test)]
 mod role_tests;
 #[cfg(test)]
@@ -894,6 +899,9 @@ impl Server {
     {
         if let Some(answer) = self.probe(parts).await {
             return Ok(answer);
+        }
+        if matches!(parts.method, Method::GET | Method::HEAD) {
+            ops::refuse_unsigned_overrides(parts)?;
         }
         let signed = auth::verify(&self.config, parts)?;
         let reads = matches!(parts.method, Method::GET | Method::HEAD);
