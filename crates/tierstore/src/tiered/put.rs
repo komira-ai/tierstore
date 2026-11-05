@@ -1,5 +1,5 @@
 //! The put paths of the proxy: a held body and a streamed one, to the hot tier or, where the hot
-//! tier is full, to the cold tier, and the creation of the object of a multipart upload. Each is
+//! tier is full, to the cold tier, and (in `uploads.rs`) the completion of a multipart upload. Each is
 //! made on the entry of its key (`entry_put.rs`); the rules are those of the type's rustdoc.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,18 +69,6 @@ impl<'a> Offered<'a> {
 }
 
 impl Inner {
-    /// Creates the object of a multipart upload in the cold tier, create-only, on the entry of its
-    /// key. The cold tier's own completion refuses a key it holds.
-    pub(super) async fn complete_cold(
-        &self,
-        key: &str,
-        id: &str,
-        parts: &[(u32, String)],
-    ) -> Result<String, Error> {
-        self.admit_write(key).await?;
-        self.complete_on_entry(key, id, parts).await
-    }
-
     /// Puts a held body on the entry of `key`.
     pub(super) async fn put_object(&self, key: &str, body: Bytes) -> Result<(), Error> {
         self.admit_write(key).await?;

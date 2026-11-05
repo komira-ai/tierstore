@@ -131,6 +131,7 @@ impl Rig {
             write_idle: Duration::from_secs(30),
             lifetime: Duration::from_secs(3600),
             drain_deadline: Duration::from_secs(30),
+            listen: tierstore::server::ListenTuning::default(),
         };
         change(&mut limits);
         let bound = match &tls {

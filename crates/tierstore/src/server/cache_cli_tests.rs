@@ -15,7 +15,9 @@ use tierstore_testkit::dir::TestDir;
 use tokio::sync::oneshot;
 
 use super::Drained;
-use super::cache_cli::{run_cache, serve_cache, size_of_file_system, unjudged_warning};
+use super::cache_cli::{
+    bind_cache_s3, run_cache, serve_cache, size_of_file_system, unjudged_warning,
+};
 use super::cli::Error;
 use super::cli::{checked, exit_status};
 use super::config::{PerRun, Settings, settings_from_text};
@@ -24,6 +26,7 @@ use super::config_testing::oci_interface;
 use super::listen::LoopbackBind;
 use super::local_cache::testing::{FakeDisk, Quirk, digest, pattern};
 use super::local_cache::{Disk, SystemDisk};
+use super::testing::established_unaccepted;
 use crate::{
     Backend, ByteRange as TierRange, Error as BackendError, FaultyBackend, Listed, MemoryBackend,
     Meta, Op,
@@ -814,4 +817,25 @@ async fn a_taken_loopback_port_stops_the_start_of_a_build_node() {
         std::net::TcpListener::bind(configured).is_ok(),
         "still held"
     );
+}
+
+/// Asserts that the backlog given to the bind of a node with a local cache is the one every one
+/// of its sockets listens with, the configured address and the loopback socket added for the
+/// cache: with a backlog of 1, of six connections no more than the queue and the one the kernel
+/// lets over it are established while nothing accepts; with a larger one more than that are.
+#[tokio::test]
+async fn the_cache_bind_listens_with_the_backlog_given_on_every_socket() {
+    let configured = ["127.0.0.2:0".parse().expect("an address")];
+    let small = bind_cache_s3(&configured, 1).expect("bound");
+    assert_eq!(small.len(), 2);
+    for listener in &small {
+        let at = listener.local_addr().expect("an address");
+        let held = established_unaccepted(at, 6).await;
+        assert!((1..=3).contains(&held), "{held} established on {at}");
+    }
+    let large = bind_cache_s3(&configured, 1024).expect("bound");
+    for listener in &large {
+        let at = listener.local_addr().expect("an address");
+        assert!(established_unaccepted(at, 6).await > 3, "{at}");
+    }
 }

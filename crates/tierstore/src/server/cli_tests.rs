@@ -25,6 +25,8 @@ use super::{
 mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
+#[path = "cli_tests/tiers.rs"]
+mod tiers;
 
 /// The JSON form of a key file with the id `JSONID` and the secret `json-secret-0123456789`.
 const JSON_KEY: &str =
@@ -107,6 +109,7 @@ fn the_keys_have_their_defaults() {
     assert_eq!(cli.usage_stale_after, Duration::from_secs(120));
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
+    assert_eq!(cli.delete_concurrency, 16);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));
     assert_eq!(cli.put_min_bytes_per_sec, 1024);
     assert_eq!(cli.put_rate_grace, Duration::from_secs(30));

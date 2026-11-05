@@ -400,3 +400,32 @@ impl Backend for Plain {
         Ok(Vec::new())
     }
 }
+
+/// How many of `tries` connections to the listener at `at` are established while nothing accepts
+/// them. The kernel keeps a listener's queue of established connections to its backlog (and lets
+/// one more in) and drops the rest of the handshakes, which stay pending; so the count is at most
+/// the backlog plus one, and a listener with a larger backlog shows more. The first connection is
+/// waited for, so that the count is never zero for a listener that works; the others are given a
+/// number of turns of the runtime, and a handshake that had not come by then is not counted.
+pub(crate) async fn established_unaccepted(at: std::net::SocketAddr, tries: usize) -> usize {
+    let attempts: Vec<_> = (0..tries)
+        .map(|_| tokio::spawn(tokio::net::TcpStream::connect(at)))
+        .collect();
+    let (first, rest) = attempts.split_first().expect("at least one try");
+    let mut established = 0;
+    while !first.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    for attempt in rest {
+        if attempt.is_finished() {
+            established += 1;
+        }
+    }
+    for attempt in &attempts {
+        attempt.abort();
+    }
+    established + 1
+}

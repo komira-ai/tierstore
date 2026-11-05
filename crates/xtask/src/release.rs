@@ -33,8 +33,13 @@
 //! ([`hostkeeper_index`]) writes the release index of the three, `index.json`; and
 //! `verify-assets hostkeeper-package` and `verify-assets hostkeeper-index`
 //! ([`hostkeeper_verify`]) check them as a host does. See those modules.
+//!
+//! After a release, by hand: `release desired` ([`desired`]) reads the release index of a published
+//! release and gives the version and digest `.github/workflows/hostkeeper-desired.yml` sets on the
+//! hostkeeper coordinator, or refuses a release whose index lacks a platform.
 
 mod binary;
+pub mod desired;
 pub mod hostkeeper_index;
 pub mod hostkeeper_package;
 pub mod hostkeeper_verify;

@@ -4,10 +4,11 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hyper::StatusCode;
 use hyper::body::Body;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
+use hyper::{Method, StatusCode};
+use objstore_s3::key_rules;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
@@ -16,6 +17,7 @@ use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
+use super::delete_objects::DELETE_BODY_LIMIT;
 use super::handover::hand_over;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
@@ -31,8 +33,9 @@ use super::xml::{self, Listing, UploadListing};
 /// adds an `Owner` to the entries of a listing when it is asked to.
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 14] = [
+const SUPPORTED: [&str; 15] = [
     "continuation-token",
+    "delete",
     "delimiter",
     "fetch-owner",
     "key-marker",
@@ -76,6 +79,21 @@ pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 /// The most keys in a page of a listing, and the number of parts of an upload.
 const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
+
+/// Whether a call is DeleteObjects: a `POST` to the bucket with `?delete`.
+pub(super) fn deletes_many(method: &Method, target: &Target, query: &Query) -> bool {
+    *method == Method::POST && *target == Target::Bucket && query.has("delete")
+}
+
+/// The most bytes the body of a call may have: the limit of the server, and for DeleteObjects
+/// what 1000 keys fill ([`DELETE_BODY_LIMIT`]), since that body is held whole.
+pub(super) fn body_limit(limit: usize, deleting: bool) -> usize {
+    if deleting {
+        limit.min(DELETE_BODY_LIMIT)
+    } else {
+        limit
+    }
+}
 
 /// The range a `Range` header asks for, if it is one valid single range (`bytes=<first>-<last>`,
 /// `bytes=<first>-` or `bytes=-<count>`); anything else is no range, and asks for the whole
@@ -134,11 +152,20 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
-/// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
-/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed), and this front does
-/// not support `encoding-type=url`. A key with one would make every page that lists it malformed.
-fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
+/// A key that is stored must be one S3 accepts and one a listing can carry:
+///
+/// - S3's own rules (`objstore_s3::key_rules::s3_key`): over 1024 bytes is [`Error::InvalidKey`]
+///   (400 `KeyTooLongError`, as S3 answers). Any other text is a key. (A `.` or `..` segment is
+///   one too: an S3 tier refuses it itself, see `objstore_s3::key_rules::s3_client_key`.)
+/// - A character a listing can carry: the answers of a listing are XML 1.0, which has no
+///   character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF (tab, line
+///   feed, carriage return, U+007F and the C1 controls are allowed), and this front does not
+///   support `encoding-type=url`, the only way S3 lists such a key. A key with one would make
+///   every page that lists it malformed.
+fn refuse_unstorable(key: &str) -> Result<(), S3Error> {
+    if key_rules::s3_key(key).is_err() {
+        return Err(S3Error::from(Error::InvalidKey(key.to_owned())));
+    }
     let bad = |c: char| {
         matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
             || matches!(c, '\u{FFFE}' | '\u{FFFF}')
@@ -379,6 +406,13 @@ impl Server {
         if setting.is_none() && !buckets {
             refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         }
+        let deleting = deletes_many(&parts.method, &target, query);
+        if query.has("delete") && !deleting {
+            return Err(S3Error::unsupported("this operation is not supported"));
+        }
+        if deleting {
+            return self.delete_objects(parts, reader, check).await;
+        }
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let declared = header(&parts.headers, "content-length");
@@ -538,11 +572,14 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
-        let (carry, body) = hand_over(pieces(reader, check, refused.clone()));
+        let (carry, body) = hand_over(
+            pieces(reader, check, refused.clone()),
+            self.config.put_pieces_queued,
+        );
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
@@ -650,7 +687,7 @@ impl Server {
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);

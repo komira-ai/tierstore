@@ -213,6 +213,7 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.grant_key_files` | paths, none | deprecated, ignored: the read grant was removed (use a presigned GET URL). Accepted so that a file written for the release before still starts; the files are not read, and the server logs `tierstore: server.grant_key_files is ignored: the read grant was removed; use a presigned GET URL` |
 | `server.grant_max_lifetime` | duration, none | deprecated, ignored, like `server.grant_key_files`; its warning names `server.grant_max_lifetime` |
 | `server.max_request_bytes` | bytes, 268435456 (256 MiB) | the longest body of a request: the longest object and the longest part. A body over it is refused with 413 and nothing is stored |
+| `server.delete_concurrency` | count, 16 | the most keys of one DeleteObjects call (`POST /<bucket>?delete`) deleted at once; at least 1. The call is not limited by it, only how many of its deletes run together |
 | `server.max_concurrent_puts` | count, 32 | the most put bodies and parts taken at once; one more waits for one to end, up to `server.put_permit_wait` |
 | `server.put_permit_wait` | duration, `15s` | How long a put that finds every put slot taken waits for one to end before it is answered 503 `SlowDown` with `Retry-After: 1`; `0s` answers at once. No byte of its body is read while it waits, and a waiter counts as in flight in a drain (never past `--drain-deadline`) |
 | `server.put_min_bytes_per_sec` | bytes a second, 1024 | the least average rate of a body, counted over the time spent waiting for the client; 0 turns it off |
@@ -225,6 +226,18 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.s3_pool_idle_timeout` | duration, `30s` (1ms to 1h) | how long an unused connection to an `s3` tier is kept before it is dropped. Keep it shorter than the idle close of the store and of any proxy before it |
 | `server.s3_read_retries` | count, 2 (0 to 8) | how many times a read of an `s3` tier that failed in transport (a connection closed after the request went out) is sent again; 0 sends it once. A read that timed out is never sent again |
 | `server.s3_read_retry_wait` | duration, `50ms` (1ms to 10s) | the wait before the first resend of a read; each resend waits twice the one before |
+| `server.header_timeout` | duration, `60s` (1ms to 1h) | how long a client has to send the head of a request, and so how long a connection may wait, idle, for its next request (S3 and OCI fronts); also how long the drain waits for a client to close a connection the server shut. Keep it above the time a client keeps an idle connection in its pool |
+| `server.listen_backlog` | count, 1024 (1 to 65535) | the length of the queue of connections the system keeps for a listening socket that is not yet accepted from; the system may cut it to its own limit (`net.core.somaxconn` on Linux) |
+| `server.accept_pause` | duration, `100ms` (1ms to 1m) | how long an accept loop (both fronts and the hand-off socket) waits after an accept that failed, so that a listener that keeps failing is not asked again at once |
+| `server.door_grace` | duration, `3s` (1ms to 1m) | the longest the closing door of a draining front takes connections whose handshake is still in flight, and how long a new connection has to send its first request after the settle |
+| `server.door_look` | duration, `10ms`, or `door_grace` if that is shorter (1ms to 10s, not over `door_grace`) | how far apart the two looks are that must both find no handshake in flight before the door closes |
+| `server.put_pieces_queued` | count, 4 (1 to 4096) | how many pieces of a streamed put's body wait for the backend to take them; with the piece in hand and the one the backend has, all a put holds between the client and the backend |
+| `server.oci_handshake_timeout` | duration, `10s` (1ms to 1h) | how long a client has to finish the TLS handshake with the OCI front before the connection is closed to free its slot |
+| `server.s3_chunks_waiting` | count, 1 (1 to 1024) | how many chunks of a part wait for the request to an `s3` tier that sends them |
+| `server.dir_copy_chunk` | bytes, 1 MiB (1 to 1 GiB) | the size of the pieces in which a `dir` tier joins the parts of a multipart upload |
+| `server.dir_read_chunk` | bytes, 64 KiB (1 to 1 GiB) | the size of the chunks in which a `dir` tier gives a streamed read |
+| `server.s3_single_put_max` | size, `5GiB` (1MiB to 5GiB) | the longest object of known length that an `s3` tier (both tiers, or the upstream of a cache) is written with one PUT, whose body is streamed and never held whole; a longer one, and a body of unknown length, is a multipart upload. 5GiB is the most S3 takes in one PUT. Lower it for a store or a proxy that takes a long PUT worse than several short ones |
+| `server.s3_part_bytes` | size, `16MiB` (5MiB to 1GiB) | the size of a part of a multipart upload to an `s3` tier. One part is held in memory while it is sent, so a write holds this much; an object too large for 10,000 parts of this size gets larger parts |
 | `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself; without it, the default, a start binds its own sockets and makes no control socket. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
 | `server.handoff_wait` | duration, `10s` (1ms to 1h) | how long a start waits for the instance that answers on `server.handoff_socket` to hand its sockets over, from the connection to the end of the hand-off; a start that is not answered in that time fails (exit 1) and binds nothing. Refused without `server.handoff_socket` |
 
@@ -235,7 +248,7 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | Key | Type, default | What |
 |---|---|---|
 | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | required | the hot tier |
-| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go straight to it, so it must do them (all three kinds do) |
+| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go to it when the hot tier is full, and it is where the reconciler copies them, so it must do them (all three kinds do) |
 | `hot_store.endpoint` | `http://host[:port]`, required for `s3` | the hot tier's store. No path; TLS is not built yet |
 | `hot_store.region` | string, `us-east-1` | the signing region of the hot tier's store |
 | `hot_store.credentials_file` | path, required for `s3` | the key file of the hot tier's store |
@@ -260,7 +273,8 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
-| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
+| `hot_store.abandoned_upload_after` | duration, `0s` (0s to 8760h) | how long a multipart upload may stand open in the hot tier before the reconciler's stray sweep (at takeover and daily) aborts it, by the start time the tier gives. The default `0s` aborts none: as in S3, an incomplete upload is kept, and its parts hold hot-tier space, until its client aborts it. Set it, for example `"168h"`, to opt in, as an S3 bucket owner does with an `AbortIncompleteMultipartUpload` lifecycle rule. Uploads are made in the hot tier when it has room (see [Multipart uploads](operations.md#multipart-uploads)) |
+| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to one tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.retry_min` | duration, `1s` (1ms to 1h) | the delay before the reconciler tries again an entry whose item failed once; it doubles for each failure after the first |
 | `hot_store.retry_max` | duration, `60s` (1ms to 1h) | the longest delay of a failing item; not below `retry_min` |
 | `hot_store.stray_grace` | duration, `10m` (1ms to 8760h) | how old a hot object with no entry and no cold object must be before the stray sweep adopts it |
@@ -353,7 +367,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 - the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
-These tuning values are fixed in this release and have no key: the multipart part size (16 MiB) and threshold, the intervals of the cache's passes and of the scrub, the buffer sizes of the S3 front's pipes and of the OCI front, the accept pause, the listen backlog, the handshake time of the OCI front, and the timeouts of the update hook's calls.
+These tuning values are fixed in this release and have no key: the intervals of the cache's passes and of the scrub, the buffer sizes of the OCI front, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 

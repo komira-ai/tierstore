@@ -9,6 +9,7 @@
 //! One store value addresses one bucket.
 
 mod body;
+pub mod key_rules;
 pub mod listing;
 pub mod s3;
 mod types;
@@ -57,8 +58,8 @@ pub trait ObjectStore: Send + Sync + 'static {
     ///
     /// The default gathers the body whole and calls [`ObjectStore::put_new`]: for the
     /// in-memory fake and the test stores that wrap another. The S3 store sends a large
-    /// object as a multipart upload ([`s3::MULTIPART_THRESHOLD`]), a part at a time, and
-    /// aborts it on any failure; the local-directory store writes the pieces to its
+    /// object as one streamed PUT up to [`s3::S3Tuning::single_put_max`] (5 GiB by default) and
+    /// as a multipart upload, a part at a time, above it, aborting it on any failure; the local-directory store writes the pieces to its
     /// file as they come.
     fn put_stream(
         &self,

@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, MULTIPART_THRESHOLD, S3Config, S3Store};
+use objstore_s3::s3::{Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use reqwest::Client;
 use rustix::process::{Pid, Signal, kill_process};
@@ -104,7 +104,12 @@ impl Running {
             request_timeout: Duration::from_secs(30),
             min_body_rate: None,
         };
-        S3Store::new(config).unwrap()
+        // The threshold of the client before it was a setting (see `support.rs`).
+        let tuning = S3Tuning {
+            single_put_max: PART_BYTES,
+            ..S3Tuning::default()
+        };
+        S3Store::new_tuned(config, tuning).unwrap()
     }
 
     pub(crate) fn signal(&self, signal: Signal) {
@@ -616,14 +621,15 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
 /// Asserts that the binary serves over two S3 tiers, each a bucket of a store of its own that it
 /// reaches with the key file and the region of its tier: an object put is read back, is in the
 /// hot store and then, copied by the reconciler, in the cold store; a multipart upload lands in
-/// the cold store only, as one object made of the parts, with no upload left open; and the
+/// the hot store, as one object made of the parts, and is then copied to the cold store, with no
+/// upload left open in either; and the
 /// requests of each tier were signed with the key and the region of that tier (each store
 /// refuses another key); and the `ETag` a head answers is the tag in quotes once, for an
 /// object put whole and for one made of parts, and an `If-Match` with it names the object's
 /// tag (the answer is that objects cannot be replaced) where another tag is a failed
 /// precondition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_one() {
+async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_hot_one() {
     let hot = FakeS3::start().await;
     let cold = FakeS3::start().await;
     // A hot tier that keeps its format between starts is activated by the operator
@@ -677,14 +683,22 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert!(copied.is_ok(), "not copied");
 
     let big = ObjectKey::new("cas/big").unwrap();
-    let len = MULTIPART_THRESHOLD + 1;
+    let len = PART_BYTES + 1;
     let bytes = Bytes::from(vec![9_u8; usize::try_from(len).unwrap()]);
     let body: BodyStream = stream::iter(vec![Ok(bytes)]).boxed();
     store.put_stream(&big, len, body).await.unwrap();
+    assert_eq!(hot.object_len(&big), Some(len));
+    assert_eq!(hot.stats().completed, 1);
+    assert_eq!(hot.incomplete_uploads(), 0);
+    let name = "cas/big".to_owned();
+    let copying = async {
+        while !cold.keys().contains(&name) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let copied = tokio::time::timeout(SAFETY, copying).await;
+    assert!(copied.is_ok(), "not copied");
     assert_eq!(cold.object_len(&big), Some(len));
-    assert!(!hot.keys().contains(&"cas/big".to_owned()));
-    let completed = (cold.stats().completed, hot.stats().completed);
-    assert_eq!(completed, (1, 0));
     assert_eq!(cold.incomplete_uploads(), 0);
     assert_eq!(store.head(&big).await.unwrap().size, len);
     let head = store.head(&big).await.unwrap();
