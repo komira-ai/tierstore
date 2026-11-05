@@ -318,6 +318,8 @@ mod hosted_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
+mod key_rules_tests;
+#[cfg(test)]
 mod list_options_tests;
 #[cfg(test)]
 mod lock_tests;
