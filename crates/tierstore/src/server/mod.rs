@@ -68,6 +68,15 @@
 //!   `NextPartNumberMarker`; `max-parts` is at most 1000 and `0` is an empty page; an upload
 //!   that is not open (never given, of another key, aborted, completed) is `NoSuchUpload`. A
 //!   full key, a read-only key and a scoped key with a write prefix over the key may list parts;
+//! - ListObjectVersions (`GET /<bucket>?versions`) with `prefix`, `delimiter`, `max-keys`,
+//!   `encoding-type=url`, `key-marker` and `version-id-marker`, for a bucket that is not
+//!   versioned, as S3 answers it: every object is one `Version` whose `VersionId` is `null` and
+//!   `IsLatest` is `true`, and there is no `DeleteMarker`. It walks the keys as a listing of
+//!   objects does; the markers of a page are its last key and `null`, or a common prefix and no
+//!   id. A `version-id-marker` needs a `key-marker` and can only be `null` (`InvalidArgument`
+//!   otherwise). `versionId=null` on a GetObject, HeadObject or DeleteObject is the call without
+//!   it; any other id is `NoSuchVersion` (404), and `versionId` on another call is
+//!   `NotImplemented`;
 //! - HeadBucket of the served bucket, with `x-amz-bucket-region`; CreateBucket of it, which
 //!   exists, so it is answered as S3 answers a create of a bucket one owns (200 in `us-east-1`,
 //!   409 `BucketAlreadyOwnedByYou` elsewhere; a `LocationConstraint` other than the server's
@@ -84,7 +93,7 @@
 //!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know (`versionId`), is answered `NotImplemented`.
+//! know, is answered `NotImplemented`.
 //! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
@@ -388,6 +397,8 @@ mod list_options_tests;
 mod list_parts_tests;
 #[cfg(test)]
 mod list_uploads_delimiter_tests;
+#[cfg(test)]
+mod list_versions_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]

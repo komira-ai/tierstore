@@ -167,12 +167,7 @@ async fn the_settings_are_read_by_signed_requests_on_the_bucket_only() {
         let reply = rig.call("GET", call, b"").await;
         assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED, "{call}");
     }
-    for (method, query) in [
-        ("PUT", "versioning"),
-        ("DELETE", "policy"),
-        ("PUT", "acl"),
-        ("GET", "versions"),
-    ] {
+    for (method, query) in [("PUT", "versioning"), ("DELETE", "policy"), ("PUT", "acl")] {
         let reply = rig
             .send(method, &format!("/{BUCKET}?{query}"), &[], b"")
             .await;

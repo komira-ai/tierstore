@@ -28,7 +28,9 @@ use super::request::{
     BoxError, Check, Query, Reader, Refused, Target, header, pieces, query_pairs,
 };
 use super::time::{http_date, parse_http_date};
-use super::xml::{self, Listing, ListingV1, PartListing, UploadListing};
+use super::xml::{
+    self, Listing, ListingV1, NULL_VERSION, PartListing, UploadListing, VersionListing,
+};
 
 /// The query parameters this front understands. A request with another is not served.
 /// `delimiter` and `encoding-type` are parameters of ListObjectsV2, ListObjects (which also
@@ -36,7 +38,7 @@ use super::xml::{self, Listing, ListingV1, PartListing, UploadListing};
 /// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 19] = [
+const SUPPORTED: [&str; 22] = [
     "continuation-token",
     "delete",
     "delimiter",
@@ -55,6 +57,9 @@ const SUPPORTED: [&str; 19] = [
     "upload-id-marker",
     "uploadId",
     "uploads",
+    "version-id-marker",
+    "versionId",
+    "versions",
     "x-id",
 ];
 
@@ -369,6 +374,27 @@ pub(super) fn creates_only(headers: &HeaderMap) -> bool {
     matches!(conditions, (None, None | Some("*")))
 }
 
+/// Holds a call that names a version with `versionId` to what the bucket has. Objects are
+/// immutable and the bucket is not versioned, so an object has one version, `null` (S3 names it
+/// so in a bucket that was never versioned): a GET, a HEAD or a DELETE of an object may name it,
+/// and any other id is `NoSuchVersion`. The key of the proxy's own is refused first, as it is
+/// by every call. Any other call does not take the parameter.
+fn named_version(method: &str, target: &Target, multipart: bool, id: &str) -> Result<(), S3Error> {
+    match (method, target, multipart) {
+        ("GET" | "HEAD" | "DELETE", Target::Object(key), false) => {
+            refuse_reserved(key)?;
+            if id == NULL_VERSION {
+                Ok(())
+            } else {
+                Err(S3Error::no_such_version())
+            }
+        }
+        _ => Err(S3Error::unsupported(
+            "versionId is only supported on a GET, HEAD or DELETE of an object",
+        )),
+    }
+}
+
 /// The answer to a failed call on a multipart upload: where the backend has no such upload, it
 /// is `NoSuchUpload`, not `NoSuchKey`.
 fn upload_error(error: Error) -> S3Error {
@@ -412,6 +438,9 @@ impl Server {
             return self.delete_objects(parts, reader, check).await;
         }
         let multipart = query.has_any(&MULTIPART);
+        if let Some(id) = query.get("versionId") {
+            named_version(method, &target, multipart, id)?;
+        }
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let len = body_len(parts, &check);
             return self.upload_part(query, key, len, reader, check).await;
@@ -433,6 +462,9 @@ impl Server {
             ("PUT", Target::Bucket, false) => self.create_bucket(&body),
             ("HEAD", Target::Bucket, false) => Ok(self.head_bucket()),
             ("DELETE", Target::Bucket, false) => self.delete_bucket().await,
+            ("GET", Target::Bucket, false) if query.has("versions") => {
+                self.list_versions(query).await
+            }
             ("GET", Target::Bucket, false) => self.list_objects(query).await,
             ("GET", Target::Bucket, true) if query.has("uploads") => self.list_uploads(query).await,
             ("GET", Target::Object(key), true) if query.has("uploadId") => {
@@ -683,6 +715,53 @@ impl Server {
             objects: &page.objects,
             prefixes: &page.prefixes,
             next: page.next.as_ref().map(list_token::token),
+        };
+        Ok(xml_answer(StatusCode::OK, listing.to_xml()))
+    }
+
+    /// ListObjectVersions (`?versions`), for a bucket that is not versioned: the same walk as a
+    /// listing of objects, starting after `key-marker`, and each object is its one version,
+    /// `null`. The marker of the next page is the last key of the page and the id `null`, or,
+    /// after a common prefix, the prefix and no id (as for the uploads). A
+    /// `version-id-marker` needs a `key-marker`, and can only name `null`.
+    async fn list_versions(&self, query: &Query) -> Result<Answer, S3Error> {
+        let prefix = query.get("prefix").unwrap_or_default();
+        let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
+        let url = encoded(query)?;
+        let max_keys = page_size(query, "max-keys", "maxKeys")?;
+        let key_marker = query.get("key-marker").unwrap_or_default();
+        let id_marker = query.get("version-id-marker").unwrap_or_default();
+        if !id_marker.is_empty() && key_marker.is_empty() {
+            return Err(S3Error::invalid(
+                "A version-id marker cannot be specified without a key marker.",
+            ));
+        }
+        if !id_marker.is_empty() && id_marker != NULL_VERSION {
+            return Err(S3Error::invalid("Invalid version id specified"));
+        }
+        let batch = if delimiter.is_some() {
+            PAGE_LIMIT + 1
+        } else {
+            max_keys + 1
+        };
+        let start = (!key_marker.is_empty()).then(|| Start::After(key_marker.to_owned()));
+        let backend = self.backend.as_ref();
+        let page = listing::page(backend, prefix, delimiter, start, max_keys, batch).await?;
+        let next = page.next.as_ref().map(|start| match start {
+            Start::After(key) => (key.as_str(), NULL_VERSION),
+            Start::PastPrefix(common) => (common.as_str(), ""),
+        });
+        let listing = VersionListing {
+            bucket: &self.config.bucket,
+            prefix,
+            delimiter,
+            url,
+            key_marker,
+            id_marker,
+            max_keys,
+            objects: &page.objects,
+            prefixes: &page.prefixes,
+            next,
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))
     }

@@ -331,6 +331,13 @@ impl S3Error {
         Self::new(StatusCode::NOT_FOUND, "NoSuchUpload", text)
     }
 
+    /// A request that names a version of an object other than `null`, the only version an
+    /// object of this server has.
+    pub(crate) fn no_such_version() -> Self {
+        let text = "The specified version does not exist.";
+        Self::new(StatusCode::NOT_FOUND, "NoSuchVersion", text)
+    }
+
     /// A request whose path or query is not valid percent-encoded UTF-8.
     pub(crate) fn invalid_uri() -> Self {
         let text = "The path or the query is not valid percent-encoded UTF-8.";
