@@ -12,6 +12,9 @@ use super::oci::{OciError, Upstream, UpstreamSettings};
 /// The default of `params.upstream.timeout`.
 const DEFAULT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The default of `params.upstream.recheck_timeout`.
+const DEFAULT_UPSTREAM_RECHECK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The default of `params.upstream.max_redirects`.
 const DEFAULT_UPSTREAM_REDIRECTS: u32 = 4;
 
@@ -55,6 +58,9 @@ pub(super) fn upstream_of(table: &UpstreamTable) -> Result<Upstream, Error> {
             .timeout
             .map_or(DEFAULT_UPSTREAM_TIMEOUT, |timeout| timeout.0),
         max_redirects: table.max_redirects.unwrap_or(DEFAULT_UPSTREAM_REDIRECTS),
+        recheck_timeout: table
+            .recheck_timeout
+            .map_or(DEFAULT_UPSTREAM_RECHECK_TIMEOUT, |timeout| timeout.0),
     };
     Upstream::new(settings).map_err(refuse)
 }
