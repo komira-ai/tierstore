@@ -253,6 +253,24 @@ async fn sdk_read_only_key_reads_and_is_refused_writes() {
     assert!(new.unwrap_err().into_service_error().is_not_found());
 }
 
+/// Asserts that the SDK's GetBucketLocation, which minio-go and s3cmd send before most calls,
+/// is answered: the SDK reads the `LocationConstraint` of a server in `us-east-1` as the empty
+/// name S3 gives that region, and the same call by a read-only key succeeds.
+#[tokio::test]
+async fn sdk_gets_the_location_of_the_bucket() {
+    let h = serving().await;
+    for sdk in [client(&h), reader(&h)] {
+        let found = sdk
+            .get_bucket_location()
+            .bucket(BUCKET)
+            .send()
+            .await
+            .unwrap();
+        let constraint = found.location_constraint().map(|region| region.as_str());
+        assert_eq!(constraint, Some(""));
+    }
+}
+
 /// Asserts that the multipart flow of the SDK (create, two parts, complete) makes one object
 /// that reads back whole, by a range across the join of the parts, and with its size, and that an
 /// upload that is aborted is accepted: the way an output too big for one put goes up.

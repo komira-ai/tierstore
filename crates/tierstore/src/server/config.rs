@@ -52,6 +52,7 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
@@ -366,6 +367,41 @@ pub(super) struct TierTable {
     pub upload_listing_calls: Option<u32>,
     #[serde(default)]
     pub abandoned_upload_after: Option<Dur>,
+    pub retry_min: Option<Dur>,
+    #[serde(default)]
+    pub retry_max: Option<Dur>,
+    #[serde(default)]
+    pub stray_grace: Option<Dur>,
+    #[serde(default)]
+    pub stray_interval: Option<Dur>,
+    #[serde(default)]
+    pub copy_back_ttl: Option<Dur>,
+    #[serde(default)]
+    pub usage_interval: Option<Dur>,
+    #[serde(default)]
+    pub usage_scan_interval: Option<Dur>,
+    #[serde(default)]
+    pub proxy_usage_stale_after: Option<Dur>,
+    #[serde(default)]
+    pub format_refresh: Option<Dur>,
+    #[serde(default)]
+    pub delete_wait: Option<Dur>,
+    #[serde(default)]
+    pub delete_poll_min: Option<Dur>,
+    #[serde(default)]
+    pub delete_poll_max: Option<Dur>,
+    #[serde(default)]
+    pub stray_rate: Option<u32>,
+    #[serde(default)]
+    pub copy_back_max: Option<u32>,
+    #[serde(default)]
+    pub scan_pages: Option<u32>,
+    #[serde(default)]
+    pub candidate_limit: Option<u32>,
+    #[serde(default)]
+    pub tag_record_limit: Option<u32>,
+    #[serde(default)]
+    pub entry_rounds: Option<u32>,
     pub heartbeat: Option<Dur>,
     #[serde(default)]
     pub departure: Option<Dur>,
@@ -502,6 +538,27 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
             "abandoned_upload_after",
             cold.abandoned_upload_after.is_some(),
         ),
+        ("retry_min", cold.retry_min.is_some()),
+        ("retry_max", cold.retry_max.is_some()),
+        ("stray_grace", cold.stray_grace.is_some()),
+        ("stray_interval", cold.stray_interval.is_some()),
+        ("copy_back_ttl", cold.copy_back_ttl.is_some()),
+        ("usage_interval", cold.usage_interval.is_some()),
+        ("usage_scan_interval", cold.usage_scan_interval.is_some()),
+        (
+            "proxy_usage_stale_after",
+            cold.proxy_usage_stale_after.is_some(),
+        ),
+        ("format_refresh", cold.format_refresh.is_some()),
+        ("delete_wait", cold.delete_wait.is_some()),
+        ("delete_poll_min", cold.delete_poll_min.is_some()),
+        ("delete_poll_max", cold.delete_poll_max.is_some()),
+        ("stray_rate", cold.stray_rate.is_some()),
+        ("copy_back_max", cold.copy_back_max.is_some()),
+        ("scan_pages", cold.scan_pages.is_some()),
+        ("candidate_limit", cold.candidate_limit.is_some()),
+        ("tag_record_limit", cold.tag_record_limit.is_some()),
+        ("entry_rounds", cold.entry_rounds.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
@@ -653,6 +710,7 @@ pub(super) fn storage(
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
     let hot_tuning = hot_tuning(&hot)?;
+    let entry_tuning = entry_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
@@ -679,6 +737,7 @@ pub(super) fn storage(
         s3_request_timeout: shared.s3_request_timeout,
         s3_client: shared.s3_client,
         hot_tuning,
+        entry_tuning,
         hot_bytes: hot_budget,
         high_water,
         low_water,

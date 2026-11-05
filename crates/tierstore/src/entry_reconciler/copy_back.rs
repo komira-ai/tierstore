@@ -85,7 +85,7 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.require_lease()?;
+        self.require_lease().await?;
         let body = self.while_leased(opened.body);
         match self.hot.put_stream(key, Some(opened.meta.size), body).await {
             Ok(()) | Err(Error::AlreadyExists(_) | Error::Full(_)) => Ok(()),
