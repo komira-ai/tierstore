@@ -7,6 +7,7 @@ use hyper::StatusCode;
 use crate::Op;
 
 use super::AccessKey;
+use super::bucket_tests::{rig_with_every_role, statuses};
 use super::testing::{BUCKET, Reply, Rig, texts};
 
 const MEBIBYTE: u64 = 1 << 20;
@@ -144,4 +145,18 @@ async fn deleting_an_empty_bucket_is_refused_and_it_stays() {
     rig.hot.fail_next(Op::List, 1);
     let failed = rig.send("DELETE", &uri, &[], b"").await;
     assert!(failed.status.is_server_error(), "{}", failed.status);
+}
+
+/// Asserts which role may make HeadBucket, CreateBucket and DeleteBucket: HeadBucket is 200 for the
+/// full and the read-only key; CreateBucket (200, the bucket exists in `us-east-1`) is for the full
+/// key only; DeleteBucket of a bucket with an object (409 `BucketNotEmpty` for the full key) is
+/// refused 403 to the read-only key; and a scoped key and a GC key are 403 on all three.
+#[tokio::test(start_paused = true)]
+async fn only_the_full_key_creates_or_deletes_and_the_read_only_key_heads_the_bucket() {
+    let rig = rig_with_every_role().await;
+    let uri = format!("/{BUCKET}");
+    assert_eq!(statuses(&rig, "HEAD", &uri).await, [200, 200, 403, 403]);
+    assert_eq!(statuses(&rig, "PUT", &uri).await, [200, 403, 403, 403]);
+    rig.call("PUT", "k", b"x").await;
+    assert_eq!(statuses(&rig, "DELETE", &uri).await, [409, 403, 403, 403]);
 }

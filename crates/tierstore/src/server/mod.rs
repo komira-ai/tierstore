@@ -101,8 +101,8 @@
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
 //! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation,
 //! ListBuckets and the reads of the settings of the bucket, and nothing else.
-//! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
-//! multipart upload but the listing, which reads) is
+//! Any other call signed by a read-only key (a put, a delete, CreateBucket, DeleteBucket, and
+//! every call of a multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
 //! nothing. The roles of those keys are of the key and not of a prefix. A put by the full key
 //! is create-only but, when the hot tier is full, can race another put of the same key into the

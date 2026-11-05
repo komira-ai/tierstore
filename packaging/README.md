@@ -72,7 +72,7 @@ refuses a key file that its group or others can read):
   object, list the bucket (objects, and the open multipart uploads), head the bucket, read its region
   (GetBucketLocation), list the buckets (ListBuckets) and read the settings of the bucket
   (versioning, policy, ACL and the rest, answered as S3 does for a bucket with none set); a put, a delete,
-  CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
+  CreateBucket, DeleteBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
   List one file for each read-only key, to give each reader a key of its own. The access key
   ids of all the keys of one server must differ: a request names its key by its id, so a start

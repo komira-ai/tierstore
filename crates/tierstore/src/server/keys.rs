@@ -99,9 +99,9 @@ pub(crate) enum Role {
 
 impl Role {
     /// Whether a call with this method is one the role does. The reads are the `GET` and
-    /// `HEAD` calls; a `PUT` (a put, a part, CreateBucket), a `DELETE` (a delete, an abort), a
-    /// `POST` (the start and the completion of an upload) and every other method change
-    /// something or are not served.
+    /// `HEAD` calls; a `PUT` (a put, a part, CreateBucket), a `DELETE` (a delete, an abort,
+    /// DeleteBucket), a `POST` (the start and the completion of an upload) and every other method
+    /// change something or are not served.
     ///
     /// # Errors
     /// [`READ_ONLY`], for a read-only key and a call that is not a read.
