@@ -32,6 +32,9 @@ mod listing;
 mod pause;
 mod put;
 mod read;
+mod uploads;
+#[cfg(test)]
+mod uploads_tests;
 
 pub use entry_delete::DeleteWait;
 use heartbeat::Heartbeat;
@@ -218,14 +221,21 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   multipart call of a key under a reserved prefix is refused with [`Error::Reserved`]. The S3
 ///   front and the local cache of a build node refuse those keys as well, each for itself.
 /// - **Multipart uploads** (`create_upload`, `upload_part`, `complete_upload`, `abort_upload`)
-///   go straight to the cold tier: the parts are passed on as they arrive, so the proxy holds no
-///   part, in memory or on disk, and the uploads are the cold tier's own (they outlive the
-///   proxy where the cold tier keeps them). The completion is a put on the entry of the key whose
-///   object is made in the cold tier by the cold tier's own create-only completion, and so is
-///   refused with [`Error::AlreadyExists`] where either tier holds the key. It is in the hot tier
-///   only after a get asks for the copy-back. The cold tier must do multipart uploads (the
-///   provided methods of [`Backend`] do not). [`Backend::list_uploads`] lists the cold tier's open
-///   uploads, which are the only ones: the proxy keeps no state of an upload.
+///   are made in the hot tier whenever it has room and in the cold tier only when it is full
+///   (`uploads.rs`): the tier is chosen at `create_upload`, as a put's is, and is named in the id
+///   the proxy gives, which is the hot tier's own id with a prefix, or the cold tier's own id
+///   unchanged, so that an id of a release before the prefix names a cold upload. The parts are
+///   passed on to that tier as they arrive, so the proxy holds no part, in memory or on disk, and
+///   the uploads are the tiers' own (they outlive the proxy where the tier keeps them). A hot tier
+///   with no room for a part answers [`Error::Full`] and keeps the upload; the part is never moved
+///   to the cold tier. The completion is a put on the entry of the key whose object is made, in the
+///   upload's tier, by that tier's own create-only completion, and so is refused with
+///   [`Error::AlreadyExists`] where either tier holds the key; one made in the hot tier leaves a
+///   `(PUT, PENDING)` entry, and the reconciler copies the object to the cold tier. Both tiers must
+///   do multipart uploads (the provided methods of [`Backend`] do not). [`Backend::list_uploads`]
+///   lists the open uploads of both tiers (the cold tier's uploads of a key first): the proxy keeps
+///   no state of an upload. The reconciler aborts an upload of the hot tier that has stood open
+///   for `abandoned_upload_after`.
 ///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
@@ -290,6 +300,8 @@ impl Proxy {
         }
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
+        #[cfg(feature = "server")]
+        tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,
@@ -608,8 +620,7 @@ impl Backend for Proxy {
     }
 
     async fn create_upload(&self, key: &str) -> Result<String, Error> {
-        self.inner.admit_write(key).await?;
-        self.inner.cold.create_upload(key).await
+        self.inner.start_upload(key).await
     }
 
     async fn upload_part(
@@ -631,10 +642,7 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<String, Error> {
-        self.inner.admit_write(key).await?;
-        let cold = &self.inner.cold;
-        let upload = cold.upload_part_with_len(key, id, number, len, body);
-        upload.await
+        self.inner.send_part(key, id, number, len, body).await
     }
 
     async fn complete_upload(
@@ -643,15 +651,15 @@ impl Backend for Proxy {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        self.inner.complete_cold(key, id, parts).await
+        self.inner.complete_on_entry(key, id, parts).await
     }
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
-        refuse_reserved(key)?;
-        self.inner.cold.abort_upload(key, id).await
+        self.inner.drop_upload(key, id).await
     }
 
-    /// The parts of an open upload are the cold tier's own (see the type), so this asks it.
+    /// The parts of an open upload are in the tier its id names (see the type), so this asks that
+    /// tier.
     async fn list_parts(
         &self,
         key: &str,
@@ -659,52 +667,23 @@ impl Backend for Proxy {
         after: Option<u32>,
         max_parts: usize,
     ) -> Result<Vec<UploadedPart>, Error> {
-        refuse_reserved(key)?;
-        let cold = &self.inner.cold;
-        cold.list_parts(key, id, after, max_parts).await
+        self.inner
+            .list_upload_parts(key, id, after, max_parts)
+            .await
     }
 
-    /// The open uploads are the cold tier's own (see the type), so this asks the cold tier, and
-    /// leaves out an upload of a reserved key: none is made through the proxy, but the tier is
-    /// shared with other writers. A page that the filter cut short is made up from the next
-    /// page of the tier, so that a short page is the last, as the trait says.
+    /// The open uploads of both tiers (see the type): the proxy keeps no state of an upload, so
+    /// this asks the tiers, and leaves out an upload of a reserved key: none is made through the
+    /// proxy, but the tiers are shared with other writers. A page that the filter cut short is made
+    /// up from the next page of the tier, so that a short page is the last, as the trait says.
     async fn list_uploads(
         &self,
         prefix: &str,
         after: Option<UploadsAfter<'_>>,
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
-        let cold = &self.inner.cold;
-        let mut after = after.map(|(key, id)| (key.to_owned(), id.map(str::to_owned)));
-        let mut found: Vec<OpenUpload> = Vec::new();
-        let mut calls = 0;
-        while found.len() < max_uploads {
-            calls += 1;
-            let limit = self.inner.config.upload_listing_calls;
-            if calls > limit {
-                let text = format!("the cold tier's listing of uploads took over {limit} calls");
-                return Err(Error::Unavailable(text));
-            }
-            let want = max_uploads - found.len();
-            let marker = after
-                .as_ref()
-                .map(|(key, id)| (key.as_str(), id.as_deref()));
-            let page = cold.list_uploads(prefix, marker, want).await?;
-            let last = page.last().map(|up| (up.key.clone(), Some(up.id.clone())));
-            let full = page.len() == want;
-            found.extend(page.into_iter().filter(|up| !is_reserved(&up.key)));
-            match last {
-                Some(last) if full => {
-                    // A full page that ends where the last one did would be asked for for ever.
-                    if after.as_ref().is_some_and(|before| last <= *before) {
-                        let text = "the cold tier's listing of uploads did not advance";
-                        return Err(Error::Unavailable(text.to_owned()));
-                    }
-                    after = Some(last);
-                }
-                _ => break,
-            }
-        }
-        Ok(found)
+        self.inner
+            .list_open_uploads(prefix, after, max_uploads)
+            .await
     }
 }

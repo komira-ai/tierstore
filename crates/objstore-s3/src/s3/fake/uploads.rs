@@ -1,6 +1,6 @@
 //! ListMultipartUploads of the fake service.
 
-use super::{Request, State, Upload, answer, error, iso_date, unescape};
+use super::{Request, State, Upload, answer, error, iso_date, unescape, xml_text};
 
 /// ListParts: the parts of the upload `id` of `key` numbered above `part-number-marker`, in
 /// ascending order of number, at most `max-parts` of them (1000 where the request has none), with
@@ -75,16 +75,18 @@ pub(super) fn list_uploads(state: &State, request: &Request) -> Vec<u8> {
     let mut body = String::from("<ListMultipartUploadsResult>");
     for (key, id, upload) in page {
         body.push_str(&format!(
-            "<Upload><Key>{key}</Key><UploadId>{id}</UploadId>\
+            "<Upload><Key>{}</Key><UploadId>{id}</UploadId>\
              <Initiated>{}</Initiated></Upload>",
+            xml_text(key),
             iso_date(upload.initiated)
         ));
     }
     let more = page.last().filter(|_| matching.len() > page.len());
     let tail = match more {
         Some((key, id, _)) => format!(
-            "<IsTruncated>true</IsTruncated><NextKeyMarker>{key}</NextKeyMarker>\
-             <NextUploadIdMarker>{id}</NextUploadIdMarker>"
+            "<IsTruncated>true</IsTruncated><NextKeyMarker>{}</NextKeyMarker>\
+             <NextUploadIdMarker>{id}</NextUploadIdMarker>",
+            xml_text(key)
         ),
         None => "<IsTruncated>false</IsTruncated>".to_owned(),
     };

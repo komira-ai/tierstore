@@ -215,10 +215,14 @@ async fn a_checksum_that_does_not_match_is_400_and_nothing_is_stored() {
     let invalid = call(&h, "PUT", "j", &[], &malformed, b"hello").await;
     assert_eq!(invalid.status(), 400);
     assert!(text(invalid).await.contains("<Code>InvalidDigest</Code>"));
-    let crc64 = [("x-amz-checksum-crc64nvme", "AAAAAAAAAAA=")];
-    let unsupported = call(&h, "PUT", "j", &[], &crc64, b"hello").await;
-    assert_eq!(unsupported.status(), 501);
-    assert!(h.hot_mem.get("j", None).await.is_err());
+    // CRC-64/NVMe of "hello", the base64 of its eight big-endian bytes.
+    let crc64 = [("x-amz-checksum-crc64nvme", "M3eFcAZSQlc=")];
+    let stored = call(&h, "PUT", "j", &[], &crc64, b"hello").await;
+    assert_eq!(stored.status(), 200);
+    let refused = call(&h, "PUT", "j2", &[], &crc64, b"hellp").await;
+    assert_eq!(refused.status(), 400);
+    assert!(text(refused).await.contains("<Code>BadDigest</Code>"));
+    assert!(h.hot_mem.get("j2", None).await.is_err());
 }
 
 /// Asserts that a body of the limit is taken and a longer one is 413.

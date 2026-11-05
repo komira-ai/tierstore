@@ -40,7 +40,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -52,16 +52,15 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+use super::config_entry::entry_tuning;
 use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
 use super::config_policy::{Policy, check_policies};
-use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
-use super::config_unknown::announce_unknown_keys;
 use super::front::{FrontSettings, S3Tls};
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
@@ -135,6 +134,9 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-connection-lifetime", &["params.connection_lifetime"]),
     ("oci-require-auth", &["params.require_auth"]),
     ("oci-stage-read", &["params.stage_read"]),
+    ("oci-max-manifest-bytes", &["params.max_manifest_bytes"]),
+    ("oci-read-chunk-bytes", &["params.read_chunk_bytes"]),
+    ("oci-echo-bytes", &["params.echo_bytes"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -364,6 +366,43 @@ pub(super) struct TierTable {
     pub listing_heads: Option<u32>,
     #[serde(default)]
     pub upload_listing_calls: Option<u32>,
+    #[serde(default)]
+    pub abandoned_upload_after: Option<Dur>,
+    pub retry_min: Option<Dur>,
+    #[serde(default)]
+    pub retry_max: Option<Dur>,
+    #[serde(default)]
+    pub stray_grace: Option<Dur>,
+    #[serde(default)]
+    pub stray_interval: Option<Dur>,
+    #[serde(default)]
+    pub copy_back_ttl: Option<Dur>,
+    #[serde(default)]
+    pub usage_interval: Option<Dur>,
+    #[serde(default)]
+    pub usage_scan_interval: Option<Dur>,
+    #[serde(default)]
+    pub proxy_usage_stale_after: Option<Dur>,
+    #[serde(default)]
+    pub format_refresh: Option<Dur>,
+    #[serde(default)]
+    pub delete_wait: Option<Dur>,
+    #[serde(default)]
+    pub delete_poll_min: Option<Dur>,
+    #[serde(default)]
+    pub delete_poll_max: Option<Dur>,
+    #[serde(default)]
+    pub stray_rate: Option<u32>,
+    #[serde(default)]
+    pub copy_back_max: Option<u32>,
+    #[serde(default)]
+    pub scan_pages: Option<u32>,
+    #[serde(default)]
+    pub candidate_limit: Option<u32>,
+    #[serde(default)]
+    pub tag_record_limit: Option<u32>,
+    #[serde(default)]
+    pub entry_rounds: Option<u32>,
     pub heartbeat: Option<Dur>,
     #[serde(default)]
     pub departure: Option<Dur>,
@@ -440,6 +479,12 @@ pub(super) struct OciFlags {
     pub require_auth: bool,
     /// The most bytes of a stored chunk read in one call at the end of an upload.
     pub stage_read: Option<u64>,
+    /// The largest manifest, in bytes.
+    pub max_manifest_bytes: Option<u64>,
+    /// The most bytes asked of the store at once for a blob.
+    pub read_chunk_bytes: Option<u64>,
+    /// The longest piece of request text an error repeats, in bytes.
+    pub echo_bytes: Option<u64>,
     /// The registry a miss is pulled from, checked by `config_interface`; none pulls nothing.
     pub upstream: Option<UpstreamTable>,
 }
@@ -456,6 +501,9 @@ impl OciFlags {
             connection_lifetime: None,
             require_auth: false,
             stage_read: None,
+            max_manifest_bytes: None,
+            read_chunk_bytes: None,
+            echo_bytes: None,
             upstream: None,
         }
     }
@@ -496,6 +544,31 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("delete_rounds", cold.delete_rounds.is_some()),
         ("listing_heads", cold.listing_heads.is_some()),
         ("upload_listing_calls", cold.upload_listing_calls.is_some()),
+        (
+            "abandoned_upload_after",
+            cold.abandoned_upload_after.is_some(),
+        ),
+        ("retry_min", cold.retry_min.is_some()),
+        ("retry_max", cold.retry_max.is_some()),
+        ("stray_grace", cold.stray_grace.is_some()),
+        ("stray_interval", cold.stray_interval.is_some()),
+        ("copy_back_ttl", cold.copy_back_ttl.is_some()),
+        ("usage_interval", cold.usage_interval.is_some()),
+        ("usage_scan_interval", cold.usage_scan_interval.is_some()),
+        (
+            "proxy_usage_stale_after",
+            cold.proxy_usage_stale_after.is_some(),
+        ),
+        ("format_refresh", cold.format_refresh.is_some()),
+        ("delete_wait", cold.delete_wait.is_some()),
+        ("delete_poll_min", cold.delete_poll_min.is_some()),
+        ("delete_poll_max", cold.delete_poll_max.is_some()),
+        ("stray_rate", cold.stray_rate.is_some()),
+        ("copy_back_max", cold.copy_back_max.is_some()),
+        ("scan_pages", cold.scan_pages.is_some()),
+        ("candidate_limit", cold.candidate_limit.is_some()),
+        ("tag_record_limit", cold.tag_record_limit.is_some()),
+        ("entry_rounds", cold.entry_rounds.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
@@ -579,7 +652,7 @@ impl Settings {
 }
 
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
-fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
+pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     let File {
         mut server,
         hot_store,
@@ -647,6 +720,7 @@ pub(super) fn storage(
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
     let hot_tuning = hot_tuning(&hot)?;
+    let entry_tuning = entry_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
@@ -673,6 +747,7 @@ pub(super) fn storage(
         s3_request_timeout: shared.s3_request_timeout,
         s3_client: shared.s3_client,
         hot_tuning,
+        entry_tuning,
         hot_bytes: hot_budget,
         high_water,
         low_water,
@@ -713,6 +788,9 @@ pub(super) fn storage(
         oci_connection_lifetime: oci.connection_lifetime,
         oci_require_auth: oci.require_auth,
         oci_stage_read: oci.stage_read,
+        oci_max_manifest_bytes: oci.max_manifest_bytes,
+        oci_read_chunk_bytes: oci.read_chunk_bytes,
+        oci_echo_bytes: oci.echo_bytes,
         oci_upstream: oci.upstream,
     })
 }
@@ -799,116 +877,9 @@ pub(super) fn front_of(
     })
 }
 
-/// The settings of the TOML `text`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format.
-pub(super) fn settings_from_text(text: &str, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let table: toml::Table = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    find_secret("", &table)?;
-    let file: File = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    settings(file, per_run)
-}
-
-/// The settings of a storage-node file.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format, or is a build node's.
-pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError> {
-    match settings_from_text(text, per_run)? {
-        Settings::Storage(cli) => Ok(*cli),
-        Settings::Cache(_) => {
-            let why =
-                "is the file of a build node, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-        Settings::Combined(_) => {
-            let why = "is in a file with [hot_store] too, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-    }
-}
-
-impl Cli {
-    /// The settings of a storage node's configuration file, given as its text, with the knobs of
-    /// the run at their defaults. Nothing is read of the files it names.
-    ///
-    /// # Errors
-    /// The refusal of a file that is not one of this format, or is the file of a build node.
-    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
-        let per_run = PerRun {
-            drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
-            drain_deadline: DEFAULT_DRAIN_DEADLINE,
-        };
-        from_text(text, per_run)
-    }
-}
-
-/// What a flag that is no longer one is refused with: the key of the file that holds what it
-/// held, or none if `flag` (without `--`) was never one of the data path's.
-pub(super) fn removed(flag: &str) -> Option<String> {
-    let instead = match flag {
-        "listen" => {
-            "declare an [[interface]] with type = \"s3\" and params port or addresses".to_owned()
-        }
-        "oci-listen" => {
-            "declare an [[interface]] with type = \"oci\" and params port or addresses".to_owned()
-        }
-        "print-config" => {
-            return Some(
-                "--print-config was removed: there are no flags to print a file for; write the file (docs/configuration.md)"
-                    .to_owned(),
-            );
-        }
-        other => {
-            let (_, keys) = KEYS.iter().find(|(name, _)| *name == other)?;
-            let of = if other.starts_with("oci-") {
-                " of an oci interface"
-            } else {
-                ""
-            };
-            format!("set {}{of}", keys.join(", "))
-        }
-    };
-    Some(format!(
-        "--{flag} was removed: the file given with --config holds it; {instead}"
-    ))
-}
-
-/// The settings of the file at `path`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`] that names the file: it cannot be read, or is not a file of this format.
-pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(source) => {
-            let path = path.to_owned();
-            return Err(ConfigError::Read { path, source });
-        }
-    };
-    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
-        path: path.to_owned(),
-        source: Box::new(source),
-    })?;
-    announce_unknown_keys(&text);
-    Ok(settings)
-}
-
-/// `message` with the name of each flag in it replaced by the key that stands for it in the
-/// file, so that a refusal in a start from a file speaks of the keys the operator wrote.
-pub(super) fn keys_for_flags(message: &str) -> String {
-    let mut names: Vec<(&str, &str)> = KEYS
-        .iter()
-        .filter_map(|(flag, keys)| keys.first().map(|key| (*flag, *key)))
-        .collect();
-    names.sort_by_key(|(flag, _)| std::cmp::Reverse(flag.len()));
-    let mut text = message.to_owned();
-    for (flag, key) in names {
-        text = text.replace(&format!("--{flag}"), key);
-    }
-    text
-}
+#[cfg(test)]
+pub(super) use super::config_load::{from_text, settings_from_text};
+pub(super) use super::config_load::{keys_for_flags, load, removed};
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

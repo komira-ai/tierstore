@@ -265,38 +265,41 @@ async fn an_upload_of_the_directory_backend_survives_a_restart() {
     assert_eq!(text(&third, "big").await, "hello");
 }
 
-/// Asserts that a multipart upload through the proxy goes to the cold tier only: the parts and
-/// the completion are calls of the cold tier and none of the hot tier, the object is made in the
-/// cold tier, a head, a listing and a read find it, the read copies nothing into the hot tier, and
-/// a delete removes it.
+/// Asserts that a multipart upload through the proxy with room in the hot tier goes to the hot
+/// tier only: the parts and the completion are calls of the hot tier and none of the cold tier,
+/// the object is made in the hot tier, a head, a listing and a read find it, and a delete removes
+/// it.
 #[tokio::test]
-async fn a_multipart_upload_through_the_proxy_goes_to_the_cold_tier_only() {
+async fn a_multipart_upload_through_the_proxy_goes_to_the_hot_tier_only() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
     let id = proxy.create_upload("big").await.unwrap();
     let one = part(&proxy, "big", &id, 1, &["hello "]).await.unwrap();
     let two = part(&proxy, "big", &id, 2, &["world"]).await.unwrap();
-    assert_eq!(rig.cold.calls(Op::UploadPart), 2);
-    assert_eq!(rig.hot.calls(Op::UploadPart), 0);
+    assert_eq!(rig.hot.calls(Op::UploadPart), 2);
+    assert_eq!(rig.cold.calls(Op::UploadPart), 0);
 
     let parts = [(1, one), (2, two)];
     let tag = complete(&proxy, "big", &id, &parts).await.unwrap();
 
-    assert_eq!(text(rig.cold_mem.as_ref(), "big").await, "hello world");
-    assert_absent(rig.hot_mem.as_ref(), "big").await;
+    assert_eq!(text(rig.hot_mem.as_ref(), "big").await, "hello world");
+    assert_absent(rig.cold_mem.as_ref(), "big").await;
+    for op in MULTIPART_OPS {
+        assert_eq!(rig.cold.calls(op), 0, "{op:?}");
+    }
     assert_eq!(proxy.head("big").await.unwrap().tag, tag);
     assert_eq!(keys(&proxy).await, ["big"]);
     assert_eq!(read(&proxy, "big").await, "hello world");
-    assert_absent(rig.hot_mem.as_ref(), "big").await;
     proxy.delete("big").await.unwrap();
     assert_absent(&proxy, "big").await;
-    assert_absent(rig.cold_mem.as_ref(), "big").await;
+    assert_absent(rig.hot_mem.as_ref(), "big").await;
 }
 
 /// Asserts that a completion through the proxy is create-only across both tiers: a key that the
 /// hot tier holds, and one that only the cold tier holds, are refused with `AlreadyExists` and
 /// the objects are as they were, the upload is left open and completes once the key is free, and
-/// a hot tier that does not answer fails the completion before the cold tier is asked.
+/// a hot tier that does not answer a head fails the completion before the upload's tier is asked
+/// to complete it.
 #[tokio::test]
 async fn a_completion_through_the_proxy_never_replaces_an_object_of_either_tier() {
     let rig = Rig::new();
@@ -317,13 +320,13 @@ async fn a_completion_through_the_proxy_never_replaces_an_object_of_either_tier(
     let tag = part(&proxy, "cold", &id, 1, &["new"]).await.unwrap();
     let parts = [(1, tag)];
     rig.hot.fail_next(Op::Head, 1);
-    let calls = rig.cold.calls(Op::CompleteUpload);
+    let calls = rig.hot.calls(Op::CompleteUpload);
     let done = complete(&proxy, "cold", &id, &parts).await;
     assert!(done.unwrap_err().is_unavailable());
-    assert_eq!(rig.cold.calls(Op::CompleteUpload), calls);
+    assert_eq!(rig.hot.calls(Op::CompleteUpload), calls);
     proxy.delete("cold").await.unwrap();
     complete(&proxy, "cold", &id, &parts).await.unwrap();
-    assert_eq!(text(rig.cold_mem.as_ref(), "cold").await, "new");
+    assert_eq!(text(rig.hot_mem.as_ref(), "cold").await, "new");
 }
 
 /// Asserts that the keys the proxy keeps for itself cannot be named by any call of a multipart
@@ -343,6 +346,7 @@ async fn the_multipart_calls_of_the_proxy_refuse_its_reserved_keys() {
         assert_eq!(proxy.abort_upload(key, "u").await, Err(reserved));
     }
     for op in MULTIPART_OPS {
+        assert_eq!(rig.hot.calls(op), 0, "{op:?}");
         assert_eq!(rig.cold.calls(op), 0, "{op:?}");
     }
 }
@@ -391,9 +395,9 @@ async fn the_cache_passes_multipart_calls_on() {
 }
 
 /// Asserts that a part passes through the proxy, the fault injector and the cache whether its
-/// length is told or not: the cold tier of the proxy is told the length, or none, in the order
-/// of the calls, a part of either kind is stored, and the proxy refuses a reserved key whichever
-/// call is made, without asking the cold tier.
+/// length is told or not: the hot tier of the proxy (where the upload is made) is told the
+/// length, or none, in the order of the calls, a part of either kind is stored, and the proxy
+/// refuses a reserved key whichever call is made, without asking the hot tier.
 #[tokio::test]
 async fn a_part_passes_through_the_wrappers_with_its_length_or_without() {
     let rig = Rig::new();
@@ -401,21 +405,21 @@ async fn a_part_passes_through_the_wrappers_with_its_length_or_without() {
     let id = proxy.create_upload("k").await.unwrap();
     let blind = blind_part(&proxy, "k", &id, 1, &["ab"]).await.unwrap();
     let sized = part(&proxy, "k", &id, 2, &["cd"]).await.unwrap();
-    assert_eq!(rig.cold.part_lengths(), [None, Some(2)]);
+    assert_eq!(rig.hot.part_lengths(), [None, Some(2)]);
     let parts = [(1, blind), (2, sized)];
     complete(&proxy, "k", &id, &parts).await.unwrap();
-    assert_eq!(text(rig.cold_mem.as_ref(), "k").await, "abcd");
+    assert_eq!(text(rig.hot_mem.as_ref(), "k").await, "abcd");
     let key = "_tiering/lease";
     let reserved = blind_part(&proxy, key, "u", 1, &["x"]).await;
     assert_eq!(reserved, Err(Error::Reserved(key.to_owned())));
     let reserved = part(&proxy, key, "u", 1, &["x"]).await;
     assert_eq!(reserved, Err(Error::Reserved(key.to_owned())));
-    assert_eq!(rig.cold.part_lengths(), [None, Some(2)]);
+    assert_eq!(rig.hot.part_lengths(), [None, Some(2)]);
 
     let id = rig.cold.create_upload("direct").await.unwrap();
     let stored = blind_part(rig.cold.as_ref(), "direct", &id, 1, &["x"]);
     stored.await.unwrap();
-    assert_eq!(rig.cold.part_lengths(), [None, Some(2), None]);
+    assert_eq!(rig.cold.part_lengths(), [None]);
 
     let cache = CachedStore::new(Arc::new(MemoryBackend::new()), 1 << 20);
     let id = cache.create_upload("k").await.unwrap();
@@ -464,7 +468,7 @@ fn assert_unsupported(error: &Error, call: &str) {
 
 /// Asserts that a backend that does not override the multipart calls answers each of them
 /// `Unsupported`, naming the call (the upload of a part with its length told is the upload of a
-/// part), and so does a proxy whose cold tier is one.
+/// part), and so does a proxy whose cold tier is one while the hot tier is full.
 #[tokio::test]
 async fn a_backend_without_multipart_calls_answers_unsupported() {
     let plain = Plain;
@@ -485,6 +489,9 @@ async fn a_backend_without_multipart_calls_answers_unsupported() {
 
     let clock = Arc::new(TestClock::new());
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    // Only a full hot tier sends an upload to the cold tier.
+    let usage = r#"{"hot_bytes":1048576,"copy_lag":0,"time":0}"#;
+    hot.put("_tiering/usage", body(usage)).await.unwrap();
     let config = ProxyConfig::new("p1", 1 << 20, clock);
     let proxy = crate::support::open_live(hot, Arc::new(Plain), config)
         .await

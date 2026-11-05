@@ -10,12 +10,15 @@
 //! - a job's `permissions` is not a mapping, or grants `write` for a scope that is not in
 //!   [`WRITE_ALLOWED`] for that workflow file and job, or grants it under another `if:` than
 //!   the one the table gives. So `id-token` and `attestations` (the scopes that sign) are
-//!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, and by
-//!   the site's deploy job; `contents: write` by the release's `publish` job alone.
+//!   written by the one `attest` job of `artifacts.yml`, on a push to `main` alone, `id-token`
+//!   also by the site's deploy job and by the `set-desired` job of `hostkeeper-desired.yml`
+//!   (the token the hostkeeper coordinator admits); `contents: write` by the release's `publish`
+//!   job alone.
 //!
 //! Keys are matched exactly. What this does not evaluate it refuses: a YAML tag, a second
 //! document, an alias to an unfinished node, a document that does not parse.
 
+use super::desired::DESIRED_IF;
 use super::yaml::{self, Node, Value};
 
 /// A write permission a job may hold: the workflow file, the job, the scope, and the `if:` of
@@ -55,6 +58,12 @@ pub const WRITE_ALLOWED: &[Allowed] = &[
         job: "deploy",
         scope: "id-token",
         condition: SITE_IF,
+    },
+    Allowed {
+        file: "hostkeeper-desired.yml",
+        job: "set-desired",
+        scope: "id-token",
+        condition: DESIRED_IF,
     },
     Allowed {
         file: "release.yml",

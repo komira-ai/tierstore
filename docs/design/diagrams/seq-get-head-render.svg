@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 702" width="1000" height="702" role="img" aria-label="Sequence diagram of a get: Client, S3 front, Proxy, Hot tier, Cold tier. open_read returns size, tag and record with the body; the front renders ETag, content headers, user metadata, tag count and, in checksum mode on a whole-object read, the checksum and its type; an object without a record is answered as before; a tagging read asks hot then cold.">
+<title>A get or head: the record is read with the object, the front renders the S3 forms</title>
+<defs><marker id="seq-get-head-render-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-get-head-render-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.act{fill:#F3F3F1;stroke:#5A5A57;stroke-width:1.2}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1000" height="702" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A get or head: the record is read with the object, the front renders the S3 forms</text>
+<rect x="50.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="110.0" y="65" class="b" text-anchor="middle">Client</text>
+<line x1="110.0" y1="76" x2="110.0" y2="620" class="ln-d"/>
+<rect x="245.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="305.0" y="65" class="b" text-anchor="middle">S3 front</text>
+<line x1="305.0" y1="76" x2="305.0" y2="620" class="ln-d"/>
+<rect x="440.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="500.0" y="65" class="b" text-anchor="middle">Proxy</text>
+<line x1="500.0" y1="76" x2="500.0" y2="620" class="ln-d"/>
+<rect x="635.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="695.0" y="65" class="b" text-anchor="middle">Hot tier</text>
+<line x1="695.0" y1="76" x2="695.0" y2="620" class="ln-d"/>
+<rect x="830.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="890.0" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="890.0" y1="76" x2="890.0" y2="620" class="ln-d"/>
+<text x="120.0" y="100" class="t-m lbl">0  GET key (x-amz-checksum-mode: ENABLED) or HEAD key</text>
+<line x1="110.0" y1="112" x2="305.0" y2="112" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<text x="315.0" y="138" class="t-m lbl">1  open_read(key, span)</text>
+<line x1="305.0" y1="150" x2="500.0" y2="150" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<text x="510.0" y="176" class="t-m lbl">2  hot open_read: Meta { size, tag, record? } and the body, one call</text>
+<line x1="500.0" y1="188" x2="695.0" y2="188" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<rect x="311.0" y="210" width="532.0" height="64" rx="4" class="act"/>
+<text x="321.0" y="227" class="t-m">3  render_s3(meta): ETag, Content-Type, Content-Encoding/-Disposition/-Language,</text>
+<text x="321.0" y="245" class="t-m">Cache-Control, Expires, x-amz-meta-*, x-amz-tagging-count,</text>
+<text x="321.0" y="263" class="t-m">x-amz-checksum-* and -type: only when asked and only for a whole object</text>
+<rect x="311.0" y="288" width="602.4" height="28" rx="4" class="act"/>
+<text x="321.0" y="305" class="t-m">   no record (an object of an older release): ETag = tag, application/octet-stream, no more</text>
+<text x="120.0" y="334" class="t-m lbl">4  200 or 206 with the body</text>
+<line x1="305.0" y1="346" x2="110.0" y2="346" class="ln-od" marker-end="url(#seq-get-head-render-ao)"/>
+<line x1="20" y1="374" x2="980" y2="374" class="ln-d"/>
+<text x="20" y="396" class="b lbl">Hot miss</text>
+<text x="510.0" y="418" class="t-m lbl">5  cold open_read: Meta with the cold record (it travelled with the copy)</text>
+<line x1="500.0" y1="430" x2="890.0" y2="430" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<text x="503.6" y="456" class="t-m lbl">6  best-effort (CB, PENDING) entry; the leader copies back object and record</text>
+<line x1="500.0" y1="468" x2="695.0" y2="468" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<line x1="20" y1="496" x2="980" y2="496" class="ln-d"/>
+<text x="20" y="518" class="b lbl">GET ?tagging</text>
+<text x="315.0" y="540" class="t-m lbl">7  get_tags(key): hot head, then cold head on not-found; no entry is read</text>
+<line x1="305.0" y1="552" x2="500.0" y2="552" class="ln" marker-end="url(#seq-get-head-render-ak)"/>
+<text x="120.0" y="578" class="t-m lbl">8  200 &lt;Tagging&gt;&lt;TagSet&gt;...; an object with no tags answers an empty TagSet</text>
+<line x1="305.0" y1="590" x2="110.0" y2="590" class="ln-od" marker-end="url(#seq-get-head-render-ao)"/>
+<rect x="30" y="626" width="940" height="72" rx="5" class="box-o"/>
+<text x="40" y="646" class="t-m">A rendering is a pure function of Meta and the request headers, one per front: the S3 forms of ETag and checksum live in one module; a front</text>
+<text x="40" y="666" class="t-m">for another API would render md5Hash, crc32c and a generation from the same Meta.</text>
+<text x="40" y="686" class="t-m">A 206 carries no checksum: it would describe bytes the response does not hold.</text>
+</svg>

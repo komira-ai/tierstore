@@ -22,9 +22,13 @@ This replaces the port-forward of sections 1 to 4 and the slot ports. The hook u
 `run_handing`, with the control socket named by `server.handoff_socket`), on Linux; macOS has no hand-over and restarts.
 The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
 (default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
-A build node and a storage node with `[local_cache]` refuse both keys, so the hook updates such a node only with
-`mode = "restart"`. A build with it lists `handoff-socket-v1` in `tierstore --capabilities`, beside `handover-v1`, which the
-hook no longer reads.
+A build node and a storage node with `[local_cache]` hand off through the same `run_handing` machinery: `bind_fronts`
+(`server/cli_serve.rs`) takes or binds the sockets, and `serve_front` (`server/cache_cli.rs`) uses it for the build node and
+for the combined node. The sockets handed over include the loopback sockets the cache shape adds; a `server.handoff_socket`
+inside `local_cache.path` is refused. A build with it lists `handoff-socket-v1` in `tierstore --capabilities`, beside
+`handover-v1`, which the hook no longer reads, and `handoff-cache-v1` for the cache shapes. Released v0.3.47 lists
+`handoff-socket-v1` but its cache shapes refuse the keys, so `prepare` requires `handoff-cache-v1` of both releases for a
+configuration with a `[local_cache]` table: the update to this release from it is a restart.
 
 Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
 (`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
@@ -63,7 +67,7 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
 
 Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
-set `server.handoff_socket`: an update on a Mac is a restart.
+set `server.handoff_socket`: an update on a Mac is a restart, for every shape.
 
 ### The hook on top of it
 
@@ -73,7 +77,7 @@ The package ships one unit template, `tierstore@.service`, and the hook alternat
 is there (`ConditionPathExists=`), so at boot only the recorded one runs.
 
 - `prepare` reads the node's configuration (`config_file`), requires `server.handoff_socket` for an update, asks both releases for
-  `--capabilities`, and records the mode: a hand-over when both list `handoff-socket-v1`, else a restart. `mode = "restart"` in the
+  `--capabilities`, and records the mode: a hand-over when both list `handoff-socket-v1` (and, for a configuration with a `[local_cache]` table, `handoff-cache-v1`), else a restart. `mode = "restart"` in the
   manifest's params records a restart whatever the capabilities say, for a storage node whose hot tier is a `dir:` tier, where the
   lease's compare-and-swap is not atomic across processes. Nothing is started.
 - `cutover` sets the marker of the idle instance and starts it; in a hand-over it takes the sockets and the old instance drains and
@@ -384,7 +388,7 @@ the cut requests are counted in `Drained.abandoned` (`cut_note`).
 | `cache_fills_total`, `cache_fills_skipped_total`, `cache_fills_skipped_busy_total`, `cache_fill_failures_total{reason}`, `cache_evictions_total{reason}`, `cache_pinned_skips_total`, `cache_staging_files` | stay 0 | v-current only |
 | `cache_discarded_at_start_total` | 0 (read-only open deletes nothing) | v-current's |
 | `cache_bytes`, `cache_objects` (a snapshot in v-next), `cache_fs_free_bytes` | start snapshot / live | **double-count** one directory and one file system |
-| `hits_total`, `misses_total`, `read_errors_total`, `reads_total`, `bytes_served_total`, `bytes_read_total` (`tier`, `op`), `promotions_*` (storage), `oci_requests_total`, `oci_bytes_served_total`, `oci_digest_mismatches_total`, `oci_front_info` | count | per process; the sum is right |
+| `hits_total`, `misses_total`, `read_errors_total`, `reads_total`, `bytes_served_total`, `bytes_read_total` (`tier`, `op`), `promotions_*` (storage), `oci_requests_total`, `oci_bytes_served_total`, `oci_digest_mismatches_total`, `oci_tag_recheck_failures_total`, `oci_front_info` | count | per process; the sum is right |
 
 Counters restart at 0 in a new process; a rate handles it; read the directory gauges from the lock holder. No family names
 a build, slot or mode today, and a scrape of 9300 does not say which instance answered. New: `tierstore_build_info

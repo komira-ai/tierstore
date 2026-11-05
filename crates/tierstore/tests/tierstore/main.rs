@@ -32,6 +32,8 @@ mod recheck;
 mod s3;
 #[cfg(feature = "s3")]
 mod s3_conditional_delete;
+#[cfg(feature = "server")]
+mod s3_keys;
 #[cfg(feature = "s3")]
 mod s3_streamed;
 #[cfg(feature = "s3")]
