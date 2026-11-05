@@ -79,6 +79,10 @@ pub const MARKER_DIR: &str = "/var/lib/tierstore";
 pub fn marker_path(instance: Instance) -> PathBuf {
     PathBuf::from(MARKER_DIR).join(format!("run-{}", instance.letter()))
 }
+/// The account the service runs as: the template's `User=`. A check of the configuration by a
+/// release runs as this account when the hook runs as root, so that the release judges the files
+/// as the unit will.
+pub const SERVICE_ACCOUNT: &str = "tierstore";
 /// The binary of a release, under its version directory (hostkeeper's package layout).
 pub const RELEASE_BINARY: &str = "bin/tierstore";
 /// The plist of the launchd job, as hostkeeper links it from the package's `units/`.
@@ -86,6 +90,12 @@ pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
 /// The capability (`tierstore --capabilities`) of a release that offers and takes listening
 /// sockets over `server.handoff_socket`. Both releases need it for a hand-over.
 pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_CAPABILITY;
+/// The capability of a release whose build node and storage node with `[local_cache]` hand their
+/// sockets over too. Both releases need it, beside [`HANDOFF_CAPABILITY`], for a hand-over of a
+/// node whose configuration has `[local_cache]`.
+pub const CACHE_HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_CACHE_CAPABILITY;
+/// The table of the configuration that makes a node one with a local cache.
+pub const LOCAL_CACHE_TABLE: &str = "local_cache";
 /// The configuration key of the hand-over socket, in the `[server]` table.
 pub const HANDOFF_SOCKET_KEY: &str = "handoff_socket";
 

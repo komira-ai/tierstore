@@ -119,7 +119,7 @@ two instances, `tierstore@a` and `tierstore@b`. Both run `current/bin/tierstore`
 the hand-over socket (`server.handoff_socket` in `/etc/tierstore/config.toml`, for example
 `/var/lib/tierstore/handoff.sock`), and the live one drains and exits 0. An instance starts only
 when its marker file, `/var/lib/tierstore/run-a` or `run-b`, exists, so that at boot, with both
-units enabled, only the one the hook's record names starts. A host whose releases or whose hot
+units enabled, only the one the hook's record names starts. A host whose releases (a node with `[local_cache]` needs `handoff-cache-v1` as well as `handoff-socket-v1`) or whose hot
 tier cannot hand over (a `dir:` hot tier, say) sets `mode = "restart"` in the package's params:
 the update then stops the live instance and starts the other, with a gap in serving.
 
