@@ -32,7 +32,8 @@
 //!   `StartAfter`, the `Prefix` of a common prefix), a space as `+`, `/` and `*` as they are
 //!   and `~` as `%7E`; any other `encoding-type` is `InvalidArgument`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
-//!   the backend does (the [`Proxy`](crate::Proxy) passes them to its cold tier). The server
+//!   the backend does (the [`Proxy`](crate::Proxy) passes them to the tier that holds the upload:
+//!   its hot tier when that has room, else its cold tier, as the upload id says). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
 //!   piece as it arrives, so a part of any size is stored without being held in memory, and
 //!   the completion joins the parts into the object in the backend, create-only. A part
@@ -45,7 +46,7 @@
 //!   and `upload-id-marker`, and with `delimiter` and `encoding-type=url` as ListObjectsV2 has
 //!   them (a common prefix counts against `max-uploads`, and the markers of a page that ends
 //!   with one are the prefix and no upload id): the open uploads of the backend (for the
-//!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
+//!   [`Proxy`](crate::Proxy), those of both its tiers), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
@@ -229,6 +230,7 @@ mod config_combined;
 mod config_entry;
 mod config_handoff;
 mod config_interface;
+mod config_load;
 mod config_policy;
 mod config_syntax;
 mod config_tier;

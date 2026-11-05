@@ -159,29 +159,59 @@ async fn the_directory_backend_lists_its_open_uploads() {
     assert_eq!(again[0].id, id);
 }
 
-/// Asserts that the proxy lists the uploads of the cold tier and asks the hot tier nothing: the
-/// uploads it started, and one another writer started in the cold tier, by prefix and by page.
+/// Asserts that the proxy lists the uploads of both tiers: the ones it started in the hot tier
+/// (with the id it gave, not the hot tier's own), one it started in the cold tier while the hot
+/// tier was full, and one another writer started in the cold tier, by prefix and by page, with the
+/// cold tier's uploads of a key before the hot tier's, and that a marker of either kind resumes
+/// after its upload in both tiers.
 #[tokio::test]
-async fn the_proxy_lists_the_open_uploads_of_the_cold_tier() {
+async fn the_proxy_lists_the_open_uploads_of_both_tiers() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
     let through = proxy.create_upload("jobs/a").await.unwrap();
     let direct = rig.cold_mem.create_upload("jobs/b").await.unwrap();
     let other = proxy.create_upload("other/c").await.unwrap();
+    crate::support::set_usage(&rig, 1 << 20, 0).await;
+    let full = proxy.create_upload("jobs/a").await.unwrap();
+    assert_ne!(full, through);
 
     let all = proxy.list_uploads("", None, 10).await.unwrap();
-    assert_eq!(keys_of(&all), ["jobs/a", "jobs/b", "other/c"]);
-    let want = BTreeSet::from([through, direct, other]);
+    assert_eq!(keys_of(&all), ["jobs/a", "jobs/a", "jobs/b", "other/c"]);
+    let want = BTreeSet::from([through.clone(), full.clone(), direct, other]);
     assert_eq!(ids_of(&all), want);
+    // The cold tier's upload of "jobs/a" comes before the hot tier's.
+    assert_eq!(all[0].id, full);
+    assert_eq!(all[1].id, through);
+    let hot_own = rig.hot_mem.list_uploads("", None, 10).await.unwrap();
+    assert_eq!(hot_own.len(), 2);
+    // The id a client holds is the hot tier's own with a prefix.
+    assert!(hot_own.iter().all(|up| up.id != through));
+    assert!(hot_own.iter().any(|up| through.ends_with(&up.id)));
     let jobs = proxy.list_uploads("jobs/", None, 10).await.unwrap();
-    assert_eq!(jobs, all[..2]);
+    assert_eq!(jobs, all[..3]);
+    // Every page size and every marker visits each upload once, in the same order.
+    for size in 1..=4 {
+        let mut seen = Vec::new();
+        let mut after: Option<(String, Option<String>)> = None;
+        loop {
+            let marker = after.as_ref().map(|(k, id)| (k.as_str(), id.as_deref()));
+            let page = proxy.list_uploads("", marker, size).await.unwrap();
+            seen.extend(page.iter().cloned());
+            if page.len() < size {
+                break;
+            }
+            let last = page.last().unwrap();
+            after = Some((last.key.clone(), Some(last.id.clone())));
+        }
+        assert_eq!(seen, all, "pages of {size}");
+    }
+    // A marker with a key and no id is after every upload of the key, in both tiers.
+    let past = proxy.list_uploads("", Some(("jobs/a", None)), 10).await;
+    assert_eq!(past.unwrap(), all[2..]);
+    // A marker the cold tier gave still finds the hot tier's uploads of the same key.
     let end = (all[0].key.as_str(), Some(all[0].id.as_str()));
     let rest = proxy.list_uploads("", Some(end), 10).await.unwrap();
     assert_eq!(rest, all[1..]);
-    assert_eq!(rig.hot.calls(Op::ListUploads), 0);
-    assert_eq!(rig.cold.calls(Op::ListUploads), 3);
-    let by_cold = rig.cold_mem.list_uploads("", None, 10).await.unwrap();
-    assert_eq!(by_cold, all);
 }
 
 /// Asserts that the proxy leaves out the uploads of the keys it keeps for itself, wherever the
@@ -193,6 +223,7 @@ async fn the_proxy_lists_the_open_uploads_of_the_cold_tier() {
 async fn the_proxy_never_lists_an_upload_of_a_reserved_key() {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
+    crate::support::set_usage(&rig, 1 << 20, 0).await;
     for key in ["_journal/p1/0", "_journal/p1/1", "_tiering/lease"] {
         rig.cold_mem.create_upload(key).await.unwrap();
     }
