@@ -70,7 +70,66 @@ pub struct UploadsPage {
     pub next: Option<(ObjectKey, String)>,
 }
 
+/// A part stored in an open upload, as [`S3Store::list_parts`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoredPart {
+    /// The number of the part.
+    pub number: u32,
+    /// The `ETag` of the part as the store states it, quotes included, as
+    /// [`S3Store::upload_part_stream`] gives it.
+    pub etag: String,
+    /// The size of the part in bytes.
+    pub size: u64,
+    /// When the part was stored, in milliseconds since the Unix epoch, as the listing states it
+    /// (S3 sends whole seconds).
+    pub modified_millis: u64,
+}
+
+/// One page of [`S3Store::list_parts`], in ascending order of part number.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartsPage {
+    /// The parts on this page.
+    pub parts: Vec<StoredPart>,
+    /// The part number after which the next page starts, or `None` if this is the last page.
+    pub next: Option<u32>,
+}
+
 impl S3Store {
+    /// ListParts: one page of at most `max_parts` of the parts of the upload `upload_id` of
+    /// `key`, those numbered above `after` (all of them for `None`), in ascending order of
+    /// number.
+    ///
+    /// # Errors
+    /// [`ObjectStoreError::Service`] if the store refuses (an upload it does not hold is
+    /// `NoSuchUpload`), [`ObjectStoreError::Transport`] if the request does not complete,
+    /// [`ObjectStoreError::Protocol`] if the answer is not a listing of parts, lists a part
+    /// without a number, an `ETag`, a size or a readable time, or is truncated without saying
+    /// where it goes on.
+    pub async fn list_parts(
+        &self,
+        key: &ObjectKey,
+        upload_id: &str,
+        after: Option<u32>,
+        max_parts: PageSize,
+    ) -> Result<PartsPage, ObjectStoreError> {
+        let mut query = vec![
+            ("uploadId", upload_id.to_owned()),
+            ("max-parts", max_parts.get().to_string()),
+        ];
+        if let Some(number) = after {
+            query.push(("part-number-marker", number.to_string()));
+        }
+        let resp = self
+            .conn
+            .send(Method::GET, Some(key), &query, Vec::new(), Bytes::new())
+            .await?;
+        if resp.status() != StatusCode::OK {
+            return Err(failure(resp).await);
+        }
+        let body = resp.bytes().await.map_err(transport)?;
+        xml::parts_page(&body)
+    }
+
     /// ListMultipartUploads: one page of at most `max_uploads` of the uploads under `prefix`
     /// that are neither completed nor aborted. The page starts after `after`, the key (and
     /// the upload id, if the page before ended inside a key) that ends the page before;
