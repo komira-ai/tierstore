@@ -226,6 +226,17 @@ pub struct Meta {
     pub modified: u64,
 }
 
+/// What a backend's answer to a create-only put says of the object it made, so that a caller that
+/// keeps a copy need not ask with a HEAD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PutAnswer {
+    /// The object's content tag, as [`Meta::tag`] has it for the same object.
+    pub tag: String,
+    /// When the object was last written, in milliseconds, if the answer says (S3's answer to a PUT
+    /// does not); `None` leaves the time to the caller.
+    pub modified: Option<u64>,
+}
+
 impl Meta {
     /// Whether both describe the same bytes: the same size and the same content tag.
     #[must_use]
@@ -375,6 +386,32 @@ pub trait Backend: Send + Sync {
             whole.extend_from_slice(&chunk?);
         }
         self.put(key, whole.freeze()).await
+    }
+
+    /// [`Backend::put_stream`], or [`Backend::put_stream_hot_only`] if `hot_only`, giving what the
+    /// answer to the write says of the object when that is the tag [`Backend::head`] gives for it
+    /// (and `None` when the backend cannot say without another call). For a caller that keeps a
+    /// copy of what it writes and would otherwise ask with a HEAD.
+    ///
+    /// The provided implementation writes and answers `None`: the caller asks. A backend overrides
+    /// it only if the tag of the answer is the tag its HEAD gives, which it must be for as long as
+    /// the object stands.
+    ///
+    /// # Errors
+    /// As [`Backend::put_stream`].
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        if hot_only {
+            self.put_stream_hot_only(key, len, body).await?;
+        } else {
+            self.put_stream(key, len, body).await?;
+        }
+        Ok(None)
     }
 
     /// [`Backend::put_stream`] for a writer that cannot be trusted to race: a backend with more

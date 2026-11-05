@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::{Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, UploadsAfter};
+use crate::{
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, UploadsAfter,
+};
 
 /// What a cached read was asked for: an object, and a range of it or the whole of it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -200,6 +202,18 @@ impl Backend for CachedStore {
         body: PartBody<'_>,
     ) -> Result<String, Error> {
         self.inner.put_stream_tagged(key, len, body).await
+    }
+
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.inner
+            .put_stream_answered(key, len, body, hot_only)
+            .await
     }
 
     async fn put_stream_hot_only(
