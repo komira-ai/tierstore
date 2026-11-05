@@ -42,6 +42,7 @@ fn a_listing_that_goes_on_carries_the_next_token() {
         bucket: "bkt",
         prefix: "p/",
         max_keys: 2,
+        owner: false,
         objects: &objects,
         next: Some("6322".to_owned()),
     };
@@ -58,6 +59,29 @@ fn a_listing_that_goes_on_carries_the_next_token() {
     assert_eq!(texts(&xml, "LastModified"), times);
 }
 
+/// Asserts that a listing asked to fetch the owner gives each object an `Owner` with an `ID` and
+/// a `DisplayName` between its `Size` and its `StorageClass` (where S3 puts it), and that one
+/// that did not ask has none.
+#[test]
+fn the_owner_of_each_object_is_written_when_asked() {
+    let objects = [listed("a", 1, 0), listed("b", 2, 0)];
+    let mut listing = Listing {
+        bucket: "bkt",
+        prefix: "",
+        max_keys: 10,
+        owner: true,
+        objects: &objects,
+        next: None,
+    };
+    let xml = listing.to_xml();
+    assert_eq!(texts(&xml, "ID"), ["tierstore", "tierstore"]);
+    assert_eq!(texts(&xml, "DisplayName"), ["tierstore", "tierstore"]);
+    assert!(xml.contains("</Size><Owner><ID>tierstore</ID>"), "{xml}");
+    assert!(xml.contains("</Owner><StorageClass>"), "{xml}");
+    listing.owner = false;
+    assert!(texts(&listing.to_xml(), "Owner").is_empty());
+}
+
 /// Asserts that the last page has `IsTruncated` false and no token, and that an empty page is a
 /// well-formed document with no object.
 #[test]
@@ -66,6 +90,7 @@ fn the_last_page_has_no_token() {
         bucket: "bkt",
         prefix: "",
         max_keys: 1000,
+        owner: false,
         objects: &[],
         next: None,
     };

@@ -11,16 +11,19 @@
 //!   `-disposition`, `-encoding`, `-language`, `-cache-control` and `-expires` parameters of a
 //!   signed request or a presigned URL, which set the header of the answer (a request with one
 //!   and no signature is 400 `InvalidRequest`), and with `If-Match` (another content tag
-//!   is `PreconditionFailed`) and `If-None-Match` (the content tag is a 304); the conditions on
-//!   the time are `NotImplemented`;
+//!   is `PreconditionFailed`), `If-None-Match` (the content tag is a 304), `If-Unmodified-Since`
+//!   (a time before the object's is `PreconditionFailed`) and `If-Modified-Since` (a time not
+//!   before the object's is a 304), in the order of RFC 7232 and to the second; a date that is
+//!   not an HTTP date is ignored, as S3 does;
 //! - PutObject, which only ever creates: `If-None-Match: *` is what a client sends, and a put
 //!   without it is create-only too, because the proxy keeps objects immutable. A key that
 //!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
 //!   content tag and `NotImplemented` for the right one (an immutable object cannot be
 //!   replaced);
 //! - DeleteObject, which succeeds for a key that is not there;
-//! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`, without
-//!   `delimiter`;
+//! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`; an empty
+//!   `delimiter` is no delimiter and `fetch-owner=true` adds an `Owner` to each object, but a
+//!   `delimiter` with text is `NotImplemented`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
 //!   the backend does (the [`Proxy`](crate::Proxy) passes them to its cold tier). The server
 //!   holds no part: the body of an UploadPart is handed to the backend as a stream, piece by
@@ -32,14 +35,14 @@
 //!   is the content tag the backend gives it, and that of the completion is the content tag of
 //!   the object;
 //! - ListMultipartUploads (`GET /<bucket>?uploads`) with `prefix`, `max-uploads`, `key-marker`
-//!   and `upload-id-marker`, without `delimiter`: the open uploads of the backend (for the
+//!   and `upload-id-marker`, without a `delimiter` (an empty one is none): the open uploads of the backend (for the
 //!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
+//! know (`versionId`), and a `delimiter` with text, is answered `NotImplemented`. A request with a key under
 //! `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
@@ -277,6 +280,8 @@ mod combined_order_tests;
 #[cfg(test)]
 mod completion_tests;
 #[cfg(test)]
+mod conditional_date_tests;
+#[cfg(test)]
 mod conditional_delete_tests;
 #[cfg(test)]
 mod config_cache_tests;
@@ -298,6 +303,8 @@ mod gc_server_tests;
 mod gc_tests;
 #[cfg(test)]
 mod idle_tests;
+#[cfg(test)]
+mod list_options_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
