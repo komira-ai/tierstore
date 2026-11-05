@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  /Library/LaunchDaemons/tierstore.plist: tierstore as a LaunchDaemon on a Mac, installed by
+  hostkeeper's package of tierstore (hostkeeper links it from the package's units/). root:wheel,
+  mode 0644. One job, which the update hook (`tierstore update-hook`,
+  crates/tierstore/docs/update-hook.md) boots out and bootstraps by the label below; an update is
+  a restart with a gap in serving. The label is the service name, `tierstore`: hostkeeper takes a
+  package's job from units/<label>.plist and watches it by the label its manifest's run entry and
+  the hook's `launchd_label` param name, so the file name, the label and both entries agree. The program is the binary of the release link `current`, so it
+  is always the binary of the release that link names; the hook never moves the link.
+
+  Configuration is the file and the two flags of the drain, nothing else. The file holds no
+  secret, only the paths of the key files, and no environment variable is set: the process reads
+  none.
+
+  launchd sends SIGTERM on bootout. The process drains: /readyz says 503 for the settle of the
+  drain (drain-lb-wait, 1 s: on loopback there is no load balancer to wait for), then it stops
+  accepting and waits for requests in flight for at most the drain's deadline (drain-deadline,
+  60 s), and exits 0. ExitTimeOut (90 s) is the 1 s, the 60 s and a margin, so that launchd never
+  sends SIGKILL to a drain in progress. KeepAlive starts the process again whenever it exits while
+  the job is loaded, at most once in ThrottleInterval (30 s); a bootout unloads the job, so a stop
+  is a stop.
+
+  crates/tierstore/tests/packaging_hostkeeper.rs parses this file and checks it against the hook
+  and the binary.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>tierstore</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore</string>
+    <string>--config</string>
+    <string>/usr/local/tierstore/etc/tierstore.toml</string>
+    <string>--drain-lb-wait</string>
+    <string>1s</string>
+    <string>--drain-deadline</string>
+    <string>60s</string>
+  </array>
+  <key>UserName</key>
+  <string>_tierstore</string>
+  <key>GroupName</key>
+  <string>_tierstore</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ExitTimeOut</key>
+  <integer>90</integer>
+  <key>ProcessType</key>
+  <string>Standard</string>
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>65536</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/usr/local/tierstore/log/tierstore.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/usr/local/tierstore/log/tierstore.err.log</string>
+</dict>
+</plist>

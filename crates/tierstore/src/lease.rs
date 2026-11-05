@@ -133,11 +133,17 @@ impl Lease {
         }
         let mut state = self.shared.state.lock().await;
         let sent = self.shared.mono.now();
+        #[cfg(feature = "server")]
+        let renewed = state.etag.is_some();
         let held = match state.etag.clone() {
             Some(etag) => self.shared.renew(&mut state, &etag).await,
             None => self.shared.acquire(&mut state).await,
         };
         self.shared.settle(held, sent);
+        #[cfg(feature = "server")]
+        if held && !renewed {
+            tracing::debug!(nonce = %self.shared.nonce, "tierstore: lease taken");
+        }
         held
     }
 
@@ -245,7 +251,13 @@ impl Lease {
                 Err(_) => false,
             };
             if ours {
-                let _ = self.shared.hot.delete(LEASE_KEY).await;
+                let deleted = self.shared.hot.delete(LEASE_KEY).await;
+                #[cfg(feature = "server")]
+                if deleted.is_ok() {
+                    tracing::debug!(nonce = %self.shared.nonce, "tierstore: lease released");
+                }
+                #[cfg(not(feature = "server"))]
+                drop(deleted);
             }
         }
     }

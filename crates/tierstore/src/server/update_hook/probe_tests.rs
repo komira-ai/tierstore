@@ -63,28 +63,29 @@ fn a_metrics_text_without_a_usable_gauge_gives_none() {
     assert_eq!(build_of("tierstore_build_info{version=\"1\" 1\n"), None);
 }
 
-/// Asserts when a build is the instance on a slot with a version: the slot must be named and
-/// equal, and the version is the crate version or that, `+` and the commit. It would catch a
-/// probe through the public port that takes the old instance's answer for the new one's, which
-/// would let a cutover pass with traffic still on the old release.
+/// Asserts when a build runs a version: the crate version the gauge names, or that, `+` and the
+/// commit (the form hostkeeper's versions take), and no other. It would catch a probe that takes
+/// the old release's answer for the new one's, which would let a cutover pass with traffic still
+/// on the old release.
 #[test]
-fn a_build_is_an_instance_only_if_slot_and_version_agree() {
+fn a_build_is_a_version_when_the_version_or_the_version_and_commit_agree() {
     let build = build_of(GAUGE).unwrap();
-    assert!(build.is(9302, "0.4.0"));
-    assert!(build.is(9302, "0.4.0+abc123"));
-    assert!(!build.is(9301, "0.4.0"));
-    assert!(!build.is(9302, "0.3.0"));
-    assert!(!build.is(9302, "0.4.0+other"));
-    let no_slot = build_of("tierstore_build_info{version=\"0.4.0\"} 1\n").unwrap();
-    assert!(!no_slot.is(9302, "0.4.0"));
-    assert!(!no_slot.is(9302, "0.4.0+abc123"));
+    assert!(build.is("0.4.0"));
+    assert!(build.is("0.4.0+abc123"));
+    assert!(!build.is("0.3.0"));
+    assert!(!build.is("0.4.0+other"));
+    assert!(!build.is("0.4.0+"));
+    assert!(!build.is("abc123"));
+    assert!(!build.is(""));
+    let no_commit = build_of("tierstore_build_info{version=\"0.4.0\"} 1\n").unwrap();
+    assert!(no_commit.is("0.4.0"));
+    assert!(!no_commit.is("0.4.0+abc123"));
 }
 
 /// Asserts that the reader of the hook reads the gauge the server renders, as the server renders
-/// it ([`gauge`], the function `/metricz` calls), with a slot and without: with `--slot` the
-/// build is the instance on that slot and no other, and without it no instance at all. It would
-/// catch a server and a hook that no longer agree on the label, which no hand-written text in
-/// these tests shows.
+/// it ([`gauge`], the function `/metricz` calls), with a slot and without: the build is the
+/// version and the commit the server names. It would catch a server and a hook that no longer
+/// agree on the label, which no hand-written text in these tests shows.
 #[test]
 fn the_reader_reads_the_gauge_the_server_renders() {
     use crate::server::build_info::{COMMIT, VERSION, gauge};
@@ -92,10 +93,10 @@ fn the_reader_reads_the_gauge_the_server_renders() {
     assert_eq!(with.slot, Some(9301));
     assert_eq!(with.version, VERSION);
     assert_eq!(with.commit.as_deref(), Some(COMMIT));
-    assert!(with.is(9301, VERSION));
-    assert!(with.is(9301, &format!("{VERSION}+{COMMIT}")));
-    assert!(!with.is(9302, VERSION));
+    assert!(with.is(VERSION));
+    assert!(with.is(&format!("{VERSION}+{COMMIT}")));
     let without = build_of(&gauge(VERSION, COMMIT, None)).unwrap();
     assert_eq!(without.slot, None);
-    assert!(!without.is(9301, VERSION));
+    assert!(without.is(VERSION));
+    assert!(without.is(&format!("{VERSION}+{COMMIT}")));
 }

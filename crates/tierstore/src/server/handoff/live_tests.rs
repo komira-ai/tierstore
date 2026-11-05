@@ -12,7 +12,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use crate::Backend;
-use crate::server::handoff::testing::{handoff, scratch};
+use crate::server::handoff::testing::{handoff, scratch, within};
 use crate::server::handoff::{Front, Offer, Socket, Want, take};
 use crate::server::listen::{bind, duplicates};
 use crate::server::pipes::{head, status_of, until};
@@ -55,7 +55,8 @@ async fn taken(path: &Path, at: SocketAddr) -> Option<Vec<TcpListener>> {
         s3: &[at],
         oci: &[],
     };
-    let taken = take(&handoff(path.to_owned()), &want)
+    let setup = handoff(path.to_owned());
+    let taken = within("taking the sockets", take(&setup, &want))
         .await
         .expect("a hand-off");
     taken.map(|inherited| inherited.s3)
@@ -63,6 +64,11 @@ async fn taken(path: &Path, at: SocketAddr) -> Option<Vec<TcpListener>> {
 
 /// A put of `key` to `at`, signed for `rig`, on a connection of its own: the whole answer.
 async fn put(rig: &Rig, at: SocketAddr, key: &str) -> String {
+    within(format!("the put of {key}"), put_unbounded(rig, at, key)).await
+}
+
+/// [`put`], with no bound on its waits.
+async fn put_unbounded(rig: &Rig, at: SocketAddr, key: &str) -> String {
     let mut connection = TcpStream::connect(at).await.expect("connected");
     let (uri, body) = (format!("/{BUCKET}/{key}"), b"body");
     let text = head(rig, "PUT", &uri, &CREATE, body, CLOSE);
@@ -108,13 +114,19 @@ async fn a_request_in_flight_finishes_and_none_fails_while_the_sockets_change_ha
     let old_served = instance(&old, vec![listener], &path);
     put_all([&old, &new], at, &keys("before")).await;
 
-    let mut slow = TcpStream::connect(at).await.unwrap();
-    let (uri, body) = (format!("/{BUCKET}/slow"), b"0123456789");
-    slow.write_all(head(&old, "PUT", &uri, &CREATE, body, CLOSE).as_bytes())
+    let mut slow = within("the connect of slow", TcpStream::connect(at))
         .await
         .unwrap();
-    slow.write_all(&body[..4]).await.unwrap();
-    until(&old.server, |server| server.in_flight() == 1).await;
+    let (uri, body) = (format!("/{BUCKET}/slow"), b"0123456789");
+    let slow_head = head(&old, "PUT", &uri, &CREATE, body, CLOSE);
+    within("the head of slow", slow.write_all(slow_head.as_bytes()))
+        .await
+        .unwrap();
+    within("half the body of slow", slow.write_all(&body[..4]))
+        .await
+        .unwrap();
+    let begun = until(&old.server, |server| server.in_flight() == 1);
+    within("slow in flight", begun).await;
 
     let sockets = taken(&path, at).await.expect("the old instance answers");
     let new_served = instance(&new, sockets, &path);
@@ -124,13 +136,18 @@ async fn a_request_in_flight_finishes_and_none_fails_while_the_sockets_change_ha
         "the request in flight holds the old drain open"
     );
 
-    slow.write_all(&body[4..]).await.unwrap();
+    within("the rest of the body of slow", slow.write_all(&body[4..]))
+        .await
+        .unwrap();
     let mut answer = Vec::new();
-    slow.read_to_end(&mut answer).await.unwrap();
+    within("the answer to slow", slow.read_to_end(&mut answer))
+        .await
+        .unwrap();
     let answer = String::from_utf8_lossy(&answer).into_owned();
     assert_eq!(status_of(&answer), 200, "{answer}");
     assert!(old.hot_mem.get("slow", None).await.is_ok());
-    assert_eq!(old_served.await.unwrap(), Drained { abandoned: 0 });
+    let old_drained = within("the old drain", old_served).await.unwrap();
+    assert_eq!(old_drained, Drained { abandoned: 0 });
 
     let after = keys("after");
     put_all([&new, &old], at, &after).await;
@@ -145,7 +162,8 @@ async fn a_request_in_flight_finishes_and_none_fails_while_the_sockets_change_ha
         );
     }
     new.server.begin_drain();
-    assert_eq!(new_served.await.unwrap(), Drained { abandoned: 0 });
+    let new_drained = within("the new drain", new_served).await.unwrap();
+    assert_eq!(new_drained, Drained { abandoned: 0 });
 }
 
 /// Asserts that with no instance running the take finds none (so the first instance binds its own

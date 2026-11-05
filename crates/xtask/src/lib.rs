@@ -283,6 +283,25 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// The hostkeeper package of a built binary, `<out>/tierstore-<version>-<platform>.tar.zst`.
+    HostkeeperPackage {
+        /// The built binary; it is not run, so it may be of any platform.
+        #[arg(long)]
+        binary: PathBuf,
+        /// `<major>.<minor>.<patch>+<12 hex digits>`, what the binary's `--version` prints after
+        /// its name; the binary must hold this text.
+        #[arg(long)]
+        version: String,
+        /// The oldest hostkeeper that runs the package, `<major>.<minor>.<patch>`.
+        #[arg(long)]
+        min_hostkeeper: String,
+        /// The platform the binary was built for.
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+        /// The directory the package is written to; created when missing.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// `dir` holds exactly the assets of the commit, each tarball with its bundle.
     Check {
         dir: PathBuf,
@@ -498,6 +517,19 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             &commit,
             &note,
             output.as_deref(),
+        ),
+        Verb::Release(ReleaseVerb::HostkeeperPackage {
+            binary,
+            version,
+            min_hostkeeper,
+            platform,
+            out,
+        }) => release::hostkeeper_package::hostkeeper_package(
+            &binary,
+            &version,
+            &min_hostkeeper,
+            platform,
+            &out,
         ),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {

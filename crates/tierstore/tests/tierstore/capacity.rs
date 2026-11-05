@@ -12,8 +12,9 @@ use tierstore::Backend;
 
 /// Asserts that a put made while the published usage is at or above the critical share of the
 /// budget and under the budget takes exactly as much of the paused clock as a put made under the
-/// share (the journal's linger and nothing more), and the object is in the hot tier. (Before,
-/// such a put slept a fixed back-pressure on top.)
+/// share, and that neither takes any: the acknowledgement of a put waits on no timer (the
+/// journal's batching linger, which once did, is gone), and the object is in the hot tier.
+/// (Before, such a put slept a fixed back-pressure on top.)
 #[tokio::test(start_paused = true)]
 async fn a_put_above_the_critical_mark_goes_to_the_hot_tier_without_waiting() {
     let rig = Rig::new();
@@ -25,6 +26,7 @@ async fn a_put_above_the_critical_mark_goes_to_the_hot_tier_without_waiting() {
     let start = Instant::now();
     proxy.put("a", body("1")).await.unwrap();
     let under = start.elapsed();
+    assert_eq!(under, std::time::Duration::ZERO);
 
     set_usage(&rig, 600, 0).await;
     let start = Instant::now();
