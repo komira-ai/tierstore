@@ -13,6 +13,7 @@ fn listed(id: &str, size: u64, modified: u64) -> Listed {
         key: proxy_key(id),
         size,
         modified,
+        tag: String::new(),
     }
 }
 
@@ -66,6 +67,7 @@ fn a_registration_that_leaves_the_listing_is_forgotten_and_one_outside_the_prefi
         key: "_tiering/usage".into(),
         size: 1,
         modified: 1,
+        tag: String::new(),
     };
     seen.observe(0, &[listed("a", 1, 1), stray]);
     seen.observe(100, &[]);

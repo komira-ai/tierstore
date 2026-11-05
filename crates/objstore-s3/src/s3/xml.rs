@@ -31,6 +31,7 @@ struct Entry {
     key: ObjectKey,
     size: u64,
     modified: Option<String>,
+    etag: Option<String>,
 }
 
 /// A ListObjectsV2 answer as a [`ListPage`].
@@ -47,7 +48,7 @@ pub(crate) fn list_page(body: &[u8]) -> Result<ListPage, ObjectStoreError> {
 }
 
 /// A ListObjectsV2 answer as a [`StampedPage`]: every object must carry a readable
-/// `<LastModified>`.
+/// `<LastModified>` and an `<ETag>`.
 pub(crate) fn stamped_page(body: &[u8]) -> Result<StampedPage, ObjectStoreError> {
     let (entries, next) = list_result(body)?;
     let mut objects = Vec::with_capacity(entries.len());
@@ -59,10 +60,17 @@ pub(crate) fn stamped_page(body: &[u8]) -> Result<StampedPage, ObjectStoreError>
                 entry.key
             ))
         })?;
+        let etag = entry.etag.ok_or_else(|| {
+            ObjectStoreError::Protocol(format!(
+                "ListObjectsV2 answer: {}: missing <ETag>",
+                entry.key
+            ))
+        })?;
         objects.push(StampedObject {
             key: entry.key,
             size: entry.size,
             modified_millis,
+            etag,
         });
     }
     Ok(StampedPage { objects, next })
@@ -85,10 +93,12 @@ fn list_result(body: &[u8]) -> Result<(Vec<Entry>, Option<ListToken>), ObjectSto
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| bad(format!("{key}: missing or bad <Size>")))?;
         let modified = child_text(c, "LastModified").map(str::to_owned);
+        let etag = child_text(c, "ETag").map(|etag| etag.trim().to_owned());
         entries.push(Entry {
             key,
             size,
             modified,
+            etag,
         });
     }
     let truncated = match child_text(root, "IsTruncated") {
@@ -473,16 +483,22 @@ mod tests {
              <Contents><Key>p/a</Key><LastModified>2009-10-12T17:50:30.000Z</LastModified>\
              <ETag>\"x\"</ETag><Size>3</Size></Contents>\
              <Contents><Key>p/b</Key><LastModified>1970-01-01T00:00:01.500Z</LastModified>\
-             <Size>0</Size></Contents></ListBucketResult>"
+             <ETag>&quot;y-2&quot;</ETag><Size>0</Size></Contents></ListBucketResult>"
         );
         let page = stamped_page(body.as_bytes()).unwrap();
         assert_eq!(page.next, Some(ListToken(Token::Continue("t2".into()))));
         let got: Vec<_> = page
             .objects
             .iter()
-            .map(|o| (o.key.as_str(), o.size, o.modified_millis))
+            .map(|o| (o.key.as_str(), o.size, o.modified_millis, o.etag.as_str()))
             .collect();
-        assert_eq!(got, [("p/a", 3, 1_255_369_830_000), ("p/b", 0, 1_500)]);
+        assert_eq!(
+            got,
+            [
+                ("p/a", 3, 1_255_369_830_000, "\"x\""),
+                ("p/b", 0, 1_500, "\"y-2\"")
+            ]
+        );
         assert_eq!(list_page(body.as_bytes()).unwrap().objects.len(), 2);
     }
 
@@ -493,8 +509,8 @@ mod tests {
     fn a_stamped_page_without_readable_times_is_a_protocol_error() {
         for modified in ["", "<LastModified>yesterday</LastModified>"] {
             let body = format!(
-                "<ListBucketResult><Contents><Key>p/a</Key>{modified}<Size>1</Size>\
-                 </Contents></ListBucketResult>"
+                "<ListBucketResult><Contents><Key>p/a</Key>{modified}<ETag>\"x\"</ETag>\
+                 <Size>1</Size></Contents></ListBucketResult>"
             );
             let err = stamped_page(body.as_bytes()).unwrap_err();
             assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err:?}");
@@ -502,6 +518,20 @@ mod tests {
             assert!(err.to_string().contains(why), "{err}");
         }
         assert!(stamped_page(b"not xml").is_err());
+    }
+
+    /// Asserts that a stamped page is a protocol error, naming the key, when an object has no
+    /// `<ETag>`: the listing of a store that leaves it out cannot be told apart from a HEAD.
+    #[test]
+    fn a_stamped_page_without_an_etag_is_a_protocol_error() {
+        let body = format!(
+            "<ListBucketResult {NS}><Contents><Key>p/a</Key>\
+             <LastModified>2009-10-12T17:50:30.000Z</LastModified><Size>1</Size>\
+             </Contents></ListBucketResult>"
+        );
+        let err = stamped_page(body.as_bytes()).unwrap_err();
+        assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err:?}");
+        assert!(err.to_string().contains("p/a: missing <ETag>"), "{err}");
     }
 
     /// Catches: an uploads page that loses the id or the time of an upload, reads a truncated

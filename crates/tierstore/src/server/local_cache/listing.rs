@@ -48,7 +48,22 @@ impl Inner {
         }
         let mut found = self.upstream.list(prefix).await?;
         found.retain(|object| !is_reserved(&object.key));
+        self.with_kept_tags(&mut found);
         Ok(found)
+    }
+
+    /// Gives each object the cache keeps the tag a HEAD of it gives (the one recorded at its
+    /// fill, which can differ from the upstream's), so that the tag of a listing is the tag of
+    /// a HEAD through the same cache. One look at the index for each object, no call upstream.
+    fn with_kept_tags(&self, objects: &mut [Listed]) {
+        for object in objects {
+            let kept = self
+                .cacheable(&object.key)
+                .and_then(|name| self.kept(&name));
+            if let Some(meta) = kept {
+                object.tag = meta.tag;
+            }
+        }
     }
 
     /// A page of [`list_data`](Self::list_data): at most `max_keys` objects after `start_after`.
@@ -83,6 +98,7 @@ impl Inner {
                 break;
             }
         }
+        self.with_kept_tags(&mut found);
         Ok(found)
     }
 

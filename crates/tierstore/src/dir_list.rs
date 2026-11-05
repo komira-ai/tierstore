@@ -5,6 +5,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 
 use crate::{Error, Listed};
 
@@ -58,11 +59,25 @@ async fn scan(dir: &Path, base: &str, prefix: &str, found: &mut Vec<Listed>) -> 
         let Some(meta) = meta.filter(std::fs::Metadata::is_file) else {
             continue;
         };
+        // The tag is the first bytes of the file, the same ones a HEAD reads; a file that
+        // cannot be read through them (gone, or shorter than a tag) is not an object.
+        let Some(tag) = read_tag(&entry.path()).await else {
+            continue;
+        };
         found.push(Listed {
             key,
             size: meta.len().saturating_sub(TAG_LEN as u64),
             modified: modified_of(&meta),
+            tag: hex::encode(tag),
         });
     }
     Ok(())
+}
+
+/// The content tag stored at the start of the file at `path`, or `None` if it cannot be read.
+async fn read_tag(path: &Path) -> Option<[u8; TAG_LEN]> {
+    let mut file = fs::File::open(path).await.ok()?;
+    let mut tag = [0_u8; TAG_LEN];
+    file.read_exact(&mut tag).await.ok()?;
+    Some(tag)
 }

@@ -52,6 +52,9 @@ pub struct StampedObject {
     /// states it: S3 sends whole seconds, and another store may send milliseconds. It need not
     /// equal [`ObjectHead::modified_millis`] of the same object.
     pub modified_millis: u64,
+    /// The object's entity tag as the listing states it, with its quotes if the store sends
+    /// them (as [`ObjectHead::etag`] does).
+    pub etag: String,
 }
 
 /// One page of [`S3Store::list_stamped`], in ascending key order.
