@@ -220,6 +220,14 @@ pub const MAX_CONCURRENT_FILLS: usize = 4;
 /// otherwise: 65536 names of 64 bytes, about 4 MiB.
 pub const FORGET_LIMIT: usize = 65_536;
 
+/// How long the eviction loop of the binary waits between two passes, unless the settings say
+/// otherwise.
+pub const PASS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// How long a cache waits between two tries of the lock of its directory, unless the settings say
+/// otherwise.
+pub const LOCK_INTERVAL: Duration = Duration::from_secs(1);
+
 /// The keeps of a put that may run at once, unless the settings say otherwise.
 pub const MAX_CONCURRENT_KEEPS: usize = 8;
 
@@ -287,6 +295,16 @@ pub struct CacheConfig {
     /// The most keys a read-only cache remembers it deleted or replaced through the upstream
     /// (see the module `hold`). Past it the cache is emptied when it takes the lock.
     pub forget_limit: usize,
+    /// How long the eviction loop waits between two passes (`maintain`).
+    pub pass_interval: Duration,
+    /// How long the loop that holds the lock of the directory waits between two tries (`hold`).
+    pub lock_interval: Duration,
+    /// The time between two ticks of the scrub. The scrub reads `scrub_rate` bytes a second, so
+    /// `scrub_rate` times this to the second at each tick.
+    pub scrub_tick: Duration,
+    /// The most pages of the upstream one listing reads to make up for the names it leaves out.
+    /// At least one (0 is read as 1).
+    pub listing_calls: u32,
 }
 
 impl CacheConfig {
@@ -311,6 +329,10 @@ impl CacheConfig {
             keep_queue_bytes: keep::KEEP_QUEUE_BYTES,
             write_through: false,
             forget_limit: FORGET_LIMIT,
+            pass_interval: PASS_INTERVAL,
+            lock_interval: LOCK_INTERVAL,
+            scrub_tick: SCRUB_TICK,
+            listing_calls: listing::LISTING_CALLS,
         }
     }
 
@@ -436,6 +458,12 @@ pub struct LocalCache {
 }
 
 impl LocalCache {
+    /// The settings the cache was opened with.
+    #[must_use]
+    pub fn config(&self) -> &CacheConfig {
+        &self.inner.config
+    }
+
     /// Opens the cache in `config.path`: makes the directory, removes what a fill that was
     /// running left in `.stage/`, and reads the objects back (an object whose sidecar does not
     /// say what the file holds is deleted), the least recently used first by the time of the

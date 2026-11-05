@@ -20,6 +20,8 @@ use super::bucket;
 use super::chunked::Framing;
 use super::delete_objects::DELETE_BODY_LIMIT;
 use super::handover::hand_over;
+use super::list_token;
+use super::listing::{self, UploadsNext};
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{
@@ -29,15 +31,16 @@ use super::time::{http_date, parse_http_date};
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
-/// `delimiter` is understood only empty (which is no delimiter: [`refuse_delimiter`]), and
-/// `fetch-owner` is accepted and ignored: the listing has no owner to give, and S3 itself only
-/// adds an `Owner` to the entries of a listing when it is asked to.
+/// `delimiter` and `encoding-type` are parameters of ListObjectsV2 and of ListMultipartUploads,
+/// and with `fetch-owner=true` the objects of a listing carry the `Owner` that S3 adds then
+/// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 15] = [
+const SUPPORTED: [&str; 16] = [
     "continuation-token",
     "delete",
     "delimiter",
+    "encoding-type",
     "fetch-owner",
     "key-marker",
     "list-type",
@@ -78,7 +81,7 @@ pub(super) const RESPONSE_OVERRIDES: [(&str, &str); 6] = [
 pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 
 /// The most keys in a page of a listing, and the number of parts of an upload.
-const PAGE_LIMIT: usize = 1000;
+pub(super) const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
 
 /// Whether a call is DeleteObjects: a `POST` to the bucket with `?delete`.
@@ -160,9 +163,10 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
 ///   one too: an S3 tier refuses it itself, see `objstore_s3::key_rules::s3_client_key`.)
 /// - A character a listing can carry: the answers of a listing are XML 1.0, which has no
 ///   character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF (tab, line
-///   feed, carriage return, U+007F and the C1 controls are allowed), and this front does not
-///   support `encoding-type=url`, the only way S3 lists such a key. A key with one would make
-///   every page that lists it malformed.
+///   feed, carriage return, U+007F and the C1 controls are allowed). A client that does not ask
+///   for `encoding-type=url` gets keys as they are, so a key with one would make every page that
+///   lists it malformed for such a client; a listing with `encoding-type=url` could carry the
+///   key, and the set of characters a key may have is the narrow one all the same.
 fn refuse_unstorable(key: &str) -> Result<(), S3Error> {
     if key_rules::s3_key(key).is_err() {
         return Err(S3Error::from(Error::InvalidKey(key.to_owned())));
@@ -186,6 +190,18 @@ fn body_len(parts: &Parts, check: &Check) -> Option<u64> {
     let decoded = check.framing().map(Framing::decoded);
     let declared = header(&parts.headers, "content-length");
     decoded.or_else(|| declared.and_then(|text| text.parse().ok()))
+}
+
+/// Whether the listing asked for `encoding-type=url`. S3 knows no other encoding type, and says
+/// so for any other text; an empty one is none.
+fn encoded(query: &Query) -> Result<bool, S3Error> {
+    match query.get("encoding-type") {
+        None | Some("") => Ok(false),
+        Some("url") => Ok(true),
+        Some(_) => Err(S3Error::invalid(
+            "Invalid Encoding Method specified in Request",
+        )),
+    }
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
@@ -255,15 +271,6 @@ fn overridden(mut answer: Answer, set: Vec<(&'static str, HeaderValue)>) -> Answ
     answer
 }
 
-/// A listing that names a `delimiter` is not supported; an empty one is no delimiter, as it is
-/// for S3.
-fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
-    if query.get("delimiter").is_some_and(|text| !text.is_empty()) {
-        return Err(S3Error::unsupported("a delimiter is not supported"));
-    }
-    Ok(())
-}
-
 /// The size of a page a listing asked for in the parameter `name` (`max-keys` or
 /// `max-uploads`), at most [`PAGE_LIMIT`]. `0` is a size: S3 answers it with an empty,
 /// untruncated page. A text that is not a whole number from 0 to 2147483647 is `InvalidArgument`
@@ -278,18 +285,6 @@ fn page_size(query: &Query, name: &str, argument: &str) -> Result<usize, S3Error
             "Argument {argument} must be an integer between 0 and 2147483647"
         ))),
     }
-}
-
-/// The token of the page that follows the page that ends with `key`.
-fn token(key: &str) -> String {
-    hex::encode(key)
-}
-
-/// The key a token stands for.
-fn untoken(token: &str) -> Result<String, S3Error> {
-    let bad = || S3Error::invalid("the continuation token is not one this server gave");
-    let bytes = hex::decode(token).map_err(|_| bad())?;
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 /// Whether the header `name` of the request names `tag` among its entity tags (`*` names every
@@ -377,15 +372,6 @@ fn upload_error(error: Error) -> S3Error {
     match error {
         Error::NotFound(_) => S3Error::no_such_upload(),
         other => S3Error::from(other),
-    }
-}
-
-/// The key a listing starts after: the one its continuation token stands for, else
-/// `start-after`.
-fn start_after(query: &Query) -> Result<Option<String>, S3Error> {
-    match query.get("continuation-token") {
-        Some(text) => untoken(text).map(Some),
-        None => Ok(query.get("start-after").map(str::to_owned)),
     }
 }
 
@@ -633,31 +619,42 @@ impl Server {
         Ok(answer(StatusCode::NO_CONTENT, &[], Bytes::new()))
     }
 
+    /// ListObjectsV2: a page of the objects under `prefix`, after the token or `start-after`.
+    /// With a `delimiter` the keys that have it after the prefix are folded into common
+    /// prefixes, and both kinds of entry count against `max-keys` ([`listing::page`]).
     async fn list_objects(&self, query: &Query) -> Result<Answer, S3Error> {
-        refuse_delimiter(query)?;
         if query.get("list-type") != Some("2") {
             return Err(S3Error::unsupported(
                 "only ListObjectsV2 (list-type=2) is supported",
             ));
         }
         let prefix = query.get("prefix").unwrap_or_default();
+        let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
+        let url = encoded(query)?;
         let max_keys = page_size(query, "max-keys", "maxKeys")?;
-        let after = start_after(query)?;
-        let after = after.as_deref();
-        // A page of no keys reads nothing, and is not truncated (as for S3).
-        let listed = match max_keys {
-            0 => Vec::new(),
-            _ => self.backend.list_page(prefix, after, max_keys + 1).await?,
+        // Without a delimiter every key is an entry: one read of the page and one key more
+        // tells whether the listing goes on. With one, a prefix may hold any number of keys, and
+        // they are read a page at a time.
+        let batch = if delimiter.is_some() {
+            PAGE_LIMIT + 1
+        } else {
+            max_keys + 1
         };
-        let page = &listed[..listed.len().min(max_keys)];
-        let next = (listed.len() > max_keys).then(|| token(&page[max_keys - 1].key));
+        let backend = self.backend.as_ref();
+        let start = list_token::start(query)?;
+        let page = listing::page(backend, prefix, delimiter, start, max_keys, batch).await?;
         let listing = Listing {
             bucket: &self.config.bucket,
             prefix,
+            delimiter,
+            url,
+            start_after: query.get("start-after"),
+            continuation_token: query.get("continuation-token"),
             max_keys,
             owner: query.get("fetch-owner") == Some("true"),
-            objects: page,
-            next,
+            objects: &page.objects,
+            prefixes: &page.prefixes,
+            next: page.next.as_ref().map(list_token::token),
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))
     }
@@ -666,27 +663,39 @@ impl Server {
     /// (and `upload-id-marker`, which S3 ignores without a key marker), at most `max-uploads`.
     /// The uploads of a key under the proxy's reserved prefixes are never listed.
     async fn list_uploads(&self, query: &Query) -> Result<Answer, S3Error> {
-        refuse_delimiter(query)?;
         let prefix = query.get("prefix").unwrap_or_default();
+        let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
+        let url = encoded(query)?;
         let max_uploads = page_size(query, "max-uploads", "max-uploads")?;
         let key_marker = query.get("key-marker").unwrap_or_default();
         let id_marker = query.get("upload-id-marker").filter(|id| !id.is_empty());
-        let after = (!key_marker.is_empty()).then_some((key_marker, id_marker));
-        let backend = &self.backend;
-        let listed = match max_uploads {
-            0 => Ok(Vec::new()),
-            _ => backend.list_uploads(prefix, after, max_uploads + 1).await,
+        let start =
+            (!key_marker.is_empty()).then(|| (key_marker.to_owned(), id_marker.map(str::to_owned)));
+        // As for objects: without a delimiter every upload is an entry and one read is enough.
+        let batch = if delimiter.is_some() {
+            PAGE_LIMIT + 1
+        } else {
+            max_uploads + 1
         };
-        let listed = listed.map_err(S3Error::from)?;
-        let page = &listed[..listed.len().min(max_uploads)];
-        let next = (listed.len() > max_uploads).then(|| &page[max_uploads - 1]);
+        let backend = self.backend.as_ref();
+        let page = listing::uploads_page(backend, prefix, delimiter, start, max_uploads, batch);
+        let page = page.await?;
+        // After an upload the next page starts after its id; after a common prefix, after the
+        // prefix and so after all that is under it, and there is no id.
+        let next = page.next.as_ref().map(|next| match next {
+            UploadsNext::After(key, id) => (key.as_str(), id.as_str()),
+            UploadsNext::PastPrefix(common) => (common.as_str(), ""),
+        });
         let listing = UploadListing {
             bucket: &self.config.bucket,
             prefix,
+            delimiter,
+            url,
             key_marker,
             id_marker: id_marker.unwrap_or_default(),
             max_uploads,
-            uploads: page,
+            uploads: &page.uploads,
+            prefixes: &page.prefixes,
             next,
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))

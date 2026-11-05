@@ -257,13 +257,23 @@ impl Backend for StuckUploads {
 
 /// A cache over a [`StuckUploads`] in a scratch directory.
 fn over_stuck_uploads(name: &str, moving: bool) -> (Arc<StuckUploads>, LocalCache, TestDir) {
+    over_stuck_uploads_capped(name, moving, LISTING_CALLS)
+}
+
+/// [`over_stuck_uploads`] with a cap of `listing_calls` pages on a listing.
+fn over_stuck_uploads_capped(
+    name: &str,
+    moving: bool,
+    listing_calls: u32,
+) -> (Arc<StuckUploads>, LocalCache, TestDir) {
     let stuck = Arc::new(StuckUploads {
         inner: MemoryBackend::new(),
         calls: AtomicU64::new(0),
         moving,
     });
     let dir = TestDir::under(std::env::temp_dir(), name);
-    let config = CacheConfig::new(dir.path().join("cache"), 1 << 20, Vec::new());
+    let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, Vec::new());
+    config.listing_calls = listing_calls;
     let (upstream, disk, clock) = (
         stuck.clone(),
         Arc::new(FakeDisk::new()),
@@ -366,4 +376,37 @@ async fn a_listing_that_never_gets_past_the_reserved_keys_stops_at_the_cap() {
     let page = cache.list_page("", None, 2).await;
     assert!(matches!(page, Err(Error::Unavailable(_))), "{page:?}");
     assert_eq!(stuck.pages.load(Ordering::SeqCst), u64::from(LISTING_CALLS));
+}
+
+/// Asserts that the cap on the pages of one listing is the `listing_calls` of the settings: with 7,
+/// a listing of objects that never gets past the reserved keys asks the upstream seven times and
+/// says so in its error, and a listing of uploads does the same; and a cap of 0 is read as 1.
+#[tokio::test]
+async fn the_cap_on_the_pages_of_a_listing_is_the_listing_calls_of_the_settings() {
+    for (cap, asked) in [(7_u32, 7_u32), (0, 1)] {
+        let inner = MemoryBackend::new();
+        for key in ["_journal/a", "_journal/b", "_journal/c"] {
+            inner.put(key, Bytes::from_static(b"x")).await.unwrap();
+        }
+        let stuck = Arc::new(Stuck {
+            inner,
+            pages: AtomicU64::new(0),
+        });
+        let dir = TestDir::under(std::env::temp_dir(), "tscache-list-cap-key");
+        let mut config = CacheConfig::new(dir.path().join("cache"), 1 << 20, Vec::new());
+        config.listing_calls = cap;
+        let disk = Arc::new(FakeDisk::new());
+        let clock = Arc::new(TestClock::new());
+        let cache = LocalCache::open(config, stuck.clone(), disk, clock).unwrap();
+        let page = cache.list_page("", None, 2).await;
+        let text = format!("the upstream's listing took over {asked} calls");
+        assert_eq!(page.unwrap_err(), Error::Unavailable(text));
+        assert_eq!(stuck.pages.load(Ordering::SeqCst), u64::from(asked));
+
+        let (stuck, cache, _dir) = over_stuck_uploads_capped("tscache-list-up-cap-key", true, cap);
+        let found = cache.list_uploads("", None, 2).await;
+        let text = format!("the upstream's listing of uploads took over {asked} calls");
+        assert_eq!(found.unwrap_err(), Error::Unavailable(text));
+        assert_eq!(stuck.calls.load(Ordering::SeqCst), u64::from(asked));
+    }
 }

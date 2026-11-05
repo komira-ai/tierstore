@@ -23,9 +23,16 @@
 //! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
 //!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
 //!   needed), a result for each key (see [`delete_objects`]), for the full key only;
-//! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`; an empty
-//!   `delimiter` is no delimiter and `fetch-owner=true` adds an `Owner` to each object, but a
-//!   `delimiter` with text is `NotImplemented`;
+//! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token`, `start-after`, `delimiter`
+//!   and `encoding-type=url`, and with `fetch-owner=true`, which adds an `Owner` to each
+//!   object. An empty `delimiter` is no delimiter. With one, the keys that have it after the
+//!   prefix are folded into `CommonPrefixes`, and a prefix counts against `max-keys` as an
+//!   object does, so a page ends between whole prefixes and the token of a prefix starts the
+//!   next page after every key under it (the walk reads the keys of a prefix a page at a time to
+//!   pass them); a common prefix that does not sort after `start-after` is left out, as for S3.
+//!   `encoding-type=url` percent-encodes the names in the answer (`Key`, `Prefix`, `Delimiter`,
+//!   `StartAfter`, the `Prefix` of a common prefix), a space as `+`, `/` and `*` as they are
+//!   and `~` as `%7E`; any other `encoding-type` is `InvalidArgument`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
 //!   the backend does (the [`Proxy`](crate::Proxy) passes them to the tier that holds the upload:
 //!   its hot tier when that has room, else its cold tier, as the upload id says). The server
@@ -38,9 +45,10 @@
 //!   is the content tag the backend gives it, and that of the completion is the content tag of
 //!   the object;
 //! - ListMultipartUploads (`GET /<bucket>?uploads`) with `prefix`, `max-uploads`, `key-marker`
-//!   and `upload-id-marker`, without a `delimiter` (an empty one is none): the open uploads of
-//!   the backend (for the [`Proxy`](crate::Proxy), those of both its tiers), by key and then by
-//!   id, paged by the two
+//!   and `upload-id-marker`, and with `delimiter` and `encoding-type=url` as ListObjectsV2 has
+//!   them (a common prefix counts against `max-uploads`, and the markers of a page that ends
+//!   with one are the prefix and no upload id): the open uploads of the backend (for the
+//!   [`Proxy`](crate::Proxy), those of both its tiers), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
@@ -52,8 +60,8 @@
 //!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
-//! know (`versionId`), and a `delimiter` with text, is answered `NotImplemented`. A request with a key under
-//! `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
+//! know (`versionId`), is answered `NotImplemented`.
+//! A request with a key under `_journal/`, `_tiering/` or `_entries/` is refused with `AccessDenied` by each supported call
 //! before the operation's own processing, including the parsing of the XML body of an upload
 //! completion; a request refused as unsupported (see above) is answered so first.
 //!
@@ -225,9 +233,11 @@ mod cli_heartbeat;
 mod cli_oci;
 mod cli_reconcile;
 mod cli_serve;
+mod cli_text;
 mod combined_cli;
 mod config;
 mod config_cache;
+mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
 mod config_handoff;
@@ -235,6 +245,7 @@ mod config_interface;
 mod config_io;
 mod config_load;
 mod config_policy;
+mod config_reconcile;
 mod config_syntax;
 mod config_tier;
 mod config_tuning;
@@ -254,7 +265,9 @@ mod idle;
 mod keys;
 mod launch;
 mod linger;
+mod list_token;
 mod listen;
+mod listing;
 pub mod local_cache;
 mod lock;
 mod memory_format;
@@ -335,7 +348,11 @@ mod idle_tests;
 #[cfg(test)]
 mod key_rules_tests;
 #[cfg(test)]
+mod list_delimiter_tests;
+#[cfg(test)]
 mod list_options_tests;
+#[cfg(test)]
+mod list_uploads_delimiter_tests;
 #[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
