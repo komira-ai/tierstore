@@ -305,7 +305,7 @@ async fn a_listing_with_a_bad_argument_is_refused() {
 /// `NoSuchBucket`, and the calls this server does not do are `NotImplemented`: another method,
 /// a subresource of an object, a multipart parameter on a plain read, a listing of the bucket
 /// that names an upload id and not `uploads`, a post with no upload, a post with a part number
-/// and no upload id, and a delete of the bucket.
+/// and no upload id. (The delete of the bucket has tests of its own, in `bucket_life_tests`.)
 #[tokio::test(start_paused = true)]
 async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -326,7 +326,6 @@ async fn the_bucket_calls_and_the_calls_that_are_not_done() {
             .await,
         rig.call("POST", "k", b"").await,
         rig.call("POST", "k?partNumber=1", b"").await,
-        rig.send("DELETE", &bucket, &[], b"").await,
     ];
     for reply in not_done {
         assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);

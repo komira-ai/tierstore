@@ -1,13 +1,14 @@
 //! The calls on the bucket itself: the bucket is one the server is configured with, so a call
 //! about it is answered from the settings, and none of them reaches the backend.
 
+use bytes::Bytes;
 use hyper::StatusCode;
 
 use crate::Backend;
 use crate::journal::FORMAT_KEY;
 
 use super::Server;
-use super::reply::{Answer, S3Error, xml_answer};
+use super::reply::{Answer, S3Error, answer, xml_answer};
 use super::request::{Query, Target};
 use super::xml;
 
@@ -205,5 +206,57 @@ impl Server {
             Unset::Acl => Ok(xml_answer(StatusCode::OK, xml::acl())),
             Unset::Missing(code, text) => Err(S3Error::new(StatusCode::NOT_FOUND, code, *text)),
         }
+    }
+
+    /// HeadBucket: the bucket is there, and `x-amz-bucket-region` says where, which the SDKs
+    /// read to find the endpoint of a bucket.
+    pub(super) fn head_bucket(&self) -> Answer {
+        let headers = [("x-amz-bucket-region", self.config.region.clone())];
+        answer(StatusCode::OK, &headers, Bytes::new())
+    }
+
+    /// CreateBucket of the bucket the server serves (a bucket of another name is
+    /// `NoSuchBucket` before this): it exists, so, as S3 does for a bucket one owns, it is
+    /// 200 with `Location` in `us-east-1` and 409 `BucketAlreadyOwnedByYou` in every other
+    /// region. A `LocationConstraint` that is not the region of the server (or empty, which
+    /// is `us-east-1`'s way of saying nothing) is 400 `IllegalLocationConstraintException`, and a
+    /// body that is not a `CreateBucketConfiguration` is `MalformedXML`.
+    pub(super) fn create_bucket(&self, body: &[u8]) -> Result<Answer, S3Error> {
+        let Some(asked) = xml::parse_create(body) else {
+            let text = "The XML you provided was not well-formed or did not validate against \
+                        our published schema.";
+            return Err(S3Error::new(StatusCode::BAD_REQUEST, "MalformedXML", text));
+        };
+        let region = self.config.region.as_str();
+        if !asked.is_empty() && asked != region {
+            let text = format!(
+                "The {asked} location constraint is incompatible for the region specific \
+                 endpoint this request was sent to."
+            );
+            let code = "IllegalLocationConstraintException";
+            return Err(S3Error::new(StatusCode::BAD_REQUEST, code, text));
+        }
+        if region != "us-east-1" {
+            let text = "Your previous request to create the named bucket succeeded and you \
+                        already own it.";
+            let code = "BucketAlreadyOwnedByYou";
+            return Err(S3Error::new(StatusCode::CONFLICT, code, text));
+        }
+        let headers = [("location", format!("/{}", self.config.bucket))];
+        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
+    }
+
+    /// DeleteBucket: S3 refuses a bucket that has objects, 409 `BucketNotEmpty`, and removes one
+    /// that has none. This bucket is set up by the configuration of the server, so a call does
+    /// not remove it: an empty bucket is 403 `AccessDenied` and stays. Nothing is deleted.
+    pub(super) async fn delete_bucket(&self) -> Result<Answer, S3Error> {
+        let found = self.backend.list_page("", None, 1).await?;
+        if found.is_empty() {
+            let text = "The bucket is set up by the configuration of this server and is not \
+                        deleted by a call.";
+            return Err(S3Error::new(StatusCode::FORBIDDEN, "AccessDenied", text));
+        }
+        let text = "The bucket you tried to delete is not empty.";
+        Err(S3Error::new(StatusCode::CONFLICT, "BucketNotEmpty", text))
     }
 }
