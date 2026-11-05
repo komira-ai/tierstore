@@ -20,14 +20,19 @@ use super::handover::hand_over;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
-use super::time::http_date;
+use super::time::{http_date, parse_http_date};
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
+/// `delimiter` is understood only empty (which is no delimiter: [`refuse_delimiter`]), and
+/// `fetch-owner` is accepted and ignored: the listing has no owner to give, and S3 itself only
+/// adds an `Owner` to the entries of a listing when it is asked to.
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 12] = [
+const SUPPORTED: [&str; 14] = [
     "continuation-token",
+    "delimiter",
+    "fetch-owner",
     "key-marker",
     "list-type",
     "max-keys",
@@ -150,16 +155,27 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
     Ok(())
 }
 
+/// A listing that names a `delimiter` is not supported; an empty one is no delimiter, as it is
+/// for S3.
+fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
+    if query.get("delimiter").is_some_and(|text| !text.is_empty()) {
+        return Err(S3Error::unsupported("a delimiter is not supported"));
+    }
+    Ok(())
+}
+
 /// The size of a page a listing asked for in the parameter `name` (`max-keys` or
-/// `max-uploads`), at most [`PAGE_LIMIT`].
-fn page_size(query: &Query, name: &str) -> Result<usize, S3Error> {
+/// `max-uploads`), at most [`PAGE_LIMIT`]. `0` is a size: S3 answers it with an empty,
+/// untruncated page. A text that is not a whole number from 0 to 2147483647 is `InvalidArgument`
+/// with the words S3 uses, where `argument` is the name S3 gives the parameter (`maxKeys`).
+fn page_size(query: &Query, name: &str, argument: &str) -> Result<usize, S3Error> {
     let Some(text) = query.get(name) else {
         return Ok(PAGE_LIMIT);
     };
-    match text.parse::<usize>() {
-        Ok(count) if count > 0 => Ok(count.min(PAGE_LIMIT)),
+    match text.parse::<i32>() {
+        Ok(count) if count >= 0 => Ok(usize::try_from(count).unwrap_or(0).min(PAGE_LIMIT)),
         _ => Err(S3Error::invalid(format!(
-            "{name} must be a positive whole number"
+            "Argument {argument} must be an integer between 0 and 2147483647"
         ))),
     }
 }
@@ -184,28 +200,42 @@ fn names(parts: &Parts, name: &str, tag: &str) -> Option<bool> {
     Some(listed.any(|item| ["*", tag].contains(&item)))
 }
 
-/// The answer that the conditions of a read give in place of the object, if they do:
-/// `PreconditionFailed` when `If-Match` does not name the tag of the object, and 304 when
-/// `If-None-Match` does. `None` when the read goes on. The conditions on the time are not
-/// supported.
+/// The time, in whole seconds, that the header `name` of the request holds, if it has the header
+/// and it is an HTTP date. S3 ignores a date that is not one, and so does this.
+fn date_of(parts: &Parts, name: &str) -> Option<u64> {
+    parse_http_date(header(&parts.headers, name)?).map(|millis| millis / 1000)
+}
+
+/// The answer that the conditions of a read give in place of the object, if they do, in the order
+/// of RFC 7232 (section 6): `PreconditionFailed` when `If-Match` does not name the tag of the
+/// object, or, without an `If-Match`, when `If-Unmodified-Since` is before the time of the
+/// object; then 304 when `If-None-Match` names the tag, or, without an `If-None-Match`, when
+/// `If-Modified-Since` is not before the time of the object. A date is compared to the second,
+/// as `Last-Modified` shows it, and one that is not a date is ignored. `None` when the read goes
+/// on.
 fn conditional(parts: &Parts, key: &str, meta: &Meta) -> Result<Option<Answer>, S3Error> {
-    let since = ["if-modified-since", "if-unmodified-since"];
-    if since.iter().any(|name| parts.headers.contains_key(*name)) {
-        return Err(S3Error::unsupported(
-            "only If-Match and If-None-Match are supported",
-        ));
+    let modified = meta.modified / 1000;
+    let unmodified_since = || date_of(parts, "if-unmodified-since").is_some_and(|at| modified > at);
+    let failed = match names(parts, "if-match", &meta.tag) {
+        Some(named) => !named,
+        None => unmodified_since(),
+    };
+    if failed {
+        return Err(S3Error::from(Error::PreconditionFailed(key.to_owned())));
     }
-    let if_match = names(parts, "if-match", &meta.tag);
-    let if_none_match = names(parts, "if-none-match", &meta.tag);
-    match (if_match, if_none_match) {
-        (Some(false), _) => Err(S3Error::from(Error::PreconditionFailed(key.to_owned()))),
-        (_, Some(true)) => {
-            let headers = object_headers(meta);
-            let not_modified = answer(StatusCode::NOT_MODIFIED, &headers, Bytes::new());
-            Ok(Some(not_modified))
-        }
-        _ => Ok(None),
+    let not_modified = match names(parts, "if-none-match", &meta.tag) {
+        Some(named) => named,
+        None => date_of(parts, "if-modified-since").is_some_and(|at| modified <= at),
+    };
+    if not_modified {
+        let headers = object_headers(meta);
+        return Ok(Some(answer(
+            StatusCode::NOT_MODIFIED,
+            &headers,
+            Bytes::new(),
+        )));
     }
+    Ok(None)
 }
 
 /// Runs a call that changes the store to its end on a task of its own. The server drops the
@@ -487,22 +517,28 @@ impl Server {
     }
 
     async fn list_objects(&self, query: &Query) -> Result<Answer, S3Error> {
+        refuse_delimiter(query)?;
         if query.get("list-type") != Some("2") {
             return Err(S3Error::unsupported(
                 "only ListObjectsV2 (list-type=2) is supported",
             ));
         }
         let prefix = query.get("prefix").unwrap_or_default();
-        let max_keys = page_size(query, "max-keys")?;
+        let max_keys = page_size(query, "max-keys", "maxKeys")?;
         let after = start_after(query)?;
         let after = after.as_deref();
-        let listed = self.backend.list_page(prefix, after, max_keys + 1).await?;
+        // A page of no keys reads nothing, and is not truncated (as for S3).
+        let listed = match max_keys {
+            0 => Vec::new(),
+            _ => self.backend.list_page(prefix, after, max_keys + 1).await?,
+        };
         let page = &listed[..listed.len().min(max_keys)];
         let next = (listed.len() > max_keys).then(|| token(&page[max_keys - 1].key));
         let listing = Listing {
             bucket: &self.config.bucket,
             prefix,
             max_keys,
+            owner: query.get("fetch-owner") == Some("true"),
             objects: page,
             next,
         };
@@ -513,13 +549,17 @@ impl Server {
     /// (and `upload-id-marker`, which S3 ignores without a key marker), at most `max-uploads`.
     /// The uploads of a key under the proxy's reserved prefixes are never listed.
     async fn list_uploads(&self, query: &Query) -> Result<Answer, S3Error> {
+        refuse_delimiter(query)?;
         let prefix = query.get("prefix").unwrap_or_default();
-        let max_uploads = page_size(query, "max-uploads")?;
+        let max_uploads = page_size(query, "max-uploads", "max-uploads")?;
         let key_marker = query.get("key-marker").unwrap_or_default();
         let id_marker = query.get("upload-id-marker").filter(|id| !id.is_empty());
         let after = (!key_marker.is_empty()).then_some((key_marker, id_marker));
         let backend = &self.backend;
-        let listed = backend.list_uploads(prefix, after, max_uploads + 1).await;
+        let listed = match max_uploads {
+            0 => Ok(Vec::new()),
+            _ => backend.list_uploads(prefix, after, max_uploads + 1).await,
+        };
         let listed = listed.map_err(S3Error::from)?;
         let page = &listed[..listed.len().min(max_uploads)];
         let next = (listed.len() > max_uploads).then(|| &page[max_uploads - 1]);

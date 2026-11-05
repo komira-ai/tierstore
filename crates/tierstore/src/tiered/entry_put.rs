@@ -16,7 +16,9 @@
 //!    and a tier holds the key, and with [`Error::Unavailable`] otherwise (a put, delete or copy
 //!    of the key is in flight). It looks again if the entry was gone in between, at most
 //!    [`ProxyConfig::entry_rounds`](super::ProxyConfig::entry_rounds) times.
-//! 4. Under the entry, the hot tier and the cold tier are asked once more. A cold tier that
+//! 4. Under the entry, the hot tier and the cold tier are asked once more, together. The first
+//!    answer of the hot tier (step 2) may be stale by now: another put may have landed and been
+//!    released since, and a put at `Full` would land in the cold tier beside it. A cold tier that
 //!    cannot be asked is an [`Error::Unavailable`]: a new key is not accepted while it is down.
 //! 5. The object lands, create-only: in the hot tier, or in the cold tier when the hot tier is
 //!    full (a presigned put answers [`Error::Full`] instead) or when the put is the completion of
@@ -188,12 +190,15 @@ impl Inner {
         }
     }
 
-    /// Under the entry: neither tier holds the key.
+    /// Under the entry: neither tier holds the key. The two heads are asked together, since neither
+    /// answer is needed to ask the other; the hot tier's answer is judged first, so the errors and
+    /// the refusals are the ones of asking them one after the other.
     async fn check_tiers(&self, key: &str) -> Result<(), Failed> {
-        if self.hot_has(key).await.map_err(Failed::Definite)? {
+        let (hot, cold) = futures::join!(self.hot_has(key), self.cold_has(key));
+        if hot.map_err(Failed::Definite)? {
             return Err(Failed::Definite(Error::AlreadyExists(key.to_owned())));
         }
-        if self.cold_has(key).await.map_err(Failed::Definite)? {
+        if cold.map_err(Failed::Definite)? {
             return Err(Failed::Definite(Error::AlreadyExists(key.to_owned())));
         }
         Ok(())
