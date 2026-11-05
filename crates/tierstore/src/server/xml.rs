@@ -34,6 +34,14 @@ pub(crate) fn error_body(code: &str, message: &str, resource: &str, request_id: 
     )
 }
 
+/// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
+/// empty for `us-east-1`.
+pub(crate) fn location(region: &str) -> String {
+    let named = if region == "us-east-1" { "" } else { region };
+    let text = escape(named);
+    format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
+}
+
 /// One page of a ListObjectsV2 answer.
 pub(crate) struct Listing<'a> {
     pub(crate) bucket: &'a str,
