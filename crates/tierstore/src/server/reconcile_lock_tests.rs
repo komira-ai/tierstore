@@ -420,7 +420,7 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
 enum Spoiled {
     /// The delete of the lease fails.
     Fails,
-    /// The delete of the lease takes longer than the stop waits for it (`STOP_WAIT`, 5 s).
+    /// The delete of the lease takes longer than the stop waits for it (`hot_store.stop_wait`, 5 s).
     Hangs,
 }
 
@@ -569,4 +569,35 @@ fn open_gate_names_the_flag_and_the_path_and_keeps_the_io_error() {
         refused.to_string(),
         format!("--lock-file {}: {source}", missing.display())
     );
+}
+
+/// Asserts that the wait between two tries of a lock file another process holds is the
+/// `hot_store.lock_retry` of the settings: with 30 s, the lock is free from the start of the
+/// wait, and the reconciler makes no call to the hot tier through the twenty-nine seconds before
+/// the first try, and takes the lease after it.
+#[tokio::test(start_paused = true)]
+async fn the_gate_tries_the_lock_every_lock_retry_of_the_settings() {
+    let (tiers, reconciler) = Tiers::new().await;
+    let dir = TestDir::under(std::env::temp_dir(), "tierstore-gate-retry");
+    let path = dir.path().join("instance.lock");
+    let given = format!(
+        "budget = 1000\nlock_file = {:?}\nlock_retry = \"30s\"",
+        path.display().to_string()
+    );
+    let text = MINIMAL.replacen("budget = 1000", &given, 1);
+    let cli = Cli::from_config_text(&text).unwrap();
+    let holder = try_take(&path).unwrap().unwrap();
+    let gate = open_gate(&cli).unwrap().unwrap();
+    drop(holder);
+    let halt = Arc::new(Notify::new());
+    let working = reconcile_gated(reconciler, Arc::clone(&halt), gate);
+    let watching = async {
+        for _ in 0..29 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+        }
+        assert_eq!(tiers.hot_calls(), 0);
+        tiers.lease(true, Duration::from_secs(1)).await;
+        halt.notify_one();
+    };
+    tokio::join!(working, watching);
 }

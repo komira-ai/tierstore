@@ -547,8 +547,15 @@ put 403.
 | `local_cache.write_through` | `false` by default: a read cache that refuses every write with 403 before the role of the key is looked at. `true`: the node takes the writes its keys may do and sends each to the upstream, which must be written with a key that may write; the upstream is not tested at start |
 | `local_cache.whole_fill_limit` | the most an object may be for a ranged read of it to fill the whole of it: a number or a size such as `"512MiB"`, from 1 byte to the `budget` (default 64 MiB); a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | `true`, the default; `false` is refused (leave `[local_cache]` out to run without a cache) |
-| `local_cache.scrub_min_round` | the least time between the starts of two rounds of the scrub (default `"1h"`; at least `"1s"`, or `"0s"`: a round starts as soon as the last is done): a small cache is not read again and again at the rate |
+| `local_cache.scrub_min_round` | the least time between the starts of two rounds of the scrub (default `"1h"`; at least `scrub_tick`, `"1s"` unless that is set, or `"0s"`: a round starts as soon as the last is done): a small cache is not read again and again at the rate |
 | `local_cache.scrub_rate` | the bytes a second the scrub reads, a size and `/s` such as `"50MiB/s"` (default `"16MiB/s"`); `"off"` turns the scrub off |
+| `local_cache.pass_interval` | how often the eviction pass runs (1ms to 1h, default `10s`) |
+| `local_cache.lock_interval` | how often a cache that does not hold the lock of its directory tries it again, and one that holds it checks that the lock file is still the file at the path (1ms to 1h, default `1s`) |
+| `local_cache.scrub_tick` | the time between two ticks of the scrub (1ms to 1h, default `1s`); `scrub_rate` stays a rate in bytes a second, and `scrub_min_round` may not be shorter than a tick |
+| `local_cache.listing_calls` | the most pages of the upstream one listing reads to make up for the names it leaves out (1 to 1000000, default 100); a listing that needs more is answered 503 |
+| `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
+| `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
+| `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
 | `cold_store.endpoints` | a list of exactly one endpoint, in place of `endpoint`: several are refused as not supported yet, since the cache reads from one upstream |
 
 `[cold_store]` is the upstream: any `kind` (an `s3` bucket, with `endpoint` and a `credentials_file`
@@ -719,7 +726,7 @@ what "tested" means below.
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
 | checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs and is checked, as the others and `Content-MD5` are; `aws-chunked` and trailing checksums are refused with 501 |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
-| listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
+| listing | nothing to set | `delimiter` and `encoding-type=url` are served, on ListObjectsV2 and ListMultipartUploads; the Rust SDK leaves the names percent-encoded when it is asked for `url`, and decoding them is the caller's (a space is `+`) |
 
 Payload signing, read from the front's code and not tested as such (not checked: whether the Rust
 SDK signs the hex hash or `UNSIGNED-PAYLOAD` for an in-memory body): a body whose signed `x-amz-content-sha256` is its hex SHA-256 is checked against it;
@@ -784,17 +791,17 @@ s3 = boto3.client(
 )
 ```
 
-One thing is known from the front and not from those clients: boto3 and the aws CLI are said to
-add `encoding-type=url` to a ListObjects or ListObjectsV2 call on their own, with no setting to
-stop it, and the front answers that parameter with 501 `NotImplemented`. If that is so, `aws s3
-ls` and `list_objects_v2` fail against the front, and the calls that name a key (`get_object`,
-`put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
-client before relying on either.
+boto3 and the aws CLI are said to add `encoding-type=url` to a ListObjects or ListObjectsV2 call on
+their own, with no setting to stop it. The front serves it (and `delimiter`, which `aws s3 ls` sends),
+and answers with percent-encoded names, as S3 does (the set of characters it leaves unencoded is
+the one a listing of MinIO showed, since the S3 reference does not give it); that is tested with
+the Rust SDK and not checked with a real boto3 or aws CLI.
 
 A put or a CreateMultipartUpload of a key with a character XML 1.0 forbids (U+0000-U+0008, U+000B,
 U+000C, U+000E-U+001F, U+FFFE or U+FFFF) is answered 400 `InvalidArgument` and stores nothing: the
-front's listings are XML 1.0, which cannot carry those characters, and with no `encoding-type=url`
-there is no other way to list such a key. Tab, line feed, U+007F and the C1 controls are allowed.
+front's listings are XML 1.0, which cannot carry those characters, and a client that does not ask
+for `encoding-type=url` gets keys as they are. (A listing with `encoding-type=url` carries such a
+key, if a store holds one.) Tab, line feed, U+007F and the C1 controls are allowed.
 
 ## The OCI read front
 
