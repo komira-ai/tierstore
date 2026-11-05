@@ -11,10 +11,11 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use super::{
-    Addrs, ListenTuning, LoopbackBind, bind, bind_all, bind_all_with, bind_set, bind_with, joined,
-    local_addrs,
+    Addrs, ListenTuning, Listeners, LoopbackBind, bind, bind_all, bind_all_with, bind_set,
+    bind_with, joined, local_addrs, note_nodelay,
 };
 use crate::server::Drained;
+use crate::server::Incoming as _;
 use crate::server::cli_serve::bind_s3;
 use crate::server::testing::{Rig, established_unaccepted};
 
@@ -273,6 +274,36 @@ fn a_loopback_bind_error_names_loopback_the_port_and_the_reason() {
     assert!(text.contains("loopback"), "{text}");
     assert!(text.contains("127.0.0.1:9300"), "{text}");
     assert!(text.contains("address in use"), "{text}");
+}
+
+/// Asserts that a connection taken from either of two sockets of `Listeners` has `TCP_NODELAY`
+/// set, and that a client's own socket (which this code does not touch) does not.
+/// It would catch an accept that returns the stream as the kernel made it, with Nagle's
+/// algorithm on: the response head and a small body would then be two segments, the second held
+/// until the client's delayed ACK.
+#[tokio::test]
+async fn accepted_connections_have_nodelay() {
+    let sockets = vec![
+        bind(addr("127.0.0.1:0")).expect("bound"),
+        bind(addr("127.0.0.1:0")).expect("bound"),
+    ];
+    let mut listeners = Listeners::new(sockets);
+    for at in listeners.local_addrs().expect("addresses") {
+        let client = std::net::TcpStream::connect(at).expect("connected");
+        let (stream, _) = std::future::poll_fn(|cx| listeners.poll_incoming(cx))
+            .await
+            .expect("accepted");
+        assert!(stream.nodelay().expect("option read"));
+        assert!(!client.nodelay().expect("option read"));
+    }
+}
+
+/// Asserts that a failed `TCP_NODELAY` is only noted, and a successful one is too: neither
+/// panics, so the connection is served either way.
+#[test]
+fn a_failed_nodelay_is_not_fatal() {
+    note_nodelay(Ok(()));
+    note_nodelay(Err(std::io::Error::other("refused")));
 }
 
 /// Asserts that the backlog given to the bind makes a listening socket that takes connections, for
