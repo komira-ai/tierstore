@@ -17,7 +17,7 @@ use std::sync::Arc;
 use super::entry_put::landing;
 use super::{Inner, Level, refuse_reserved};
 use crate::journal::is_reserved;
-use crate::{Backend, Error, OpenUpload, PartBody, UploadsAfter};
+use crate::{Backend, Error, OpenUpload, PartBody, UploadedPart, UploadsAfter};
 
 /// What an upload id of the hot tier starts with, in the id the proxy gives a client. The ids of
 /// the stores (S3 services, the directory and memory backends) have no `~`.
