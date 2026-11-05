@@ -106,8 +106,8 @@ use super::combined_cli::serve_combined_until_signalled;
 use super::config::{Settings, keys_for_flags};
 use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
-use super::config_reconcile::ReconcileTuning;
 use super::config_io::IoTuning;
+use super::config_reconcile::ReconcileTuning;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
