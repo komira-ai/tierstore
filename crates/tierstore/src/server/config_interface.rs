@@ -58,6 +58,9 @@ pub(super) struct UpstreamTable {
     pub timeout: Option<Dur>,
     /// The most redirects one request follows (4 if left out).
     pub max_redirects: Option<u32>,
+    /// How long the whole re-check of a tag the store has may take, all its requests together;
+    /// past it the stored tag is served (`5s` if left out).
+    pub recheck_timeout: Option<Dur>,
 }
 
 /// One `[[interface]]` entry.

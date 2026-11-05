@@ -15,6 +15,7 @@ use crate::journal::is_reserved;
 use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
+use super::bucket;
 use super::handover::hand_over;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
@@ -308,8 +309,11 @@ impl Server {
     {
         // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
         // not parameters of the call.
-        refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         let method = parts.method.as_str();
+        let location = bucket::asks_location(method, &target, query);
+        if !location {
+            refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+        }
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let declared = header(&parts.headers, "content-length");
@@ -324,6 +328,9 @@ impl Server {
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;
+        if location {
+            return Ok(self.location());
+        }
         match (method, target, multipart) {
             ("PUT" | "HEAD", Target::Bucket, false) => {
                 Ok(answer(StatusCode::OK, &[], Bytes::new()))
