@@ -1,7 +1,7 @@
 //! The hostkeeper package `cargo xtask release hostkeeper-package` writes, read by the code that
-//! reads it on a host: hostkeeper's unpacker and manifest loader (with the manifest's `platform`
-//! key, komira-ai/hostkeeper#23), and its placed-path lint and manifest loader of main (which reads
-//! launchd jobs), taken as dev-dependencies at pinned commits. The archive's bytes are read here too: its zstd frame, its
+//! reads it on a host: hostkeeper's unpacker and manifest loader (komira-ai/hostkeeper#23 as
+//! merged, which reads the manifest's `platform` key and launchd jobs), and its placed-path lint
+//! with the manifest loader of an earlier commit of main, taken at pinned commits. The archive's bytes are read here too: its zstd frame, its
 //! tar headers, the manifest as TOML, the unit's assignments and the plist as XML. Every platform
 //! is built and read on the Linux runner from a stand-in binary; the binary is never run.
 //!

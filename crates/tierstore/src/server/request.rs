@@ -9,6 +9,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, Bytes, BytesMut};
+use crc::{CRC_64_NVME, Crc, Digest as Crc64Digest, Table};
 use crc32fast::Hasher as Crc32;
 use futures::StreamExt;
 use futures::stream::unfold;
@@ -28,9 +29,8 @@ use super::reply::{PAYLOAD_HEADER, S3Error};
 /// The error of a request body.
 pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The headers of checksums that are not supported: no crate for them is among the ones this
-/// crate depends on.
-const UNSUPPORTED_CHECKSUMS: [&str; 1] = ["x-amz-checksum-crc64nvme"];
+/// CRC-64/NVMe, with the table of 16 slices that makes it fast enough for a body at line rate.
+static CRC64_NVME: Crc<u64, Table<16>> = Crc::<u64, Table<16>>::new(&CRC_64_NVME);
 
 /// The header of the one checksum that is held to a body that is not data of an object.
 const MD5_HEADER: &str = "content-md5";
@@ -261,12 +261,18 @@ enum Hasher {
     Crc32(Crc32),
     Crc32c(u32),
     Sha1(Sha1Context),
+    Crc64Nvme(Crc64Digest<'static, u64, Table<16>>),
 }
 
 impl Hasher {
     /// A SHA-1 hasher: the checksum a client asks for in `x-amz-checksum-sha1` is a SHA-1.
     fn sha1() -> Self {
         Self::Sha1(Sha1Context::new(&SHA1_FOR_LEGACY_USE_ONLY))
+    }
+
+    /// A CRC-64/NVMe hasher: the checksum a client asks for in `x-amz-checksum-crc64nvme`.
+    fn crc64_nvme() -> Self {
+        Self::Crc64Nvme(CRC64_NVME.digest())
     }
 
     fn update(&mut self, data: &[u8]) {
@@ -276,6 +282,7 @@ impl Hasher {
             Self::Crc32(hasher) => hasher.update(data),
             Self::Crc32c(state) => *state = crc32c::crc32c_append(*state, data),
             Self::Sha1(context) => context.update(data),
+            Self::Crc64Nvme(digest) => digest.update(data),
         }
     }
 
@@ -287,6 +294,7 @@ impl Hasher {
             Self::Crc32(hasher) => hasher.finalize().to_be_bytes().to_vec(),
             Self::Crc32c(state) => state.to_be_bytes().to_vec(),
             Self::Sha1(context) => context.finish().as_ref().to_vec(),
+            Self::Crc64Nvme(digest) => digest.finalize().to_be_bytes().to_vec(),
         }
     }
 }
@@ -300,20 +308,21 @@ struct Want {
 
 /// The headers a request may claim a hash of its body in, each with the length in bytes of the
 /// hash and a hasher for it.
-fn claimable() -> [(&'static str, usize, Hasher); 5] {
+fn claimable() -> [(&'static str, usize, Hasher); 6] {
     [
         (MD5_HEADER, 16, Hasher::Md5(Md5::new())),
         ("x-amz-checksum-crc32", 4, Hasher::Crc32(Crc32::new())),
         ("x-amz-checksum-crc32c", 4, Hasher::Crc32c(0)),
         ("x-amz-checksum-sha1", 20, Hasher::sha1()),
         ("x-amz-checksum-sha256", 32, Hasher::Sha256(Sha256::new())),
+        ("x-amz-checksum-crc64nvme", 8, Hasher::crc64_nvme()),
     ]
 }
 
 /// What the body of a request must hash to: the hash the signature covers (the
 /// `x-amz-content-sha256` header), and each hash the request claims in `Content-MD5`,
-/// `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1` or
-/// `x-amz-checksum-sha256`. The body is fed to the check a piece at a time, so a body of any
+/// `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1`,
+/// `x-amz-checksum-sha256` or `x-amz-checksum-crc64nvme`. The body is fed to the check a piece at a time, so a body of any
 /// size is checked without being held.
 pub(crate) struct Check(Vec<Want>);
 
@@ -325,8 +334,7 @@ impl Check {
     /// the object the call makes, not of its body. `Content-MD5` is held to every body.
     ///
     /// # Errors
-    /// `NotImplemented` for a signed or chunked payload and, for the data of an object, for a
-    /// checksum of an algorithm that is not supported (`x-amz-checksum-crc64nvme`);
+    /// `NotImplemented` for a signed or chunked payload;
     /// `InvalidDigest` for a checksum header whose value is not the base64 of a hash of the
     /// right length.
     pub(crate) fn new(claim: &str, headers: &HeaderMap, data: bool) -> Result<Self, S3Error> {
@@ -342,12 +350,6 @@ impl Check {
                 hasher: Hasher::Sha256(Sha256::new()),
                 expected: hex::decode(claim).unwrap_or_default(),
             }),
-        }
-        for name in UNSUPPORTED_CHECKSUMS {
-            if data && headers.contains_key(name) {
-                let text = format!("{name} is not supported; use sha256, crc32, crc32c or md5");
-                return Err(S3Error::unsupported(text));
-            }
         }
         for (name, length, hasher) in claimable() {
             let Some(value) = headers.get(name).filter(|_| data || name == MD5_HEADER) else {
