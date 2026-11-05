@@ -48,9 +48,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 
 mod dates;
+mod escape;
 mod uploads;
 
 use self::dates::{http_date, iso_date, system_seconds};
+use self::escape::xml_text;
 use self::uploads::list_uploads;
 use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store};
@@ -589,7 +591,10 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
     state.stats.largest_body = state.stats.largest_body.max(body_len);
     // `/bucket/key`: the key is everything after the bucket.
     let key = request.path.trim_start_matches('/');
-    let key = key.split_once('/').map_or("", |(_, k)| k).to_owned();
+    let key = unescape(key.split_once('/').map_or("", |(_, k)| k));
+    if key.len() > 1024 {
+        return error("400 Bad Request", "KeyTooLongError");
+    }
     let q = |name: &str| request.query.get(name).cloned();
     let conditional = request.headers.get("if-none-match").map(String::as_str) == Some("*");
     let method = request.method.as_str();
@@ -922,8 +927,9 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     let mut body = String::from("<ListBucketResult>");
     for (key, stored) in page {
         body.push_str(&format!(
-            "<Contents><Key>{key}</Key><Size>{}</Size>\
+            "<Contents><Key>{}</Key><Size>{}</Size>\
              <LastModified>{}</LastModified></Contents>",
+            xml_text(key),
             stored.kept.len,
             iso_date(stored.modified)
         ));
@@ -932,7 +938,8 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     let tail = match more {
         Some((last, _)) => format!(
             "<IsTruncated>true</IsTruncated>\
-             <NextContinuationToken>{last}</NextContinuationToken>"
+             <NextContinuationToken>{}</NextContinuationToken>",
+            xml_text(last)
         ),
         None => "<IsTruncated>false</IsTruncated>".to_owned(),
     };

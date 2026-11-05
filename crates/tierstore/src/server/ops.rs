@@ -8,6 +8,7 @@ use hyper::StatusCode;
 use hyper::body::Body;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
+use objstore_s3::key_rules;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
@@ -137,13 +138,21 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
-/// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
-/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed). A client that does
-/// not ask for `encoding-type=url` gets keys as they are, so a key with one would make every page
-/// that lists it malformed for such a client; a listing with `encoding-type=url` could carry the
-/// key, and the set of characters a key may have is the narrow one all the same.
-fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
+/// A key that is stored must be one S3 accepts and one a listing can carry:
+///
+/// - S3's own rules (`objstore_s3::key_rules::s3_key`): over 1024 bytes is [`Error::InvalidKey`]
+///   (400 `KeyTooLongError`, as S3 answers). Any other text is a key. (A `.` or `..` segment is
+///   one too: an S3 tier refuses it itself, see `objstore_s3::key_rules::s3_client_key`.)
+/// - A character a listing can carry: the answers of a listing are XML 1.0, which has no
+///   character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF (tab, line
+///   feed, carriage return, U+007F and the C1 controls are allowed). A client that does not ask
+///   for `encoding-type=url` gets keys as they are, so a key with one would make every page that
+///   lists it malformed for such a client; a listing with `encoding-type=url` could carry the
+///   key, and the set of characters a key may have is the narrow one all the same.
+fn refuse_unstorable(key: &str) -> Result<(), S3Error> {
+    if key_rules::s3_key(key).is_err() {
+        return Err(S3Error::from(Error::InvalidKey(key.to_owned())));
+    }
     let bad = |c: char| {
         matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
             || matches!(c, '\u{FFFE}' | '\u{FFFF}')
@@ -521,7 +530,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
@@ -656,7 +665,7 @@ impl Server {
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);
