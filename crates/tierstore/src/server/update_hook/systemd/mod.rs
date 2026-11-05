@@ -10,7 +10,8 @@
 //!
 //! - `prepare` checks that the node can take the update (a configuration that names
 //!   `server.handoff_socket`, unless the params force a restart), asks the staged and the
-//!   previous binary what they can do, picks the mode (hand-over when both can, restart
+//!   previous binary what they can do (`handoff-socket-v1`, and `handoff-cache-v1` for a
+//!   configuration with a `[local_cache]` table), picks the mode (hand-over when both can, restart
 //!   otherwise) and records the update. Nothing is started.
 //! - `cutover` starts `next`: in a hand-over it takes the listening sockets from `live`, which
 //!   drains and exits on its own; in a restart `live` is stopped first; on a first install

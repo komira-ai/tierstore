@@ -1,12 +1,13 @@
 //! `prepare`: the hand-over socket, the mode, the instances it picks, and what it refuses.
 
 use crate::server::update_hook::{
-    Class, HANDOFF_CAPABILITY, Instance, Mode, Reason, Record, Step, UnitState,
+    CACHE_HANDOFF_CAPABILITY, Class, HANDOFF_CAPABILITY, Instance, Mode, Reason, Record, Step,
+    UnitState,
 };
 
 use super::fake::{
-    CONFIG, NEW, OLD, SystemdFake, assert_deferred, assert_failed, assert_ok, detail, params,
-    params_with,
+    CONFIG, NEW, OLD, SystemdFake, WITH_CACHE_SOCKET, WITH_SOCKET, assert_deferred, assert_failed,
+    assert_ok, detail, params, params_with,
 };
 
 use Step::{Cutover, Prepare};
@@ -90,6 +91,67 @@ fn the_mode_is_a_hand_over_only_when_both_releases_can_hand_over() {
         assert_eq!(fake.record().mode, Some(mode), "{staged:?} {previous:?}");
         assert!(detail(&done).contains(mode.as_str()), "{done:?}");
     }
+}
+
+/// Asserts that for a configuration with `[server] handoff_socket` and `[local_cache]` the mode is
+/// a hand-over only when both releases list `handoff-socket-v1` and `handoff-cache-v1`, and a
+/// restart when either lacks the cache word (a release that hands over a storage node only).
+/// Catches a cache shape handed over to or from a release that refuses the keys.
+#[test]
+fn a_cache_shape_hands_over_only_between_releases_with_the_cache_word() {
+    let both: &[&str] = &[HANDOFF_CAPABILITY, CACHE_HANDOFF_CAPABILITY];
+    let socket_only: &[&str] = &[HANDOFF_CAPABILITY];
+    let cases = [
+        (both, both, Mode::Handover),
+        (socket_only, both, Mode::Restart),
+        (both, socket_only, Mode::Restart),
+        (socket_only, socket_only, Mode::Restart),
+    ];
+    for (staged, previous, mode) in cases {
+        let fake = SystemdFake::installed();
+        fake.set_config(Some(WITH_CACHE_SOCKET));
+        fake.set_capabilities(NEW, staged);
+        fake.set_capabilities(OLD, previous);
+        let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+        assert_ok(&done);
+        assert_eq!(fake.record().mode, Some(mode), "{staged:?} {previous:?}");
+        assert!(detail(&done).contains(mode.as_str()), "{done:?}");
+    }
+}
+
+/// Asserts that a storage node's configuration without `[local_cache]` still hands over between
+/// releases that list only `handoff-socket-v1`.
+#[test]
+fn a_storage_node_hands_over_with_the_socket_word_alone() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_SOCKET));
+    let socket_only: &[&str] = &[HANDOFF_CAPABILITY];
+    fake.set_capabilities(NEW, socket_only);
+    fake.set_capabilities(OLD, socket_only);
+    assert_ok(&fake.run(Prepare, &params(NEW, Some(OLD))));
+    assert_eq!(fake.record().mode, Some(Mode::Handover));
+}
+
+/// Asserts that a configuration with `[local_cache]` and no `handoff_socket` is refused with
+/// `handoff_not_configured`, as one of any other shape is, whatever the releases list.
+#[test]
+fn a_cache_shape_without_the_hand_over_socket_is_not_configured() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some("[local_cache]\npath = \"/c\"\n"));
+    let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+    assert_failed(&done, Reason::HandoffNotConfigured);
+    assert_eq!(done.report.class, Class::Environment);
+}
+
+/// Asserts that `mode = "restart"` in the params gives a restart for a cache shape that both
+/// releases could hand over, and a restart without the staged release listing the cache word.
+#[test]
+fn a_restart_mode_in_the_params_restarts_a_cache_shape() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_CACHE_SOCKET));
+    let p = params_with(NEW, Some(OLD), "mode = \"restart\"\n");
+    assert_ok(&fake.run(Prepare, &p));
+    assert_eq!(fake.record().mode, Some(Mode::Restart));
 }
 
 /// Asserts that `config_file` missing from the params is `bad_params`, and a configuration file

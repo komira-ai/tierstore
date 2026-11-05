@@ -1,5 +1,6 @@
 //! The two hand-off keys of `[server]`: what a file without them makes, their defaults, the values
-//! they refuse at start, and the shapes of node that refuse them.
+//! they refuse at start, and the build node and the storage node with `[local_cache]`, which read
+//! them as a storage node does.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -162,30 +163,149 @@ fn build_node(server: &str) -> String {
     )
 }
 
-/// Asserts that a build node and a storage node with `[local_cache]`, which do not serve through
-/// the hand-off, refuse each key by name instead of reading past it, and load without them.
+/// A build node's file with the cache at `path` and `server` as more lines of `[server]`.
+fn build_node_at(path: &str, server: &str) -> String {
+    build_node(server).replacen("path = \"/c\"", &format!("path = \"{path}\""), 1)
+}
+
+/// A storage node's file with `[local_cache]` at `path` and `server` as more lines of `[server]`.
+fn combined_at(path: &str, server: &str) -> String {
+    format!(
+        "{}\n[local_cache]\npath = \"{path}\"\nbudget = 1000\n\n[[policy]]\nprefix = \"cas/\"\ncache = true\n",
+        with_server(server)
+    )
+}
+
+/// The hand-off a build node's file `text` makes.
+fn cache_handoff(text: &str) -> Option<Handoff> {
+    settings_from_text(text, DEFAULTS)
+        .unwrap()
+        .into_cache()
+        .expect("a build node")
+        .handoff
+}
+
+/// The hand-off the file `text` of a storage node with `[local_cache]` makes.
+fn combined_handoff(text: &str) -> Option<Handoff> {
+    settings_from_text(text, DEFAULTS)
+        .unwrap()
+        .into_combined()
+        .expect("a combined node")
+        .node
+        .handoff
+}
+
+const SOCKET_LINE: &str = "handoff_socket = \"/var/lib/tierstore/handoff.sock\"";
+
+/// Asserts that a build node reads both keys: no hand-off without them, the socket with the
+/// default wait of 10 seconds, and the socket with the wait given.
 #[test]
-fn the_shapes_that_do_not_hand_off_refuse_the_keys() {
-    let socket = "handoff_socket = \"/var/lib/tierstore/handoff.sock\"";
-    let wait = "handoff_wait = \"5s\"";
-    for (key, line) in [("handoff_socket", socket), ("handoff_wait", wait)] {
-        assert_eq!(
-            refusal(&build_node(line)),
-            format!("server.{key}: a build node does not hand off its sockets; leave it out")
-        );
-        let combined = format!(
-            "{}\n[local_cache]\npath = \"/c\"\nbudget = 1000\n\n[[policy]]\nprefix = \"cas/\"\ncache = true\n",
-            with_server(line)
-        );
-        assert_eq!(
-            refusal(&combined),
-            format!(
-                "server.{key}: a storage node with [local_cache] does not hand off its sockets; \
-                 leave it out"
-            )
+fn a_build_node_reads_the_hand_off_keys() {
+    assert_eq!(cache_handoff(&build_node("")), None);
+    let socket = PathBuf::from("/var/lib/tierstore/handoff.sock");
+    assert_eq!(
+        cache_handoff(&build_node(SOCKET_LINE)),
+        Some(Handoff {
+            socket: socket.clone(),
+            wait: Duration::from_secs(10),
+        })
+    );
+    let waiting = build_node(&format!("{SOCKET_LINE}\nhandoff_wait = \"5s\""));
+    assert_eq!(
+        cache_handoff(&waiting),
+        Some(Handoff {
+            socket,
+            wait: Duration::from_secs(5),
+        })
+    );
+}
+
+/// Asserts that a storage node with `[local_cache]` reads both keys: no hand-off without them,
+/// the socket with the default wait, and the socket with the wait given.
+#[test]
+fn a_storage_node_with_a_local_cache_reads_the_hand_off_keys() {
+    assert_eq!(combined_handoff(&combined_at("/c", "")), None);
+    let socket = PathBuf::from("/var/lib/tierstore/handoff.sock");
+    assert_eq!(
+        combined_handoff(&combined_at("/c", SOCKET_LINE)),
+        Some(Handoff {
+            socket: socket.clone(),
+            wait: Duration::from_secs(10),
+        })
+    );
+    let waiting = combined_at("/c", &format!("{SOCKET_LINE}\nhandoff_wait = \"7s\""));
+    assert_eq!(
+        combined_handoff(&waiting),
+        Some(Handoff {
+            socket,
+            wait: Duration::from_secs(7),
+        })
+    );
+}
+
+/// Asserts that on both cache shapes a wait without a socket is refused by name, as on a storage
+/// node without a cache.
+#[test]
+fn a_wait_without_a_socket_is_refused_on_both_cache_shapes() {
+    let words = "server.handoff_wait: it is the wait for the running instance of \
+                 server.handoff_socket, which is not given";
+    assert_eq!(refusal(&build_node("handoff_wait = \"5s\"")), words);
+    assert_eq!(refusal(&combined_at("/c", "handoff_wait = \"5s\"")), words);
+}
+
+/// Asserts that a control socket inside the cache directory is refused on both cache shapes with
+/// the exact words, whether it is directly in the directory or deeper, and that a socket beside
+/// the directory (another directory or a file next to it that only shares the name's start) loads:
+/// the paths are compared by component, not by string prefix.
+#[test]
+fn a_socket_inside_the_cache_directory_is_refused_on_both_cache_shapes() {
+    let words = "local_cache.path: must not hold server.handoff_socket: it is not a place for the \
+                 cache's files";
+    for socket in ["/c/x.sock", "/c/deeper/x.sock", "/c/../c/x.sock"] {
+        let line = format!("handoff_socket = \"{socket}\"");
+        assert_eq!(refusal(&build_node(&line)), words, "{socket}");
+        assert_eq!(refusal(&combined_at("/c", &line)), words, "{socket}");
+    }
+    for socket in ["/c-other/x.sock", "/c.sock", "/other/c/x.sock"] {
+        let line = format!("handoff_socket = \"{socket}\"");
+        assert!(cache_handoff(&build_node(&line)).is_some(), "{socket}");
+        assert!(
+            combined_handoff(&combined_at("/c", &line)).is_some(),
+            "{socket}"
         );
     }
-    assert!(settings_from_text(&build_node(""), DEFAULTS).is_ok());
+}
+
+/// Asserts that a build node whose cache path is relative cannot be compared with a socket and is
+/// refused with the exact words, and that without a socket the same relative path loads.
+#[test]
+fn a_relative_cache_path_with_a_socket_is_refused_on_a_build_node() {
+    assert_eq!(
+        refusal(&build_node_at("cache", SOCKET_LINE)),
+        "local_cache.path: must be an absolute path to be compared with server.handoff_socket"
+    );
+    assert_eq!(cache_handoff(&build_node_at("cache", "")), None);
+}
+
+/// Asserts that on a storage node with `[local_cache]` the control socket may not be the lock file
+/// of the hot tier, and a socket beside the lock file loads.
+#[test]
+fn a_socket_that_is_the_lock_file_is_refused_on_a_combined_node() {
+    let lock = "/var/lib/tierstore/instance.lock";
+    let text = combined_at("/c", &format!("handoff_socket = \"{lock}\"")).replacen(
+        "budget = 1000",
+        &format!("budget = 1000\nlock_file = \"{lock}\""),
+        1,
+    );
+    assert_eq!(
+        refusal(&text),
+        format!(
+            "server.handoff_socket: \"{lock}\" is hot_store.lock_file too; \
+             the control socket replaces the file at its path"
+        )
+    );
+    let beside = text.replacen(&format!("handoff_socket = \"{lock}\""), SOCKET_LINE, 1);
+    assert!(combined_handoff(&beside).is_some());
 }
 
 /// Asserts that both keys are keys of `[server]` this release knows, so a file that sets them has

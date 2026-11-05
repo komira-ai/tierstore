@@ -2,10 +2,13 @@
 
 use std::path::PathBuf;
 
-use crate::server::update_hook::{Instance, Marker, Mode, Reason, Record, Step, UnitState};
+use crate::server::update_hook::{
+    HANDOFF_CAPABILITY, Instance, Marker, Mode, Reason, Record, Step, UnitState,
+};
 
 use super::fake::{
-    NEW, NEWER, OLD, SystemdFake, assert_failed, assert_ok, detail, params, version_of,
+    NEW, NEWER, OLD, SystemdFake, WITH_CACHE_SOCKET, assert_failed, assert_ok, detail, params,
+    version_of,
 };
 
 use Step::{Cleanup, Cutover, Prepare, Rollback, Verify};
@@ -180,4 +183,41 @@ fn only_the_configuration_file_of_the_params_is_ever_read() {
     fake.complete(&params(NEW, Some(OLD)));
     assert_eq!(fake.config_paths(), ["/etc/tierstore/config.toml"]);
     assert!(!fake.log().iter().any(|line| line.contains("updater.d")));
+}
+
+/// Asserts that an update of a node whose configuration has `[local_cache]`, between releases
+/// that list both hand-over words, runs as a hand-over: the old instance drains without being
+/// stopped and the new one serves.
+#[test]
+fn a_cache_shape_update_between_releases_with_the_cache_word_hands_over() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_CACHE_SOCKET));
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    assert_eq!(fake.record().mode, Some(Mode::Handover));
+    fake.drive(&p, &[Cutover]);
+    assert_eq!(fake.actions(), ["markers.set b", "units.start b"]);
+    assert_eq!(fake.peek(Instance::A), UnitState::Deactivating);
+    assert_eq!(fake.peek(Instance::B), UnitState::Active);
+    fake.drive(&p, &[Verify, Cleanup]);
+    assert_eq!(fake.record().live, Some(Instance::B));
+    assert_eq!(fake.running(), [Instance::B]);
+}
+
+/// Asserts that the same update from a previous release that lists only `handoff-socket-v1` is a
+/// restart that ends with the new release serving on the other letter, and not a start that
+/// fails for want of the old instance's sockets.
+#[test]
+fn a_cache_shape_update_from_a_release_without_the_cache_word_restarts() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_CACHE_SOCKET));
+    fake.set_capabilities(OLD, &[HANDOFF_CAPABILITY]);
+    let p = params(NEW, Some(OLD));
+    fake.drive(&p, &[Prepare]);
+    assert_eq!(fake.record().mode, Some(Mode::Restart));
+    fake.drive(&p, &[Cutover, Verify, Cleanup]);
+    let finished = fake.record();
+    assert!(!finished.updating);
+    assert_eq!(finished.live, Some(Instance::B));
+    assert_eq!(fake.running(), [Instance::B]);
 }

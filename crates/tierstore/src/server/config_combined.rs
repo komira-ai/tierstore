@@ -155,7 +155,9 @@ fn overlap(cache: &Path, node: &Cli) -> Result<(), ConfigError> {
         ),
         (
             "server.handoff_socket",
-            node.handoff.as_ref().map(|handoff| handoff.socket.as_path()),
+            node.handoff
+                .as_ref()
+                .map(|handoff| handoff.socket.as_path()),
         ),
     ];
     for (name, file) in files {

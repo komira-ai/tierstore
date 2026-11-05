@@ -6,7 +6,7 @@
 //! `ConditionPathExists=` names (read from the packaged unit file) the unit stays inactive;
 //! otherwise the instance runs the release `current` names. When the other instance serves, a
 //! hand-over (the configuration names `server.handoff_socket` and both releases have the
-//! capability) makes the new one serve and the old one drain, which is running without
+//! capabilities, and for a `[local_cache]` table the cache one too) makes the new one serve and the old one drain, which is running without
 //! serving for a chosen number of `state` looks and then inactive (exit 0, not restarted); with
 //! no hand-over the new instance cannot bind and fails. The instances answer `/readyz` and
 //! `/metricz` of port 9300 from the serving one. The clock is a number that `pause` moves on.
@@ -24,9 +24,9 @@ use std::time::Duration;
 use crate::server::build_info::gauge;
 use crate::server::update_hook::systemd::run_step;
 use crate::server::update_hook::{
-    Clock, Done, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, Host, Instance, Instances, Lock, Markers,
-    Outcome, Params, PortError, PortKind, Reason, Record, Reply, StateDir, Step, SystemdPorts,
-    UnitState, Units, marker_path,
+    CACHE_HANDOFF_CAPABILITY, Clock, Done, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, Host, Instance,
+    Instances, LOCAL_CACHE_TABLE, Lock, Markers, Outcome, Params, PortError, PortKind, Reason,
+    Record, Reply, StateDir, Step, SystemdPorts, UnitState, Units, marker_path,
 };
 
 /// The release that runs at first.
@@ -39,6 +39,9 @@ pub const NEWER: &str = "/var/lib/hostkeeper/packages/tierstore/0.5.0";
 pub const CONFIG: &str = "/etc/tierstore/config.toml";
 /// A configuration that names the hand-over socket.
 pub const WITH_SOCKET: &str = "[server]\nhandoff_socket = \"/var/lib/tierstore/handoff.sock\"\n";
+/// A configuration of a build node or a storage node with a cache that names the hand-over
+/// socket.
+pub const WITH_CACHE_SOCKET: &str = "[server]\nhandoff_socket = \"/var/lib/tierstore/handoff.sock\"\n\n[local_cache]\npath = \"/var/lib/tierstore/cache\"\n";
 /// The commit of every release's build.
 const COMMIT: &str = "0123456789ab";
 /// The unit file the package ships.
@@ -161,10 +164,18 @@ impl World {
 
     /// Whether the hand-over works between the releases of the two instances.
     fn can_hand_over(&self, old: Option<&Path>, new: &Path) -> bool {
+        // A configuration with a `[local_cache]` table is a cache shape, which hands over only
+        // between releases that list the cache word too.
+        let with_cache = self
+            .config
+            .as_deref()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|table| table.contains_key(LOCAL_CACHE_TABLE));
         let capable = |release: &Path| {
-            self.capabilities
-                .get(release)
-                .is_some_and(|list| list.iter().any(|word| word == HANDOFF_CAPABILITY))
+            self.capabilities.get(release).is_some_and(|list| {
+                let has = |need: &str| list.iter().any(|word| word == need);
+                has(HANDOFF_CAPABILITY) && (!with_cache || has(CACHE_HANDOFF_CAPABILITY))
+            })
         };
         let configured = self
             .config
@@ -232,7 +243,10 @@ pub struct SystemdFake {
 
 impl SystemdFake {
     fn world(current: &str) -> SystemdFake {
-        let capable = vec![HANDOFF_CAPABILITY.to_owned()];
+        let capable = vec![
+            HANDOFF_CAPABILITY.to_owned(),
+            CACHE_HANDOFF_CAPABILITY.to_owned(),
+        ];
         SystemdFake {
             w: RefCell::new(World {
                 units: Instance::ALL

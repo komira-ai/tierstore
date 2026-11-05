@@ -381,7 +381,10 @@ fn offer_of(
 }
 
 /// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first.
-pub(super) async fn stopped_by(stop: impl Future<Output = ()> + Send + 'static, offer: Option<Offer>) {
+pub(super) async fn stopped_by(
+    stop: impl Future<Output = ()> + Send + 'static,
+    offer: Option<Offer>,
+) {
     match offer {
         Some(offer) => tokio::select! {
             () = stop => {}
