@@ -14,6 +14,7 @@ use tokio::sync::oneshot;
 
 use super::Drained;
 use super::cache_cli_tests::probe;
+use super::cache_handoff_tests::successor_readyz;
 use super::cli::{Addresses, Error, HandingError, exit_status};
 use super::combined_cli::serve_combined;
 use super::combined_cli_tests::{Node, QUICK};
@@ -268,7 +269,7 @@ async fn the_second_cache_is_read_only_until_the_first_exits_and_then_read_write
         h.go.send(()).unwrap();
         let taken = h.new_bound.await.unwrap();
         assert_eq!(taken, at);
-        let (status, text) = probe(at.s3, "/readyz").await;
+        let (status, text) = successor_readyz(at.s3).await;
         assert_eq!((status, text.as_str()), (200, "ready read-only"));
         // The first instance goes on holding the directory while its connection is open.
         drop(before);

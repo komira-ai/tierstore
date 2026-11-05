@@ -149,6 +149,20 @@ async fn read_until(connection: &mut TcpStream, end: &str) -> String {
     String::from_utf8_lossy(&got).into_owned()
 }
 
+/// The `/readyz` answer of the instance that is not draining at `addr`. While the first drains,
+/// both instances accept from one queue of the same socket, and the first answers every probe
+/// 503 `draining`; a probe it takes is made again, in a bounded number of tries.
+pub(super) async fn successor_readyz(addr: SocketAddr) -> (u16, String) {
+    for _ in 0..1500 {
+        let (status, text) = probe(addr, "/readyz").await;
+        if (status, text.as_str()) != (503, "draining") {
+            return (status, text);
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("every probe of /readyz at {addr} was answered by the draining instance");
+}
+
 /// Polls `/readyz` at `addr` until it says `want`, in a bounded number of tries.
 async fn readyz_becomes(addr: SocketAddr, want: &str) {
     let mut tick = tokio::time::interval(Duration::from_millis(20));
@@ -201,7 +215,7 @@ async fn a_second_build_node_takes_the_sockets_with_a_request_in_flight() {
         assert_eq!(taken.s3_all, pair.old.s3_all, "the very sockets");
         assert_eq!(taken.oci, None);
         assert_control_socket(&seen);
-        let (status, text) = probe(taken.s3, "/readyz").await;
+        let (status, text) = successor_readyz(taken.s3).await;
         assert_eq!((status, text.as_str()), (200, "ready read-only"));
         before.write_all(rest).await.unwrap();
         let late = read_until(&mut before, "\r\n\r\nok").await;
@@ -236,7 +250,7 @@ async fn the_second_build_node_is_read_only_until_the_first_has_exited() {
     let work = |mut pair: Pair| async move {
         let (before, taken, _) =
             take_with_request_in_flight(pair.old.s3, pair.go, pair.new_bound).await;
-        let (_, text) = probe(taken.s3, "/readyz").await;
+        let (_, text) = successor_readyz(taken.s3).await;
         assert_eq!(text, "ready read-only");
         assert!(super::lock::try_take(&lock).unwrap().is_none());
         drop(before);
