@@ -10,8 +10,9 @@
 use std::num::NonZeroU64;
 use std::time::Duration;
 
+use crate::dir::{COPY_CHUNK, READ_CHUNK};
 use crate::reconciler::COMPARE_RANGE;
-use crate::s3::S3Tuning;
+use crate::s3::{CHUNKS_WAITING, S3Tuning};
 use objstore_s3::s3::{MIN_PART_BYTES, SINGLE_PUT_MAX};
 
 use super::config::{ConfigError, ServerTable, TierTable, duration, invalid, within};
@@ -29,6 +30,13 @@ pub struct S3Client {
     /// `server.s3_pool_idle_timeout`, `server.s3_read_retries`, `server.s3_read_retry_wait`,
     /// `server.s3_single_put_max` and `server.s3_part_bytes`.
     pub tuning: S3Tuning,
+    /// `server.s3_chunks_waiting`: how many chunks of a part an S3 tier holds between the body it
+    /// is given and the request that sends it.
+    pub chunks_waiting: usize,
+    /// `server.dir_copy_chunk` and `server.dir_read_chunk`: the bytes in which a `dir` tier joins
+    /// the parts of an upload and gives a streamed read.
+    pub dir_copy_chunk: usize,
+    pub dir_read_chunk: u64,
 }
 
 impl Default for S3Client {
@@ -37,6 +45,9 @@ impl Default for S3Client {
             connect_timeout: Duration::from_secs(5),
             min_body_rate: NonZeroU64::new(1 << 20),
             tuning: S3Tuning::default(),
+            chunks_waiting: CHUNKS_WAITING,
+            dir_copy_chunk: COPY_CHUNK,
+            dir_read_chunk: READ_CHUNK,
         }
     }
 }
@@ -162,6 +173,7 @@ pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
             single_put_max,
             part_bytes,
         },
+        ..old
     })
 }
 

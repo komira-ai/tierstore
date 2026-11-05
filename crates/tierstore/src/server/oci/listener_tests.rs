@@ -21,6 +21,7 @@ use super::{
 use crate::MemoryBackend;
 use crate::server::drain::Drain;
 use crate::server::listen::bind;
+use crate::server::testing::established_unaccepted;
 use crate::server::{ACCEPT_PAUSE, Incoming};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -66,6 +67,7 @@ async fn a_failed_accept_is_followed_by_another_ask() {
         write_idle: second,
         lifetime: second,
         drain_deadline: second,
+        listen: crate::server::ListenTuning::default(),
     };
     let asked = Arc::new(AtomicUsize::new(0));
     let incoming = Failing {
@@ -100,6 +102,7 @@ fn plain_front() -> (Arc<OciFront>, OciLimits) {
         write_idle: second,
         lifetime: second,
         drain_deadline: second,
+        listen: crate::server::ListenTuning::default(),
     };
     (front, limits)
 }
@@ -403,6 +406,7 @@ fn closing_loop(
         write_idle: minute,
         lifetime: minute,
         drain_deadline: minute,
+        listen: crate::server::ListenTuning::default(),
     };
     let (stop, stopped) = watch::channel(false);
     let shared = Shared::new(drain_of(&front, limits), limits.max_connections);
@@ -696,4 +700,26 @@ async fn a_connection_reset_before_its_first_request_frees_its_slot() {
     assert_ping(&answer, true);
     drop(next);
     assert_eq!(looping.await.expect("the loop ended"), 0);
+}
+
+/// Asserts that the backlog in the limits of the OCI listener is the one its sockets listen with:
+/// with a backlog of 1, of six connections no more than the queue and the one the kernel lets
+/// over it are established while nothing accepts; with the default backlog more than that are.
+#[tokio::test]
+async fn the_oci_bind_listens_with_the_backlog_in_its_limits() {
+    let (front, limits) = plain_front();
+    let wanted: SocketAddr = "127.0.0.1:0".parse().expect("an address");
+    let mut small = limits;
+    small.listen.backlog = 1;
+    let listener = OciListener::bind_plain(wanted, Arc::clone(&front), small)
+        .await
+        .expect("bound");
+    let at = listener.local_addr().expect("an address");
+    let held = established_unaccepted(at, 6).await;
+    assert!((1..=3).contains(&held), "{held} established on {at}");
+    let listener = OciListener::bind_plain(wanted, front, limits)
+        .await
+        .expect("bound");
+    let at = listener.local_addr().expect("an address");
+    assert!(established_unaccepted(at, 6).await > 3, "{at}");
 }

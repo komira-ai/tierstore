@@ -558,7 +558,10 @@ impl Server {
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
-        let (carry, body) = hand_over(pieces(reader, check, refused.clone()));
+        let (carry, body) = hand_over(
+            pieces(reader, check, refused.clone()),
+            self.config.put_pieces_queued,
+        );
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;
