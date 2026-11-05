@@ -18,7 +18,7 @@ use crate::Error;
 
 use super::reply::S3Error;
 use super::request::{Check, Query, Reader, Refused, Target, header, pieces, query_pairs, resolve};
-use super::testing::{CHECKSUMS, Scripted, Step, checksum};
+use super::testing::{CHECKSUMS, Scripted, Step, checksum, crc64nvme};
 
 /// An idle timeout that no test of a body comes near.
 const IDLE: Duration = Duration::from_secs(30);
@@ -244,7 +244,7 @@ fn a_body_is_checked_against_the_hash_the_signature_covers() {
 }
 
 /// Asserts that a body that comes to the checksum a header claims is accepted, for each header
-/// (`Content-MD5`, CRC-32, CRC-32C, SHA-1, SHA-256) and for all of them at once, in whatever
+/// (`Content-MD5`, CRC-32, CRC-32C, SHA-1, SHA-256, CRC-64/NVMe) and for all of them at once, in whatever
 /// pieces the body comes, and that a body that does not is `BadDigest` naming the header.
 #[test]
 fn each_checksum_header_is_held_to() {
@@ -293,15 +293,20 @@ fn a_checksum_header_that_is_not_a_hash_is_invalid() {
     }
 }
 
-/// Asserts that the checksum of an algorithm that no dependency of the crate computes
-/// (`x-amz-checksum-crc64nvme`) is `NotImplemented` and names the header, whatever its value.
+/// Asserts that the CRC-64/NVMe checksum is the standard one: the check value of the algorithm
+/// for `123456789` is `0xae8b14860a799888`, and the reference of the tests agrees with it; the
+/// base64 of its eight big-endian bytes is accepted for that body in any pieces and refused,
+/// as `BadDigest`, for another. It catches a polynomial, an initial value or a byte order that
+/// is not the one S3 uses.
 #[test]
-fn the_checksum_of_another_algorithm_is_not_implemented() {
+fn the_crc64nvme_checksum_is_the_standard_one() {
+    assert_eq!(crc64nvme(b"123456789"), 0xae8b_1486_0a79_9888);
     let name = "x-amz-checksum-crc64nvme";
-    let headers = with(&[(name, "AAAA")]);
-    let refused = verdict("UNSIGNED-PAYLOAD", &headers, &[b"x"]).unwrap_err();
-    let not_done = (StatusCode::NOT_IMPLEMENTED, "NotImplemented");
-    assert_eq!(refused.kind(), not_done);
+    let headers = with(&[(name, "rosUhgp5mIg=")]);
+    assert!(verdict("UNSIGNED-PAYLOAD", &headers, &[b"123456789"]).is_ok());
+    assert!(verdict("UNSIGNED-PAYLOAD", &headers, &[b"1234", b"", b"56789"]).is_ok());
+    let refused = verdict("UNSIGNED-PAYLOAD", &headers, &[b"123456780"]).unwrap_err();
+    assert_eq!(refused.kind(), (StatusCode::BAD_REQUEST, "BadDigest"));
     assert!(refused.message().contains(name));
 }
 
@@ -332,8 +337,6 @@ fn a_body_that_is_not_data_is_held_only_to_its_signature_and_content_md5() {
         let malformed = with(&[(name, "!!!")]);
         assert!(verdict_of(false, "UNSIGNED-PAYLOAD", &malformed, &chunks).is_ok());
     }
-    let unsupported = with(&[("x-amz-checksum-crc64nvme", "AAAA")]);
-    assert!(verdict_of(false, "UNSIGNED-PAYLOAD", &unsupported, &chunks).is_ok());
     let name = "content-md5";
     let wrong = with(&[(name, &checksum(name, b"another body"))]);
     let refused = verdict_of(false, "UNSIGNED-PAYLOAD", &wrong, &chunks).unwrap_err();

@@ -3,9 +3,10 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
-silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); no
-package and no container image is released (`cargo xtask release hostkeeper-package` builds a
-hostkeeper package from `hostkeeper/`, see its README, but no workflow runs it yet). These files,
+silicon), as a tarball with its SBOM and its provenance bundle, and as a hostkeeper package of each
+of those platforms with its provenance bundle and one release index, `index.json`
+(`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
+`hostkeeper/`, see its README); no system package and no container image is released. These files,
 for Linux hosts, go beside the binary.
 
 | file | what |
@@ -699,7 +700,7 @@ what "tested" means below.
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
 | request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
-| checksum algorithm | none, or CRC-32, CRC-32C, SHA-1 or SHA-256 | read from the front's code, not tested with an SDK: CRC-64/NVMe, `aws-chunked` and trailing checksums are refused with 501; `Content-MD5` is checked |
+| checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs and is checked, as the others and `Content-MD5` are; `aws-chunked` and trailing checksums are refused with 501 |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
 | listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
 
