@@ -236,7 +236,7 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | Key | Type, default | What |
 |---|---|---|
 | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | required | the hot tier |
-| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go straight to it, so it must do them (all three kinds do) |
+| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go to it when the hot tier is full, and it is where the reconciler copies them, so it must do them (all three kinds do) |
 | `hot_store.endpoint` | `http://host[:port]`, required for `s3` | the hot tier's store. No path; TLS is not built yet |
 | `hot_store.region` | string, `us-east-1` | the signing region of the hot tier's store |
 | `hot_store.credentials_file` | path, required for `s3` | the key file of the hot tier's store |
@@ -261,7 +261,8 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
-| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
+| `hot_store.abandoned_upload_after` | duration, `0s` (0s to 8760h) | how long a multipart upload may stand open in the hot tier before the reconciler's stray sweep (at takeover and daily) aborts it, by the start time the tier gives. The default `0s` aborts none: as in S3, an incomplete upload is kept, and its parts hold hot-tier space, until its client aborts it. Set it, for example `"168h"`, to opt in, as an S3 bucket owner does with an `AbortIncompleteMultipartUpload` lifecycle rule. Uploads are made in the hot tier when it has room (see [Multipart uploads](operations.md#multipart-uploads)) |
+| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to one tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.retry_min` | duration, `1s` (1ms to 1h) | the delay before the reconciler tries again an entry whose item failed once; it doubles for each failure after the first |
 | `hot_store.retry_max` | duration, `60s` (1ms to 1h) | the longest delay of a failing item; not below `retry_min` |
 | `hot_store.stray_grace` | duration, `10m` (1ms to 8760h) | how old a hot object with no entry and no cold object must be before the stray sweep adopts it |
