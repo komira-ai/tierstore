@@ -40,7 +40,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -58,11 +58,9 @@ use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
 use super::config_policy::{Policy, check_policies};
-use super::config_syntax::{find_secret, syntax};
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
-use super::config_unknown::announce_unknown_keys;
 use super::front::{FrontSettings, S3Tls};
 use super::hosted::valid_domain;
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
@@ -372,6 +370,7 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub upload_listing_calls: Option<u32>,
     #[serde(default)]
+    pub abandoned_upload_after: Option<Dur>,
     pub retry_min: Option<Dur>,
     #[serde(default)]
     pub retry_max: Option<Dur>,
@@ -548,6 +547,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("delete_rounds", cold.delete_rounds.is_some()),
         ("listing_heads", cold.listing_heads.is_some()),
         ("upload_listing_calls", cold.upload_listing_calls.is_some()),
+        (
+            "abandoned_upload_after",
+            cold.abandoned_upload_after.is_some(),
+        ),
         ("retry_min", cold.retry_min.is_some()),
         ("retry_max", cold.retry_max.is_some()),
         ("stray_grace", cold.stray_grace.is_some()),
@@ -652,7 +655,7 @@ impl Settings {
 }
 
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
-fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
+pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     let File {
         mut server,
         hot_store,
@@ -895,116 +898,9 @@ pub(super) fn front_of(
     })
 }
 
-/// The settings of the TOML `text`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format.
-pub(super) fn settings_from_text(text: &str, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let table: toml::Table = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    find_secret("", &table)?;
-    let file: File = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    settings(file, per_run)
-}
-
-/// The settings of a storage-node file.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format, or is a build node's.
-pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError> {
-    match settings_from_text(text, per_run)? {
-        Settings::Storage(cli) => Ok(*cli),
-        Settings::Cache(_) => {
-            let why =
-                "is the file of a build node, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-        Settings::Combined(_) => {
-            let why = "is in a file with [hot_store] too, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-    }
-}
-
-impl Cli {
-    /// The settings of a storage node's configuration file, given as its text, with the knobs of
-    /// the run at their defaults. Nothing is read of the files it names.
-    ///
-    /// # Errors
-    /// The refusal of a file that is not one of this format, or is the file of a build node.
-    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
-        let per_run = PerRun {
-            drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
-            drain_deadline: DEFAULT_DRAIN_DEADLINE,
-        };
-        from_text(text, per_run)
-    }
-}
-
-/// What a flag that is no longer one is refused with: the key of the file that holds what it
-/// held, or none if `flag` (without `--`) was never one of the data path's.
-pub(super) fn removed(flag: &str) -> Option<String> {
-    let instead = match flag {
-        "listen" => {
-            "declare an [[interface]] with type = \"s3\" and params port or addresses".to_owned()
-        }
-        "oci-listen" => {
-            "declare an [[interface]] with type = \"oci\" and params port or addresses".to_owned()
-        }
-        "print-config" => {
-            return Some(
-                "--print-config was removed: there are no flags to print a file for; write the file (docs/configuration.md)"
-                    .to_owned(),
-            );
-        }
-        other => {
-            let (_, keys) = KEYS.iter().find(|(name, _)| *name == other)?;
-            let of = if other.starts_with("oci-") {
-                " of an oci interface"
-            } else {
-                ""
-            };
-            format!("set {}{of}", keys.join(", "))
-        }
-    };
-    Some(format!(
-        "--{flag} was removed: the file given with --config holds it; {instead}"
-    ))
-}
-
-/// The settings of the file at `path`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`] that names the file: it cannot be read, or is not a file of this format.
-pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(source) => {
-            let path = path.to_owned();
-            return Err(ConfigError::Read { path, source });
-        }
-    };
-    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
-        path: path.to_owned(),
-        source: Box::new(source),
-    })?;
-    announce_unknown_keys(&text);
-    Ok(settings)
-}
-
-/// `message` with the name of each flag in it replaced by the key that stands for it in the
-/// file, so that a refusal in a start from a file speaks of the keys the operator wrote.
-pub(super) fn keys_for_flags(message: &str) -> String {
-    let mut names: Vec<(&str, &str)> = KEYS
-        .iter()
-        .filter_map(|(flag, keys)| keys.first().map(|key| (*flag, *key)))
-        .collect();
-    names.sort_by_key(|(flag, _)| std::cmp::Reverse(flag.len()));
-    let mut text = message.to_owned();
-    for (flag, key) in names {
-        text = text.replace(&format!("--{flag}"), key);
-    }
-    text
-}
+#[cfg(test)]
+pub(super) use super::config_load::{from_text, settings_from_text};
+pub(super) use super::config_load::{keys_for_flags, load, removed};
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

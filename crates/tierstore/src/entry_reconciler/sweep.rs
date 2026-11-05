@@ -1,5 +1,8 @@
 //! The stray sweep: a hot object that no entry and no cold object accompanies is adopted, by a
-//! pending put entry, so that the next step copies it.
+//! pending put entry, so that the next step copies it. The same sweep aborts the multipart uploads
+//! that have stood open in the hot tier for longer than
+//! [`EntryReconcilerConfig::abandoned_upload_after`](super::EntryReconcilerConfig): an upload takes
+//! no entry until its completion, so nothing else finds one that its client has left.
 
 use std::time::Duration;
 
@@ -54,6 +57,9 @@ impl EntryReconciler {
             }
             after = page.last().map(|object| object.key.clone());
         }
+        if let Err(error) = self.abort_abandoned(report).await {
+            return report.failed.push(error);
+        }
         self.sweep_at = Some(now.saturating_add(millis(self.config.stray_interval)));
     }
 
@@ -68,6 +74,53 @@ impl EntryReconciler {
             }
             Ok(Created::Exists) => {}
             Err(error) => report.failed.push(error),
+        }
+    }
+
+    /// Aborts each open upload of the hot tier that was started more than
+    /// `abandoned_upload_after` ago by the wall clock of the settings (an upload whose start the
+    /// hot tier does not know, which it gives as 0, is left), one per `1 / stray_rate` seconds, on
+    /// the loop's own wait. Aborting touches no object and no entry, so it cannot break write-once;
+    /// a completion that meets an aborted upload is answered `NoSuchUpload`. A hot tier that does
+    /// no multipart uploads has none. `abandoned_upload_after` of zero turns the abort off.
+    async fn abort_abandoned(&self, report: &mut StepReport) -> Result<(), Error> {
+        let after = millis(self.config.abandoned_upload_after);
+        if after == 0 {
+            return Ok(());
+        }
+        let oldest = self.config.base.clock.now().saturating_sub(after);
+        let page_size = self.config.base.page_size.max(1);
+        let rate = u64::from(self.config.stray_rate.max(1));
+        let pause = Duration::from_micros(1_000_000_u64.div_ceil(rate));
+        let mut marker: Option<(String, String)> = None;
+        loop {
+            let at = marker
+                .as_ref()
+                .map(|(key, id)| (key.as_str(), Some(id.as_str())));
+            let page = match self.hot.list_uploads("", at, page_size).await {
+                Ok(page) => page,
+                Err(Error::Unsupported(_)) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            for upload in &page {
+                let reserved = RESERVED_PREFIXES
+                    .iter()
+                    .any(|prefix| upload.key.starts_with(prefix));
+                if reserved || upload.initiated == 0 || upload.initiated > oldest {
+                    continue;
+                }
+                self.config.waiter.sleep(pause).await;
+                match self.hot.abort_upload(&upload.key, &upload.id).await {
+                    Ok(()) => report.uploads_aborted += 1,
+                    // Completed or aborted by its client meanwhile.
+                    Err(Error::NotFound(_)) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if page.len() < page_size {
+                return Ok(());
+            }
+            marker = page.last().map(|up| (up.key.clone(), up.id.clone()));
         }
     }
 }

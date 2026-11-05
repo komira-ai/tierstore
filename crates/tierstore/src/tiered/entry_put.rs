@@ -21,8 +21,9 @@
 //!    released since, and a put at `Full` would land in the cold tier beside it. A cold tier that
 //!    cannot be asked is an [`Error::Unavailable`]: a new key is not accepted while it is down.
 //! 5. The object lands, create-only: in the hot tier, or in the cold tier when the hot tier is
-//!    full (a presigned put answers [`Error::Full`] instead) or when the put is the completion of
-//!    a multipart upload.
+//!    full (a presigned put answers [`Error::Full`] instead). The completion of a multipart upload
+//!    lands in the tier that holds the upload (`uploads.rs`): the hot tier unless the upload was
+//!    begun while it was full.
 //! 6. The entry becomes `(PUT, PENDING)`, which is the acknowledgement of the put. If the entry
 //!    changed, the put is not acknowledged and touches nothing again. If the proxy is no longer
 //!    live when the replace has answered, the put is not acknowledged either ([`Error::Unavailable`]),
@@ -52,7 +53,7 @@ pub(super) enum Failed {
 }
 
 /// Sorts the error of a landing: a store that did not answer may have written.
-fn landing(error: Error) -> Failed {
+pub(super) fn landing(error: Error) -> Failed {
     match error {
         Error::Unavailable(_) | Error::Other(_) => Failed::Maybe(error),
         definite => Failed::Definite(definite),
@@ -263,22 +264,5 @@ impl Inner {
         } else {
             landing(error)
         }
-    }
-
-    /// The completion of a multipart upload on its entry: the object is made in the cold tier,
-    /// whose own completion is create-only.
-    pub(super) async fn complete_on_entry(
-        &self,
-        key: &str,
-        id: &str,
-        parts: &[(u32, String)],
-    ) -> Result<String, Error> {
-        let done = || async move {
-            self.cold
-                .complete_upload(key, id, parts)
-                .await
-                .map_err(landing)
-        };
-        self.put_on_entry(key, done).await
     }
 }
