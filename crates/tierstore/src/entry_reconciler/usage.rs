@@ -359,13 +359,13 @@ impl EntryReconciler {
         self.books.scan_at = Some(now.saturating_add(wait));
     }
 
-    /// Publishes the figure if it is due and known, and the lease has its margin left. A figure
+    /// Publishes the figure if it is due and known, and the lease has its margin left or can be renewed now. A figure
     /// that fails to be written is tried again at the next step.
     pub(super) async fn publish_usage(&mut self, now: u64, report: &mut StepReport) {
         let Some(hot_bytes) = self.books.bytes else {
             return;
         };
-        if self.books.publish_at.is_some_and(|at| now < at) || !self.lease.margin_ok() {
+        if self.books.publish_at.is_some_and(|at| now < at) || !self.lease.ensure_margin().await {
             return;
         }
         let usage = Usage {
