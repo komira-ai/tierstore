@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 838" width="960" height="838" role="img" aria-label="Sequence diagram of a put over a key whose earlier put is being copied to cold: Client, Node, Leader, Hot tier, Cold tier. The leader holds the entry for the copy. The node amends the entry into its own replace put, replaces the hot object, and acknowledges. The leader finishes streaming the old object into cold, its seal fails because the entry changed, and the next pass copies the new object over the old one with If-Match on the cold tag.">
+<title>An overwrite while the leader copies the previous put: the entry is amended, the copy is superseded</title>
+<defs><marker id="seq-overwrite-pending-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-overwrite-pending-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-t{fill:none;stroke:#FD4F1D;stroke-width:2}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.t-n{fill:#5A5A57;font-size:13px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="838" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">An overwrite while the leader copies the previous put: the entry is amended, the copy is superseded</text>
+<rect x="25" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="80" y="65" class="b" text-anchor="middle">Client</text>
+<rect x="195" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="250" y="65" class="b" text-anchor="middle">Node</text>
+<rect x="375" y="44" width="110" height="32" rx="5" class="box-b"/>
+<text x="430" y="65" class="b" text-anchor="middle">Leader</text>
+<rect x="595" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="650" y="65" class="b" text-anchor="middle">Hot tier</text>
+<rect x="805" y="44" width="110" height="32" rx="5" class="box"/>
+<text x="860" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="80" y1="76" x2="80" y2="722" class="ln-d"/>
+<line x1="250" y1="76" x2="250" y2="722" class="ln-d"/>
+<line x1="430" y1="76" x2="430" y2="722" class="ln-d"/>
+<line x1="650" y1="76" x2="650" y2="722" class="ln-d"/>
+<line x1="860" y1="76" x2="860" y2="722" class="ln-d"/>
+<text x="438" y="112" class="t-m lbl">start: hot holds v1, entry (PUT, PENDING), cold has no object; the put of v1</text>
+<text x="438" y="128" class="t-m lbl">was acknowledged</text>
+<text x="540" y="154" class="t-m lbl" text-anchor="middle">A1  CAS (PUT,PENDING) to (PUT,HELD,leader)</text>
+<line x1="430" y1="166" x2="650" y2="166" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="645" y="192" class="t-m lbl" text-anchor="middle">A2  stream v1 from hot, create-only publish at the end</text>
+<line x1="430" y1="204" x2="860" y2="204" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="165" y="230" class="t-m lbl" text-anchor="middle">B0  PUT key (v2)</text>
+<line x1="80" y1="242" x2="250" y2="242" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="450" y="268" class="t-m lbl" text-anchor="middle">B1  create entry: EXISTS; read it: (PUT,HELD,leader)</text>
+<line x1="250" y1="280" x2="650" y2="280" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="450" y="306" class="t-m lbl" text-anchor="middle">B2  CAS (PUT,HELD,leader) to (PUT,HELD,node,replace)</text>
+<text x="450" y="322" class="t-m lbl" text-anchor="middle">amend: the leader keeps copying, this put does not wait for it</text>
+<line x1="250" y1="334" x2="650" y2="334" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="450" y="360" class="t-m lbl" text-anchor="middle">B3  hot HEAD key (v1), cold HEAD key (absent)</text>
+<line x1="250" y1="372" x2="650" y2="372" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="450" y="398" class="t-m lbl" text-anchor="middle">B4  replace key in hot, If-Match on the tag of v1: now v2</text>
+<line x1="250" y1="410" x2="650" y2="410" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="450" y="436" class="t-m lbl" text-anchor="middle">B5  CAS entry to (PUT,PENDING,replace)</text>
+<line x1="250" y1="448" x2="650" y2="448" class="ln-o" marker-end="url(#seq-overwrite-pending-ao)"/>
+<text x="165" y="474" class="t-m lbl" text-anchor="middle">B6  200: v2 is acknowledged; every read finds</text>
+<text x="165" y="490" class="t-m lbl" text-anchor="middle">v2 in hot</text>
+<line x1="250" y1="502" x2="80" y2="502" class="ln-o" marker-end="url(#seq-overwrite-pending-ao)"/>
+<text x="645" y="528" class="t-m lbl" text-anchor="middle">A3  the publish of v1 lands: cold holds v1 (hidden by hot)</text>
+<line x1="430" y1="540" x2="860" y2="540" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="540" y="566" class="t-m lbl" text-anchor="middle">A4  CAS to SEALED fails: the entry is not the one it held</text>
+<text x="540" y="582" class="t-m lbl" text-anchor="middle">it releases nothing and goes on to the next pass</text>
+<line x1="430" y1="594" x2="650" y2="594" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="540" y="620" class="t-m lbl" text-anchor="middle">C1  next pass: CAS (PUT,PENDING,replace) to (PUT,HELD,leader,replace)</text>
+<line x1="430" y1="632" x2="650" y2="632" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="645" y="658" class="t-m lbl" text-anchor="middle">C2  cold HEAD (v1 tag), stream v2 from hot, replace If-Match on the v1 tag</text>
+<line x1="430" y1="670" x2="860" y2="670" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<text x="540" y="696" class="t-m lbl" text-anchor="middle">C3  CAS to SEALED, delete the entry: cold and hot both hold v2</text>
+<line x1="430" y1="708" x2="650" y2="708" class="ln" marker-end="url(#seq-overwrite-pending-ak)"/>
+<rect x="30" y="734" width="900" height="80" rx="5" class="box-o"/>
+<text x="40" y="754" class="t-m">A copy that was started before the overwrite can publish after it. That is safe because hot holds v2 for the whole time and a read finds hot</text>
+<text x="40" y="770" class="t-m">first; nothing evicts a key that has an entry. A cold publish of v1 by a stalled leader after C2 is a create-only write against an existing object</text>
+<text x="40" y="786" class="t-m">and fails. A delete that meets the leader's copy waits for the release (the delete diagram); an overwrite does not, because it leaves an object in</text>
+<text x="40" y="802" class="t-m">hot and a delete does not. An overwrite that lands in the cold tier (a multipart completion) does wait (section 5.3).</text>
+</svg>
