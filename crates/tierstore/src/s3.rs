@@ -11,13 +11,14 @@
 //!   would replace an object that exists.
 //! - `put_stream` is the store client's streamed write, given the chunks of the body as they
 //!   arrive and their total length (the `Content-Length` of the request; without one the body
-//!   is held first, since S3 takes no request of unknown length). A body of at most 16 MiB is
-//!   gathered and sent as one PUT with `If-None-Match: *`; a longer one is a multipart upload
-//!   whose parts are sent as they fill, completed with `If-None-Match: *` only after the body
+//!   is held first, since S3 takes no request of unknown length). A body of at most
+//!   `server.s3_single_put_max` (5 GiB, S3's limit for one PUT, by default) is streamed as one PUT
+//!   with `If-None-Match: *`, never held whole; a longer one is a multipart upload
+//!   whose parts (`server.s3_part_bytes`, 16 MiB by default) are sent as they fill, completed with `If-None-Match: *` only after the body
 //!   has ended with exactly its length, and aborted on any failure. Either way the object comes
 //!   into being in the last request, after the whole body was read and checked by the caller, so
 //!   a body that ends with an error, or is cut short, leaves no object and no staged key, and
-//!   at most 16 MiB of the body is held at a time. A key that exists is
+//!   at most one part of the body is held at a time (a few chunks for a single PUT). A key that exists is
 //!   [`Error::AlreadyExists`].
 //! - `put_if_match` is a PUT with `If-Match: "<tag>"` (a tag given in quotes is not quoted
 //!   twice); the 412 is [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. It
@@ -41,11 +42,11 @@
 //!   quotes) of that answer, so the bytes and the tag are those of one object whatever is written to
 //!   the key meanwhile; an answer without an `ETag` is an [`Error::Other`].
 //! - `put_stream_if_match` is `put_if_match` for a body that arrives as chunks: a body of at most
-//!   16 MiB is gathered and sent as one PUT with `If-Match`, a longer one is a multipart upload
+//!   `server.s3_single_put_max` is streamed as one PUT with `If-Match`, a longer one is a multipart upload
 //!   whose completion carries `If-Match`, aborted on any failure, so the object is replaced only
 //!   after the whole body was read and only if it still has the tag. A body of unknown length is
-//!   not collected either: its first 16 MiB are read, and a body that ends there is one PUT, while
-//!   a longer one is a multipart upload whose 16 MiB parts are each sent as soon as they are full,
+//!   not collected either: its first `server.s3_part_bytes` (16 MiB by default) are read, and a body
+//!   that ends there is one PUT, while a longer one is a multipart upload whose parts are each sent as soon as they are full,
 //!   so at most one part and one chunk are held. It is sent once. The tag
 //!   that does not match is [`Error::PreconditionFailed`] and no object is [`Error::NotFound`].
 //! - `delete` is a DELETE; a 404 is a success.
@@ -91,6 +92,10 @@
 //!
 //! Notes on the mapping:
 //!
+//! - A key is the client's [`ObjectKey`], which follows S3's rules (`objstore_s3::key_rules`):
+//!   any text of 1 to 1024 bytes, space, `+`, `%`, `&`, `<`, `?`, `#` and non-ASCII text
+//!   included, escaped by the client; a key or a prefix the rules refuse (over 1024 bytes, or a
+//!   `.` or `..` segment) is [`Error::InvalidKey`] (S3 answer 400 `KeyTooLongError`).
 //! - S3 answers 416 to a range that starts at or past the end of the object, and a range of
 //!   length zero is no request at all. The trait wants no bytes for a range starting at the
 //!   end and an [`Error::Other`] for one starting past it, so a HEAD decides both, and finds
@@ -280,7 +285,7 @@ impl S3Backend {
         start_after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Listed>, Error> {
-        let under = KeyPrefix::new(prefix).map_err(|e| Error::Other(e.to_string()))?;
+        let under = KeyPrefix::new(prefix).map_err(|_| Error::InvalidKey(prefix.to_owned()))?;
         let after = start_after.map(object_key).transpose()?;
         let mut after = after.map(|key| ListToken::after(&key));
         let mut listed = Vec::new();
@@ -311,9 +316,10 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     objstore_s3::ByteRange::new(range.offset(), len)
 }
 
-/// The key as the client names it, or [`Error::Other`] if it cannot be named.
+/// The key as the client names it, or [`Error::InvalidKey`] if S3's rules refuse it (see
+/// `objstore_s3::key_rules`: empty, over 1024 bytes, or a `.` or `..` segment).
 fn object_key(key: &str) -> Result<ObjectKey, Error> {
-    ObjectKey::new(key).map_err(|e| Error::Other(e.to_string()))
+    ObjectKey::new(key).map_err(|_| Error::InvalidKey(key.to_owned()))
 }
 
 /// An object of a listing of the client as one of this crate.
@@ -756,7 +762,7 @@ impl Backend for S3Backend {
         after: Option<UploadsAfter<'_>>,
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
-        let under = KeyPrefix::new(prefix).map_err(|e| Error::Other(e.to_string()))?;
+        let under = KeyPrefix::new(prefix).map_err(|_| Error::InvalidKey(prefix.to_owned()))?;
         let mut marker = match after {
             Some((key, id)) => Some((object_key(key)?, id.map(str::to_owned))),
             None => None,

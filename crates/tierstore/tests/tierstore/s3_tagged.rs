@@ -53,13 +53,13 @@ async fn a_tagged_read_is_one_get_whole_or_by_range() {
     two_reads_are_two_gets(&s3, &backend, body("third object"), &again).await;
 }
 
-/// Asserts that a key the client cannot name is `Other` for a read with its tag, before a request
-/// is made.
+/// Asserts that a key the client cannot name (a `..` segment) is `InvalidKey` for a read with its
+/// tag, before a request is made.
 #[tokio::test]
 async fn a_key_the_client_cannot_name_is_refused_by_a_tagged_read() {
     let (s3, backend) = backend().await;
-    let read = backend.get_tagged("a b", None).await;
-    assert!(matches!(read, Err(Error::Other(_))), "{read:?}");
+    let read = backend.get_tagged("a/../b", None).await;
+    assert!(matches!(read, Err(Error::InvalidKey(_))), "{read:?}");
     assert_eq!(s3.requests(), Vec::<String>::new());
 }
 
