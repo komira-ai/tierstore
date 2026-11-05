@@ -9,6 +9,7 @@
 //! One store value addresses one bucket.
 
 mod body;
+pub mod key_rules;
 pub mod listing;
 pub mod s3;
 mod types;

@@ -270,13 +270,16 @@ async fn a_key_that_does_not_ascend_is_refused() {
 }
 
 /// Asserts that `KeyPrefix::child` appends a name to the prefix and checks the result
-/// as a prefix: `run/` and `1/` make `run/1/`, a name with a character that needs
-/// escaping is refused, and a child of the empty prefix is the name alone.
+/// as a prefix: `run/` and `1/` make `run/1/`, a name with a space is kept (S3's rules take
+/// any text), a name that makes the prefix longer than 1024 bytes is refused, and a child of
+/// the empty prefix is the name alone.
 #[test]
 fn a_prefix_has_children() {
     let run = KeyPrefix::new("run/").unwrap();
     assert_eq!(run.child("1/").unwrap().as_str(), "run/1/");
-    assert!(run.child("a b").is_err());
+    assert_eq!(run.child("a b/").unwrap().as_str(), "run/a b/");
+    assert!(run.child(&"a".repeat(1021)).is_err());
+    assert!(run.child(&"a".repeat(1020)).is_ok());
     assert_eq!(KeyPrefix::default().child("x").unwrap().as_str(), "x");
 }
 
