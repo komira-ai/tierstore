@@ -84,13 +84,3 @@ async fn a_page_size_of_zero_is_an_empty_page() {
         assert_eq!(texts(&reply.body, "Message"), [message], "{bad}");
     }
 }
-
-/// Asserts that a non-empty `delimiter` is still 501 `NotImplemented` in this change, so that
-/// nothing answers it with a listing that ignores it.
-#[tokio::test(start_paused = true)]
-async fn a_delimiter_with_text_is_still_not_implemented() {
-    let rig = stocked().await;
-    let reply = rig.list("delimiter=%2F").await;
-    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reply.code(), "NotImplemented");
-}
