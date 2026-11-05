@@ -794,3 +794,48 @@ fn release_hostkeeper_package_writes_the_package_and_a_malformed_version_exits_2
         stderr(&o)
     );
 }
+
+#[test]
+fn release_desired_refuses_a_release_without_an_index_with_status_1_and_a_bad_version_with_status_2()
+ {
+    // Catches: the flags of `release desired` not reaching it (it asks GitHub for the release the
+    // version names, through the `gh` given), a release made before the hostkeeper packages
+    // passed, and a malformed --version not reported as a usage error.
+    let d = dir("release-desired");
+    put(
+        &d,
+        &format!("repos/{REPO}/releases/tags/v0.3.53"),
+        &format!(
+            "{{\"tag_name\":\"v0.3.53\",\"target_commitish\":\"{COMMIT}\",\"draft\":false,\"prerelease\":false,\"assets\":[{{\"name\":\"SHA256SUMS\",\"size\":10}}]}}"
+        ),
+    );
+    let args = |version: &'static str| {
+        [
+            "release",
+            "desired",
+            "--repo",
+            REPO,
+            "--version",
+            version,
+            "--dir",
+            "desired",
+            "--output",
+            "github-output",
+            "--gh",
+            FAKE,
+        ]
+    };
+    let o = run(&d, &args("0.3.53"));
+    assert_eq!(o.status.code(), Some(1), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "xtask: release v0.3.53 has no index.json: it has no hostkeeper packages for a host to take\n"
+    );
+    assert!(!d.join("desired").exists() && !d.join("github-output").exists());
+    let o = run(&d, &args("v0.3.53"));
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert_eq!(
+        stderr(&o),
+        "xtask: --version \"v0.3.53\" is not <major>.<minor>.<patch>, a release tag without its v\n"
+    );
+}

@@ -10,11 +10,13 @@
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
+| `hostkeeper-desired.yml` | by hand, from `main` | sets the desired version of tierstore on the hostkeeper coordinator to a published release and waits for the fleet; skipped while the repository variable `HOSTKEEPER_COORDINATOR_URL` is empty. See [Setting the desired version on the hostkeeper coordinator](#setting-the-desired-version-on-the-hostkeeper-coordinator). |
 
 Every workflow is held to the same rules by `crates/xtask/tests/workflows`: every `uses:` is a
 40-digit commit SHA with a version comment, `permissions: {}` at the top, no
 `pull_request_target`, and `id-token`, `attestations`, `contents` and `issues` written only by the
-one job that needs each (and for `id-token` and `attestations`, only on a push to `main`).
+one job that needs each, under the exact `if:` the lint lists for it (`attestations`, and the
+`id-token` of the signing job, only on a push to `main`).
 
 ## The release files
 
@@ -192,6 +194,47 @@ release as a draft at the commit, reads its assets back and publishes it, which 
 A tag or release that exists is refused, and so is a commit that the highest release tag already
 covers (no second tag is made for a released commit). The binary must say the tag you give, so a release by hand
 is made from a commit whose `artifacts.yml` run computed that same version.
+
+## Setting the desired version on the hostkeeper coordinator
+
+Hosts take tierstore through hostkeeper: the coordinator holds the version each service should
+run, and every host's daemon fetches that version from the release channel
+(`{release_channel}/tierstore/<version>/`) and installs the package of its own platform.
+`hostkeeper-desired.yml` sets that version for a published release. It is run by hand, from
+`main` ("Run workflow"), with the release's version `X.Y.Z`; nothing else starts it, release.yml
+included.
+
+Before you run it, the release must be in the release channel: stage it with hostkeeper's
+`cargo xtask release channel-stage` (komira-ai/hostkeeper, `docs/deploy/release-channel.md`).
+Nothing in CI publishes into the channel, and a version the channel does not hold leaves every host
+failing its fetch.
+
+Its `check` job (`cargo xtask release desired`, no token that writes) refuses the run unless the
+release `vX.Y.Z` is published, its `index.json` is the one its `SHA256SUMS` lists, hostkeeper's own
+reader reads it as the index of tierstore `X.Y.Z+<the first 12 digits of the release's commit>`,
+and it lists a package for each of linux-x86_64, linux-arm64 and macos-arm64 that is an asset of
+the release at the size the index gives. The coordinator orders a service and a version and never
+a platform, so a host whose platform the index lacks is refused the version
+(`no_package_for_platform`) while the others take it; a release made before the hostkeeper
+packages has no index and is refused too. Only then does the `set-desired` job call hostkeeper's
+reusable workflow (`set-desired.yml` of komira-ai/hostkeeper, pinned to a commit with the
+hostkeeper release whose program makes the calls), which proves that release, sets the version
+with the job's OIDC token, and reads the convergence every 10 seconds. Each change is printed as
+one line with the hosts of each role at the version, updating, failed and down, and the job fails
+unless every live host reaches the version. The version the coordinator is given is the packages'
+(`X.Y.Z+<12 hex>`), and the digest is the SHA-256 of `index.json`, which pins every platform's
+package.
+
+The workflow is off until a maintainer sets it up once:
+
+1. The coordinator's allow-list entry for this repository: its id, `refs/heads/main`, the event
+   `workflow_dispatch`, the audience `tierstore-hostkeeper-desired`, the service `tierstore`, and the
+   `job_workflow_ref` `komira-ai/hostkeeper/.github/workflows/set-desired.yml@<the pinned commit>`.
+   A new pin in the workflow needs a new `job_workflow_ref` in the entry.
+2. The repository variable `HOSTKEEPER_COORDINATOR_CA`: the PEM certificates of the CA the
+   coordinator's private listener chains to.
+3. The repository variable `HOSTKEEPER_COORDINATOR_URL`: that listener, `https://<host>[:<port>]`.
+   While it is empty both jobs are skipped.
 
 ## The compatibility check against the release before
 
