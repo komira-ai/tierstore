@@ -20,7 +20,9 @@
 //!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
 //!   content tag and `NotImplemented` for the right one (an immutable object cannot be
 //!   replaced);
-//! - DeleteObject, which succeeds for a key that is not there;
+//! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
+//!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
+//!   needed), a result for each key (see [`delete_objects`]), for the full key only;
 //! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`; an empty
 //!   `delimiter` is no delimiter and `fetch-owner=true` adds an `Owner` to each object, but a
 //!   `delimiter` with text is `NotImplemented`;
@@ -234,6 +236,7 @@ mod config_tuning;
 mod config_units;
 mod config_unknown;
 mod counted;
+mod delete_objects;
 mod deprecated;
 mod door;
 mod drain;
@@ -306,6 +309,8 @@ mod config_cache_tests;
 mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
+#[cfg(test)]
+mod delete_objects_tests;
 #[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
@@ -782,12 +787,15 @@ impl Server {
                 .role
                 .permit_list_uploads(query.get("prefix").unwrap_or_default())?;
         }
-        let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        let deleting = ops::deletes_many(&parts.method, &target, &query);
+        let puts = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        // The checksum headers of a put, and of DeleteObjects, are those of the body.
+        let data = puts || deleting;
         let check = Check::new(&signed.payload, &parts.headers, data)?;
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }
-        let limit = self.config.max_request_bytes;
+        let limit = ops::body_limit(self.config.max_request_bytes, deleting);
         let limit = signed.presign.as_ref().map_or(limit, |grant| {
             limit.min(usize::try_from(grant.max_object_bytes).unwrap_or(usize::MAX))
         });
