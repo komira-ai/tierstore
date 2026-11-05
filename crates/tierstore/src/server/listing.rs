@@ -96,7 +96,17 @@ pub(super) async fn page(
     max_keys: usize,
     batch: usize,
 ) -> Result<Page, S3Error> {
-    let (mut after, mut skipping) = match start(query)? {
+    let start = start(query)?;
+    // A page of no entries reads nothing, and is not truncated (as for S3).
+    if max_keys == 0 {
+        let (objects, prefixes) = (Vec::new(), Vec::new());
+        return Ok(Page {
+            objects,
+            prefixes,
+            next: None,
+        });
+    }
+    let (mut after, mut skipping) = match start {
         None => (None, None),
         Some(Start::After(key)) => (Some(key), None),
         Some(Start::PastPrefix(skipped)) => (Some(skipped.clone()), Some(skipped)),

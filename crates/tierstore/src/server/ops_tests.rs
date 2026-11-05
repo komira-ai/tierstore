@@ -279,7 +279,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
     assert_eq!(texts(&empty.body, "KeyCount"), ["0"]);
 }
 
-/// Asserts that a listing is refused when its size is not a positive whole number or its token
+/// Asserts that a listing is refused when its size is not a whole number from 0 to 2147483647 or its token
 /// is not one the server gave (not hex, or hex of bytes that are not text), and that anything
 /// but ListObjectsV2 or with a parameter this server does not know (`versions`) is
 /// `NotImplemented`.
@@ -287,7 +287,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
 async fn a_listing_with_a_bad_argument_is_refused() {
     let rig = Rig::new(MEBIBYTE).await;
     let bad = [
-        "max-keys=0",
+        "max-keys=-1",
         "max-keys=many",
         "continuation-token=zz",
         "continuation-token=ff",

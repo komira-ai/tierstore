@@ -17,8 +17,8 @@
 //!   replaced);
 //! - DeleteObject, which succeeds for a key that is not there;
 //! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token`, `start-after`, `delimiter`
-//!   and `encoding-type=url`, and with `fetch-owner`, which is accepted and ignored (no `Owner`
-//!   is given). An empty `delimiter` is no delimiter. With one, the keys that have it after the
+//!   and `encoding-type=url`, and with `fetch-owner=true`, which adds an `Owner` to each
+//!   object. An empty `delimiter` is no delimiter. With one, the keys that have it after the
 //!   prefix are folded into `CommonPrefixes`, and a prefix counts against `max-keys` as an
 //!   object does, so a page ends between whole prefixes and the token of a prefix starts the
 //!   next page after every key under it (the walk reads the keys of a prefix a page at a time to

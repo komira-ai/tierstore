@@ -181,15 +181,17 @@ fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
 }
 
 /// The size of a page a listing asked for in the parameter `name` (`max-keys` or
-/// `max-uploads`), at most [`PAGE_LIMIT`].
-fn page_size(query: &Query, name: &str) -> Result<usize, S3Error> {
+/// `max-uploads`), at most [`PAGE_LIMIT`]. `0` is a size: S3 answers it with an empty,
+/// untruncated page. A text that is not a whole number from 0 to 2147483647 is `InvalidArgument`
+/// with the words S3 uses, where `argument` is the name S3 gives the parameter (`maxKeys`).
+fn page_size(query: &Query, name: &str, argument: &str) -> Result<usize, S3Error> {
     let Some(text) = query.get(name) else {
         return Ok(PAGE_LIMIT);
     };
-    match text.parse::<usize>() {
-        Ok(count) if count > 0 => Ok(count.min(PAGE_LIMIT)),
+    match text.parse::<i32>() {
+        Ok(count) if count >= 0 => Ok(usize::try_from(count).unwrap_or(0).min(PAGE_LIMIT)),
         _ => Err(S3Error::invalid(format!(
-            "{name} must be a positive whole number"
+            "Argument {argument} must be an integer between 0 and 2147483647"
         ))),
     }
 }
@@ -497,7 +499,7 @@ impl Server {
         let prefix = query.get("prefix").unwrap_or_default();
         let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
         let url = encoded(query)?;
-        let max_keys = page_size(query, "max-keys")?;
+        let max_keys = page_size(query, "max-keys", "maxKeys")?;
         // Without a delimiter every key is an entry: one read of the page and one key more
         // tells whether the listing goes on. With one, a prefix may hold any number of keys, and
         // they are read a page at a time.
@@ -516,6 +518,7 @@ impl Server {
             start_after: query.get("start-after"),
             continuation_token: query.get("continuation-token"),
             max_keys,
+            owner: query.get("fetch-owner") == Some("true"),
             objects: &page.objects,
             prefixes: &page.prefixes,
             next: page.next,
@@ -529,12 +532,15 @@ impl Server {
     async fn list_uploads(&self, query: &Query) -> Result<Answer, S3Error> {
         refuse_delimiter(query)?;
         let prefix = query.get("prefix").unwrap_or_default();
-        let max_uploads = page_size(query, "max-uploads")?;
+        let max_uploads = page_size(query, "max-uploads", "max-uploads")?;
         let key_marker = query.get("key-marker").unwrap_or_default();
         let id_marker = query.get("upload-id-marker").filter(|id| !id.is_empty());
         let after = (!key_marker.is_empty()).then_some((key_marker, id_marker));
         let backend = &self.backend;
-        let listed = backend.list_uploads(prefix, after, max_uploads + 1).await;
+        let listed = match max_uploads {
+            0 => Ok(Vec::new()),
+            _ => backend.list_uploads(prefix, after, max_uploads + 1).await,
+        };
         let listed = listed.map_err(S3Error::from)?;
         let page = &listed[..listed.len().min(max_uploads)];
         let next = (listed.len() > max_uploads).then(|| &page[max_uploads - 1]);
