@@ -18,7 +18,7 @@ fn refusal(text: &str) -> String {
     from_text(text, DEFAULTS).unwrap_err().to_string()
 }
 
-const FULL: &str = r#", upstream = { url = "https://registry.example:5000", username = "puller", password_file = "/etc/tierstore/upstream.password", ca_file = "/etc/tierstore/upstream-ca.pem", timeout = "45s", max_redirects = 2 }"#;
+const FULL: &str = r#", upstream = { url = "https://registry.example:5000", username = "puller", password_file = "/etc/tierstore/upstream.password", ca_file = "/etc/tierstore/upstream-ca.pem", timeout = "45s", max_redirects = 2, recheck_timeout = "2s" }"#;
 
 /// Asserts a table with every key makes the settings it says, one with the url alone leaves the
 /// rest to the defaults of the start, and a file without the param pulls nothing.
@@ -32,6 +32,7 @@ fn an_upstream_table_makes_the_settings_it_says() {
         ca_file: Some(PathBuf::from("/etc/tierstore/upstream-ca.pem")),
         timeout: Some(Dur(Duration::from_secs(45))),
         max_redirects: Some(2),
+        recheck_timeout: Some(Dur(Duration::from_secs(2))),
     };
     assert_eq!(cli.oci_upstream, Some(expected));
     let least = from_text(
@@ -44,6 +45,7 @@ fn an_upstream_table_makes_the_settings_it_says() {
     assert_eq!(upstream.username, None);
     assert_eq!(upstream.timeout, None);
     assert_eq!(upstream.max_redirects, None);
+    assert_eq!(upstream.recheck_timeout, None);
     let none = from_text(&with_upstream(""), DEFAULTS).unwrap();
     assert_eq!(none.oci_upstream, None);
 }

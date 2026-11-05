@@ -37,6 +37,14 @@ pub(crate) fn error_body(code: &str, message: &str, resource: &str, request_id: 
     )
 }
 
+/// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
+/// empty for `us-east-1`.
+pub(crate) fn location(region: &str) -> String {
+    let named = if region == "us-east-1" { "" } else { region };
+    let text = escape(named);
+    format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
+}
+
 /// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy
 /// has no accounts: it serves one bucket to every caller it lets in, so every object has the
 /// same owner, named for the proxy.

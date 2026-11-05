@@ -11,9 +11,26 @@
 //! - A manifest by tag: the same request with the tag. The manifest is stored by the digest its
 //!   bytes hash to, and the tag's first version is created (see `tags`) with the create-only
 //!   write and nothing else; a tag that was made in the meantime is left as it is, and the answer
-//!   is the manifest that tag points at, read back after the write. A tag that is in the store is
-//!   never asked of the upstream again: it keeps pointing at the manifest it first pointed at,
-//!   however the upstream moves it. A tag that is moved by a push is a push's to move.
+//!   is the manifest that tag points at, read back after the write.
+//! - A tag that is in the store is re-checked on each pull of it (a `GET` or `HEAD` of the tag),
+//!   with a `HEAD` of the manifest at the upstream and its `Docker-Content-Digest`. If that is
+//!   the digest the newest version of the tag holds, the stored manifest is served and no `GET`
+//!   is made. If it differs, the manifest is pulled by the tag as above, and the next version of
+//!   the tag is written (see `tags`, `point`: versions are immutable and the newest wins), and
+//!   that manifest is served. If the `HEAD` or that pull fails (the upstream cannot be reached,
+//!   answers late, or answers 429, 5xx or anything but 200, or sends no digest), the stored tag
+//!   is served and the failure is counted in `tierstore_oci_tag_recheck_failures_total`
+//!   (stale-if-error). A pull by digest is never re-checked: a digest names its bytes for good.
+//!   The `HEAD` uses the upstream's `timeout`, login and redirects, as a `GET` does.
+//!
+//!   A repository that is pushed to and pulled through: the upstream is the authority for a tag
+//!   whenever the front has an upstream. A tag moved by a push stays as pushed while the upstream
+//!   holds the digest the push left, or has no such tag (404, which is not a failure: a tag
+//!   pushed here only is never overwritten). The first pull after the upstream's tag differs from
+//!   the newest version, pushed or pulled, writes the upstream's digest as the next version, so a
+//!   push to a tag the upstream also has lasts until the upstream's next move of it, or until the
+//!   next pull of the tag if the pushed digest is not the upstream's. A front with no upstream
+//!   asks nothing and keeps its tags as pushes leave them.
 //! - A blob: `GET /v2/<name>/blobs/<digest>` upstream, handed to the store's streamed put as the
 //!   bytes arrive, hashed in the same pass, and refused (nothing is stored) if the hash is not
 //!   the digest. There is no limit on its size and no copy of it in memory. The client's own
@@ -168,6 +185,70 @@ impl OciFront {
         // The tag now holds what its newest version says: this pull's digest, or that of a tag
         // made in the meantime, which is the one answered.
         self.tagged(name, tag).await.map_err(failed)
+    }
+
+    /// The digest of the tag `tag` of `name` now: `stored` if the upstream still has it there (or
+    /// has no such tag), or the one the upstream moved it to, written as the next version of the
+    /// tag. A failure to ask, pull or write, or a re-check that takes longer than the upstream's
+    /// `recheck_timeout` as a whole, is counted and logged and the answer is `stored`.
+    pub(super) async fn recheck_tag(
+        &self,
+        upstream: &Upstream,
+        name: &str,
+        tag: &str,
+        stored: Digest,
+    ) -> Digest {
+        let bound = upstream.recheck_timeout();
+        let asked = tokio::time::timeout(bound, self.upstream_tag(upstream, name, tag, &stored));
+        let asked = asked
+            .await
+            .unwrap_or_else(|_| Err(format!("no answer within {bound:?}")));
+        match asked {
+            Ok(current) => current,
+            Err(why) => {
+                self.metrics.recheck_failed();
+                tracing::warn!("tierstore: oci: re-checking {name}:{tag} with the upstream: {why}");
+                stored
+            }
+        }
+    }
+
+    /// The digest the upstream has the tag at, after storing it and pointing the tag at it if it
+    /// is not `stored`.
+    async fn upstream_tag(
+        &self,
+        upstream: &Upstream,
+        name: &str,
+        tag: &str,
+        stored: &Digest,
+    ) -> Result<Digest, String> {
+        let path = format!("/v2/{name}/manifests/{tag}");
+        let reply = match upstream.head(&path, ACCEPT_MANIFESTS).await {
+            Ok(reply) => reply,
+            // A tag only this front has, made by a push: it stands.
+            Err(UpstreamError::NotFound) => return Ok(stored.clone()),
+            Err(other) => return Err(other.to_string()),
+        };
+        let announced = reply.header("docker-content-digest");
+        let Some(announced) = announced.and_then(Digest::parse) else {
+            return Err("the upstream sent no usable Docker-Content-Digest".to_owned());
+        };
+        if announced == *stored {
+            return Ok(announced);
+        }
+        let detail = json!({ "tag": echoed(tag) });
+        let fetched = self.fetch_manifest(upstream, name, tag, &detail).await;
+        let (body, digest) = fetched.map_err(|_| format!("pulling {path} failed"))?;
+        if digest == *stored {
+            return Ok(digest);
+        }
+        let key = self.prefix.key(&digest);
+        let kept = self.keep_manifest(&key, body, detail).await;
+        kept.map_err(|_| format!("storing the manifest of {path} failed"))?;
+        let prefix = self.tag_prefix(name, tag);
+        let pointed = tags::point(&*self.backend, &prefix, &digest).await;
+        pointed.map_err(|failure| failure.to_string())?;
+        Ok(digest)
     }
 
     /// Fills the blob `digest` from the upstream, in one pass: the bytes are hashed as they are

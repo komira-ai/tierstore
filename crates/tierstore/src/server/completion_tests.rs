@@ -13,16 +13,14 @@ const MEBIBYTE: u64 = 1 << 20;
 
 /// Asserts that the checksum headers of a completion, which are the checksums of the whole
 /// object it makes, are not held to the XML body of the call: each of them, right for the
-/// object, and one of an algorithm the server does not compute, leave the completion to
+/// object (CRC-64/NVMe, which S3 makes the checksum of the whole object, included), leave the completion to
 /// succeed; and that `Content-MD5`, which is the hash of the body, is held to it: a wrong one
 /// is 400 `BadDigest` and leaves the upload open, and the right one completes it.
 #[tokio::test(start_paused = true)]
 async fn a_completion_is_not_held_to_the_checksums_of_the_object_it_makes() {
     let rig = Rig::new(MEBIBYTE).await;
     let whole = b"hello world";
-    let mut names: Vec<&str> = CHECKSUMS.into_iter().skip(1).collect();
-    names.push("x-amz-checksum-crc64nvme");
-    for name in names {
+    for name in CHECKSUMS.into_iter().skip(1) {
         let id = start(&rig, name).await;
         let part = upload(&rig, name, &id, 1, whole).await;
         let body = completion(&[(1, part.header("etag"))]);
