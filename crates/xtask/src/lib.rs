@@ -7,7 +7,8 @@
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
 //! - [`build_commit`]: a built binary names the commit it was built from.
 //! - [`release`]: find the successful build of a commit, check its files, publish them; and the
-//!   hostkeeper packages of a build, their release index and the checks a host makes of them.
+//!   hostkeeper packages of a build, their release index and the checks a host makes of them;
+//!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`advisories`]: keep the security advisories in one issue.
 //!
 //! The workflows that call them are in `.github/workflows`; `tests/workflows.rs` holds each
@@ -342,6 +343,24 @@ enum ReleaseVerb {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    /// The version and digest of a published release to set as tierstore's desired version on
+    /// the hostkeeper coordinator; refuses a release whose index lacks a platform.
+    Desired {
+        #[arg(long)]
+        repo: String,
+        /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        version: String,
+        /// Where `index.json` and `SHA256SUMS` of the release are downloaded; created when
+        /// missing.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Append `package-version=` and `package-digest=` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
     /// `dir` holds exactly the assets of the commit, each tarball and package with its bundle.
     Check {
         dir: PathBuf,
@@ -588,6 +607,19 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             event,
             output,
         }) => release::hostkeeper_index::hostkeeper_index(&dir, &commit, &event, output.as_deref()),
+        Verb::Release(ReleaseVerb::Desired {
+            repo,
+            version,
+            dir,
+            output,
+            gh,
+        }) => release::desired::desired(
+            &release::RealGh(gh),
+            &repo,
+            &version,
+            &dir,
+            output.as_deref(),
+        ),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),
         Verb::Release(ReleaseVerb::Publish {
             dir,
