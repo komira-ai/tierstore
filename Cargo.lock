@@ -2141,6 +2141,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crc",
  "crc32c",
  "crc32fast",
  "futures",

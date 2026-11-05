@@ -744,10 +744,9 @@ async fn a_put_whose_checksum_does_not_match_is_refused_and_stores_nothing() {
 }
 
 /// Asserts that a checksum header that is not the base64 of a hash of the right length is 400
-/// `InvalidDigest` and stores nothing, and that the checksum of the algorithm the server does
-/// not compute (CRC-64/NVME) is 501 `NotImplemented` and stores nothing.
+/// `InvalidDigest` (for CRC-64/NVMe too) and stores nothing.
 #[tokio::test(start_paused = true)]
-async fn a_put_with_a_malformed_or_unsupported_checksum_stores_nothing() {
+async fn a_put_with_a_malformed_checksum_stores_nothing() {
     let rig = Rig::new(MEBIBYTE).await;
     let puts = rig.hot.calls(Op::Put);
     for name in CHECKSUMS {
@@ -757,10 +756,6 @@ async fn a_put_with_a_malformed_or_unsupported_checksum_stores_nothing() {
             assert_eq!(reply.code(), "InvalidDigest", "{name} {value:?}");
         }
     }
-    let extra = [("x-amz-checksum-crc64nvme", "AAAAAAAAAAA=")];
-    let reply = put_with(&rig, "k", &extra, b"x").await;
-    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reply.code(), "NotImplemented");
     assert_eq!(rig.hot.calls(Op::Put), puts);
     let head = rig.call("HEAD", "k", b"").await;
     assert_eq!(head.status, StatusCode::NOT_FOUND);
