@@ -83,7 +83,7 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.require_lease()?;
+        self.require_lease().await?;
         match self
             .hot
             .put_stream(key, Some(opened.meta.size), opened.body)

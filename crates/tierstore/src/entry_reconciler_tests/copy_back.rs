@@ -226,3 +226,30 @@ fn the_copy_back_settings_default_to_ten_minutes_and_a_thousand() {
     assert_eq!(config.copy_back_ttl, Duration::from_secs(600));
     assert_eq!(config.copy_back_max, 1000);
 }
+
+/// Asserts that a copy-back whose lease was taken over by another holder before the hot write is
+/// not written: the lease cannot be renewed, so the hot tier gets no object, the item fails with
+/// `Unavailable` and the entry stays sealed (the holder that has the lease removes it).
+#[tokio::test]
+async fn a_copy_back_is_not_written_when_the_lease_was_taken_over() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.cold.put("k", bytes("v")).await.unwrap();
+    rig.client("p1").create("k", Take::CopyBack).await.unwrap();
+    let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+    let gate = gated.gate(Op::Head, "k", Phase::Pre);
+    let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    rig.hot.delete(LEASE_KEY).await.unwrap();
+    rig.hot.put(LEASE_KEY, bytes("other\nn\n1")).await.unwrap();
+    rig.mono.advance(Duration::from_millis(10_001));
+    gate.release();
+    let done = step.await;
+    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+    assert!(!rig.hot_has("k").await);
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Cb, EntryState::Sealed, None))
+    );
+}
