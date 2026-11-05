@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" role="img" aria-label="Fronts on the left (s3, gcs, oci, fs, ops), each an Interface implementation, answer every request by calling the proxy core, which makes calls on the hot and cold tiers through the Backend trait; each tier is s3, gcs, dir or memory, chosen independently.">
+<title>Interfaces on the client side, Backends on the store side, one proxy core between them</title>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+</style>
+<rect x="0" y="0" width="960" height="420" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">Two independent seams: the Interface (client side) and the Backend (store side)</text>
+<text x="30" y="62" class="t-m">trait Interface: one per front</text>
+<rect x="30" y="72" width="200" height="40" rx="5" class="box-b"/><text x="130" y="97" class="b" text-anchor="middle">s3 (built)</text>
+<rect x="30" y="122" width="200" height="40" rx="5" class="box-b"/><text x="130" y="147" class="b" text-anchor="middle">oci (built)</text>
+<rect x="30" y="172" width="200" height="40" rx="5" class="box-o"/><text x="130" y="197" class="b" text-anchor="middle">gcs (planned)</text>
+<rect x="30" y="222" width="200" height="40" rx="5" class="box-o"/><text x="130" y="247" class="b" text-anchor="middle">fs (planned, no port)</text>
+<rect x="30" y="272" width="200" height="40" rx="5" class="box-b"/><text x="130" y="297" class="b" text-anchor="middle">ops (split out)</text>
+<rect x="330" y="72" width="280" height="240" rx="5" class="box"/>
+<text x="470" y="100" class="b" text-anchor="middle">Proxy core</text>
+<text x="470" y="126" class="t-m" text-anchor="middle">one call per operation</text>
+<text x="470" y="146" class="t-m" text-anchor="middle">reserved prefixes filtered here</text>
+<text x="470" y="166" class="t-m" text-anchor="middle">entry, write-once, delete wait</text>
+<text x="470" y="186" class="t-m" text-anchor="middle">shared listing walk</text>
+<text x="470" y="216" class="t-m" text-anchor="middle">knows no wire format, no auth,</text>
+<text x="470" y="232" class="t-m" text-anchor="middle">no store API</text>
+<text x="470" y="270" class="t-m" text-anchor="middle">answers every request itself;</text>
+<text x="470" y="286" class="t-m" text-anchor="middle">it is not a pass-through</text>
+<text x="710" y="62" class="t-m">trait Backend: one per store kind, per tier</text>
+<rect x="710" y="72" width="220" height="100" rx="5" class="box"/>
+<text x="820" y="96" class="b" text-anchor="middle">Hot tier</text>
+<text x="820" y="120" class="t-m" text-anchor="middle">s3 | dir | memory | gcs (planned)</text>
+<text x="820" y="140" class="t-m" text-anchor="middle">needs create-only + If-Match</text>
+<rect x="710" y="192" width="220" height="100" rx="5" class="box"/>
+<text x="820" y="216" class="b" text-anchor="middle">Cold tier</text>
+<text x="820" y="240" class="t-m" text-anchor="middle">s3 | dir | memory | gcs (planned)</text>
+<text x="820" y="260" class="t-m" text-anchor="middle">needs create-only put and completion</text>
+<line x1="230" y1="92" x2="330" y2="130" class="ln"/><line x1="230" y1="142" x2="330" y2="150" class="ln"/><line x1="230" y1="192" x2="330" y2="180" class="ln"/><line x1="230" y1="242" x2="330" y2="210" class="ln"/>
+<line x1="610" y1="122" x2="710" y2="122" class="ln"/><line x1="610" y1="242" x2="710" y2="242" class="ln"/>
+<rect x="30" y="340" width="900" height="64" rx="5" class="box-p"/>
+<text x="40" y="360" class="t-m">Left of the core: how clients reach us, their API, key rules, auth, errors, listing format. Right of it: how we reach a store. Neither side knows the other's kind.</text>
+<text x="40" y="378" class="t-m">An s3 front over a gcs cold tier, an fs front over an s3 hot tier, and the same store behind two fronts all work, because only the core is shared.</text>
+<text x="40" y="396" class="t-m">Chaining (local_cache over a hot+cold proxy) is another Backend behind the right seam, in the process or across processes.</text>
+</svg>

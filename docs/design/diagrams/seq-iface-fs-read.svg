@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 488" width="960" height="488" role="img" aria-label="Sequence diagram of a read of a file under the FUSE mount: the kernel asks the fs front, which maps the path to a store key and makes the same proxy read as the S3 front.">
+<title>A read through the filesystem front</title>
+<defs><marker id="seq-iface-fs-read-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-iface-fs-read-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.box-p{fill:none;stroke:#5A5A57;stroke-width:1.4;stroke-dasharray:6 4}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="960" height="488" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A read through the filesystem front</text>
+<rect x="55" y="44" width="110" height="32" rx="5" class="box-b"/><text x="110" y="65" class="b" text-anchor="middle">Process</text>
+<line x1="110" y1="76" x2="110" y2="416" class="ln-d"/>
+<rect x="235" y="44" width="110" height="32" rx="5" class="box-b"/><text x="290" y="65" class="b" text-anchor="middle">Kernel (FUSE)</text>
+<line x1="290" y1="76" x2="290" y2="416" class="ln-d"/>
+<rect x="415" y="44" width="110" height="32" rx="5" class="box-b"/><text x="470" y="65" class="b" text-anchor="middle">fs front</text>
+<line x1="470" y1="76" x2="470" y2="416" class="ln-d"/>
+<rect x="595" y="44" width="110" height="32" rx="5" class="box"/><text x="650" y="65" class="b" text-anchor="middle">Proxy core</text>
+<line x1="650" y1="76" x2="650" y2="416" class="ln-d"/>
+<rect x="795" y="44" width="110" height="32" rx="5" class="box"/><text x="850" y="65" class="b" text-anchor="middle">Hot / cold</text>
+<line x1="850" y1="76" x2="850" y2="416" class="ln-d"/>
+<text x="200.0" y="112" class="t-m lbl" text-anchor="middle">0  open and read(path, offset, len)</text>
+<line x1="110" y1="124" x2="290" y2="124" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="380.0" y="150" class="t-m lbl" text-anchor="middle">1  FUSE LOOKUP, OPEN, READ on the /dev/fuse fd</text>
+<line x1="290" y1="162" x2="470" y2="162" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="560.0" y="188" class="t-m lbl" text-anchor="middle">2  path rules; path to store key K'; Proxy::open_read(K', span)</text>
+<line x1="470" y1="200" x2="650" y2="200" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="750.0" y="226" class="t-m lbl" text-anchor="middle">3  hot open_read; on a miss cold open_read (streamed range)</text>
+<line x1="650" y1="238" x2="850" y2="238" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="750.0" y="264" class="t-m lbl" text-anchor="middle">bytes, or not found</text>
+<line x1="850" y1="276" x2="650" y2="276" class="ln-d" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="560.0" y="302" class="t-m lbl" text-anchor="middle">4  Meta and body chunks</text>
+<line x1="650" y1="314" x2="470" y2="314" class="ln-d" marker-end="url(#seq-iface-fs-read-ak)"/>
+<text x="380.0" y="340" class="t-m lbl" text-anchor="middle">5  FUSE reply: attributes and data (not found: ENOENT)</text>
+<line x1="470" y1="352" x2="290" y2="352" class="ln-o" marker-end="url(#seq-iface-fs-read-ao)"/>
+<text x="200.0" y="378" class="t-m lbl" text-anchor="middle">6  bytes, or ENOENT or EIO</text>
+<line x1="290" y1="390" x2="110" y2="390" class="ln-o" marker-end="url(#seq-iface-fs-read-ao)"/>
+<rect x="30" y="426" width="900" height="48" rx="5" class="box-o"/>
+<text x="40" y="446" class="t-m">No port and no tierstore auth: the owner and mode of the mount decide who may read. Directories are prefixes: READDIR is the shared listing walk with delimiter / and a cursor token.</text>
+<text x="40" y="462" class="t-m">A key with no path form (an empty segment, '.' or '..', a name that is both a file and a directory) is not shown and is counted in a metric. Writes, later, are create-only files closed whole.</text>
+</svg>
