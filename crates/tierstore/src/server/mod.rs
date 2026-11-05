@@ -220,6 +220,7 @@ mod config_combined;
 mod config_entry;
 mod config_handoff;
 mod config_interface;
+mod config_load;
 mod config_policy;
 mod config_syntax;
 mod config_tier;
