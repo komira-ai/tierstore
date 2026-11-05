@@ -44,13 +44,32 @@ pub(super) const BUCKET: &str = "tier-bucket";
 pub(super) const NOW: u64 = 1_800_000_000_000;
 
 /// The headers in which a request may carry a checksum of its body.
-pub(super) const CHECKSUMS: [&str; 5] = [
+pub(super) const CHECKSUMS: [&str; 6] = [
     "content-md5",
     "x-amz-checksum-crc32",
     "x-amz-checksum-crc32c",
     "x-amz-checksum-sha1",
     "x-amz-checksum-sha256",
+    "x-amz-checksum-crc64nvme",
 ];
+
+/// CRC-64/NVME of `body`, bit by bit from its definition (reflected polynomial
+/// `0x9a6c9329ac4bc9b5`, all ones in, all ones out), so that the tests do not trust the
+/// implementation they check.
+pub(super) fn crc64nvme(body: &[u8]) -> u64 {
+    let mut crc = u64::MAX;
+    for byte in body {
+        crc ^= u64::from(*byte);
+        for _ in 0..8 {
+            let low = crc & 1;
+            crc >>= 1;
+            if low == 1 {
+                crc ^= 0x9a6c_9329_ac4b_c9b5;
+            }
+        }
+    }
+    !crc
+}
 
 /// The value of the checksum header `name` for `body`, worked out apart from the server.
 pub(super) fn checksum(name: &str, body: &[u8]) -> String {
@@ -59,6 +78,7 @@ pub(super) fn checksum(name: &str, body: &[u8]) -> String {
         "x-amz-checksum-crc32" => crc32fast::hash(body).to_be_bytes().to_vec(),
         "x-amz-checksum-crc32c" => crc32c::crc32c(body).to_be_bytes().to_vec(),
         "x-amz-checksum-sha1" => sha1_of(&SHA1_FOR_LEGACY_USE_ONLY, body).as_ref().to_vec(),
+        "x-amz-checksum-crc64nvme" => crc64nvme(body).to_be_bytes().to_vec(),
         _ => Sha256::digest(body).to_vec(),
     };
     STANDARD.encode(hash)

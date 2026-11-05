@@ -241,6 +241,89 @@ fn the_verb_writes_the_archive_and_prints_its_name_digest_and_size() {
             written.len()
         )]
     );
+    assert_eq!(
+        std::fs::read_to_string(out.join("SHA256SUMS.macos-arm64")).expect("the sums file"),
+        format!("{}  {name}\n", hex::encode(Sha256::digest(&written)))
+    );
+}
+
+/// The text of `out/SHA256SUMS.<platform>`.
+fn sums_text(out: &Path, platform: Platform) -> String {
+    std::fs::read_to_string(out.join(format!("SHA256SUMS.{}", platform.name())))
+        .expect("the sums file")
+}
+
+#[test]
+fn a_second_platforms_package_leaves_the_first_platforms_sums_file_alone() {
+    // Catches: one sums file for every platform, or a sums file of one platform rewritten while
+    // another's package is added.
+    let dir = scratch("two-platforms");
+    let bin = put_binary(&dir, &binary());
+    let out = dir.join("out");
+    hostkeeper_package(&bin, VERSION, "0.1.0", Platform::LinuxX86_64, &out).expect("first");
+    let first = sums_text(&out, Platform::LinuxX86_64);
+    hostkeeper_package(&bin, VERSION, "0.1.0", Platform::LinuxArm64, &out).expect("second");
+    assert_eq!(sums_text(&out, Platform::LinuxX86_64), first);
+    let second = sums_text(&out, Platform::LinuxArm64);
+    assert_eq!(second.lines().count(), 1);
+    assert!(
+        second.ends_with(&format!("  {}\n", file_name(VERSION, Platform::LinuxArm64))),
+        "{second}"
+    );
+}
+
+#[test]
+fn the_package_line_is_appended_after_the_lines_package_wrote() {
+    // Catches: a sums file rewritten from the package's line alone, which would drop the
+    // tarball's and the SBOM's lines, or a package line written before them.
+    let dir = scratch("after-package");
+    let (binary_path, sbom) = (dir.join("tierstore"), dir.join("sbom.cdx.json"));
+    std::fs::write(&binary_path, binary()).expect("binary");
+    std::fs::write(&sbom, b"{\"bomFormat\":\"CycloneDX\"}").expect("sbom");
+    let out = dir.join("out");
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    crate::package::package(&binary_path, &sbom, Platform::LinuxX86_64, commit, &out)
+        .expect("package");
+    let earlier = sums_text(&out, Platform::LinuxX86_64);
+    assert_eq!(earlier.lines().count(), 2);
+    hostkeeper_package(&binary_path, VERSION, "0.1.0", Platform::LinuxX86_64, &out)
+        .expect("hostkeeper package");
+    let after = sums_text(&out, Platform::LinuxX86_64);
+    assert!(after.starts_with(&earlier), "{after}");
+    let rest = &after[earlier.len()..];
+    let package = std::fs::read(out.join(file_name(VERSION, Platform::LinuxX86_64))).expect("pkg");
+    assert_eq!(
+        rest,
+        format!(
+            "{}  {}\n",
+            hex::encode(Sha256::digest(&package)),
+            file_name(VERSION, Platform::LinuxX86_64)
+        )
+    );
+}
+
+#[test]
+fn a_malformed_sums_file_is_refused_and_nothing_is_written() {
+    // Catches: a package written beside a sums file that cannot be read back, or a damaged
+    // sums file rewritten from scratch.
+    let dir = scratch("bad-sums");
+    let bin = put_binary(&dir, &binary());
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).expect("out");
+    let sums_path = out.join("SHA256SUMS.linux-x86_64");
+    std::fs::write(&sums_path, "not a sums line\n").expect("sums");
+    let err = hostkeeper_package(&bin, VERSION, "0.1.0", Platform::LinuxX86_64, &out).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Refused(vec![
+            "line 1: \"not a sums line\" is not `<sha256>  <file name>` and a newline".to_owned()
+        ])
+    );
+    assert_eq!(
+        std::fs::read_to_string(&sums_path).expect("sums"),
+        "not a sums line\n"
+    );
+    assert!(!out.join(file_name(VERSION, Platform::LinuxX86_64)).exists());
 }
 
 #[test]
@@ -293,6 +376,18 @@ fn the_verb_refuses_a_binary_that_does_not_hold_the_version() {
         hostkeeper_package(&short, VERSION, "0.1.0", Platform::LinuxX86_64, &dir).unwrap_err();
     assert!(matches!(err, Error::Failed(_)), "{err:?}");
     assert_eq!(std::fs::read_dir(&dir).expect("dir").count(), 1);
+    // Neither the archive nor the sums file is written into an out of its own.
+    let out = dir.join("out");
+    let err = hostkeeper_package(
+        &bin,
+        "0.4.1+0123456789ab",
+        "0.1.0",
+        Platform::LinuxX86_64,
+        &out,
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Failed(_)), "{err:?}");
+    assert!(!out.exists());
 }
 
 #[test]
@@ -312,10 +407,25 @@ fn the_verb_refuses_an_out_that_cannot_be_made_or_a_package_already_there() {
     hostkeeper_package(&bin, VERSION, "0.1.0", Platform::LinuxX86_64, &out).expect("first");
     let path = out.join(file_name(VERSION, Platform::LinuxX86_64));
     let before = std::fs::read(&path).expect("package");
+    let sums_before = sums_text(&out, Platform::LinuxX86_64);
+    let err = hostkeeper_package(&bin, VERSION, "0.2.0", Platform::LinuxX86_64, &out).unwrap_err();
+    assert_eq!(
+        err,
+        Error::Failed(format!(
+            "{} already lists {}",
+            out.join("SHA256SUMS.linux-x86_64").display(),
+            file_name(VERSION, Platform::LinuxX86_64)
+        ))
+    );
+    assert_eq!(std::fs::read(&path).expect("package"), before);
+    assert_eq!(sums_text(&out, Platform::LinuxX86_64), sums_before);
+    // An archive the sums file does not list is still not overwritten.
+    std::fs::remove_file(out.join("SHA256SUMS.linux-x86_64")).expect("remove the sums");
     let err = hostkeeper_package(&bin, VERSION, "0.2.0", Platform::LinuxX86_64, &out).unwrap_err();
     assert!(
         matches!(&err, Error::Spawn { what, .. } if what == &format!("write {}", path.display())),
         "{err:?}"
     );
     assert_eq!(std::fs::read(&path).expect("package"), before);
+    assert!(!out.join("SHA256SUMS.linux-x86_64").exists());
 }
