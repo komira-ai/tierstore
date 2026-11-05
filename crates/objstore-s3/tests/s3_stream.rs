@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{StreamExt, stream};
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Credentials, S3Config, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStoreError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -57,7 +57,14 @@ async fn script_heads(
                 .unwrap_or(0);
             while buf.len() < head_end + body_len {
                 let n = sock.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
                 buf.extend_from_slice(&chunk[..n]);
+            }
+            // A request whose body was cut is not a request the store took: not logged, not answered.
+            if buf.len() < head_end + body_len {
+                continue;
             }
             log.lock().unwrap().push(head.clone());
             let _ = told.send(head);
@@ -84,7 +91,11 @@ fn answer(status: &str, headers: &[&str], body: &str) -> String {
 }
 
 fn store(endpoint: String) -> S3Store {
-    S3Store::new(S3Config {
+    S3Store::new(config(endpoint)).unwrap()
+}
+
+fn config(endpoint: String) -> S3Config {
+    S3Config {
         endpoint,
         region: "us-east-1".into(),
         bucket: "test-bucket".into(),
@@ -96,8 +107,17 @@ fn store(endpoint: String) -> S3Store {
         connect_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(5),
         min_body_rate: None,
-    })
-    .unwrap()
+    }
+}
+
+/// A store that sends an object over [`OVER_ONE_PUT`] bytes less one as a multipart upload (the
+/// default sends it as one PUT up to 5 GiB), so that the tests of the upload write 16 MiB, not 5 GiB.
+fn store_cut_at_a_part(endpoint: String) -> S3Store {
+    let tuning = S3Tuning {
+        single_put_max: OVER_ONE_PUT - 1,
+        ..S3Tuning::default()
+    };
+    S3Store::new_tuned(config(endpoint), tuning).unwrap()
 }
 
 fn key() -> &'static ObjectKey {
@@ -306,15 +326,19 @@ async fn a_small_streamed_replace_is_one_put_with_if_match() {
     assert!(put.contains("\r\nif-match: \"old\"\r\n"), "{put}");
     assert!(!put.contains("if-none-match"), "{put}");
 
-    let (endpoint, seen) = script(Vec::new()).await;
+    // The request is begun and its body cut: the server never has the whole of it, and answers nothing.
+    let (endpoint, seen_cut) = script(vec![answer("200 OK", &[], "")]).await;
     let s = store(endpoint);
     let cut = ObjectStoreError::Body("cut".to_owned());
     let failing = zeros(2 << 20, Some(cut.clone()));
     let failed = s.put_stream_if_match(key(), 2 << 20, failing, "\"old\"");
     assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    let (endpoint, seen_short) = script(vec![answer("200 OK", &[], "")]).await;
+    let s = store(endpoint);
     let short = s.put_stream_if_match(key(), 100, zeros(10, None), "\"old\"");
     assert!(matches!(short.await, Err(ObjectStoreError::Body(_))));
-    assert_eq!(seen.lock().unwrap().len(), 0);
+    assert_eq!(seen_cut.lock().unwrap().len(), 0);
+    assert_eq!(seen_short.lock().unwrap().len(), 0);
 
     let refused = answer(
         "412 Precondition Failed",
@@ -365,7 +389,7 @@ async fn big_replace(
     aborted: bool,
 ) -> (Result<String, ObjectStoreError>, Vec<String>) {
     let (endpoint, seen) = script(upload_answers(completion, aborted)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_if_match(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None), "\"old\"");
     let outcome = put.await;
     let requests = seen.lock().unwrap().clone();
@@ -605,15 +629,19 @@ async fn a_small_streamed_create_is_one_put_with_if_none_match_and_gives_its_tag
     assert!(put.contains("\r\nif-none-match: *\r\n"), "{put}");
     assert!(!put.contains("if-match: "), "{put}");
 
-    let (endpoint, seen) = script(Vec::new()).await;
+    // The request is begun and its body cut: the server never has the whole of it, and answers nothing.
+    let (endpoint, seen_cut) = script(vec![answer("200 OK", &[], "")]).await;
     let s = store(endpoint);
     let cut = ObjectStoreError::Body("cut".to_owned());
     let failing = zeros(2 << 20, Some(cut.clone()));
     let failed = s.put_stream_new_tagged(key(), 2 << 20, failing);
     assert_eq!(failed.await.unwrap_err().to_string(), cut.to_string());
+    let (endpoint, seen_short) = script(vec![answer("200 OK", &[], "")]).await;
+    let s = store(endpoint);
     let short = s.put_stream_new_tagged(key(), 100, zeros(10, None));
     assert!(matches!(short.await, Err(ObjectStoreError::Body(_))));
-    assert_eq!(seen.lock().unwrap().len(), 0);
+    assert_eq!(seen_cut.lock().unwrap().len(), 0);
+    assert_eq!(seen_short.lock().unwrap().len(), 0);
 
     let refused = answer(
         "412 Precondition Failed",
@@ -636,7 +664,7 @@ async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
     let ok =
         "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
     let (endpoint, seen) = script(upload_answers(answer("200 OK", &[], ok), false)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     assert_eq!(put.await.unwrap(), "\"joined-2\"");
     let requests = seen.lock().unwrap().clone();
@@ -653,7 +681,7 @@ async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
 
     let unnamed = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
     let (endpoint, _) = script(upload_answers(answer("200 OK", &[], unnamed), false)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     let err = put.await.unwrap_err();
     assert!(matches!(err, ObjectStoreError::Protocol(_)), "{err}");
@@ -664,7 +692,7 @@ async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
         "<Error><Code>PreconditionFailed</Code></Error>",
     );
     let (endpoint, seen) = script(upload_answers(refused, true)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_new_tagged(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     let err = put.await.unwrap_err();
     assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
