@@ -69,7 +69,8 @@ refuses a key file that its group or others can read):
   list, delete, and the calls of a multipart upload;
 - `/etc/tierstore/daemons.key`: a read-only key (`server.read_only_key_files`), for the daemons that
   read blobs and must not write or delete them. A request signed with it may get and head an
-  object, list the bucket (objects, and the open multipart uploads) and head the bucket; a put, a
+  object, list the bucket (objects, and the open multipart uploads), head the bucket and read its region
+  (GetBucketLocation); a put, a
   delete, CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
   List one file for each read-only key, to give each reader a key of its own. The access key
@@ -178,7 +179,7 @@ and is longer than it:
 | DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
-| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
+| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the prefix, the prefix itself | no |
 
 A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
@@ -231,7 +232,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
-| the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
+| the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote (add the

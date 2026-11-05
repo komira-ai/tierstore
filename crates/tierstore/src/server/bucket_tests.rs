@@ -4,13 +4,48 @@ use bytes::Bytes;
 use http_body_util::Empty;
 use hyper::{Request, StatusCode};
 
-use super::AccessKey;
 use super::testing::{BUCKET, Reply, Rig, texts};
+use super::{AccessKey, GcKey, Prefixes, ScopedKey};
 
 const MEBIBYTE: u64 = 1 << 20;
 
 /// The id and the secret of a read-only key.
 const READER: (&str, &str) = ("AKIDREADER", "reader-secret-0123456789");
+
+/// The id and the secret of a scoped key, and of a GC key.
+const SCOPED: (&str, &str) = ("AKIDSCOPED", "scoped-secret-0123456789");
+const GC: (&str, &str) = ("AKIDGC", "gc-secret-0123456789");
+
+/// A rig with one key of each role: the full key (the rig's own), a read-only key, a scoped key
+/// and a GC key.
+async fn rig_with_every_role() -> Rig {
+    Rig::with(MEBIBYTE, |config| {
+        config.read_only_keys = vec![AccessKey::new(READER.0, READER.1)];
+        let prefixes = Prefixes {
+            read: &["r/"],
+            write: &["w/"],
+            delete: &["d/"],
+        };
+        config.scoped_keys = vec![ScopedKey::new(SCOPED.0, SCOPED.1, &prefixes).unwrap()];
+        config.gc_keys = vec![GcKey::new(GC.0, GC.1, "cas/b/").unwrap()];
+    })
+    .await
+}
+
+/// The status of a call on `uri`, signed by the key of each role, in the order full, read-only,
+/// scoped, GC.
+async fn statuses(rig: &Rig, method: &str, uri: &str) -> [u16; 4] {
+    let full = rig.send(method, uri, &[], b"").await.status.as_u16();
+    let mut out = [full, 0, 0, 0];
+    for (slot, key) in out[1..].iter_mut().zip([READER, SCOPED, GC]) {
+        *slot = rig
+            .send_as(key, method, uri, &[], b"")
+            .await
+            .status
+            .as_u16();
+    }
+    out
+}
 
 /// A rig whose server is in the region `region`.
 async fn rig_in(region: &'static str) -> Rig {
@@ -73,4 +108,14 @@ async fn location_is_for_signed_requests_on_the_bucket_only() {
     assert_eq!(object.status, StatusCode::NOT_IMPLEMENTED);
     let put = rig.send("PUT", &uri, &[], b"").await;
     assert_eq!(put.status, StatusCode::NOT_IMPLEMENTED);
+}
+
+/// Asserts which role may make GetBucketLocation: the full key and a read-only key do (200), a
+/// scoped key and a GC key are `403 AccessDenied`, as they are for every call on the bucket
+/// itself.
+#[tokio::test(start_paused = true)]
+async fn only_the_full_and_the_read_only_key_may_get_the_location() {
+    let rig = rig_with_every_role().await;
+    let uri = format!("/{BUCKET}?location");
+    assert_eq!(statuses(&rig, "GET", &uri).await, [200, 200, 403, 403]);
 }
