@@ -305,6 +305,23 @@ fn an_oci_interface_with_stage_read_starts_on_this_branch_and_is_refused_by_the_
     assert_eq!(status(tierstore::server::cli::main(check_args(&plain))), ok);
 }
 
+/// Asserts the three size keys of an `oci` interface, `max_manifest_bytes`, `read_chunk_bytes` and
+/// `echo_bytes`: a file with them set starts on this branch, and the release before refuses the
+/// file at start (an unknown param, and it does not know `[[interface]]` either).
+#[test]
+fn an_oci_interface_with_size_keys_starts_on_this_branch_and_is_refused_by_the_release_before() {
+    let node = Node::new("compat-config-oci-sizes");
+    let ok = status(ExitCode::SUCCESS);
+    let sized = node.file(
+        "",
+        "",
+        "\n[[interface]]\ntype = \"oci\"\nparams = { addresses = [\"127.0.0.1:0\"], max_manifest_bytes = 4096, read_chunk_bytes = 4096, echo_bytes = 64 }",
+    );
+    let (now, before) = both(&sized);
+    assert_eq!(now, ok);
+    assert_ne!(before, ok);
+}
+
 /// Asserts the one param `upstream` of an `oci` interface: a file with it starts on this branch
 /// (`--check-config` makes the pull-through client as the start does), and the release before
 /// refuses the file at start (it does not know `[[interface]]`) rather than serve a front that

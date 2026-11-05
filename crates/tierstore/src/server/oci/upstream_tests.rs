@@ -28,6 +28,7 @@ fn settings(url: &str) -> UpstreamSettings {
         ca_pem: None,
         timeout: Duration::from_secs(30),
         max_redirects: 4,
+        recheck_timeout: Duration::from_secs(5),
     }
 }
 
@@ -662,4 +663,40 @@ async fn a_body_that_is_cut_ends_its_stream_with_an_error() {
     let whole = over_a_duplex(cut(), Duration::from_secs(30)).await;
     let refused = whole.bytes(100).await.expect_err("failed");
     assert!(matches!(refused, UpstreamError::Failed(_)), "{refused}");
+}
+
+/// Asserts `head` sends a `HEAD` (never a `GET`), answers with the headers of the 200 (the
+/// `Docker-Content-Digest` read by name, none for a header the answer lacks), follows a redirect
+/// with a `HEAD`, answers a Basic challenge with the login, and tells a 404 and a 5xx as `get`
+/// does.
+#[tokio::test]
+async fn a_head_is_sent_as_a_head_with_the_login_and_redirects_of_a_get() {
+    let wanted = basic_of("alice", "s3cret");
+    let registry = Registry::start(
+        move |seen| match (seen.path.as_str(), &seen.authorization) {
+            ("/v2/a/manifests/old", _) => Fake::redirect(302, "/v2/a/manifests/new"),
+            ("/v2/a/manifests/new", _) => Fake::status(200),
+            ("/v2/a/manifests/gone", _) => Fake::status(404),
+            ("/v2/a/manifests/down", _) => Fake::status(503),
+            (_, None) => Fake::challenge("Basic realm=\"r\""),
+            (_, Some(sent)) if *sent == wanted => {
+                Fake::status(200).with("docker-content-digest", "sha256:abc")
+            }
+            _ => Fake::status(403),
+        },
+    )
+    .await;
+    let upstream = client(logged_in(&registry.url()));
+    let reply = upstream.head("/v2/a/manifests/t", "text/plain").await;
+    let reply = reply.expect("a reply");
+    assert_eq!(reply.header("docker-content-digest"), Some("sha256:abc"));
+    assert_eq!(reply.header("etag"), None);
+    let moved = upstream.head("/v2/a/manifests/old", "text/plain").await;
+    assert!(moved.is_ok());
+    let gone = upstream.head("/v2/a/manifests/gone", "text/plain").await;
+    assert!(matches!(failure(gone), UpstreamError::NotFound));
+    let down = upstream.head("/v2/a/manifests/down", "text/plain").await;
+    assert!(matches!(failure(down), UpstreamError::Status(503)));
+    let methods: Vec<String> = registry.seen().into_iter().map(|s| s.method).collect();
+    assert!(methods.iter().all(|method| method == "HEAD"), "{methods:?}");
 }

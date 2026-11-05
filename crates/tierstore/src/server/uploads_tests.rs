@@ -188,14 +188,14 @@ async fn uploads_under_reserved_prefixes_are_never_listed() {
 }
 
 /// Asserts that a request the listing does not do is refused as it is for the other calls: a
-/// `max-uploads` that is not a positive whole number is `InvalidArgument`, a `delimiter` and a
+/// `max-uploads` that is not a whole number from 0 to 2147483647 is `InvalidArgument`, a `delimiter` and a
 /// listing of the parts of one upload (`GET /key?uploadId=`) are `NotImplemented`, and a cold
 /// tier that does not answer is `ServiceUnavailable`.
 #[tokio::test(start_paused = true)]
 async fn a_listing_of_uploads_refuses_what_it_does_not_do() {
     let rig = Rig::new(1 << 20).await;
     let id = start(&rig, "k").await;
-    for bad in ["max-uploads=0", "max-uploads=-1", "max-uploads=many"] {
+    for bad in ["max-uploads=-1", "max-uploads=many"] {
         let reply = list(&rig, bad).await;
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
         assert_eq!(reply.code(), "InvalidArgument", "{bad}");

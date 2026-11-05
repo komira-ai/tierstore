@@ -750,3 +750,47 @@ fn licenses_writes_the_notice_that_package_puts_in_the_tarball_and_a_refused_one
         .expect("tar -t");
     assert_eq!(stdout(&listed), "tierstore\nTHIRD-PARTY-LICENSES.txt\n");
 }
+
+#[test]
+fn release_hostkeeper_package_writes_the_package_and_a_malformed_version_exits_2() {
+    // Catches: the verb's flags not reaching it (the package is not written, or under another
+    // name), or a malformed --version not reported as a usage error.
+    let d = dir("release-hostkeeper-package");
+    put(
+        &d,
+        "tierstore",
+        "stand-in binary of 0.4.0+0123456789ab and more",
+    );
+    let args = |version: &'static str| {
+        [
+            "release",
+            "hostkeeper-package",
+            "--binary",
+            "tierstore",
+            "--version",
+            version,
+            "--min-hostkeeper",
+            "0.1.0",
+            "--platform",
+            "linux-arm64",
+            "--out",
+            "out",
+        ]
+    };
+    let o = run(&d, &args("0.4.0+0123456789ab"));
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let name = "tierstore-0.4.0+0123456789ab-linux-arm64.tar.zst";
+    assert!(
+        stdout(&o).starts_with(&format!("{name}: sha256 ")),
+        "{}",
+        stdout(&o)
+    );
+    assert!(d.join("out").join(name).is_file());
+    let o = run(&d, &args("0.4.0"));
+    assert_eq!(o.status.code(), Some(2), "{}", stderr(&o));
+    assert!(
+        stderr(&o).contains("--version \"0.4.0\" is not"),
+        "{}",
+        stderr(&o)
+    );
+}

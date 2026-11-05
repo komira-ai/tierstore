@@ -228,7 +228,7 @@ impl EntryReconciler {
             Ok(_) | Err(Error::NotFound(_)) => return Ok(Evicted::Kept),
             Err(error) => return Err(error),
         }
-        self.require_lease()?;
+        self.require_lease().await?;
         let deleted = match self.hot.delete_if_match(key, &hot.tag).await {
             Err(Error::Unsupported(_)) => self.hot.delete(key).await,
             answer => answer,

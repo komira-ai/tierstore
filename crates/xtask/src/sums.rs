@@ -5,9 +5,10 @@
 //! in a newline, as `sha256sum` writes them; a name holds no `/` ([`parse`]).
 //!
 //! - `sums assemble <dir> [--expect <file>] [--summary <file>] [--digest-output <file>]` ([`assemble`]): merges
-//!   the `SHA256SUMS.<platform>` files `package` wrote into `<dir>/SHA256SUMS`, sorted
-//!   by name, and removes them. A name in two of them, or a `SHA256SUMS.<suffix>` that
-//!   names no platform, is refused. `--expect` refuses a result that is not byte for
+//!   the `SHA256SUMS.<platform>` files `package` and `release hostkeeper-package` wrote, and the
+//!   `SHA256SUMS.index` file `release hostkeeper-index` wrote when there is one, into
+//!   `<dir>/SHA256SUMS`, sorted by name, and removes them. A name in two of them, or a
+//!   `SHA256SUMS.<suffix>` that names neither a platform nor the index, is refused. `--expect` refuses a result that is not byte for
 //!   byte that file (the published one); `--summary` appends the result to a file (the
 //!   job summary); `--digest-output` appends `sha256=<hex>`, the SHA-256 of the `SHA256SUMS` it
 //!   wrote, to a file (on Actions, `GITHUB_OUTPUT`: the sums job hands the digest on, and the
@@ -19,14 +20,16 @@
 //!   line, so a check that accepts anything fails instead of passing.
 //! - `verify-assets attestations <dir> --repo <owner/repo> --workflow-ref <ref> --commit
 //!   <sha> [--source-ref refs/heads/<branch>] [--trusted-root <file>] [--gh <program>]`
-//!   ([`verify_attestations`]): every listed tarball and SBOM has build provenance
-//!   signed by the workflow `--workflow-ref` names, for the branch `--source-ref` names
-//!   (default `refs/heads/main`; a value that is not `refs/heads/<branch>` is a usage
+//!   ([`verify_attestations`]): every listed tarball, SBOM, hostkeeper package
+//!   (`tierstore-<version>-<platform>.tar.zst`) and release index (`index.json`) has build
+//!   provenance signed by the workflow `--workflow-ref` names, for the branch `--source-ref`
+//!   names (default `refs/heads/main`; a value that is not `refs/heads/<branch>` is a usage
 //!   error), on a GitHub-hosted runner, and every tarball has an SBOM attestation from
 //!   the same workflow: the `gh attestation verify` commands a deployment runs.
 //!   First, before `gh` is run, `<dir>` holds exactly one bundle per listed tarball and
-//!   no other, each the bundle of that tarball ([`bundles::pairing`]). Every tarball
-//!   also verifies against its own bundle, as a host's installer does it (`--bundle`,
+//!   hostkeeper package and no other, each the bundle of that file ([`bundles::pairing`]). Every
+//!   tarball and package also verifies against its own bundle, as a host's installer and
+//!   hostkeeper do it (`--bundle`,
 //!   with `--cert-oidc-issuer`, `--source-digest <sha>`, `--predicate-type` and the
 //!   flags above); with `--trusted-root` (`gh attestation trusted-root`) that check
 //!   runs under a proxy nothing listens on and with no bypass list (`NO_PROXY` removed),
@@ -46,6 +49,7 @@ use crate::build_commit::full_commit;
 use crate::bundles;
 use crate::fetch::Sha256;
 use crate::package::{Platform, read, write_new};
+use crate::release::hostkeeper_index::{INDEX, INDEX_PART, SUFFIX as PACKAGE_SUFFIX};
 
 /// The file name of the merged sums file.
 pub const SUMS: &str = "SHA256SUMS";
@@ -165,9 +169,9 @@ pub fn assemble(
         let Some(suffix) = name.strip_prefix(&prefix) else {
             continue;
         };
-        if Platform::named(suffix).is_none() {
+        if Platform::named(suffix).is_none() && suffix != INDEX_PART {
             return Err(Error::Failed(format!(
-                "{name}: {suffix:?} names no platform"
+                "{name}: {suffix:?} names neither a platform nor the {INDEX_PART}"
             )));
         }
         parts.push(dir.join(name));
@@ -490,13 +494,19 @@ pub fn verify_attestations(dir: &Path, a: &Attestations) -> Result<Vec<String>, 
             a.require(&file, workflow, Some(SBOM_PREDICATE))?;
             a.require_bundle(dir, &l.name, workflow)?;
             printed.push(format!("verified: {} (provenance, SBOM, bundle)", l.name));
-        } else if l.name.ends_with(".cdx.json") {
-            // An SBOM has build provenance only.
+        } else if l.name.ends_with(PACKAGE_SUFFIX) {
+            // A hostkeeper package: the build provenance of the sums and its own bundle, the
+            // one hostkeeper verifies offline.
+            a.require(&file, workflow, None)?;
+            a.require_bundle(dir, &l.name, workflow)?;
+            printed.push(format!("verified: {} (provenance, bundle)", l.name));
+        } else if l.name.ends_with(".cdx.json") || l.name == INDEX {
+            // An SBOM, and the release index, have build provenance only.
             a.require(&file, workflow, None)?;
             printed.push(format!("verified: {} (provenance)", l.name));
         } else {
             return Err(Error::Failed(format!(
-                "{SUMS} lists {}, neither a tarball nor an SBOM",
+                "{SUMS} lists {}, which is neither a tarball, an SBOM, a hostkeeper package nor the release index",
                 l.name
             )));
         }

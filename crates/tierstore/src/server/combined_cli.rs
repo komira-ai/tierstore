@@ -80,7 +80,13 @@ pub(super) async fn serve_combined(
     built.server.cache_writes = true;
     // Both fronts read, and write, through the cache.
     let beside_halt = Arc::new(Notify::new());
-    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
+    let reconciler = Rounds::tuned(
+        built.hot,
+        built.cold,
+        built.reconciler,
+        departure,
+        &built.entry,
+    );
     let halt = Arc::clone(&beside_halt);
     let reconciling = async move {
         match gate {

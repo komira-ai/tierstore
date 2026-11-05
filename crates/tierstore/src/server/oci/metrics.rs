@@ -81,6 +81,8 @@ pub struct OciMetrics {
     requests: [[AtomicU64; OUTCOMES.len()]; ROUTES.len()],
     bytes: AtomicU64,
     mismatches: AtomicU64,
+    /// The re-checks of a pulled tag that failed, so that the stored tag was served.
+    recheck_failures: AtomicU64,
     /// The connections whose client wrote after the front shut its end in a drain: the drain of
     /// the front's listener counts into it.
     late: Arc<AtomicU64>,
@@ -110,6 +112,17 @@ impl OciMetrics {
     /// Counts an object whose bytes were not the digest it is named by.
     pub(super) fn mismatch(&self) {
         self.mismatches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Counts a re-check of a pulled tag with the upstream that failed.
+    pub(super) fn recheck_failed(&self) {
+        self.recheck_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The re-checks of a pulled tag that failed, each answered with the stored tag.
+    #[must_use]
+    pub fn recheck_failures(&self) -> u64 {
+        self.recheck_failures.load(Ordering::Relaxed)
     }
 
     /// The requests counted for `route` and `outcome`.
@@ -165,6 +178,12 @@ impl OciMetrics {
         let mismatches = self.mismatches();
         let _ = writeln!(text, "# TYPE tierstore_oci_digest_mismatches_total counter");
         let _ = writeln!(text, "tierstore_oci_digest_mismatches_total {mismatches}");
+        let rechecks = self.recheck_failures();
+        let _ = writeln!(
+            text,
+            "# TYPE tierstore_oci_tag_recheck_failures_total counter"
+        );
+        let _ = writeln!(text, "tierstore_oci_tag_recheck_failures_total {rechecks}");
         let late = self.late_requests();
         let _ = writeln!(
             text,

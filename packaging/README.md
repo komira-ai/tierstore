@@ -3,8 +3,11 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
-silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); there is
-no package and no container image. These files, for Linux hosts, go beside the binary.
+silicon), as a tarball with its SBOM and its provenance bundle, and as a hostkeeper package of each
+of those platforms with its provenance bundle and one release index, `index.json`
+(`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
+`hostkeeper/`, see its README); no system package and no container image is released. These files,
+for Linux hosts, go beside the binary.
 
 | file | what |
 |---|---|
@@ -12,7 +15,7 @@ no package and no container image. These files, for Linux hosts, go beside the b
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
 | `tierstore.toml` | the configuration file of `tierstore.service`: one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
-| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, `com.komira.tierstore`, running `bin/tierstore` of the same link |
+| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
@@ -125,7 +128,7 @@ units enabled, only the one the hook's record names starts. A host whose release
 tier cannot hand over (a `dir:` hot tier, say) sets `mode = "restart"` in the package's params:
 the update then stops the live instance and starts the other, with a gap in serving.
 
-On a Mac the package has one job, `tierstore.plist` (label `com.komira.tierstore`, installed as
+On a Mac the package has one job, `tierstore.plist` (label `tierstore`, installed as
 `/Library/LaunchDaemons/tierstore.plist`), and an update is a restart with a gap: `launchctl
 bootout`, then `launchctl bootstrap`.
 
@@ -299,12 +302,27 @@ AccessDenied` before any body is read:
 | a scoped key's URL for an object outside its read prefixes | 403 |
 | PUT, POST or DELETE of anything (parts too) with the URL of a key that reads | 403 |
 | a listing, a call on the bucket or the root | 403 |
-| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above and `x-id` | 403 |
+| GET or HEAD with `response-content-type`, `-disposition`, `-encoding`, `-language`, `-cache-control` or `-expires` signed into the URL | served, with that header set (see Response headers of a GET) |
+| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above, `x-id` and the six `response-*` ones | 403 |
 | a URL that is expired, has `X-Amz-Expires` of zero or over the cap, is malformed, is signed with another secret, names a key id the server does not have, or was edited after it was signed | 403 |
 
 A program in Rust that links the `tierstore` library with its `server` feature makes the URL with
 `tierstore::server::presign_get(&key, &request)`, as `presign_put` makes a PUT URL (see Presigned
 PUT URLs); any SDK presigner makes the same URL.
+
+### Response headers of a GET
+
+A GET or HEAD of an object, signed in the header or in a presigned URL, may carry `response-content-type`,
+`response-content-disposition`, `response-content-encoding`, `response-content-language`,
+`response-cache-control` and `response-expires` in its query, and the answer (200 or 206, and the
+HEAD) carries that header with the value given, in place of the object's own (the content type of an
+object is `application/octet-stream`), as S3 answers. The value is sent as it was given; a value that
+is not a header value (a line feed, a NUL) is `400 InvalidArgument`, and a parameter with an empty value
+is not applied. A 304, a 412 and every error answer carry none of them. A presigned URL signs the
+parameters with the rest of its query, so one added after the URL was made is `SignatureDoesNotMatch`.
+A GET or HEAD with one of the parameters and no signature at all (no `Authorization` header and no SigV4
+parameter in the query) is `400 InvalidRequest` ("Request specific response headers cannot be used for
+anonymous GET requests."), as S3 answers, and not the `403` of an unsigned request without them.
 
 ## The configuration file
 
@@ -656,7 +674,7 @@ what "tested" means below.
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
 | request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
-| checksum algorithm | none, or CRC-32, CRC-32C, SHA-1 or SHA-256 | read from the front's code, not tested with an SDK: CRC-64/NVMe, `aws-chunked` and trailing checksums are refused with 501; `Content-MD5` is checked |
+| checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs and is checked, as the others and `Content-MD5` are; `aws-chunked` and trailing checksums are refused with 501 |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
 | listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
 
@@ -756,6 +774,9 @@ The registry front). The params of the entry:
 | `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
 | `params.stage_read` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.max_manifest_bytes` | the largest manifest the front stores, serves or pulls, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.read_chunk_bytes` | the most bytes asked of the store in one call when a blob is served, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.echo_bytes` | the longest piece of a request an error answer repeats, 256 if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
 | `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Without it the front is read-only. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a

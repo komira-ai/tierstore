@@ -15,7 +15,9 @@
 //!   version or a pin of the commands below without changing their text), its `run:` steps are not exactly
 //!   [`build_commands`] in that order (the build, the SBOM, the check of the built binary, the
 //!   resolution of the build's crates, the third-party licence notice, the package, the unpack of
-//!   the tarball with the runner's own `tar` and the check of the binary unpacked from it), it uses an action other than checkout, a cache restore that restores
+//!   the tarball with the runner's own `tar` and the check of the binary unpacked from it, the
+//!   hostkeeper package of the binary and its unpack with hostkeeper's rules, and on macOS the
+//!   check of the unpacked binary's code signature), it uses an action other than checkout, a cache restore that restores
 //!   nothing on a push (`lookup-only`), a cache save and the upload, or it uploads another
 //!   artifact than `assets-<platform>` from `dist/`;
 //! - the cargo-cyclonedx checksum a build job names is not 64 lowercase hex digits in the file's
@@ -29,7 +31,8 @@
 //!   `published` and the bundles into `dist`;
 //! - `attest` lacks, for any platform, the SBOM attestation of its tarball, the provenance
 //!   attestation of its tarball alone, or the copy of that attestation's bundle under the
-//!   tarball's name; uses an action other than the download, the two attest actions and the
+//!   tarball's name, or the same two for its hostkeeper package (named by the sums job's
+//!   `package-version` output); uses an action other than the download, the two attest actions and the
 //!   upload; runs a command other than [`attest_commands`] (nothing built in this repository runs
 //!   while it holds `id-token: write`); runs on another runner than ubuntu; or does not upload the
 //!   bundles as `bundles`;
@@ -109,6 +112,17 @@ const BUNDLES: &str = "bundles";
 /// The artifact that holds `SHA256SUMS`.
 const SUMS: &str = "sha256sums";
 
+/// The hostkeeper package version a build job names its package by: the release version and the
+/// first 12 digits of the commit, what the binary's `--version` prints.
+pub const PACKAGE_VERSION: &str = "$RELEASE_VERSION+${GITHUB_SHA::12}";
+
+/// The hostkeeper version the packages need: the first whose loader reads `platform`.
+pub const MIN_HOSTKEEPER: &str = "0.1.0";
+
+/// The check of the macOS package's binary: its code signature, where hostkeeper's unpack of the
+/// build job put it.
+pub const CODESIGN: &str = "codesign --verify --strict \"$RUNNER_TEMP/hostkeeper/packages/tierstore/$RELEASE_VERSION+${GITHUB_SHA::12}/bin/tierstore\"";
+
 /// The `run:` commands of the build job of `b`, in order.
 pub fn build_commands(b: &Build) -> Vec<String> {
     let platform = b.platform;
@@ -135,15 +149,25 @@ pub fn build_commands(b: &Build) -> Vec<String> {
             "tar -xzf \"dist/tierstore-${{GITHUB_SHA}}-{platform}.tar.gz\" -C \"$RUNNER_TEMP/unpacked\" tierstore"
         ),
         "cargo xtask build-commit \"$RUNNER_TEMP/unpacked/tierstore\" \"$GITHUB_SHA\" --version \"$RELEASE_VERSION\"".to_owned(),
+        format!(
+            "cargo xtask release hostkeeper-package --binary \"target/$TARGET/release/tierstore\" --version \"{PACKAGE_VERSION}\" --min-hostkeeper {MIN_HOSTKEEPER} --platform {platform} --out dist"
+        ),
+        format!(
+            "cargo xtask verify-assets hostkeeper-package dist --version \"{PACKAGE_VERSION}\" --platform {platform} --scratch \"$RUNNER_TEMP/hostkeeper\""
+        ),
     ];
     if b.tests {
         commands.insert(3, MAC_TESTS.to_owned());
+    }
+    if b.platform == "macos-arm64" {
+        commands.push(CODESIGN.to_owned());
     }
     commands
 }
 
 /// The `run:` commands of `attest` for `platforms`, in order: the two checks of the sums, then
-/// the copy of each platform's bundle.
+/// the copy of each platform's bundle, then the copy of each platform's hostkeeper package's
+/// bundle.
 pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
     let mut commands = vec![
         "/usr/bin/sha256sum --check --strict <<< \"$SUMS_SHA256  dist/SHA256SUMS\"".to_owned(),
@@ -154,8 +178,21 @@ pub fn attest_commands(platforms: &[&str]) -> Vec<String> {
             "cp \"$BUNDLE\" \"dist/tierstore-${{GITHUB_SHA}}-{platform}.tar.gz.sigstore.json\""
         ));
     }
+    for platform in platforms {
+        commands.push(package_copy(platform));
+    }
     commands
 }
+
+/// The copy of the bundle of the hostkeeper package of `platform` under the package's name.
+pub fn package_copy(platform: &str) -> String {
+    format!(
+        "cp \"$BUNDLE\" \"dist/tierstore-${{PACKAGE_VERSION}}-{platform}.tar.zst.sigstore.json\""
+    )
+}
+
+/// The version of the hostkeeper packages, as the attest job reads it: the sums job's output.
+pub const PACKAGE_VERSION_OUTPUT: &str = "${{ needs.sums.outputs.package-version }}";
 
 /// Whether the artifact `name` is taken by the download `pattern`, where `*` stands for any run
 /// of characters (the only wildcard these workflows use).
@@ -591,6 +628,7 @@ fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
                 "attest: the bundle of {platform} is not copied as `{copy}` from {output}"
             ));
         }
+        problems.extend(package_attest_problems(attest, &provenance_steps, platform));
     }
     problems.extend(action_problems(
         "attest",
@@ -620,6 +658,41 @@ fn attest_problems(attest: Option<&Node>, platforms: &[&str]) -> Vec<String> {
     if bundle_uploads != [(Some(BUNDLES), Some("dist/*.sigstore.json"))] {
         problems.push(format!(
             "attest: uploads {bundle_uploads:?}, not [\"{BUNDLES}\"] from dist/*.sigstore.json"
+        ));
+    }
+    problems
+}
+
+/// One line per way `attest` does not sign the hostkeeper package of `platform` as its own
+/// subject, by the name the sums job's `package-version` output gives it, and copy that
+/// attestation's bundle under the package's name.
+fn package_attest_problems(
+    attest: Option<&Node>,
+    provenance_steps: &[&Node],
+    platform: &str,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let package = format!("dist/tierstore-{PACKAGE_VERSION_OUTPUT}-{platform}.tar.zst");
+    let id = format!("provenance-hostkeeper-{platform}");
+    let own = provenance_steps.iter().any(|s| {
+        at(s, &["id"]) == Some(id.as_str())
+            && at(s, &["with", "subject-path"]) == Some(package.as_str())
+    });
+    if !own {
+        problems.push(format!(
+            "attest: no provenance attestation `{id}` of {package} alone"
+        ));
+    }
+    let output = format!("${{{{ steps.{id}.outputs.bundle-path }}}}");
+    let copy = package_copy(platform);
+    let copied = steps(attest).iter().any(|s| {
+        at(s, &["env", "BUNDLE"]) == Some(output.as_str())
+            && at(s, &["env", "PACKAGE_VERSION"]) == Some(PACKAGE_VERSION_OUTPUT)
+            && at(s, &["run"]).is_some_and(|r| r.trim_end() == copy)
+    });
+    if !copied {
+        problems.push(format!(
+            "attest: the bundle of the hostkeeper package of {platform} is not copied as `{copy}` from {output} with PACKAGE_VERSION {PACKAGE_VERSION_OUTPUT}"
         ));
     }
     problems
