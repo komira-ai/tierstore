@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 770" width="960" height="770" role="img" aria-label="Sequence diagram of a put over an existing key: Client, Node, Hot tier, Cold tier. The node takes the entry of the key, reads both tiers, evaluates If-None-Match and If-Match against the tags of the current version, declares the replacement on the entry, replaces the hot object atomically on its tag, then moves the entry to PENDING with a compare-and-swap, which is the acknowledgement point. The leader later replaces the cold copy.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 770" width="960" height="770" role="img" aria-label="Sequence diagram of a put over an existing key: Client, Node, Hot tier, Cold tier. The node takes the entry of the key, reads both tiers, evaluates If-None-Match and If-Match against the ETag of the current version, declares the replacement on the entry, replaces the hot object atomically on its tag, then moves the entry to PENDING with a compare-and-swap, which is the acknowledgement point. The leader later replaces the cold copy.">
 <title>An overwrite: take the entry, find the key, check the condition, replace in hot, then acknowledge</title>
 <defs><marker id="seq-overwrite-put-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-overwrite-put-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
 <style>
@@ -31,8 +31,8 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="340" y1="76" x2="340" y2="638" class="ln-d"/>
 <line x1="600" y1="76" x2="600" y2="638" class="ln-d"/>
 <line x1="840" y1="76" x2="840" y2="638" class="ln-d"/>
-<text x="225" y="112" class="t-m lbl" text-anchor="middle">0  PUT key (streamed body)</text>
-<text x="225" y="128" class="t-m lbl" text-anchor="middle">optional If-None-Match: * or If-Match: "tag"</text>
+<text x="225" y="112" class="t-m lbl" text-anchor="middle">0  PUT key (body; key may delete and write)</text>
+<text x="225" y="128" class="t-m lbl" text-anchor="middle">optional If-None-Match: * or If-Match: "etag"</text>
 <line x1="110" y1="140" x2="340" y2="140" class="ln" marker-end="url(#seq-overwrite-put-ak)"/>
 <text x="470" y="166" class="t-m lbl" text-anchor="middle">1  create _entries/&lt;sha256(key)&gt;, create-only</text>
 <text x="470" y="182" class="t-m lbl" text-anchor="middle">the entry (PUT, HELD, this node); on EXISTS see the take table</text>
@@ -46,7 +46,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <rect x="30" y="334" width="900" height="64" rx="5" fill="#FFFFFF"/>
 <rect x="30" y="334" width="900" height="64" rx="5" class="box-p"/>
 <text x="40" y="354" class="t-m">3  Conditions, decided here, under the entry. Key absent in both tiers: If-Match is 404 NoSuchKey, else this is a new-key put (the put diagram).</text>
-<text x="40" y="370" class="t-m">Key present: If-None-Match: * is 412 and the entry is freed. If-Match is 412 unless the tag is one of the tags of the current version (section 4).</text>
+<text x="40" y="370" class="t-m">Key present: If-None-Match: * is 412 and the entry is freed. If-Match is 412 unless the ETag is that of the current version (section 4).</text>
 <text x="40" y="386" class="t-m">A cold tier that cannot be asked: free the entry, 503 (fails closed, as for a new key).</text>
 <text x="470" y="412" class="t-m lbl" text-anchor="middle">4  CAS the entry, If-Match: (PUT,HELD) to (PUT,HELD,replace)</text>
 <text x="470" y="428" class="t-m lbl" text-anchor="middle">declares that the cold copy, if any, is the older version</text>

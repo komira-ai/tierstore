@@ -46,7 +46,7 @@ Goals:
 
 Non-goals:
 
-- Versioning or object locking. Overwrite was a non-goal; it is decided (section 15, decision 13) and designed in [overwrite.md](overwrite.md), and until it is built a put of an existing key is still 412.
+- Versioning or object locking. Overwrite was a non-goal; it is decided (section 15, decision 14) and designed in [overwrite.md](overwrite.md), and until it is built a put of an existing key is still 412.
 - Transactions across keys.
 - Recovery of a lost hot tier: objects not yet copied to the cold tier are lost with it.
 - Scrubbing stored objects for bit rot.
@@ -663,7 +663,7 @@ An interface is a front over the same proxy. `port` is the IPv4 wildcard at that
 
 **(e) Format versioning and the compatibility test.** What: a version in each stored format, or the written additive-only rule enforced by a test that reads the previous release's objects, run in both directions. Why: the entry body carries `v` from the start, but the older formats do not, and the rollout depends on the rule. Touches: the stored-format fixtures and a compatibility test per format.
 
-**(f) Overwrite (decided 2026-11-05, designed, not built).** What: a put, a put with `If-Match`, the completion of a multipart upload and a copy replace an existing key, last writer wins, with S3's answers and strong read-after-write consistency through one tierstore. Why: clients use tierstore exactly as they use S3, and S3 overwrites (gap G10, also G11 and G31). Touches: the entry body (two optional fields), the put, the leader's copy, the version token and the conditionals of the reads, the local cache's revalidation, the scoped and presigned keys, and a rollout gate in `_tiering/format`. The design, its diagrams, the edge cases, the crash table, the compatibility tests and the order of the pull requests are in [overwrite.md](overwrite.md).
+**(g) Overwrite (decided 2026-11-05, designed, not built).** What: a put, a put with `If-Match`, the completion of a multipart upload and a copy replace an existing key, last writer wins, with S3's answers and strong read-after-write consistency through one tierstore. Why: clients use tierstore exactly as they use S3, and S3 overwrites (gap G10, also G11 and G31). Touches: the entry body (two optional fields), the put, the leader's copy, the ETag and the conditionals of the reads, the local cache (freshness by the object's `Cache-Control`, otherwise revalidation), and the scoped and presigned keys (as in S3, the right to write includes overwriting; no delete right is needed, and a scoped key overwrites only under its own write prefixes). An overwrite is a delete followed by a write. The design, its diagrams, the edge cases, the crash table, the compatibility tests and the order of the pull requests are in [overwrite.md](overwrite.md).
 
 ## 15. Decisions
 
@@ -681,7 +681,7 @@ The decisions of 2026-11-03, taken by the CEO on the design as drafted (1 to 7, 
 10. **Reserved prefixes are filtered once, in the proxy core.** The proxy refuses get, head, put, delete and multipart of a reserved key and drops reserved keys from every listing, hot and cold; the fronts have no filter of their own. Sections 5 and 7.
 11. **Every arbitrary number is config with a default.** The table of keys after the timings in section 6.9 lists the keys and defaults (usage refresh, staleness limit, D, margin, idle back-off from 1 to 10 s, lease, copy-back cap and backlog of 16 MiB, and the rest). The values of `copy_back_backlog_bytes` and the names of the keys that do not exist yet are the design's proposal.
 12. **In configuration C the local cache sits in front of the proxy.** Cache hits skip the hot tier, and the hot+cold pair is the cache's upstream through the same store interface, in the same process or across processes. Section 4.
-13. **Overwrite is supported, like S3: last writer wins.** Decided by the CEO on 2026-11-05. A plain put over an existing key replaces it; `If-Match` and `If-None-Match` work on a put and on the completion of a multipart upload; a copy may name an existing key. Formats change only by adding optional fields; the feature is gated in `_tiering/format` so that it is off while a node of the previous release runs. Designed in [overwrite.md](overwrite.md); not built, so sections 1 to 14 above describe the write-once code until its pull requests land and rewrite them.
+14. **Overwrite is supported, like S3: last writer wins.** Decided by the CEO on 2026-11-05. A plain put over an existing key replaces it; `If-Match` and `If-None-Match` work on a put and on the completion of a multipart upload; a copy may name an existing key. Formats change only by adding optional fields; there is no switch, so the operator upgrades every node before clients overwrite. Designed in [overwrite.md](overwrite.md); not built, so sections 1 to 14 above describe the write-once code until its pull requests land and rewrite them.
 
 ## 16. Glossary
 
