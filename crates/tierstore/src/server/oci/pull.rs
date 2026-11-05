@@ -6,7 +6,7 @@
 //! request is answered from the store and never reaches the upstream.
 //!
 //! - A manifest by digest: `GET /v2/<name>/manifests/<digest>` upstream. The bytes are read whole
-//!   (at most [`MAX_MANIFEST_BYTES`]), must be a manifest (see `manifest`) and must hash to the
+//!   (at most `params.max_manifest_bytes`), must be a manifest (see `manifest`) and must hash to the
 //!   digest, and are stored by it.
 //! - A manifest by tag: the same request with the tag. The manifest is stored by the digest its
 //!   bytes hash to, and the tag's first version is created (see `tags`) with the create-only
@@ -61,7 +61,7 @@ use super::metrics::Outcome;
 use super::names::Digest;
 use super::push::{Answer, Refusal, Tally, counted};
 use super::upstream::{Upstream, UpstreamError};
-use super::{MAX_MANIFEST_BYTES, OciFront, echoed, error, manifest, store_failed, tags};
+use super::{OciFront, echoed, error, manifest, store_failed, tags};
 use crate::Error;
 use crate::server::ops::detached;
 
@@ -113,7 +113,10 @@ impl OciFront {
             .map_err(failed)?;
         let failed =
             |why: UpstreamError| pull_failed(&why, &path, MANIFEST_UNKNOWN, detail.clone());
-        let body = reply.bytes(MAX_MANIFEST_BYTES).await.map_err(failed)?;
+        let body = reply
+            .bytes(self.sizes.manifest_bytes)
+            .await
+            .map_err(failed)?;
         if let Err(why) = manifest::media_type(&body) {
             tracing::warn!("tierstore: oci: the upstream's {path} is not a manifest: {why}");
             return Err(unavailable(
@@ -172,7 +175,7 @@ impl OciFront {
         name: &str,
         tag: &str,
     ) -> Result<Digest, Answer> {
-        let detail = json!({ "tag": echoed(tag) });
+        let detail = json!({ "tag": echoed(tag, self.sizes.echo_bytes) });
         let (body, digest) = self.fetch_manifest(upstream, name, tag, &detail).await?;
         let key = self.prefix.key(&digest);
         self.keep_manifest(&key, body, detail.clone()).await?;
@@ -236,7 +239,7 @@ impl OciFront {
         if announced == *stored {
             return Ok(announced);
         }
-        let detail = json!({ "tag": echoed(tag) });
+        let detail = json!({ "tag": echoed(tag, self.sizes.echo_bytes) });
         let fetched = self.fetch_manifest(upstream, name, tag, &detail).await;
         let (body, digest) = fetched.map_err(|_| format!("pulling {path} failed"))?;
         if digest == *stored {
