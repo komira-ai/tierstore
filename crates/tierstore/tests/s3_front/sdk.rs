@@ -282,7 +282,13 @@ async fn sdk_lists_the_one_bucket() {
         let names: Vec<_> = found.buckets().iter().map(|b| b.name().unwrap()).collect();
         assert_eq!(names, [BUCKET]);
         let first = &found.buckets()[0];
-        assert_eq!(first.creation_date().map(|date| date.secs()), Some(0));
+        // The store has no format object here, so the date is the start of the server: after 2020,
+        // never the Unix epoch.
+        let created = first.creation_date().map(|date| date.secs());
+        assert!(
+            created.is_some_and(|secs| secs > 1_577_836_800),
+            "{created:?}"
+        );
         assert_eq!(first.bucket_region(), Some("us-east-1"));
         assert_eq!(
             found.owner().and_then(|o| o.display_name()),
