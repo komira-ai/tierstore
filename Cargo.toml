@@ -27,6 +27,8 @@ aws-smithy-http-client = { version = "1.1.4", default-features = false, features
 base64 = "0.23.1"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
+# CRC-64/NVMe, the checksum that the AWS SDKs send by default (MIT or Apache-2.0).
+crc = "3.4.0"
 # The hardware CRC-32C (SSE4.2 / ARMv8) with a portable fallback.
 crc32c = "0.6.8"
 crc32fast = "1.5.2"
