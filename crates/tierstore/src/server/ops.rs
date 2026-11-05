@@ -16,6 +16,7 @@ use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::handover::hand_over;
+use super::list_token;
 use super::listing;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
@@ -509,7 +510,8 @@ impl Server {
             max_keys + 1
         };
         let backend = self.backend.as_ref();
-        let page = listing::page(backend, query, prefix, delimiter, max_keys, batch).await?;
+        let start = list_token::start(query)?;
+        let page = listing::page(backend, prefix, delimiter, start, max_keys, batch).await?;
         let listing = Listing {
             bucket: &self.config.bucket,
             prefix,
@@ -521,7 +523,7 @@ impl Server {
             owner: query.get("fetch-owner") == Some("true"),
             objects: &page.objects,
             prefixes: &page.prefixes,
-            next: page.next,
+            next: page.next.as_ref().map(list_token::token),
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))
     }

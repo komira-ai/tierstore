@@ -1,11 +1,12 @@
-//! The walk of a ListObjectsV2 page: which keys are entries of it, and where the next page
-//! starts. With a `delimiter` the keys under one prefix fold into one `CommonPrefixes` entry,
-//! as they do for S3.
+//! The walk of one page of a listing of keys: which keys are entries of it, and where the next
+//! page starts. With a delimiter the keys under one prefix fold into one common prefix, as they
+//! do for S3. Nothing here is S3's wire: not the XML, not the spelling of a token, not an error
+//! code. The front that answers a listing (the S3 front, in `ops.rs`, with `list_token.rs` and
+//! `xml.rs`) reads its request into a prefix, a delimiter, a [`Start`] and a size, calls
+//! [`page`], and writes the [`Page`] in its own format, so another front (a JSON listing of a
+//! GCS bucket, a directory listing) can use the same walk and give its own tokens.
 
-use crate::{Backend, Listed};
-
-use super::reply::S3Error;
-use super::request::Query;
+use crate::{Backend, Error, Listed};
 
 /// One entry of a page, which counts one against `max-keys`.
 enum Entry {
@@ -16,64 +17,20 @@ enum Entry {
 }
 
 /// Where a page starts.
-enum Start {
+pub(super) enum Start {
     /// After a key (a key that need not exist), as `start-after` and the token of an object do.
     After(String),
-    /// After every key that starts with the prefix: the token of a common prefix, so that the
+    /// After every key that starts with the prefix: the place after a common prefix, so that the
     /// next page does not start with that prefix again.
     PastPrefix(String),
 }
 
-/// One page: its objects and common prefixes, each in key order, and the token of the next
-/// page if the listing goes on.
+/// One page: its objects and common prefixes, each in key order, and where the next page starts
+/// if the listing goes on.
 pub(super) struct Page {
     pub(super) objects: Vec<Listed>,
     pub(super) prefixes: Vec<String>,
-    pub(super) next: Option<String>,
-}
-
-/// The mark of the token of a common prefix. It is not a hexadecimal digit, so it tells that
-/// token from the token of an object, which is the hexadecimal of its key (the only token
-/// before common prefixes were listed, and still the token of an object).
-const PREFIX_MARK: char = 'p';
-
-/// The token of the page after `entry`.
-fn token(entry: &Entry) -> String {
-    match entry {
-        Entry::Object(listed) => hex::encode(&listed.key),
-        Entry::Prefix(prefix) => format!("{PREFIX_MARK}{}", hex::encode(prefix)),
-    }
-}
-
-/// Where the page a token stands for starts.
-fn untoken(token: &str) -> Result<Start, S3Error> {
-    let bad = || S3Error::invalid("the continuation token is not one this server gave");
-    let (hexed, prefix) = match token.strip_prefix(PREFIX_MARK) {
-        Some(rest) => (rest, true),
-        None => (token, false),
-    };
-    let bytes = hex::decode(hexed).map_err(|_| bad())?;
-    let text = String::from_utf8(bytes).map_err(|_| bad())?;
-    // A common prefix has the delimiter in it, so it is never empty.
-    if prefix && text.is_empty() {
-        return Err(bad());
-    }
-    Ok(if prefix {
-        Start::PastPrefix(text)
-    } else {
-        Start::After(text)
-    })
-}
-
-/// Where a listing starts: after what its continuation token stands for, else after
-/// `start-after`, else at the first key.
-fn start(query: &Query) -> Result<Option<Start>, S3Error> {
-    match query.get("continuation-token") {
-        Some(text) => untoken(text).map(Some),
-        None => Ok(query
-            .get("start-after")
-            .map(|key| Start::After(key.to_owned()))),
-    }
+    pub(super) next: Option<Start>,
 }
 
 /// The common prefix of `key` for a request with `prefix` and `delimiter`: `prefix`, then the
@@ -85,18 +42,25 @@ fn fold(key: &str, prefix: &str, delimiter: &str) -> Option<String> {
     Some(format!("{prefix}{}", &rest[..end]))
 }
 
+/// Where the page after `entry` starts.
+fn resume(entry: &Entry) -> Start {
+    match entry {
+        Entry::Object(listed) => Start::After(listed.key.clone()),
+        Entry::Prefix(prefix) => Start::PastPrefix(prefix.clone()),
+    }
+}
+
 /// The page of a listing of `prefix` with at most `max_keys` entries, `batch` keys being read
 /// from the backend at a time. (Without a delimiter every key is an entry, and one read of
 /// `max_keys + 1` keys is enough; the caller says so with `batch`.)
 pub(super) async fn page(
     backend: &dyn Backend,
-    query: &Query,
     prefix: &str,
     delimiter: Option<&str>,
+    start: Option<Start>,
     max_keys: usize,
     batch: usize,
-) -> Result<Page, S3Error> {
-    let start = start(query)?;
+) -> Result<Page, Error> {
     // A page of no entries reads nothing, and is not truncated (as for S3).
     if max_keys == 0 {
         let (objects, prefixes) = (Vec::new(), Vec::new());
@@ -142,7 +106,7 @@ pub(super) async fn page(
     }
     let truncated = entries.len() > max_keys;
     entries.truncate(max_keys);
-    let next = truncated.then(|| token(&entries[max_keys - 1]));
+    let next = truncated.then(|| resume(&entries[max_keys - 1]));
     let (mut objects, mut prefixes) = (Vec::new(), Vec::new());
     for entry in entries {
         match entry {
