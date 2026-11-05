@@ -317,3 +317,22 @@ async fn the_taken_sockets_come_with_their_addresses_and_copies() {
         .collect();
     assert_eq!(copies, vec![(Front::S3, a), (Front::Oci, b)]);
 }
+
+/// Asserts (T10, in-process) that every socket taken over the control socket is close-on-exec,
+/// though the kernel hands descriptors over without the flag: a program the new instance starts
+/// does not hold its listening sockets. Catches a taker that leaves the flag as it came.
+#[tokio::test]
+async fn the_taken_sockets_are_close_on_exec() {
+    use rustix::io::{FdFlags, fcntl_getfd};
+
+    let (_dir, path) = scratch();
+    let ((s3, a), (oci, b)) = (listening(), listening());
+    let sockets = vec![socket(Front::S3, &s3), socket(Front::Oci, &oci)];
+    let serving = tokio::spawn(Offer::bind(&path, sockets).unwrap().serve());
+    let taken = taking(&handoff(path), &[a], &[b]).await.unwrap().unwrap();
+    serving.await.unwrap();
+    for listener in taken.s3.iter().chain(&taken.oci) {
+        let flags = fcntl_getfd(listener).unwrap();
+        assert!(flags.contains(FdFlags::CLOEXEC), "{flags:?}");
+    }
+}
