@@ -257,3 +257,82 @@ async fn an_answer_that_is_not_the_protocol_is_refused() {
         fake.await.unwrap();
     }
 }
+
+/// A copy that the system refuses, as a process out of descriptors (EMFILE) does.
+fn no_copy(_: &TcpListener) -> std::io::Result<StdListener> {
+    Err(std::io::Error::from_raw_os_error(24))
+}
+
+/// Asserts (T05) that a taker that cannot make the copies of the sockets for its own offer (the
+/// process is out of descriptors) answers `nak` before the running instance's `done`: the take is
+/// an error saying what was being done, the running instance goes on serving with its control
+/// socket, and a later taker that can copy takes the sockets. Catches a taker that fails to copy
+/// only after the running instance has begun its drain.
+#[tokio::test]
+async fn a_taker_that_cannot_copy_the_sockets_refuses_before_the_running_instance_drains() {
+    let (_dir, path) = scratch();
+    let (s3, a) = listening();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &s3)])
+            .unwrap()
+            .serve(),
+    );
+    let want = Want { s3: &[a], oci: &[] };
+    let error = super::exchange(&path, &want, no_copy).await.err().unwrap();
+    assert_eq!(
+        error.to_string(),
+        "hand-off: taking over a socket: Too many open files (os error 24)"
+    );
+    assert!(
+        path.exists(),
+        "the running instance keeps its control socket"
+    );
+    assert!(!serving.is_finished());
+    let taken = taking(&handoff(path.clone()), &[a], &[]).await.unwrap();
+    assert!(taken.is_some());
+    serving.await.unwrap();
+}
+
+/// Asserts that the sockets taken come with their addresses and a copy of each, made before the
+/// `ack`: the addresses are the offered ones, by front, and each copy is the same socket as its
+/// original, offered under the same front.
+#[tokio::test]
+async fn the_taken_sockets_come_with_their_addresses_and_copies() {
+    let (_dir, path) = scratch();
+    let ((s3, a), (oci, b)) = (listening(), listening());
+    let sockets = vec![socket(Front::S3, &s3), socket(Front::Oci, &oci)];
+    drop((s3, oci));
+    let serving = tokio::spawn(Offer::bind(&path, sockets).unwrap().serve());
+    let taken = taking(&handoff(path.clone()), &[a], &[b])
+        .await
+        .unwrap()
+        .unwrap();
+    serving.await.unwrap();
+    assert_eq!(taken.s3_addrs, vec![a]);
+    assert_eq!(taken.oci_addrs, vec![b]);
+    let copies: Vec<_> = taken
+        .copies
+        .iter()
+        .map(|copy| (copy.front(), copy.local_addr().unwrap()))
+        .collect();
+    assert_eq!(copies, vec![(Front::S3, a), (Front::Oci, b)]);
+}
+
+/// Asserts (T10, in-process) that every socket taken over the control socket is close-on-exec,
+/// though the kernel hands descriptors over without the flag: a program the new instance starts
+/// does not hold its listening sockets. Catches a taker that leaves the flag as it came.
+#[tokio::test]
+async fn the_taken_sockets_are_close_on_exec() {
+    use rustix::io::{FdFlags, fcntl_getfd};
+
+    let (_dir, path) = scratch();
+    let ((s3, a), (oci, b)) = (listening(), listening());
+    let sockets = vec![socket(Front::S3, &s3), socket(Front::Oci, &oci)];
+    let serving = tokio::spawn(Offer::bind(&path, sockets).unwrap().serve());
+    let taken = taking(&handoff(path), &[a], &[b]).await.unwrap().unwrap();
+    serving.await.unwrap();
+    for listener in taken.s3.iter().chain(&taken.oci) {
+        let flags = fcntl_getfd(listener).unwrap();
+        assert!(flags.contains(FdFlags::CLOEXEC), "{flags:?}");
+    }
+}

@@ -3,7 +3,9 @@
 //! leader finds half done, is done again from the start.
 
 use super::EntryReconciler;
-use crate::backend::ByteRange;
+use futures::StreamExt;
+
+use crate::backend::{ByteRange, ReadBody};
 use crate::entry::{EntryOp, EntryState, Outcome, Seen, Step};
 use crate::{Error, Meta};
 
@@ -141,9 +143,22 @@ impl EntryReconciler {
         if self.lease.ensure_margin().await {
             return Ok(());
         }
-        Err(Error::Unavailable(
-            "less than the margin of the lease is left".to_owned(),
-        ))
+        Err(lease_lapsed())
+    }
+
+    /// `body`, cut short with [`Error::Unavailable`] at the first chunk that is asked for once less
+    /// than the margin of the lease is left, so that a write fed from it stops instead of
+    /// running on after this process has lost the lease.
+    pub(super) fn while_leased(&self, body: ReadBody) -> ReadBody {
+        let lease = self.lease.clone();
+        body.map(move |chunk| {
+            if lease.margin_ok() {
+                chunk
+            } else {
+                Err(lease_lapsed())
+            }
+        })
+        .boxed()
     }
 
     /// Makes the cold tier hold the hot object of `key`: nothing if the hot tier has none, a copy
@@ -259,4 +274,9 @@ impl EntryReconciler {
         }
         Ok(())
     }
+}
+
+/// The failure of a step that finds less than the margin of the lease left.
+fn lease_lapsed() -> Error {
+    Error::Unavailable("less than the margin of the lease is left".to_owned())
 }

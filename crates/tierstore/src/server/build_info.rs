@@ -37,14 +37,29 @@ pub const RELEASE_VERSION: &str = concat!(
 /// sockets when `server.handoff_socket` is set (see `server::handoff`). The update hook's
 /// `prepare` step reads the list of the staged and of the previous release for it
 /// (`update_hook::HANDOFF_CAPABILITY`, the same constant) and records a hand-over only when both
-/// list it. This list is all `--capabilities` prints.
-pub const CAPABILITIES: &[&str] = &["handover-v1", HANDOFF_SOCKET_CAPABILITY];
+/// list it.
+///
+/// [`HANDOFF_CACHE_CAPABILITY`] says the same of a build node and of a storage node with
+/// `[local_cache]`. `prepare` needs both releases to list it too when the node's configuration has
+/// `[local_cache]`: a release with only `handoff-socket-v1` refuses the key in that shape, so its
+/// instance has no control socket to take from. This list is all `--capabilities` prints.
+pub const CAPABILITIES: &[&str] = &[
+    "handover-v1",
+    HANDOFF_SOCKET_CAPABILITY,
+    HANDOFF_CACHE_CAPABILITY,
+];
 
 /// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
 /// sockets of the instance that answers on that control socket (or binds its own where none
 /// answers), offers them there in its turn, and drains when a successor takes them; the wait for
 /// the running instance is `server.handoff_wait`.
 pub const HANDOFF_SOCKET_CAPABILITY: &str = "handoff-socket-v1";
+
+/// `handoff-cache-v1`: a build node and a storage node with `[local_cache]` read
+/// `server.handoff_socket` and `server.handoff_wait` and hand their listening sockets over as a
+/// storage node does (see [`HANDOFF_SOCKET_CAPABILITY`]); the cache directory lock keeps the new
+/// instance read-only until the old one has exited.
+pub const HANDOFF_CACHE_CAPABILITY: &str = "handoff-cache-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]
