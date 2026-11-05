@@ -378,6 +378,31 @@ async fn a_listing_that_never_gets_past_the_reserved_keys_stops_at_the_cap() {
     assert_eq!(stuck.pages.load(Ordering::SeqCst), u64::from(LISTING_CALLS));
 }
 
+/// Asserts that a listing, whole and in a page, gives for an object the cache keeps the tag a
+/// HEAD through the cache gives (the one recorded at the fill, with no call upstream, even after
+/// the upstream's object has other bytes), and for an object it does not keep the upstream's.
+#[tokio::test]
+async fn a_listed_tag_is_the_tag_a_head_through_the_cache_gives() {
+    let rig = Rig::new("tscache-list-tag");
+    rig.put("cas/kept", b"first").await;
+    rig.put("plain", b"second").await;
+    rig.get("cas/kept").await.unwrap();
+    rig.replace("cas/kept", b"other").await;
+    let upstream = rig.tamper.head("cas/kept").await.unwrap().tag;
+
+    let kept = rig.cache.head("cas/kept").await.unwrap().tag;
+    assert_ne!(kept, upstream);
+    let plain = rig.tamper.head("plain").await.unwrap().tag;
+    let heads = rig.calls(Op::Head);
+    let tags = |listed: Vec<Listed>| -> Vec<(String, String)> {
+        listed.into_iter().map(|o| (o.key, o.tag)).collect()
+    };
+    let want = [("cas/kept".to_owned(), kept), ("plain".to_owned(), plain)];
+    assert_eq!(tags(rig.cache.list("").await.unwrap()), want);
+    assert_eq!(tags(rig.cache.list_page("", None, 10).await.unwrap()), want);
+    assert_eq!(rig.calls(Op::Head), heads);
+}
+
 /// Asserts that the cap on the pages of one listing is the `listing_calls` of the settings: with 7,
 /// a listing of objects that never gets past the reserved keys asks the upstream seven times and
 /// says so in its error, and a listing of uploads does the same; and a cap of 0 is read as 1.

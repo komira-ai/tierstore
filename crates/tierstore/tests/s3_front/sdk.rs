@@ -654,3 +654,84 @@ async fn a_url_from_the_stock_presigner_is_accepted_once() {
         b"pack"
     );
 }
+
+/// Asserts that the `ETag` the SDK reads from each object of a ListObjectsV2 (plain, with
+/// `encoding-type=url` and `fetch-owner`, and by pages) is the one it reads from a HEAD and a
+/// GET of that object, quotes and all, for keys that need encoding, and that different bytes
+/// have different tags.
+#[tokio::test]
+async fn sdk_lists_the_etag_that_a_head_and_a_get_give() {
+    let h = serving().await;
+    let sdk = client(&h);
+    for (name, body) in [
+        ("t/a b", &b"one"[..]),
+        ("t/c&d", b"two"),
+        ("t/plain", b"three"),
+    ] {
+        put(&sdk, name, body).await.unwrap();
+    }
+    let listings = [
+        sdk.list_objects_v2().bucket(BUCKET).prefix("t/"),
+        sdk.list_objects_v2()
+            .bucket(BUCKET)
+            .prefix("t/")
+            .encoding_type(EncodingType::Url)
+            .fetch_owner(true),
+    ];
+    let names = ["t/a b", "t/c&d", "t/plain"];
+    let mut tags = Vec::new();
+    for request in listings {
+        let out = request.send().await.unwrap();
+        // The SDK does not decode the keys of `encoding-type=url`; the order is the same.
+        let listed: Vec<&str> = out
+            .contents()
+            .iter()
+            .map(|o| o.e_tag().expect("a tag"))
+            .collect();
+        assert_eq!(listed.len(), 3);
+        for (name, tag) in names.iter().zip(&listed) {
+            let head = sdk
+                .head_object()
+                .bucket(BUCKET)
+                .key(*name)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(head.e_tag(), Some(*tag), "{name}");
+            let got = sdk
+                .get_object()
+                .bucket(BUCKET)
+                .key(*name)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(got.e_tag(), Some(*tag), "{name}");
+            assert!(tag.starts_with('"') && tag.ends_with('"'), "{tag}");
+        }
+        assert_ne!(listed[0], listed[1]);
+        tags.push(listed.iter().map(|t| (*t).to_owned()).collect::<Vec<_>>());
+    }
+    assert_eq!(tags[0], tags[1]);
+    let first = page(&sdk, "t/", 1, None).await;
+    let second = sdk
+        .list_objects_v2()
+        .bucket(BUCKET)
+        .prefix("t/")
+        .max_keys(1)
+        .set_continuation_token(first.2)
+        .send()
+        .await
+        .unwrap();
+    let (key, tag) = (
+        second.contents()[0].key().unwrap(),
+        second.contents()[0].e_tag(),
+    );
+    let head = sdk
+        .head_object()
+        .bucket(BUCKET)
+        .key(key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.e_tag(), tag);
+}

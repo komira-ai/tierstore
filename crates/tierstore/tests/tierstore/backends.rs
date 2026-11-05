@@ -121,6 +121,33 @@ async fn a_listing_holds_the_keys_under_a_prefix_in_order() {
     conformance::a_listing_holds_the_keys_under_a_prefix_in_order(&backend).await;
 }
 
+/// Asserts that the tag of a listed object is the tag a HEAD of it gives.
+#[tokio::test]
+async fn a_listing_gives_the_tag_a_head_gives() {
+    let backend = MemoryBackend::new();
+    conformance::a_listing_gives_the_tag_a_head_gives(&backend).await;
+}
+
+/// Asserts that the tag of an object a directory tier lists is the tag a HEAD of it gives.
+#[tokio::test]
+async fn a_directory_listing_gives_the_tag_a_head_gives() {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tierstore-list-tag");
+    let backend = tierstore::DirBackend::open(dir.path()).unwrap();
+    conformance::a_listing_gives_the_tag_a_head_gives(&backend).await;
+}
+
+/// Asserts that a file of a directory tier too short to hold a content tag (so one that cannot be
+/// read as an object, as a HEAD of it says) is not listed, and that the objects beside it are.
+#[tokio::test]
+async fn a_directory_listing_leaves_out_a_file_without_a_tag() {
+    let dir = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "tierstore-list-short");
+    let backend = tierstore::DirBackend::open(dir.path()).unwrap();
+    backend.put("whole", body("bytes")).await.unwrap();
+    std::fs::write(dir.path().join("short"), b"abc").unwrap();
+    assert_eq!(keys(&backend).await, ["whole"]);
+    assert!(backend.head("short").await.is_err());
+}
+
 /// Asserts that a page of a listing holds at most `max_keys` keys that sort after the
 /// start-after key, in key order, that a page shorter than `max_keys` is the last, and that
 /// a page of none holds none.
