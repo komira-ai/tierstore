@@ -40,7 +40,8 @@ ureq = { version = "3.4.2", default-features = false, features = ["rustls-no-pro
 [dev-dependencies]
 # The tests of the hostkeeper package (tests/hostkeeper_package) read it with hostkeeper's own
 # code: the unpacker and the manifest loader, and the placed-path lint with the loader it is built
-# on (the root `Cargo.toml` says which commits and why two).
+# on, which also loads the macOS package's launchd job (the root `Cargo.toml` says which commits
+# and why two).
 hostkeeper-config.workspace = true
 hostkeeper-config-main.workspace = true
 hostkeeper-placed.workspace = true

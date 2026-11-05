@@ -24,6 +24,8 @@ The update hook of this tree still drives the slot units of `packaging/tierstore
 a/b instances, the hand-over through `server.handoff_socket` and the `[params]` the manifest names
 are its rewrite for hostkeeper, which has not landed. Until it has, no host runs this package.
 
-hostkeeper's manifest loader does not yet take a launchd plist as a unit file or a launchd label as
-a `run` entry, so it refuses the macOS package today; the test that loads it waits, ignored, until
-it does.
+hostkeeper's main manifest loader takes a launchd plist as a unit file and a launchd label as a
+`run` entry, and the tests load the macOS manifest and plist with it. Its unpacker on main does not
+yet know the manifest's `platform` key (komira-ai/hostkeeper#23, open), and #23's unpacker predates
+launchd jobs, so the test that unpacks the macOS package with hostkeeper waits, ignored, until one
+commit of hostkeeper has both.
