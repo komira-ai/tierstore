@@ -146,8 +146,8 @@ mod sleeper_tests;
 mod tiered;
 
 pub use backend::{
-    Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span, UploadsAfter,
-    Window,
+    Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Span,
+    UploadsAfter, Window,
 };
 pub use bounded::Bounded;
 pub use cache::CachedStore;

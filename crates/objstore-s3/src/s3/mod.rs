@@ -44,7 +44,7 @@ pub use multipart::{
 };
 pub use parts::{OpenUpload, UploadsPage};
 pub use streamed::{ObjectBody, ObjectRead};
-pub use tagged::{ObjectHead, StampedObject, StampedPage};
+pub use tagged::{ObjectHead, PutAnswer, StampedObject, StampedPage};
 pub use tuning::{READ_RETRIES, S3Tuning};
 
 use std::fmt;

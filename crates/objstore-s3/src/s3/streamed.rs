@@ -18,7 +18,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
-use super::tagged::{header, retrying};
+use super::tagged::{PutAnswer, header, retrying};
 use super::{Conn, MULTIPART_THRESHOLD, S3Store, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
@@ -179,6 +179,31 @@ impl S3Store {
         }
         let done = multipart::put(&self.conn, key, len, body, None).await?;
         done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+    }
+
+    /// [`put_stream_new_tagged`](Self::put_stream_new_tagged) for a caller that can do without the
+    /// tag: gives what the answer to the write that made the object says (a PUT's answer, or the
+    /// completion of the multipart upload, whose answer has an `ETag` and no `Last-Modified`),
+    /// and an answer with no `ETag` is not an error (the object is made).
+    ///
+    /// # Errors
+    /// As [`put_stream_new_tagged`](Self::put_stream_new_tagged), except that no `ETag` is not a
+    /// [`ObjectStoreError::Protocol`].
+    pub async fn put_stream_new_answered(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+    ) -> Result<PutAnswer, ObjectStoreError> {
+        if len <= MULTIPART_THRESHOLD {
+            let bytes = crate::gather(body, len).await?;
+            return self.put_new_answered(key, bytes).await;
+        }
+        let etag = multipart::put(&self.conn, key, len, body, None).await?;
+        Ok(PutAnswer {
+            etag,
+            modified_millis: None,
+        })
     }
 
     /// [`put_stream_if_match`](Self::put_stream_if_match) for a body whose length is not known,

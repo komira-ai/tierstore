@@ -670,3 +670,78 @@ async fn a_large_streamed_create_is_completed_create_only_and_gives_its_tag() {
     assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
     assert!(seen.lock().unwrap()[4].starts_with("DELETE "));
 }
+
+/// Asserts that a create-only streamed write that is answered, not tagged, gives what the answer of
+/// the PUT says: the `ETag` and the `Last-Modified` it carries, each absent when the answer has
+/// none (an answer with no `ETag` is a made object, not a protocol error as it is for the tagged
+/// write), that the request is the create-only PUT, that an object that exists is typed, and that a
+/// store without conditional writes refuses it before any request.
+#[tokio::test]
+async fn a_create_only_write_gives_the_etag_and_time_of_the_answer_when_it_has_them() {
+    let stamp = "last-modified: Tue, 03 Nov 2026 08:49:37 GMT";
+    let both = answer("200 OK", &["etag: \"made\"", stamp], "");
+    let (endpoint, seen) = script(vec![both]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_answered(key(), 3, zeros(3, None));
+    let got = put.await.unwrap();
+    assert_eq!(got.etag.as_deref(), Some("\"made\""));
+    assert_eq!(got.modified_millis, Some(1_793_695_777_000));
+    let head = seen.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(head.contains("\r\nif-none-match: *\r\n"), "{head}");
+
+    let (endpoint, _) = script(vec![answer("200 OK", &[], "")]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_answered(key(), 3, zeros(3, None));
+    let got = put.await.unwrap();
+    assert_eq!((got.etag, got.modified_millis), (None, None));
+
+    let refused = answer(
+        "412 Precondition Failed",
+        &[],
+        "<Error><Code>PreconditionFailed</Code></Error>",
+    );
+    let (endpoint, _) = script(vec![refused]).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_answered(key(), 3, zeros(3, None));
+    let err = put.await.unwrap_err();
+    assert!(matches!(err, ObjectStoreError::AlreadyExists(_)), "{err}");
+
+    let plain = S3Store::new(S3Config {
+        endpoint: "http://127.0.0.1:1".to_owned(),
+        region: "us-east-1".into(),
+        bucket: "test-bucket".into(),
+        credentials: Credentials::new("AKIDEXAMPLE", "secret"),
+        capabilities: Capabilities::default(),
+        connect_timeout: Duration::from_secs(5),
+        request_timeout: Duration::from_secs(5),
+        min_body_rate: None,
+    })
+    .unwrap();
+    let err = plain
+        .put_stream_new_answered(key(), 3, zeros(3, None))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ObjectStoreError::Unsupported(_)), "{err}");
+}
+
+/// Asserts that the completion of a multipart upload gives its `ETag` as the answer of the write,
+/// no time (a completion's answer has none), and that a completion whose answer names no `ETag` is
+/// a made object with no tag, not an error.
+#[tokio::test]
+async fn a_multipart_create_gives_the_etag_of_the_completion_and_no_time() {
+    let ok =
+        "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
+    let (endpoint, _) = script(upload_answers(answer("200 OK", &[], ok), false)).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let got = put.await.unwrap();
+    assert_eq!(got.etag.as_deref(), Some("\"joined-2\""));
+    assert_eq!(got.modified_millis, None);
+
+    let bare = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
+    let (endpoint, _) = script(upload_answers(answer("200 OK", &[], bare), false)).await;
+    let s = store(endpoint);
+    let put = s.put_stream_new_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
+    let got = put.await.unwrap();
+    assert_eq!((got.etag, got.modified_millis), (None, None));
+}
