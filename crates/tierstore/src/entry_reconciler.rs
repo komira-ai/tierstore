@@ -55,9 +55,10 @@
 //!    hot object older than [`EntryReconcilerConfig::stray_grace`] with no cold object and no entry
 //!    gets a `(PUT, PENDING)` entry, which the next step copies.
 //!
-//! An item that fails (a store call that fails, or less than the lease margin left) is tried again
-//! after a delay that starts at [`EntryReconcilerConfig::retry_min`] and doubles to
-//! [`EntryReconcilerConfig::retry_max`], so that a cold tier that is down is not asked about every
+//! An item that fails (a store call that fails, or less than the lease margin left that a renewal
+//! at once does not restore) is tried again after a delay that starts at
+//! [`EntryReconcilerConfig::retry_min`] and doubles to [`EntryReconcilerConfig::retry_max`], so
+//! that a cold tier that is down is not asked about every
 //! entry at every step.
 //!
 //! [`EntryReconciler::run`] steps without waiting while a step makes progress, waits

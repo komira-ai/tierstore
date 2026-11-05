@@ -71,7 +71,8 @@ refuses a key file that its group or others can read):
   list, delete, and the calls of a multipart upload;
 - `/etc/tierstore/daemons.key`: a read-only key (`server.read_only_key_files`), for the daemons that
   read blobs and must not write or delete them. A request signed with it may get and head an
-  object, list the bucket (objects, and the open multipart uploads) and head the bucket; a put, a
+  object, list the bucket (objects, and the open multipart uploads), head the bucket and read its region
+  (GetBucketLocation); a put, a
   delete, CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
   List one file for each read-only key, to give each reader a key of its own. The access key
@@ -180,7 +181,7 @@ and is longer than it:
 | DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
-| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
+| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the prefix, the prefix itself | no |
 
 A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
@@ -233,7 +234,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
-| the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
+| the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote (add the
@@ -299,12 +300,27 @@ AccessDenied` before any body is read:
 | a scoped key's URL for an object outside its read prefixes | 403 |
 | PUT, POST or DELETE of anything (parts too) with the URL of a key that reads | 403 |
 | a listing, a call on the bucket or the root | 403 |
-| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above and `x-id` | 403 |
+| GET or HEAD with `response-content-type`, `-disposition`, `-encoding`, `-language`, `-cache-control` or `-expires` signed into the URL | served, with that header set (see Response headers of a GET) |
+| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above, `x-id` and the six `response-*` ones | 403 |
 | a URL that is expired, has `X-Amz-Expires` of zero or over the cap, is malformed, is signed with another secret, names a key id the server does not have, or was edited after it was signed | 403 |
 
 A program in Rust that links the `tierstore` library with its `server` feature makes the URL with
 `tierstore::server::presign_get(&key, &request)`, as `presign_put` makes a PUT URL (see Presigned
 PUT URLs); any SDK presigner makes the same URL.
+
+### Response headers of a GET
+
+A GET or HEAD of an object, signed in the header or in a presigned URL, may carry `response-content-type`,
+`response-content-disposition`, `response-content-encoding`, `response-content-language`,
+`response-cache-control` and `response-expires` in its query, and the answer (200 or 206, and the
+HEAD) carries that header with the value given, in place of the object's own (the content type of an
+object is `application/octet-stream`), as S3 answers. The value is sent as it was given; a value that
+is not a header value (a line feed, a NUL) is `400 InvalidArgument`, and a parameter with an empty value
+is not applied. A 304, a 412 and every error answer carry none of them. A presigned URL signs the
+parameters with the rest of its query, so one added after the URL was made is `SignatureDoesNotMatch`.
+A GET or HEAD with one of the parameters and no signature at all (no `Authorization` header and no SigV4
+parameter in the query) is `400 InvalidRequest` ("Request specific response headers cannot be used for
+anonymous GET requests."), as S3 answers, and not the `403` of an unsigned request without them.
 
 ## The configuration file
 

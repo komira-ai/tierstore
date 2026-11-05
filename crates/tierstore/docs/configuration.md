@@ -266,11 +266,29 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
 | `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
+| `hot_store.retry_min` | duration, `1s` (1ms to 1h) | the delay before the reconciler tries again an entry whose item failed once; it doubles for each failure after the first |
+| `hot_store.retry_max` | duration, `60s` (1ms to 1h) | the longest delay of a failing item; not below `retry_min` |
+| `hot_store.stray_grace` | duration, `10m` (1ms to 8760h) | how old a hot object with no entry and no cold object must be before the stray sweep adopts it |
+| `hot_store.stray_interval` | duration, `24h` (1ms to 8760h) | how often the stray sweep runs again after the one at takeover |
+| `hot_store.stray_rate` | count, 100 (1 to 1000000) | the most cold lookups a second of the stray sweep |
+| `hot_store.copy_back_ttl` | duration, `10m` (1ms to 8760h) | how long a requested copy-back may wait before it is dropped without a copy |
+| `hot_store.copy_back_max` | count, 1000 (1 to 1000000) | the most copy-backs copied at a time; the rest are dropped without a copy |
+| `hot_store.usage_interval` | duration, `10s` (1ms to 1h) | how often the reconciler publishes the usage figure to `_tiering/usage` |
+| `hot_store.usage_scan_interval` | duration, `24h` (1ms to 8760h) | how often the hot tier is listed to measure its usage and pick the objects to evict, after the listing at takeover |
+| `hot_store.scan_pages` | count, 100 (1 to 100000) | the most pages of that listing read in one step of the reconciler |
+| `hot_store.candidate_limit` | count, 10000 (1 to 10000000) | the most eviction candidates kept from one listing, the oldest |
+| `hot_store.tag_record_limit` | count, 100000 (1 to 100000000) | the most keys whose copy tags are remembered, so that the eviction can skip the compare |
+| `hot_store.proxy_usage_stale_after` | duration, `30s` (1ms to 1h) | how long a proxy lets the usage object stand unchanged before it ignores it; longer than `usage_interval`. Not `usage_stale_after`, which is the limit of `/usagez` |
+| `hot_store.format_refresh` | duration, `5s` (1ms to 1h) | how long a proxy uses the format object it read before it reads it again, so how soon a pause reaches a proxy that writes |
+| `hot_store.entry_rounds` | count, 3 (1 to 100) | how many times a put or a delete looks again at an entry that vanished between its create and its read, before it answers 503 |
+| `hot_store.delete_wait` | duration, `30s` (1ms to 1h) | the most time a delete waits for the reconciler to release an entry, as the sum of its sleeps; keep it under the S3 request timeout of the clients |
+| `hot_store.delete_poll_min` | duration, `1s` (1ms to 1h) | the first sleep of that wait; each sleep after it is twice the one before; not above `delete_poll_max` or `delete_wait` |
+| `hot_store.delete_poll_max` | duration, `10s` (1ms to 1h) | the longest sleep of that wait |
 | `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
 | `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. |
 | `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |
 
-The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
+The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It refuses `retry_max` below `retry_min`, `delete_poll_max` or `delete_wait` below `delete_poll_min`, a `proxy_usage_stale_after` at or below `usage_interval`, and a value outside the range of its key, naming the key. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
 
 ## `[local_cache]`
 
@@ -308,7 +326,7 @@ The upstream is `[cold_store]`, with any `kind`. In place of `endpoint` it may h
 
 On main, not in v0.0.41. A registry the OCI front pulls from when its store has no such manifest or blob (a pull-through cache). It is an inline table in the params of an `oci` interface, for example `params = { addresses = ["127.0.0.1:5000"], upstream = { url = "https://registry.example" } }`. A storage node's file takes it, with or without `[local_cache]`; a build node's file is refused with it, because a pull is stored and a build node takes no writes.
 
-**This makes tierstore an outbound client.** Without the param the process only accepts connections for the registry front. With it, a request for an object the store lacks makes the process open a connection of its own to the upstream's address, and the host it runs on must be allowed to reach it. Nothing else of tierstore dials out for the front. A connection is made for each request and carries a plain `GET`: nothing is pooled and no state is kept between pulls.
+**This makes tierstore an outbound client.** Without the param the process only accepts connections for the registry front. With it, a request for an object the store lacks makes the process open a connection of its own to the upstream's address, and the host it runs on must be allowed to reach it. Nothing else of tierstore dials out for the front. A connection is made for each request and carries a plain `GET` (or a `HEAD` to re-check a tag): nothing is pooled and no state is kept between pulls.
 
 | Key | Type, default | What |
 | --- | --- | --- |
@@ -318,6 +336,7 @@ On main, not in v0.0.41. A registry the OCI front pulls from when its store has 
 | `params.upstream.ca_file` | path | PEM certificates the upstream's certificate may be issued by, besides the system's; read once at the start |
 | `params.upstream.timeout` | duration, `30s` | how long the upstream has to answer a request, and to send the next piece of a body; the time a whole body takes is not bounded |
 | `params.upstream.max_redirects` | count, 4 | the most redirects one request follows |
+| `params.upstream.recheck_timeout` | duration, `5s` | how long the whole re-check of a tag the store has may take, its `HEAD`, a login and a `GET` of a moved manifest together; past it the stored tag is served |
 
 For example, a registry at `registry.example` that wants a login is `url = "https://registry.example"` with `username` and `password_file`, as keys of the `upstream` table of the `oci` interface.
 
@@ -327,7 +346,7 @@ How it behaves:
 - A manifest by digest, a manifest by tag and a blob are pulled, as `GET /v2/<name>/manifests/<reference>` and `GET /v2/<name>/blobs/<digest>` of the upstream, with the `<name>` of the request. The store is still one namespace: an object that is in it is served for any name, and the upstream is asked only for what the store lacks. `tags/list` is the store's own and is not pulled.
 - A manifest is read whole (at most 4 MiB), must be a manifest, and is stored by the digest its bytes hash to; one asked for by digest that does not hash to it is refused. A tag is then pointed at the manifest. A blob is streamed into the store and hashed in the same pass, with no limit on its size and no copy of it in memory, and nothing is stored if it does not hash to its digest.
 - The client's request waits while the object is pulled and stored, and is then answered from the store as any other (a `Range` too; a `HEAD` of a blob that is not there pulls it). A later request never reaches the upstream. A client that goes away does not stop a blob being stored. Two requests for one missing object at once each pull it.
-- A tag that is in the store is never asked of the upstream again: it keeps pointing at the manifest it first pointed at, however the upstream moves it. A tag that moves is a push's to move.
+- A tag that is in the store is re-checked on each `GET` or `HEAD` of it: the process sends a `HEAD` of the manifest to the upstream (with the same login, `timeout` and redirects) and reads its `Docker-Content-Digest`. If that is the digest the newest version of the tag holds, the stored manifest is served and no `GET` is made. If it differs, the manifest is pulled by the tag, stored, and the next version of the tag is written (versions are immutable and the newest wins; the old ones stay), and that manifest is served. If the `HEAD` fails (the upstream cannot be reached, answers late, answers 429, 5xx or any status but 200 or 404, or sends no valid digest, or the re-check as a whole takes longer than `recheck_timeout`), or the moved manifest cannot be pulled or stored, the stored tag is served and `tierstore_oci_tag_recheck_failures_total` counts it. A pull by digest is never re-checked. A repository that is pushed to and pulled through has the upstream as the authority for its tags: a tag moved by a push stays while the upstream has the same digest or no such tag (404), and is moved to the upstream's digest by the next pull of the tag if the upstream's differs. A file with no `upstream` re-checks nothing.
 - The login follows the upstream's challenge. `Basic` is answered with the user name and password. `Bearer` is answered with a token fetched from the challenge's realm, logged in with the same user name and password (or anonymously, if there is none), and used for that pull only. A password is sent only over HTTPS or to a loopback address: the start refuses a login that would go in the clear, and a token realm that is neither is asked with no password. Redirects are followed and carry no login.
 - The client is told 404 when the upstream has no such object, and 502 with the code `UNAVAILABLE` for any other failure of the upstream (it cannot be reached, refuses the login, answers late, sends bytes that are not the object, or cuts a body); what the upstream said is on stderr and not in the answer. A store that cannot take what was pulled answers as it does for any write it cannot make.
 

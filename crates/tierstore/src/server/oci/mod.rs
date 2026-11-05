@@ -409,7 +409,10 @@ impl OciFront {
             None if names::is_tag(reference) => {
                 let found = self.tagged(name, reference).await;
                 match (found, &self.upstream) {
-                    (Ok(digest), _) => digest,
+                    (Ok(digest), None) => digest,
+                    (Ok(stored), Some(upstream)) => {
+                        self.recheck_tag(upstream, name, reference, stored).await
+                    }
                     (Err(Error::NotFound(_)), Some(upstream)) => {
                         match self.pull_tag(upstream, name, reference).await {
                             Ok(digest) => digest,

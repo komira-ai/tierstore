@@ -73,7 +73,7 @@ impl Shape {
 enum Config {
     Plain(Cli),
     Build(CacheSettings),
-    Combined(CombinedSettings),
+    Combined(Box<CombinedSettings>),
 }
 
 /// The scratch directories of a node of one shape, and its control socket.
@@ -179,7 +179,7 @@ kind = "memory"
         let line = format!("lock_file = {:?}", lock.display().to_string());
         let text = node.text_with(&server, &line, "").replace(any, &quoted);
         let settings = settings_from_text(&text, QUICK).unwrap();
-        Config::Combined(settings.into_combined().unwrap())
+        Config::Combined(Box::new(settings.into_combined().unwrap()))
     }
 }
 
@@ -197,7 +197,7 @@ async fn start(
             let upstream: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
             serve_cache(settings, upstream, disk, stop, ready).await
         }
-        Config::Combined(settings) => serve_combined(settings, disk, stop, ready).await,
+        Config::Combined(settings) => serve_combined(&settings, disk, stop, ready).await,
     }
 }
 
