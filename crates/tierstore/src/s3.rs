@@ -580,7 +580,7 @@ impl Backend for S3Backend {
         let object = object_key(key)?;
         let store = &self.store;
         let sending = |len, source| store.put_stream_new_answered(&object, len, source);
-        let sent = streamed(body, len, sending).await?;
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let answer = sent.map_err(|e| map_error(e, key))?;
         Ok(answer.etag.map(|etag| PutAnswer {
             tag: unquoted(&etag),
