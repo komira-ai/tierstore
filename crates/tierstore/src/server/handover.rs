@@ -21,7 +21,8 @@ use tokio::sync::mpsc;
 
 use crate::{Error, PartBody};
 
-/// How many pieces of a body wait for the backend to take them. With the piece the request has
+/// The default of how many pieces of a body wait for the backend to take them
+/// ([`ServerConfig::put_pieces_queued`](super::ServerConfig::put_pieces_queued)). With the piece the request has
 /// in hand and the one the backend has, that is all a streamed put holds between the client and
 /// the backend; a piece is what the connection delivers in one frame, so the memory of a put does
 /// not grow with the length of the object.
@@ -41,8 +42,9 @@ fn cut() -> Error {
 /// stream was dropped.
 pub(crate) fn hand_over<'a>(
     pieces: PartBody<'a>,
+    queued: usize,
 ) -> (impl Future<Output = ()> + Send + 'a, PartBody<'static>) {
-    let (sender, receiver) = mpsc::channel(PIECES_QUEUED);
+    let (sender, receiver) = mpsc::channel(queued.max(1));
     (carry(pieces, sender), received(receiver))
 }
 
