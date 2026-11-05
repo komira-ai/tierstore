@@ -7,7 +7,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use objstore_s3::Capabilities;
-use objstore_s3::s3::{Credentials, S3Config, S3Store};
+use objstore_s3::s3::{Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
 use tierstore::server::{Drained, Server, ServerConfig};
 use tierstore::{
     Backend, Clock, EntryReconciler, EntryReconcilerConfig, Error, FaultyBackend, MemoryBackend,
@@ -124,6 +124,21 @@ impl Harness {
         self.store_with(KEY_ID, SECRET, capabilities)
     }
 
+    /// The `S3Store` client with the settings it has by default: one streamed PUT up to 5 GiB.
+    pub fn store_default(&self, capabilities: Capabilities) -> S3Store {
+        let config = S3Config {
+            endpoint: format!("http://{}", self.addr),
+            region: "us-east-1".to_owned(),
+            bucket: BUCKET.to_owned(),
+            credentials: Credentials::new(KEY_ID, SECRET),
+            capabilities,
+            connect_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(30),
+            min_body_rate: None,
+        };
+        S3Store::new(config).expect("a store")
+    }
+
     /// The `S3Store` client, with this key.
     pub fn store_with(&self, key_id: &str, secret: &str, capabilities: Capabilities) -> S3Store {
         let config = S3Config {
@@ -136,7 +151,13 @@ impl Harness {
             request_timeout: Duration::from_secs(30),
             min_body_rate: None,
         };
-        S3Store::new(config).expect("a store")
+        // The threshold of the client before it was a setting, so that a 16 MiB body and a little
+        // more is the multipart upload these tests are of, not 5 GiB.
+        let tuning = S3Tuning {
+            single_put_max: PART_BYTES,
+            ..S3Tuning::default()
+        };
+        S3Store::new_tuned(config, tuning).expect("a store")
     }
 
     /// The headers that sign a request for the server at the fixed time.

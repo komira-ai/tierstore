@@ -180,6 +180,7 @@ and is longer than it:
 | ListMultipartUploads | with a `prefix` inside the key's, the open uploads under it; no prefix or another is 403, not filtered |
 | HeadObject | yes |
 | DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
+| DeleteObjects (`POST ?delete`) | no: the keys are in the body, which is not read |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
 | put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation | no |
@@ -234,6 +235,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | CreateMultipartUpload, UploadPart, CompleteMultipartUpload | `write_prefixes` | of a key inside a write prefix, each call checked |
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
+| DeleteObjects (`POST ?delete`) | none | no: the keys are in the body, and only the full key calls it |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
 | the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
@@ -662,6 +664,31 @@ The unit's two flags are the drain on SIGTERM: `--drain-lb-wait` is how long `/r
 while the server goes on accepting and serving (the settle), and `--drain-deadline` is how long it
 then waits for requests in flight and for the connections it closes. `tierstore --help` lists the
 flags of a run.
+
+## DeleteObjects
+
+`POST /<bucket>?delete` with a `Delete` document (up to 1000 `Object` elements with a `Key`, and
+`Quiet`) deletes the keys, each by the path of a single DeleteObject (both tiers, on the entry of the
+key), at most `server.delete_concurrency` (16 by default) at a time, and answers `200` with a
+`DeleteResult`: a `Deleted` for each key, in the order asked (a key that is not there is deleted, as
+in S3; a key asked twice is deleted once and answered twice), none of them if `Quiet` is `true`, and
+an `Error` with a `Code` and a `Message` for each key that was not deleted. The result is the S3 one
+for these cases:
+
+| request | answer |
+|---|---|
+| a key of the proxy (`_journal/`, `_tiering/`, `_entries/`) | `Error` `AccessDenied` for that key, the others are deleted |
+| an object with a `VersionId` | `Error` `NotImplemented` for that key |
+| a key the tier fails to delete | `Error` for that key, with the code a single delete of it gives (`ServiceUnavailable`, `SlowDown`), others are deleted |
+| neither `Content-MD5` nor an `x-amz-checksum-crc32`, `-crc32c`, `-sha1` or `-sha256` header | `400 InvalidRequest`, nothing deleted |
+| a document that does not hash to the header | `400 BadDigest` (or `InvalidDigest` for a header that is no hash), nothing deleted |
+| not a `Delete` document, no object, an object with no key, `Quiet` not `true` or `false`, or more than 1000 objects | `400 MalformedXML`, nothing deleted |
+| a document over what 1000 keys fill (about 6 MiB) | `413 EntityTooLarge` |
+| `x-amz-checksum-crc64nvme` that does not match the document | `400 BadDigest`, nothing deleted |
+| a read-only, scoped, GC or presigning key, or a presigned URL | `403 AccessDenied`, nothing deleted |
+
+The batch runs to its end if the client goes away. It is not atomic: a failure of one key does not
+undo the others. A build node (a read cache) refuses it, as it refuses every write.
 
 ## Using a stock SDK
 

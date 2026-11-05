@@ -126,6 +126,9 @@ pub(super) const DEFAULT_MAX_REQUEST_BYTES: u64 = 256 << 20;
 /// The streamed bodies taken at once: 32 of them hold at most 32 x (16 MiB + a few pieces).
 pub(super) const DEFAULT_MAX_CONCURRENT_PUTS: u32 = 32;
 
+/// The keys of one DeleteObjects call deleted at once (`server.delete_concurrency`'s default).
+pub(super) const DEFAULT_DELETE_CONCURRENCY: u32 = 16;
+
 /// How long a put that finds all the slots taken waits for one before it is answered 503
 /// (`server.put_permit_wait`'s default, `15s`).
 pub(super) const DEFAULT_PUT_PERMIT_WAIT: Duration = Duration::from_secs(15);
@@ -352,6 +355,12 @@ pub struct Cli {
     /// more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
     /// directory tiers.
     pub max_concurrent_puts: u32,
+    /// The most keys of one DeleteObjects call (`POST /<bucket>?delete`, up to 1000 keys) that are
+    /// deleted at once, each by the same path as a single DeleteObject. The call as a whole is not
+    /// limited by this, only how many of its deletes run together, so that one call cannot take
+    /// every connection of the tiers' stores; raise it for a store that deletes fast, lower it for
+    /// one that throttles. At least 1.
+    pub delete_concurrency: u32,
     /// How long a put body or upload part that arrives when `server.max_concurrent_puts` bodies are
     /// already being taken waits for one of them to end: a number and `ms`, `s`, `m` or `h`. If a
     /// slot is free in that time the body is taken; if not, it is answered 503 `SlowDown` with

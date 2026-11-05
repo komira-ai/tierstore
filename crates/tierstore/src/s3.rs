@@ -11,13 +11,14 @@
 //!   would replace an object that exists.
 //! - `put_stream` is the store client's streamed write, given the chunks of the body as they
 //!   arrive and their total length (the `Content-Length` of the request; without one the body
-//!   is held first, since S3 takes no request of unknown length). A body of at most 16 MiB is
-//!   gathered and sent as one PUT with `If-None-Match: *`; a longer one is a multipart upload
-//!   whose parts are sent as they fill, completed with `If-None-Match: *` only after the body
+//!   is held first, since S3 takes no request of unknown length). A body of at most
+//!   `server.s3_single_put_max` (5 GiB, S3's limit for one PUT, by default) is streamed as one PUT
+//!   with `If-None-Match: *`, never held whole; a longer one is a multipart upload
+//!   whose parts (`server.s3_part_bytes`, 16 MiB by default) are sent as they fill, completed with `If-None-Match: *` only after the body
 //!   has ended with exactly its length, and aborted on any failure. Either way the object comes
 //!   into being in the last request, after the whole body was read and checked by the caller, so
 //!   a body that ends with an error, or is cut short, leaves no object and no staged key, and
-//!   at most 16 MiB of the body is held at a time. A key that exists is
+//!   at most one part of the body is held at a time (a few chunks for a single PUT). A key that exists is
 //!   [`Error::AlreadyExists`].
 //! - `put_if_match` is a PUT with `If-Match: "<tag>"` (a tag given in quotes is not quoted
 //!   twice); the 412 is [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. It
@@ -41,11 +42,11 @@
 //!   quotes) of that answer, so the bytes and the tag are those of one object whatever is written to
 //!   the key meanwhile; an answer without an `ETag` is an [`Error::Other`].
 //! - `put_stream_if_match` is `put_if_match` for a body that arrives as chunks: a body of at most
-//!   16 MiB is gathered and sent as one PUT with `If-Match`, a longer one is a multipart upload
+//!   `server.s3_single_put_max` is streamed as one PUT with `If-Match`, a longer one is a multipart upload
 //!   whose completion carries `If-Match`, aborted on any failure, so the object is replaced only
 //!   after the whole body was read and only if it still has the tag. A body of unknown length is
-//!   not collected either: its first 16 MiB are read, and a body that ends there is one PUT, while
-//!   a longer one is a multipart upload whose 16 MiB parts are each sent as soon as they are full,
+//!   not collected either: its first `server.s3_part_bytes` (16 MiB by default) are read, and a body
+//!   that ends there is one PUT, while a longer one is a multipart upload whose parts are each sent as soon as they are full,
 //!   so at most one part and one chunk are held. It is sent once. The tag
 //!   that does not match is [`Error::PreconditionFailed`] and no object is [`Error::NotFound`].
 //! - `delete` is a DELETE; a 404 is a success.
