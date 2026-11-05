@@ -228,7 +228,7 @@ async fn a_presigned_url_of_a_key_that_reads_does_nothing_but_read_one_object() 
         ("cas/a", &[("uploadId", "u1")]),
         ("cas/a", &[("partNumber", "1"), ("uploadId", "u1")]),
         ("cas/a", &[("uploads", "")]),
-        ("cas/a", &[("response-content-type", "text/plain")]),
+        ("cas/a", &[("versionId", "1")]),
     ];
     for (key, extra) in calls {
         let url = presign_url("GET", &full, &request(key, 300), extra).unwrap();
