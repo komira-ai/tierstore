@@ -24,6 +24,8 @@ use tokio_rustls::TlsAcceptor;
 /// What a request asked, as the registry saw it.
 #[derive(Clone, Debug)]
 pub(crate) struct Seen {
+    /// `GET`, `HEAD`.
+    pub(crate) method: String,
     /// The path and the query.
     pub(crate) path: String,
     pub(crate) authorization: Option<String>,
@@ -159,6 +161,7 @@ where
                     .map(str::to_owned)
             };
             let asked = Seen {
+                method: request.method().to_string(),
                 path: request.uri().to_string(),
                 authorization: header("authorization"),
                 accept: header("accept"),
