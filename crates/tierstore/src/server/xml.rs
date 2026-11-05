@@ -386,6 +386,25 @@ impl UploadListing<'_> {
     }
 }
 
+/// The `LocationConstraint` of the body of a CreateBucket, empty if the body has none (a body of
+/// no bytes, or a `CreateBucketConfiguration` without the element). `None` for a body that is
+/// not a `CreateBucketConfiguration` document.
+pub(crate) fn parse_create(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    if text.trim().is_empty() {
+        return Some(String::new());
+    }
+    let doc = Document::parse(text).ok()?;
+    let root = doc.root_element();
+    (root.tag_name().name() == "CreateBucketConfiguration").then_some(())?;
+    Some(
+        child_text(root, "LocationConstraint")
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    )
+}
+
 /// One page of a ListParts answer.
 pub(crate) struct PartListing<'a> {
     pub(crate) bucket: &'a str,
