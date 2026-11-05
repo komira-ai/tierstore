@@ -139,6 +139,68 @@ async fn a_put_over_s3_is_kept_with_the_upstreams_tag_also_when_sent_as_parts() 
     drained(&config).await;
 }
 
+/// Asserts that a put through the cache to an S3 upstream makes one HEAD (the one before the body)
+/// and not two: the tag and the time of the kept object are those of the answer to the put (the
+/// `ETag`, and the time the cache's clock showed when the answer arrived, since S3's answer has no
+/// `Last-Modified`), for a single PUT and for a multipart upload. The tag in each sidecar equals
+/// the tag a later HEAD of the upstream gives (the multipart one has a dash, no hash of the bytes
+/// could give it), and a HEAD and an open read through the cache give that tag with no call of the
+/// upstream. A cache that asks the upstream after the put makes two HEADs for each.
+#[tokio::test]
+async fn a_put_over_s3_makes_no_head_for_the_keep_and_keeps_the_upstreams_tag() {
+    let s3 = FakeS3::start().await;
+    let backend = s3_backend(&s3);
+    let upstream = Arc::new(FaultyBackend::new(backend.clone()));
+    let dir = TestDir::under(std::env::temp_dir(), "tscache-keep-s3-nohead");
+    let policies = vec![("cas/".to_owned(), true)];
+    let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
+    config.write_through = true;
+    config.keep_queue_bytes = 64 << 20;
+    never_expires(&mut config);
+    let clock = Arc::new(TestClock::new());
+    clock.advance(1_234_000);
+    let cache = LocalCache::open(
+        config.clone(),
+        upstream.clone(),
+        Arc::new(SystemDisk),
+        clock.clone(),
+    );
+    let cache = cache.unwrap();
+
+    let large = pattern(17 << 20);
+    let small = pattern(3 << 20);
+    for (key, bytes) in [("cas/b/parts", &large), ("cas/b/single", &small)] {
+        let made = cache.put_stream(key, Some(bytes.len() as u64), pieces(bytes));
+        assert_eq!(made.await, Ok(()), "{key}");
+    }
+    assert_eq!(upstream.calls(Op::Head), 2);
+    assert_eq!(read(&cache.counters().keeps_expired), 0);
+
+    let heads = upstream.calls(Op::Head);
+    for (key, bytes) in [("cas/b/parts", &large), ("cas/b/single", &small)] {
+        let path = meta_path(&config.path, &name_of(key).hex);
+        let kept: Sidecar = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(kept.size, bytes.len() as u64, "{key}");
+        assert_eq!(kept.sha256, digest(bytes), "{key}");
+        assert_eq!(kept.modified, clock.now(), "{key}");
+        let head = cache.head(key).await.unwrap();
+        assert_eq!(head.tag, kept.tag, "{key}");
+        let opened = cache.open_read(key, None).await.unwrap();
+        assert_eq!(opened.meta.tag, kept.tag, "{key}");
+        drop(opened);
+    }
+    assert_eq!(upstream.calls(Op::Head), heads);
+    assert_eq!(upstream.calls(Op::Get), 0);
+
+    for key in ["cas/b/parts", "cas/b/single"] {
+        let path = meta_path(&config.path, &name_of(key).hex);
+        let kept: Sidecar = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(kept.tag, backend.head(key).await.unwrap().tag, "{key}");
+    }
+    assert!(backend.head("cas/b/parts").await.unwrap().tag.contains('-'));
+    drained(&config).await;
+}
+
 /// Asserts that a put through the cache of a 20 MiB body to an S3 upstream with the default
 /// settings is one PutObject and no multipart call (16 MiB parts, which is what it was, would be two
 /// parts and a completion), and that the copy it leaves in the cache has the tag the upstream
