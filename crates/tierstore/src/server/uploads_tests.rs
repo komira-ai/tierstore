@@ -61,7 +61,7 @@ async fn uploads_started_under_two_prefixes_are_listed_by_prefix() {
     assert_eq!(none.status, StatusCode::OK);
     assert!(uploads(&none).is_empty());
     assert_eq!(texts(&none.body, "IsTruncated"), ["false"]);
-    assert_eq!(rig.hot.calls(Op::ListUploads), 0);
+    assert_eq!(rig.hot.calls(Op::ListUploads), 5);
     assert_eq!(rig.cold.calls(Op::ListUploads), 5);
 }
 
@@ -149,7 +149,7 @@ async fn a_completed_or_aborted_upload_is_not_listed() {
 
     let left = list(&rig, "").await;
     assert_eq!(uploads(&left), [("k/open".to_owned(), open)]);
-    assert_eq!(rig.cold_mem.get("k/done", None).await.unwrap(), "bytes");
+    assert_eq!(rig.hot_mem.get("k/done", None).await.unwrap(), "bytes");
 }
 
 /// Asserts that an upload of a key under a reserved prefix is never listed, whatever the prefix
@@ -188,9 +188,10 @@ async fn uploads_under_reserved_prefixes_are_never_listed() {
 }
 
 /// Asserts that a request the listing does not do is refused as it is for the other calls: a
-/// `max-uploads` that is not a whole number from 0 to 2147483647 is `InvalidArgument`, a `delimiter` and a
-/// listing of the parts of one upload (`GET /key?uploadId=`) are `NotImplemented`, and a cold
-/// tier that does not answer is `ServiceUnavailable`.
+/// `max-uploads` that is not a whole number from 0 to 2147483647 is `InvalidArgument`, a listing
+/// of the parts of one upload (`GET /key?uploadId=`) is `NotImplemented` (the `delimiter` it
+/// refused before is served now: `list_uploads_delimiter_tests`), and a cold tier that does not
+/// answer is `ServiceUnavailable`.
 #[tokio::test(start_paused = true)]
 async fn a_listing_of_uploads_refuses_what_it_does_not_do() {
     let rig = Rig::new(1 << 20).await;
@@ -201,8 +202,6 @@ async fn a_listing_of_uploads_refuses_what_it_does_not_do() {
         assert_eq!(reply.code(), "InvalidArgument", "{bad}");
         assert!(reply.body.contains("max-uploads"), "{}", reply.body);
     }
-    let delimited = list(&rig, "delimiter=%2F").await;
-    assert_eq!(delimited.status, StatusCode::NOT_IMPLEMENTED);
     let parts = rig.call("GET", &format!("k?uploadId={id}"), b"").await;
     assert_eq!(parts.status, StatusCode::NOT_IMPLEMENTED);
     let on_key = rig.call("GET", "k?uploads", b"").await;

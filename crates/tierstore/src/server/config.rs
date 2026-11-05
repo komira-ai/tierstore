@@ -40,14 +40,14 @@
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use super::cli::{
-    Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
+    Cli, DEFAULT_DELETE_CONCURRENCY, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_PUT_MIN_BYTES_PER_SEC, DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
@@ -57,12 +57,12 @@ use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
+use super::config_io::io_tuning;
 use super::config_policy::{Policy, check_policies};
-use super::config_syntax::{find_secret, syntax};
+use super::config_reconcile::reconcile_tuning;
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
-use super::config_unknown::announce_unknown_keys;
 use super::front::{FrontSettings, S3Tls};
 use super::keys::DEFAULT_MIN_SECRET_BYTES;
 use super::listen::Addrs;
@@ -285,6 +285,7 @@ pub(super) struct ServerTable {
     pub grant_max_lifetime: Option<Dur>,
     pub max_request_bytes: Option<u64>,
     pub max_concurrent_puts: Option<u32>,
+    pub delete_concurrency: Option<u32>,
     pub put_permit_wait: Option<Dur>,
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
@@ -300,6 +301,19 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    // The keys of `config_io`.
+    pub header_timeout: Option<Dur>,
+    pub accept_pause: Option<Dur>,
+    pub listen_backlog: Option<i32>,
+    pub door_grace: Option<Dur>,
+    pub door_look: Option<Dur>,
+    pub put_pieces_queued: Option<u32>,
+    pub oci_handshake_timeout: Option<Dur>,
+    pub s3_chunks_waiting: Option<u32>,
+    pub dir_copy_chunk: Option<Size>,
+    pub dir_read_chunk: Option<Size>,
+    pub s3_single_put_max: Option<Size>,
+    pub s3_part_bytes: Option<Size>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,
@@ -345,6 +359,22 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub lock_file: Option<PathBuf>,
     #[serde(default)]
+    pub idle_min: Option<Dur>,
+    #[serde(default)]
+    pub idle_max: Option<Dur>,
+    #[serde(default)]
+    pub lease_renew: Option<Dur>,
+    #[serde(default)]
+    pub lease_margin: Option<Dur>,
+    #[serde(default)]
+    pub listing_page_size: Option<u32>,
+    #[serde(default)]
+    pub stop_wait: Option<Dur>,
+    #[serde(default)]
+    pub lock_retry: Option<Dur>,
+    #[serde(default)]
+    pub first_beat_poll: Option<Dur>,
+    #[serde(default)]
     pub usage_stale_after: Option<Dur>,
     #[serde(default)]
     pub journal_linger: Option<Dur>,
@@ -369,6 +399,7 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub upload_listing_calls: Option<u32>,
     #[serde(default)]
+    pub abandoned_upload_after: Option<Dur>,
     pub retry_min: Option<Dur>,
     #[serde(default)]
     pub retry_max: Option<Dur>,
@@ -545,6 +576,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("delete_rounds", cold.delete_rounds.is_some()),
         ("listing_heads", cold.listing_heads.is_some()),
         ("upload_listing_calls", cold.upload_listing_calls.is_some()),
+        (
+            "abandoned_upload_after",
+            cold.abandoned_upload_after.is_some(),
+        ),
         ("retry_min", cold.retry_min.is_some()),
         ("retry_max", cold.retry_max.is_some()),
         ("stray_grace", cold.stray_grace.is_some()),
@@ -574,6 +609,14 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
             "registration_retention",
             cold.registration_retention.is_some(),
         ),
+        ("idle_min", cold.idle_min.is_some()),
+        ("idle_max", cold.idle_max.is_some()),
+        ("lease_renew", cold.lease_renew.is_some()),
+        ("lease_margin", cold.lease_margin.is_some()),
+        ("listing_page_size", cold.listing_page_size.is_some()),
+        ("stop_wait", cold.stop_wait.is_some()),
+        ("lock_retry", cold.lock_retry.is_some()),
+        ("first_beat_poll", cold.first_beat_poll.is_some()),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -649,7 +692,7 @@ impl Settings {
 }
 
 /// The settings a file stands for, with the knobs of this run, by the shape its tables make.
-fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
+pub(super) fn settings(file: File, per_run: PerRun) -> Result<Settings, ConfigError> {
     let File {
         mut server,
         hot_store,
@@ -723,6 +766,8 @@ pub(super) fn storage(
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
+    let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
+    let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
@@ -763,18 +808,21 @@ pub(super) fn storage(
         drain_deadline: front.drain_deadline,
         tls: front.tls,
         copy_parallel,
-        lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
+        lease_ttl,
         lock_file,
+        reconcile_tuning,
         handoff,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
+        delete_concurrency: front.delete_concurrency,
         put_permit_wait: front.put_permit_wait,
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
         min_secret_bytes: front.min_secret_bytes,
+        io_tuning: front.io,
         skip_backend_check: cold.skip_checks.unwrap_or_default(),
         backend_check_wait: shared.backend_check_wait,
         oci_listen: oci.listen,
@@ -815,7 +863,8 @@ pub(super) fn front_of(
     listen: Vec<SocketAddr>,
     per_run: PerRun,
 ) -> Result<Shared, ConfigError> {
-    let s3_client = s3_client(&server)?;
+    let mut s3_client = s3_client(&server)?;
+    let io = io_tuning(&server, &mut s3_client)?;
     let max_request_bytes = server
         .max_request_bytes
         .unwrap_or(DEFAULT_MAX_REQUEST_BYTES);
@@ -833,6 +882,16 @@ pub(super) fn front_of(
         "server",
         "max_concurrent_puts",
         max_concurrent_puts,
+        1,
+        u32::MAX,
+    )?;
+    let delete_concurrency = server
+        .delete_concurrency
+        .unwrap_or(DEFAULT_DELETE_CONCURRENCY);
+    let delete_concurrency = within(
+        "server",
+        "delete_concurrency",
+        delete_concurrency,
         1,
         u32::MAX,
     )?;
@@ -856,6 +915,7 @@ pub(super) fn front_of(
         grant_max_lifetime: server.grant_max_lifetime.map(|wait| wait.0),
         max_request_bytes,
         max_concurrent_puts,
+        delete_concurrency,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
         put_min_bytes_per_sec: server
             .put_min_bytes_per_sec
@@ -865,6 +925,7 @@ pub(super) fn front_of(
         min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,
+        io,
     };
     Ok(Shared {
         front,
@@ -874,116 +935,9 @@ pub(super) fn front_of(
     })
 }
 
-/// The settings of the TOML `text`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format.
-pub(super) fn settings_from_text(text: &str, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let table: toml::Table = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    find_secret("", &table)?;
-    let file: File = toml::from_str(text).map_err(|e| syntax(text, &e))?;
-    settings(file, per_run)
-}
-
-/// The settings of a storage-node file.
-///
-/// # Errors
-/// A [`ConfigError`]: text that is not a file of this format, or is a build node's.
-pub(super) fn from_text(text: &str, per_run: PerRun) -> Result<Cli, ConfigError> {
-    match settings_from_text(text, per_run)? {
-        Settings::Storage(cli) => Ok(*cli),
-        Settings::Cache(_) => {
-            let why =
-                "is the file of a build node, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-        Settings::Combined(_) => {
-            let why = "is in a file with [hot_store] too, which these settings of a storage node cannot hold";
-            Err(invalid("local_cache", why))
-        }
-    }
-}
-
-impl Cli {
-    /// The settings of a storage node's configuration file, given as its text, with the knobs of
-    /// the run at their defaults. Nothing is read of the files it names.
-    ///
-    /// # Errors
-    /// The refusal of a file that is not one of this format, or is the file of a build node.
-    pub fn from_config_text(text: &str) -> Result<Self, ConfigError> {
-        let per_run = PerRun {
-            drain_lb_wait: DEFAULT_DRAIN_LB_WAIT,
-            drain_deadline: DEFAULT_DRAIN_DEADLINE,
-        };
-        from_text(text, per_run)
-    }
-}
-
-/// What a flag that is no longer one is refused with: the key of the file that holds what it
-/// held, or none if `flag` (without `--`) was never one of the data path's.
-pub(super) fn removed(flag: &str) -> Option<String> {
-    let instead = match flag {
-        "listen" => {
-            "declare an [[interface]] with type = \"s3\" and params port or addresses".to_owned()
-        }
-        "oci-listen" => {
-            "declare an [[interface]] with type = \"oci\" and params port or addresses".to_owned()
-        }
-        "print-config" => {
-            return Some(
-                "--print-config was removed: there are no flags to print a file for; write the file (docs/configuration.md)"
-                    .to_owned(),
-            );
-        }
-        other => {
-            let (_, keys) = KEYS.iter().find(|(name, _)| *name == other)?;
-            let of = if other.starts_with("oci-") {
-                " of an oci interface"
-            } else {
-                ""
-            };
-            format!("set {}{of}", keys.join(", "))
-        }
-    };
-    Some(format!(
-        "--{flag} was removed: the file given with --config holds it; {instead}"
-    ))
-}
-
-/// The settings of the file at `path`, with the knobs of this run.
-///
-/// # Errors
-/// A [`ConfigError`] that names the file: it cannot be read, or is not a file of this format.
-pub(super) fn load(path: &Path, per_run: PerRun) -> Result<Settings, ConfigError> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(source) => {
-            let path = path.to_owned();
-            return Err(ConfigError::Read { path, source });
-        }
-    };
-    let settings = settings_from_text(&text, per_run).map_err(|source| ConfigError::In {
-        path: path.to_owned(),
-        source: Box::new(source),
-    })?;
-    announce_unknown_keys(&text);
-    Ok(settings)
-}
-
-/// `message` with the name of each flag in it replaced by the key that stands for it in the
-/// file, so that a refusal in a start from a file speaks of the keys the operator wrote.
-pub(super) fn keys_for_flags(message: &str) -> String {
-    let mut names: Vec<(&str, &str)> = KEYS
-        .iter()
-        .filter_map(|(flag, keys)| keys.first().map(|key| (*flag, *key)))
-        .collect();
-    names.sort_by_key(|(flag, _)| std::cmp::Reverse(flag.len()));
-    let mut text = message.to_owned();
-    for (flag, key) in names {
-        text = text.replace(&format!("--{flag}"), key);
-    }
-    text
-}
+#[cfg(test)]
+pub(super) use super::config_load::{from_text, settings_from_text};
+pub(super) use super::config_load::{keys_for_flags, load, removed};
 
 #[cfg(test)]
 #[path = "config_tests.rs"]

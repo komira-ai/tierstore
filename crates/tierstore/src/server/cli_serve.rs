@@ -5,7 +5,6 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -21,15 +20,12 @@ use super::handoff::{
     Front, Handoff, HandoffError, Inherited, MAX_SOCKETS, Offer, Socket, Want, check_control_path,
     take,
 };
-use super::listen::{bind_all, duplicates, local_addrs};
+use super::listen::{bind_all_with, duplicates, local_addrs};
 use super::memory_format::start_format;
 use super::oci::{OciError, OciFront, OciListener, OciMode};
 use super::rounds::Rounds;
 use super::stop_watcher::{oci_cut_note, serve_fronts, serve_oci, stop_watcher};
 use super::{Drained, Server};
-
-/// How long a process that does not hold the `--lock-file` waits between two tries of it.
-const LOCK_RETRY: Duration = Duration::from_secs(1);
 
 /// The addresses [`run_serving`] is bound to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,8 +86,8 @@ impl Addresses {
 ///
 /// # Errors
 /// An address cannot be bound; the message names it.
-pub(super) fn bind_s3(addrs: &[SocketAddr]) -> Result<Vec<TcpListener>, Error> {
-    bind_all(addrs).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
+pub(super) fn bind_s3(addrs: &[SocketAddr], backlog: i32) -> Result<Vec<TcpListener>, Error> {
+    bind_all_with(addrs, backlog).map_err(|(addr, why)| format!("binding {addr}: {why}").into())
 }
 
 /// Opens the proxy and serves it until `stop` resolves, and then drains.
@@ -166,10 +162,11 @@ pub async fn run_handing(
     let opened = Proxy::open(hot, cold, built.proxy).await;
     let proxy = Arc::new(opened.map_err(|why| Error::from(format!("opening the proxy: {why}")))?);
     proxy.start_heartbeat(Arc::new(TokioSleeper));
-    wait_first_beat(&proxy, heartbeat).await;
+    wait_first_beat(&proxy, heartbeat, cli.reconcile_tuning.first_beat_poll).await;
     let beating = Arc::clone(&proxy);
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
+    let listen = built.server.listen;
     let server = Server::new(proxy, built.server);
     let Bound {
         s3: listeners,
@@ -179,11 +176,12 @@ pub async fn run_handing(
     } = bind_fronts(
         handoff,
         &cli.listen,
-        || bind_s3(&cli.listen),
+        || bind_s3(&cli.listen, listen.backlog),
         built.oci,
         oci_backend,
     )
     .await?;
+    let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
     let stop = stopped_by(stop, offer);
     ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
@@ -269,7 +267,7 @@ impl From<Error> for HandingError {
 /// A lock file that cannot be opened.
 pub(super) fn open_gate(cli: &Cli) -> Result<Option<Gate>, LockFileError> {
     match &cli.lock_file {
-        Some(path) => match Gate::open(path, LOCK_RETRY) {
+        Some(path) => match Gate::open(path, cli.reconcile_tuning.lock_retry) {
             Ok(gate) => Ok(Some(gate)),
             Err(source) => Err(LockFileError {
                 path: path.clone(),

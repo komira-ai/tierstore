@@ -12,9 +12,12 @@ const NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 
 const PROLOG: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
 
-/// `text` with the characters XML gives meaning to escaped.
+/// `text` with the characters XML gives meaning to escaped. A carriage return is written as a
+/// character reference, since a parser reads a bare one as a line feed (a tab and a line feed
+/// are read as they are written).
 pub(crate) fn escape(text: &str) -> String {
     text.replace('&', "&amp;")
+        .replace('\r', "&#13;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
@@ -32,6 +35,24 @@ pub(crate) fn error_body(code: &str, message: &str, resource: &str, request_id: 
         "{PROLOG}<Error><Code>{code}</Code><Message>{message}</Message>\
          <Resource>{resource}</Resource><RequestId>{request_id}</RequestId></Error>"
     )
+}
+
+/// `text` as S3 writes it for `encoding-type=url`: every byte but letters, digits, `-`, `.`, `_`,
+/// `*` and `/` as `%` and two capital hexadecimal digits, and a space as `+`. (The S3 reference
+/// does not list the characters it leaves; the set is what a listing of MinIO gave, which is
+/// like `URLEncoder` of Java but for the slash, and so `~` is `%7E` and `*` stays.)
+pub(crate) fn url_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'*' | b'/' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
@@ -93,39 +114,77 @@ pub(crate) fn buckets(bucket: &str, region: &str, created_ms: u64, listed: bool)
 pub(crate) const OWNER: &str =
     "<Owner><ID>tierstore</ID><DisplayName>tierstore</DisplayName></Owner>";
 
+/// The text of a name field: percent-encoded if the request asked, escaped as XML.
+fn name_text(name: &str, url: bool) -> String {
+    escape(&if url {
+        url_encode(name)
+    } else {
+        name.to_owned()
+    })
+}
+
 /// One page of a ListObjectsV2 answer.
 pub(crate) struct Listing<'a> {
     pub(crate) bucket: &'a str,
     pub(crate) prefix: &'a str,
+    /// The `delimiter` of the request, if it had one that is not empty.
+    pub(crate) delimiter: Option<&'a str>,
+    /// Whether the request asked for `encoding-type=url`.
+    pub(crate) url: bool,
+    /// The `start-after` and the `continuation-token` of the request, as they were sent.
+    pub(crate) start_after: Option<&'a str>,
+    pub(crate) continuation_token: Option<&'a str>,
     pub(crate) max_keys: usize,
     /// Whether the request asked for `fetch-owner=true`: each object then has an `Owner`.
     pub(crate) owner: bool,
     pub(crate) objects: &'a [Listed],
+    /// The common prefixes of the page (none without a delimiter).
+    pub(crate) prefixes: &'a [String],
     /// The continuation token of the next page, if the listing goes on.
     pub(crate) next: Option<String>,
 }
 
 impl Listing<'_> {
     pub(crate) fn to_xml(&self) -> String {
-        let (bucket, prefix) = (escape(self.bucket), escape(self.prefix));
-        let (count, max_keys) = (self.objects.len(), self.max_keys);
+        let text = |name: &str| name_text(name, self.url);
+        let bucket = escape(self.bucket);
+        let (count, max_keys) = (self.objects.len() + self.prefixes.len(), self.max_keys);
         let truncated = self.next.is_some();
+        // The order of the elements is the one of the S3 reference's examples.
         let mut xml = format!("{PROLOG}<ListBucketResult xmlns=\"{NAMESPACE}\">");
         xml.push_str(&element("Name", &bucket));
-        xml.push_str(&element("Prefix", &prefix));
+        xml.push_str(&element("Prefix", &text(self.prefix)));
+        if let Some(sent) = self.start_after {
+            xml.push_str(&element("StartAfter", &text(sent)));
+        }
+        if let Some(sent) = self.continuation_token {
+            xml.push_str(&element("ContinuationToken", &escape(sent)));
+        }
+        xml.push_str(&next_token(self.next.as_deref()));
         xml.push_str(&format!(
             "<KeyCount>{count}</KeyCount><MaxKeys>{max_keys}</MaxKeys>"
         ));
+        if let Some(delimiter) = self.delimiter {
+            xml.push_str(&element("Delimiter", &text(delimiter)));
+        }
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
-        xml.push_str(&next_token(self.next.as_deref()));
         let owner = if self.owner { OWNER } else { "" };
         for object in self.objects {
-            let key = escape(&object.key);
+            let key = text(&object.key);
             let (size, modified) = (object.size, iso8601(object.modified));
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
                  <Size>{size}</Size>{owner}<StorageClass>STANDARD</StorageClass></Contents>"
             ));
+        }
+        for prefix in self.prefixes {
+            let prefix = text(prefix);
+            xml.push_str(&format!(
+                "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
+            ));
+        }
+        if self.url {
+            xml.push_str(&element("EncodingType", "url"));
         }
         xml.push_str("</ListBucketResult>");
         xml
@@ -142,37 +201,57 @@ fn next_token(next: Option<&str>) -> String {
 pub(crate) struct UploadListing<'a> {
     pub(crate) bucket: &'a str,
     pub(crate) prefix: &'a str,
+    /// The `delimiter` of the request, if it had one that is not empty.
+    pub(crate) delimiter: Option<&'a str>,
+    /// Whether the request asked for `encoding-type=url`.
+    pub(crate) url: bool,
     /// The `key-marker` and the `upload-id-marker` of the request, as they were sent.
     pub(crate) key_marker: &'a str,
     pub(crate) id_marker: &'a str,
     pub(crate) max_uploads: usize,
     pub(crate) uploads: &'a [OpenUpload],
-    /// The last upload of the page, if the listing goes on after it.
-    pub(crate) next: Option<&'a OpenUpload>,
+    /// The common prefixes of the page (none without a delimiter).
+    pub(crate) prefixes: &'a [String],
+    /// The key and the upload id (empty after a common prefix) that start the next page, if the
+    /// listing goes on.
+    pub(crate) next: Option<(&'a str, &'a str)>,
 }
 
 impl UploadListing<'_> {
     pub(crate) fn to_xml(&self) -> String {
+        let text = |name: &str| name_text(name, self.url);
         let mut xml = format!("{PROLOG}<ListMultipartUploadsResult xmlns=\"{NAMESPACE}\">");
         xml.push_str(&element("Bucket", &escape(self.bucket)));
-        xml.push_str(&element("KeyMarker", &escape(self.key_marker)));
+        xml.push_str(&element("KeyMarker", &text(self.key_marker)));
         xml.push_str(&element("UploadIdMarker", &escape(self.id_marker)));
-        if let Some(last) = self.next {
-            xml.push_str(&element("NextKeyMarker", &escape(&last.key)));
-            xml.push_str(&element("NextUploadIdMarker", &escape(&last.id)));
+        if let Some((key, id)) = self.next {
+            xml.push_str(&element("NextKeyMarker", &text(key)));
+            xml.push_str(&element("NextUploadIdMarker", &escape(id)));
         }
-        xml.push_str(&element("Prefix", &escape(self.prefix)));
+        xml.push_str(&element("Prefix", &text(self.prefix)));
+        if let Some(delimiter) = self.delimiter {
+            xml.push_str(&element("Delimiter", &text(delimiter)));
+        }
         let max_uploads = self.max_uploads;
         xml.push_str(&format!("<MaxUploads>{max_uploads}</MaxUploads>"));
         let truncated = self.next.is_some();
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
         for upload in self.uploads {
-            let (key, id) = (escape(&upload.key), escape(&upload.id));
+            let (key, id) = (text(&upload.key), escape(&upload.id));
             let initiated = iso8601(upload.initiated);
             xml.push_str(&format!(
                 "<Upload><Key>{key}</Key><UploadId>{id}</UploadId>\
                  <StorageClass>STANDARD</StorageClass><Initiated>{initiated}</Initiated></Upload>"
             ));
+        }
+        for prefix in self.prefixes {
+            let prefix = text(prefix);
+            xml.push_str(&format!(
+                "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
+            ));
+        }
+        if self.url {
+            xml.push_str(&element("EncodingType", "url"));
         }
         xml.push_str("</ListMultipartUploadsResult>");
         xml
@@ -239,4 +318,77 @@ pub(crate) fn parse_complete(body: &[u8]) -> Option<Vec<(u32, String)>> {
             Some((number, tag.to_owned()))
         })
         .collect()
+}
+
+/// One `Object` of a `Delete` document.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteObject {
+    pub(crate) key: String,
+    /// Whether the object names a version.
+    pub(crate) versioned: bool,
+}
+
+/// What a `Delete` document asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteRequest {
+    /// Whether the answer leaves out the keys that were deleted.
+    pub(crate) quiet: bool,
+    pub(crate) objects: Vec<DeleteObject>,
+}
+
+/// The objects and the `Quiet` flag a `Delete` body names, in its order. `None` if the body is not
+/// that document: not XML, another root, an object with no key or an empty one, or a `Quiet` that
+/// is not `true` or `false`.
+pub(crate) fn parse_delete(body: &[u8]) -> Option<DeleteRequest> {
+    let text = std::str::from_utf8(body).ok()?;
+    let doc = Document::parse(text).ok()?;
+    let root = doc.root_element();
+    (root.tag_name().name() == "Delete").then_some(())?;
+    let quiet = match child_text(root, "Quiet").map(str::trim) {
+        None => false,
+        Some("true") => true,
+        Some("false") => false,
+        Some(_) => return None,
+    };
+    let objects = root
+        .children()
+        .filter(|node| node.tag_name().name() == "Object")
+        .map(|node| {
+            let key = child_text(node, "Key").filter(|key| !key.is_empty())?;
+            let versioned = child_text(node, "VersionId").is_some();
+            Some(DeleteObject {
+                key: key.to_owned(),
+                versioned,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(DeleteRequest { quiet, objects })
+}
+
+/// What became of one key of a `Delete` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Deleted,
+    Failed { code: &'static str, message: String },
+}
+
+/// The answer of DeleteObjects: a `Deleted` for each key that was deleted (none if `quiet`) and
+/// an `Error` for each that was not, in the order of the call.
+pub(crate) fn delete_result(results: &[(&str, Outcome)], quiet: bool) -> String {
+    let mut xml = format!("{PROLOG}<DeleteResult xmlns=\"{NAMESPACE}\">");
+    for (key, outcome) in results {
+        let key = escape(key);
+        match outcome {
+            Outcome::Deleted if quiet => {}
+            Outcome::Deleted => xml.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>")),
+            Outcome::Failed { code, message } => {
+                let message = escape(message);
+                xml.push_str(&format!(
+                    "<Error><Key>{key}</Key><Code>{code}</Code><Message>{message}</Message></Error>"
+                ));
+            }
+        }
+    }
+    xml.push_str("</DeleteResult>");
+    xml
 }

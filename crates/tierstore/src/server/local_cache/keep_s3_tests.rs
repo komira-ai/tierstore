@@ -16,7 +16,7 @@ use super::layout::{Sidecar, meta_path, name_of};
 use super::metrics::read;
 use super::testing::{digest, never_expires, pattern};
 use super::{CacheConfig, LocalCache, SystemDisk};
-use crate::s3::{Capabilities, Credentials, S3Config};
+use crate::s3::{Capabilities, Credentials, S3Config, S3Tuning};
 use crate::{Backend, FaultyBackend, Op, PartBody, S3Backend, TestClock};
 
 /// A body of `bytes` in pieces of a mebibyte.
@@ -56,7 +56,7 @@ fn node(s3: &FakeS3, name: &str) -> (LocalCache, CacheConfig, TestDir) {
     (cache.unwrap(), config, dir)
 }
 
-/// A backend over the bucket of the loopback S3 service.
+/// A backend over the bucket of the loopback S3 service, with `single_put_max` of 16 MiB.
 fn s3_backend(s3: &FakeS3) -> Arc<S3Backend> {
     let store = S3Config {
         endpoint: s3.endpoint().to_owned(),
@@ -68,7 +68,13 @@ fn s3_backend(s3: &FakeS3) -> Arc<S3Backend> {
         request_timeout: Duration::from_secs(60),
         min_body_rate: None,
     };
-    Arc::new(S3Backend::new(store).unwrap())
+    // A body over 16 MiB is a multipart upload (by default it is one PUT, up to 5 GiB), so that
+    // these tests keep an object that S3 made from parts without writing 5 GiB.
+    let tuning = S3Tuning {
+        single_put_max: 16 << 20,
+        ..S3Tuning::default()
+    };
+    Arc::new(S3Backend::new_tuned(store, tuning).unwrap())
 }
 
 /// Asserts that a put of a body over 16 MiB (which the S3 backend sends as a multipart upload)
@@ -130,6 +136,56 @@ async fn a_put_over_s3_is_kept_with_the_upstreams_tag_also_when_sent_as_parts() 
     assert_eq!(read(&cache.counters().hits), 2);
     assert_eq!(cache.held(), ((17 + 3) << 20, 2));
     assert_eq!(cache.inner.reserved.load(Ordering::SeqCst), 0);
+    drained(&config).await;
+}
+
+/// Asserts that a put through the cache of a 20 MiB body to an S3 upstream with the default
+/// settings is one PutObject and no multipart call (16 MiB parts, which is what it was, would be two
+/// parts and a completion), and that the copy it leaves in the cache has the tag the upstream
+/// gives, which for one PUT is the MD5 of the bytes (no dash).
+#[tokio::test]
+async fn a_put_over_s3_of_more_than_a_part_is_one_put_by_default() {
+    let s3 = FakeS3::start().await;
+    let store = S3Config {
+        endpoint: s3.endpoint().to_owned(),
+        region: "us-east-1".to_owned(),
+        bucket: "tier-test".to_owned(),
+        credentials: Credentials::new("test-key", "test-secret"),
+        capabilities: Capabilities::default(),
+        connect_timeout: Duration::from_secs(5),
+        request_timeout: Duration::from_secs(60),
+        min_body_rate: None,
+    };
+    let backend = Arc::new(S3Backend::new(store).unwrap());
+    let dir = TestDir::under(std::env::temp_dir(), "tscache-keep-s3-single");
+    let policies = vec![("cas/".to_owned(), true)];
+    let mut config = CacheConfig::new(dir.path().join("cache"), 64 << 20, policies);
+    config.write_through = true;
+    config.keep_queue_bytes = 64 << 20;
+    never_expires(&mut config);
+    let clock = Arc::new(TestClock::new());
+    let cache = LocalCache::open(config.clone(), backend.clone(), Arc::new(SystemDisk), clock);
+    let cache = cache.unwrap();
+
+    let bytes = pattern(20 << 20);
+    let made = cache.put_stream("cas/b/twenty", Some(bytes.len() as u64), pieces(&bytes));
+    assert_eq!(made.await, Ok(()));
+    let stats = s3.stats();
+    assert_eq!(
+        (
+            stats.single_puts,
+            stats.parts,
+            stats.completed,
+            stats.aborted
+        ),
+        (1, 0, 0, 0)
+    );
+    let told = backend.head("cas/b/twenty").await.unwrap();
+    let path = meta_path(&config.path, &name_of("cas/b/twenty").hex);
+    let kept: Sidecar = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(kept.tag, told.tag);
+    assert!(!told.tag.contains('-'), "{}", told.tag);
+    assert_eq!(cache.get("cas/b/twenty", None).await.unwrap(), bytes);
     drained(&config).await;
 }
 

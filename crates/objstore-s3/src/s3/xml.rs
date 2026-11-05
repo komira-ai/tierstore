@@ -267,6 +267,42 @@ mod tests {
         assert_eq!(got, [("p/a", 3), ("p/b", 0)]);
     }
 
+    /// Asserts that keys with XML escapes in a listing are read as the keys they stand for:
+    /// `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, decimal and hex character references
+    /// (including tab, line feed and carriage return), a space at either end, parentheses, `+`,
+    /// `%` and non-ASCII text, and the same in the next key marker of an uploads page.
+    #[test]
+    fn keys_with_xml_escapes_and_s3_characters_are_read_as_written() {
+        let body = format!(
+            "<ListBucketResult {NS}><IsTruncated>false</IsTruncated>\
+             <Contents><Key>a&amp;b&lt;c&gt;&quot;&apos;</Key><Size>1</Size></Contents>\
+             <Contents><Key>&#38;&#x26;&#9;&#10;&#13;&#x20AC;</Key><Size>2</Size></Contents>\
+             <Contents><Key> f(x) +100%\u{e9} </Key><Size>3</Size></Contents>\
+             <Contents><Key>a//b/</Key><Size>4</Size></Contents></ListBucketResult>"
+        );
+        let page = list_page(body.as_bytes()).unwrap();
+        let got: Vec<_> = page.objects.iter().map(|o| o.key.as_str()).collect();
+        assert_eq!(
+            got,
+            [
+                "a&b<c>\"'",
+                "&&\t\n\r\u{20ac}",
+                " f(x) +100%\u{e9} ",
+                "a//b/"
+            ]
+        );
+        let body = format!(
+            "<ListMultipartUploadsResult {NS}><IsTruncated>true</IsTruncated>\
+             <NextKeyMarker>a&amp;b (1)</NextKeyMarker><NextUploadIdMarker>u</NextUploadIdMarker>\
+             <Upload><Key>x&lt;y</Key><UploadId>u</UploadId>\
+             <Initiated>2009-10-12T17:50:30.000Z</Initiated></Upload>\
+             </ListMultipartUploadsResult>"
+        );
+        let page = uploads_page(body.as_bytes()).unwrap();
+        assert_eq!(page.uploads[0].key.as_str(), "x<y");
+        assert_eq!(page.next.unwrap().0.as_str(), "a&b (1)");
+    }
+
     /// Catches: a last page read as truncated, an empty listing refused, and a
     /// truncated answer with no token accepted (which would end a listing early).
     #[test]
