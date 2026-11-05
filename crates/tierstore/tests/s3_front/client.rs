@@ -7,7 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use objstore_s3::s3::{MULTIPART_THRESHOLD, S3Store};
+use objstore_s3::s3::{PART_BYTES, S3Store};
 use objstore_s3::{
     BodyStream, ByteRange, Capabilities, KeyPrefix, ListToken, ObjectKey, ObjectStore,
     ObjectStoreError, PageSize,
@@ -258,24 +258,43 @@ fn pieces(bytes: &Bytes) -> BodyStream {
     stream::iter(chunks).boxed()
 }
 
+/// Asserts that a client with the default settings sends an object of more than one part as one
+/// streamed PUT (a request with `Content-Length` and an unsigned payload), that the server takes it
+/// into the hot tier whole (a single put goes there) with no multipart upload begun, reads it back byte for byte, and
+/// refuses a second write of the key with `AlreadyExists`.
+#[tokio::test]
+async fn a_default_client_sends_an_object_of_more_than_a_part_as_one_streamed_put() {
+    let h = Harness::start(|_| {}).await;
+    let store = h.store_default(CONDITIONAL);
+    let bytes = pattern(PART_BYTES as usize + 1000);
+    let k = key("cas/single");
+    let len = bytes.len() as u64;
+    store.put_stream(&k, len, pieces(&bytes)).await.unwrap();
+    assert_eq!(h.cold.calls(Op::CreateUpload), 0);
+    assert_eq!(h.hot_mem.get("cas/single", None).await.unwrap(), bytes);
+    assert_eq!(store.get_range(&k, window(0, len)).await.unwrap(), bytes);
+    let again = store.put_stream(&k, len, pieces(&bytes)).await;
+    assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
+}
+
 /// Asserts that an object over the size of one put goes up as a multipart upload with the
-/// client's own parts, is made in the cold tier and not in the hot tier, reads back byte for byte
-/// (the read asks for its copy into the hot tier and makes none itself), and that a second upload of
-/// the key fails at its completion with `AlreadyExists` and leaves the first object.
+/// client's own parts, is made in the hot tier and not in the cold tier, reads back byte for byte,
+/// and that a second upload of the key fails at its completion with `AlreadyExists` and leaves
+/// the first object.
 #[tokio::test]
 async fn a_large_object_goes_up_in_parts_and_reads_back() {
     let h = Harness::start(|_| {}).await;
     let store = h.store(CONDITIONAL);
-    let bytes = pattern(MULTIPART_THRESHOLD as usize + 1000);
+    let bytes = pattern(PART_BYTES as usize + 1000);
     let k = key("cas/large");
     let len = bytes.len() as u64;
     store.put_stream(&k, len, pieces(&bytes)).await.unwrap();
-    assert_eq!(h.cold_mem.get("cas/large", None).await.unwrap(), bytes);
-    assert!(h.hot_mem.get("cas/large", None).await.is_err());
+    assert_eq!(h.hot_mem.get("cas/large", None).await.unwrap(), bytes);
+    assert!(h.cold_mem.get("cas/large", None).await.is_err());
     assert_eq!(store.get_range(&k, window(0, len)).await.unwrap(), bytes);
     let tail = store.get_range(&k, window(len - 10, 10)).await.unwrap();
     assert_eq!(tail, bytes.slice(bytes.len() - 10..));
     let again = store.put_stream(&k, len, pieces(&bytes)).await;
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
-    assert_eq!(h.cold_mem.get("cas/large", None).await.unwrap(), bytes);
+    assert_eq!(h.hot_mem.get("cas/large", None).await.unwrap(), bytes);
 }

@@ -190,3 +190,68 @@ async fn this_branch_reads_and_replaces_what_the_previous_release_wrote_to_s3() 
     assert_eq!(read, Bytes::from(patterned(9, CHUNK + 2)));
     assert_eq!(before.head("plain").await.unwrap().tag, replaced);
 }
+
+/// Asserts, over one service, what each release does with keys S3's rules take that the previous
+/// release's client refused (a space, parentheses, `+`, `%`, non-ASCII text): this branch puts,
+/// reads, lists and deletes them; the previous release cannot name them, so a read, a head and
+/// a delete of one are `Error::Other` and no request is made, and a listing of a prefix that holds
+/// one fails as a whole with an error that names the key (it does not skip the key, and it does not
+/// return a page without it), while a listing of a prefix that does not hold one, and the reads
+/// of the plain keys beside them, work; once this branch has deleted them the previous release
+/// lists the bucket again; and this branch reads and lists what the previous release wrote.
+#[tokio::test]
+async fn the_previous_release_cannot_name_keys_this_branch_takes_and_its_listings_fail_over_them() {
+    let s3 = FakeS3::start().await;
+    let (now, before) = both(s3.endpoint());
+    let wide = ["wide/a b", "wide/f(x)+1%", "wide/caf\u{e9}"];
+
+    before
+        .put("plain/old", Bytes::from_static(b"old"))
+        .await
+        .unwrap();
+    now.put("plain/new", Bytes::from_static(b"new"))
+        .await
+        .unwrap();
+    for key in wide {
+        now.put(key, Bytes::from_static(b"wide")).await.unwrap();
+        assert_eq!(now.get(key, None).await.unwrap(), "wide", "{key}");
+    }
+    let listed = now.list("wide/").await.unwrap();
+    let mut keys: Vec<&str> = listed.iter().map(|o| o.key.as_str()).collect();
+    keys.sort_unstable();
+    let mut want = wide.to_vec();
+    want.sort_unstable();
+    assert_eq!(keys, want);
+
+    let requests = s3.requests().len();
+    for key in wide {
+        let read = before.get(key, None).await;
+        assert!(matches!(read, Err(PrevError::Other(_))), "{key}");
+        let head = before.head(key).await;
+        assert!(matches!(head, Err(PrevError::Other(_))), "{key}");
+        let delete = before.delete(key).await;
+        assert!(matches!(delete, Err(PrevError::Other(_))), "{key}");
+    }
+    assert_eq!(
+        s3.requests().len(),
+        requests,
+        "no request for a key it cannot name"
+    );
+
+    for prefix in ["wide/", ""] {
+        let refused = before.list(prefix).await.unwrap_err();
+        assert!(refused.to_string().contains("listed key"), "{refused}");
+    }
+    let plain = before.list("plain/").await.unwrap();
+    let plain: Vec<&str> = plain.iter().map(|o| o.key.as_str()).collect();
+    assert_eq!(plain, ["plain/new", "plain/old"]);
+    assert_eq!(before.get("plain/new", None).await.unwrap(), "new");
+    assert_eq!(now.get("plain/old", None).await.unwrap(), "old");
+
+    for key in wide {
+        now.delete(key).await.unwrap();
+    }
+    let (seen, read) = listings(&now, &before).await;
+    assert_eq!(seen, read);
+    assert_eq!(seen.len(), 2);
+}

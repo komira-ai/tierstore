@@ -6,7 +6,9 @@
 //! - [`licenses`]: the third-party licence notice of a binary, which `package` puts in its tarball.
 //! - [`sums`]: assemble `SHA256SUMS` and check the files and their attestations against it.
 //! - [`build_commit`]: a built binary names the commit it was built from.
-//! - [`release`]: find the successful build of a commit, check its files, publish them.
+//! - [`release`]: find the successful build of a commit, check its files, publish them; and the
+//!   hostkeeper packages of a build, their release index and the checks a host makes of them;
+//!   and the version and digest a published release is set as on the hostkeeper coordinator.
 //! - [`advisories`]: keep the security advisories in one issue.
 //!
 //! The workflows that call them are in `.github/workflows`; `tests/workflows.rs` holds each
@@ -199,6 +201,30 @@ enum VerifyAssets {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
+    /// `dir/tierstore-<version>-<platform>.tar.zst` unpacks as a host unpacks it.
+    HostkeeperPackage {
+        dir: PathBuf,
+        /// `<major>.<minor>.<patch>+<12 hex digits>`, the version of the package.
+        #[arg(long)]
+        version: String,
+        /// The platform of the package.
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+        /// Where the package is unpacked, below `packages/`; created when missing.
+        #[arg(long)]
+        scratch: PathBuf,
+    },
+    /// `dir/index.json` lists the hostkeeper package of every platform, each as its file is, and
+    /// each unpacks as a host unpacks it.
+    HostkeeperIndex {
+        dir: PathBuf,
+        /// The commit the packages were built from, a full SHA.
+        #[arg(long)]
+        commit: String,
+        /// Where the packages are unpacked, one directory per platform; created when missing.
+        #[arg(long)]
+        scratch: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -283,7 +309,59 @@ enum ReleaseVerb {
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
     },
-    /// `dir` holds exactly the assets of the commit, each tarball with its bundle.
+    /// The hostkeeper package of a built binary, `<out>/tierstore-<version>-<platform>.tar.zst`.
+    HostkeeperPackage {
+        /// The built binary; it is not run, so it may be of any platform.
+        #[arg(long)]
+        binary: PathBuf,
+        /// `<major>.<minor>.<patch>+<12 hex digits>`, what the binary's `--version` prints after
+        /// its name; the binary must hold this text.
+        #[arg(long)]
+        version: String,
+        /// The oldest hostkeeper that runs the package, `<major>.<minor>.<patch>`.
+        #[arg(long)]
+        min_hostkeeper: String,
+        /// The platform the binary was built for.
+        #[arg(long, value_enum)]
+        platform: package::Platform,
+        /// The directory the package is written to; created when missing.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// The release index of the hostkeeper packages in `dir`, `dir/index.json`, and its sums
+    /// line in `dir/SHA256SUMS.index`.
+    HostkeeperIndex {
+        dir: PathBuf,
+        /// The commit the packages were built from, a full SHA.
+        #[arg(long)]
+        commit: String,
+        /// The event of the run (`GITHUB_EVENT_NAME`): for `pull_request` the macOS package is
+        /// not built and no index is written.
+        #[arg(long)]
+        event: String,
+        /// Append `package-version=<version>` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// The version and digest of a published release to set as tierstore's desired version on
+    /// the hostkeeper coordinator; refuses a release whose index lacks a platform.
+    Desired {
+        #[arg(long)]
+        repo: String,
+        /// `<major>.<minor>.<patch>`: the release `v<major>.<minor>.<patch>`.
+        #[arg(long)]
+        version: String,
+        /// Where `index.json` and `SHA256SUMS` of the release are downloaded; created when
+        /// missing.
+        #[arg(long)]
+        dir: PathBuf,
+        /// Append `package-version=` and `package-digest=` to this file (`GITHUB_OUTPUT`).
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+    },
+    /// `dir` holds exactly the assets of the commit, each tarball and package with its bundle.
     Check {
         dir: PathBuf,
         #[arg(long)]
@@ -429,6 +507,17 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             };
             sums::verify_attestations(&dir, &attestations)
         }
+        Verb::VerifyAssets(VerifyAssets::HostkeeperPackage {
+            dir,
+            version,
+            platform,
+            scratch,
+        }) => release::hostkeeper_verify::verify_package(&dir, &version, platform, &scratch),
+        Verb::VerifyAssets(VerifyAssets::HostkeeperIndex {
+            dir,
+            commit,
+            scratch,
+        }) => release::hostkeeper_verify::verify_index(&dir, &commit, &scratch),
         Verb::Release(ReleaseVerb::Locate {
             repo,
             commit,
@@ -497,6 +586,38 @@ fn run(cli: Cli) -> Result<Vec<String>, Error> {
             &tag,
             &commit,
             &note,
+            output.as_deref(),
+        ),
+        Verb::Release(ReleaseVerb::HostkeeperPackage {
+            binary,
+            version,
+            min_hostkeeper,
+            platform,
+            out,
+        }) => release::hostkeeper_package::hostkeeper_package(
+            &binary,
+            &version,
+            &min_hostkeeper,
+            platform,
+            &out,
+        ),
+        Verb::Release(ReleaseVerb::HostkeeperIndex {
+            dir,
+            commit,
+            event,
+            output,
+        }) => release::hostkeeper_index::hostkeeper_index(&dir, &commit, &event, output.as_deref()),
+        Verb::Release(ReleaseVerb::Desired {
+            repo,
+            version,
+            dir,
+            output,
+            gh,
+        }) => release::desired::desired(
+            &release::RealGh(gh),
+            &repo,
+            &version,
+            &dir,
             output.as_deref(),
         ),
         Verb::Release(ReleaseVerb::Check { dir, commit }) => release::check(&dir, &commit),

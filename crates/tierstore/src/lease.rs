@@ -133,10 +133,41 @@ impl Lease {
         }
         let mut state = self.shared.state.lock().await;
         let sent = self.shared.mono.now();
+        #[cfg(feature = "server")]
+        let renewed = state.etag.is_some();
         let held = match state.etag.clone() {
             Some(etag) => self.shared.renew(&mut state, &etag).await,
             None => self.shared.acquire(&mut state).await,
         };
+        self.shared.settle(held, sent);
+        #[cfg(feature = "server")]
+        if held && !renewed {
+            tracing::debug!(nonce = %self.shared.nonce, "tierstore: lease taken");
+        }
+        held
+    }
+
+    /// For work that is about to start and needs the margin: true if at least the margin is
+    /// left; else, if the lease is still held (this holder has the tag of its last write and its
+    /// own clock has not passed the end of the ttl), renews it now with a write and answers
+    /// whether that kept it. A lease that was lost, or never taken, is not taken here: that is
+    /// the business of [`Lease::ensure`] at the start of a step. A renewal that is already under
+    /// way holds the lock; its answer is used instead of a second write.
+    pub(crate) async fn ensure_margin(&self) -> bool {
+        if self.margin_ok() {
+            return true;
+        }
+        let mut state = self.shared.state.lock().await;
+        if self.margin_ok() {
+            return true;
+        }
+        let until = self.shared.valid_until.load(Ordering::SeqCst);
+        let sent = self.shared.mono.now();
+        let expired = sent >= until.saturating_add(self.shared.margin);
+        let Some(etag) = state.etag.clone().filter(|_| until != 0 && !expired) else {
+            return false;
+        };
+        let held = self.shared.renew(&mut state, &etag).await;
         self.shared.settle(held, sent);
         held
     }
@@ -245,7 +276,13 @@ impl Lease {
                 Err(_) => false,
             };
             if ours {
-                let _ = self.shared.hot.delete(LEASE_KEY).await;
+                let deleted = self.shared.hot.delete(LEASE_KEY).await;
+                #[cfg(feature = "server")]
+                if deleted.is_ok() {
+                    tracing::debug!(nonce = %self.shared.nonce, "tierstore: lease released");
+                }
+                #[cfg(not(feature = "server"))]
+                drop(deleted);
             }
         }
     }

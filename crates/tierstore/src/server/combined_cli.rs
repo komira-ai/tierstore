@@ -7,7 +7,8 @@
 //! checks of the settings, the lock file of the hot tier (the reconciler's [`Gate`]), the proxy (which writes
 //! its registration `_tiering/proxies/<id>` to the hot tier), then the cache directory (its lock, the
 //! file-system probe if this process holds the lock, the budget against the file system), and
-//! last the addresses. The tiers are not tested. Only the checks of the settings and the lock file
+//! last the addresses (taken from the running instance with `server.handoff_socket`, as a
+//! storage node's are, see [`bind_fronts`](super::cli_serve::bind_fronts)). The tiers are not tested. Only the checks of the settings and the lock file
 //! come before a write. A refusal of the cache directory, its file system, its budget or an address
 //! comes after the proxy's registration, so it leaves the registration (a JSON object, see
 //! `Registration`) in the hot tier, and the heartbeat, which starts with the proxy, may already
@@ -15,8 +16,11 @@
 //! the other starts.
 //!
 //! The cache directory has its own lock beside the hot tier's lock file. A second process
-//! started beside the first serves at once from the proxy; its cache is `ready read-only` until
-//! the first one exits, and its reconciler waits for the lock file or the lease.
+//! started beside the first, such as the successor of a hand-off, serves at once from the proxy;
+//! its cache is `ready read-only` until the first one exits, and its reconciler waits for the lock
+//! file or the lease. A hand-off that is refused, mismatched or not ended within
+//! `server.handoff_wait` fails the start (exit status 1) with nothing bound; the proxy's
+//! registration is written by then, as with the other refusals that come after it.
 //!
 //! On SIGTERM or SIGINT the process drains as the other starts do: both fronts, then the
 //! reconciler (which gives its lease up), the eviction pass, the lock task and the scrub, which
@@ -30,6 +34,7 @@ use tokio::sync::Notify;
 use crate::{Backend, Clock, Proxy, SystemClock, TokioSleeper};
 
 use super::Drained;
+use super::bucket::created_at;
 use super::build_info::{COMMIT, VERSION};
 use super::cache_cli::{Fronts, open, serve_front};
 use super::cli::{Addresses, Error, build, probe_run_id, signals};
@@ -59,6 +64,7 @@ pub(super) async fn serve_combined(
     let mut built = build(cli)?;
     let gate = open_gate(cli)?;
     start_format(cli, built.hot.as_ref()).await?;
+    built.server.bucket_created = created_at(built.hot.as_ref(), built.server.bucket_created).await;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let heartbeat = built.proxy.heartbeat;
@@ -74,13 +80,20 @@ pub(super) async fn serve_combined(
     built.server.cache_writes = true;
     // Both fronts read, and write, through the cache.
     let beside_halt = Arc::new(Notify::new());
-    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
+    let reconciler = Rounds::tuned(
+        built.hot,
+        built.cold,
+        built.reconciler,
+        departure,
+        &built.entry,
+    );
     let halt = Arc::clone(&beside_halt);
     let reconciling = async move {
         match gate {
             Some(gate) => reconcile_gated(reconciler, halt, gate).await,
             None => reconcile(reconciler, halt).await,
         }
+        tracing::debug!("tierstore: reconciler ended");
     };
     let fronts = Fronts {
         listen: &cli.listen,
@@ -89,6 +102,7 @@ pub(super) async fn serve_combined(
         scrub_min_round: settings.cache.scrub_min_round,
         beside_halt,
         beating: Some(beating),
+        handoff: cli.handoff.as_ref(),
     };
     let (server, oci) = (built.server, built.oci);
     serve_front(cache, server, oci, fronts, stop, ready, reconciling).await

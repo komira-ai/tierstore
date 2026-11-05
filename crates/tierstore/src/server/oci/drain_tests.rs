@@ -54,6 +54,7 @@ impl Front {
             write_idle: long,
             lifetime: long,
             drain_deadline: long,
+            listen: crate::server::ListenTuning::default(),
         };
         change(&mut limits);
         let backend = Arc::new(MemoryBackend::new());
@@ -410,6 +411,7 @@ async fn a_lingering_connection_task_keeps_its_permit() {
         write_idle: long,
         lifetime: long,
         drain_deadline: long,
+        listen: crate::server::ListenTuning::default(),
     };
     let backend = Arc::new(MemoryBackend::new());
     let metrics = Arc::new(OciMetrics::default());

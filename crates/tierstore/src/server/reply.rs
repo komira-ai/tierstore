@@ -342,6 +342,11 @@ impl S3Error {
         (self.status, self.code)
     }
 
+    /// The S3 error code.
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+
     /// The text for the client.
     pub(crate) fn message(&self) -> &str {
         &self.message

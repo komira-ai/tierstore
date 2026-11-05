@@ -390,6 +390,85 @@ async fn accepts_that_keep_failing_hold_the_door_no_longer_than_the_grace() {
     assert_eq!(drained(serving.served).await, Drained { abandoned: 0 });
 }
 
+/// Asserts that the grace and the look in the settings of the server are the door's: with a grace
+/// of 500 ms and a look of 5 ms, a handshake that never ends holds the door open until just before
+/// 500 ms from the end of the settle, and the door is closed no later than that, where the
+/// default would hold it for [`GRACE`].
+#[tokio::test(start_paused = true)]
+async fn the_grace_and_look_of_the_settings_are_the_doors() {
+    let grace = Duration::from_millis(500);
+    let look = Duration::from_millis(5);
+    let serving = Serving::start(|config| {
+        short_settle(config);
+        config.listen.door_grace = grace;
+        config.listen.door_look = look;
+    })
+    .await;
+    let handshake = serving.handshake();
+    let begun = Instant::now();
+    serving.rig.server.begin_drain();
+    serving.settle_over().await;
+
+    tokio::time::advance(grace - look * 3).await;
+    assert!(serving.door_open(), "the handshake is still waited for");
+    serving.refusing().await;
+    no_later(begun, SETTLE + grace);
+    assert!(handshake.complete().is_none(), "too late: reset");
+    assert_eq!(drained(serving.served).await, Drained { abandoned: 0 });
+}
+
+/// Asserts that the first request of a connection taken before the settle has the configured
+/// grace to begin, and no more: a connection that sends nothing in 500 ms from the settle is closed
+/// as an idle one, long before the default grace of [`GRACE`].
+#[tokio::test(start_paused = true)]
+async fn a_connection_that_sends_nothing_is_closed_at_the_configured_grace() {
+    let grace = Duration::from_millis(500);
+    let serving = Serving::start(|config| {
+        short_settle(config);
+        config.listen.door_grace = grace;
+    })
+    .await;
+    let mut client = serving.connect().unwrap();
+    until(&serving.rig.server, |server| server.open_connections() == 1).await;
+    let begun = Instant::now();
+    serving.rig.server.begin_drain();
+    serving.refusing().await;
+
+    tokio::time::advance(grace - LOOK * 3).await;
+    assert_eq!(serving.rig.server.open_connections(), 1, "still waited for");
+    assert_eq!(
+        read_answer(&mut client).await,
+        "",
+        "shut, with nothing sent"
+    );
+    no_later(begun, SETTLE + grace);
+    drop(client);
+    assert_eq!(drained(serving.served).await, Drained { abandoned: 0 });
+}
+
+/// Asserts that the accept pause in the settings of the server is what an accept that failed
+/// waits: with a grace of 100 ms and a pause of a second, the door that takes a failing accept
+/// is held a second by the pause, no less (the default pause, [`ACCEPT_PAUSE`], would end it at
+/// the grace) and no more than the pause and the grace.
+#[tokio::test(start_paused = true)]
+async fn an_accept_that_failed_waits_the_configured_pause() {
+    let pause = Duration::from_secs(1);
+    let grace = Duration::from_millis(100);
+    let serving = Serving::start_after(usize::MAX, |config| {
+        short_settle(config);
+        config.listen.accept_pause = pause;
+        config.listen.door_grace = grace;
+    })
+    .await;
+    let begun = Instant::now();
+    serving.rig.server.begin_drain();
+    serving.refusing().await;
+    let passed = Instant::now() - begun;
+    assert!(passed >= pause, "{passed:?}, less than the pause {pause:?}");
+    no_later(begun, SETTLE + pause + grace + pause);
+    assert_eq!(drained(serving.served).await, Drained { abandoned: 0 });
+}
+
 /// Asserts that outside Linux the count is an error, which the door takes for handshakes in
 /// flight, and waits out the grace: the system keeps no table it can read, and a count of zero
 /// would close the door on a handshake it cannot see.
@@ -575,7 +654,10 @@ TcpExt: 0 0 0
         let rig = Rig::with(1 << 20, short_settle).await;
         rig.server.begin_drain();
         rig.server.drain.settle();
-        let mut door = Closing::begin(Listeners::new(sockets));
+        let mut door = Closing::begin(
+            Listeners::new(sockets),
+            crate::server::ListenTuning::default(),
+        );
         let mut taken = Vec::new();
         while let Some(accepted) = door.next().await {
             let (stream, _) = accepted.as_ref().expect("an accept");

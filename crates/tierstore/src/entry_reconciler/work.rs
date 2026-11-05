@@ -3,7 +3,9 @@
 //! leader finds half done, is done again from the start.
 
 use super::EntryReconciler;
-use crate::backend::ByteRange;
+use futures::StreamExt;
+
+use crate::backend::{ByteRange, ReadBody};
 use crate::entry::{EntryOp, EntryState, Outcome, Seen, Step};
 use crate::{Error, Meta};
 
@@ -124,24 +126,39 @@ impl EntryReconciler {
     /// Deletes the key from the cold tier and then from the hot tier, and removes the sealed entry
     /// of the delete, which lets the deletes that wait for it answer.
     async fn finish_delete(&self, sealed: &Seen) -> Result<Verdict, Error> {
-        self.require_lease()?;
+        self.require_lease().await?;
         let key = &sealed.entry.key;
         ignore_missing(self.cold.delete(key).await)?;
-        self.require_lease()?;
+        self.require_lease().await?;
         ignore_missing(self.hot.delete(key).await)?;
         self.tally.caught_up(key);
         self.release(sealed).await
     }
 
     /// Refuses a destructive step or a publish to the cold tier when less than the margin of the
-    /// lease is left.
-    pub(super) fn require_lease(&self) -> Result<(), Error> {
-        if self.lease.margin_ok() {
+    /// lease is left and the lease cannot be renewed now: a lease that is still held with less
+    /// than the margin left (the timer's renewal is under way or late) is renewed here, and the
+    /// step goes on if that keeps it.
+    pub(super) async fn require_lease(&self) -> Result<(), Error> {
+        if self.lease.ensure_margin().await {
             return Ok(());
         }
-        Err(Error::Unavailable(
-            "less than the margin of the lease is left".to_owned(),
-        ))
+        Err(lease_lapsed())
+    }
+
+    /// `body`, cut short with [`Error::Unavailable`] at the first chunk that is asked for once less
+    /// than the margin of the lease is left, so that a write fed from it stops instead of
+    /// running on after this process has lost the lease.
+    pub(super) fn while_leased(&self, body: ReadBody) -> ReadBody {
+        let lease = self.lease.clone();
+        body.map(move |chunk| {
+            if lease.margin_ok() {
+                chunk
+            } else {
+                Err(lease_lapsed())
+            }
+        })
+        .boxed()
     }
 
     /// Makes the cold tier hold the hot object of `key`: nothing if the hot tier has none, a copy
@@ -171,13 +188,13 @@ impl EntryReconciler {
     /// Streams the hot object to the cold tier, create-only. An object that appeared there since
     /// the look counts as copied.
     async fn publish(&self, key: &str, hot: &Meta) -> Result<Replicated, Error> {
-        self.require_lease()?;
+        self.require_lease().await?;
         let body = match self.hot.get_stream(key, None).await {
             Ok(body) => body,
             Err(Error::NotFound(_)) => return Ok(Replicated::Same),
             Err(error) => return Err(error),
         };
-        self.require_lease()?;
+        self.require_lease().await?;
         match self.cold.put_stream(key, Some(hot.size), body).await {
             Ok(()) => {
                 // The tag of the copy is read to be remembered; a copy that cannot be read back
@@ -257,4 +274,9 @@ impl EntryReconciler {
         }
         Ok(())
     }
+}
+
+/// The failure of a step that finds less than the margin of the lease left.
+fn lease_lapsed() -> Error {
+    Error::Unavailable("less than the margin of the lease is left".to_owned())
 }

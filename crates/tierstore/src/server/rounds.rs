@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::config_entry::EntryTuning;
 use crate::entry_reconciler::Idle;
 use crate::format::{Format, read_format};
 use crate::{Backend, EntryReconciler, EntryReconcilerConfig, Error, ReconcilerConfig, StepReport};
@@ -31,22 +32,36 @@ pub(crate) struct Rounds {
 }
 
 impl Rounds {
-    /// A reconciler over `hot` and `cold` with the settings `config`; it counts a proxy as departed
-    /// after `departure`, which is the proxies' own `--departure`.
-    pub(crate) fn new(
+    /// A reconciler over `hot` and `cold` with the settings `config` and `tuning` (`[hot_store]`'s
+    /// entry keys); it counts a proxy as departed after `departure`, which is the proxies' own
+    /// `--departure`.
+    pub(crate) fn tuned(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
         config: ReconcilerConfig,
         departure: Duration,
+        tuning: &EntryTuning,
     ) -> Self {
         let mut entry_config = EntryReconcilerConfig::new(config);
         entry_config.departure = departure;
+        tuning.apply_reconciler(&mut entry_config);
         let idle = Idle::new(entry_config.idle_min, entry_config.idle_max);
         Self {
             reconciler: EntryReconciler::new(Arc::clone(&hot), cold, entry_config),
             hot,
             idle,
         }
+    }
+
+    /// [`Rounds::tuned`] with the default settings of the entry reconciler.
+    #[cfg(test)]
+    pub(crate) fn new(
+        hot: Arc<dyn Backend>,
+        cold: Arc<dyn Backend>,
+        config: ReconcilerConfig,
+        departure: Duration,
+    ) -> Self {
+        Self::tuned(hot, cold, config, departure, &EntryTuning::default())
     }
 
     /// Does one round, as the module says.

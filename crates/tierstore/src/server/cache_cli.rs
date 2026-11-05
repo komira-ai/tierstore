@@ -26,13 +26,21 @@
 //! read-write when the holder has exited. A start that is alone holds the lock before it binds
 //! the address, so it is read-write from its first answer.
 //!
+//! With `server.handoff_socket` the start gets its listening sockets as a storage node's does
+//! (see [`bind_fronts`]): after the cache is open it takes the S3 sockets, the loopback ones
+//! included, and the OCI ones from the instance that answers on the control socket, or binds its
+//! own where none answers, and then answers there itself. The instance it took them from drains
+//! and exits 0; the new one is read-only until then, by the lock above. A refusal, other addresses
+//! than the settings name, or no end of the hand-off within `server.handoff_wait` fails the start
+//! (exit status 1) with nothing bound.
+//!
 //! On SIGTERM or SIGINT the process drains as a storage node does; the eviction pass and the
 //! lock task are the only things running beside the server, and they stop with it. Nothing is
 //! owed to the upstream: no journal, no lease, no copy in flight.
 //!
 //! A storage node with a cache in front of its own proxy (see
 //! [`combined_cli`](super::combined_cli)) uses the same cache directory start (`open`), the same
-//! sockets (`bind_cache_s3`) and the same two loops; its upstream is the proxy.
+//! sockets (`bind_cache_s3`, or the hand-off) and the same loops; its upstream is the proxy.
 
 use std::future::Future;
 use std::path::Path;
@@ -47,11 +55,12 @@ use super::build_info::{COMMIT, VERSION};
 use super::cli::{
     Addresses, Error, OciSetup, S3Flags, oci_setup_of, open_tier, probe_run_id, signals,
 };
-use super::cli_serve::{bind_oci, bind_s3, cut_note};
+use super::cli_serve::{Bound, bind_fronts, bind_s3, cut_note, stopped_by};
 use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
-use super::listen::{LoopbackBind, bind, bind_set, joined, local_addrs};
+use super::handoff::Handoff;
+use super::listen::{LoopbackBind, bind_set, bind_with, joined};
 use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
@@ -73,10 +82,11 @@ pub(super) const LOCK_INTERVAL: Duration = Duration::from_secs(1);
 /// A configured address that cannot be bound (named), or a loopback socket that cannot ([`LoopbackBind`]).
 pub(super) fn bind_cache_s3(
     configured: &[std::net::SocketAddr],
+    backlog: i32,
 ) -> Result<Vec<tokio::net::TcpListener>, Error> {
-    let mut listeners = bind_s3(configured)?;
+    let mut listeners = bind_s3(configured, backlog)?;
     for addr in &bind_set(configured, true)[configured.len()..] {
-        let socket = bind(*addr).map_err(|why| LoopbackBind { addr: *addr, why })?;
+        let socket = bind_with(*addr, backlog).map_err(|why| LoopbackBind { addr: *addr, why })?;
         listeners.push(socket);
     }
     Ok(listeners)
@@ -187,6 +197,7 @@ pub(super) async fn serve_cache(
         scrub_min_round: settings.scrub_min_round,
         beside_halt: Arc::new(Notify::new()),
         beating: None,
+        handoff: settings.handoff.as_ref(),
     };
     serve_front(
         cache,
@@ -216,6 +227,9 @@ pub(super) struct Fronts<'a> {
     /// it beats until the in-flight requests of the S3 front and of the OCI front are finished or
     /// cut.
     pub(super) beating: Option<Arc<Proxy>>,
+    /// The hand-off of the listening sockets (`server.handoff_socket`), if the settings ask for
+    /// one.
+    pub(super) handoff: Option<&'a Handoff>,
 }
 
 /// Serves the S3 front (and the OCI front, if there is a setup) over `cache`, with the loops of
@@ -223,8 +237,15 @@ pub(super) struct Fronts<'a> {
 /// cache, whatever its upstream is: a store of a build node or the proxy of a storage node.
 /// `beside` is a loop of the caller's that runs until `fronts.beside_halt` is notified.
 ///
+/// With `fronts.handoff` the sockets are got as a storage node's are (see
+/// [`bind_fronts`]): taken from the instance that answers on the control socket, or bound where
+/// none answers, and then offered there; when a successor takes them it stops as if `stop` had
+/// resolved, and drains. The cache directory lock keeps the successor read-only until this
+/// process has exited.
+///
 /// # Errors
-/// An address that cannot be bound.
+/// An address that cannot be bound, or a hand-off that is refused, mismatched or not ended within
+/// `server.handoff_wait` (a [`HandingError`](super::cli::HandingError), boxed).
 pub(super) async fn serve_front(
     cache: LocalCache,
     mut config: ServerConfig,
@@ -235,12 +256,27 @@ pub(super) async fn serve_front(
     beside: impl Future<Output = ()>,
 ) -> Result<Drained, Error> {
     config.cache = Some(cache.clone());
+    let listen = config.listen;
     // The registry front reads what the S3 front reads: through the cache.
     let backend: Arc<dyn Backend> = Arc::new(cache.clone());
     let server = Server::new(Arc::clone(&backend), config);
-    let listeners = bind_cache_s3(fronts.listen)?;
-    let oci = bind_oci(oci, backend).await?;
-    ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
+    let Bound {
+        s3: listeners,
+        oci,
+        addresses,
+        offer,
+    } = bind_fronts(
+        fronts.handoff,
+        &bind_set(fronts.listen, true),
+        || bind_cache_s3(fronts.listen, listen.backlog),
+        oci,
+        backend,
+    )
+    .await
+    .map_err(super::cli::HandingError::into_boxed)?;
+    let offer = offer.map(|offer| offer.with_accept_pause(listen.accept_pause));
+    let stop = stopped_by(stop, offer);
+    ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
@@ -266,20 +302,28 @@ pub(super) async fn serve_front(
             after,
         )
         .await;
+        tracing::debug!("tierstore: fronts drained");
         for halting in &halts {
             halting.notify_one();
         }
         ended
     };
-    let maintaining = cache.maintain(PASS_INTERVAL, halt);
-    let holding = cache.hold(LOCK_INTERVAL, lock_halt);
+    let maintaining = async {
+        cache.maintain(PASS_INTERVAL, halt).await;
+        tracing::debug!("tierstore: maintain ended");
+    };
+    let holding = async {
+        cache.hold(LOCK_INTERVAL, lock_halt).await;
+        tracing::debug!("tierstore: hold ended");
+    };
     let min_round = fronts.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
-    let scrubbing = cache.scrub(
-        fronts.scrub_rate,
-        min_round,
-        Every::new(SCRUB_TICK),
-        scrub_halt,
-    );
+    let scrubbing = async {
+        let every = Every::new(SCRUB_TICK);
+        cache
+            .scrub(fronts.scrub_rate, min_round, every, scrub_halt)
+            .await;
+        tracing::debug!("tierstore: scrub ended");
+    };
     let ((drained, oci_cut), (), (), (), ()) =
         tokio::join!(serving, beside, maintaining, holding, scrubbing);
     watcher.abort();

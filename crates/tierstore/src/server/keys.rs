@@ -3,9 +3,9 @@
 //!
 //! A server has one full key, which may do everything the front serves
 //! ([`ServerConfig::access_key_id`]), and any number of read-only keys
-//! ([`ServerConfig::read_only_keys`]), which may do GetObject, HeadObject, ListObjectsV2 and
-//! HeadBucket and nothing else: any other call signed by one is answered 403 `AccessDenied`
-//! before its body is read, and changes nothing. A request names its key by the id in its
+//! ([`ServerConfig::read_only_keys`]), which may do GetObject, HeadObject, ListObjectsV2,
+//! ListMultipartUploads, HeadBucket, GetBucketLocation and ListBuckets and nothing else: any other
+//! call signed by one is answered 403 `AccessDenied` before its body is read, and changes nothing. A request names its key by the id in its
 //! credential, so the ids of the keys of one server differ ([`ensure_distinct`], which the
 //! binary applies at start).
 //!
@@ -85,7 +85,8 @@ impl fmt::Debug for AccessKey {
 pub(crate) enum Role {
     /// Everything the front serves.
     Full,
-    /// GetObject, HeadObject, ListObjectsV2, ListMultipartUploads and HeadBucket.
+    /// GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation
+    /// and ListBuckets.
     ReadOnly,
     /// A presigning key: one presigned `PUT`, as far as its grant goes (see `presign`).
     PresignPut,

@@ -98,7 +98,7 @@ tierstore: oci: <peer>: TLS handshake: <error>
 tierstore: oci: <peer>: TLS handshake took too long
 ```
 
-The first is a client that does not trust the certificate, speaks plain HTTP to an HTTPS front, or sends garbage: the `<error>` says which. The second is a connection that did not finish the handshake in 10 seconds (a port scan, a stalled client, or a path that drops packets); the connection is closed to free its slot. Neither needs a restart.
+The first is a client that does not trust the certificate, speaks plain HTTP to an HTTPS front, or sends garbage: the `<error>` says which. The second is a connection that did not finish the handshake in `server.oci_handshake_timeout` (10 seconds by default) (a port scan, a stalled client, or a path that drops packets); the connection is closed to free its slot. Neither needs a restart.
 
 ### Build-node cache
 
@@ -134,7 +134,7 @@ Both exit 3 and the unit does not restart. The first is a probe that could not b
 | 400 `RequestTimeout` | a body that stalled for `server.body_idle_timeout` or came slower than `server.put_min_bytes_per_sec`; nothing is stored |
 | 503 `SlowDown` | more than `server.max_concurrent_puts` bodies at once for longer than `server.put_permit_wait`, or a put that met a full tier; retry |
 | 503 `ServiceUnavailable` | a write while the format object does not say `active` at epoch 2 (the text names `tierstore format-epoch --activate`; a store is activated once, see [operations](operations.md#rolling-out-the-entry-protocol)), or while it says `drain` or `drained` (writes are paused); a put or delete that met a put, delete or copy of the same key in flight (retry); a delete that waited for the reconciler's release of the key and did not get it before the request deadline; a tier could not be reached; a drain answers no request 503 (see "A connection ends during a restart") |
-| 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, CRC-64/NVMe, or `encoding-type=url` on a listing; set the SDK's checksum calculation to "when required" |
+| 501 `NotImplemented` | an `aws-chunked` or trailing-checksum body, or `encoding-type=url` or a `delimiter` with text on a listing; set the SDK's checksum calculation to "when required" |
 
 ## The hot tier keeps filling
 

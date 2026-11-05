@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 use super::{MAX_FRAME, recv, send};
-use crate::server::handoff::testing::listening;
+use crate::server::handoff::testing::{listening, within};
 
 /// Asserts that a frame arrives with its lines in order and with its descriptors, and that a
 /// descriptor that arrives is the same socket: the address of the listener made of it is the one
@@ -59,12 +59,18 @@ async fn a_stream_that_ends_inside_a_frame_is_an_error() {
 }
 
 /// Asserts that a peer that never ends its frame cannot make the reader hold more than the
-/// protocol allows: the frame is refused as invalid data.
+/// protocol allows: the frame is refused as invalid data. The peer writes while the reader reads,
+/// as two processes do: the bytes are more than a socket's buffer holds on macOS (8 KiB there),
+/// so a writer that waited for all of them to be taken before anyone read would wait forever.
 #[tokio::test]
 async fn a_frame_longer_than_the_protocol_allows_is_refused() {
     let (mut near, far) = UnixStream::pair().unwrap();
-    near.write_all(&vec![b'x'; MAX_FRAME + 1]).await.unwrap();
-    let error = recv(&far).await.expect_err("an error");
+    let too_long = vec![b'x'; MAX_FRAME + 1];
+    let writing = async { near.write_all(&too_long).await.expect("written") };
+    let reading = async { tokio::join!(recv(&far), writing).0 };
+    let error = within("reading a frame that is too long", reading)
+        .await
+        .expect_err("an error");
     assert_eq!(error.kind(), ErrorKind::InvalidData);
     assert_eq!(error.to_string(), "a frame longer than the protocol allows");
 }

@@ -25,6 +25,8 @@ fn keys_of(uploads: &[OpenUpload]) -> Vec<&str> {
 async fn rig_with(reserved: &[&str], plain: &[&str]) -> (Rig, Proxy) {
     let rig = Rig::new();
     let proxy = rig.proxy("p1", 1 << 20).await;
+    // A full hot tier, so that the uploads the proxy starts are the cold tier's.
+    crate::support::set_usage(&rig, 1 << 20, 0).await;
     for key in reserved {
         rig.cold_mem.create_upload(key).await.unwrap();
     }

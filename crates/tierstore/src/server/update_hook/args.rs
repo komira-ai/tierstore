@@ -1,56 +1,49 @@
-//! The command line of the hook: `tierstore update-hook <step> [<artifact>] [--params <file>]`.
+//! The command line of the hook: `tierstore update-hook <step> [<artifact>] --params <file>`.
 //!
-//! The updater runs `<executable> <hook_args> <step> [args]`. This module parses what follows
-//! the verb: the step, the staged release directory (`prepare` only) and the file of the
-//! `[hook.params]` table, which the five steps need and `restore` (the boot entry, run before
-//! any update) does not take. Flags only: no value comes from the environment.
-//!
-//! A build with the `hook-conformance` feature, which only this crate's own tests turn on, takes
-//! six more flags that say where the host is ([`HostArgs`]): `--root`, `--root-uid`, `--nft`,
-//! `--systemctl`, `--public-port` and `--poll-interval-ms`. They let a test run the real binary
-//! against a scratch root, fake programs and its own ports. A release has none of them: there the
-//! host is always `/`, root's, `/usr/sbin/nft`, `/usr/bin/systemctl`, port 9300 and a poll a
-//! second, and the words are refused like any other unexpected argument.
+//! hostkeeper runs `<command> <step> --params <file>`, the command being the manifest's
+//! `["bin/tierstore", "update-hook"]`. This module parses what follows the verb: the step, the
+//! staged release directory (`prepare` only) and the params file, which every step takes: the
+//! five steps of an update, `uninstall`, and `restore`, the boot step the manifest names
+//! (`boot = "restore"`). Flags only: no value comes from the environment.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
 
-use super::declaration::PUBLIC_PORT;
-use super::machine::{NFT_PROGRAM, SYSTEMCTL_PROGRAM};
-use super::plain::is_plain;
-
-/// One of the five steps of the contract, or the boot entry `restore`.
+/// One step of the hook.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// Check the host can take the update and make it ready; nothing a client sees changes.
+    /// Check the host can take the update and record it; nothing a client sees changes.
     Prepare,
-    /// The visible change.
+    /// The visible change: the new release serves.
     Cutover,
-    /// Observe that the new version serves.
+    /// Observe that the new release serves.
     Verify,
-    /// Undo what `prepare` and `cutover` did, as far as they can be undone.
+    /// Undo what `prepare` and `cutover` did, before the commit.
     Rollback,
-    /// Remove what only the update needed.
+    /// Retire what only the update needed; the commit.
     Cleanup,
-    /// The boot entry: apply the rules and start the slot the record names.
+    /// Stop the service for good; its data stays.
+    Uninstall,
+    /// The boot step: start the instance the record names, and only that one.
     Restore,
 }
 
 impl Step {
-    /// Every step, in the order of the contract's table, then the boot entry.
-    pub const ALL: [Step; 6] = [
+    /// Every step: the five of an update in the order of the contract's table, then `uninstall`
+    /// and the boot step.
+    pub const ALL: [Step; 7] = [
         Step::Prepare,
         Step::Cutover,
         Step::Verify,
         Step::Rollback,
         Step::Cleanup,
+        Step::Uninstall,
         Step::Restore,
     ];
 
-    /// The word the updater puts on the command line.
+    /// The word hostkeeper puts on the command line.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
@@ -59,6 +52,7 @@ impl Step {
             Step::Verify => "verify",
             Step::Rollback => "rollback",
             Step::Cleanup => "cleanup",
+            Step::Uninstall => "uninstall",
             Step::Restore => "restore",
         }
     }
@@ -102,130 +96,9 @@ pub enum ArgsError {
     /// `--params` twice.
     #[error("--params given twice")]
     DuplicateParams,
-    /// A step other than `restore` without `--params`.
+    /// No `--params`.
     #[error("--params <file> is required")]
     MissingParams,
-    /// A flag of the host is the last word.
-    #[error("{0} needs a value")]
-    MissingValue(&'static str),
-    /// A flag of the host given twice.
-    #[error("{0} given twice")]
-    DuplicateFlag(&'static str),
-    /// `--root`, `--nft` or `--systemctl` is not an absolute UTF-8 path of plain components.
-    #[error("{0} must be an absolute UTF-8 path of plain components")]
-    NotPlain(&'static str),
-    /// `--root-uid`, `--public-port` or `--poll-interval-ms` is not a number in its range.
-    #[error("{0} must be a whole number in its range")]
-    NotNumber(&'static str),
-}
-
-/// The root the host's files are read under.
-pub const ROOT_FLAG: &str = "--root";
-/// The user that must own the declaration and a staged release's binary.
-pub const ROOT_UID_FLAG: &str = "--root-uid";
-/// The `nft` program.
-pub const NFT_FLAG: &str = "--nft";
-/// The `systemctl` program.
-pub const SYSTEMCTL_FLAG: &str = "--systemctl";
-/// The public port.
-pub const PUBLIC_PORT_FLAG: &str = "--public-port";
-/// The time between two looks at an instance, in milliseconds.
-pub const POLL_FLAG: &str = "--poll-interval-ms";
-/// Every flag of the host.
-const ALL_HOST_FLAGS: [&str; 6] = [
-    ROOT_FLAG,
-    ROOT_UID_FLAG,
-    NFT_FLAG,
-    SYSTEMCTL_FLAG,
-    PUBLIC_PORT_FLAG,
-    POLL_FLAG,
-];
-
-/// The flags of the host a build takes: all six in a conformance build, none in a release. Only
-/// these two sets are ever parsed with: the parser is not given a list from outside the hook.
-#[must_use]
-pub(super) const fn host_flags(conformance: bool) -> &'static [&'static str] {
-    if conformance { &ALL_HOST_FLAGS } else { &[] }
-}
-
-/// The user that must own the declaration and a staged release's binary unless `--root-uid`
-/// says otherwise: root, since both are the updater's.
-pub const ROOT_UID: u32 = 0;
-
-/// Where the hook finds the host it acts on. A release always has the defaults: the root is `/`,
-/// the declaration and a staged release's binary must be root's (uid 0), the programs are
-/// `/usr/sbin/nft` and `/usr/bin/systemctl`, the public port is 9300 and a poll waits a second.
-/// A conformance build lets a test set each, to run the real binary against a scratch host.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HostArgs {
-    /// `--root`: the root the declaration, `etc/group`, `etc/passwd`, `proc` and the state
-    /// directory are read under.
-    pub root: PathBuf,
-    /// `--root-uid`: the user that must own the declaration and the binary of a staged release.
-    pub root_uid: u32,
-    /// `--nft`: the `nft` program.
-    pub nft: PathBuf,
-    /// `--systemctl`: the `systemctl` program.
-    pub systemctl: PathBuf,
-    /// `--public-port`: the port clients call, which the redirect sends to the serving slot.
-    pub public_port: u16,
-    /// `--poll-interval-ms`: what a step waits between two looks at an instance; `None` is the
-    /// steps' own interval, a second.
-    pub poll: Option<Duration>,
-}
-
-impl Default for HostArgs {
-    fn default() -> HostArgs {
-        HostArgs {
-            root: PathBuf::from("/"),
-            root_uid: ROOT_UID,
-            nft: PathBuf::from(NFT_PROGRAM),
-            systemctl: PathBuf::from(SYSTEMCTL_PROGRAM),
-            public_port: PUBLIC_PORT,
-            poll: None,
-        }
-    }
-}
-
-/// `value` as a number of type `T`; `NotNumber(flag)` when it is not one, or out of range.
-fn number<T: FromStr>(flag: &'static str, value: &OsString) -> Result<T, ArgsError> {
-    value
-        .to_str()
-        .and_then(|text| text.parse().ok())
-        .ok_or(ArgsError::NotNumber(flag))
-}
-
-impl HostArgs {
-    /// Sets the value of `flag`, one of [`host_flags`].
-    fn set(&mut self, flag: &'static str, value: OsString) -> Result<(), ArgsError> {
-        match flag {
-            ROOT_UID_FLAG => self.root_uid = number(flag, &value)?,
-            PUBLIC_PORT_FLAG => {
-                self.public_port = number(flag, &value)?;
-                if self.public_port == 0 {
-                    return Err(ArgsError::NotNumber(flag));
-                }
-            }
-            POLL_FLAG => self.poll = Some(Duration::from_millis(number(flag, &value)?)),
-            _ => {
-                // A path that is not UTF-8 is refused rather than spelt over: the programs are
-                // run by a name that is text.
-                let Some(text) = value.to_str() else {
-                    return Err(ArgsError::NotPlain(flag));
-                };
-                let path = PathBuf::from(text);
-                if !is_plain(&path) {
-                    return Err(ArgsError::NotPlain(flag));
-                }
-                match flag {
-                    ROOT_FLAG => self.root = path,
-                    NFT_FLAG => self.nft = path,
-                    _ => self.systemctl = path,
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// The step a hook was asked to run, with its arguments.
@@ -235,10 +108,8 @@ pub struct Invocation {
     pub step: Step,
     /// The staged release directory: given to `prepare` and to no other step.
     pub artifact: Option<PathBuf>,
-    /// The file of the `[hook.params]` table: given to the five steps, not to `restore`.
-    pub params: Option<PathBuf>,
-    /// Where the host is: the defaults unless a flag says otherwise.
-    pub host: HostArgs,
+    /// The params file hostkeeper wrote for this run.
+    pub params: PathBuf,
 }
 
 impl Invocation {
@@ -250,37 +121,15 @@ impl Invocation {
     where
         I: IntoIterator<Item = OsString>,
     {
-        Invocation::parse_taking(args, host_flags(cfg!(feature = "hook-conformance")))
-    }
-
-    /// Parses as [`Invocation::parse`] does, taking the flags of the host in `flags` only: what
-    /// a build with them takes, or what a release takes (none), whichever this build is.
-    ///
-    /// # Errors
-    /// As [`Invocation::parse`]; a flag of the host not in `flags` is an unknown step or an
-    /// unexpected argument, like any other word.
-    pub(super) fn parse_taking<I>(args: I, flags: &[&'static str]) -> Result<Invocation, ArgsError>
-    where
-        I: IntoIterator<Item = OsString>,
-    {
         let mut args = args.into_iter();
-        let (mut step, mut artifact, mut params) = (None, None, None);
-        let (mut host, mut given) = (HostArgs::default(), Vec::new());
+        let step = args
+            .next()
+            .ok_or(ArgsError::MissingStep)?
+            .to_string_lossy()
+            .parse::<Step>()?;
+        let (mut artifact, mut params) = (None, None);
         while let Some(arg) = args.next() {
-            if let Some(&flag) = flags.iter().find(|flag| arg == **flag) {
-                let value = args.next().ok_or(ArgsError::MissingValue(flag))?;
-                if given.contains(&flag) {
-                    return Err(ArgsError::DuplicateFlag(flag));
-                }
-                given.push(flag);
-                host.set(flag, value)?;
-                continue;
-            }
-            let Some(step) = step else {
-                step = Some(arg.to_string_lossy().parse::<Step>()?);
-                continue;
-            };
-            if arg == "--params" && step != Step::Restore {
+            if arg == "--params" {
                 let file = args.next().ok_or(ArgsError::MissingParamsFile)?;
                 if params.replace(PathBuf::from(file)).is_some() {
                     return Err(ArgsError::DuplicateParams);
@@ -291,18 +140,13 @@ impl Invocation {
                 return Err(ArgsError::Unexpected(arg));
             }
         }
-        let step = step.ok_or(ArgsError::MissingStep)?;
         if step == Step::Prepare && artifact.is_none() {
             return Err(ArgsError::MissingArtifact);
-        }
-        if step != Step::Restore && params.is_none() {
-            return Err(ArgsError::MissingParams);
         }
         Ok(Invocation {
             step,
             artifact,
-            params,
-            host,
+            params: params.ok_or(ArgsError::MissingParams)?,
         })
     }
 }

@@ -26,7 +26,7 @@ Include what you can of:
 
 - The S3 listener: request signing and presigned URLs, key roles and their grants, and request parsing.
 - Key and configuration handling, including key files and their permissions.
-- The update hook, which runs as `tierstore-update` with `CAP_NET_ADMIN` on Linux and as root on macOS, and the firewall (nftables) and launchd changes it makes.
+- The update hook, which hostkeeper runs as root, and the units or the launchd job it starts and stops and the record and markers it writes.
 - The release artifacts and their attestations.
 
 Reports about a deployment's own misconfiguration (for example a key file readable by every user, or a listener bound

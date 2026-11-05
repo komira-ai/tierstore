@@ -250,10 +250,10 @@ async fn a_hot_tier_that_answers_full_sends_a_put_to_cold_and_refuses_a_presigne
     assert!(!rig.cold_has("presigned").await);
 }
 
-/// Asserts that the completion of a multipart upload makes the object in the cold tier and leaves
-/// a `(PUT, PENDING)` entry, with nothing in the hot tier.
+/// Asserts that the completion of a multipart upload makes the object in the hot tier and leaves
+/// a `(PUT, PENDING)` entry, with nothing in the cold tier.
 #[tokio::test]
-async fn a_multipart_completion_lands_in_cold_and_leaves_a_pending_entry() {
+async fn a_multipart_completion_lands_in_hot_and_leaves_a_pending_entry() {
     let rig = Rig::active().await;
     let id = rig.proxy.create_upload("k").await.unwrap();
     let tag = rig
@@ -265,13 +265,13 @@ async fn a_multipart_completion_lands_in_cold_and_leaves_a_pending_entry() {
         .complete_upload("k", &id, &[(1, tag)])
         .await
         .unwrap();
-    assert_eq!(rig.cold_mem.get("k", None).await.unwrap(), body("ab"));
-    assert!(!rig.hot_has("k").await);
+    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("ab"));
+    assert!(!rig.cold_has("k").await);
     assert_eq!(rig.shape("k").await, pending());
 }
 
-/// Asserts that a completion the cold tier refuses (a part it does not know) is answered with the
-/// cold tier's error and removes its entry, and that a completion the cold tier did not answer is
+/// Asserts that a completion the hot tier refuses (a part it does not know) is answered with the
+/// hot tier's error and removes its entry, and that a completion the hot tier did not answer is
 /// answered `Unavailable` and leaves the entry pending, for the reconciler to find the object or
 /// none.
 #[tokio::test]
@@ -285,14 +285,15 @@ async fn a_multipart_completion_that_fails_removes_its_entry_and_one_without_an_
         .await
         .unwrap();
     let invalid = Error::InvalidPart("1".to_owned());
-    rig.cold.fail_next_with(Op::CompleteUpload, invalid.clone());
+    rig.hot_faults
+        .fail_next_with(Op::CompleteUpload, invalid.clone());
     let done = rig
         .proxy
         .complete_upload("k", &id, &[(1, tag.clone())])
         .await;
     assert_eq!(done, Err(invalid));
     assert_eq!(rig.shape("k").await, None);
-    rig.cold.fail_next(Op::CompleteUpload, 1);
+    rig.hot_faults.fail_next(Op::CompleteUpload, 1);
     let lost = rig.proxy.complete_upload("k", &id, &[(1, tag)]).await;
     assert!(matches!(lost, Err(Error::Unavailable(_))), "{lost:?}");
     assert_eq!(rig.shape("k").await, pending());
@@ -541,4 +542,51 @@ async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with
         .fail_next_on(Op::Head, &entry_key("k"), unreadable);
     assert_eq!(rig.proxy.put("k", body("v")).await, Err(unanswered));
     assert_eq!(rig.shape("k").await, held_by("p1"));
+}
+
+/// Asserts that a put of a new key asks the cold tier once, and the hot tier twice: once before
+/// the entry (the answer of a put of an existing key, which makes no entry) and once under it
+/// (the one that decides). A streamed put and a held one ask alike.
+#[tokio::test]
+async fn a_put_of_a_new_key_asks_the_cold_tier_once_and_the_hot_tier_before_and_under_its_entry() {
+    let rig = Rig::active().await;
+    rig.proxy.put("k", body("v")).await.unwrap();
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "k"), 2);
+    assert_eq!(rig.cold.calls_on(Op::Head, "k"), 1);
+    let streamed = rig
+        .proxy
+        .put_stream("s", Some(2), chunks(&["a", "b"]))
+        .await;
+    streamed.unwrap();
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "s"), 2);
+    assert_eq!(rig.cold.calls_on(Op::Head, "s"), 1);
+}
+
+/// Asserts that a put of a key the hot tier has asks the hot tier once, never the cold tier, and
+/// makes no entry.
+#[tokio::test]
+async fn a_put_of_an_existing_key_asks_the_hot_tier_once_and_nothing_else() {
+    let rig = Rig::active().await;
+    rig.hot_mem.put("k", body("old")).await.unwrap();
+    let put = rig.proxy.put("k", body("v")).await;
+    assert_eq!(put, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "k"), 1);
+    assert_eq!(rig.cold.calls_on(Op::Head, "k"), 0);
+    assert_eq!(rig.shape("k").await, None);
+}
+
+/// Asserts that when both heads under the entry fail, the answer is the hot tier's error, as when
+/// the tiers are asked in turn, and the entry is removed.
+#[tokio::test]
+async fn a_hot_failure_under_the_entry_is_answered_before_a_cold_one() {
+    let rig = Rig::active().await;
+    let down = Error::Unavailable("hot down".to_owned());
+    rig.hot_faults
+        .fail_next_on(Op::Head, "k", Error::NotFound("k".to_owned()));
+    rig.hot_faults.fail_next_on(Op::Head, "k", down.clone());
+    rig.cold
+        .fail_next_on(Op::Head, "k", Error::Unavailable("cold down".to_owned()));
+    assert_eq!(rig.proxy.put("k", body("v")).await, Err(down));
+    assert_eq!(rig.shape("k").await, None);
+    assert!(!rig.cold_has("k").await);
 }

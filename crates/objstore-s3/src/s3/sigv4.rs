@@ -22,7 +22,7 @@ pub(crate) struct Request<'a> {
     pub method: &'a str,
     /// `host` or `host:port`, exactly as the `Host` header carries it.
     pub host: &'a str,
-    /// The path, already URI-encoded (keys need no encoding; see `ObjectKey`).
+    /// The path, already URI-encoded (see [`encode_key_path`]).
     pub path: &'a str,
     /// Query parameters, not yet encoded.
     pub query: &'a [(&'a str, String)],
@@ -112,6 +112,13 @@ pub(crate) fn uri_encode(s: &str) -> String {
         }
     }
     out
+}
+
+/// An object key as the path of a request: each byte but the RFC 3986 unreserved characters
+/// and the `/` between segments percent-encoded, once. S3 signs the path as it is sent, so
+/// this is both the canonical URI and the path of the URL.
+pub(crate) fn encode_key_path(key: &str) -> String {
+    key.split('/').map(uri_encode).collect::<Vec<_>>().join("/")
 }
 
 /// The size of the input block of SHA-256, which is the size of an HMAC-SHA-256 key.
@@ -318,6 +325,19 @@ mod tests {
             canonical_query(&[("b", "2".into()), ("a", "x/y".into())]),
             "a=x%2Fy&b=2"
         );
+    }
+
+    /// Asserts that a key becomes a path with each byte encoded once but the unreserved
+    /// characters and the `/` between segments (`%` as `%25`, a space as `%20`, `+` as `%2B`,
+    /// UTF-8 bytes one by one, `?` and `#` encoded), and that empty segments are kept.
+    #[test]
+    fn a_key_is_encoded_once_as_a_path() {
+        assert_eq!(encode_key_path("cas/ab/cd.seg-1_~"), "cas/ab/cd.seg-1_~");
+        assert_eq!(
+            encode_key_path("f(x) a+b%41&<?#/\u{e9}"),
+            "f%28x%29%20a%2Bb%2541%26%3C%3F%23/%C3%A9"
+        );
+        assert_eq!(encode_key_path("/a//b/"), "/a//b/");
     }
 
     /// Catches: calendar arithmetic off by a day at month, leap-year or century edges,

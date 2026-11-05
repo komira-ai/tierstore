@@ -44,13 +44,32 @@ pub(super) const BUCKET: &str = "tier-bucket";
 pub(super) const NOW: u64 = 1_800_000_000_000;
 
 /// The headers in which a request may carry a checksum of its body.
-pub(super) const CHECKSUMS: [&str; 5] = [
+pub(super) const CHECKSUMS: [&str; 6] = [
     "content-md5",
     "x-amz-checksum-crc32",
     "x-amz-checksum-crc32c",
     "x-amz-checksum-sha1",
     "x-amz-checksum-sha256",
+    "x-amz-checksum-crc64nvme",
 ];
+
+/// CRC-64/NVME of `body`, bit by bit from its definition (reflected polynomial
+/// `0x9a6c9329ac4bc9b5`, all ones in, all ones out), so that the tests do not trust the
+/// implementation they check.
+pub(super) fn crc64nvme(body: &[u8]) -> u64 {
+    let mut crc = u64::MAX;
+    for byte in body {
+        crc ^= u64::from(*byte);
+        for _ in 0..8 {
+            let low = crc & 1;
+            crc >>= 1;
+            if low == 1 {
+                crc ^= 0x9a6c_9329_ac4b_c9b5;
+            }
+        }
+    }
+    !crc
+}
 
 /// The value of the checksum header `name` for `body`, worked out apart from the server.
 pub(super) fn checksum(name: &str, body: &[u8]) -> String {
@@ -59,6 +78,7 @@ pub(super) fn checksum(name: &str, body: &[u8]) -> String {
         "x-amz-checksum-crc32" => crc32fast::hash(body).to_be_bytes().to_vec(),
         "x-amz-checksum-crc32c" => crc32c::crc32c(body).to_be_bytes().to_vec(),
         "x-amz-checksum-sha1" => sha1_of(&SHA1_FOR_LEGACY_USE_ONLY, body).as_ref().to_vec(),
+        "x-amz-checksum-crc64nvme" => crc64nvme(body).to_be_bytes().to_vec(),
         _ => Sha256::digest(body).to_vec(),
     };
     STANDARD.encode(hash)
@@ -379,4 +399,33 @@ impl Backend for Plain {
     async fn list(&self, _prefix: &str) -> Result<Vec<Listed>, Error> {
         Ok(Vec::new())
     }
+}
+
+/// How many of `tries` connections to the listener at `at` are established while nothing accepts
+/// them. The kernel keeps a listener's queue of established connections to its backlog (and lets
+/// one more in) and drops the rest of the handshakes, which stay pending; so the count is at most
+/// the backlog plus one, and a listener with a larger backlog shows more. The first connection is
+/// waited for, so that the count is never zero for a listener that works; the others are given a
+/// number of turns of the runtime, and a handshake that had not come by then is not counted.
+pub(crate) async fn established_unaccepted(at: std::net::SocketAddr, tries: usize) -> usize {
+    let attempts: Vec<_> = (0..tries)
+        .map(|_| tokio::spawn(tokio::net::TcpStream::connect(at)))
+        .collect();
+    let (first, rest) = attempts.split_first().expect("at least one try");
+    let mut established = 0;
+    while !first.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    for attempt in rest {
+        if attempt.is_finished() {
+            established += 1;
+        }
+    }
+    for attempt in &attempts {
+        attempt.abort();
+    }
+    established + 1
 }

@@ -14,7 +14,7 @@ use tierstore_testkit::dir::TestDir;
 use tokio::sync::watch;
 
 use super::{Cli, Error, build, exit_status};
-use crate::server::cli_serve::bind_oci;
+use crate::server::cli_serve::bind_fronts;
 use crate::server::config_interface::UpstreamTable;
 use crate::server::config_units::Dur;
 use crate::server::oci::fake_upstream::{Fake, Registry};
@@ -47,6 +47,7 @@ fn table(url: &str) -> UpstreamTable {
         ca_file: None,
         timeout: None,
         max_redirects: None,
+        recheck_timeout: None,
     }
 }
 
@@ -81,6 +82,7 @@ fn the_start_makes_a_client_only_for_an_upstream_table() {
         ca_file: Some(roots),
         timeout: Some(Dur(Duration::from_secs(45))),
         max_redirects: Some(2),
+        recheck_timeout: Some(Dur(Duration::from_secs(2))),
         ..with_login("https://registry.example", password)
     });
     let made = build(&given).expect("built").oci.expect("a front");
@@ -231,10 +233,13 @@ async fn the_bound_front_pulls_a_missing_blob_from_the_upstream() {
     flags.oci_upstream = Some(table(&registry.url()));
     let built = build(&flags).expect("built");
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
-    let listener = bind_oci(built.oci, backend)
+    let s3: Vec<std::net::SocketAddr> = vec!["127.0.0.1:0".parse().expect("an address")];
+    let own =
+        || crate::server::cli_serve::bind_s3(&s3, crate::server::ListenTuning::default().backlog);
+    let bound = bind_fronts(None, &s3, own, built.oci, backend)
         .await
-        .expect("bound")
-        .expect("a front");
+        .expect("bound");
+    let listener = bound.oci.expect("a front");
     let addr = listener.local_addr().expect("an address");
     let (stop, stopped) = watch::channel(false);
     let serving = tokio::spawn(listener.serve(stopped));

@@ -58,6 +58,9 @@ pub(super) struct UpstreamTable {
     pub timeout: Option<Dur>,
     /// The most redirects one request follows (4 if left out).
     pub max_redirects: Option<u32>,
+    /// How long the whole re-check of a tag the store has may take, all its requests together;
+    /// past it the stored tag is served (`5s` if left out).
+    pub recheck_timeout: Option<Dur>,
 }
 
 /// One `[[interface]]` entry.
@@ -84,6 +87,9 @@ pub(super) struct Params {
     pub connection_lifetime: Option<Dur>,
     pub require_auth: Option<bool>,
     pub stage_read: Option<u64>,
+    pub max_manifest_bytes: Option<u64>,
+    pub read_chunk_bytes: Option<u64>,
+    pub echo_bytes: Option<u64>,
     pub upstream: Option<UpstreamTable>,
 }
 
@@ -141,6 +147,9 @@ fn check_s3(at: &str, params: &Params) -> Result<(), ConfigError> {
         ("connection_lifetime", params.connection_lifetime.is_some()),
         ("require_auth", params.require_auth.is_some()),
         ("stage_read", params.stage_read.is_some()),
+        ("max_manifest_bytes", params.max_manifest_bytes.is_some()),
+        ("read_chunk_bytes", params.read_chunk_bytes.is_some()),
+        ("echo_bytes", params.echo_bytes.is_some()),
         ("upstream", params.upstream.is_some()),
     ];
     super::config::refuse(&place, "not for type \"s3\"", &others)
@@ -168,6 +177,14 @@ fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags
         Some(bytes) => Some(within(&place, "stage_read", bytes, 1, u64::MAX)?),
         None => None,
     };
+    let size = |name: &str, given: Option<u64>| {
+        given
+            .map(|bytes| within(&place, name, bytes, 1, u64::MAX))
+            .transpose()
+    };
+    let max_manifest_bytes = size("max_manifest_bytes", params.max_manifest_bytes)?;
+    let read_chunk_bytes = size("read_chunk_bytes", params.read_chunk_bytes)?;
+    let echo_bytes = size("echo_bytes", params.echo_bytes)?;
     let upstream = params
         .upstream
         .clone()
@@ -182,6 +199,9 @@ fn oci_of(at: &str, params: &Params, listen: Vec<SocketAddr>) -> Result<OciFlags
         connection_lifetime: params.connection_lifetime.map(|dur| dur.0),
         require_auth: params.require_auth.unwrap_or(false),
         stage_read,
+        max_manifest_bytes,
+        read_chunk_bytes,
+        echo_bytes,
         upstream,
     })
 }
@@ -225,6 +245,15 @@ fn differing(first: &OciFlags, next: &OciFlags) -> Option<&'static str> {
         ),
         ("require_auth", first.require_auth == next.require_auth),
         ("stage_read", first.stage_read == next.stage_read),
+        (
+            "max_manifest_bytes",
+            first.max_manifest_bytes == next.max_manifest_bytes,
+        ),
+        (
+            "read_chunk_bytes",
+            first.read_chunk_bytes == next.read_chunk_bytes,
+        ),
+        ("echo_bytes", first.echo_bytes == next.echo_bytes),
         ("upstream", first.upstream == next.upstream),
     ];
     same.iter().find(|(_, same)| !same).map(|(name, _)| *name)
@@ -323,7 +352,7 @@ pub(super) fn interfaces(tables: &[InterfaceTable]) -> Result<Interfaces, Config
             Some((first_at, first)) => {
                 if let Some(name) = differing(first, &this) {
                     let why = format!(
-                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read and upstream"
+                        "it differs from interface[{first_at}]: one registry front serves every oci interface, so they share tls_cert_file, tls_key_file, prefix, max_connections, connection_lifetime, require_auth, stage_read, max_manifest_bytes, read_chunk_bytes, echo_bytes and upstream"
                     );
                     return Err(invalid(&format!("{at}.params.{name}"), why));
                 }

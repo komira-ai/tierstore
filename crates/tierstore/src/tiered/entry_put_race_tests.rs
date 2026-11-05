@@ -280,3 +280,32 @@ async fn a_put_that_finds_an_object_with_no_entry_under_its_own_entry_removes_th
     assert_eq!(rig.shape("k").await, None);
     assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("theirs"));
 }
+
+/// Asserts that a put whose look at the hot tier found nothing, and which takes its entry only
+/// after another put of the key landed in the hot tier and had its entry released, is refused as
+/// existing by the look under its entry, even though the tier is full by then and the put would
+/// otherwise land in the cold tier: the key is in one tier only, and the other's object stays.
+#[tokio::test]
+async fn a_put_whose_early_look_at_the_hot_tier_went_stale_is_refused_under_its_entry() {
+    let rig = Rig::active().await;
+    let gate = rig.hot.gate(Op::Head, "k", Phase::Post);
+    let proxy = rig.proxy.clone();
+    let slow = tokio::spawn(async move { proxy.put("k", body("slow")).await });
+    gate.parked().await;
+    rig.proxy.put("k", body("fast")).await.unwrap();
+    let seen = rig.entry("k").await.unwrap();
+    let Outcome::Done(sealed) = rig.other().advance(&seen, Step::Seal).await.unwrap() else {
+        panic!("the entry was not sealed");
+    };
+    assert_eq!(
+        rig.other().release(&sealed).await.unwrap(),
+        Outcome::Done(())
+    );
+    rig.fill_hot().await;
+    assert!(gate.release());
+    let slow = slow.await.unwrap();
+    assert_eq!(slow, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("fast"));
+    assert!(!rig.cold_has("k").await);
+    assert_eq!(rig.shape("k").await, None);
+}

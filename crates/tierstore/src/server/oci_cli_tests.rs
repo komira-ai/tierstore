@@ -129,6 +129,28 @@ fn the_params_make_the_front() {
     assert_eq!(setup.limits.lifetime, Duration::from_secs(90));
 }
 
+/// Asserts that the io keys of `[server]` are the limits of the registry front: the handshake
+/// time, the header timeout and the listen settings (backlog, accept pause and the closing door's
+/// times) of its listener are the file's.
+#[test]
+fn the_io_keys_of_the_server_table_are_the_limits_of_the_front() {
+    let rig = Rig::new("oci-interface-io-keys");
+    let params = rig.tls();
+    let text = rig.file(Some(("127.0.0.1:0", &params))).replacen(
+        "proxy_id = \"p1\"",
+        "proxy_id = \"p1\"\noci_handshake_timeout = \"17s\"\nheader_timeout = \"41s\"\nlisten_backlog = 99\naccept_pause = \"7ms\"\ndoor_grace = \"2s\"\ndoor_look = \"3ms\"",
+        1,
+    );
+    let cli = Cli::from_config_text(&text).expect("a file");
+    let setup = build(&cli).expect("built").oci.expect("a front");
+    assert_eq!(setup.limits.handshake_timeout, Duration::from_secs(17));
+    assert_eq!(setup.limits.header_timeout, Duration::from_secs(41));
+    assert_eq!(setup.limits.listen.backlog, 99);
+    assert_eq!(setup.limits.listen.accept_pause, Duration::from_millis(7));
+    assert_eq!(setup.limits.listen.door_grace, Duration::from_secs(2));
+    assert_eq!(setup.limits.listen.door_look, Duration::from_millis(3));
+}
+
 /// Asserts that the size of the reads at the end of a push is 1 MiB unless `params.stage_read`
 /// gives it.
 #[test]
@@ -138,6 +160,24 @@ fn the_stage_read_param_sets_the_size_of_a_read() {
     assert_eq!(setup.stage_read, 1 << 20);
     let given = build(&rig.cli(", stage_read = 4096")).expect("built");
     assert_eq!(given.oci.expect("a front").stage_read, 4096);
+}
+
+/// Asserts that the front's sizes are 4 MiB of manifest, 4 MiB of blob read and 256 bytes of echo
+/// unless `params.max_manifest_bytes`, `params.read_chunk_bytes` and `params.echo_bytes` give them.
+#[test]
+fn the_size_params_set_the_manifest_limit_the_read_chunk_and_the_echo_length() {
+    let rig = Rig::new("oci-params-sizes");
+    let setup = build(&rig.cli("")).expect("built").oci.expect("a front");
+    assert_eq!(setup.sizes, crate::server::oci::OciSizes::default());
+    assert_eq!(setup.sizes.manifest_bytes, 4 << 20);
+    assert_eq!(setup.sizes.chunk_bytes, 4 << 20);
+    assert_eq!(setup.sizes.echo_bytes, 256);
+    let given = rig.cli(", max_manifest_bytes = 1000, read_chunk_bytes = 2000, echo_bytes = 30");
+    let sizes = build(&given).expect("built").oci.expect("a front").sizes;
+    assert_eq!(
+        (sizes.manifest_bytes, sizes.chunk_bytes, sizes.echo_bytes),
+        (1000, 2000, 30)
+    );
 }
 
 /// Asserts that a prefix that cannot work, a lifetime of nothing, and a certificate or key that

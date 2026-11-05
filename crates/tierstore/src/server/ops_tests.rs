@@ -279,7 +279,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
     assert_eq!(texts(&empty.body, "KeyCount"), ["0"]);
 }
 
-/// Asserts that a listing is refused when its size is not a positive whole number or its token
+/// Asserts that a listing is refused when its size is not a whole number from 0 to 2147483647 or its token
 /// is not one the server gave (not hex, or hex of bytes that are not text), and that anything
 /// but ListObjectsV2 or with a parameter this server does not know (`delimiter`) is
 /// `NotImplemented`.
@@ -287,7 +287,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
 async fn a_listing_with_a_bad_argument_is_refused() {
     let rig = Rig::new(MEBIBYTE).await;
     let bad = [
-        "max-keys=0",
+        "max-keys=-1",
         "max-keys=many",
         "continuation-token=zz",
         "continuation-token=ff",
@@ -308,10 +308,10 @@ async fn a_listing_with_a_bad_argument_is_refused() {
 }
 
 /// Asserts that creating and heading the served bucket succeed, another bucket is
-/// `NoSuchBucket`, and the calls this server does not do are `NotImplemented`: the service
-/// root, another method, a subresource of an object, a multipart parameter on a plain read,
-/// a listing of the bucket that names an upload id and not `uploads`, a post with no upload, a post with a part number and no upload id, and a delete of the
-/// bucket.
+/// `NoSuchBucket`, and the calls this server does not do are `NotImplemented`: another method,
+/// a subresource of an object, a multipart parameter on a plain read, a listing of the bucket
+/// that names an upload id and not `uploads`, a post with no upload, a post with a part number
+/// and no upload id, and a delete of the bucket.
 #[tokio::test(start_paused = true)]
 async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -325,7 +325,6 @@ async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     assert_eq!(other.code(), "NoSuchBucket");
     let patch = format!("{bucket}/k");
     let not_done = [
-        rig.send("GET", "/", &[], b"").await,
         rig.send("PATCH", &patch, &[], b"").await,
         rig.call("GET", "k?acl", b"").await,
         rig.call("GET", "k?uploadId=u", b"").await,
@@ -430,13 +429,13 @@ pub(super) fn completion(parts: &[(u32, &str)]) -> String {
     xml
 }
 
-/// Asserts that an upload in parts is put together in the cold tier: each part answers its ETag,
+/// Asserts that an upload in parts is put together in the hot tier: each part answers its ETag,
 /// the completion creates the parts joined in the order named, the answer names the key and has
-/// the content tag of the object, which is the one a head gives, the object is in the cold tier
-/// and not in the hot tier, a read finds it and asks for its copy into the hot tier, and the
-/// upload is gone after.
+/// the content tag of the object, which is the one a head gives, the object is in the hot tier
+/// and not in the cold tier, a read finds it there, the reconciler then copies it to the cold
+/// tier, and the upload is gone after. The cold tier saw no part.
 #[tokio::test(start_paused = true)]
-async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
+async fn a_multipart_upload_is_completed_into_one_object_in_the_hot_tier() {
     let rig = Rig::new(MEBIBYTE).await;
     let id = start(&rig, "big").await;
     let two = upload(&rig, "big", &id, 2, b"world").await;
@@ -449,8 +448,8 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     assert_eq!(texts(&done.body, "Key"), ["big"]);
     let tag = format!("\"{}\"", tag_of(b"hello world"));
     assert_eq!(texts(&done.body, "ETag").concat(), tag);
-    assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "hello world");
-    assert!(rig.hot_mem.get("big", None).await.is_err());
+    assert_eq!(rig.hot_mem.get("big", None).await.unwrap(), "hello world");
+    assert!(rig.cold_mem.get("big", None).await.is_err());
     // The completion is a put on the entry of the key, which finds the object and refuses first.
     let again = complete(&rig, "big", &id, &body).await;
     assert_eq!(again.status, StatusCode::PRECONDITION_FAILED);
@@ -458,9 +457,12 @@ async fn a_multipart_upload_is_completed_into_one_object_in_the_cold_tier() {
     let head = rig.call("HEAD", "big", b"").await;
     assert_eq!(head.header("etag"), tag);
     assert_eq!(rig.get("big", None).await.body, "hello world");
-    rig.copy_back_asked("big").await;
-    assert!(rig.hot_mem.get("big", None).await.is_err());
-    assert_eq!(rig.cold.calls(Op::UploadPart), 2);
+    rig.settle().await;
+    assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "hello world");
+    assert_eq!(rig.hot.calls(Op::UploadPart), 2);
+    assert_eq!(rig.cold.calls(Op::CreateUpload), 0);
+    assert_eq!(rig.cold.calls(Op::UploadPart), 0);
+    assert_eq!(rig.cold.calls(Op::CompleteUpload), 0);
 }
 
 /// Asserts that a completion that names parts wrongly is refused, and the upload stays open:
@@ -486,11 +488,11 @@ async fn a_completion_that_names_the_parts_wrongly_is_refused() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{code}");
         assert_eq!(reply.code(), code);
     }
-    assert!(rig.cold_mem.get("big", None).await.is_err());
+    assert!(rig.hot_mem.get("big", None).await.is_err());
     let both = completion(&[(1, e1), (2, e2)]);
     let done = complete(&rig, "big", &id, &both).await;
     assert_eq!(done.status, StatusCode::OK);
-    assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "ab");
+    assert_eq!(rig.hot_mem.get("big", None).await.unwrap(), "ab");
 }
 
 /// Asserts that the calls on an upload the server does not hold are `NoSuchUpload`: a part,
@@ -548,6 +550,7 @@ async fn a_part_needs_its_arguments_and_a_completion_needs_a_free_key() {
     assert_eq!(refused.status, StatusCode::PRECONDITION_FAILED);
     assert_eq!(rig.get("big", None).await.body, "taken");
     assert!(rig.cold_mem.get("big", None).await.is_err());
+    assert_eq!(rig.hot_mem.get("big", None).await.unwrap(), "taken");
     let cold = Bytes::from_static(b"c");
     rig.cold_mem.put("cold", cold).await.unwrap();
     let id = start(&rig, "cold").await;
@@ -559,7 +562,7 @@ async fn a_part_needs_its_arguments_and_a_completion_needs_a_free_key() {
     rig.call("DELETE", "cold", b"").await;
     let done = complete(&rig, "cold", &id, &body).await;
     assert_eq!(done.status, StatusCode::OK);
-    assert_eq!(rig.cold_mem.get("cold", None).await.unwrap(), "a");
+    assert_eq!(rig.hot_mem.get("cold", None).await.unwrap(), "a");
 }
 
 /// Asserts that a listing of more keys than the largest page has a second page: 1001 keys are
@@ -589,8 +592,8 @@ async fn read_with(rig: &Rig, method: &str, name: &str, value: &str) -> Reply {
 /// Asserts the conditions of a read, for a get and for a head: `If-Match` of another tag is
 /// `PreconditionFailed`, and of the tag of the object (also among others, and as `*`) is
 /// served; `If-None-Match` of the tag of the object (also among others, and as `*`) is 304 with
-/// the tag and no body, and of another tag is served; the conditions on the time are
-/// `NotImplemented`.
+/// the tag and no body, and of another tag is served. (The conditions on the time are in
+/// `conditional_date_tests`.)
 #[tokio::test(start_paused = true)]
 async fn a_read_with_conditions_is_served_or_refused_as_s3_does() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -616,11 +619,6 @@ async fn a_read_with_conditions_is_served_or_refused_as_s3_does() {
             assert_eq!(same.status, StatusCode::NOT_MODIFIED, "{method} {value}");
             assert_eq!(same.header("etag"), own);
             assert_eq!(same.body, "");
-        }
-        for name in ["if-modified-since", "if-unmodified-since"] {
-            let date = "Fri, 15 Jan 2027 08:00:00 GMT";
-            let timed = read_with(&rig, method, name, date).await;
-            assert_eq!(timed.status, StatusCode::NOT_IMPLEMENTED, "{method} {name}");
         }
     }
 }
@@ -658,7 +656,7 @@ async fn dropped(rig: &Rig, method: &str, key: &str, body: &[u8]) {
 
 /// Asserts that a call that changes the store is done to its end when its request is dropped
 /// before the store has answered: a put leaves the object and its entry, a delete leaves
-/// the key deleted, and the completion of an upload leaves the object in the cold tier.
+/// the key deleted, and the completion of an upload leaves the object in the hot tier.
 #[tokio::test(start_paused = true)]
 async fn a_request_that_is_dropped_still_changes_the_store() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -669,7 +667,7 @@ async fn a_request_that_is_dropped_still_changes_the_store() {
     rig.hot.set_delay(Op::Put, Some(Duration::from_secs(10)));
     rig.hot.set_delay(Op::Delete, Some(Duration::from_secs(10)));
     let delay = Some(Duration::from_secs(10));
-    rig.cold.set_delay(Op::CompleteUpload, delay);
+    rig.hot.set_delay(Op::CompleteUpload, delay);
     dropped(&rig, "PUT", "fresh", b"y").await;
     dropped(&rig, "DELETE", "gone", b"").await;
     let complete_key = format!("whole?uploadId={id}");
@@ -677,7 +675,7 @@ async fn a_request_that_is_dropped_still_changes_the_store() {
     tokio::time::sleep(Duration::from_secs(120)).await;
     assert_eq!(rig.hot_mem.get("fresh", None).await.unwrap(), "y");
     assert!(rig.hot_mem.get("gone", None).await.is_err());
-    assert_eq!(rig.cold_mem.get("whole", None).await.unwrap(), "a");
+    assert_eq!(rig.hot_mem.get("whole", None).await.unwrap(), "a");
 }
 
 /// Sends a put to `uri` whose body is played by `steps`, and whose signature covers `signed`.
@@ -744,10 +742,9 @@ async fn a_put_whose_checksum_does_not_match_is_refused_and_stores_nothing() {
 }
 
 /// Asserts that a checksum header that is not the base64 of a hash of the right length is 400
-/// `InvalidDigest` and stores nothing, and that the checksum of the algorithm the server does
-/// not compute (CRC-64/NVME) is 501 `NotImplemented` and stores nothing.
+/// `InvalidDigest` (for CRC-64/NVMe too) and stores nothing.
 #[tokio::test(start_paused = true)]
-async fn a_put_with_a_malformed_or_unsupported_checksum_stores_nothing() {
+async fn a_put_with_a_malformed_checksum_stores_nothing() {
     let rig = Rig::new(MEBIBYTE).await;
     let puts = rig.hot.calls(Op::Put);
     for name in CHECKSUMS {
@@ -757,10 +754,6 @@ async fn a_put_with_a_malformed_or_unsupported_checksum_stores_nothing() {
             assert_eq!(reply.code(), "InvalidDigest", "{name} {value:?}");
         }
     }
-    let extra = [("x-amz-checksum-crc64nvme", "AAAAAAAAAAA=")];
-    let reply = put_with(&rig, "k", &extra, b"x").await;
-    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reply.code(), "NotImplemented");
     assert_eq!(rig.hot.calls(Op::Put), puts);
     let head = rig.call("HEAD", "k", b"").await;
     assert_eq!(head.status, StatusCode::NOT_FOUND);
@@ -804,7 +797,7 @@ async fn a_part_is_stored_only_if_its_checksums_match() {
     }
     let done = complete(&rig, "big", &id, &body).await;
     assert_eq!(done.status, StatusCode::OK);
-    assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "the part");
+    assert_eq!(rig.hot_mem.get("big", None).await.unwrap(), "the part");
 }
 
 /// Uploads the part `number` of the upload `id` of `big` with these extra headers.
@@ -910,7 +903,7 @@ async fn a_body_that_fails_or_is_too_large_is_refused_and_stores_nothing() {
 }
 
 /// Asserts that a part whose body comes in several pieces, with a wait between, is stored as their
-/// join by one call to the cold tier, and the object made of it reads back whole.
+/// join by one call to the hot tier, and the object made of it reads back whole.
 #[tokio::test(start_paused = true)]
 async fn the_pieces_of_a_part_reach_the_backend_in_one_call() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -925,22 +918,31 @@ async fn the_pieces_of_a_part_reach_the_backend_in_one_call() {
     let part_uri = format!("/{BUCKET}/big?partNumber=1&uploadId={id}");
     let sent = play(&rig, &part_uri, &[], b"one two three", steps).await;
     assert_eq!(sent.status, StatusCode::OK);
-    assert_eq!(rig.cold.calls(Op::UploadPart), 1);
+    assert_eq!(rig.hot.calls(Op::UploadPart), 1);
     let body = completion(&[(1, sent.header("etag"))]);
     let done = complete(&rig, "big", &id, &body).await;
     assert_eq!(done.status, StatusCode::OK);
-    let joined = rig.cold_mem.get("big", None).await.unwrap();
+    let joined = rig.hot_mem.get("big", None).await.unwrap();
     assert_eq!(joined, "one two three");
 }
 
 /// Asserts that a cold tier that does not do multipart uploads answers every call of one
-/// `NotImplemented` (the provided methods of the backend): a start, a part, a completion, an
-/// abort and a listing of the open uploads.
+/// `NotImplemented` (the provided methods of the backend): a start (which the cold tier gets only
+/// because the hot tier is full), a part, a completion, an abort and a listing of the open
+/// uploads.
 #[tokio::test(start_paused = true)]
 async fn a_cold_tier_without_multipart_uploads_answers_not_implemented() {
     let clock = Arc::new(TestClock::new());
     clock.set(NOW);
     let hot = Arc::new(MemoryBackend::with_clock(Arc::clone(&clock)));
+    // A full hot tier is the only one that sends an upload to the cold tier.
+    let usage = crate::journal::Usage {
+        hot_bytes: MEBIBYTE,
+        copy_lag: 0,
+        time: 0,
+    };
+    let usage = Bytes::from(serde_json::to_vec(&usage).unwrap());
+    hot.put(crate::journal::USAGE_KEY, usage).await.unwrap();
     let config = ProxyConfig::new("p1", MEBIBYTE, clock.clone());
     let proxy = live_proxy(hot, Arc::new(Plain), config).await.unwrap();
     let settings = ServerConfig::new(BUCKET, KEY_ID, SECRET, clock);
