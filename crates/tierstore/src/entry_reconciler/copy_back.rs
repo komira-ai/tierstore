@@ -1,8 +1,9 @@
 //! The copy-back of the cold tier's object into the hot tier, for an entry `(CB, PENDING)` that a
 //! read of a cold object asked for. The request carries no bytes: the reconciler copies the object
 //! the key holds when it takes the entry, so that a copy-back cannot bring back what a delete
-//! removed, as long as the reconciler that sealed the entry still holds the lease: a write still in
-//! flight after a takeover is not fenced.
+//! removed, as long as the reconciler that sealed the entry still holds the lease. The hot write
+//! stops at the first chunk it asks for after the margin of the lease is gone; a write already
+//! sent to a store that applies it later, or one of a frozen process, is not fenced.
 
 use std::collections::BTreeSet;
 
@@ -70,7 +71,8 @@ impl EntryReconciler {
 
     /// Streams the cold object of `key` into the hot tier, create-only, if the hot tier has none:
     /// nothing if the hot tier has one, the cold tier has none, or the hot tier is full. The
-    /// object is read once, and no bytes are held whole. A failure leaves the entry sealed, which
+    /// object is read once, and no bytes are held whole; the write stops, and lands nothing, once less
+    /// than the margin of the lease is left. A failure leaves the entry sealed, which
     /// the next step removes.
     async fn land_copy_back(&self, key: &str) -> Result<(), Error> {
         match self.hot.head(key).await {
@@ -83,12 +85,9 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        self.require_lease()?;
-        match self
-            .hot
-            .put_stream(key, Some(opened.meta.size), opened.body)
-            .await
-        {
+        self.require_lease().await?;
+        let body = self.while_leased(opened.body);
+        match self.hot.put_stream(key, Some(opened.meta.size), body).await {
             Ok(()) | Err(Error::AlreadyExists(_) | Error::Full(_)) => Ok(()),
             Err(error) => Err(error),
         }

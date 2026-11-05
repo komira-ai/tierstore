@@ -28,19 +28,19 @@ const KEY_ID: &str = "AKIDCACHE";
 const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
-const QUICK: PerRun = PerRun {
+pub(super) const QUICK: PerRun = PerRun {
     drain_lb_wait: Duration::from_millis(50),
     drain_deadline: Duration::from_secs(60),
 };
 
 /// A scratch directory with a key file, and the directories of a node's tiers and cache in it.
-struct Node {
-    dir: TestDir,
-    key: PathBuf,
+pub(super) struct Node {
+    pub(super) dir: TestDir,
+    pub(super) key: PathBuf,
 }
 
 impl Node {
-    fn new(name: &str) -> Self {
+    pub(super) fn new(name: &str) -> Self {
         let dir = TestDir::under(std::env::temp_dir(), name);
         let key = dir.path().join("key");
         std::fs::write(&key, format!("{KEY_ID}\n{SECRET}\n")).unwrap();
@@ -48,30 +48,42 @@ impl Node {
         Self { dir, key }
     }
 
-    fn hot(&self) -> PathBuf {
+    pub(super) fn hot(&self) -> PathBuf {
         self.dir.path().join("hot")
     }
 
-    fn cold(&self) -> PathBuf {
+    pub(super) fn cold(&self) -> PathBuf {
         self.dir.path().join("cold")
     }
 
-    fn cache_dir(&self) -> PathBuf {
+    pub(super) fn cache_dir(&self) -> PathBuf {
         self.dir.path().join("cache")
     }
 
     /// The file of a node with a cache, with this text added to `[hot_store]`.
     fn text(&self, hot_extra: &str) -> String {
+        self.text_with("", hot_extra, "")
+    }
+
+    /// The same file with `server_extra` added to `[server]`, `hot_extra` to `[hot_store]`, and
+    /// `interfaces` (whole `[[interface]]` tables) after the `s3` one.
+    pub(super) fn text_with(
+        &self,
+        server_extra: &str,
+        hot_extra: &str,
+        interfaces: &str,
+    ) -> String {
         format!(
             r#"
 [[interface]]
 type   = "s3"
 params = {{ addresses = ["127.0.0.1:0"] }}
-
+{interfaces}
 [server]
 proxy_id        = "n1"
 bucket          = "tier-bucket"
 access_key_file = "{key}"
+{server_extra}
 
 [hot_store]
 kind   = "dir"
@@ -98,21 +110,21 @@ cache  = true
         )
     }
 
-    fn settings(&self, hot_extra: &str) -> CombinedSettings {
+    pub(super) fn settings(&self, hot_extra: &str) -> CombinedSettings {
         let settings = settings_from_text(&self.text(hot_extra), QUICK).unwrap();
         settings.into_combined().unwrap()
     }
 
     /// Writes the active format into the hot directory, as `format-epoch --activate` does for a
     /// new store, so that the node takes writes.
-    async fn activate(&self) {
+    pub(super) async fn activate(&self) {
         let active = bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
         let hot = Self::tier(self.hot());
         hot.put("_tiering/format", active).await.unwrap();
     }
 
     /// The tier directory `path` as a backend, to read what the node stored there.
-    fn tier(path: PathBuf) -> DirBackend {
+    pub(super) fn tier(path: PathBuf) -> DirBackend {
         DirBackend::open(path).unwrap()
     }
 }

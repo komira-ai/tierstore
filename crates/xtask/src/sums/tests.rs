@@ -247,6 +247,30 @@ fn assemble_merges_the_platform_files_sorted_by_name_and_removes_them() {
 }
 
 #[test]
+fn assemble_merges_the_index_part_with_the_platform_parts_and_removes_it() {
+    // Catches: the index's line left out because only platform parts are merged, the part
+    // refused as a stray suffix, or the part left in the directory (verify-assets would refuse
+    // it as unlisted).
+    let dir = scratch("assemble-index");
+    let (a, b) = (line(A, b"a"), line(B, b"b"));
+    let index = line("index.json", b"index");
+    parts(
+        &dir,
+        &[("linux-x86_64", &a), ("linux-arm64", &b), ("index", &index)],
+    );
+    let printed = assemble(&dir, None, None, None).expect("assemble");
+    let want = format!("{index}{b}{a}");
+    assert_eq!(printed, want.lines().collect::<Vec<_>>());
+    assert_eq!(std::fs::read_to_string(dir.join(SUMS)).expect("sums"), want);
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .expect("ls")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, [SUMS]);
+}
+
+#[test]
 fn assemble_checks_the_result_against_the_published_file() {
     // Catches: --expect ignored, so the attest job could sign sums other than the ones
     // the sums job checked and published; and a matching file refused.
@@ -286,14 +310,21 @@ fn assemble_refuses_a_name_twice_an_unknown_platform_and_no_files() {
     }
     type Parts<'a> = Vec<(&'a str, &'a str)>;
     type Want = fn(&Path) -> Error;
-    let cases: [(&str, Parts, Want); 5] = [
+    let cases: [(&str, Parts, Want); 6] = [
         (
             "twice",
             vec![("linux-x86_64", &a), ("linux-arm64", &a)],
             |_| Error::Refused(vec![format!("listed twice: {A}")]),
         ),
+        (
+            "twice-in-the-index",
+            vec![("linux-x86_64", &a), ("index", &a)],
+            |_| Error::Refused(vec![format!("listed twice: {A}")]),
+        ),
         ("unknown", vec![("linux-x86_64", &a), ("riscv", &a)], |_| {
-            Error::Failed(format!("{SUMS}.riscv: \"riscv\" names no platform"))
+            Error::Failed(format!(
+                "{SUMS}.riscv: \"riscv\" names neither a platform nor the index"
+            ))
         }),
         ("none", vec![], |dir| {
             Error::Failed(format!("{} holds no {SUMS}.<platform> file", dir.display()))

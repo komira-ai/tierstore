@@ -408,10 +408,10 @@ impl Conn {
         mut headers: Vec<(&'static str, String)>,
         payload: &str,
     ) -> reqwest::RequestBuilder {
-        // `ObjectKey` holds only unreserved characters and `/`, so the path needs no
-        // encoding and is signed exactly as sent.
+        // The key is percent-encoded here, once, and that text is both signed and sent: `Url`
+        // keeps an escape it is given as it is (it would leave a bare `%` or `+` alone).
         let path = match key {
-            Some(k) => format!("/{}/{}", self.bucket, k.as_str()),
+            Some(k) => format!("/{}/{}", self.bucket, sigv4::encode_key_path(k.as_str())),
             None => format!("/{}", self.bucket),
         };
         #[expect(

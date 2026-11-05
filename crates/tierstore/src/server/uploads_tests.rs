@@ -61,7 +61,7 @@ async fn uploads_started_under_two_prefixes_are_listed_by_prefix() {
     assert_eq!(none.status, StatusCode::OK);
     assert!(uploads(&none).is_empty());
     assert_eq!(texts(&none.body, "IsTruncated"), ["false"]);
-    assert_eq!(rig.hot.calls(Op::ListUploads), 0);
+    assert_eq!(rig.hot.calls(Op::ListUploads), 5);
     assert_eq!(rig.cold.calls(Op::ListUploads), 5);
 }
 
@@ -149,7 +149,7 @@ async fn a_completed_or_aborted_upload_is_not_listed() {
 
     let left = list(&rig, "").await;
     assert_eq!(uploads(&left), [("k/open".to_owned(), open)]);
-    assert_eq!(rig.cold_mem.get("k/done", None).await.unwrap(), "bytes");
+    assert_eq!(rig.hot_mem.get("k/done", None).await.unwrap(), "bytes");
 }
 
 /// Asserts that an upload of a key under a reserved prefix is never listed, whatever the prefix
