@@ -98,6 +98,7 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!(cli.put_min_bytes_per_sec, 1024);
     assert_eq!(cli.put_rate_grace, Duration::from_secs(30));
     assert_eq!(cli.body_idle_timeout, Duration::from_secs(30));
+    assert_eq!(cli.aws_chunked_max_line_bytes, 1024);
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(60));
     assert_eq!(cli.backend_check_wait, None);
     assert_eq!(cli.hot_conditional_delete, None);

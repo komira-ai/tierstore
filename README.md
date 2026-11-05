@@ -71,16 +71,14 @@ The process asks each tier the questions its guarantees rest on, then prints `ti
 
 ### 4. Put and get an object
 
-The front serves one bucket, path-style (or virtual-hosted-style for `server.domains`), over plain HTTP, and refuses the checksum trailer that recent AWS clients send by
-default, so tell the `aws` CLI to send checksums only when required:
+The front serves one bucket, path-style (or virtual-hosted-style for `server.domains`), over plain HTTP. The `aws` CLI works on its default settings, including the
+CRC-64/NVMe checksum it sends and the `aws-chunked` body it streams a large file in:
 
 ```sh
 export AWS_ACCESS_KEY_ID=AKIDEXAMPLE
 export AWS_SECRET_ACCESS_KEY=example-secret-change-me
 export AWS_DEFAULT_REGION=us-east-1
 aws configure set default.s3.addressing_style path
-aws configure set default.request_checksum_calculation when_required
-aws configure set default.response_checksum_validation when_required
 
 echo hello > hello.txt
 aws --endpoint-url http://127.0.0.1:9000 s3api put-object --bucket tierstore --key hello.txt --body hello.txt
@@ -89,7 +87,7 @@ cat out.txt
 ```
 
 A put is create-only: putting `hello.txt` again is refused with 412. The aws CLI is not part of tierstore's own tests, which
-drive the front with an SDK; the settings above are those the SDK needs.
+drive the front with an SDK on its default settings and with bodies framed by hand.
 
 ## The configurations
 

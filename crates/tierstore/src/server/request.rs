@@ -2,6 +2,7 @@
 //! held to.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -24,6 +25,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{Clock, Error, PartBody};
 
+use super::chunked::{Decoder, Framing};
 use super::reply::{PAYLOAD_HEADER, S3Error};
 
 /// The error of a request body.
@@ -128,6 +130,13 @@ pub(crate) struct Reader<B> {
     limit: usize,
     idle: Duration,
     floor: Option<Floor>,
+    /// The decoder of an `aws-chunked` body: what [`Reader::next`] gives is then the data of the
+    /// chunks, not the pieces of the wire.
+    decoder: Option<Decoder>,
+    /// Decoded pieces that [`Reader::next`] has not given yet.
+    ready: VecDeque<Bytes>,
+    /// The text of the trailing checksum of an `aws-chunked` body, once the body has ended.
+    trailer: Option<String>,
 }
 
 /// The least average rate of a body, counted over the time the reader spent waiting for the
@@ -169,7 +178,22 @@ where
             limit,
             idle,
             floor: None,
+            decoder: None,
+            ready: VecDeque::new(),
+            trailer: None,
         }
+    }
+
+    /// The same reader, giving the data of the `aws-chunked` body `decoder` decodes, if there is
+    /// one. The limit, the idle timeout and the floor are those of the wire.
+    pub(crate) fn with_decoder(mut self, decoder: Option<Decoder>) -> Self {
+        self.decoder = decoder;
+        self
+    }
+
+    /// The trailing checksum of an `aws-chunked` body, once [`Reader::next`] has given its end.
+    pub(crate) fn trailer(&self) -> Option<&str> {
+        self.trailer.as_deref()
     }
 
     /// The same reader, held to an average of at least `min_bytes_per_sec` over the time it
@@ -192,13 +216,33 @@ where
         self
     }
 
-    /// The next piece of the body, or `None` at its end.
+    /// The next piece of the body (of its data, for an `aws-chunked` body), or `None` at its end.
     ///
     /// # Errors
     /// `RequestTimeout` for no piece within the idle timeout, or for a body under its floor;
     /// `EntityTooLarge` for a body of
-    /// more than the limit; `IncompleteBody` for one that could not be read.
+    /// more than the limit; `IncompleteBody` for one that could not be read; the errors of
+    /// [`Decoder::feed`] and [`Decoder::finish`] for an `aws-chunked` body.
     pub(crate) async fn next(&mut self) -> Result<Option<Bytes>, S3Error> {
+        loop {
+            if let Some(piece) = self.ready.pop_front() {
+                return Ok(Some(piece));
+            }
+            let Some(wire) = self.wire().await? else {
+                if let Some(decoder) = self.decoder.take() {
+                    self.trailer = decoder.finish()?;
+                }
+                return Ok(None);
+            };
+            let Some(decoder) = &mut self.decoder else {
+                return Ok(Some(wire));
+            };
+            decoder.feed(wire, &mut self.ready)?;
+        }
+    }
+
+    /// The next piece of the wire, or `None` at its end.
+    async fn wire(&mut self) -> Result<Option<Bytes>, S3Error> {
         loop {
             let began = self.floor.as_ref().map(|floor| floor.clock.now());
             let waiting = tokio::time::timeout(self.idle, self.body.frame());
@@ -249,6 +293,7 @@ where
             check.update(&piece);
             whole.extend_from_slice(&piece);
         }
+        check.accept_trailer(self.trailer())?;
         check.finish()?;
         Ok(whole.freeze())
     }
@@ -304,6 +349,8 @@ struct Want {
     header: &'static str,
     hasher: Hasher,
     expected: Vec<u8>,
+    /// The length in bytes of a hash of this algorithm.
+    length: usize,
 }
 
 /// The headers a request may claim a hash of its body in, each with the length in bytes of the
@@ -324,7 +371,13 @@ fn claimable() -> [(&'static str, usize, Hasher); 6] {
 /// `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1`,
 /// `x-amz-checksum-sha256` or `x-amz-checksum-crc64nvme`. The body is fed to the check a piece at a time, so a body of any
 /// size is checked without being held.
-pub(crate) struct Check(Vec<Want>);
+pub(crate) struct Check {
+    wants: Vec<Want>,
+    /// The framing of an `aws-chunked` body, if it is one.
+    framing: Option<Framing>,
+    /// The place in `wants` of the checksum the trailer of an `aws-chunked` body carries.
+    trailer: Option<usize>,
+}
 
 impl Check {
     /// The check of a request that claims `claim` as the hash of its body in
@@ -339,17 +392,36 @@ impl Check {
     /// right length.
     pub(crate) fn new(claim: &str, headers: &HeaderMap, data: bool) -> Result<Self, S3Error> {
         let mut wants = Vec::new();
+        let framing = if data {
+            Framing::parse(claim, headers)?
+        } else {
+            None
+        };
         match claim {
             "UNSIGNED-PAYLOAD" => {}
+            _ if framing.is_some() => {}
             _ if claim.starts_with("STREAMING-") => {
-                let text = "signed or chunked payloads are not supported";
+                let text =
+                    "an aws-chunked body is accepted only as the data of an object or a part";
                 return Err(S3Error::unsupported(text));
             }
             _ => wants.push(Want {
                 header: PAYLOAD_HEADER,
                 hasher: Hasher::Sha256(Sha256::new()),
                 expected: hex::decode(claim).unwrap_or_default(),
+                length: 32,
             }),
+        }
+        let trailer = framing.as_ref().and_then(Framing::trailer);
+        let trailer_at = trailer.map(|_| wants.len());
+        for (header, length, hasher) in claimable().into_iter().filter(|c| Some(c.0) == trailer) {
+            let expected = Vec::new();
+            wants.push(Want {
+                header,
+                hasher,
+                expected,
+                length,
+            });
         }
         for (name, length, hasher) in claimable() {
             let Some(value) = headers.get(name).filter(|_| data || name == MD5_HEADER) else {
@@ -364,14 +436,41 @@ impl Check {
                 header: name,
                 hasher,
                 expected,
+                length,
             });
         }
-        Ok(Self(wants))
+        Ok(Self {
+            wants,
+            framing,
+            trailer: trailer_at,
+        })
+    }
+
+    /// The framing of the body, if it is an `aws-chunked` one.
+    pub(crate) fn framing(&self) -> Option<&Framing> {
+        self.framing.as_ref()
+    }
+
+    /// The checksum an `aws-chunked` body carried after its data, as its text: it is the one to
+    /// hold the body to, and the body is `BadDigest` if its data does not come to it.
+    ///
+    /// # Errors
+    /// `InvalidDigest` for a value that is not the base64 of a hash of the right length.
+    pub(crate) fn accept_trailer(&mut self, value: Option<&str>) -> Result<(), S3Error> {
+        let (Some(text), Some(at)) = (value, self.trailer) else {
+            return Ok(());
+        };
+        for want in self.wants.iter_mut().skip(at).take(1) {
+            let decoded = STANDARD.decode(text.trim()).ok();
+            let bytes = decoded.filter(|bytes| bytes.len() == want.length);
+            want.expected = bytes.ok_or_else(|| S3Error::invalid_digest(want.header))?;
+        }
+        Ok(())
     }
 
     /// Feeds the next piece of the body to the hashes.
     pub(crate) fn update(&mut self, data: &[u8]) {
-        for want in &mut self.0 {
+        for want in &mut self.wants {
             want.hasher.update(data);
         }
     }
@@ -382,7 +481,7 @@ impl Check {
     /// `BadDigest` for a checksum header whose hash is not the body's, and
     /// `XAmzContentSHA256Mismatch` for the hash the signature covers.
     pub(crate) fn finish(self) -> Result<(), S3Error> {
-        for want in self.0 {
+        for want in self.wants {
             if want.hasher.finish() != want.expected {
                 return Err(S3Error::mismatch(want.header));
             }
@@ -430,7 +529,10 @@ where
                 check.update(&piece);
                 return Some((Ok(piece), (reader, Some(check), refused)));
             }
-            Ok(None) => check.finish(),
+            Ok(None) => {
+                let accepted = check.accept_trailer(reader.trailer());
+                accepted.and_then(|()| check.finish())
+            }
             Err(error) => Err(error),
         };
         refused.set(outcome.err()?);

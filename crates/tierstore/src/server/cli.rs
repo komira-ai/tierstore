@@ -136,6 +136,10 @@ pub(super) const DEFAULT_DELETE_CONCURRENCY: u32 = 16;
 /// (`server.put_permit_wait`'s default, `15s`).
 pub(super) const DEFAULT_PUT_PERMIT_WAIT: Duration = Duration::from_secs(15);
 
+/// The longest line of an `aws-chunked` body that is read whole (`server.aws_chunked_max_line_bytes`'s
+/// default): the header of a chunk with its signature is under 100 bytes.
+pub(super) const DEFAULT_AWS_CHUNKED_MAX_LINE_BYTES: u64 = 1024;
+
 /// The least average rate of a body, in bytes a second.
 pub(super) const DEFAULT_PUT_MIN_BYTES_PER_SEC: u64 = 1024;
 
@@ -398,6 +402,12 @@ pub struct Cli {
     /// is closed; a connection whose client stops reading an answer is closed. Both are
     /// logged on stderr, and a drain waits no longer than this for a stalled client.
     pub body_idle_timeout: Duration,
+    /// The longest line of an `aws-chunked` request body that the server holds to read it: the
+    /// header of a chunk (its size and its signature) and a line of the trailer. The data of a
+    /// chunk is passed on as it arrives and is not a line, so no chunk is too long. A body with
+    /// a longer line is refused with 400 `InvalidRequest`. The headers of a chunk are under 100
+    /// bytes, and the trailer of an SDK is one checksum, so the default leaves a wide margin.
+    pub aws_chunked_max_line_bytes: u64,
     /// The fewest bytes a secret access key may have, whichever kind of key it is (full,
     /// read-only, presigning, GC or scoped): a server whose key file holds a shorter
     /// secret does not start.

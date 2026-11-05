@@ -46,8 +46,9 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::cli::{
-    Cli, DEFAULT_DELETE_CONCURRENCY, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES,
-    DEFAULT_PUT_MIN_BYTES_PER_SEC, DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
+    Cli, DEFAULT_AWS_CHUNKED_MAX_LINE_BYTES, DEFAULT_DELETE_CONCURRENCY,
+    DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
+    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
@@ -120,6 +121,10 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("put-min-bytes-per-sec", &["server.put_min_bytes_per_sec"]),
     ("put-rate-grace", &["server.put_rate_grace"]),
     ("body-idle-timeout", &["server.body_idle_timeout"]),
+    (
+        "aws-chunked-max-line-bytes",
+        &["server.aws_chunked_max_line_bytes"],
+    ),
     ("hot-conditional-delete", &["hot_store.conditional_delete"]),
     (
         "cold-conditional-delete",
@@ -293,6 +298,7 @@ pub(super) struct ServerTable {
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
     pub body_idle_timeout: Option<Dur>,
+    pub aws_chunked_max_line_bytes: Option<u64>,
     pub min_secret_bytes: Option<u32>,
     pub s3_request_timeout: Option<Dur>,
     /// Deprecated and ignored (the start-up self-test was removed); accepted so that an old file
@@ -825,6 +831,7 @@ pub(super) fn storage(
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
         body_idle_timeout: front.body_idle_timeout,
+        aws_chunked_max_line_bytes: front.aws_chunked_max_line_bytes,
         min_secret_bytes: front.min_secret_bytes,
         io_tuning: front.io,
         skip_backend_check: cold.skip_checks.unwrap_or_default(),
@@ -943,6 +950,9 @@ pub(super) fn front_of(
             .unwrap_or(DEFAULT_PUT_MIN_BYTES_PER_SEC),
         put_rate_grace: duration(server.put_rate_grace, Duration::from_secs(30)),
         body_idle_timeout: duration(server.body_idle_timeout, Duration::from_secs(30)),
+        aws_chunked_max_line_bytes: server
+            .aws_chunked_max_line_bytes
+            .unwrap_or(DEFAULT_AWS_CHUNKED_MAX_LINE_BYTES),
         min_secret_bytes: server.min_secret_bytes.unwrap_or(DEFAULT_MIN_SECRET_BYTES),
         drain_lb_wait: per_run.drain_lb_wait,
         drain_deadline: per_run.drain_deadline,

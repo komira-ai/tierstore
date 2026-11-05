@@ -445,3 +445,45 @@ fn the_block_key_gives_the_tags_of_the_crates_own_key_handling() {
         );
     }
 }
+
+/// Asserts that the material for the chunk signatures of a request is made from the request's
+/// own head: the signing key of its day and region, its time, its scope and the lower case hex of
+/// its signature; and that a request with no header, an unknown key, or no date has none.
+#[test]
+fn the_material_for_chunk_signatures_comes_from_the_head_of_the_request() {
+    let config = keyed_config();
+    let parts = signed_by(&config, READ_ONE);
+    let text = parts.headers["authorization"].to_str().unwrap().to_owned();
+    let stream = super::auth::stream(&config, &parts).unwrap();
+    let day = &stream.stamp[..8];
+    assert_eq!(stream.scope, format!("{day}/us-east-1/s3/aws4_request"));
+    assert_eq!(stream.stamp, amz_date(NOW));
+    let signature = text.rsplit_once("Signature=").unwrap().1;
+    assert_eq!(stream.seed, signature.to_ascii_lowercase());
+    assert_eq!(
+        stream.key,
+        super::auth::signing_key(READ_ONE.1, day, "us-east-1")
+    );
+    let upper = text.replace(signature, &signature.to_uppercase());
+    let mut shouted = signed_by(&config, READ_ONE);
+    shouted
+        .headers
+        .insert("authorization", HeaderValue::from_str(&upper).unwrap());
+    assert_eq!(
+        super::auth::stream(&config, &shouted).unwrap().seed,
+        stream.seed
+    );
+
+    let mut none = signed_by(&config, READ_ONE);
+    none.headers.remove("authorization");
+    assert!(super::auth::stream(&config, &none).is_none());
+    let mut unknown = signed_by(&config, READ_ONE);
+    let other = text.replace(READ_ONE.0, "AKIDNOBODY");
+    unknown
+        .headers
+        .insert("authorization", HeaderValue::from_str(&other).unwrap());
+    assert!(super::auth::stream(&config, &unknown).is_none());
+    let mut undated = signed_by(&config, READ_ONE);
+    undated.headers.remove("x-amz-date");
+    assert!(super::auth::stream(&config, &undated).is_none());
+}

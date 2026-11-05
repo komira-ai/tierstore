@@ -35,6 +35,7 @@ put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
 body_idle_timeout     = "20s"
+aws_chunked_max_line_bytes = 2048
 s3_request_timeout    = "2m"
 
 [local_cache]
@@ -192,6 +193,7 @@ fn a_build_node_file_makes_a_cache() {
     assert_eq!(front.put_min_bytes_per_sec, 2048);
     assert_eq!(front.put_rate_grace, Duration::from_secs(45));
     assert_eq!(front.body_idle_timeout, Duration::from_secs(20));
+    assert_eq!(front.aws_chunked_max_line_bytes, 2048);
     assert_eq!(cache.s3_request_timeout, Duration::from_secs(120));
     assert_eq!(front.drain_lb_wait, DEFAULTS.drain_lb_wait);
 

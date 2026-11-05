@@ -170,10 +170,12 @@
 //!   bytes):
 //!   `BadDigest` for a body that does not match, `InvalidDigest` for a value that is not the
 //!   base64 of a hash of the right length;
-//! - a trailing checksum or a signed stream (`STREAMING-` payloads, `aws-chunked`) is answered
-//!   `NotImplemented`. The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
-//!   body for a streamed upload, so such a client is refused with 501 until it sends a
-//!   checksum only when an operation requires one (see `packaging/README.md`).
+//! - a body in `aws-chunked` framing (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, `...-PAYLOAD-TRAILER`
+//!   or `STREAMING-UNSIGNED-PAYLOAD-TRAILER`, which the AWS SDKs send by default for a streamed
+//!   upload) is decoded as it arrives, on a put and on a part: see [`chunked`]. The signatures of
+//!   its chunks are checked (`SignatureDoesNotMatch`), its trailing checksum is held to the
+//!   decoded data like a header one (`BadDigest`), and the length of the object is
+//!   `x-amz-decoded-content-length`. Any other `STREAMING-` payload is `NotImplemented`.
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
@@ -249,6 +251,7 @@ mod auth;
 mod bucket;
 pub mod build_info;
 mod cache_cli;
+mod chunked;
 pub mod cli;
 mod cli_heartbeat;
 mod cli_oci;
@@ -333,6 +336,8 @@ mod cache_handoff_tests;
 mod cache_handoff_traffic_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+#[cfg(test)]
+mod chunked_tests;
 #[cfg(test)]
 mod cli_heartbeat_tests;
 #[cfg(test)]
@@ -468,6 +473,7 @@ pub use presign::{Grant, PresignKey, PresignRequest, presign_get, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 pub use server_config::ServerConfig;
 
+use chunked::Decoder;
 use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
@@ -870,11 +876,16 @@ impl Server {
         });
         let config = &self.config;
         let floor = (config.put_min_bytes_per_sec, config.put_rate_grace);
-        let reader = Reader::new(body, limit, config.body_idle_timeout).with_floor(
-            floor.0,
-            floor.1,
-            Arc::clone(&config.rate_clock),
-        );
+        let stream = check
+            .framing()
+            .filter(|framing| framing.signed())
+            .and_then(|_| auth::stream(config, parts));
+        let decoder = check
+            .framing()
+            .map(|framing| Decoder::new(framing, stream, config.aws_chunked_max_line_bytes));
+        let reader = Reader::new(body, limit, config.body_idle_timeout)
+            .with_decoder(decoder)
+            .with_floor(floor.0, floor.1, Arc::clone(&config.rate_clock));
         let grant = signed.presign.as_ref();
         self.dispatch(parts, target, &query, reader, check, grant)
             .await

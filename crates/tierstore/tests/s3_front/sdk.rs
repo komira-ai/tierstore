@@ -599,11 +599,11 @@ async fn sdk_x_id_does_not_let_an_unknown_parameter_through() {
     assert!(kept.unwrap_err().into_service_error().is_not_found());
 }
 
-/// Asserts why the settings turn flexible checksums off: with the SDK's defaults, a put whose
-/// body is a file, which the SDK sends with a trailing checksum in an aws-chunked body, is
-/// refused with 501 `NotImplemented`, and nothing is stored.
+/// Asserts that the SDK on its defaults, which sends a body that is a file with a trailing
+/// checksum in an `aws-chunked` body, has the put accepted and the object stored as the bytes
+/// of the file, not as the framed body.
 #[tokio::test]
-async fn sdk_default_checksums_on_a_streamed_body_are_refused() {
+async fn sdk_default_checksums_on_a_streamed_body_are_accepted() {
     let h = serving().await;
     let files = Files::new("sdk-defaults");
     let defaults = Config::builder()
@@ -615,21 +615,22 @@ async fn sdk_default_checksums_on_a_streamed_body_are_refused() {
         .credentials_provider(Credentials::new(KEY_ID, SECRET, None, None, "static"));
     let sdk = Client::from_conf(defaults.build());
     let body = ByteStream::from_path(&files.key).await.unwrap();
-    let sent = sdk
-        .put_object()
+    sdk.put_object()
         .bucket(BUCKET)
         .key("out/streamed")
         .body(body)
         .send()
-        .await;
-    assert_eq!(refusal(sent), (501, "NotImplemented".to_owned()));
+        .await
+        .unwrap();
     let kept = client(&h)
-        .head_object()
+        .get_object()
         .bucket(BUCKET)
         .key("out/streamed")
         .send()
-        .await;
-    assert!(kept.unwrap_err().into_service_error().is_not_found());
+        .await
+        .unwrap();
+    let got = kept.body.collect().await.unwrap().into_bytes();
+    assert_eq!(got.as_ref(), std::fs::read(&files.key).unwrap().as_slice());
 }
 
 /// Asserts that a URL made by the stock presigner of the SDK (`PresigningConfig`, which signs the

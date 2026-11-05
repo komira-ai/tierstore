@@ -109,6 +109,7 @@ pub(super) struct FrontSettings {
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
     pub body_idle_timeout: Duration,
+    pub aws_chunked_max_line_bytes: u64,
     pub min_secret_bytes: u32,
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
@@ -142,6 +143,7 @@ impl Cli {
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
             body_idle_timeout: self.body_idle_timeout,
+            aws_chunked_max_line_bytes: self.aws_chunked_max_line_bytes,
             min_secret_bytes: self.min_secret_bytes,
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
@@ -238,6 +240,8 @@ pub(super) fn server_config(
     server.region = front.region.clone();
     server.max_request_bytes = usize::try_from(front.max_request_bytes).unwrap_or(usize::MAX);
     server.body_idle_timeout = front.body_idle_timeout;
+    server.aws_chunked_max_line_bytes =
+        usize::try_from(front.aws_chunked_max_line_bytes).unwrap_or(usize::MAX);
     server.max_concurrent_puts = front.max_concurrent_puts as usize;
     server.domains = front.domains.clone();
     server.delete_concurrency = front.delete_concurrency as usize;

@@ -58,6 +58,9 @@ pub struct ServerConfig {
     /// slowly but steadily is not cut, and neither is a slow reader that keeps taking bytes.
     /// See the module docs.
     pub body_idle_timeout: Duration,
+    /// The longest line of an `aws-chunked` body that is held to be read: a chunk header or a
+    /// line of the trailer (`server.aws_chunked_max_line_bytes`). The data of a chunk is not held.
+    pub aws_chunked_max_line_bytes: usize,
     /// The most streamed bodies (puts and parts of uploads) taken at once. A request over the
     /// limit waits up to `put_permit_wait` for one to end, and is then answered 503 `SlowDown`
     /// with a `Retry-After`; its body is not read either way. Each
@@ -163,6 +166,7 @@ impl ServerConfig {
             presign_max_expires: Duration::from_secs(900),
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
+            aws_chunked_max_line_bytes: 1024,
             max_concurrent_puts: 32,
             delete_concurrency: 16,
             put_permit_wait: Duration::from_secs(15),
