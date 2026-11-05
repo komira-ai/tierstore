@@ -101,6 +101,42 @@ pub(crate) fn parse_amz_date(text: &str) -> Option<u64> {
     (amz_date(millis) == text).then_some(millis)
 }
 
+/// The time in milliseconds of an HTTP date in any of the three forms HTTP/1.1 recipients accept
+/// (RFC 7231, 7.1.1.1): `Sun, 06 Nov 1994 08:49:37 GMT`, `Sunday, 06-Nov-94 08:49:37 GMT` (a
+/// two-digit year below 70 is 20xx, else 19xx) and `Sun Nov  6 08:49:37 1994`. `None` if `text`
+/// is none of them, or names a day that is not one (the 31st of February). The weekday is not
+/// checked.
+pub(crate) fn parse_http_date(text: &str) -> Option<u64> {
+    let spaced = text.replace([',', '-'], " ");
+    let words: Vec<&str> = spaced.split_whitespace().collect();
+    let (day, month, year, clock) = match words[..] {
+        [_, day, month, year, clock, "GMT"] => (day, month, year, clock),
+        [_, month, day, clock, year] => (day, month, year, clock),
+        _ => return None,
+    };
+    let month = (0..12_u32).find(|at| abbreviation(MONTHS, *at as usize) == month)? + 1;
+    let day = day.parse::<u32>().ok()?;
+    let year = match year.len() {
+        2 => {
+            let short = year.parse::<i64>().ok()?;
+            short + if short < 70 { 2000 } else { 1900 }
+        }
+        4 => year.parse::<i64>().ok()?,
+        _ => return None,
+    };
+    let mut fields = clock.split(':').map(|field| field.parse::<u64>().ok());
+    let (hour, minute, second) = (fields.next()??, fields.next()??, fields.next()??);
+    if fields.next().is_some() || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let days = u64::try_from(days_from_civil(year, month, day)).ok()?;
+    let millis = (days * 86_400 + hour * 3600 + minute * 60 + second) * 1000;
+    // A date that is not one does not come back the same.
+    let back = civil(millis);
+    let same = (back.year, back.month, back.day) == (year, month, day);
+    same.then_some(millis)
+}
+
 /// The count of days since 1970-01-01 of a date (proleptic Gregorian), after Howard Hinnant's
 /// `days_from_civil`.
 fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {

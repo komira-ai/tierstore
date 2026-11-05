@@ -52,6 +52,7 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
@@ -309,6 +310,11 @@ pub(super) struct ServerTable {
     pub s3_chunks_waiting: Option<u32>,
     pub dir_copy_chunk: Option<Size>,
     pub dir_read_chunk: Option<Size>,
+    // The keys of `config_handoff`.
+    #[serde(default)]
+    pub handoff_socket: Option<PathBuf>,
+    #[serde(default)]
+    pub handoff_wait: Option<Dur>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
@@ -660,6 +666,7 @@ pub(super) fn storage(
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
+    let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
     let front = shared.front;
@@ -700,6 +707,7 @@ pub(super) fn storage(
         copy_parallel,
         lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
         lock_file,
+        handoff,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,

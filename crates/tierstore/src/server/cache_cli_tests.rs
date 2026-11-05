@@ -36,7 +36,7 @@ const KEY_ID: &str = "AKIDCACHE";
 const SECRET: &str = "cache-secret-0123456789";
 
 /// The knobs of a run whose drain does not wait.
-const QUICK: PerRun = PerRun {
+pub(super) const QUICK: PerRun = PerRun {
     drain_lb_wait: Duration::from_millis(50),
     drain_deadline: Duration::from_secs(60),
 };
@@ -61,7 +61,7 @@ impl Node {
     }
 
     /// The file of a build node with this extra text in `[server]`, and `local` in `[local_cache]`.
-    fn text(&self, server: &str, local: &str) -> String {
+    pub(super) fn text(&self, server: &str, local: &str) -> String {
         format!(
             r#"
 [[interface]]

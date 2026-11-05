@@ -6,7 +6,7 @@
 |---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint`: format, cargo-deny (licences, bans, sources), clippy, the workflow lint. `test`: every test under cargo-llvm-cov with branch coverage, and the 99% gate on lines and branches of every crate (`crates/coverage-gate`). |
 | `advisories.yml` | daily, push to `main` | `cargo deny check advisories`; the result is kept in one issue, and the run is green whatever it finds. |
-| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (its single-instance launchd steps, the macOS declaration and the macOS packaging; the two-slot conformance test and the `nft` and `systemctl` ports are Linux only and compiled out there). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
+| `artifacts.yml` | pull request, push to `main`; by hand | builds `tierstore` (`--features server`) for linux-x86_64, linux-arm64 and macos-arm64, each on a GitHub-hosted runner of its platform, packages it with its SBOM, makes `SHA256SUMS`. The macos-arm64 job also runs the tests of `tierstore`, `objstore-s3` and `tierstore-testkit` on macOS, the update hook's among them (both of its arms are built and tested on every system, each against fakes of its service manager, and the macOS packaging). No macOS runner is part of a pull request's checks: for a pull request the macos-arm64 job is skipped and the sums cover the Linux files; a push to `main` builds every platform, and a run by hand (`gh workflow run artifacts.yml --ref <branch>`) builds and sums every platform of a branch and signs nothing. On a push to `main` it also signs (build provenance and SBOM attestations) and checks what it signed. |
 | `release.yml` | when `ci` or `artifacts` finishes on a push to `main` (automatic, see Releases); by hand | `plan` decides whether the push is released and as which tag; `verify` and `publish` attach the files that push built and signed to a GitHub release, after checking them again. Builds nothing of tierstore. |
 | `tierstore-site.yml` | pull request, push to `main`, when the site changes | typecheck, tests and build of tierstore.dev. |
 | `tierstore-site-publish.yml` | push to `main` / by hand | builds the site again; uploads it only when the repository variable `TIERSTORE_SITE_PUBLISH` is `true`. |
@@ -132,6 +132,18 @@ then refused, and the next push is built and released under the new number. File
 commit, not the version, and are unchanged.
 
 `v0.3.1` predates this: its binary reports `0.3.0+e7fd86844000`, the crate's version at the time.
+
+### The hostkeeper package
+
+`cargo xtask release hostkeeper-package --binary <path> --version <X.Y.Z+12 hex> --min-hostkeeper
+<x.y.z> --platform <platform> --out <dir>` assembles the package hostkeeper installs on a host,
+`tierstore-<version>-<platform>.tar.zst`, for linux-x86_64, linux-arm64 or macos-arm64, from a built
+binary: the manifest and the units of `packaging/hostkeeper/` (its README says what each holds) and
+the binary as `bin/tierstore`, byte for byte, so the macOS binary keeps the signature its build
+gave it. The verb never runs the binary, so it packages any platform's on any runner, but it
+refuses a `--version` that is not what `tierstore --version` prints after the name or that the
+binary does not hold. The same inputs give the same bytes. No workflow runs the verb yet, and the
+release files above are unchanged.
 
 ### Releasing by hand
 
