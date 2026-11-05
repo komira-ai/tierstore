@@ -46,6 +46,7 @@ use std::path::{Component, Path, PathBuf};
 use super::cli::Cli;
 use super::config::{ConfigError, OciFlags, PerRun, ServerTable, TierTable, invalid, storage};
 use super::config_cache::{CachePart, LocalCacheTable, check_oci_is_kept};
+use super::config_handoff::refuse_handoff;
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
 
@@ -73,6 +74,7 @@ pub(super) fn combined(
         let why = "a node that owns the data takes writes, and they pass through the cache so that its entries stay right: leave it out or give true";
         return Err(invalid("local_cache.write_through", why));
     }
+    refuse_handoff(&server, "a storage node with [local_cache]")?;
     let node = storage(server, tiers, fronts, per_run)?;
     overlap(&table.path, &node)?;
     let mut cache = CachePart::new(table, policy)?;

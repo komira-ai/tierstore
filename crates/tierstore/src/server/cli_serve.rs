@@ -98,14 +98,21 @@ pub async fn run(
 /// closes each idle connection with a lingering close and each other one in the same way once its
 /// answer is out, and waits for them within `--drain-deadline`.
 ///
+/// With [`Cli::handoff`] (`server.handoff_socket`) it is [`run_handing`] with that hand-off: it
+/// takes the sockets of the instance that answers on the control socket, or binds its own where
+/// none answers, offers them there in its turn, and drains when a successor takes them. Without
+/// it, it binds its own sockets and makes no control socket.
+///
 /// # Errors
-/// As [`run`], and the OCI front's flags and files (see [`OciError`](super::oci::OciError)).
+/// As [`run`], the OCI front's flags and files (see [`OciError`](super::oci::OciError)), and with
+/// a hand-off, a [`HandingError`] (boxed) of a hand-off that is refused, mismatched or not ended
+/// within `server.handoff_wait`.
 pub async fn run_serving(
     cli: &Cli,
     stop: impl Future<Output = ()> + Send + 'static,
     ready: impl FnOnce(Addresses),
 ) -> Result<Drained, Error> {
-    run_handing(cli, None, stop, ready)
+    run_handing(cli, cli.handoff.as_ref(), stop, ready)
         .await
         .map_err(HandingError::into_boxed)
 }
@@ -115,7 +122,8 @@ pub async fn run_serving(
 /// addresses are the ones the settings name), binding its own only where none answers, and then
 /// answers the control socket itself, so that the next update can take from it. When a successor
 /// takes its sockets it stops, as if `stop` had resolved: it drains, with the requests in flight
-/// finished, and returns.
+/// finished, and returns. It reads `handoff`, not [`Cli::handoff`]: [`run_serving`] passes that
+/// one.
 ///
 /// # Errors
 /// As [`run_serving`], and a hand-off that is refused, that offers other addresses than the

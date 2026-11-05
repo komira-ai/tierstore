@@ -32,10 +32,20 @@ pub const RELEASE_VERSION: &str = concat!(
 /// The host updater's `prepare` step reads it to choose a hand-over over a plain restart, so a
 /// release that named it without all three would be handed over to and fail; the test
 /// `handover_v1_is_listed_with_the_three_behaviours_it_promises` (tests/oci_front) runs the
-/// binary against each of them. This list is all `--capabilities` prints. The hook looks for the
-/// same name as `update_hook::HANDOVER_CAPABILITY`, and `the_pages_say_the_build_lists_handover_v1`
-/// holds the two equal.
-pub const CAPABILITIES: &[&str] = &["handover-v1"];
+/// binary against each of them. The hook looks for the same name as
+/// `update_hook::HANDOVER_CAPABILITY`, and `the_pages_say_the_build_lists_handover_v1` holds the
+/// two equal.
+///
+/// [`HANDOFF_SOCKET_CAPABILITY`] says the binary serves through the hand-off of its listening
+/// sockets when `server.handoff_socket` is set (see `server::handoff`). This list is all
+/// `--capabilities` prints.
+pub const CAPABILITIES: &[&str] = &["handover-v1", HANDOFF_SOCKET_CAPABILITY];
+
+/// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
+/// sockets of the instance that answers on that control socket (or binds its own where none
+/// answers), offers them there in its turn, and drains when a successor takes them; the wait for
+/// the running instance is `server.handoff_wait`.
+pub const HANDOFF_SOCKET_CAPABILITY: &str = "handoff-socket-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]

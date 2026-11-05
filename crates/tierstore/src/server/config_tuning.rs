@@ -62,7 +62,7 @@ impl Default for HotTuning {
 }
 
 /// The duration of `table.key`, or `default`, from `low` to `high`, both included.
-fn span(
+pub(super) fn span(
     place: (&str, &str),
     value: Option<Dur>,
     default: Duration,
