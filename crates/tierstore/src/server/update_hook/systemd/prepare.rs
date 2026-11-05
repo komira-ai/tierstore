@@ -1,6 +1,8 @@
 //! `prepare`: can the node take the update, and which way; the record of the update. Nothing is
 //! started.
 
+use std::path::Path;
+
 use super::super::params::{CONFIG_FILE_KEY, Params};
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
@@ -53,6 +55,14 @@ pub(super) fn prepare(
             })
         }
     };
+    // Before anything is recorded or stopped, each release that will run the configuration says
+    // whether it accepts it: a refusal found later leaves a unit that exits 2 and is not retried.
+    if let Some(config) = &params.config_file {
+        check_config(c, "staged", &params.staged_release, config)?;
+        if let Some(previous) = update {
+            check_config(c, "previous", &previous.release, config)?;
+        }
+    }
     // A run again keeps the instances an earlier run chose: nothing has been started since.
     let kept = record.filter(|record| record.updating);
     let live = match kept {
@@ -77,6 +87,21 @@ pub(super) fn prepare(
         live.map_or_else(|| "none".to_owned(), unit_name),
         unit_name(next),
     )))
+}
+
+/// Has `release` check `config`; a release that refuses it fails `prepare` with the line it said.
+fn check_config(c: &Ctx<'_, '_>, which: &str, release: &Path, config: &Path) -> Result<(), Done> {
+    match c.ports.host.check_config(release, config)? {
+        None => Ok(()),
+        Some(line) => Err(Done::fail(
+            Reason::ConfigRefused,
+            format!(
+                "the {which} release {} refuses {}: {line}",
+                release.display(),
+                config.display()
+            ),
+        )),
+    }
 }
 
 /// The instance that serves now. Both running is not a state to start an update from: the old

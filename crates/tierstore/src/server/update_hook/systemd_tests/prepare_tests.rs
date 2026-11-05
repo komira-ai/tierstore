@@ -296,3 +296,151 @@ fn prepare_reports_a_failed_unit_look_and_a_failed_write() {
     fake.fail_on(Some("state.save"));
     assert_failed(&fake.run(Prepare, &params(NEW, Some(OLD))), Reason::StateIo);
 }
+
+/// The line a release that predates the cache shapes prints when it refuses the key.
+const REFUSAL: &str = "tierstore: config file /etc/tierstore/config.toml: server.handoff_socket: \
+     a build node does not hand off its sockets; leave it out";
+
+/// Asserts (T29, H01) that when the previous release refuses the configuration, `prepare` fails
+/// with `config_refused` of class environment, the detail names the previous release, its path
+/// and the refusal line, the record is unchanged, and no unit was asked about or touched. Catches
+/// an edit made while the live release still refuses the key, found only when the live unit
+/// restarts onto it.
+#[test]
+fn prepare_refuses_a_configuration_the_previous_release_refuses() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_CACHE_SOCKET));
+    fake.set_refusal(OLD, REFUSAL);
+    let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+    assert_failed(&done, Reason::ConfigRefused);
+    assert_eq!(done.report.class, Class::Environment);
+    let words = detail(&done);
+    assert!(words.contains("previous release"), "{done:?}");
+    assert!(words.contains(OLD), "{done:?}");
+    assert!(words.contains(REFUSAL), "{done:?}");
+    assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
+    assert!(
+        !fake
+            .log()
+            .iter()
+            .any(|line| line.starts_with("units.") || line == "state.save"),
+        "{:?}",
+        fake.log()
+    );
+}
+
+/// Asserts (H01) that when the staged release refuses the configuration, `prepare` fails with
+/// `config_refused` naming the staged release, and records nothing.
+#[test]
+fn prepare_refuses_a_configuration_the_staged_release_refuses() {
+    let fake = SystemdFake::installed();
+    fake.set_refusal(NEW, "tierstore: wait out of range");
+    let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+    assert_failed(&done, Reason::ConfigRefused);
+    let words = detail(&done);
+    assert!(words.contains("staged release"), "{done:?}");
+    assert!(words.contains(NEW), "{done:?}");
+    assert!(words.contains("tierstore: wait out of range"), "{done:?}");
+    assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
+}
+
+/// Asserts (H01) that when both releases accept the configuration, each is asked once, with the
+/// configuration file the params name, the staged release first, and `prepare` goes on to record
+/// the update, in a hand-over or a restart as the capabilities say.
+#[test]
+fn prepare_asks_both_releases_to_check_the_configuration_and_goes_on() {
+    let fake = SystemdFake::installed();
+    assert_ok(&fake.run(Prepare, &params(NEW, Some(OLD))));
+    assert_eq!(
+        fake.config_checks(),
+        vec![
+            (NEW.to_owned(), CONFIG.to_owned()),
+            (OLD.to_owned(), CONFIG.to_owned())
+        ]
+    );
+    assert_eq!(fake.record().mode, Some(Mode::Handover));
+}
+
+/// Asserts (T29, H01) that `mode = "restart"` with a `config_file` still has both releases
+/// check the configuration: a restart onto a refused key is the case that leaves a port dark. A
+/// refusal by the previous release fails `prepare` and records nothing.
+#[test]
+fn a_restart_mode_with_a_config_file_still_checks_both_releases() {
+    let fake = SystemdFake::installed();
+    let p = params_with(
+        NEW,
+        Some(OLD),
+        &format!("mode = \"restart\"\nconfig_file = \"{CONFIG}\"\n"),
+    );
+    assert_ok(&fake.run(Prepare, &p));
+    assert_eq!(fake.record().mode, Some(Mode::Restart));
+    assert_eq!(fake.config_checks().len(), 2);
+    assert!(fake.config_paths().is_empty());
+
+    let fake = SystemdFake::installed();
+    fake.set_refusal(OLD, REFUSAL);
+    let done = fake.run(Prepare, &p);
+    assert_failed(&done, Reason::ConfigRefused);
+    assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
+}
+
+/// Asserts (H01) that `mode = "restart"` without a `config_file` reads and checks no
+/// configuration at all.
+#[test]
+fn a_restart_mode_without_a_config_file_checks_nothing() {
+    let fake = SystemdFake::installed();
+    fake.set_refusal(OLD, REFUSAL);
+    let p = params_with(NEW, Some(OLD), "mode = \"restart\"\n");
+    assert_ok(&fake.run(Prepare, &p));
+    assert!(fake.config_checks().is_empty());
+    assert!(fake.config_paths().is_empty());
+}
+
+/// Asserts (H01) that a check that cannot be run (the host call fails: exit 1, a signal, no
+/// spawn, no end) fails `prepare` with `host_failed`, not `config_refused`, and records nothing.
+#[test]
+fn a_check_that_cannot_be_run_is_host_failed() {
+    let fake = SystemdFake::installed();
+    fake.fail_on(Some("host.check_config"));
+    assert_failed(
+        &fake.run(Prepare, &params(NEW, Some(OLD))),
+        Reason::HostFailed,
+    );
+    assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
+}
+
+/// Asserts (H01) that a first install, which has no previous release, has the staged release
+/// check the configuration the params name, and a refusal fails `prepare` with `config_refused`;
+/// a first install without a `config_file` checks nothing.
+#[test]
+fn a_first_install_has_the_staged_release_check_the_configuration() {
+    let fake = SystemdFake::installed();
+    assert_ok(&fake.run(Prepare, &params(NEW, None)));
+    assert_eq!(
+        fake.config_checks(),
+        vec![(NEW.to_owned(), CONFIG.to_owned())]
+    );
+
+    let fake = SystemdFake::installed();
+    fake.set_refusal(NEW, REFUSAL);
+    let done = fake.run(Prepare, &params(NEW, None));
+    assert_failed(&done, Reason::ConfigRefused);
+    assert!(detail(&done).contains("staged release"), "{done:?}");
+
+    let fake = SystemdFake::installed();
+    assert_ok(&fake.run(Prepare, &params_with(NEW, None, "")));
+    assert!(fake.config_checks().is_empty());
+}
+
+/// Asserts (H01) that a cache-shape update the previous release refuses is refused whatever the
+/// capabilities say, even when both lists would otherwise give a restart.
+#[test]
+fn the_check_comes_before_the_mode_is_chosen() {
+    let fake = SystemdFake::installed();
+    fake.set_config(Some(WITH_CACHE_SOCKET));
+    fake.set_capabilities(OLD, &[]);
+    fake.set_refusal(OLD, REFUSAL);
+    let done = fake.run(Prepare, &params(NEW, Some(OLD)));
+    assert_failed(&done, Reason::ConfigRefused);
+    assert_eq!(fake.record(), Record::idle(Some(Instance::A)));
+}

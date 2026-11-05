@@ -135,3 +135,27 @@ fn the_page_says_the_build_lists_the_hand_off() {
         assert!(!PAGE.contains(stale), "update-hook.md still says {stale:?}");
     }
 }
+
+/// Asserts (T23, T24) that the page states the order of releases: the first release that accepts
+/// the key goes in by `mode = "restart"`, the key is added only after it is live, and the next
+/// release is the first hand-over; and that it names `config_refused` and the check it comes
+/// from. Catches a page that tells operators to add the key before the live release accepts it.
+#[test]
+fn the_page_states_the_order_of_releases_and_the_configuration_check() {
+    let start = PAGE
+        .find("### The order of releases")
+        .expect("update-hook.md has the order of releases");
+    let order = &PAGE[start..];
+    let order = &order[..order.find("\n## ").unwrap_or(order.len())];
+    for needle in [
+        "`mode = \"restart\"`",
+        "`server.handoff_socket` added",
+        "`config_refused`",
+        "first hand-over",
+        CACHE_HANDOFF_CAPABILITY,
+    ] {
+        assert!(order.contains(needle), "the order lacks {needle}");
+    }
+    assert!(PAGE.contains("--check-config"));
+    assert!(PAGE.contains("A Mac never hands over"));
+}

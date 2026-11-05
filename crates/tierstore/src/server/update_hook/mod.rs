@@ -79,6 +79,10 @@ pub const MARKER_DIR: &str = "/var/lib/tierstore";
 pub fn marker_path(instance: Instance) -> PathBuf {
     PathBuf::from(MARKER_DIR).join(format!("run-{}", instance.letter()))
 }
+/// The account the service runs as: the template's `User=`. A check of the configuration by a
+/// release runs as this account when the hook runs as root, so that the release judges the files
+/// as the unit will.
+pub const SERVICE_ACCOUNT: &str = "tierstore";
 /// The binary of a release, under its version directory (hostkeeper's package layout).
 pub const RELEASE_BINARY: &str = "bin/tierstore";
 /// The plist of the launchd job, as hostkeeper links it from the package's `units/`.

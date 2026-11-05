@@ -63,7 +63,7 @@ The next update starts the other letter: a, b, a, and so on. A cache node serves
 
 ### On a Mac
 
-One job, whose label is `launchd_label`, loaded from the plist `/Library/LaunchDaemons/tierstore.plist` (hostkeeper links it from the package's `units/`). An update is a restart with a gap: `cutover` boots the job out, then bootstraps the plist, which starts the release `current` now names. A first install bootstraps only, and boots nothing out. The record has no `live`, `next` or `mode`, and `prepare` does not ask for a hand-over socket. The hook touches the one label and no other.
+One job, whose label is `launchd_label`, loaded from the plist `/Library/LaunchDaemons/tierstore.plist` (hostkeeper links it from the package's `units/`). An update is a restart with a gap: `cutover` boots the job out, then bootstraps the plist, which starts the release `current` now names. A first install bootstraps only, and boots nothing out. The record has no `live`, `next` or `mode`, and `prepare` does not ask for a hand-over socket. `prepare` does not run a release either: it checks that the `config_file` param is there and names a file, and no more, so a configuration that the live or the staged release refuses is found when the job starts. A Mac never hands over, and its configuration has no `handoff_socket` key; a configuration with `[server] handoff_socket` and `[local_cache]` still updates by a restart, whatever the releases list. The hook touches the one label and no other.
 
 ## The steps
 
@@ -75,6 +75,7 @@ Nothing a client sees changes, and nothing is started.
 - Both arms: the `config_file` param must be there (`bad_params`) and name a file that exists (`config_missing`).
 - systemd, an update, no `mode = "restart"`: the configuration must have the `handoff_socket` key of the `[server]` table, a non-empty string; else `handoff_not_configured`. The key is needed in every shape of node, a build node and a storage node with `[local_cache]` included. A configuration that is not TOML is refused the same way, with the parse message.
 - systemd: the hook runs `<staged release>/bin/tierstore --capabilities` (a staged release with no binary there, or a binary that does not run, is `host_failed`), and for an update the previous release's too. The mode is a hand-over when `mode` is not `"restart"` and both list `handoff-socket-v1` (and, for a configuration with a top-level `[local_cache]` table, both also list `handoff-cache-v1`), and a restart otherwise. A first install records no mode.
+- systemd, an update or a first install, whenever the params name a `config_file` (with `mode = "restart"` too): before anything is recorded or stopped, the hook has the staged release and then, for an update, the previous release check the configuration, by running `<release>/bin/tierstore --config <config_file> --check-config`. Exit 0 is a configuration the release accepts. Exit 2 is one it refuses: `prepare` fails with `config_refused`, and the detail says whether the staged or the previous release refused, its path, and the refusal line it printed. Any other exit, a signal, a binary that cannot be started and a check that does not end within 10 seconds are `host_failed`. Nothing is recorded and no unit is touched in either case. A first install has no previous release, so only the staged one checks. `mode = "restart"` without a `config_file` checks nothing. When the hook runs as root, the check runs as the account `tierstore` (the template's `User=`, found in `/etc/passwd`; an account that is not there is `host_failed`), because the check refuses key files that the user it runs as does not own, and the unit does not run as root. A hook that is not root runs the check as itself. The check is the loader's only: what a start finds of the disk, the tiers or the heartbeat is not checked.
 - systemd: it looks at the units. Both running defers the step (75, `host_not_ready`, retry after 30 seconds). One running is `live`. None running is the record's `live` on an update, and no instance on a first install. `next` is the other one of `live`, or `a` when there is none.
 - It saves the record: updating, from the previous release, to the staged release, the version, and on systemd `live`, `next` and the mode.
 
@@ -118,9 +119,17 @@ The boot step. It starts the instance the record names, and only it: the recorde
 
 A hand-over needs the `handoff_socket` key in the `[server]` table of the node's configuration, the path of a Unix socket in a directory the service owns, for example `/var/lib/tierstore/handoff.sock`. The new instance connects to it, takes the listening sockets and then binds the path itself. It also needs both releases to list the capability `handoff-socket-v1` in `tierstore --capabilities`. For a configuration with a top-level `[local_cache]` table (a build node, or a storage node with a cache), both releases must also list `handoff-cache-v1`. When any of these is missing, the update is a restart, which `prepare` records as the mode. A configuration without `handoff_socket` is refused with `handoff_not_configured`, whatever the shape, unless the params force a restart.
 
-This binary has the hand-over socket and lists `handoff-socket-v1`: the new instance takes the sockets of the running one over `server.handoff_socket`, waiting at most `server.handoff_wait` (10s) for it to hand them over (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)). An update from a release that does not list it is still a restart. A build node and a storage node with `[local_cache]` hand over too, and this binary lists `handoff-cache-v1` for it. The update to this release from v0.3.47 or an earlier one, of a node with `[local_cache]`, is a restart: that release lists `handoff-socket-v1` but its cache shapes refuse the key, so its instance has no control socket. Later updates of such a node hand over.
+This binary has the hand-over socket and lists `handoff-socket-v1`: the new instance takes the sockets of the running one over `server.handoff_socket`, waiting at most `server.handoff_wait` (10s) for it to hand them over (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)). An update from a release that does not list it is still a restart. A build node and a storage node with `[local_cache]` hand over too, and this binary lists `handoff-cache-v1` for it. The update to this release from v0.3.47 or an earlier one, of a node with `[local_cache]`, is a restart: that release lists `handoff-socket-v1` but its cache shapes refuse the key, so its instance has no control socket. Later updates of such a node hand over, once the key is in the configuration (see [The order of releases](update-hook.md#the-order-of-releases)).
 
 `mode = "restart"` in the manifest's params forces a restart, and then the configuration needs no `handoff_socket` key. Set it on a storage node whose hot tier is a `dir:` tier: the lease's compare-and-swap there is atomic within one process only, so two instances must never run side by side. The hook does not detect such a tier; a host with one that omits `mode = "restart"` is a documented gap.
+
+### The order of releases
+
+A release that refuses `server.handoff_socket` on a build node or a storage node with `[local_cache]` (v0.3.47 and earlier) exits 2 at start when the key is there, and the unit's `RestartPreventExitStatus=2 3` then keeps it from being started again. So the key goes in by this order:
+
+1. The first release that accepts the key on every shape of node (it lists `handoff-cache-v1`) goes in with `mode = "restart"` in the manifest's params. A restart needs no `handoff_socket` key, and the configuration still has none.
+2. Only when that release is live is `server.handoff_socket` added to the node's configuration. While the live release still refuses the key, `prepare` of any update refuses the edited configuration with `config_refused`, naming the previous release, before anything is stopped.
+3. The next release, whose manifest has no `mode = "restart"`, is the first hand-over: both releases list the capabilities, and the configuration has the key.
 
 ## The reasons
 
@@ -143,11 +152,12 @@ This binary has the hand-over socket and lists `handoff-socket-v1`: the new inst
 | `wrong_build` | release | the build gauge on 9300 is not the target version |
 | `handoff_not_configured` | environment | the configuration has no `handoff_socket` key in `[server]`, or cannot be read as TOML |
 | `config_missing` | environment | there is no file at `config_file` |
+| `config_refused` | environment | the staged or the previous release refuses the configuration at `config_file` when it checks it (`--check-config` exits 2); the detail names the release and the line |
 | `service_manager_unknown` | release | `service_manager` names a manager the hook does not drive |
 | `no_previous_release` | release | `rollback` of a first install: there is nothing to go back to; the instance `cutover` started is stopped |
 | `unit_failed` | environment | a unit or the launchd job could not be started, stopped or asked |
 | `state_io` | environment | the record or a start marker could not be read or written |
-| `host_failed` | environment | the host could not be asked: the configuration or `--capabilities` of a release |
+| `host_failed` | environment | the host could not be asked: the configuration, or `--capabilities` or `--check-config` of a release (cannot be run, exits any status but its answer, or does not end), or the account `tierstore` is not in `/etc/passwd` |
 
 ## First install
 

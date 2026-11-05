@@ -504,6 +504,28 @@ impl Host for Fake {
             "no release is run by a launchd step",
         ))
     }
+
+    fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
+        self.no_check(release, config)
+    }
+}
+
+impl Fake {
+    // A launchd step runs no release to ask, here as for the capabilities.
+    fn no_check(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
+        self.tick(
+            format!(
+                "host.check_config {} {}",
+                release.display(),
+                config.display()
+            ),
+            PortKind::Host,
+        )?;
+        Err(PortError::failed(
+            PortKind::Host,
+            "no release is run by a launchd step",
+        ))
+    }
 }
 
 impl Clock for Fake {

@@ -142,6 +142,7 @@ struct World {
     current: PathBuf,
     config: Option<String>,
     capabilities: BTreeMap<PathBuf, Vec<String>>,
+    refusals: BTreeMap<PathBuf, String>,
     lies: BTreeMap<PathBuf, String>,
     mute: BTreeSet<PathBuf>,
     read_only: bool,
@@ -260,6 +261,7 @@ impl SystemdFake {
                     .into_iter()
                     .map(|release| (PathBuf::from(release), capable.clone()))
                     .collect(),
+                refusals: BTreeMap::new(),
                 lies: BTreeMap::new(),
                 mute: BTreeSet::new(),
                 read_only: false,
@@ -356,6 +358,25 @@ impl SystemdFake {
             PathBuf::from(release),
             words.iter().map(|word| (*word).to_owned()).collect(),
         );
+    }
+
+    /// `release` refuses the node's configuration when asked to check it, with `line`; every
+    /// release accepts it unless this says otherwise.
+    pub fn set_refusal(&self, release: &str, line: &str) {
+        self.w
+            .borrow_mut()
+            .refusals
+            .insert(PathBuf::from(release), line.to_owned());
+    }
+
+    /// The `(release, configuration)` pairs the step asked to check, in order.
+    pub fn config_checks(&self) -> Vec<(String, String)> {
+        self.log()
+            .iter()
+            .filter_map(|line| line.strip_prefix("host.check_config "))
+            .filter_map(|rest| rest.split_once(' '))
+            .map(|(release, config)| (release.to_owned(), config.to_owned()))
+            .collect()
     }
 
     /// The record on disk, as bytes.
@@ -663,6 +684,24 @@ impl Host for SystemdFake {
             .get(release)
             .cloned()
             .ok_or_else(|| PortError::failed(PortKind::Host, "not a release of this host"))
+    }
+
+    fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
+        self.check_config_of(release, config)
+    }
+}
+
+impl SystemdFake {
+    fn check_config_of(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError> {
+        self.count(
+            format!(
+                "host.check_config {} {}",
+                release.display(),
+                config.display()
+            ),
+            PortKind::Host,
+        )?;
+        Ok(self.w.borrow().refusals.get(release).cloned())
     }
 }
 

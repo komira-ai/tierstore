@@ -300,6 +300,117 @@ fn capabilities_lists_the_three_hand_over_words() {
     );
 }
 
+/// The file of a build node and of a storage node with a cache, as `--check-config` reads them,
+/// each with `server_extra` lines in `[server]`: the S3 tiers are named, never called.
+fn handoff_files(files: &Files, server_extra: &str) -> [(&'static str, String); 2] {
+    let dir = files.key.parent().unwrap().to_path_buf();
+    let upstream = files.secret("upstream.key", "UPKEY\nup-secret\n");
+    let build = format!(
+        r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "bin-build"
+bucket          = "tier-bucket"
+access_key_file = "{key}"
+{server_extra}
+
+[local_cache]
+path   = "{cache}"
+budget = "1MiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-fake"
+endpoint         = "http://192.0.2.1:9300"
+credentials_file = "{upstream}"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+        key = files.key.display(),
+        cache = dir.join("cache").display(),
+        upstream = upstream.display(),
+    );
+    let combined = format!(
+        r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "bin-combined"
+bucket          = "tier-bucket"
+access_key_file = "{key}"
+{server_extra}
+
+[hot_store]
+kind   = "dir"
+path   = "{hot}"
+budget = "1MiB"
+
+[cold_store]
+kind = "dir"
+path = "{cold}"
+
+[local_cache]
+path   = "{cache}"
+budget = "1MiB"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+        key = files.key.display(),
+        hot = dir.join("hot").display(),
+        cold = dir.join("cold").display(),
+        cache = dir.join("cache").display(),
+    );
+    [("build.toml", build), ("combined.toml", combined)]
+}
+
+/// Asserts (T29) that `--config <file> --check-config` of this build exits 0 with nothing printed
+/// for a build node and for a storage node with `[local_cache]`, each with an absolute
+/// `server.handoff_socket` and a `server.handoff_wait`, and that it creates neither the socket nor
+/// the cache. This is the answer the update hook's `prepare` reads from the staged release; the
+/// previous release that refuses the same file is modelled by the hook's fake, as no older
+/// binary is at hand offline.
+#[test]
+fn check_config_accepts_the_handoff_keys_of_a_build_node_and_a_combined_node() {
+    let files = Files::new("bin-check-handoff-good");
+    let socket = files.key.with_file_name("handoff.sock");
+    let extra = format!(
+        "handoff_socket = {:?}\nhandoff_wait = \"5s\"",
+        socket.display().to_string()
+    );
+    for (name, text) in handoff_files(&files, &extra) {
+        let config = files.secret(name, &text).display().to_string();
+        let flags = ["--config", &config, "--check-config"].map(str::to_owned);
+        assert_eq!(run(&flags), (0, String::new(), String::new()), "{name}");
+    }
+    assert!(!socket.exists());
+    assert!(!files.key.with_file_name("cache").exists());
+}
+
+/// Asserts (T29) that `--check-config` of a build node and of a storage node with `[local_cache]`
+/// whose `server.handoff_socket` is not an absolute path exits 2, prints nothing on stdout and
+/// names `server.handoff_socket` on stderr. Catches a check that passes a file whose start would
+/// refuse.
+#[test]
+fn check_config_refuses_a_bad_handoff_socket_naming_the_key() {
+    let files = Files::new("bin-check-handoff-bad");
+    for (name, text) in handoff_files(&files, "handoff_socket = \"handoff.sock\"") {
+        let config = files.secret(name, &text).display().to_string();
+        let flags = ["--config", &config, "--check-config"].map(str::to_owned);
+        let (code, out, err) = run(&flags);
+        assert_eq!((code, out.as_str()), (2, ""), "{name}");
+        assert!(err.contains("server.handoff_socket"), "{name}: {err}");
+    }
+}
+
 /// Asserts that `--capabilities` with any other flag is refused with status 2, naming it, and
 /// prints nothing on stdout, so that a script that reads the list never takes a refusal for one.
 /// Catches: the other flags ignored (a start's flags given by mistake read as a list), and a

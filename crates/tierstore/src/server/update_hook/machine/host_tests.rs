@@ -275,3 +275,178 @@ fn a_binary_that_is_a_link_a_directory_missing_or_not_under_bin_is_not_run() {
     assert!(message(host.capabilities(release).unwrap_err()).ends_with("is not a directory"));
     assert!(runner.calls().is_empty());
 }
+
+/// The password file of a scratch root that has the service account.
+fn passwd_with_account(root: &Path) {
+    fs::create_dir_all(root.join("etc")).unwrap();
+    fs::write(
+        root.join("etc/passwd"),
+        "root:x:0:0:root:/root:/bin/sh\n\
+         broken:x:nine:9::/:/bin/false\n\
+         short:x:5\n\
+         tierstore:x:991:992:tierstore:/var/lib/tierstore:/usr/sbin/nologin\n",
+    )
+    .unwrap();
+}
+
+fn check_args(root: &Path) -> Vec<String> {
+    vec![
+        "--config".to_owned(),
+        root.join("etc/tierstore/config.toml")
+            .to_string_lossy()
+            .into_owned(),
+        "--check-config".to_owned(),
+    ]
+}
+
+/// Asserts (T29, H01) that a check of the configuration is the call
+/// `<release>/bin/tierstore --config <file under the root> --check-config`, with no input and the
+/// host's time limit, run as the hook itself when the hook is not root, and that exit 0 is
+/// `None`: the release accepts it.
+#[test]
+fn a_check_runs_the_binary_with_config_and_check_config_as_the_hook() {
+    let (_guard, root) = scratch("host-check");
+    release_with(&root, 0o755);
+    let runner = FakeRunner::replying(vec![exit(0, "", "")]);
+    let got = host(&root, &runner)
+        .with_hook_user(1000)
+        .check_config(Path::new(RELEASE), Path::new("/etc/tierstore/config.toml"))
+        .unwrap();
+    assert_eq!(got, None);
+    let binary = release_dir(&root).join("bin/tierstore");
+    let call = runner.calls().remove(0);
+    assert_eq!(call.program, binary.to_str().unwrap());
+    assert_eq!(call.args, check_args(&root));
+    assert_eq!(call.stdin, None);
+    assert_eq!(call.timeout, LIMIT);
+    assert_eq!(call.run_as, None);
+}
+
+/// Asserts (T29, H01) that exit 2 is a refusal and its standard error is the line returned,
+/// trimmed; exit 1, a signal, a program that cannot be run and one that does not end are
+/// `host_failed`-class errors that say what happened, not refusals.
+#[test]
+fn a_check_exiting_2_refuses_and_any_other_end_is_an_error() {
+    let (_guard, root) = scratch("host-check-ends");
+    release_with(&root, 0o755);
+    let config = Path::new("/etc/tierstore/config.toml");
+    let line = "tierstore: config file x: server.handoff_socket: a build node does not hand off";
+    let runner = FakeRunner::replying(vec![
+        exit(2, "", &format!("{line}\n")),
+        exit(1, "", "boom"),
+        signalled(),
+        Err(RunError::Spawn("no such file".to_owned())),
+        Err(RunError::Timeout(LIMIT)),
+    ]);
+    let host = host(&root, &runner).with_hook_user(1000);
+    let refused = host.check_config(Path::new(RELEASE), config).unwrap();
+    assert_eq!(refused, Some(line.to_owned()));
+    let exited = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(exited.contains("exited 1: boom"), "{exited}");
+    let killed = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(killed.contains("ended by a signal"), "{killed}");
+    let spawn = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(spawn.contains("cannot run: no such file"), "{spawn}");
+    let timeout = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(timeout.contains("killed"), "{timeout}");
+}
+
+/// Asserts (T29) that a hook that runs as root has the check run as the user and group ids of the
+/// service account in `etc/passwd` under the root (the fields of its line, not those of a line
+/// that is short or not numeric), and that a hook that runs as another user than root runs it as
+/// itself even when the file has the account. Catches a check run as root, which refuses the key
+/// files the service account owns.
+#[test]
+fn a_check_by_a_root_hook_runs_as_the_service_account() {
+    let (_guard, root) = scratch("host-check-root");
+    release_with(&root, 0o755);
+    passwd_with_account(&root);
+    let config = Path::new("/etc/tierstore/config.toml");
+    let runner = FakeRunner::replying(vec![exit(0, "", ""), exit(0, "", "")]);
+    let host = host(&root, &runner);
+    host.with_hook_user(0)
+        .check_config(Path::new(RELEASE), config)
+        .unwrap();
+    assert_eq!(runner.calls()[0].run_as, Some((991, 992)));
+    assert_eq!(runner.calls()[0].args, check_args(&root));
+}
+
+/// Asserts (T29) that when the hook runs as root and the service account is not in the password
+/// file, is on a line that is not numeric or short, or the file is absent, the check is an error
+/// that names the file and the account, and no program is run.
+#[test]
+fn a_check_by_a_root_hook_without_the_account_is_an_error() {
+    let (_guard, root) = scratch("host-check-noaccount");
+    release_with(&root, 0o755);
+    let config = Path::new("/etc/tierstore/config.toml");
+    let runner = FakeRunner::replying(vec![]);
+    let host = host(&root, &runner).with_hook_user(0);
+    let text = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(
+        text.contains("etc/passwd has no account tierstore"),
+        "{text}"
+    );
+    fs::create_dir_all(root.join("etc")).unwrap();
+    for body in [
+        "root:x:0:0::/:/bin/sh\n",
+        "tierstore:x:nine:9::/:/bin/false\n",
+        "tierstore:x:9:nine::/:/bin/false\n",
+        "tierstore:x:9\n",
+        "tierstore\n",
+    ] {
+        fs::write(root.join("etc/passwd"), body).unwrap();
+        let text = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+        assert!(
+            text.contains("has no account tierstore"),
+            "{body:?}: {text}"
+        );
+    }
+    assert!(runner.calls().is_empty());
+}
+
+/// Asserts (T29) that a password file that cannot be read as text is an error naming it.
+#[test]
+fn a_check_by_a_root_hook_with_an_unreadable_password_file_is_an_error() {
+    let (_guard, root) = scratch("host-check-badpasswd");
+    release_with(&root, 0o755);
+    fs::create_dir_all(root.join("etc")).unwrap();
+    fs::write(root.join("etc/passwd"), [0xff, 0xfe]).unwrap();
+    let runner = FakeRunner::replying(vec![]);
+    let text = message(
+        host(&root, &runner)
+            .with_hook_user(0)
+            .check_config(Path::new(RELEASE), Path::new("/c"))
+            .unwrap_err(),
+    );
+    assert!(text.contains("etc/passwd"), "{text}");
+    assert!(text.contains("UTF-8"), "{text}");
+}
+
+/// Asserts (T29) that a check is refused, without running anything, for a release whose binary
+/// is not one to run (missing, writable by others), as the capabilities are.
+#[test]
+fn a_check_of_a_binary_that_is_not_one_to_run_is_an_error() {
+    let (_guard, root) = scratch("host-check-binary");
+    let config = Path::new("/etc/tierstore/config.toml");
+    let runner = FakeRunner::replying(vec![]);
+    let host = host(&root, &runner).with_hook_user(1000);
+    let missing = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(missing.contains("bin"), "{missing}");
+    release_with(&root, 0o777);
+    let open = message(host.check_config(Path::new(RELEASE), config).unwrap_err());
+    assert!(open.contains("written by a group or others"), "{open}");
+    assert!(runner.calls().is_empty());
+}
+
+/// Asserts that the account the check runs as is the `User=` of the unit file the package
+/// ships. Catches a unit file whose account is renamed and a hook that still looks up the old one.
+#[test]
+fn the_service_account_is_the_user_of_the_unit_file() {
+    const UNIT: &str =
+        include_str!("../../../../../../packaging/hostkeeper/units/tierstore@.service");
+    let user = UNIT
+        .lines()
+        .find_map(|line| line.strip_prefix("User="))
+        .expect("the unit file has a User=");
+    assert_eq!(user, super::super::SERVICE_ACCOUNT);
+}
