@@ -4,10 +4,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use hyper::StatusCode;
 use hyper::body::Body;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
+use hyper::{Method, StatusCode};
 use objstore_s3::key_rules;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
@@ -17,6 +17,7 @@ use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::bucket;
+use super::delete_objects::DELETE_BODY_LIMIT;
 use super::handover::hand_over;
 use super::list_token;
 use super::listing::{self, Start, UploadsNext};
@@ -36,6 +37,7 @@ use super::xml::{self, Listing, ListingV1, UploadListing};
 /// the calls of an object, so a request with it is served as one without.
 const SUPPORTED: [&str; 16] = [
     "continuation-token",
+    "delete",
     "delimiter",
     "encoding-type",
     "fetch-owner",
@@ -81,6 +83,21 @@ pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 /// The most keys in a page of a listing, and the number of parts of an upload.
 pub(super) const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
+
+/// Whether a call is DeleteObjects: a `POST` to the bucket with `?delete`.
+pub(super) fn deletes_many(method: &Method, target: &Target, query: &Query) -> bool {
+    *method == Method::POST && *target == Target::Bucket && query.has("delete")
+}
+
+/// The most bytes the body of a call may have: the limit of the server, and for DeleteObjects
+/// what 1000 keys fill ([`DELETE_BODY_LIMIT`]), since that body is held whole.
+pub(super) fn body_limit(limit: usize, deleting: bool) -> usize {
+    if deleting {
+        limit.min(DELETE_BODY_LIMIT)
+    } else {
+        limit
+    }
+}
 
 /// The range a `Range` header asks for, if it is one valid single range (`bytes=<first>-<last>`,
 /// `bytes=<first>-` or `bytes=-<count>`); anything else is no range, and asks for the whole
@@ -371,9 +388,17 @@ impl Server {
         // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
         // not parameters of the call.
         let method = parts.method.as_str();
-        let location = bucket::asks_location(method, &target, query);
-        if !location {
+        let setting = bucket::asks_setting(method, &target, query);
+        let buckets = bucket::asks_buckets(method, &target);
+        if setting.is_none() && !buckets {
             refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+        }
+        let deleting = deletes_many(&parts.method, &target, query);
+        if query.has("delete") && !deleting {
+            return Err(S3Error::unsupported("this operation is not supported"));
+        }
+        if deleting {
+            return self.delete_objects(parts, reader, check).await;
         }
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
@@ -389,8 +414,11 @@ impl Server {
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;
-        if location {
-            return Ok(self.location());
+        if let Some(setting) = &setting {
+            return self.setting(setting);
+        }
+        if buckets {
+            return self.list_buckets(query);
         }
         match (method, target, multipart) {
             ("PUT" | "HEAD", Target::Bucket, false) => {
@@ -535,7 +563,10 @@ impl Server {
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
-        let (carry, body) = hand_over(pieces(reader, check, refused.clone()));
+        let (carry, body) = hand_over(
+            pieces(reader, check, refused.clone()),
+            self.config.put_pieces_queued,
+        );
         let (backend, name) = (Arc::clone(&self.backend), key.to_owned());
         let mut storing = tokio::spawn(async move {
             let _permit = permit;

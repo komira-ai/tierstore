@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::stream;
 use objstore_s3::s3::fake::{FakeS3, part_etag};
-use tierstore::s3::{Capabilities, Credentials, S3Config};
+use tierstore::s3::{Capabilities, Credentials, S3Config, S3Tuning};
 use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, SystemClock};
 
 use crate::conformance;
@@ -38,6 +38,18 @@ pub fn config(endpoint: &str) -> S3Config {
 pub async fn backend() -> (FakeS3, S3Backend) {
     let s3 = FakeS3::start().await;
     let backend = S3Backend::new(config(s3.endpoint())).unwrap();
+    (s3, backend)
+}
+
+/// A backend over a service of its own that sends a body of more than 16 MiB as a multipart upload
+/// (the default is one PUT up to 5 GiB), for the tests of the upload, which write 17 MiB and not 5 GiB.
+pub async fn backend_cut_at_a_part() -> (FakeS3, S3Backend) {
+    let s3 = FakeS3::start().await;
+    let tuning = S3Tuning {
+        single_put_max: 16 << 20,
+        ..S3Tuning::default()
+    };
+    let backend = S3Backend::new_tuned(config(s3.endpoint()), tuning).unwrap();
     (s3, backend)
 }
 
@@ -571,7 +583,7 @@ fn generated(count: usize, end: Option<Error>) -> PartBody<'static> {
 /// is refused after the upload was aborted, and a whole body makes one object of its length.
 #[tokio::test]
 async fn a_large_streamed_put_is_completed_only_after_the_last_chunk() {
-    let (s3, backend) = backend().await;
+    let (s3, backend) = backend_cut_at_a_part().await;
     let len = Some(17 * MEBIBYTE as u64);
     let cut = Error::Other("cut".to_owned());
 

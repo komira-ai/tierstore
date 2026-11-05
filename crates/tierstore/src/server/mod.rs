@@ -20,7 +20,9 @@
 //!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
 //!   content tag and `NotImplemented` for the right one (an immutable object cannot be
 //!   replaced);
-//! - DeleteObject, which succeeds for a key that is not there;
+//! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
+//!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
+//!   needed), a result for each key (see [`delete_objects`]), for the full key only;
 //! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token`, `start-after`, `delimiter`
 //!   and `encoding-type=url`, and with `fetch-owner=true`, which adds an `Owner` to each
 //!   object. Each object has its `ETag` (the tag, in quotes, that a HEAD or a GET of it through
@@ -59,7 +61,18 @@
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
-//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls.
+//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
+//! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
+//!   filters and `max-buckets` checked; its creation date is the time `_tiering/format` was last
+//!   written (the server does not know when the bucket was made; see
+//!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner;
+//! - the reads of the settings of the bucket (`GET /<bucket>?versioning`, `object-lock`, `acl`,
+//!   `policy`, `lifecycle`, `cors`, `encryption`, `tagging`, `replication`, `website`,
+//!   `notification`, `accelerate`, `logging`, `requestPayment`, `ownershipControls`,
+//!   `publicAccessBlock`, `policyStatus`), each answered as S3 answers a bucket on which that
+//!   is not set: an empty document, the owner's `FULL_CONTROL` for the ACL, or the 404 code S3
+//!   gives (`NoSuchBucketPolicy`, `ObjectLockConfigurationNotFoundError`, ...). The writes of
+//!   them are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`versionId`), is answered `NotImplemented`.
@@ -112,8 +125,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket and GetBucketLocation
-//! and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation,
+//! ListBuckets and the reads of the settings of the bucket, and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
@@ -229,23 +242,29 @@ pub mod build_info;
 mod cache_cli;
 pub mod cli;
 mod cli_heartbeat;
+mod cli_oci;
 mod cli_reconcile;
 mod cli_serve;
+mod cli_text;
 mod combined_cli;
 mod config;
 mod config_cache;
+mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
 mod config_handoff;
 mod config_interface;
+mod config_io;
 mod config_load;
 mod config_policy;
+mod config_reconcile;
 mod config_syntax;
 mod config_tier;
 mod config_tuning;
 mod config_units;
 mod config_unknown;
 mod counted;
+mod delete_objects;
 mod deprecated;
 mod door;
 mod drain;
@@ -287,6 +306,8 @@ mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
 #[cfg(test)]
+mod bucket_config_tests;
+#[cfg(test)]
 mod bucket_tests;
 #[cfg(test)]
 mod cache_cli_tests;
@@ -320,6 +341,8 @@ mod config_cache_tests;
 mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
+#[cfg(test)]
+mod delete_objects_tests;
 #[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
@@ -435,6 +458,7 @@ use drain::Drain;
 use drain::SETTLED;
 use idle::Watched;
 use linger::Lingering;
+pub use listen::ListenTuning;
 use listen::Listeners;
 pub use reply::AnswerBody;
 use reply::{Answer, S3Error, answer};
@@ -449,8 +473,12 @@ pub struct Drained {
     pub abandoned: usize,
 }
 
-/// How long [`Server::serve`] waits after a failed accept before the next.
-const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+/// The default of how long [`Server::serve`] waits after a failed accept before the next
+/// ([`ListenTuning::accept_pause`]).
+pub(crate) const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
+
+/// The default of how long a client has to finish the TLS handshake with the OCI front.
+pub(crate) const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
 
 /// Where [`Server::serve`] takes its connections from: the listener of a socket, and in the
 /// tests a channel of pipes, which a test runs on a paused clock.
@@ -473,9 +501,9 @@ trait Incoming {
 
 /// Waits a moment when an accept failed, so that a listener that keeps failing is not asked
 /// again at once.
-async fn pause_after(failed: bool) {
+async fn pause_after(failed: bool, pause: Duration) {
     if failed {
-        tokio::time::sleep(ACCEPT_PAUSE).await;
+        tokio::time::sleep(pause).await;
     }
 }
 
@@ -608,7 +636,7 @@ impl Server {
         // The idle connections close as the door does, so that a client that waits for the end
         // of its stream frees what it holds.
         self.drain.settle();
-        let mut door = door::Closing::begin(incoming);
+        let mut door = door::Closing::begin(incoming, self.config.listen);
         while let Some(accepted) = door.next().await {
             self.take(accepted).await;
         }
@@ -630,7 +658,7 @@ impl Server {
         let failed = accepted
             .map(|(stream, peer)| self.connection(stream, peer))
             .is_err();
-        pause_after(failed).await;
+        pause_after(failed, self.config.listen.accept_pause).await;
     }
 
     /// Waits as [`Server::finish`] does, for [`ServerConfig::drain_deadline`] at most, and says
@@ -679,6 +707,7 @@ impl Server {
             let (server, wire) = (Arc::clone(&server), Arc::clone(&on_wire));
             async move { Ok::<_, Infallible>(server.handle_on(request, Some(&wire)).await) }
         });
+        let grace = self.config.listen.door_grace;
         let serving = http1::Builder::new()
             .timer(TokioTimer::new())
             .header_read_timeout(self.config.header_timeout)
@@ -694,7 +723,7 @@ impl Server {
                 // The settle is over. A connection with a request on the wire is closed once
                 // that request is answered in full; one without is closed now, and the stream
                 // lingers.
-                () = drain::time_to_close(&wire, settled) => {}
+                () = drain::time_to_close(&wire, settled, grace) => {}
             }
             serving.as_mut().graceful_shutdown();
             let _ = serving.await;
@@ -802,12 +831,15 @@ impl Server {
                 .role
                 .permit_list_uploads(query.get("prefix").unwrap_or_default())?;
         }
-        let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        let deleting = ops::deletes_many(&parts.method, &target, &query);
+        let puts = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        // The checksum headers of a put, and of DeleteObjects, are those of the body.
+        let data = puts || deleting;
         let check = Check::new(&signed.payload, &parts.headers, data)?;
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }
-        let limit = self.config.max_request_bytes;
+        let limit = ops::body_limit(self.config.max_request_bytes, deleting);
         let limit = signed.presign.as_ref().map_or(limit, |grant| {
             limit.min(usize::try_from(grant.max_object_bytes).unwrap_or(usize::MAX))
         });

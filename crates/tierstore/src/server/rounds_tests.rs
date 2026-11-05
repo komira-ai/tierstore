@@ -220,6 +220,44 @@ async fn the_loop_works_the_entries_until_halted_and_gives_the_lease_up() {
     assert!(!rig.lease_held().await);
 }
 
+/// Asserts that the idle wait is the one the settings name: with `idle_min` 3 s and `idle_max`
+/// 7 s, the rounds of a node that holds the lease and has nothing to do wait 3 s, then 6 s, then
+/// 7 s, and stay at 7 s (rounds that made progress, which wait for nothing, are left out).
+#[tokio::test(start_paused = true)]
+async fn the_idle_wait_doubles_from_the_idle_min_of_the_settings_to_their_idle_max() {
+    let rig = Rig::new();
+    rig.set_format(ACTIVE).await;
+    let mut config = ReconcilerConfig::new("node/reconciler", BUDGET, rig.clock.clone());
+    config.idle_min = Duration::from_secs(3);
+    config.idle_max = Duration::from_secs(7);
+    let mut rounds = Rounds::new(rig.hot.clone(), rig.cold.clone(), config, DEPARTURE);
+    let mut pauses = Vec::new();
+    for _ in 0..20 {
+        pauses.extend(rounds.round().await.pause);
+    }
+    let secs = Duration::from_secs;
+    assert_eq!(pauses[..4], [secs(3), secs(6), secs(7), secs(7)]);
+}
+
+/// Asserts that a stop waits for the release of the lease for the `stop_wait` of the settings and
+/// no longer: with the delete of the lease taking 10 s, a stop that waits 20 s releases it, and a
+/// stop that waits 2 s returns with the lease still held.
+#[tokio::test(start_paused = true)]
+async fn a_stop_waits_for_the_release_of_the_lease_for_the_stop_wait_of_the_settings() {
+    for (wait, released) in [(20, true), (2, false)] {
+        let rig = Rig::new();
+        rig.set_format(ACTIVE).await;
+        let mut config = ReconcilerConfig::new("node/reconciler", BUDGET, rig.clock.clone());
+        config.stop_wait = Duration::from_secs(wait);
+        let mut rounds = Rounds::new(rig.hot.clone(), rig.cold.clone(), config, DEPARTURE);
+        assert!(rounds.round().await.failed.is_empty());
+        assert!(rig.lease_held().await);
+        rig.hot.set_delay(Op::Delete, Some(Duration::from_secs(10)));
+        rounds.stop().await;
+        assert_eq!(rig.lease_held().await, !released, "stop_wait {wait} s");
+    }
+}
+
 /// Asserts that `Rounds::tuned` hands its `EntryTuning` to the running entry reconciler: with the
 /// default `usage_interval` (10 seconds) the usage object is rewritten by rounds 12 seconds apart,
 /// and with one of an hour it is published once and left as it was.

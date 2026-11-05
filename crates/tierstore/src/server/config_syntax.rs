@@ -41,6 +41,13 @@ const LOCAL_CACHE_KEYS: &[&str] = &[
     "whole_fill_limit",
     "scrub_rate",
     "scrub_min_round",
+    "pass_interval",
+    "lock_interval",
+    "scrub_tick",
+    "listing_calls",
+    "forget_limit",
+    "fill_chunk",
+    "keep_queue_bytes",
 ];
 
 /// Whether `key` is a name some table of the file holds: the last part of a key in [`KEYS`], a

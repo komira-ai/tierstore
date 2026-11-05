@@ -11,13 +11,14 @@
 //!   would replace an object that exists.
 //! - `put_stream` is the store client's streamed write, given the chunks of the body as they
 //!   arrive and their total length (the `Content-Length` of the request; without one the body
-//!   is held first, since S3 takes no request of unknown length). A body of at most 16 MiB is
-//!   gathered and sent as one PUT with `If-None-Match: *`; a longer one is a multipart upload
-//!   whose parts are sent as they fill, completed with `If-None-Match: *` only after the body
+//!   is held first, since S3 takes no request of unknown length). A body of at most
+//!   `server.s3_single_put_max` (5 GiB, S3's limit for one PUT, by default) is streamed as one PUT
+//!   with `If-None-Match: *`, never held whole; a longer one is a multipart upload
+//!   whose parts (`server.s3_part_bytes`, 16 MiB by default) are sent as they fill, completed with `If-None-Match: *` only after the body
 //!   has ended with exactly its length, and aborted on any failure. Either way the object comes
 //!   into being in the last request, after the whole body was read and checked by the caller, so
 //!   a body that ends with an error, or is cut short, leaves no object and no staged key, and
-//!   at most 16 MiB of the body is held at a time. A key that exists is
+//!   at most one part of the body is held at a time (a few chunks for a single PUT). A key that exists is
 //!   [`Error::AlreadyExists`].
 //! - `put_if_match` is a PUT with `If-Match: "<tag>"` (a tag given in quotes is not quoted
 //!   twice); the 412 is [`Error::PreconditionFailed`] and a 404 is [`Error::NotFound`]. It
@@ -41,11 +42,11 @@
 //!   quotes) of that answer, so the bytes and the tag are those of one object whatever is written to
 //!   the key meanwhile; an answer without an `ETag` is an [`Error::Other`].
 //! - `put_stream_if_match` is `put_if_match` for a body that arrives as chunks: a body of at most
-//!   16 MiB is gathered and sent as one PUT with `If-Match`, a longer one is a multipart upload
+//!   `server.s3_single_put_max` is streamed as one PUT with `If-Match`, a longer one is a multipart upload
 //!   whose completion carries `If-Match`, aborted on any failure, so the object is replaced only
 //!   after the whole body was read and only if it still has the tag. A body of unknown length is
-//!   not collected either: its first 16 MiB are read, and a body that ends there is one PUT, while
-//!   a longer one is a multipart upload whose 16 MiB parts are each sent as soon as they are full,
+//!   not collected either: its first `server.s3_part_bytes` (16 MiB by default) are read, and a body
+//!   that ends there is one PUT, while a longer one is a multipart upload whose parts are each sent as soon as they are full,
 //!   so at most one part and one chunk are held. It is sent once. The tag
 //!   that does not match is [`Error::PreconditionFailed`] and no object is [`Error::NotFound`].
 //! - `delete` is a DELETE; a 404 is a success.
@@ -157,8 +158,9 @@ pub use objstore_s3::s3::{Credentials, S3Config, S3ConfigError, S3Tuning};
 /// numbers and refuses or ignores a larger one, so a range is cut here before it is sent.
 const LAST_POSITION: u64 = u64::MAX >> 1;
 
-/// How many chunks of a part wait for the request that sends them to take them.
-const CHUNKS_WAITING: usize = 1;
+/// The default of how many chunks of a part wait for the request that sends them to take them
+/// ([`S3Backend::with_chunks_waiting`]).
+pub(crate) const CHUNKS_WAITING: usize = 1;
 
 /// The codes with which a store refuses a completion for the parts it names.
 const INVALID_PART_CODES: [&str; 3] = ["InvalidPart", "InvalidPartOrder", "EntityTooSmall"];
@@ -170,6 +172,8 @@ pub struct S3Backend {
     /// Whether `delete_if_match` sends `If-Match` with the DELETE; otherwise it reads the tag
     /// first. Set from the tier's `conditional_delete` setting; off unless set.
     conditional_delete: bool,
+    /// How many chunks of a part wait for the request that sends them to take them.
+    chunks_waiting: usize,
 }
 
 impl S3Backend {
@@ -197,7 +201,22 @@ impl S3Backend {
         Ok(Self {
             store: S3Store::new_tuned(config, tuning)?,
             conditional_delete: false,
+            chunks_waiting: CHUNKS_WAITING,
         })
+    }
+
+    /// This backend holding `chunks` chunks of a part at most between the body it is given and
+    /// the request that sends it ([`CHUNKS_WAITING`] if this is not called); zero is taken as one.
+    #[must_use]
+    pub fn with_chunks_waiting(mut self, chunks: usize) -> Self {
+        self.chunks_waiting = chunks.max(1);
+        self
+    }
+
+    /// How many chunks of a part wait for the request that sends them.
+    #[cfg(test)]
+    pub(crate) fn chunks_waiting(&self) -> usize {
+        self.chunks_waiting
     }
 
     /// This backend with `delete_if_match` sent as a DELETE with `If-Match` (`true`), or as a read
@@ -462,6 +481,7 @@ async fn feed(
 async fn streamed<T, F, Fut>(
     body: PartBody<'_>,
     len: Option<u64>,
+    waiting: usize,
     send: F,
 ) -> Result<Result<T, ObjectStoreError>, Error>
 where
@@ -472,7 +492,7 @@ where
         Some(len) => (len, body),
         None => held(collect(body).await?),
     };
-    flowing(body, |source| send(len, source)).await
+    flowing(body, waiting, |source| send(len, source)).await
 }
 
 /// Sends `body` to the store as the body of the request that `send` makes, which is given the
@@ -481,13 +501,14 @@ where
 /// the answer of the store.
 async fn flowing<T, F, Fut>(
     body: PartBody<'_>,
+    waiting: usize,
     send: F,
 ) -> Result<Result<T, ObjectStoreError>, Error>
 where
     F: FnOnce(BodyStream) -> Fut,
     Fut: Future<Output = Result<T, ObjectStoreError>>,
 {
-    let (sink, mut chunks) = mpsc::channel(CHUNKS_WAITING);
+    let (sink, mut chunks) = mpsc::channel(waiting);
     let source: BodyStream = stream::poll_fn(move |cx| chunks.poll_recv(cx)).boxed();
     let (ended, sent) = futures::join!(feed(body, sink), send(source));
     match ended {
@@ -526,7 +547,7 @@ impl Backend for S3Backend {
         let object = object_key(key)?;
         let store = &self.store;
         let sending = |len, source| store.put_stream(&object, len, source);
-        let sent = streamed(body, len, sending).await?;
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         sent.map_err(|e| map_error(e, key))
     }
 
@@ -541,7 +562,7 @@ impl Backend for S3Backend {
         let object = object_key(key)?;
         let store = &self.store;
         let sending = |len, source| store.put_stream_new_tagged(&object, len, source);
-        let sent = streamed(body, len, sending).await?;
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let tag = sent.map_err(|e| map_error(e, key))?;
         Ok(unquoted(&tag))
     }
@@ -575,7 +596,7 @@ impl Backend for S3Backend {
                 }
             }
         };
-        let sent = flowing(body, sending).await?;
+        let sent = flowing(body, self.chunks_waiting, sending).await?;
         let tag = sent.map_err(|e| map_error(e, key))?;
         Ok(unquoted(&tag))
     }
@@ -729,7 +750,7 @@ impl Backend for S3Backend {
         let object = object_key(key)?;
         let store = &self.store;
         let sending = |len, source| store.upload_part_stream(&object, id, number, len, source);
-        let sent = streamed(body, len, sending).await?;
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let etag = sent.map_err(|e| upload_error(e, key, id))?;
         Ok(unquoted(&etag))
     }
@@ -803,6 +824,53 @@ mod tests {
             code: "Code".to_owned(),
             message: "message".to_owned(),
         }
+    }
+
+    /// Asserts that the number of chunks given is how many wait for the request that sends them:
+    /// the feeder takes that many chunks of the body and one more (in hand, blocked) while the
+    /// request has taken none, for one, four and nine.
+    #[tokio::test]
+    async fn the_chunks_waiting_given_are_how_many_chunks_wait_for_the_request() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for (waiting, held) in [(1_usize, 1_usize), (4, 4), (9, 9)] {
+            let pulled = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&pulled);
+            let chunks = stream::iter((0..30).map(|_| Ok(Bytes::from_static(b"x"))));
+            let body: PartBody<'_> = chunks
+                .inspect(move |_| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                })
+                .boxed();
+            let request = |source| async move {
+                for _ in 0..50 {
+                    tokio::task::yield_now().await;
+                }
+                drop(source);
+                Ok::<usize, ObjectStoreError>(pulled.load(Ordering::SeqCst))
+            };
+            let seen = flowing(body, waiting, request).await;
+            assert_eq!(seen.unwrap().unwrap(), held + 1, "{waiting}");
+        }
+    }
+
+    /// Asserts that a backend made with `with_chunks_waiting(0)` holds one chunk, not none: the
+    /// channel of the bodies is never made with a depth of zero, which it refuses.
+    #[test]
+    fn a_depth_of_zero_chunks_waiting_is_one() {
+        let config = S3Config {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            region: "us-east-1".to_owned(),
+            bucket: "tierstore-test".to_owned(),
+            credentials: Credentials::new("k", "s"),
+            capabilities: Capabilities::default(),
+            connect_timeout: std::time::Duration::from_secs(1),
+            request_timeout: std::time::Duration::from_secs(1),
+            min_body_rate: None,
+        };
+        let backend = S3Backend::new(config).unwrap();
+        assert_eq!(backend.chunks_waiting, CHUNKS_WAITING);
+        assert_eq!(backend.with_chunks_waiting(0).chunks_waiting, 1);
     }
 
     /// Asserts that each answer of the client is the error of this crate the trait documents

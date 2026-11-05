@@ -63,6 +63,51 @@ pub(crate) fn location(region: &str) -> String {
     format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
+/// The answer to a read of a setting that S3 answers with an empty document when it is not set.
+pub(crate) fn empty_setting(root: &str) -> String {
+    format!("{PROLOG}<{root} xmlns=\"{NAMESPACE}\"/>")
+}
+
+/// The answer of GetBucketRequestPayment: the bucket owner pays.
+pub(crate) fn payer() -> String {
+    format!(
+        "{PROLOG}<RequestPaymentConfiguration xmlns=\"{NAMESPACE}\">\
+         <Payer>BucketOwner</Payer></RequestPaymentConfiguration>"
+    )
+}
+
+/// The answer of GetBucketAcl: the owner, with full control, and no other grant.
+pub(crate) fn acl() -> String {
+    let who = "<ID>tierstore</ID><DisplayName>tierstore</DisplayName>";
+    let schema = "http://www.w3.org/2001/XMLSchema-instance";
+    format!(
+        "{PROLOG}<AccessControlPolicy xmlns=\"{NAMESPACE}\"><Owner>{who}</Owner>\
+         <AccessControlList><Grant><Grantee xmlns:xsi=\"{schema}\" xsi:type=\"CanonicalUser\">\
+         {who}</Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList>\
+         </AccessControlPolicy>"
+    )
+}
+
+/// The answer of ListBuckets: the owner, and the bucket (with its region and the time it was
+/// made, `created_ms` since the Unix epoch) if `listed`, which is false when a filter of the call
+/// left it out.
+pub(crate) fn buckets(bucket: &str, region: &str, created_ms: u64, listed: bool) -> String {
+    let found = if listed {
+        let (name, region) = (escape(bucket), escape(region));
+        let created = iso8601(created_ms);
+        format!(
+            "<Bucket><Name>{name}</Name><CreationDate>{created}</CreationDate>\
+             <BucketRegion>{region}</BucketRegion></Bucket>"
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "{PROLOG}<ListAllMyBucketsResult xmlns=\"{NAMESPACE}\">{OWNER}\
+         <Buckets>{found}</Buckets></ListAllMyBucketsResult>"
+    )
+}
+
 /// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy
 /// has no accounts: it serves one bucket to every caller it lets in, so every object has the
 /// same owner, named for the proxy.
@@ -320,4 +365,77 @@ pub(crate) fn parse_complete(body: &[u8]) -> Option<Vec<(u32, String)>> {
             Some((number, tag.to_owned()))
         })
         .collect()
+}
+
+/// One `Object` of a `Delete` document.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteObject {
+    pub(crate) key: String,
+    /// Whether the object names a version.
+    pub(crate) versioned: bool,
+}
+
+/// What a `Delete` document asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteRequest {
+    /// Whether the answer leaves out the keys that were deleted.
+    pub(crate) quiet: bool,
+    pub(crate) objects: Vec<DeleteObject>,
+}
+
+/// The objects and the `Quiet` flag a `Delete` body names, in its order. `None` if the body is not
+/// that document: not XML, another root, an object with no key or an empty one, or a `Quiet` that
+/// is not `true` or `false`.
+pub(crate) fn parse_delete(body: &[u8]) -> Option<DeleteRequest> {
+    let text = std::str::from_utf8(body).ok()?;
+    let doc = Document::parse(text).ok()?;
+    let root = doc.root_element();
+    (root.tag_name().name() == "Delete").then_some(())?;
+    let quiet = match child_text(root, "Quiet").map(str::trim) {
+        None => false,
+        Some("true") => true,
+        Some("false") => false,
+        Some(_) => return None,
+    };
+    let objects = root
+        .children()
+        .filter(|node| node.tag_name().name() == "Object")
+        .map(|node| {
+            let key = child_text(node, "Key").filter(|key| !key.is_empty())?;
+            let versioned = child_text(node, "VersionId").is_some();
+            Some(DeleteObject {
+                key: key.to_owned(),
+                versioned,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(DeleteRequest { quiet, objects })
+}
+
+/// What became of one key of a `Delete` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Deleted,
+    Failed { code: &'static str, message: String },
+}
+
+/// The answer of DeleteObjects: a `Deleted` for each key that was deleted (none if `quiet`) and
+/// an `Error` for each that was not, in the order of the call.
+pub(crate) fn delete_result(results: &[(&str, Outcome)], quiet: bool) -> String {
+    let mut xml = format!("{PROLOG}<DeleteResult xmlns=\"{NAMESPACE}\">");
+    for (key, outcome) in results {
+        let key = escape(key);
+        match outcome {
+            Outcome::Deleted if quiet => {}
+            Outcome::Deleted => xml.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>")),
+            Outcome::Failed { code, message } => {
+                let message = escape(message);
+                xml.push_str(&format!(
+                    "<Error><Key>{key}</Key><Code>{code}</Code><Message>{message}</Message></Error>"
+                ));
+            }
+        }
+    }
+    xml.push_str("</DeleteResult>");
+    xml
 }

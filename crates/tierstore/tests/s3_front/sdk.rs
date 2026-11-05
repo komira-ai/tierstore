@@ -271,6 +271,60 @@ async fn sdk_gets_the_location_of_the_bucket() {
     }
 }
 
+/// Asserts that the SDK's ListBuckets (`aws s3 ls` with no argument, `mc ls <alias>`) lists the
+/// one bucket with an owner and a creation date the SDK parses, for the full key and a read-only
+/// key.
+#[tokio::test]
+async fn sdk_lists_the_one_bucket() {
+    let h = serving().await;
+    for sdk in [client(&h), reader(&h)] {
+        let found = sdk.list_buckets().send().await.unwrap();
+        let names: Vec<_> = found.buckets().iter().map(|b| b.name().unwrap()).collect();
+        assert_eq!(names, [BUCKET]);
+        let first = &found.buckets()[0];
+        // The store has no format object here, so the date is the start of the server: after 2020,
+        // never the Unix epoch.
+        let created = first.creation_date().map(|date| date.secs());
+        assert!(
+            created.is_some_and(|secs| secs > 1_577_836_800),
+            "{created:?}"
+        );
+        assert_eq!(first.bucket_region(), Some("us-east-1"));
+        assert_eq!(
+            found.owner().and_then(|o| o.display_name()),
+            Some("tierstore")
+        );
+    }
+}
+
+/// Asserts that the settings the SDK reads of a bucket (versioning, object lock, ACL, policy,
+/// tags) come back as S3's answers for a bucket with none set: versioning with no status, the
+/// owner's full control, and the 404 codes of S3 that tools read as "not configured".
+#[tokio::test]
+async fn sdk_reads_the_settings_of_a_bucket_with_none_set() {
+    let h = serving().await;
+    let sdk = client(&h);
+    let versioning = sdk.get_bucket_versioning().bucket(BUCKET).send().await;
+    assert_eq!(versioning.unwrap().status(), None);
+    let acl = sdk.get_bucket_acl().bucket(BUCKET).send().await.unwrap();
+    let permissions: Vec<_> = acl
+        .grants()
+        .iter()
+        .filter_map(|grant| grant.permission().map(|p| p.as_str()))
+        .collect();
+    assert_eq!(permissions, ["FULL_CONTROL"]);
+    let lock = sdk.get_object_lock_configuration().bucket(BUCKET).send();
+    let want = (404, "ObjectLockConfigurationNotFoundError".to_owned());
+    assert_eq!(refusal(lock.await), want);
+    let policy = sdk.get_bucket_policy().bucket(BUCKET).send();
+    assert_eq!(
+        refusal(policy.await),
+        (404, "NoSuchBucketPolicy".to_owned())
+    );
+    let tags = sdk.get_bucket_tagging().bucket(BUCKET).send();
+    assert_eq!(refusal(tags.await), (404, "NoSuchTagSet".to_owned()));
+}
+
 /// Asserts that the multipart flow of the SDK (create, two parts, complete) makes one object
 /// that reads back whole, by a range across the join of the parts, and with its size, and that an
 /// upload that is aborted is accepted: the way an output too big for one put goes up.

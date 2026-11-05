@@ -7,13 +7,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
-use crate::server::pause_after;
+use crate::server::{ACCEPT_PAUSE, pause_after};
 
 use super::wire::{self, MAX_FDS};
 use super::{Front, HandoffError, line};
@@ -57,6 +58,8 @@ pub(crate) struct Offer {
     taking: Mutex<()>,
     /// Whether the control socket's file is still this instance's to remove.
     linked: AtomicBool,
+    /// How long the loop waits after an accept that failed.
+    accept_pause: Duration,
 }
 
 impl Offer {
@@ -77,7 +80,15 @@ impl Offer {
             uid: rustix::process::geteuid().as_raw(),
             taking: Mutex::new(()),
             linked: AtomicBool::new(true),
+            accept_pause: ACCEPT_PAUSE,
         })
+    }
+
+    /// The same, waiting `pause` after an accept that failed ([`ACCEPT_PAUSE`] if this is not
+    /// called).
+    pub(crate) fn with_accept_pause(mut self, pause: Duration) -> Self {
+        self.accept_pause = pause;
+        self
     }
 
     /// The same, for a taker of the user `uid`: the tests give another one.
@@ -107,7 +118,7 @@ impl Offer {
                     });
                     let accepted = said.ok().into_iter();
                     accepted.for_each(|(stream, _)| sessions.push(self.session(stream)));
-                    pause_after(failed).await;
+                    pause_after(failed, self.accept_pause).await;
                 }
                 Some(ended) = sessions.next() => match ended {
                     Ended::Handed => {
