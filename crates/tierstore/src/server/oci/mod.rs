@@ -43,7 +43,7 @@
 //! # Integrity
 //!
 //! A manifest whose bytes do not hash to its digest is 500 and is never sent. A blob is hashed
-//! as it is read, in chunks of 4 MiB, and its last chunk is held back until the hash is right:
+//! as it is read, in chunks of 4 MiB (`params.read_chunk_bytes`), and its last chunk is held back until the hash is right:
 //! if it is not, the connection is cut before the response is complete (its `Content-Length`
 //! has been sent), so a client never gets a whole body that is wrong, and a blob of one chunk
 //! delivers no body byte. Both are counted. A manifest is measured with a `head` before it is
@@ -167,11 +167,36 @@ use metrics::{Outcome, RouteKind};
 use names::{Digest, Route};
 use range::Range;
 
-/// The largest manifest or index served.
-pub const MAX_MANIFEST_BYTES: u64 = 4 << 20;
+/// The default of `params.max_manifest_bytes`: the largest manifest or index served.
+pub const DEFAULT_MANIFEST_BYTES: u64 = 4 << 20;
 
-/// The longest piece of request text an error echoes back.
-const ECHO_BYTES: usize = 256;
+/// The default of `params.echo_bytes`: the longest piece of request text an error echoes back.
+pub const DEFAULT_ECHO_BYTES: usize = 256;
+
+/// The default of `params.read_chunk_bytes`: the most bytes read from the store at once for a blob.
+pub const DEFAULT_CHUNK_BYTES: u64 = 4 << 20;
+
+/// The three sizes the front holds to; each is a key of the `oci` interface's params.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OciSizes {
+    /// The largest manifest, in bytes, that is stored, served or pulled (`max_manifest_bytes`).
+    pub manifest_bytes: u64,
+    /// The most bytes asked of the store at once when a blob is served (`read_chunk_bytes`);
+    /// zero is taken as one.
+    pub chunk_bytes: u64,
+    /// The longest piece of request text, in bytes, that an error repeats (`echo_bytes`).
+    pub echo_bytes: usize,
+}
+
+impl Default for OciSizes {
+    fn default() -> Self {
+        Self {
+            manifest_bytes: DEFAULT_MANIFEST_BYTES,
+            chunk_bytes: DEFAULT_CHUNK_BYTES,
+            echo_bytes: DEFAULT_ECHO_BYTES,
+        }
+    }
+}
 
 const DISTRIBUTION_VERSION: HeaderName = HeaderName::from_static("docker-distribution-api-version");
 const CONTENT_DIGEST: HeaderName = HeaderName::from_static("docker-content-digest");
@@ -232,6 +257,8 @@ pub struct OciFront {
     auth: Option<OciAuth>,
     /// The most bytes of a stored chunk read in one call at the end of an upload.
     stage_read: u64,
+    /// The manifest limit, the blob read chunk and the error echo length.
+    sizes: OciSizes,
     /// The registry a manifest or blob the store lacks is pulled from; none pulls nothing.
     upstream: Option<Upstream>,
 }
@@ -246,6 +273,7 @@ impl OciFront {
             metrics,
             auth: None,
             stage_read: DEFAULT_STAGE_READ,
+            sizes: OciSizes::default(),
             upstream: None,
         }
     }
@@ -263,6 +291,16 @@ impl OciFront {
     #[must_use]
     pub fn with_stage_read(mut self, bytes: u64) -> Self {
         self.stage_read = bytes.max(1);
+        self
+    }
+
+    /// The front, holding to `sizes` ([`OciSizes::default`] if this is not called).
+    #[must_use]
+    pub fn with_sizes(mut self, sizes: OciSizes) -> Self {
+        self.sizes = OciSizes {
+            chunk_bytes: sizes.chunk_bytes.max(1),
+            ..sizes
+        };
         self
     }
 
@@ -402,7 +440,7 @@ impl OciFront {
     ) -> (Outcome, Response<OciBody>) {
         const UNKNOWN: &str = "MANIFEST_UNKNOWN";
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let digest = match Digest::parse(reference) {
             Some(digest) => digest,
@@ -420,12 +458,12 @@ impl OciFront {
                         }
                     }
                     (Err(failure), _) => {
-                        let detail = json!({ "tag": echoed(reference) });
+                        let detail = json!({ "tag": echoed(reference, self.sizes.echo_bytes) });
                         return store_failed(&failure, reference, UNKNOWN, detail);
                     }
                 }
             }
-            None => return invalid_digest(reference),
+            None => return invalid_digest(reference, self.sizes.echo_bytes),
         };
         let key = self.prefix.key(&digest);
         // The size is asked first: the digest of any object under the prefix can be named here,
@@ -445,9 +483,9 @@ impl OciFront {
                 return store_failed(&failure, &key, UNKNOWN, json!({ "digest": digest.text() }));
             }
         };
-        if size > MAX_MANIFEST_BYTES {
-            let message =
-                format!("the object is over the {MAX_MANIFEST_BYTES}-byte limit of a manifest");
+        if size > self.sizes.manifest_bytes {
+            let limit = self.sizes.manifest_bytes;
+            let message = format!("the object is over the {limit}-byte limit of a manifest");
             let detail = json!({ "digest": digest.text() });
             return (
                 Outcome::NotFound,
@@ -458,7 +496,7 @@ impl OciFront {
         // the get are two calls: if the object is replaced between them, the bytes read may not
         // hash to the digest and the answer is 500 DIGEST_INVALID for that one request; a retry
         // reads the new object and succeeds.
-        let range = ByteRange::new(0, MAX_MANIFEST_BYTES);
+        let range = ByteRange::new(0, self.sizes.manifest_bytes);
         let body = match self.backend.get(&key, Some(range)).await {
             Ok(body) => body,
             Err(failure) => {
@@ -505,10 +543,10 @@ impl OciFront {
     ) -> (Outcome, Response<OciBody>) {
         const UNKNOWN: &str = "BLOB_UNKNOWN";
         if !names::valid_name(name) {
-            return invalid_name(name);
+            return invalid_name(name, self.sizes.echo_bytes);
         }
         let Some(digest) = Digest::parse(digest) else {
-            return invalid_digest(digest);
+            return invalid_digest(digest, self.sizes.echo_bytes);
         };
         let key = self.prefix.key(&digest);
         let held = match (self.backend.head(&key).await, &self.upstream) {
@@ -560,7 +598,7 @@ impl OciFront {
                 end,
                 verify: whole.then_some(digest),
                 metrics: Arc::clone(&self.metrics),
-                chunk: body::CHUNK_BYTES,
+                chunk: self.sizes.chunk_bytes,
             };
             *response.body_mut() = read.body();
         }
@@ -671,27 +709,27 @@ fn unsupported_route() -> Response<OciBody> {
     error(StatusCode::NOT_FOUND, "UNSUPPORTED", message, Value::Null)
 }
 
-/// `text` cut to [`ECHO_BYTES`] bytes (at a character boundary), for an error to repeat.
-fn echoed(text: &str) -> &str {
-    let mut end = text.len().min(ECHO_BYTES);
+/// `text` cut to `limit` bytes (at a character boundary), for an error to repeat.
+fn echoed(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
     while !text.is_char_boundary(end) {
         end -= 1;
     }
     &text[..end]
 }
 
-fn invalid_name(name: &str) -> (Outcome, Response<OciBody>) {
+fn invalid_name(name: &str, echo: usize) -> (Outcome, Response<OciBody>) {
     let message = "the repository name is not valid";
-    let detail = json!({ "name": echoed(name) });
+    let detail = json!({ "name": echoed(name, echo) });
     (
         Outcome::Invalid,
         error(StatusCode::BAD_REQUEST, "NAME_INVALID", message, detail),
     )
 }
 
-fn invalid_digest(text: &str) -> (Outcome, Response<OciBody>) {
+fn invalid_digest(text: &str, echo: usize) -> (Outcome, Response<OciBody>) {
     let message = "the digest must be sha256: and 64 lowercase hex digits";
-    let detail = json!({ "digest": echoed(text) });
+    let detail = json!({ "digest": echoed(text, echo) });
     (
         Outcome::Invalid,
         error(StatusCode::BAD_REQUEST, "DIGEST_INVALID", message, detail),

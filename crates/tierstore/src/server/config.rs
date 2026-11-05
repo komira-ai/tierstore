@@ -136,6 +136,9 @@ pub(super) const KEYS: &[(&str, &[&str])] = &[
     ("oci-connection-lifetime", &["params.connection_lifetime"]),
     ("oci-require-auth", &["params.require_auth"]),
     ("oci-stage-read", &["params.stage_read"]),
+    ("oci-max-manifest-bytes", &["params.max_manifest_bytes"]),
+    ("oci-read-chunk-bytes", &["params.read_chunk_bytes"]),
+    ("oci-echo-bytes", &["params.echo_bytes"]),
 ];
 
 /// The default of `--drain-lb-wait`, which a start from a file takes when the flag is not given.
@@ -478,6 +481,12 @@ pub(super) struct OciFlags {
     pub require_auth: bool,
     /// The most bytes of a stored chunk read in one call at the end of an upload.
     pub stage_read: Option<u64>,
+    /// The largest manifest, in bytes.
+    pub max_manifest_bytes: Option<u64>,
+    /// The most bytes asked of the store at once for a blob.
+    pub read_chunk_bytes: Option<u64>,
+    /// The longest piece of request text an error repeats, in bytes.
+    pub echo_bytes: Option<u64>,
     /// The registry a miss is pulled from, checked by `config_interface`; none pulls nothing.
     pub upstream: Option<UpstreamTable>,
 }
@@ -494,6 +503,9 @@ impl OciFlags {
             connection_lifetime: None,
             require_auth: false,
             stage_read: None,
+            max_manifest_bytes: None,
+            read_chunk_bytes: None,
+            echo_bytes: None,
             upstream: None,
         }
     }
@@ -775,6 +787,9 @@ pub(super) fn storage(
         oci_connection_lifetime: oci.connection_lifetime,
         oci_require_auth: oci.require_auth,
         oci_stage_read: oci.stage_read,
+        oci_max_manifest_bytes: oci.max_manifest_bytes,
+        oci_read_chunk_bytes: oci.read_chunk_bytes,
+        oci_echo_bytes: oci.echo_bytes,
         oci_upstream: oci.upstream,
     })
 }
