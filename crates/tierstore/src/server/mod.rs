@@ -36,7 +36,9 @@
 //!   [`Proxy`](crate::Proxy), those of its cold tier), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
-//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools.
+//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
+//! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
+//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`versionId`), and a `delimiter` with text, is answered `NotImplemented`. A request with a key under
@@ -89,7 +91,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads and HeadBucket and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket and GetBucketLocation
+//! and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
@@ -198,6 +201,7 @@
 //! `tierstore_oci_drain_late_requests_total`.
 
 mod auth;
+mod bucket;
 pub mod build_info;
 mod cache_cli;
 pub mod cli;
@@ -254,6 +258,8 @@ mod xml;
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+#[cfg(test)]
+mod bucket_tests;
 #[cfg(test)]
 mod cache_cli_tests;
 #[cfg(test)]
