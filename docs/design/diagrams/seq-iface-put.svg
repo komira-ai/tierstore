@@ -28,7 +28,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="860" y1="76" x2="860" y2="518" class="ln-d"/>
 <text x="205.0" y="112" class="t-m lbl" text-anchor="middle">0  PUT /bucket/K (signed)</text>
 <line x1="110" y1="124" x2="300" y2="124" class="ln" marker-end="url(#seq-iface-put-ak)"/>
-<text x="395.0" y="150" class="t-m lbl" text-anchor="middle">1  verify signature; effective key rule; store key K'</text>
+<text x="395.0" y="150" class="t-m lbl" text-anchor="middle">1  verify signature; S3 API rules; canonical key K'</text>
 <text x="395.0" y="166" class="t-m lbl" text-anchor="middle">(if either fails: 403 or 400, no store is touched)</text>
 <line x1="300" y1="178" x2="490" y2="178" class="ln" marker-end="url(#seq-iface-put-ak)"/>
 <text x="590.0" y="204" class="t-m lbl" text-anchor="middle">2  create-only write of the entry (If-None-Match: *)</text>
@@ -49,6 +49,6 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="490" y1="492" x2="690" y2="492" class="ln" marker-end="url(#seq-iface-put-ak)"/>
 <rect x="30" y="528" width="900" height="64" rx="5" class="box-o"/>
 <text x="40" y="548" class="t-m">The front owns steps 0, 1 and 6 (wire, auth, key rules, error rendering). Steps 2 to 5 and 7 to 8 are the core's, the same for every front.</text>
-<text x="40" y="564" class="t-m">Each store gets its own conditional write: S3 gets If-None-Match / If-Match, GCS gets ifGenerationMatch=0 (create-only). Tiers of different kinds share no wire.</text>
+<text x="40" y="564" class="t-m">Each store adapter converts the canonical call: S3 gets If-None-Match / If-Match, GCS gets ifGenerationMatch=0 (create-only). A multipart put reaches a GCS cold tier as the same canonical calls, served by staged parts and a compose.</text>
 <text x="40" y="580" class="t-m">A GCS 412 on step 7 is Backend AlreadyExists, as an S3 412 is. The tag a store returns (GCS: the generation) is never compared across tiers.</text>
 </svg>

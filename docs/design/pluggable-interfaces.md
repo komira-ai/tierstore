@@ -4,11 +4,11 @@ Status: proposal, for review. No code changes come with this document. It extend
 
 The direction (CEO, 2026-11-05): an abstraction for the interface, so that GCS or a file system can be slotted in later; the implementation decides whether tierstore hosts a server and what the API is; hot and cold may run two different APIs.
 
-Second CEO direction (2026-11-05): the API tierstore presents must be the common denominator of everything configured (every tier, the chain upstream, every front). Section 3 builds that abstraction now; GCS itself is not built now.
+Second CEO direction (2026-11-05, corrected): tierstore is an API converter. If a front speaks the S3 API, tierstore supports the S3 API in full, and the store side converts the calls to whatever the store can do (S3 multipart on a GCS store is staged parts and a compose). A configuration is never reduced to the common denominator of its stores. Section 3 gives the model; GCS itself is not built now.
 
 Earlier decisions this builds on: the S3 front matches S3 behaviour exactly; configuration is `--config` with an `[[interface]]` list; a chained local cache's upstream is another store behind the same store interface; tierstore documents what a store must do and never probes it (decision 9 of the design); every tunable is a config key with a default.
 
-![Two independent seams: the Interface on the client side and the Backend on the store side, with the proxy core between them](diagrams/interfaces-and-stores.svg)
+![Three layers: front adapters decode a wire API into the canonical operations, the core runs tiers and entries, store adapters encode the canonical operations into a store's API](diagrams/interfaces-and-stores.svg)
 
 ## 1. Problem
 
@@ -40,14 +40,13 @@ trait Interface: Send + Sync {
 }
 ```
 
-The core (`Proxy`) knows no wire format, no auth and no store API. What an implementation owns:
+A front is a *decoder*: it turns its wire API into the canonical operations of section 3 and the answers back. The core (`Proxy`) knows no wire format, no auth and no store API. What an implementation owns:
 
 | Concern | Owned by the implementation | Today |
 |---|---|---|
 | Reach | Listening sockets (`s3`, `gcs`, `oci`, `ops`), a mount (`fs`), or nothing | `listen.rs`, per front |
 | Wire API | Request parsing, headers, status codes, body framing | `server/request.rs`, `reply.rs`, `oci/` |
-| Capabilities | Declares its own key rules, listing features and needs as data (section 3); enforces and advertises the effective set, never its own wider one |
-| Key rules | How a wire name becomes a store key and back (the rules themselves are in the capability set) | S3's charset and length in the request path; OCI's `Digest` and `names.rs` |
+| Wire rules | The rules of its own API, enforced as the real service does: S3's key length and part-size limits, OCI's `Digest` and `names.rs`, a file system's path rules. How a wire name becomes a canonical key | the request path in `server/`; `oci/names.rs` |
 | Listing format | Rendering the shared walk: S3 `ListObjectsV2` XML, GCS `objects.list` JSON, a directory read | `xml.rs`; the walk is the proxy's `list_page` use |
 | Auth | Who may do what, and how that is checked | `keys.rs`, `scoped.rs`, `presign.rs`, `oci/auth.rs` |
 | Error mapping | The proxy's `Error` into the API's error body and status | per front |
@@ -89,62 +88,99 @@ params = { addresses = ["127.0.0.1:9390"] }
 
 `fs` is the case with no listening socket: it takes `mount` and no `port` or `addresses`, and the existing rule "give port or addresses, not both, not neither" becomes a rule of the implementation (each type states which reach params it takes). `key_prefix` is a tunable with the default empty (all keys).
 
-## 3. Capabilities: the common denominator
+## 3. The model: an API converter with one canonical set
 
-What a user sees must be what every part of the configuration can do. If hot is `s3` and cold is `gcs`, a key GCS cannot hold must not be accepted by the S3 front, because the leader could never copy it to cold. So each store kind and each front **declares its capabilities as data**, and tierstore computes the **effective set** once at start-up, from the configuration alone, with no call to any store (decision 9 of the design: no probes).
+Three layers:
 
-**The declaration** (a sketch of the shape; `Backend` and `Interface` each get one `fn capabilities(&self) -> Capabilities`, and the declaration of a kind is a constant of the kind):
+1. **Front adapter** (`Interface`): the wire API of a client into tierstore's canonical operations, and the answers back.
+2. **Core** (`Proxy`, tiers, entries, reconciler, cache): works only in canonical operations. It knows neither side's API.
+3. **Store adapter** (`Backend`): the canonical operations into a store's own API.
 
-| Capability | What it says | Intersection rule |
-|---|---|---|
-| `key` | Encoding (UTF-8), `max_bytes`, forbidden characters, forbidden segments (empty, `.`, `..`), forbidden prefixes, case rules | The union of the restrictions: the lowest `max_bytes`, every forbidden character, segment and prefix |
-| `multipart` | `Native { max_parts, min_part_bytes, max_parts_bytes }`, `Composable { max_sources }` (no native parts, parts staged and composed), or `None` | The weakest: `None` if any is `None`; else `Composable` if any is; the lowest limits |
-| `conditional` | `create_only`, `if_match`, `delete_if_match` | Each a logical AND. The hot tier must have the first two to be a hot tier (start-up refuses it); `delete_if_match` stays an optional fence |
-| `token` | The version token the store has: `Etag`, `Generation`, `Digest`. The core keeps it as one opaque string and never compares tokens across tiers | None: informational; each front renders the opaque token its own way (section 8) |
-| `listing` | Delimiters accepted (`Any`, `Slash`, none), URL-encoded keys, `max_page` | A front's own: the walk is shared (section 2), the features are the front's. `max_page` is the lowest |
-| `max_object_bytes` | Largest object, or none | The lowest |
-| `ranged_read` | Byte ranges are served by the store | AND |
+Because every conversion goes front-decode, canonical operation, store-encode, there are N front decoders and M store encoders, never N times M pairwise converters. A new front is written once and works over every store; a new store is written once and serves every front.
 
-The set is small on purpose: a capability is added when a front or a store needs to say it, not before (R9). Every number in it is the declaration of a kind, a constant of that kind; a tunable (a page size, a part size) stays a config key with a default.
+**The canonical set is the `Backend` trait**, and it must be the union of what any front needs. If a front can ask for it, the trait has it and every store adapter implements it:
 
-**Who is intersected.** Every tier (`hot`, `cold`), the upstream of a `local_cache` (a `Backend`, so it declares as any kind does; an in-process hot+cold proxy declares its own effective set; a remote tierstore declares what its kind says, `s3`), and every configured front. A front's key rules are part of the intersection too: a key the GCS front cannot name must not be written through the S3 front either, or it would exist in the store and be unreachable by name there. So the set of keys a user can write is the same on every front.
+| Canonical operation | Needed by |
+|---|---|
+| `put` create-only; `put_stream` with optional length; `put_tagged` | every front's PUT; the entry and the lease |
+| `put_if_match`, `put_stream_if_match` | the entry CAS, lease renewal |
+| `open_read` / `get_stream` with a byte range or suffix | GET with `Range`; fs reads; cache fill |
+| `head` | HEAD; write-once check |
+| `delete`, `delete_if_match` | DELETE; fences |
+| `list_page`: ordered by key, `start_after`, `max_keys` | every listing, over the shared walk |
+| Multipart: `create_upload`, `upload_part`, `complete_upload` (create-only), `abort_upload`, `list_uploads` | S3 multipart; large OCI blobs |
+| An opaque version token (`Meta.tag`) | ETag, generation, conditional ops |
 
-**Checking that each front can be served.** A front also declares what it needs (`needs`): the OCI front needs nothing the others do not; a file-system front needs a key rule with no empty, `.` or `..` segment and no NUL, because a path is made of segments. If the effective set does not meet a front's needs, the start fails and names the front, the capability and the kind that took it away (for example: `interface "fs" needs keys without empty segments, but tier "cold" (kind "gcs") allows them`). An effective `multipart = None` is not a failure: the S3 front is served and answers a multipart call with S3's own `NotImplemented` error.
+**Every store adapter implements every canonical operation**, natively or by emulation. A store adapter never answers a canonical call with "unsupported", and no front ever answers `NotImplemented` because of a tier. What one store cannot do, a shared helper does for it (section 4).
 
-**Enforcement.** Every front checks a key against the one effective key rule on each write (put, multipart start, and any other call that creates a name) and answers a violation in its own terms, before an entry is taken: the S3 front 400 (`KeyTooLongError` for length, `InvalidArgument` otherwise, with the rule in the message); the GCS front 400 with its own error body; the file system `ENAMETOOLONG` or `EINVAL`. The core checks it again (a front bug cannot write a key the tiers cannot hold), and each `Backend` rejects a key outside its own rules with a new `Error` case for it, so a rule cannot be skipped on any path. Keys outside the rules therefore never come into being, on any front. Reads, heads, deletes and listings do not check the rule, so what is stored stays reachable; only a front that cannot express a name on its wire cannot show it (section 6).
+**The one thing no helper can do** is make a conditional write atomic. Create-only and `If-Match` are the store's own, as design section 9 and decision 9 say: a documented requirement of the store, chosen by the operator, never probed. That stays exactly as it is.
 
-**Advertising.** S3 has no discovery call, so the S3 front advertises the set in the places S3 allows: the message of its 400 names the rule, and its documentation page is generated from the same declaration. Fronts with a discovery surface use it (the GCS bucket resource, later). The process writes the effective set to its log at start and shows it as an info metric (`tierstore_capabilities`), so an operator sees exactly what was computed.
+**Capabilities shrink to a declaration.** Each store adapter declares, as constants of its kind, only (a) which emulations it uses and (b) its hard limits (section 4.4). There is no intersection across tiers and no start-up check that a front "can be served": any front can be served on any store that meets the atomic-write requirement.
 
-**Keys stored before a stricter tier is added.** tierstore does not scan the stores at start (no probes). A config that adds a stricter tier (a cold `gcs` over an existing `s3` bucket, a lower `max_bytes`) takes effect for writes from then on. A key already in a store that the new set would refuse stays where it is and stays readable and deletable through every front that can express it. What it cannot do is reach the stricter tier: the leader's copy of it to cold is refused by that store's key error, retried with the usual per-item back-off and counted by the existing failed-copy metric, and eviction never removes the only copy, so the object stays in hot. The operator's step is documented, not automated: before adding a stricter tier, list the keys with the tooling of their choice against the rule the log prints, and rename (copy and delete) the few that break it.
+## 4. Store adapters and the shared emulations
 
-**Chain.** The effective set of a process is the set a client of its fronts sees; a process whose proxy is another process's upstream declares exactly that set as its `Backend` capabilities, so the intersection through a chain is the intersection of every link.
+The `Backend` trait stays the seam. Emulations are **shared helpers a store adapter opts into** in its declaration; none is per-store code. GCS is described to show the seam fits and is not built now.
 
-## 4. The store abstraction: `Backend`
+### 4.1 Multipart without native parts
 
-The `Backend` trait stays the seam. The one addition is `capabilities()` (section 3); a new kind otherwise implements what the trait already asks. GCS is described here to show the seam fits; it is not built now.
+For a store with no multipart (a file, GCS, any plain object store). The helper `StagedMultipart` implements the five multipart calls over three things the adapter already has: create-only `put_stream`, `delete`, `list_page`, plus a join if the store has one.
 
-**What a new store kind implements.** `put` (create-only), `put_if_match`, `head` and `open_read`, `get_stream` with ranges, `delete`, `list_page` (ordered, honours `start_after`), `put_stream` and `put_stream_if_match`; optionally multipart and `delete_if_match`. The conformance tests in `crates/tierstore/tests/tierstore/conformance.rs` are the acceptance test of a kind. The requirements are those of section 9 of the design, stated for the new kinds and documented, not probed:
+- `create_upload(key)` writes a small create-only marker `<staging>/<id>/open` (holding the key), and returns the id. The id is a random string; all state is in the store, none in the process.
+- `upload_part(n)` writes `<staging>/<id>/<n zero-padded>` with `put_stream`: any size, streamed, replaced by a later part of the same number (`delete` then create, under the id).
+- `complete_upload` takes the list of part numbers from the caller, checks them against the staged parts, and lands the final key create-only (`AlreadyExists` if it exists):
+  - **Store-side join**, if the adapter declares one (`Compose { max_sources }`: GCS compose, a file concat): compose the parts into the final key with the create-only precondition. More parts than `max_sources` compose in rounds into intermediate staged objects, then one last create-only compose.
+  - **Otherwise a streamed copy**: read the parts in order and write them as one create-only `put_stream` to the final key; one pass, nothing held whole (B16). It costs the object's size in time at completion.
+  - Then the staged parts are deleted.
+- `abort_upload` deletes everything under `<staging>/<id>/`. `list_uploads` lists the markers.
 
-| Requirement | S3 | GCS (planned) | dir (built) |
-|---|---|---|---|
-| Create-only put | `If-None-Match: *` | `ifGenerationMatch=0` | create-only under the directory lock |
-| Replace only if the tag matches | `If-Match: <etag>` | `ifGenerationMatch=<generation>` | tag compare under the lock |
-| Tag | ETag | generation (decimal string) | SHA-256 of the body |
-| Conditional delete (optional fence) | `If-Match` | `ifGenerationMatch` on delete | under the lock |
-| Missing key on delete | 204 | 404, mapped to success | success |
-| Ranged read | `Range` | `Range` on `alt=media` | file read |
-| Listing | strongly ordered, paged | strongly consistent, ordered, paged | ordered, paged |
-| Multipart (capability) | `Native` | `Composable` (below) | `None` (a file is written whole) |
-| Key rules (capability) | UTF-8, 1024 bytes | UTF-8, 1024 bytes, no CR or LF, not `.` or `..`, no `.well-known/acme-challenge/` prefix | file-name limits of the directory tier |
+The staging namespace is hidden by the adapter: its names begin with a lead byte the key codec (4.2) always escapes in a user key, so no user key can collide with it and no reserved key name is taken from users. Its names are skipped by the adapter's own `list_page`.
 
-**GCS notes (later work).**
+### 4.2 Keys a store cannot name
 
-- The generation changes on every rewrite, as an ETag does, and the contract only needs the tag from HEAD to equal the tag `put_if_match` returned and to be compared by the same store. Tags are never compared across tiers, so GCS generations and S3 ETags in one tierstore need no mapping.
-- GCS answers a failed precondition with 412. The kind maps it as `S3Backend` does: `AlreadyExists` on a create-only put, `PreconditionFailed` on `put_if_match`. 429 and 5xx are `Unavailable`; 408 and transport failures too.
-- Large objects: GCS has no S3 multipart. `put_stream` uses a resumable upload that starts with `ifGenerationMatch=0`. Its `multipart` capability is `Composable`: the multipart calls of `Backend` are served by staging parts and composing them with `ifGenerationMatch=0` as the completion (section 9, item 1). Until that is built the kind declares `None`, and the S3 front answers `NotImplemented`.
-- Credentials: provider-standard (`GOOGLE_*` or a `credentials_file` key), allowed by rule S2. `endpoint` is a config key so the tests run against a fake server (T12).
+A **reversible key codec**, applied inside the adapter, so the core and the fronts always see the canonical key. The dir backend's percent-encoding (`dir_names.rs`: `/` as `~`, every byte but a few as `%XX`, a leading `.` escaped) is the first instance and moves to a shared `key_codec` module; GCS would use another (CR and LF, a name of `.` or `..`). A codec is a pair `encode` / `decode` with these properties, each a property test: decode(encode(k)) = k; encode(prefix) is a prefix of encode(k) for every k that has that prefix; encoded names never start with the staging lead byte; the encoded form is deterministic.
 
-**Mixing kinds.** Each tier picks its `kind` independently: hot `s3` with cold `gcs`; hot `dir` with cold `s3`; hot `gcs` with cold `gcs` (the last two once those kinds exist). The effective set is the intersection of the two. The hot tier needs both conditional writes (the entry and the lease live there); the cold tier needs the create-only put and completion. A kind that cannot give create-only is not usable as a tier, as the design already says. A filesystem store is the existing `dir` kind (its atomicity from the directory lock); a shared network file system under it is the operator's to qualify, as any store is.
+**How listing order is kept.** `list_page` must return canonical keys in canonical byte order, whatever the store's order of encoded names is. Two classes of codec, declared by the adapter:
+
+- *Monotone*: encode preserves byte order. This is possible when the store forbids only a few bytes that sit together at the edge of the byte range (CR and LF are low control bytes, so the escape lead is chosen next to them in order). The adapter pages the store's own listing: `start_after` is encoded, the page is decoded, nothing is re-sorted.
+- *Reordering*: encode does not preserve order (the dir backend: `~`, `%`, and every special byte). The adapter lists the encoded names under the encoded prefix, decodes, sorts, and cuts the page, as the dir backend does today (`dir_list.rs`). It declares this, because the cost is the listing under the prefix per page, not the page.
+
+Both classes pass the same order test: a listing over random UTF-8 keys equals the sorted canonical keys, in pages of every size.
+
+### 4.3 The version token
+
+The adapter maps its native token to the one opaque string `Meta.tag`: ETag for S3, the generation (decimal) for GCS, a content hash for the dir and memory backends (a file's mtime and inode is the cheaper choice for a kind that cannot hash, as long as it changes with every write). The core never looks inside it and never compares tokens across tiers; `same_version` stays the adapter's own judgement. Each front renders it in its own form: the S3 front as a quoted `ETag`; the GCS front as `generation` (a number derived from the token when the token is not numeric, deterministic per version) and `etag`. A client's precondition comes back through the same function in the other direction.
+
+### 4.4 What an adapter declares, and the hard limits
+
+| Declaration | Meaning |
+|---|---|
+| `multipart` | `Native`, or `Staged { join: Compose { max_sources } or CopyStream }` |
+| `key_codec` | `Identity`, `Dir`, or another codec, and its class (monotone or reordering) |
+| `max_encoded_key_bytes` | The longest encoded name the store takes |
+| `max_object_bytes` | The largest object, or none |
+| `needs_length` | As today: a store that needs a body's length before it is sent |
+
+Today's kinds declare themselves native: `s3` (native multipart, identity codec, 1024 bytes, 5 TiB), `dir` (its own multipart, the dir codec, 255-byte file names), `memory`, and a chained upstream (a proxy or `S3Backend`, which declares what its own kind does).
+
+**What can still be refused, and why each is a true hard limit.** Nothing else:
+
+1. *An encoded key longer than the store takes* (a long key whose percent-encoded file name exceeds 255 bytes). No transformation can name it, so it is refused with a distinct error that the S3 front renders as its own `KeyTooLongError` (400). It is found without a special check: the core's cold HEAD under the entry (design section 5, put, step 2) fails with it, so the put is refused before anything lands.
+2. *An object larger than the store's maximum* (`max_object_bytes`). The store cannot hold it. The S3 front renders `EntityTooLarge`. A front's own S3 limit (5 TiB) applies regardless.
+3. *The API's own rules*, enforced by each front as the real service does and independent of any store: the S3 front's 1024-byte key limit, its 5 MiB minimum part size (the last part is exempt), its 10,000 parts. The staged emulation takes parts of any size; the S3 front is what enforces S3's minimum, because it is a rule of the S3 API.
+4. *A store without atomic conditional writes* is not refused at run time. It is outside the documented requirement, and a deployment on it is the operator's.
+
+### 4.5 Kinds, mixing and chaining
+
+| | S3 | GCS (later) | dir | memory |
+|---|---|---|---|---|
+| Create-only put | `If-None-Match: *` | `ifGenerationMatch=0` | under the directory lock | in-process |
+| Replace if tag matches | `If-Match` | `ifGenerationMatch=<generation>` | tag compare under the lock | in-process |
+| Token | ETag | generation | SHA-256 of the body | SHA-256 |
+| Multipart | native | staged, `Compose` | native (its own) | native |
+| Key codec | identity | GCS codec | dir codec (reordering) | identity |
+| Missing key on delete | 204 | 404 mapped to success | success | success |
+
+Each tier picks its `kind` independently: hot `s3` with cold `gcs`; hot `dir` with cold `s3`. The hot tier needs both conditional writes; the cold tier the create-only put and completion. A GCS 412 maps as `S3Backend` maps 412: `AlreadyExists` on create-only, `PreconditionFailed` on `put_if_match`; 429, 5xx and transport failures are `Unavailable`. Credentials are provider-standard (rule S2); `endpoint` is a config key so tests run on a fake server (T12).
 
 ```toml
 [hot]
@@ -152,12 +188,12 @@ kind   = "s3"
 bucket = "tier-hot"
 
 [cold]
-kind        = "gcs"
-bucket      = "tier-cold"
+kind             = "gcs"                  # later
+bucket           = "tier-cold"
 credentials_file = "/etc/tierstore/gcs-sa.json"
 ```
 
-**Chaining.** local_cache's upstream is another `Backend`, so it declares capabilities and is intersected (section 3). A hot+cold proxy in the same process, or in another process reached over the S3 front, is that `Backend`. A chain never needs a different front: the next process is a client of the front type it chooses (s3 today; a `gcs` store kind pointed at a tierstore `gcs` front later).
+**Chaining.** local_cache's upstream is another `Backend`, so it is a store adapter like any other: a hot+cold proxy in the same process, or another process reached through the front of its choice. Its canonical calls convert the same way.
 
 ## 5. How the operations look through a front
 
@@ -167,7 +203,7 @@ The core's steps are in section 5 of the design. These diagrams show the split o
 
 ![A put through the S3 front, hot = s3, cold = gcs](diagrams/seq-iface-put.svg)
 
-The front verifies the signature, checks the key against the effective key rule (section 3), and calls `Proxy::put_stream`. The core's steps are the design's: entry, check both tiers, land in hot, acknowledge with the `If-Match` write. Each store call uses that store's own conditional write. Later the leader copies to cold with `ifGenerationMatch=0`.
+The front verifies the signature, applies the S3 rules of its own API, and calls the canonical `Proxy::put_stream`. The core's steps are the design's: entry, check both tiers, land in hot, acknowledge with the `If-Match` write. Each store adapter turns the canonical calls into its store's API, with that store's own conditional write. Later the leader copies to cold; the GCS adapter sends `ifGenerationMatch=0`. If the client's put is multipart, the S3 front's multipart calls reach the cold adapter as the same canonical calls, and the staged helper (4.1) serves them.
 
 ### Get
 
@@ -189,63 +225,66 @@ The kernel's FUSE request reaches the `fs` front on the `/dev/fuse` descriptor. 
 
 ## 6. Edge cases and the mechanism for each
 
-**Keys.** The proxy's key space is a UTF-8 string, as in S3 (up to 1024 bytes). The store key is what the core passes to a `Backend`.
-
 | Case | Mechanism |
 |---|---|
-| A key valid for the S3 front but not for a store, or for another front (GCS names: no CR or LF, not `.` or `..`; a path: no empty segment). | It is outside the effective key rule, so it is refused at write time on every front with that front's own error (S3: 400), before an entry is taken. It never exists. |
-| A key already stored before a stricter tier or front was configured. | Not scanned (no probes). It stays readable and deletable where the front can express it; its copy to a stricter tier is refused by that store and retried with back-off, and it stays in hot (section 3). The operator checks and renames before adding the tier. |
-| A key written via S3 appears via GCS or the file system. | Same key, byte for byte, in binary UTF-8 order. Because the effective rule is the intersection of the fronts too, any key written through one front is nameable through all the others (a path has no empty, `.` or `..` segment; no GCS-forbidden character). |
-| A file and a directory of one name (`a` and `a/b`), which S3 allows. | The one case a key rule cannot exclude, because it depends on other keys. Declared as a limit of the `fs` front: its view shows the directory, the file stays reachable through the other fronts, and a create through `fs` that would clash is refused (`EEXIST`, `ENOTDIR`). Listed in the `fs` front's documentation. |
-| An fs path longer than the OS allows, or a segment over 255 bytes. | Part of the effective key rule when an `fs` front is configured (`max_bytes`, a segment limit), so S3 and GCS refuse such a key too. |
-| Reserved prefixes (`_entries/`, `_journal/`, `_tiering/`). | Filtered once in the core (decision 10), so a new front cannot forget it. |
+| A key valid in the S3 API that a store cannot name as it is (GCS: CR or LF; dir: `/` and special bytes). | The adapter's key codec names it (4.2). The core, the other tier and the fronts see the canonical key. Nothing is refused. |
+| The same key through two fronts (S3 and GCS and fs). | One canonical key, one object. Each front applies its own API's rules to its own requests: a front may fail to express a key on its wire (an fs path with an empty segment or `..` cannot be opened as a file) and then that key is not reachable by that front, and is by the others. Nothing is deleted or hidden by tierstore. |
+| A file and a directory of one name (`a` and `a/b`). | A property of the `fs` front: its view shows the directory, the file stays reachable through the other fronts, and a create through `fs` that would clash is refused (`EEXIST`, `ENOTDIR`). In the `fs` front's documentation. |
+| An encoded key longer than the store takes. | The one hard key refusal (4.4, item 1): the cold HEAD under the entry fails with the key-too-long error before anything lands; the S3 front answers `KeyTooLongError` (400). For a key written before the tier was added, see the last row. |
+| Multipart parts of any size on a store without native parts. | The staged helper takes any part size. The S3 front enforces S3's 5 MiB minimum (not for the last part) and the 10,000-part limit before the call reaches the core, because those are rules of the S3 API. A GCS front would apply its own. |
+| A crash, a restart or a hand-off in the middle of a multipart upload. | The upload's state is in the store (the `open` marker and the staged parts), not in a process. The successor serves `upload_part` and `complete_upload` for the same id; the hand-off carries no upload state. |
+| Staged parts left behind (a client that never completes, a crashed completion). | `complete_upload` deletes its parts after landing, best effort; `abort_upload` deletes the upload. The leader also runs a sweep over `list_uploads`: an upload whose marker and parts have not changed for `multipart_stale_after` (default 7 days, a config key) on the leader's own monotonic clock, seen first by the same rule as the usage object (design decision 8), is aborted. A complete that finds its parts gone answers `NoSuchUpload`. |
+| Listing and the staging namespace. | The adapter's `list_page` skips staged names and decodes every other name to its canonical key, in canonical order (4.2); reserved prefixes (`_entries/`, `_journal/`, `_tiering/`) are filtered once in the core (decision 10). A listing through any front sees the same keys in the same order. |
+| Listing consistency across fronts. | All fronts list through the same walk over the union of both tiers, in byte order of the key; they differ only in rendering (S3 any delimiter and `NextContinuationToken`, GCS `prefixes` and `nextPageToken`, fs `/` and an offset). The cursor is the last key, so tokens work across processes and the hand-off. A store whose listing lags is tolerated, as the design says. |
+| Conditional writes that differ per store. | The core uses three conditional operations (create-only, replace-if-tag, delete-if-tag) and each adapter maps them (4.5). The fronts expose what tierstore guarantees: objects are write-once, so a client's create-only (`If-None-Match: *`, `ifGenerationMatch=0`) means "create" and an existing key gives the API's 412; a client replace-if-tag precondition on a write is 412 as well. |
+| A key already stored before a tier with a shorter limit was added. | Not scanned (no probes). It stays readable and deletable. Its copy to the new tier fails with the key-too-long error, is retried with the usual per-item back-off and counted by the existing failed-copy metric, and the hot copy stays (eviction never removes the only copy). Documented: list against the limit before adding such a tier and rename the few keys. |
+| Auth per front. | Each front authenticates in its own terms, keys read from files (S2). `s3`, `oci` as now. `gcs`: bearer tokens from `token_file`, full and read-only. `fs`: the mount's owner and mode, `allow_other` off, `read_only` a key. A request is authorized by the front it came in on and never by the store, which sees tierstore's credentials. |
 
-**Listing consistency across fronts.** All fronts list through the same walk over the union of both tiers, in the same order (byte order of the UTF-8 key), so the same keys appear in the same order in S3, GCS and the file system. What differs is the rendering: S3 folds on any delimiter, GCS `delimiter` and `prefixes`, and the file system always folds on `/`. A listing can lag a recent write on a store that allows it (the trait allows it, and the reconciler loops); GCS lists strongly consistently. Since keys outside the effective rule cannot be written, no front hides a key that another shows, apart from keys that predate the rule.
+**A front with no port in the hand-off.** The hand-off (`handoff/`) passes `<front> <address>` lines with the sockets over `SCM_RIGHTS`. A FUSE mount has no socket but has a descriptor, the `/dev/fuse` connection. The `fs` front offers it the same way, with a line `fs <mount path>` and the descriptor; the successor checks the path, answers `ack`, and serves the same connection, so the kernel sees no unmount. The old instance stops reading and finishes its requests in flight. An instance without an `fs` front never offers such a line, so a mixed pair of old and new releases hands off as before (B8). Which platforms the `fs` front runs on, and what it does where the descriptor hand-off is not available, is that implementation's own concern (section 8, item 3).
 
-**Conditional-write semantics differing per store.** The core uses only the three operations of the `Backend` contract: create-only, replace-if-tag, delete (optionally if-tag). Each kind maps them to its store (the table in section 4). A kind is only accepted if its conformance run passes, so an ambiguity (a store whose create-only is not atomic) is the operator's choice of store, documented, not probed. The fronts expose only what tierstore guarantees to clients: objects are write-once, so `ifGenerationMatch=0` and `If-None-Match: *` from a client both mean "create" and the refusal of an existing key is the 412 a client already gets from the S3 front; a client precondition on a generation that tierstore cannot honour (`ifGenerationMatch=N`, N > 0, on a write) gets 412. Each front renders the core's one opaque version token its own way (section 8, item 2).
-
-**Auth per front.** Each front authenticates in its own terms, with keys read from files, never from the environment (S2). `s3`: SigV4 keys, as now. `oci`: as now. `gcs`: bearer tokens from `token_file`, with full and read-only tokens like the S3 keys; OAuth2 is a token an operator mints elsewhere, tierstore only compares. `fs`: none of tierstore's; the mount's owner and mode, `allow_other` off by default, and `read_only` a config key. A request is authorized by the front it came in on and never by the store: the stores see tierstore's own credentials. Presigned URLs stay an S3 feature.
-
-**A front with no port in the hand-off.** The hand-off (`handoff/`) passes `<front> <address>` lines with the sockets over `SCM_RIGHTS`. A FUSE mount has no socket, but it has a descriptor: the `/dev/fuse` connection. The `fs` front offers it the same way, with a line `fs <mount path>` and the descriptor; the successor checks that the path is its own, answers `ack`, and serves the same connection, so the kernel sees no unmount and no request fails. The old instance then stops reading and finishes the requests in flight. A running instance that has no `fs` front never offers such a line, and a successor with none never asks for one, so a mixed pair of the old and new release hands off exactly as before (B8). Until the `fs` front is built, nothing offers such a line; once built, an `fs` front on a platform without descriptor hand-off runs only where the update hook restarts (a gap, documented) and is refused with the socket hand-off configured. `ops` and the others hand off their sockets as they do today. Which platforms the `fs` front runs on is that implementation's own concern (section 8, item 3).
-
-**Drain.** `Reach::None` and `Reach::Mount` fronts take part in the drain like the others: on drain they stop taking new requests, finish those in flight and release the mount. The `/readyz` answer is the ops interface's and covers all fronts.
+**Drain.** `Reach::None` and `Reach::Mount` fronts take part in the drain like the others: stop taking new requests, finish those in flight, release the mount. `/readyz` is the ops interface's and covers all fronts.
 
 ## 7. Migration plan
 
-Each step is one pull request that can land alone, interfaces before the code that uses them (P7). Coverage stays at the floor of each crate (T1); every new front and store gets a fake peer, not the network (T12). **Built now** is (a) to (c). **Later** is in section 8.
+Each step is one pull request that can land alone, interfaces before the code that uses them (P7). Coverage stays at the floor of each crate (T1); every new front and store gets a fake peer, not the network (T12). **Now** is (a) to (c). **Later** is section 8.
 
 | | Change | Tests to add |
 |---|---|---|
 | (a) | `Interface` trait and `Reach`; `s3` and `oci` moved behind it; `serve` / `serve_all` iterate over the list. Pure refactor: no wire, config or metric change. | The existing front tests pass unchanged. New: a config's interfaces are served by one loop (two types together, port 0); a front that fails to bind fails the start naming the interface; the drain ends every front; the socket hand-off offers the same lines as before. |
 | (b) | `ops` interface split out; `ops` param on `s3` (default true); "at least one interface of any type". | `/healthz` and the others answer on the `ops` address, and on the S3 address when `ops = true`; `ops = false` frees the bucket names `usagez` and `metricz`; a file with no `s3` and an `ops` starts; an old file still starts as it did; `/readyz` goes 503 on drain on each. |
-| (c) | `Capabilities` (key, multipart, conditional, token, listing, max object, ranged read) declared by `Backend` and `Interface`; the start-up intersection; the checks of each front's `needs`; enforcement of the effective key rule on every write in the s3 and oci fronts and in the core; the new key `Error` case in each backend; the log line and `tierstore_capabilities` metric. Today's kinds declare theirs: `s3`, `dir`, `memory`, the chained upstream (a proxy or `S3Backend`). | See below. |
+| (c) | The canonical set made explicit and complete in `Backend`; the shared key codec; the emulation slots and the staged-multipart helper. Detail below. | Below. |
+
+**(c) in four parts, one pull request or split at the seams.**
+
+1. *Canonical set.* Audit the provided methods of `Backend`. Those read so far silently degrade or hold a whole body: `put_stream` (collects the body, then `put`), `get_stream` (reads whole, then streams), `put_tagged` (a HEAD after the write, not bound to it), `list_page` (cuts the whole listing), `delete_if_match` (returns `Unsupported`), and the five multipart calls (`Unsupported`). They become required methods. A fake in a test that wants the old behaviour calls an explicit helper (`put_stream_buffered` and the like), so a degrading implementation is a visible choice. The audit lists every provided method it keeps and why; an `Unsupported` answer is gone from the trait.
+2. *Shared key codec.* `dir_names.rs` `encode` / `decode` move to a shared `key_codec` module with the `Dir` codec; the dir backend uses it with no change in file names (the on-disk format is additive-only, B8).
+3. *Declaration and slots.* The adapter declaration of 4.4 and the helper slots. Today's kinds (`s3`, `dir`, `memory`, the chained upstream) declare themselves native, with their limits.
+4. *Staged multipart helper*, built and tested against the memory backend configured to have no native multipart, with and without a store-side join, so the seam is proven before any real store uses it.
 
 Tests for (c):
 
-- The intersection is computed with no store call: a fake store that fails the test on any call is built from a config, and the effective set is still computed.
-- Intersection rules, one case each: lowest `max_bytes`, union of forbidden characters, weakest multipart, AND of conditional flags, lowest `max_object_bytes`; a chain's upstream is included.
-- A config with a store of a narrower key rule makes the S3 front refuse, with 400 and the exact S3 error body, a key it otherwise accepts; with the wider store alone the same key is accepted. The refusal happens before any store call or entry.
-- A store without multipart makes the S3 front answer a multipart call with the S3 `NotImplemented` error body, and a put still works.
-- A front whose `needs` the set does not meet fails the start naming the front, the capability and the tier that took it away (a test front with a declared `needs`, as no real front fails today).
-- A hot tier without create-only or `If-Match` is refused at start.
-- Reads, heads, deletes and listings of a key outside the rule still work (a key put through a store directly before the rule), and its copy to the stricter tier fails with the key error, is retried with back-off and leaves the hot copy in place.
-- The core refuses an out-of-rule key a test front forgot to check; each of `s3`, `dir`, `memory` rejects an out-of-rule key with the key error (conformance).
-- The log line and metric show the computed set.
+- Codec: decode(encode(k)) = k, prefix preservation, and no encoded name beginning with the staging lead, over random UTF-8 keys; the dir backend's existing file names are unchanged (golden names).
+- Order: a listing through an adapter with a reordering codec equals the sorted canonical keys, for page sizes 1 to the whole, with `start_after` at and between keys, with the staging namespace populated.
+- Staged multipart on the no-native-multipart memory backend: create, parts out of order and replaced, complete with a join, complete without a join (streamed copy), the result equal byte for byte to the whole body; complete of an existing key is `AlreadyExists` and leaves the old object; abort leaves no staged name; a complete with a missing or wrong-numbered part fails and changes nothing; a join over more parts than `max_sources` composes in rounds.
+- A body larger than any single buffer completes without a whole-body allocation (the join-less path streams).
+- Crash safety: build the helper, drop it, build a second over the same store, and complete the first's upload; the sweep aborts an upload unchanged for `multipart_stale_after` on an injected clock (T10) and leaves a live one.
+- The S3 front over this backend: a multipart upload and a ranged read give the S3 answers; parts under 5 MiB (not last) are refused by the front with S3's `EntityTooSmall`, not by the store; the listing through the front shows no staged name.
+- Hard limits: a key whose encoded name exceeds the store's limit makes the S3 front answer `KeyTooLongError` (400) with nothing written; a body above `max_object_bytes` gives `EntityTooLarge`.
+- The conformance suite (`crates/tierstore/tests/tierstore/conformance.rs`) runs the multipart and listing cases on every kind, native and staged, so a new kind is accepted by the same tests.
 
-(c) changes behaviour only where a configured tier already could not hold a key: that write used to fail late (a failed copy, a store error), and now fails at once with 400.
+(c) changes behaviour in one place: a `Backend` that answered `Unsupported` for multipart now has a real answer. `s3`, `dir` and `memory` already have native multipart, so no user-visible change.
 
-## 8. Future work enabled by the abstraction
+## 8. Future work
 
-Later, each its own pull request, and none reshapes `Backend`, `Interface` or `Capabilities`.
+Later, each its own pull request; none reshapes `Backend`, `Interface` or the declaration.
 
-- **`gcs` store kind.** Implements `Backend` with the GCS table of section 4 and declares its capabilities; the conformance tests and a fake server are its acceptance. Seam: `Backend` and its declaration.
-- **`gcs` front.** Implements `Interface`: JSON API, bearer-token auth, error bodies, listing over the shared walk. Seam: `Interface`, `Capabilities.listing`.
-- **`fs` front.** Implements `Interface`; reach is a mount; the descriptor hand-off of section 6. Seam: `Reach::Mount` and its `needs`.
-- **Compose multipart** and the other two items below.
-- Writes through the `fs` front (create-only files closed whole), an NFS gateway, an Azure Blob front and store, per-interface connection limits shared by all types, and a store kind for a shared POSIX file system that proves its own create-only.
+- **`gcs` store adapter.** Implements `Backend` with the GCS column of 4.5: `ifGenerationMatch` preconditions, generation as the token, a resumable upload for `put_stream`, the GCS key codec, `multipart = Staged { Compose { 32 } }` (GCS compose takes 32 sources, so large uploads compose in rounds). Acceptance: the conformance suite on a fake GCS server, and hot = s3 with cold = gcs end to end through the S3 front.
+- **`gcs` front.** Implements `Interface`: JSON API, bearer-token auth, error bodies, listing over the shared walk, rendering the token as `generation`.
+- **`fs` front.** Implements `Interface`: reach is a mount; the descriptor hand-off of section 6. Platform support (Linux, macOS) is its own concern behind `Interface`: constructing it on an unsupported platform is a start-up error naming the platform. Writes (create-only files closed whole) later, and an NFS gateway.
+- Further fronts and stores as `Interface` and `Backend` implementations (Azure Blob), per-interface connection limits shared by all types, and a store kind for a shared POSIX file system that proves its own create-only.
 
-The three questions the first draft left open are not decided here. Each has a seam that makes it buildable without changing a trait:
+The three questions of the first draft need no new seam:
 
-1. **Multipart on a store without native parts.** The `Backend` multipart calls stay as they are. A store declares `multipart = Composable { max_sources }` and implements the same calls by staging parts under a reserved temporary prefix and composing them (create-only) at completion. Fronts see no difference except the limits in the effective set (the lowest `max_sources`, hence a lowest part count). The choice between emulation and `None` for a kind is that kind's declaration, which the intersection already reads.
-2. **A version token a front renders as an ETag or a GCS generation.** The core keeps one opaque string, never compared across tiers. The declared `token` kind is informational. A front owns two functions, to render the token in its API (S3: a quoted ETag; GCS: a generation, a number it derives deterministically from the token and the write time) and to read a client precondition back into a token comparison. Changing how a front renders touches only that front.
-3. **An `fs` front's platform support.** Which operating systems it runs on is behind `Interface`: constructing it on a platform it does not support is a start-up error naming the platform, and nothing in the traits, the capabilities or the hand-off wire mentions Linux or macOS. `Reach::Mount` is the only thing the rest of the code sees.
+1. *Multipart on a store without native parts*: the staged helper of 4.1, chosen by the adapter's declaration.
+2. *A token rendered as an ETag or a generation*: the opaque `Meta.tag` of 4.3 and the front's render function.
+3. *Platform support of the `fs` front*: behind `Interface`, as above.

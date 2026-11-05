@@ -44,5 +44,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="290" y1="390" x2="110" y2="390" class="ln-o" marker-end="url(#seq-iface-fs-read-ao)"/>
 <rect x="30" y="426" width="900" height="48" rx="5" class="box-o"/>
 <text x="40" y="446" class="t-m">No port and no tierstore auth: the owner and mode of the mount decide who may read. Directories are prefixes: READDIR is the shared listing walk with delimiter / and a cursor token.</text>
-<text x="40" y="462" class="t-m">The effective key rule keeps keys without a path form (an empty segment, '.', '..') from being written on any front. Writes, later, are create-only files closed whole.</text>
+<text x="40" y="462" class="t-m">A key with no path form (an empty segment, '.', '..') is not reachable by this front, and is by the others. Writes, later, are create-only files closed whole.</text>
 </svg>
