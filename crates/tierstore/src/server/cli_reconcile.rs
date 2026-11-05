@@ -43,7 +43,10 @@ async fn run_rounds(rounds: &mut Rounds, halt: &Notify, lock: Option<&LockFile>)
         let pause = tokio::select! {
             biased;
             () = halt.notified() => return Ended::Halted,
-            round = rounds.round() => {
+            round = async {
+                tracing::debug!("tierstore: reconciler round start");
+                rounds.round().await
+            } => {
                 for error in &round.failed {
                     tracing::warn!("tierstore: reconciler: {error}");
                 }
@@ -97,7 +100,13 @@ async fn wait_for_lock(path: &Path, retry: Duration, halt: &Notify) -> Option<Lo
         let owned = path.to_owned();
         let trying = tokio::task::spawn_blocking(move || lock::try_take(&owned));
         match trying.await.expect("a try of the lock does not panic") {
-            Ok(Some(file)) => return Some(file),
+            Ok(Some(file)) => {
+                tracing::debug!(
+                    "tierstore: lock file held after waiting: {}",
+                    path.display()
+                );
+                return Some(file);
+            }
             Ok(None) => {}
             Err(why) => tracing::warn!("tierstore: lock file {}: {why}", path.display()),
         }

@@ -290,6 +290,8 @@ impl Proxy {
         }
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
+        #[cfg(feature = "server")]
+        tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
         let inner = Inner {
             hot,

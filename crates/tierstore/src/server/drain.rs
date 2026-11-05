@@ -14,10 +14,7 @@
 //!
 //! The two properties of the drain, `Connection: close` from its start (P1, [`Drain::closes_answers`])
 //! and the lingering close (P2, [`Drain::lingers`]), are each one function here, which the S3 and
-//! the OCI front both ask. A build with the test-only feature `test-drain-off` answers both with
-//! no: it is the server as it was before them, which the hand-over test under load
-//! (`tests/handover`) runs to show that it fails without them. Only that test's CI job builds it;
-//! no release, `cargo install` or test run of the crate turns it on.
+//! the OCI front both ask.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
@@ -67,10 +64,6 @@ impl Drain {
     /// at most, and the connections whose peer writes after the front shut its end are counted in
     /// `late`.
     pub(super) fn new(linger_bound: Duration, late: Arc<AtomicU64>) -> Self {
-        #[cfg(feature = "test-drain-off")]
-        tracing::info!(
-            "tierstore: a test build (test-drain-off): no Connection: close and no lingering close in the drain"
-        );
         Self {
             phase: AtomicU8::new(SERVING),
             unanswered: AtomicUsize::new(0),
@@ -94,28 +87,14 @@ impl Drain {
 
     /// Whether an answer says `Connection: close` (P1): from the moment the drain begins, so that
     /// a client that has its answer opens its next connection to whatever now serves the port.
-    #[cfg(not(feature = "test-drain-off"))]
     pub(super) fn closes_answers(&self) -> bool {
         !self.is_ready()
     }
 
     /// Whether a connection the front shuts gets a lingering close (P2): in the drain, so that a
     /// client reads a clean end of stream and not a reset.
-    #[cfg(not(feature = "test-drain-off"))]
     pub(super) fn lingers(&self) -> bool {
         !self.is_ready()
-    }
-
-    /// The test build without P1: no answer says `Connection: close`.
-    #[cfg(feature = "test-drain-off")]
-    pub(super) fn closes_answers(&self) -> bool {
-        false
-    }
-
-    /// The test build without P2: every close is a plain close.
-    #[cfg(feature = "test-drain-off")]
-    pub(super) fn lingers(&self) -> bool {
-        false
     }
 
     /// Begins the drain: every answer says `Connection: close` from now on. Once; calling it again,

@@ -11,14 +11,18 @@ use std::time::Duration;
 use bytes::Bytes;
 use tierstore_testkit::dir::TestDir;
 use tokio::sync::Notify;
+use tracing::Level;
+use tracing::subscriber::set_default;
 
 use super::cli::Cli;
 use super::cli_reconcile::{Gate, reconcile_gated};
 use super::cli_serve::open_gate;
+use super::combined_order_tests::{Events, LEASE_RELEASED, LEASE_TAKEN, all, first_from};
 use super::config_testing::MINIMAL;
 use super::lock::try_take;
 use super::rounds::Rounds;
 use crate::Backend;
+use crate::server::build_info::stderr_log::LineLog;
 use crate::{
     Created, Entries, FaultyBackend, MemoryBackend, Op, Outcome, ReconcilerConfig, Step, Take,
     TestClock,
@@ -250,6 +254,71 @@ async fn held_by(hot: &MemoryBackend, holder: &str, step: Duration) -> Vec<Strin
     panic!("the lease was never held by {holder}");
 }
 
+/// The events of the reconcilers of one test, as the debug events of the process said them, with
+/// the path of the lock file they work under. See [`Order`].
+fn recording() -> (Events, tracing::subscriber::DefaultGuard) {
+    let events = Events::default();
+    let guard = set_default(LineLog::new(events.clone(), Level::DEBUG));
+    (events, guard)
+}
+
+/// What the events of a hand-over between two reconcilers say, as indexes into the lines.
+struct Order {
+    /// The lease the first took, and the one the second took.
+    taken: [usize; 2],
+    /// The first's lock file let go, and the second's taking of it after it waited.
+    let_go: usize,
+    waited: usize,
+    /// The round starts after the first let the lock go.
+    rounds_after: Vec<usize>,
+}
+
+/// Reads the events of a hand-over over the lock file `path`: asserts that every lock event is
+/// the first's before the second's, that the two leases have two nonces, that the first lets the
+/// lock go before the second takes it and that none of the second's rounds started before it held
+/// it, and gives where the events are.
+fn order_of(lines: &[String], path: &std::path::Path) -> Order {
+    let path = path.display().to_string();
+    let (first_took, let_go, waited) = (
+        format!("tierstore: lock file taken: {path}"),
+        format!("tierstore: lock file released: {path}"),
+        format!("tierstore: lock file held after waiting: {path}"),
+    );
+    let at = |event: &String| all(lines, |l| l == event);
+    let [first_took] = at(&first_took)[..] else {
+        panic!("the first took the lock file once:\n{lines:#?}");
+    };
+    let [let_go, second_let_go] = at(&let_go)[..] else {
+        panic!("each let the lock file go once:\n{lines:#?}");
+    };
+    let [waited] = at(&waited)[..] else {
+        panic!("the second took the lock file once, after waiting:\n{lines:#?}");
+    };
+    let taken = all(lines, |l| l.starts_with(LEASE_TAKEN));
+    let [first, second] = taken[..] else {
+        panic!("two leases are taken:\n{lines:#?}");
+    };
+    let nonce = |at: usize| lines[at][LEASE_TAKEN.len()..].to_owned();
+    assert_ne!(nonce(first), nonce(second), "{lines:#?}");
+    assert!(first_took < first && first < let_go, "{lines:#?}");
+    assert!(let_go < waited && waited < second, "{lines:#?}");
+    assert!(second < second_let_go, "{lines:#?}");
+    let rounds = all(lines, |l| l == "tierstore: reconciler round start");
+    let rounds_after: Vec<usize> = rounds.into_iter().filter(|at| *at > let_go).collect();
+    for round in &rounds_after {
+        assert!(
+            *round > waited,
+            "a round before the lock was held again: {lines:#?}"
+        );
+    }
+    Order {
+        taken: [first, second],
+        let_go,
+        waited,
+        rounds_after,
+    }
+}
+
 /// Asserts the hand-over of the reconciler between two processes of one storage node, over one
 /// hot tier and one lock file, with the proxy ids of their slots as holder names. v-current
 /// (`tierstore-9301`) holds the lock file and the lease. v-next (`tierstore-9302`) makes no call
@@ -264,6 +333,7 @@ async fn held_by(hot: &MemoryBackend, holder: &str, step: Duration) -> Vec<Strin
 /// asks for the lease before it holds the lock.
 #[tokio::test(start_paused = true)]
 async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
+    let (events, _recording) = recording();
     let clock = Arc::new(TestClock::new());
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let cold = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::with_clock(
@@ -330,6 +400,19 @@ async fn v_next_takes_the_lease_v_current_gave_up_before_it_let_the_lock_go() {
     };
     tokio::join!(current, next, watching);
     assert!(hot.get(LEASE, None).await.is_err());
+    let lines = events.lines();
+    let order = order_of(&lines, &path);
+    let released = all(&lines, |l| l.starts_with(LEASE_RELEASED));
+    assert_eq!(released.len(), 2, "{lines:#?}");
+    assert!(order.taken[0] < released[0], "{lines:#?}");
+    assert!(
+        released[0] < order.let_go && order.let_go < order.waited && order.waited < order.taken[1],
+        "the lease went after the lock, or the second took up before: {lines:#?}"
+    );
+    assert!(
+        order.rounds_after.iter().all(|round| *round > order.waited),
+        "{lines:#?}"
+    );
 }
 
 /// How the release of v-current's lease goes wrong in [`hand_over_after_a_spoiled_release`].
@@ -348,6 +431,7 @@ enum Spoiled {
 /// take it while it has not expired, through intervals of its passes; and that once the clock of
 /// the lease passes its ttl (30 s) v-next takes it over.
 async fn hand_over_after_a_spoiled_release(how: Spoiled) {
+    let (events, _recording) = recording();
     let clock = Arc::new(TestClock::new());
     let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
     let cold = Arc::new(FaultyBackend::new(Arc::new(MemoryBackend::with_clock(
@@ -399,12 +483,31 @@ async fn hand_over_after_a_spoiled_release(how: Spoiled) {
         }
         assert_eq!(lease_lines(&hot).await[0], "tierstore-9301");
         clock.set(30_000);
+        tracing::debug!("tierstore: the clock of the lease passed its ttl");
         let _ = held_by(&hot, "tierstore-9302", Duration::from_secs(1)).await;
         next_halt.notify_one();
     };
     // Each of the three ends: v-current's run among them, whatever its release did.
     tokio::join!(current, next, watching);
     assert!(hot.get(LEASE, None).await.is_err());
+    let lines = events.lines();
+    let order = order_of(&lines, &path);
+    let expired = first_from(&lines, 0, "the lease expired", |l| {
+        l == "tierstore: the clock of the lease passed its ttl"
+    });
+    // v-current's lease was not given up: of the two given up, the first is v-next's. v-next asked
+    // for the lease while it held the lock (its rounds), and took it only after it expired.
+    let released = all(&lines, |l| l.starts_with(LEASE_RELEASED));
+    assert_eq!(released.len(), 1, "{lines:#?}");
+    assert!(
+        order.let_go < order.waited && order.waited < expired,
+        "{lines:#?}"
+    );
+    assert!(
+        expired < order.taken[1] && order.taken[1] < released[0],
+        "{lines:#?}"
+    );
+    assert!(!order.rounds_after.is_empty(), "{lines:#?}");
 }
 
 /// Asserts the hand-over when v-current's delete of its lease fails (see

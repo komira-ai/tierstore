@@ -52,6 +52,7 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
+use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
 };
@@ -296,6 +297,11 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    // The keys of `config_handoff`.
+    #[serde(default)]
+    pub handoff_socket: Option<PathBuf>,
+    #[serde(default)]
+    pub handoff_wait: Option<Dur>,
 }
 
 /// `[hot_store]` or `[cold_store]`: the tier and how to reach it, and the keys only one of the
@@ -673,6 +679,7 @@ pub(super) fn storage(
     }
     let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
+    let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
     let front = shared.front;
@@ -714,6 +721,7 @@ pub(super) fn storage(
         lease_ttl,
         lock_file,
         reconcile_tuning,
+        handoff,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),
         max_request_bytes: front.max_request_bytes,

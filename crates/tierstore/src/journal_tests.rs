@@ -3,8 +3,9 @@
 use bytes::Bytes;
 
 use super::{
-    Checkpoint, JournalEntry, JournalOp, decode_checkpoint, decode_journal, encode_checkpoint,
-    encode_journal,
+    Checkpoint, ENTRIES_PREFIX, FORMAT_KEY, JOURNAL_PREFIX, JournalEntry, JournalOp, LEASE_KEY,
+    RESERVED_PREFIXES, TIERING_PREFIX, USAGE_KEY, decode_checkpoint, decode_journal,
+    encode_checkpoint, encode_journal, is_reserved, proxy_key,
 };
 use crate::Error;
 
@@ -90,5 +91,38 @@ fn a_corrupt_checkpoint_object_is_an_error() {
     assert!(
         message.starts_with("corrupt checkpoint object: "),
         "{message}"
+    );
+}
+
+/// Asserts that every key the crate writes for itself (the lease, the format, the usage, the
+/// registrations, the checkpoints, the entries and the journals) is under a reserved prefix, so
+/// that none is a key a user may own.
+#[test]
+fn internal_keys_are_under_reserved_prefixes() {
+    let internal = [
+        LEASE_KEY.to_owned(),
+        FORMAT_KEY.to_owned(),
+        USAGE_KEY.to_owned(),
+        proxy_key("p1"),
+        "_tiering/checkpoint/p1".to_owned(),
+        crate::entry::entry_key("a/b"),
+        crate::entry::entry_key(""),
+        "_journal/p1/0000000000000001".to_owned(),
+    ];
+    for key in &internal {
+        assert!(is_reserved(key), "{key} is not under a reserved prefix");
+    }
+    assert!(!is_reserved("tiering/lease"));
+    assert!(!is_reserved("_other/x"));
+}
+
+/// Asserts that the reserved set is exactly the three prefixes, so that widening it is a
+/// reviewed change.
+#[test]
+fn reserved_set_is_the_three_prefixes() {
+    assert_eq!(RESERVED_PREFIXES, ["_journal/", "_tiering/", "_entries/"]);
+    assert_eq!(
+        RESERVED_PREFIXES,
+        [JOURNAL_PREFIX, TIERING_PREFIX, ENTRIES_PREFIX]
     );
 }

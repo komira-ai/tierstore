@@ -25,8 +25,13 @@
 //!   draft's assets back and refuses unless they are exactly those files, and only then
 //!   publishes it (which is when GitHub creates the tag). A tag or a published release that
 //!   exists is refused; a draft a failed run left is replaced.
+//!
+//! Beside them, `release hostkeeper-package` ([`hostkeeper_package`]) assembles the hostkeeper
+//! package of one platform's built binary, `tierstore-<version>-<platform>.tar.zst`; see that
+//! module.
 
 mod binary;
+pub mod hostkeeper_package;
 mod plan;
 mod publish;
 mod set_version;
