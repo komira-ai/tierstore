@@ -493,22 +493,35 @@ async fn every_answer_of_a_store_under_the_eviction_entry_is_judged() {
     }
 }
 
-/// Asserts that a delete of the hot object is refused when less than the margin of the lease is
-/// left (at the margin and a millisecond under it): the object stays, the item fails, and the
-/// entry of the eviction is removed.
+/// Asserts what an eviction does when less than the margin of the lease is left (at the margin and
+/// a millisecond under it): with the margin the object is deleted with no write to the lease; with
+/// a millisecond less the held lease is renewed with one write and the object is deleted; when
+/// that renewal fails the object stays and the item fails. In every case the entry of the eviction
+/// is removed.
 #[tokio::test]
-async fn an_eviction_needs_the_margin_of_the_lease() {
-    for (left, allowed) in [(10_000, true), (10_001, false)] {
+async fn an_eviction_renews_a_held_lease_that_is_short_of_the_margin() {
+    for (left, writes, renewal_fails) in [(10_000, 0, false), (10_001, 1, false), (10_001, 1, true)]
+    {
         let rig = Rig::new();
         let mut parked = Parked::new(&rig, true).await;
+        if renewal_fails {
+            let error = Error::Unavailable("lease".to_owned());
+            parked.hot.fail_next_on(Op::PutIfMatch, LEASE_KEY, error);
+        }
         let mut step = Box::pin(parked.reconciler.step());
         park(&mut step, &parked.gate).await;
         rig.mono.advance(Duration::from_millis(left));
         parked.gate.release();
         let done = step.await;
-        assert_eq!(rig.hot_has("a").await, !allowed, "left {left}");
-        assert_eq!(done.failed.len(), usize::from(!allowed), "left {left}");
-        assert!(rig.entry("a").await.is_none(), "left {left}");
+        let case = format!("left {left}, renewal fails {renewal_fails}");
+        assert_eq!(rig.hot_has("a").await, renewal_fails, "{case}");
+        assert_eq!(done.failed.len(), usize::from(renewal_fails), "{case}");
+        assert_eq!(
+            parked.hot.calls_on(Op::PutIfMatch, LEASE_KEY),
+            writes,
+            "{case}"
+        );
+        assert!(rig.entry("a").await.is_none(), "{case}");
     }
 }
 

@@ -101,6 +101,7 @@ use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
@@ -246,6 +247,8 @@ pub struct Cli {
     pub s3_client: S3Client,
     /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
     pub hot_tuning: HotTuning,
+    /// The waits, delays and limits of the entry protocol that `[hot_store]` sets.
+    pub entry_tuning: EntryTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
     pub hot_bytes: u64,
     /// The percent of `hot_store.budget` above which the oldest copied objects are evicted from the
@@ -481,6 +484,7 @@ pub(super) struct Built {
     pub(super) server: ServerConfig,
     pub(super) proxy: ProxyConfig,
     pub(super) reconciler: ReconcilerConfig,
+    pub(super) entry: EntryTuning,
     pub(super) hot: Arc<dyn Backend>,
     pub(super) cold: Arc<dyn Backend>,
     pub(super) oci: Option<OciSetup>,
@@ -683,12 +687,14 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
     cli.heartbeat.apply(&mut proxy);
+    cli.entry_tuning.apply_proxy(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
         server,
         proxy,
         reconciler,
+        entry: cli.entry_tuning,
         hot,
         cold,
         oci,

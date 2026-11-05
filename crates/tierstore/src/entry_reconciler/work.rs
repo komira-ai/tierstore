@@ -126,19 +126,21 @@ impl EntryReconciler {
     /// Deletes the key from the cold tier and then from the hot tier, and removes the sealed entry
     /// of the delete, which lets the deletes that wait for it answer.
     async fn finish_delete(&self, sealed: &Seen) -> Result<Verdict, Error> {
-        self.require_lease()?;
+        self.require_lease().await?;
         let key = &sealed.entry.key;
         ignore_missing(self.cold.delete(key).await)?;
-        self.require_lease()?;
+        self.require_lease().await?;
         ignore_missing(self.hot.delete(key).await)?;
         self.tally.caught_up(key);
         self.release(sealed).await
     }
 
     /// Refuses a destructive step or a publish to the cold tier when less than the margin of the
-    /// lease is left.
-    pub(super) fn require_lease(&self) -> Result<(), Error> {
-        if self.lease.margin_ok() {
+    /// lease is left and the lease cannot be renewed now: a lease that is still held with less
+    /// than the margin left (the timer's renewal is under way or late) is renewed here, and the
+    /// step goes on if that keeps it.
+    pub(super) async fn require_lease(&self) -> Result<(), Error> {
+        if self.lease.ensure_margin().await {
             return Ok(());
         }
         Err(lease_lapsed())
@@ -186,13 +188,13 @@ impl EntryReconciler {
     /// Streams the hot object to the cold tier, create-only. An object that appeared there since
     /// the look counts as copied.
     async fn publish(&self, key: &str, hot: &Meta) -> Result<Replicated, Error> {
-        self.require_lease()?;
+        self.require_lease().await?;
         let body = match self.hot.get_stream(key, None).await {
             Ok(body) => body,
             Err(Error::NotFound(_)) => return Ok(Replicated::Same),
             Err(error) => return Err(error),
         };
-        self.require_lease()?;
+        self.require_lease().await?;
         match self.cold.put_stream(key, Some(hot.size), body).await {
             Ok(()) => {
                 // The tag of the copy is read to be remembered; a copy that cannot be read back
