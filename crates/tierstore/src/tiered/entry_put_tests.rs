@@ -543,3 +543,50 @@ async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with
     assert_eq!(rig.proxy.put("k", body("v")).await, Err(unanswered));
     assert_eq!(rig.shape("k").await, held_by("p1"));
 }
+
+/// Asserts that a put of a new key asks the cold tier once, and the hot tier twice: once before
+/// the entry (the answer of a put of an existing key, which makes no entry) and once under it
+/// (the one that decides). A streamed put and a held one ask alike.
+#[tokio::test]
+async fn a_put_of_a_new_key_asks_the_cold_tier_once_and_the_hot_tier_before_and_under_its_entry() {
+    let rig = Rig::active().await;
+    rig.proxy.put("k", body("v")).await.unwrap();
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "k"), 2);
+    assert_eq!(rig.cold.calls_on(Op::Head, "k"), 1);
+    let streamed = rig
+        .proxy
+        .put_stream("s", Some(2), chunks(&["a", "b"]))
+        .await;
+    streamed.unwrap();
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "s"), 2);
+    assert_eq!(rig.cold.calls_on(Op::Head, "s"), 1);
+}
+
+/// Asserts that a put of a key the hot tier has asks the hot tier once, never the cold tier, and
+/// makes no entry.
+#[tokio::test]
+async fn a_put_of_an_existing_key_asks_the_hot_tier_once_and_nothing_else() {
+    let rig = Rig::active().await;
+    rig.hot_mem.put("k", body("old")).await.unwrap();
+    let put = rig.proxy.put("k", body("v")).await;
+    assert_eq!(put, Err(Error::AlreadyExists("k".to_owned())));
+    assert_eq!(rig.hot_faults.calls_on(Op::Head, "k"), 1);
+    assert_eq!(rig.cold.calls_on(Op::Head, "k"), 0);
+    assert_eq!(rig.shape("k").await, None);
+}
+
+/// Asserts that when both heads under the entry fail, the answer is the hot tier's error, as when
+/// the tiers are asked in turn, and the entry is removed.
+#[tokio::test]
+async fn a_hot_failure_under_the_entry_is_answered_before_a_cold_one() {
+    let rig = Rig::active().await;
+    let down = Error::Unavailable("hot down".to_owned());
+    rig.hot_faults
+        .fail_next_on(Op::Head, "k", Error::NotFound("k".to_owned()));
+    rig.hot_faults.fail_next_on(Op::Head, "k", down.clone());
+    rig.cold
+        .fail_next_on(Op::Head, "k", Error::Unavailable("cold down".to_owned()));
+    assert_eq!(rig.proxy.put("k", body("v")).await, Err(down));
+    assert_eq!(rig.shape("k").await, None);
+    assert!(!rig.cold_has("k").await);
+}

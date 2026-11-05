@@ -226,3 +226,84 @@ fn the_copy_back_settings_default_to_ten_minutes_and_a_thousand() {
     assert_eq!(config.copy_back_ttl, Duration::from_secs(600));
     assert_eq!(config.copy_back_max, 1000);
 }
+
+/// A renewal timer that is driven by the test: its first wait ends when `go` is signalled, and
+/// its second wait (the renewal has been made and recorded) signals `done` and never ends.
+struct Renewal {
+    waits: std::sync::atomic::AtomicUsize,
+    go: Notify,
+    done: Notify,
+}
+
+#[async_trait]
+impl Sleeper for Renewal {
+    async fn sleep(&self, _duration: Duration) {
+        if self.waits.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+            self.go.notified().await;
+        } else {
+            self.done.notify_one();
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// Asserts that a copy-back whose leader loses the margin of its lease while the hot write is
+/// running lands nothing: the write is parked with the lease good, the margin runs out, and when
+/// the write goes on it reads no chunk, the hot tier has no object under the key, the item fails
+/// with `Unavailable`, and the entry stays sealed for the successor.
+#[tokio::test]
+async fn a_copy_back_whose_lease_margin_runs_out_during_the_hot_write_lands_nothing() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.cold.put("k", bytes("cold bytes")).await.unwrap();
+    rig.client("p1").create("k", Take::CopyBack).await.unwrap();
+    let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+    let gate = gated.gate(Op::Put, "k", Phase::Pre);
+    let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    rig.mono.advance(Duration::from_millis(10_001));
+    gate.release();
+    let done = step.await;
+    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+    assert!(!rig.hot_has("k").await);
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Cb, EntryState::Sealed, None))
+    );
+}
+
+/// Asserts that a long copy-back finishes while the lease is renewed: the write is parked, the
+/// clock moves past the end of the first lease's margin only after a renewal has been made, and
+/// the write then goes on, the object is in the hot tier, and the entry is removed.
+#[tokio::test]
+async fn a_copy_back_that_outlasts_one_lease_term_finishes_when_the_lease_is_renewed() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.cold.put("k", bytes("cold bytes")).await.unwrap();
+    rig.client("p1").create("k", Take::CopyBack).await.unwrap();
+    let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+    let gate = gated.gate(Op::Put, "k", Phase::Pre);
+    let renewal = Arc::new(Renewal {
+        waits: std::sync::atomic::AtomicUsize::new(0),
+        go: Notify::new(),
+        done: Notify::new(),
+    });
+    let timer = renewal.clone();
+    let mut r = rig.over(gated, rig.cold.clone(), "r1", move |c| {
+        c.base.sleeper = timer;
+    });
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    rig.mono.advance(Duration::from_secs(6));
+    renewal.go.notify_one();
+    tokio::select! {
+        _ = &mut step => panic!("the step finished before the renewal"),
+        () = renewal.done.notified() => {}
+    }
+    rig.mono.advance(Duration::from_secs(6));
+    gate.release();
+    assert_eq!(step.await, report(1));
+    assert_eq!(rig.hot.get("k", None).await.unwrap(), bytes("cold bytes"));
+    assert!(rig.entry("k").await.is_none());
+}
