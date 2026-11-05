@@ -170,6 +170,7 @@ impl EntryReconcilerConfig {
     #[must_use]
     pub fn new(base: ReconcilerConfig) -> Self {
         let compare_range = base.compare_range.get();
+        let abandoned_upload_after = base.abandoned_upload_after;
         Self {
             base,
             departure: Duration::from_secs(60),
@@ -180,7 +181,7 @@ impl EntryReconcilerConfig {
             compare_range,
             stray_grace: Duration::from_secs(600),
             stray_interval: Duration::from_secs(24 * 3600),
-            abandoned_upload_after: Duration::from_secs(7 * 24 * 3600),
+            abandoned_upload_after,
             copy_back_ttl: Duration::from_secs(600),
             copy_back_max: 1000,
             stray_rate: 100,

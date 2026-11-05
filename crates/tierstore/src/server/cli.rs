@@ -673,6 +673,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
+    reconciler.abandoned_upload_after = tuning.abandoned_upload_after;
     cli.heartbeat.apply(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));

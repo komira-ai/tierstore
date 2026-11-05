@@ -87,6 +87,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.compare_range",
     "hot_store.listing_heads",
     "hot_store.upload_listing_calls",
+    "hot_store.abandoned_upload_after",
 ];
 
 /// Keys of the table the pages need not name.
