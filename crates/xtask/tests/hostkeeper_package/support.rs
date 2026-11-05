@@ -85,7 +85,8 @@ pub fn hk_platform(platform: Platform) -> hostkeeper_config::platform::Platform 
 
 /// Unpacks `archive` with hostkeeper's unpacker, as the daemon does for an order of tierstore
 /// [`VERSION`] on `platform`, into `<dir>/packages`, owned by the test's own user (the daemon's is
-/// root).
+/// root). The unpack is the one of a Linux host, which makes no macOS check of the tree (a Mac's
+/// daemon also checks quarantine attributes and code signatures, through an adapter of its own).
 pub fn unpack(dir: &Path, archive: &[u8], platform: Platform) -> Result<Unpacked, UnpackError> {
     let file = dir.join("package.tar.zst");
     std::fs::create_dir_all(dir).expect("the scratch directory");
@@ -108,7 +109,13 @@ pub fn unpack(dir: &Path, archive: &[u8], platform: Platform) -> Result<Unpacked
         max_unpacked_bytes: 1 << 30,
         max_entries: 1000,
     };
-    hostkeeper_unpack::unpack(&file, &order, &limits, &fs)
+    hostkeeper_unpack::unpack(
+        &file,
+        &order,
+        &limits,
+        &fs,
+        hostkeeper_unpack::Platform::Linux,
+    )
 }
 
 /// The fields of a zstd frame header (RFC 8878, section 3.1.1.1).

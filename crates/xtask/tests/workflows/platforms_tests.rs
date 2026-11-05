@@ -21,7 +21,7 @@ fn artifacts_problems_of(text: &str) -> Vec<String> {
 
 /// `text` with `replace` replaced by `with` inside the job `job` alone (from its key to the key
 /// of the next job), which must hold it.
-fn in_job(text: &str, job: &str, replace: &str, with: &str) -> String {
+pub fn in_job(text: &str, job: &str, replace: &str, with: &str) -> String {
     let key = format!("\n  {job}:\n");
     let start = text.find(&key).unwrap_or_else(|| panic!("no job {job}")) + 1;
     let body = &text[start + key.len() - 1..];
@@ -49,7 +49,11 @@ fn in_job(text: &str, job: &str, replace: &str, with: &str) -> String {
 
 /// For each `(job, replace, with, says)`: `file` with that one change in that job must give a
 /// problem from `check` that contains `says`.
-fn each_named(file: &str, check: fn(&str) -> Vec<String>, defects: &[(&str, &str, &str, &str)]) {
+pub fn each_named(
+    file: &str,
+    check: fn(&str) -> Vec<String>,
+    defects: &[(&str, &str, &str, &str)],
+) {
     let text = text_of(file);
     for (job, replace, with, says) in defects {
         let problems = check(&in_job(&text, job, replace, with));
@@ -147,8 +151,13 @@ fn the_build_and_signing_commands_name_the_platform_and_nothing_else() {
         );
     }
     let attest = attest_commands(&["macos-arm64"]);
-    assert_eq!(attest.len(), 3);
+    assert_eq!(
+        attest.len(),
+        4,
+        "the two sums checks, the tarball's bundle, the package's"
+    );
     assert!(attest[2].ends_with("-macos-arm64.tar.gz.sigstore.json\""));
+    assert!(attest[3].ends_with("-macos-arm64.tar.zst.sigstore.json\""));
 }
 
 #[test]

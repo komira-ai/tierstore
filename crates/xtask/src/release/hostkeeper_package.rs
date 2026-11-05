@@ -1,6 +1,8 @@
 //! `release hostkeeper-package --binary <path> --version <X.Y.Z+commit> --min-hostkeeper <x.y.z>
 //! --platform <platform> --out <dir>`: the hostkeeper package of one platform's binary,
-//! `<out>/tierstore-<version>-<platform>.tar.zst`.
+//! `<out>/tierstore-<version>-<platform>.tar.zst`, whose line it appends to
+//! `<out>/SHA256SUMS.<platform>` ([`crate::sums`]), the file `package` writes the tarball's and
+//! the SBOM's lines to. The package may not exist already, and the sums file may not list it yet.
 //!
 //! The package is the format of hostkeeper's `docs/package-format.md`, which hostkeeper's
 //! unpacker and manifest loader read:
@@ -33,7 +35,9 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::Error;
-use crate::package::{Platform, read, write_new};
+use crate::fetch;
+use crate::package::{Platform, open_sums, read, write_new, write_sums};
+use crate::sums;
 
 /// The service the package is of: its name in the manifest and in the archive's name.
 pub const SERVICE: &str = "tierstore";
@@ -261,7 +265,8 @@ fn holds(haystack: &[u8], needle: &[u8]) -> bool {
 ///
 /// # Errors
 /// A version that is not of its form, a binary that cannot be read or does not hold `version`,
-/// an `out` that cannot be created, or a package that is there already.
+/// an `out` that cannot be created, a package that is there already or that the sums file lists
+/// already.
 pub fn hostkeeper_package(
     binary: &Path,
     version: &str,
@@ -287,9 +292,20 @@ pub fn hostkeeper_package(
         )));
     }
     let package = archive(platform, version, min_hostkeeper, &bytes)?;
-    std::fs::create_dir_all(out).map_err(Error::spawn(format!("create {}", out.display())))?;
     let name = file_name(version, platform);
+    let (sums_path, mut lines) = open_sums(out, platform)?;
+    if lines.iter().any(|l| l.name == name) {
+        return Err(Error::Failed(format!(
+            "{} already lists {name}",
+            sums_path.display()
+        )));
+    }
     write_new(&out.join(&name), &package)?;
+    lines.push(sums::Line {
+        sha256: fetch::Sha256::of(&package),
+        name: name.clone(),
+    });
+    write_sums(&sums_path, &lines)?;
     Ok(vec![format!(
         "{name}: sha256 {}, {} bytes",
         hex::encode(Sha256::digest(&package)),
