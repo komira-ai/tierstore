@@ -677,7 +677,7 @@ for these cases:
 | a document that does not hash to the header | `400 BadDigest` (or `InvalidDigest` for a header that is no hash), nothing deleted |
 | not a `Delete` document, no object, an object with no key, `Quiet` not `true` or `false`, or more than 1000 objects | `400 MalformedXML`, nothing deleted |
 | a document over what 1000 keys fill (about 6 MiB) | `413 EntityTooLarge` |
-| `x-amz-checksum-crc64nvme` | `501 NotImplemented`, as for a put |
+| `x-amz-checksum-crc64nvme` that does not match the document | `400 BadDigest`, nothing deleted |
 | a read-only, scoped, GC or presigning key, or a presigned URL | `403 AccessDenied`, nothing deleted |
 
 The batch runs to its end if the client goes away. It is not atomic: a failure of one key does not

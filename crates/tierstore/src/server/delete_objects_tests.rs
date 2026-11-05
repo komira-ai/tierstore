@@ -166,10 +166,10 @@ async fn a_key_listed_twice_is_deleted_once_and_answered_twice() {
 }
 
 /// Asserts that a call with no `Content-MD5` and no checksum header is 400 `InvalidRequest`
-/// and deletes nothing, and that each of `Content-MD5`, CRC-32, CRC-32C, SHA-1 and SHA-256 of
-/// the body is accepted.
+/// and deletes nothing, and that each of `Content-MD5`, CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 and
+/// SHA-256 of the body is accepted.
 #[tokio::test(start_paused = true)]
-async fn an_integrity_header_is_needed_and_any_of_the_five_will_do() {
+async fn an_integrity_header_is_needed_and_any_of_the_six_will_do() {
     let rig = rig_with(&["a"]).await;
     let body = document(&["a"], None);
     let uri = format!("/{BUCKET}?delete");
@@ -191,7 +191,8 @@ async fn an_integrity_header_is_needed_and_any_of_the_five_will_do() {
 
 /// Asserts that a body that is not the one the header names is 400 `BadDigest` and a header that
 /// is no hash is 400 `InvalidDigest`, for `Content-MD5` and for a checksum header, and that
-/// nothing is deleted; and that a CRC-64/NVMe header is 501 as it is for a put.
+/// nothing is deleted; and that a CRC-64/NVMe header that does not match the document is 400
+/// `BadDigest`, as it is for a put.
 #[tokio::test(start_paused = true)]
 async fn a_body_that_does_not_match_its_header_deletes_nothing() {
     let rig = rig_with(&["a"]).await;
@@ -221,7 +222,8 @@ async fn a_body_that_does_not_match_its_header_deletes_nothing() {
             body.as_bytes(),
         )
         .await;
-    assert_eq!(nvme.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(nvme.status, StatusCode::BAD_REQUEST);
+    assert_eq!(nvme.code(), "BadDigest");
     assert_eq!(rig.get("a", None).await.body, "body");
 }
 

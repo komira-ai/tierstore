@@ -28,10 +28,11 @@ pub(super) const DELETE_KEYS: usize = 1000;
 pub(super) const DELETE_BODY_LIMIT: usize = DELETE_KEYS * (1024 * 6 + 128);
 
 /// The headers that carry a hash of the document, one of which S3 needs on this call.
-const INTEGRITY: [&str; 5] = [
+const INTEGRITY: [&str; 6] = [
     "content-md5",
     "x-amz-checksum-crc32",
     "x-amz-checksum-crc32c",
+    "x-amz-checksum-crc64nvme",
     "x-amz-checksum-sha1",
     "x-amz-checksum-sha256",
 ];
