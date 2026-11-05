@@ -6,8 +6,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use hyper::StatusCode;
 use hyper::body::Body;
-use hyper::header::HeaderMap;
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
+use objstore_s3::key_rules;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
 
@@ -15,13 +16,16 @@ use crate::journal::is_reserved;
 use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
+use super::bucket;
 use super::handover::hand_over;
 use super::list_token;
 use super::listing::{self, Start, UploadsNext};
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
-use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
-use super::time::http_date;
+use super::request::{
+    BoxError, Check, Query, Reader, Refused, Target, header, pieces, query_pairs,
+};
+use super::time::{http_date, parse_http_date};
 use super::xml::{self, Listing, NULL_VERSION, UploadListing, VersionListing};
 
 /// The query parameters this front understands. A request with another is not served.
@@ -60,6 +64,17 @@ const PRESIGN_PARAMS: [&str; 6] = [
     "X-Amz-Expires",
     "X-Amz-SignedHeaders",
     "X-Amz-Signature",
+];
+
+/// The query parameters of a read that set a header of the answer, each with the header it sets
+/// (the `response-*` parameters of GetObject and HeadObject).
+pub(super) const RESPONSE_OVERRIDES: [(&str, &str); 6] = [
+    ("response-cache-control", "cache-control"),
+    ("response-content-disposition", "content-disposition"),
+    ("response-content-encoding", "content-encoding"),
+    ("response-content-language", "content-language"),
+    ("response-content-type", "content-type"),
+    ("response-expires", "expires"),
 ];
 
 /// The query parameters that make a request part of a multipart upload.
@@ -126,13 +141,21 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
     Ok(())
 }
 
-/// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
-/// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
-/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed). A client that does
-/// not ask for `encoding-type=url` gets keys as they are, so a key with one would make every page
-/// that lists it malformed for such a client; a listing with `encoding-type=url` could carry the
-/// key, and the set of characters a key may have is the narrow one all the same.
-fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
+/// A key that is stored must be one S3 accepts and one a listing can carry:
+///
+/// - S3's own rules (`objstore_s3::key_rules::s3_key`): over 1024 bytes is [`Error::InvalidKey`]
+///   (400 `KeyTooLongError`, as S3 answers). Any other text is a key. (A `.` or `..` segment is
+///   one too: an S3 tier refuses it itself, see `objstore_s3::key_rules::s3_client_key`.)
+/// - A character a listing can carry: the answers of a listing are XML 1.0, which has no
+///   character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF (tab, line
+///   feed, carriage return, U+007F and the C1 controls are allowed). A client that does not ask
+///   for `encoding-type=url` gets keys as they are, so a key with one would make every page that
+///   lists it malformed for such a client; a listing with `encoding-type=url` could carry the
+///   key, and the set of characters a key may have is the narrow one all the same.
+fn refuse_unstorable(key: &str) -> Result<(), S3Error> {
+    if key_rules::s3_key(key).is_err() {
+        return Err(S3Error::from(Error::InvalidKey(key.to_owned())));
+    }
     let bad = |c: char| {
         matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
             || matches!(c, '\u{FFFE}' | '\u{FFFF}')
@@ -162,7 +185,13 @@ fn encoded(query: &Query) -> Result<bool, S3Error> {
 /// know, and a copy.
 fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(), S3Error> {
     let extra: &[&str] = if presigned { &PRESIGN_PARAMS } else { &[] };
-    let allowed: Vec<&str> = SUPPORTED.iter().chain(extra).copied().collect();
+    let overrides = RESPONSE_OVERRIDES.iter().map(|(param, _)| param);
+    let allowed: Vec<&str> = SUPPORTED
+        .iter()
+        .chain(extra)
+        .chain(overrides)
+        .copied()
+        .collect();
     if !query.only(&allowed) {
         return Err(S3Error::unsupported(
             "this query parameter is not supported",
@@ -172,6 +201,51 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
         return Err(S3Error::unsupported("copying an object is not supported"));
     }
     Ok(())
+}
+
+/// Refuses a GET or HEAD that carries a `response-*` parameter and is not signed (no
+/// `Authorization` header and no SigV4 parameter in the query): S3 answers it 400
+/// `InvalidRequest`, since a reader who is not known may not choose the headers of an answer.
+pub(super) fn refuse_unsigned_overrides(parts: &Parts) -> Result<(), S3Error> {
+    let signed = parts.headers.contains_key("authorization");
+    let pairs = query_pairs(parts.uri.query()).unwrap_or_default();
+    let presigned = pairs.iter().any(|(name, _)| name == "X-Amz-Algorithm");
+    let overridden = pairs
+        .iter()
+        .any(|(name, _)| RESPONSE_OVERRIDES.iter().any(|(param, _)| param == name));
+    if signed || presigned || !overridden {
+        return Ok(());
+    }
+    Err(S3Error::new(
+        StatusCode::BAD_REQUEST,
+        "InvalidRequest",
+        "Request specific response headers cannot be used for anonymous GET requests.",
+    ))
+}
+
+/// The headers that the `response-*` parameters of `query` set, in the order of
+/// [`RESPONSE_OVERRIDES`]. A parameter with an empty value sets nothing.
+fn overrides(query: &Query) -> Result<Vec<(&'static str, HeaderValue)>, S3Error> {
+    let mut set = Vec::new();
+    for (param, name) in RESPONSE_OVERRIDES {
+        let Some(text) = query.get(param).filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(text)
+            .map_err(|_| S3Error::invalid(format!("{param} is not a valid header value")))?;
+        set.push((name, value));
+    }
+    Ok(set)
+}
+
+/// `answer` with the headers of `set` in place of its own.
+fn overridden(mut answer: Answer, set: Vec<(&'static str, HeaderValue)>) -> Answer {
+    for (name, value) in set {
+        answer
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value);
+    }
+    answer
 }
 
 /// The size of a page a listing asked for in the parameter `name` (`max-keys` or
@@ -198,28 +272,42 @@ fn names(parts: &Parts, name: &str, tag: &str) -> Option<bool> {
     Some(listed.any(|item| ["*", tag].contains(&item)))
 }
 
-/// The answer that the conditions of a read give in place of the object, if they do:
-/// `PreconditionFailed` when `If-Match` does not name the tag of the object, and 304 when
-/// `If-None-Match` does. `None` when the read goes on. The conditions on the time are not
-/// supported.
+/// The time, in whole seconds, that the header `name` of the request holds, if it has the header
+/// and it is an HTTP date. S3 ignores a date that is not one, and so does this.
+fn date_of(parts: &Parts, name: &str) -> Option<u64> {
+    parse_http_date(header(&parts.headers, name)?).map(|millis| millis / 1000)
+}
+
+/// The answer that the conditions of a read give in place of the object, if they do, in the order
+/// of RFC 7232 (section 6): `PreconditionFailed` when `If-Match` does not name the tag of the
+/// object, or, without an `If-Match`, when `If-Unmodified-Since` is before the time of the
+/// object; then 304 when `If-None-Match` names the tag, or, without an `If-None-Match`, when
+/// `If-Modified-Since` is not before the time of the object. A date is compared to the second,
+/// as `Last-Modified` shows it, and one that is not a date is ignored. `None` when the read goes
+/// on.
 fn conditional(parts: &Parts, key: &str, meta: &Meta) -> Result<Option<Answer>, S3Error> {
-    let since = ["if-modified-since", "if-unmodified-since"];
-    if since.iter().any(|name| parts.headers.contains_key(*name)) {
-        return Err(S3Error::unsupported(
-            "only If-Match and If-None-Match are supported",
-        ));
+    let modified = meta.modified / 1000;
+    let unmodified_since = || date_of(parts, "if-unmodified-since").is_some_and(|at| modified > at);
+    let failed = match names(parts, "if-match", &meta.tag) {
+        Some(named) => !named,
+        None => unmodified_since(),
+    };
+    if failed {
+        return Err(S3Error::from(Error::PreconditionFailed(key.to_owned())));
     }
-    let if_match = names(parts, "if-match", &meta.tag);
-    let if_none_match = names(parts, "if-none-match", &meta.tag);
-    match (if_match, if_none_match) {
-        (Some(false), _) => Err(S3Error::from(Error::PreconditionFailed(key.to_owned()))),
-        (_, Some(true)) => {
-            let headers = object_headers(meta);
-            let not_modified = answer(StatusCode::NOT_MODIFIED, &headers, Bytes::new());
-            Ok(Some(not_modified))
-        }
-        _ => Ok(None),
+    let not_modified = match names(parts, "if-none-match", &meta.tag) {
+        Some(named) => named,
+        None => date_of(parts, "if-modified-since").is_some_and(|at| modified <= at),
+    };
+    if not_modified {
+        let headers = object_headers(meta);
+        return Ok(Some(answer(
+            StatusCode::NOT_MODIFIED,
+            &headers,
+            Bytes::new(),
+        )));
     }
+    Ok(None)
 }
 
 /// Runs a call that changes the store to its end on a task of its own. The server drops the
@@ -305,8 +393,11 @@ impl Server {
     {
         // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
         // not parameters of the call.
-        refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         let method = parts.method.as_str();
+        let location = bucket::asks_location(method, &target, query);
+        if !location {
+            refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+        }
         let multipart = query.has_any(&MULTIPART);
         if let Some(id) = query.get("versionId") {
             named_version(method, &target, multipart, id)?;
@@ -324,6 +415,9 @@ impl Server {
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;
+        if location {
+            return Ok(self.location());
+        }
         match (method, target, multipart) {
             ("PUT" | "HEAD", Target::Bucket, false) => {
                 Ok(answer(StatusCode::OK, &[], Bytes::new()))
@@ -333,8 +427,8 @@ impl Server {
             }
             ("GET", Target::Bucket, false) => self.list_objects(query).await,
             ("GET", Target::Bucket, true) if query.has("uploads") => self.list_uploads(query).await,
-            ("GET", Target::Object(key), false) => self.get_object(parts, &key).await,
-            ("HEAD", Target::Object(key), false) => self.head_object(parts, &key).await,
+            ("GET", Target::Object(key), false) => self.get_object(parts, query, &key).await,
+            ("HEAD", Target::Object(key), false) => self.head_object(parts, query, &key).await,
             ("PUT", Target::Object(key), false) => self.put_conditional(parts, &key).await,
             ("DELETE", Target::Object(key), false) => self.delete_object(&key).await,
             ("DELETE", Target::Object(key), true) => self.abort_upload(query, &key).await,
@@ -351,8 +445,9 @@ impl Server {
     /// One call to the backend, which gives the object's meta and the body as it arrives: the
     /// headers are made from the meta and the status from the window the body holds. A
     /// condition that is not met, or a range that is not satisfiable, drops the body unread.
-    async fn get_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
+    async fn get_object(&self, parts: &Parts, query: &Query, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        let set = overrides(query)?;
         let span = asked(header(&parts.headers, "range"));
         let Opened { meta, window, body } = self.backend.open_read(key, span).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
@@ -360,31 +455,39 @@ impl Server {
         }
         let mut headers = object_headers(&meta);
         match window {
-            Window::Whole => Ok(read_answer(StatusCode::OK, &headers, meta.size, body)),
+            Window::Whole => {
+                let whole = read_answer(StatusCode::OK, &headers, meta.size, body);
+                Ok(overridden(whole, set))
+            }
             Window::Part(range) => {
                 let (start, len) = (range.offset(), range.size());
                 let (last, size) = (start + len - 1, meta.size);
                 headers.push(("content-range", format!("bytes {start}-{last}/{size}")));
-                Ok(read_answer(
-                    StatusCode::PARTIAL_CONTENT,
-                    &headers,
-                    len,
-                    body,
-                ))
+                let part = read_answer(StatusCode::PARTIAL_CONTENT, &headers, len, body);
+                Ok(overridden(part, set))
             }
             Window::Unsatisfiable => Err(S3Error::invalid_range(meta.size)),
         }
     }
 
-    async fn head_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
+    async fn head_object(
+        &self,
+        parts: &Parts,
+        query: &Query,
+        key: &str,
+    ) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        let set = overrides(query)?;
         let meta = self.backend.head(key).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
         }
         let mut headers = object_headers(&meta);
         headers.push(("content-length", meta.size.to_string()));
-        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
+        Ok(overridden(
+            answer(StatusCode::OK, &headers, Bytes::new()),
+            set,
+        ))
     }
 
     /// A put that is not a plain create (see [`creates_only`]): `If-Match`, which is refused
@@ -457,7 +560,7 @@ impl Server {
         B::Error: Into<BoxError>,
     {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let permit = self.admit(len, presign).await?;
         let hot_only = presign.is_some();
         let refused = Refused::default();
@@ -639,7 +742,7 @@ impl Server {
 
     async fn start_upload(&self, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
-        refuse_unlistable(key)?;
+        refuse_unstorable(key)?;
         let created = self.backend.create_upload(key).await;
         let id = created.map_err(upload_error)?;
         let body = xml::initiate(&self.config.bucket, key, &id);

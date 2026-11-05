@@ -285,3 +285,22 @@ fn dropping_the_group_kills_and_reaps_the_child() {
     drop(group);
     assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
 }
+
+/// Asserts that a call with `run_as` runs the program under those user and group ids: the ids
+/// of this process are given back by `id`, and `id` of a call with none says the same. (A test
+/// that is not root can only run as itself.)
+#[test]
+fn a_call_runs_as_the_user_and_group_it_names() {
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    for flag in ["-u", "-g"] {
+        let call = Call::new("id", &[flag], LIMIT).running_as(uid, gid);
+        let output = SystemRunner.run(&call).unwrap();
+        let want = if flag == "-u" { uid } else { gid };
+        assert_eq!(output.code, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            want.to_string()
+        );
+    }
+}

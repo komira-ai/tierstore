@@ -16,11 +16,14 @@
 //!    and a tier holds the key, and with [`Error::Unavailable`] otherwise (a put, delete or copy
 //!    of the key is in flight). It looks again if the entry was gone in between, at most
 //!    [`ProxyConfig::entry_rounds`](super::ProxyConfig::entry_rounds) times.
-//! 4. Under the entry, the hot tier and the cold tier are asked once more. A cold tier that
+//! 4. Under the entry, the hot tier and the cold tier are asked once more, together. The first
+//!    answer of the hot tier (step 2) may be stale by now: another put may have landed and been
+//!    released since, and a put at `Full` would land in the cold tier beside it. A cold tier that
 //!    cannot be asked is an [`Error::Unavailable`]: a new key is not accepted while it is down.
 //! 5. The object lands, create-only: in the hot tier, or in the cold tier when the hot tier is
-//!    full (a presigned put answers [`Error::Full`] instead) or when the put is the completion of
-//!    a multipart upload.
+//!    full (a presigned put answers [`Error::Full`] instead). The completion of a multipart upload
+//!    lands in the tier that holds the upload (`uploads.rs`): the hot tier unless the upload was
+//!    begun while it was full.
 //! 6. The entry becomes `(PUT, PENDING)`, which is the acknowledgement of the put. If the entry
 //!    changed, the put is not acknowledged and touches nothing again. If the proxy is no longer
 //!    live when the replace has answered, the put is not acknowledged either ([`Error::Unavailable`]),
@@ -50,7 +53,7 @@ pub(super) enum Failed {
 }
 
 /// Sorts the error of a landing: a store that did not answer may have written.
-fn landing(error: Error) -> Failed {
+pub(super) fn landing(error: Error) -> Failed {
     match error {
         Error::Unavailable(_) | Error::Other(_) => Failed::Maybe(error),
         definite => Failed::Definite(definite),
@@ -188,12 +191,15 @@ impl Inner {
         }
     }
 
-    /// Under the entry: neither tier holds the key.
+    /// Under the entry: neither tier holds the key. The two heads are asked together, since neither
+    /// answer is needed to ask the other; the hot tier's answer is judged first, so the errors and
+    /// the refusals are the ones of asking them one after the other.
     async fn check_tiers(&self, key: &str) -> Result<(), Failed> {
-        if self.hot_has(key).await.map_err(Failed::Definite)? {
+        let (hot, cold) = futures::join!(self.hot_has(key), self.cold_has(key));
+        if hot.map_err(Failed::Definite)? {
             return Err(Failed::Definite(Error::AlreadyExists(key.to_owned())));
         }
-        if self.cold_has(key).await.map_err(Failed::Definite)? {
+        if cold.map_err(Failed::Definite)? {
             return Err(Failed::Definite(Error::AlreadyExists(key.to_owned())));
         }
         Ok(())
@@ -258,22 +264,5 @@ impl Inner {
         } else {
             landing(error)
         }
-    }
-
-    /// The completion of a multipart upload on its entry: the object is made in the cold tier,
-    /// whose own completion is create-only.
-    pub(super) async fn complete_on_entry(
-        &self,
-        key: &str,
-        id: &str,
-        parts: &[(u32, String)],
-    ) -> Result<String, Error> {
-        let done = || async move {
-            self.cold
-                .complete_upload(key, id, parts)
-                .await
-                .map_err(landing)
-        };
-        self.put_on_entry(key, done).await
     }
 }

@@ -87,6 +87,9 @@ pub enum Reason {
     HandoffNotConfigured,
     /// `prepare`: there is no configuration file at the path `config_file` names.
     ConfigMissing,
+    /// `prepare`: the staged release or the previous one refuses the node's configuration when
+    /// it checks it (`--check-config`), so a start or a rollback onto it would fail.
+    ConfigRefused,
     /// The params name a service manager this hook does not drive.
     ServiceManagerUnknown,
     /// `rollback` of a first install: there is no release to go back to; what `cutover`
@@ -102,7 +105,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason.
-    pub const ALL: [Reason; 20] = [
+    pub const ALL: [Reason; 21] = [
         Reason::BadArgs,
         Reason::BadParams,
         Reason::Locked,
@@ -118,6 +121,7 @@ impl Reason {
         Reason::WrongBuild,
         Reason::HandoffNotConfigured,
         Reason::ConfigMissing,
+        Reason::ConfigRefused,
         Reason::ServiceManagerUnknown,
         Reason::NoPreviousRelease,
         Reason::UnitFailed,
@@ -144,6 +148,7 @@ impl Reason {
             Reason::WrongBuild => "wrong_build",
             Reason::HandoffNotConfigured => "handoff_not_configured",
             Reason::ConfigMissing => "config_missing",
+            Reason::ConfigRefused => "config_refused",
             Reason::ServiceManagerUnknown => "service_manager_unknown",
             Reason::NoPreviousRelease => "no_previous_release",
             Reason::UnitFailed => "unit_failed",
@@ -165,6 +170,7 @@ impl Reason {
             | Reason::Draining
             | Reason::HandoffNotConfigured
             | Reason::ConfigMissing
+            | Reason::ConfigRefused
             | Reason::UnitFailed
             | Reason::StateIo
             | Reason::HostFailed => Class::Environment,

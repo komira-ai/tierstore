@@ -138,7 +138,7 @@ async fn a_read_only_key_is_denied_every_write_and_changes_nothing() {
     let uri = upload_uri(&id);
     let done = rig.send("POST", &uri, &[], body.as_bytes()).await;
     assert_eq!(done.status, StatusCode::OK);
-    assert_eq!(rig.cold_mem.get("big", None).await.unwrap(), "part one");
+    assert_eq!(rig.hot_mem.get("big", None).await.unwrap(), "part one");
 }
 
 /// Asserts that a write by a read-only key is refused before anything of the request is looked

@@ -283,19 +283,135 @@ fn capabilities_prints_the_names_one_to_a_line_and_exits_0() {
     assert_eq!(out, expected);
 }
 
-/// Asserts that `--capabilities` of the binary prints exactly `handover-v1` and then
-/// `handoff-socket-v1`, each with a newline, and exits 0 with nothing on stderr: the first is the
-/// line the host updater's `prepare` step reads to hand over to this release instead of
-/// restarting it, the second says the binary serves through `server.handoff_socket`. Catches:
-/// either capability left out of the list (for `handover-v1`, every update is a restart), a
-/// misspelled name the updater would not find, and a third name nothing promises.
+/// Asserts that `--capabilities` of the binary prints exactly `handover-v1`, `handoff-socket-v1`
+/// and `handoff-cache-v1` in that order, each with a newline, and exits 0 with nothing on stderr:
+/// the first is the line the host updater's `prepare` step reads to hand over to this release
+/// instead of restarting it, the second says the binary serves through `server.handoff_socket`,
+/// the third that its build node and its storage node with `[local_cache]` do too (a node whose
+/// configuration has `[local_cache]` is handed over only between releases that list it). Catches:
+/// any capability left out of the list (for `handover-v1`, every update is a restart), a
+/// misspelled name the updater would not find, and a fourth name nothing promises.
 #[test]
-fn capabilities_lists_handover_v1_and_handoff_socket_v1() {
+fn capabilities_lists_the_three_hand_over_words() {
     let (code, out, err) = run(&["--capabilities".to_owned()]);
     assert_eq!(
         (code, out.as_str(), err.as_str()),
-        (0, "handover-v1\nhandoff-socket-v1\n", "")
+        (0, "handover-v1\nhandoff-socket-v1\nhandoff-cache-v1\n", "")
     );
+}
+
+/// The file of a build node and of a storage node with a cache, as `--check-config` reads them,
+/// each with `server_extra` lines in `[server]`: the S3 tiers are named, never called.
+fn handoff_files(files: &Files, server_extra: &str) -> [(&'static str, String); 2] {
+    let dir = files.key.parent().unwrap().to_path_buf();
+    let upstream = files.secret("upstream.key", "UPKEY\nup-secret\n");
+    let build = format!(
+        r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "bin-build"
+bucket          = "tier-bucket"
+access_key_file = "{key}"
+{server_extra}
+
+[local_cache]
+path   = "{cache}"
+budget = "1MiB"
+
+[cold_store]
+kind             = "s3"
+bucket           = "tierstore-fake"
+endpoint         = "http://192.0.2.1:9300"
+credentials_file = "{upstream}"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+        key = files.key.display(),
+        cache = dir.join("cache").display(),
+        upstream = upstream.display(),
+    );
+    let combined = format!(
+        r#"
+[[interface]]
+type   = "s3"
+params = {{ addresses = ["127.0.0.1:0"] }}
+
+[server]
+proxy_id        = "bin-combined"
+bucket          = "tier-bucket"
+access_key_file = "{key}"
+{server_extra}
+
+[hot_store]
+kind   = "dir"
+path   = "{hot}"
+budget = "1MiB"
+
+[cold_store]
+kind = "dir"
+path = "{cold}"
+
+[local_cache]
+path   = "{cache}"
+budget = "1MiB"
+
+[[policy]]
+prefix = "cas/"
+cache  = true
+"#,
+        key = files.key.display(),
+        hot = dir.join("hot").display(),
+        cold = dir.join("cold").display(),
+        cache = dir.join("cache").display(),
+    );
+    [("build.toml", build), ("combined.toml", combined)]
+}
+
+/// Asserts (T29) that `--config <file> --check-config` of this build exits 0 with nothing printed
+/// for a build node and for a storage node with `[local_cache]`, each with an absolute
+/// `server.handoff_socket` and a `server.handoff_wait`, and that it creates neither the socket nor
+/// the cache. This is the answer the update hook's `prepare` reads from the staged release; the
+/// previous release that refuses the same file is modelled by the hook's fake, as no older
+/// binary is at hand offline.
+#[test]
+fn check_config_accepts_the_handoff_keys_of_a_build_node_and_a_combined_node() {
+    let files = Files::new("bin-check-handoff-good");
+    // The path of a Unix socket is short (103 bytes at most): its directory is one under the
+    // system's temporary directory, not the scratch directory of the build, whose path is long.
+    let state = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "bin-handoff");
+    let socket = state.path().join("handoff.sock");
+    let extra = format!(
+        "handoff_socket = {:?}\nhandoff_wait = \"5s\"",
+        socket.display().to_string()
+    );
+    for (name, text) in handoff_files(&files, &extra) {
+        let config = files.secret(name, &text).display().to_string();
+        let flags = ["--config", &config, "--check-config"].map(str::to_owned);
+        assert_eq!(run(&flags), (0, String::new(), String::new()), "{name}");
+    }
+    assert!(!socket.exists());
+    assert!(!files.key.with_file_name("cache").exists());
+}
+
+/// Asserts (T29) that `--check-config` of a build node and of a storage node with `[local_cache]`
+/// whose `server.handoff_socket` is not an absolute path exits 2, prints nothing on stdout and
+/// names `server.handoff_socket` on stderr. Catches a check that passes a file whose start would
+/// refuse.
+#[test]
+fn check_config_refuses_a_bad_handoff_socket_naming_the_key() {
+    let files = Files::new("bin-check-handoff-bad");
+    for (name, text) in handoff_files(&files, "handoff_socket = \"handoff.sock\"") {
+        let config = files.secret(name, &text).display().to_string();
+        let flags = ["--config", &config, "--check-config"].map(str::to_owned);
+        let (code, out, err) = run(&flags);
+        assert_eq!((code, out.as_str()), (2, ""), "{name}");
+        assert!(err.contains("server.handoff_socket"), "{name}: {err}");
+    }
 }
 
 /// Asserts that `--capabilities` with any other flag is refused with status 2, naming it, and
@@ -500,14 +616,15 @@ fn a_read_only_key_file_that_cannot_be_used_is_a_start_that_says_why() {
 /// Asserts that the binary serves over two S3 tiers, each a bucket of a store of its own that it
 /// reaches with the key file and the region of its tier: an object put is read back, is in the
 /// hot store and then, copied by the reconciler, in the cold store; a multipart upload lands in
-/// the cold store only, as one object made of the parts, with no upload left open; and the
+/// the hot store, as one object made of the parts, and is then copied to the cold store, with no
+/// upload left open in either; and the
 /// requests of each tier were signed with the key and the region of that tier (each store
 /// refuses another key); and the `ETag` a head answers is the tag in quotes once, for an
 /// object put whole and for one made of parts, and an `If-Match` with it names the object's
 /// tag (the answer is that objects cannot be replaced) where another tag is a failed
 /// precondition.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_one() {
+async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_hot_one() {
     let hot = FakeS3::start().await;
     let cold = FakeS3::start().await;
     // A hot tier that keeps its format between starts is activated by the operator
@@ -565,10 +682,18 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     let bytes = Bytes::from(vec![9_u8; usize::try_from(len).unwrap()]);
     let body: BodyStream = stream::iter(vec![Ok(bytes)]).boxed();
     store.put_stream(&big, len, body).await.unwrap();
+    assert_eq!(hot.object_len(&big), Some(len));
+    assert_eq!(hot.stats().completed, 1);
+    assert_eq!(hot.incomplete_uploads(), 0);
+    let name = "cas/big".to_owned();
+    let copying = async {
+        while !cold.keys().contains(&name) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    let copied = tokio::time::timeout(SAFETY, copying).await;
+    assert!(copied.is_ok(), "not copied");
     assert_eq!(cold.object_len(&big), Some(len));
-    assert!(!hot.keys().contains(&"cas/big".to_owned()));
-    let completed = (cold.stats().completed, hot.stats().completed);
-    assert_eq!(completed, (1, 0));
     assert_eq!(cold.incomplete_uploads(), 0);
     assert_eq!(store.head(&big).await.unwrap().size, len);
     let head = store.head(&big).await.unwrap();
