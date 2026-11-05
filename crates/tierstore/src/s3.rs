@@ -147,8 +147,8 @@ use tokio::sync::mpsc;
 
 use crate::backend::open_by_head;
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
-    UploadsAfter, Window,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
+    Span, UploadsAfter, Window,
 };
 
 pub use objstore_s3::Capabilities;
@@ -564,6 +564,28 @@ impl Backend for S3Backend {
         let sent = streamed(body, len, self.chunks_waiting, sending).await?;
         let tag = sent.map_err(|e| map_error(e, key))?;
         Ok(unquoted(&tag))
+    }
+
+    /// One place to put an object, so `hot_only` changes nothing. The answer is the `ETag` of the
+    /// answer to the PUT, without its quotes, which is what a HEAD of the object gives; none if the
+    /// store's answer has none (the caller then asks with a HEAD). `Last-Modified` only if the
+    /// answer has one.
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        _hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        let object = object_key(key)?;
+        let store = &self.store;
+        let sending = |len, source| store.put_stream_new_answered(&object, len, source);
+        let sent = streamed(body, len, self.chunks_waiting, sending).await?;
+        let answer = sent.map_err(|e| map_error(e, key))?;
+        Ok(answer.etag.map(|etag| PutAnswer {
+            tag: unquoted(&etag),
+            modified: answer.modified_millis,
+        }))
     }
 
     async fn put_if_match(&self, key: &str, body: Bytes, etag: &str) -> Result<String, Error> {

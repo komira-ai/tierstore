@@ -255,6 +255,49 @@ async fn a_range_is_cut_at_the_largest_position_a_store_reads() {
     assert!(heads[2].starts_with("HEAD "), "{}", heads[2]);
 }
 
+/// A PUT answered 200 with an `ETag` and a `Last-Modified`.
+const MADE_WITH_TIME: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 0\r\n\
+                              etag: \"abc\"\r\nlast-modified: Sun, 06 Nov 1994 08:49:37 GMT\r\n\r\n";
+
+/// A PUT answered 200 with an `ETag` and no time, as S3 answers.
+const MADE: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 0\r\n\
+                    etag: \"abc\"\r\n\r\n";
+
+/// A PUT answered 200 with no `ETag`.
+const MADE_UNTAGGED: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
+
+/// Asserts that the answer of a create-only streamed put is the tag of the answer without its
+/// quotes (the tag a HEAD gives), with the time only if the answer gives one, and that an answer
+/// with no `ETag` is a made object with no answer, which the caller asks about with a HEAD. The
+/// put is made in each case.
+#[tokio::test]
+async fn a_streamed_put_answers_with_the_tag_of_the_put_when_it_has_one() {
+    for (answer, want) in [
+        (
+            MADE_WITH_TIME,
+            Some(tierstore::PutAnswer {
+                tag: "abc".to_owned(),
+                modified: Some(784_111_777_000),
+            }),
+        ),
+        (
+            MADE,
+            Some(tierstore::PutAnswer {
+                tag: "abc".to_owned(),
+                modified: None,
+            }),
+        ),
+        (MADE_UNTAGGED, None),
+    ] {
+        let (endpoint, seen) = scripted(vec![answer]);
+        let backend = S3Backend::new(config(&endpoint)).unwrap();
+        let chunks: PartBody<'static> = stream::once(async { Ok(body("abc")) }).boxed();
+        let sent = backend.put_stream_answered("k", Some(3), chunks, false);
+        assert_eq!(sent.await, Ok(want));
+        assert!(seen.lock().unwrap()[0].starts_with("PUT "));
+    }
+}
+
 /// Asserts that a listing whose page repeats the continuation token it was sent ends with an
 /// `Other` error after two requests, instead of asking for ever.
 #[tokio::test]
