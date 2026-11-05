@@ -25,7 +25,7 @@ const GC: (&str, &str) = ("AKIDGC", "gc-secret-0123456789");
 
 /// A rig with one key of each role: the full key (the rig's own), a read-only key, a scoped key
 /// and a GC key.
-async fn rig_with_every_role() -> Rig {
+pub(super) async fn rig_with_every_role() -> Rig {
     Rig::with(MEBIBYTE, |config| {
         config.read_only_keys = vec![AccessKey::new(READER.0, READER.1)];
         let prefixes = Prefixes {
@@ -41,7 +41,7 @@ async fn rig_with_every_role() -> Rig {
 
 /// The status of a call on `uri`, signed by the key of each role, in the order full, read-only,
 /// scoped, GC.
-async fn statuses(rig: &Rig, method: &str, uri: &str) -> [u16; 4] {
+pub(super) async fn statuses(rig: &Rig, method: &str, uri: &str) -> [u16; 4] {
     let full = rig.send(method, uri, &[], b"").await.status.as_u16();
     let mut out = [full, 0, 0, 0];
     for (slot, key) in out[1..].iter_mut().zip([READER, SCOPED, GC]) {
