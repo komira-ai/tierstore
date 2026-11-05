@@ -17,6 +17,10 @@ pub struct ServerConfig {
     pub bucket: String,
     /// The region in the credential scope of a signature.
     pub region: String,
+    /// When the bucket was made, in milliseconds since the Unix epoch, for the `CreationDate` of
+    /// ListBuckets: the time [`ServerConfig::new`] was called at, and in the binary the time the
+    /// store's `_tiering/format` was written, where it has one.
+    pub bucket_created: u64,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -144,6 +148,7 @@ impl ServerConfig {
         Self {
             bucket: bucket.to_owned(),
             region: "us-east-1".to_owned(),
+            bucket_created: clock.now(),
             access_key_id: access_key_id.to_owned(),
             secret_access_key: secret_access_key.to_owned(),
             read_only_keys: Vec::new(),
