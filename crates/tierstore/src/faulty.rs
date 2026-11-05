@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
-    UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
+    Span, UploadsAfter,
 };
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
@@ -271,6 +271,20 @@ impl Backend for FaultyBackend {
     ) -> Result<String, Error> {
         self.enter(Op::Put, key).await?;
         self.inner.put_stream_tagged(key, len, body).await
+    }
+
+    /// As `put_stream`, a call of kind [`Op::Put`].
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.enter(Op::Put, key).await?;
+        self.inner
+            .put_stream_answered(key, len, body, hot_only)
+            .await
     }
 
     /// As `put_stream`, a call of kind [`Op::Put`].

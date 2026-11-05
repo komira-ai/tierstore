@@ -301,7 +301,7 @@ In a read-only process the families of fills, evictions and pinned skips stay at
 What they do not count:
 
 - A fill reads the upstream in ranged chunks, so `op="get"` counts calls, not objects: an object of 350 bytes filled in chunks of 100 is four GET calls. It also counts every pass-through read.
-- `op="head"` counts the cache's own HEADs as well as the clients': the size before a ranged fill, the two HEADs of a fill, the HEAD before a put, and the HEAD after one is acknowledged. `head_hits_total` and `head_misses_total` count only the HEADs the S3 front sends to the cache, which includes the HEAD that the front sends before each GET. So `head_hits_total + head_misses_total` is a lookup rate, not a rate of HEAD requests from clients.
+- `op="head"` counts the cache's own HEADs as well as the clients': the size before a ranged fill, the two HEADs of a fill, the HEAD before a put, and the HEAD after one is acknowledged only when the upstream's answer to the put gave no tag (an S3 upstream's answer has the `ETag`, so a put to one makes no HEAD after it). `head_hits_total` and `head_misses_total` count only the HEADs the S3 front sends to the cache, which includes the HEAD that the front sends before each GET. So `head_hits_total + head_misses_total` is a lookup rate, not a rate of HEAD requests from clients.
 - A listing counts as one `list` call, and each page of a paged listing counts as one more. Each call of `list_uploads` counts one.
 - Not counted at all: deletes, creating and aborting uploads, sending a part, the start-up probe, and retries made inside a backend wrapper.
 - `upstream_bytes_read_total` counts a GET that returned. The bytes of a GET that failed are not counted, and the bytes of a GET that returned are counted even if the fill then fails (a short body, a hash mismatch, a changed object) or is dropped.
@@ -319,7 +319,7 @@ Without it, the cache is read-only and they stay 0.
 | `tierstore_cache_writes_through_total` | counter | none | the upstream took a whole-body create-only put (not a completion) |
 | `tierstore_cache_write_exists_total` | counter | none | a put was answered "already exists" |
 | `tierstore_cache_keeps_expired_total` | counter | none | a put was answered before the copy kept on the node finished, because the copy took longer than the wait |
-| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy; `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
+| `tierstore_cache_write_keep_skipped_total` | counter | `reason`: `budget`, `io`, `busy`, `head`, `deleted`, `slow`, `deadline`, `read_only` | the upstream took a put and the node did not keep a copy (`head`: the upstream's answer to the put gave no tag and the HEAD after it failed or gave another size); `read_only` is a node whose cache does not hold the lock of its directory, or lost it while the copy was made (see [operations](operations.md#the-cache-lock-and-read-only-mode)) |
 
 The reasons of a failed put:
 
