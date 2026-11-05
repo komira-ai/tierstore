@@ -162,6 +162,24 @@ fn the_stage_read_param_sets_the_size_of_a_read() {
     assert_eq!(given.oci.expect("a front").stage_read, 4096);
 }
 
+/// Asserts that the front's sizes are 4 MiB of manifest, 4 MiB of blob read and 256 bytes of echo
+/// unless `params.max_manifest_bytes`, `params.read_chunk_bytes` and `params.echo_bytes` give them.
+#[test]
+fn the_size_params_set_the_manifest_limit_the_read_chunk_and_the_echo_length() {
+    let rig = Rig::new("oci-params-sizes");
+    let setup = build(&rig.cli("")).expect("built").oci.expect("a front");
+    assert_eq!(setup.sizes, crate::server::oci::OciSizes::default());
+    assert_eq!(setup.sizes.manifest_bytes, 4 << 20);
+    assert_eq!(setup.sizes.chunk_bytes, 4 << 20);
+    assert_eq!(setup.sizes.echo_bytes, 256);
+    let given = rig.cli(", max_manifest_bytes = 1000, read_chunk_bytes = 2000, echo_bytes = 30");
+    let sizes = build(&given).expect("built").oci.expect("a front").sizes;
+    assert_eq!(
+        (sizes.manifest_bytes, sizes.chunk_bytes, sizes.echo_bytes),
+        (1000, 2000, 30)
+    );
+}
+
 /// Asserts that a prefix that cannot work, a lifetime of nothing, and a certificate or key that
 /// cannot serve are refused at start with status 2, and that a file that cannot be read is
 /// status 1, which a restart may mend.
