@@ -50,6 +50,7 @@ pub(crate) fn url_encode(text: &str) -> String {
         }
     }
     out
+}
 
 /// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
 /// empty for `us-east-1`.
