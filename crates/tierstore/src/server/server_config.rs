@@ -43,6 +43,8 @@ pub struct ServerConfig {
     /// a put or of a part is streamed to the backend and is never held whole. (The body of a
     /// request that is not streamed, the XML of a completion, is held, up to this many bytes.)
     pub max_request_bytes: usize,
+    /// The most keys of one DeleteObjects call that are deleted at once (`server.delete_concurrency`).
+    pub delete_concurrency: usize,
     /// How long a request body may go without a byte arriving, and how long the client may
     /// go without taking a byte of an answer, before the request ends: a body that arrives
     /// slowly but steadily is not cut, and neither is a slow reader that keeps taking bytes.
@@ -152,6 +154,7 @@ impl ServerConfig {
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
             max_concurrent_puts: 32,
+            delete_concurrency: 16,
             put_permit_wait: Duration::from_secs(15),
             put_min_bytes_per_sec: 1024,
             put_rate_grace: Duration::from_secs(30),
