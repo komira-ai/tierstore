@@ -51,7 +51,7 @@ pub(crate) enum Target {
     Object(String),
 }
 
-fn decode(text: &str) -> Option<String> {
+pub(super) fn decode(text: &str) -> Option<String> {
     percent_decode_str(text)
         .decode_utf8()
         .ok()
