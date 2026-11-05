@@ -57,7 +57,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="330" y1="556" x2="600" y2="556" class="ln" marker-end="url(#seq-overwrite-get-ak)"/>
 <rect x="30" y="582" width="900" height="80" rx="5" class="box-o"/>
 <text x="40" y="602" class="t-m">Each response is one call to one tier and one object, so it is one version; a client that reads a large object in ranges sends If-Match with the</text>
-<text x="40" y="618" class="t-m">ETag of its first response and gets 412 if the object changed (section 4: the match accepts the tag of either tier that holds the version). Hot is</text>
+<text x="40" y="618" class="t-m">ETag of its first response and gets 412 if the object changed (section 4: the ETag is the same in both tiers). Hot is</text>
 <text x="40" y="634" class="t-m">replaced atomically (a rename on dir:, one PUT on S3). After the ack, hot holds the new version until it is evicted, and it is evicted only after</text>
 <text x="40" y="650" class="t-m">the leader has made cold hold the same bytes, so a hot miss after the ack finds the new version in cold. A get never reads an entry on a hit.</text>
 </svg>

@@ -71,5 +71,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="40" y="754" class="t-m">A copy that was started before the overwrite can publish after it. That is safe because hot holds v2 for the whole time and a read finds hot</text>
 <text x="40" y="770" class="t-m">first; nothing evicts a key that has an entry. A cold publish of v1 by a stalled leader after C2 is a create-only write against an existing object</text>
 <text x="40" y="786" class="t-m">and fails. A delete that meets the leader's copy waits for the release (the delete diagram); an overwrite does not, because it leaves an object in</text>
-<text x="40" y="802" class="t-m">hot and a delete does not. An overwrite that lands in the cold tier (a multipart completion) does wait (section 5.3).</text>
+<text x="40" y="802" class="t-m">hot and a delete does not. An overwrite that lands in the cold tier (a multipart completion) is refused with 503 at once (section 5.3).</text>
 </svg>
