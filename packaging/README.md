@@ -73,7 +73,8 @@ refuses a key file that its group or others can read):
 - `/etc/tierstore/daemons.key`: a read-only key (`server.read_only_key_files`), for the daemons that
   read blobs and must not write or delete them. A request signed with it may get and head an
   object, list the bucket (objects, and the open multipart uploads), head the bucket, read its region
-  (GetBucketLocation) and list the buckets (ListBuckets); a put, a delete,
+  (GetBucketLocation), list the buckets (ListBuckets) and read the settings of the bucket
+  (versioning, policy, ACL and the rest, answered as S3 does for a bucket with none set); a put, a delete,
   CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
   List one file for each read-only key, to give each reader a key of its own. The access key
@@ -183,7 +184,7 @@ and is longer than it:
 | DeleteObjects (`POST ?delete`) | no: the keys are in the body, which is not read |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
-| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation | no |
+| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation, ListBuckets, the reads of the settings of the bucket | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the prefix, the prefix itself | no |
 
 A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
@@ -237,7 +238,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | DeleteObjects (`POST ?delete`) | none | no: the keys are in the body, and only the full key calls it |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
-| the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, delete) and the root (ListBuckets), any other method | none | no |
+| the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, the reads of its settings, delete) and the root (ListBuckets), any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote (add the
@@ -547,8 +548,15 @@ put 403.
 | `local_cache.write_through` | `false` by default: a read cache that refuses every write with 403 before the role of the key is looked at. `true`: the node takes the writes its keys may do and sends each to the upstream, which must be written with a key that may write; the upstream is not tested at start |
 | `local_cache.whole_fill_limit` | the most an object may be for a ranged read of it to fill the whole of it: a number or a size such as `"512MiB"`, from 1 byte to the `budget` (default 64 MiB); a larger object is passed through and kept nowhere. A fill reads 8 MiB at a time whatever the limit, so raising it does not raise the memory of the fills |
 | `local_cache.cache` | `true`, the default; `false` is refused (leave `[local_cache]` out to run without a cache) |
-| `local_cache.scrub_min_round` | the least time between the starts of two rounds of the scrub (default `"1h"`; at least `"1s"`, or `"0s"`: a round starts as soon as the last is done): a small cache is not read again and again at the rate |
+| `local_cache.scrub_min_round` | the least time between the starts of two rounds of the scrub (default `"1h"`; at least `scrub_tick`, `"1s"` unless that is set, or `"0s"`: a round starts as soon as the last is done): a small cache is not read again and again at the rate |
 | `local_cache.scrub_rate` | the bytes a second the scrub reads, a size and `/s` such as `"50MiB/s"` (default `"16MiB/s"`); `"off"` turns the scrub off |
+| `local_cache.pass_interval` | how often the eviction pass runs (1ms to 1h, default `10s`) |
+| `local_cache.lock_interval` | how often a cache that does not hold the lock of its directory tries it again, and one that holds it checks that the lock file is still the file at the path (1ms to 1h, default `1s`) |
+| `local_cache.scrub_tick` | the time between two ticks of the scrub (1ms to 1h, default `1s`); `scrub_rate` stays a rate in bytes a second, and `scrub_min_round` may not be shorter than a tick |
+| `local_cache.listing_calls` | the most pages of the upstream one listing reads to make up for the names it leaves out (1 to 1000000, default 100); a listing that needs more is answered 503 |
+| `local_cache.forget_limit` | the most keys a read-only cache remembers it deleted or replaced through the upstream (1 to 100000000, default 65536); past it the cache is emptied when it takes the lock |
+| `local_cache.fill_chunk` | the bytes a fill reads from the upstream at a time (4KiB to 1GiB, default `8MiB`) |
+| `local_cache.keep_queue_bytes` | the most bytes of a put's body that may wait for the disk before its copy is dropped (1 byte to 1GiB, default `4MiB`) |
 | `cold_store.endpoints` | a list of exactly one endpoint, in place of `endpoint`: several are refused as not supported yet, since the cache reads from one upstream |
 
 `[cold_store]` is the upstream: any `kind` (an `s3` bucket, with `endpoint` and a `credentials_file`

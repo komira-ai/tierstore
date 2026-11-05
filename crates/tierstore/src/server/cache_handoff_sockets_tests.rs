@@ -71,9 +71,9 @@ impl Shape {
 
 /// The settings of a node of one of the shapes.
 enum Config {
-    Plain(Cli),
-    Build(CacheSettings),
-    Combined(CombinedSettings),
+    Plain(Box<Cli>),
+    Build(Box<CacheSettings>),
+    Combined(Box<CombinedSettings>),
 }
 
 /// The scratch directories of a node of one shape, and its control socket.
@@ -166,20 +166,20 @@ kind = "memory"
                 key = key.display()
             );
             let settings = settings_from_text(&text, QUICK).unwrap();
-            return Config::Plain(settings.into_storage().unwrap());
+            return Config::Plain(Box::new(settings.into_storage().unwrap()));
         }
         let any = "\"127.0.0.1:0\"";
         if let Some(node) = &self.build {
             let text = node.text(&server, "").replace(any, &quoted);
             let settings = settings_from_text(&text, QUICK).unwrap();
-            return Config::Build(settings.into_cache().unwrap());
+            return Config::Build(Box::new(settings.into_cache().unwrap()));
         }
         let node = self.combined.as_ref().expect("a node");
         let lock = self.hot_lock().expect("a lock file");
         let line = format!("lock_file = {:?}", lock.display().to_string());
         let text = node.text_with(&server, &line, "").replace(any, &quoted);
         let settings = settings_from_text(&text, QUICK).unwrap();
-        Config::Combined(settings.into_combined().unwrap())
+        Config::Combined(Box::new(settings.into_combined().unwrap()))
     }
 }
 

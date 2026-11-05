@@ -100,11 +100,14 @@ use super::cache_cli::serve_cache_until_signalled;
 use super::cli_heartbeat::HeartbeatFlags;
 pub(super) use super::cli_oci::{DEFAULT_OCI_PREFIX, oci_setup, oci_setup_of};
 pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
+pub(crate) use super::cli_text::parse_duration;
+pub(super) use super::cli_text::probe_run_id;
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{Settings, keys_for_flags};
 use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
 use super::config_io::IoTuning;
+use super::config_reconcile::ReconcileTuning;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
@@ -318,6 +321,9 @@ pub struct Cli {
     pub copy_parallel: u32,
     /// How long the reconciler's lease lasts without a renewal.
     pub lease_ttl: Duration,
+    /// The idle wait, lease timing, listing page and process waits of the reconciler's loop that
+    /// `[hot_store]` sets.
+    pub reconcile_tuning: ReconcileTuning,
     /// The heartbeat of the proxy: `hot_store.heartbeat`, `hot_store.departure` and
     /// `hot_store.deadline_margin`.
     pub heartbeat: HeartbeatFlags,
@@ -450,40 +456,6 @@ pub struct Cli {
     pub oci_echo_bytes: Option<u64>,
     /// `params.upstream`: the registry the OCI front pulls a missing object from.
     pub(super) oci_upstream: Option<UpstreamTable>,
-}
-
-/// The id of a start for the probe of the cache directory's file system: the proxy id (with any character a
-/// key cannot carry replaced by `_`), the time of the start and the process id, so that two
-/// starts never share a probe object.
-pub(super) fn probe_run_id(proxy_id: &str, now: u64, process: u32) -> String {
-    let safe = |c: char| {
-        if c.is_ascii_alphanumeric() || c == '-' {
-            c
-        } else {
-            '_'
-        }
-    };
-    let proxy: String = proxy_id.chars().map(safe).collect();
-    format!("{proxy}-{now}-{process}")
-}
-
-/// A duration: a whole number of `ms`, `s`, `m` or `h`, such as `250ms` or `15m`.
-pub(crate) fn parse_duration(text: &str) -> Result<Duration, String> {
-    let bad = || format!("{text:?} is not a duration; use a number and ms, s, m or h, as in 15m");
-    let unit_at = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(bad)?;
-    let (digits, unit) = text.split_at(unit_at);
-    let count: u64 = digits.parse().map_err(|_| bad())?;
-    let millis = match unit {
-        "ms" => 1,
-        "s" => 1000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        _ => return Err(bad()),
-    };
-    count
-        .checked_mul(millis)
-        .map(Duration::from_millis)
-        .ok_or_else(bad)
 }
 
 /// The share of a budget that a percent is.
@@ -727,6 +699,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.high_water = share(cli.high_water);
     reconciler.low_water = share(cli.low_water);
     reconciler.parallel = cli.copy_parallel as usize;
+    cli.reconcile_tuning.apply(&mut reconciler);
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
     reconciler.abandoned_upload_after = tuning.abandoned_upload_after;
