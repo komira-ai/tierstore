@@ -85,7 +85,7 @@ pub const RELEASE_BINARY: &str = "bin/tierstore";
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
 /// The capability (`tierstore --capabilities`) of a release that offers and takes listening
 /// sockets over `server.handoff_socket`. Both releases need it for a hand-over.
-pub const HANDOFF_CAPABILITY: &str = "handoff-socket-v1";
+pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_CAPABILITY;
 /// The configuration key of the hand-over socket, in the `[server]` table.
 pub const HANDOFF_SOCKET_KEY: &str = "handoff_socket";
 

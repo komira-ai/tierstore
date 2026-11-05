@@ -31,11 +31,20 @@ pub const RELEASE_VERSION: &str = concat!(
 /// drain of both fronts and the wildcard listeners of both fronts, and this build has all three.
 /// The test `handover_v1_is_listed_with_the_three_behaviours_it_promises` (tests/oci_front) runs
 /// the binary against each of them, so a release that named it without all three would fail it.
-/// This list is all `--capabilities` prints. The update hook's `prepare` step reads the list of
-/// the staged and of the previous release for `update_hook::HANDOFF_CAPABILITY`
-/// (`handoff-socket-v1`), which this build does not list, so the hook records a restart for every
-/// update until a release lists it.
-pub const CAPABILITIES: &[&str] = &["handover-v1"];
+/// The update hook no longer reads it.
+///
+/// [`HANDOFF_SOCKET_CAPABILITY`] says the binary serves through the hand-off of its listening
+/// sockets when `server.handoff_socket` is set (see `server::handoff`). The update hook's
+/// `prepare` step reads the list of the staged and of the previous release for it
+/// (`update_hook::HANDOFF_CAPABILITY`, the same constant) and records a hand-over only when both
+/// list it. This list is all `--capabilities` prints.
+pub const CAPABILITIES: &[&str] = &["handover-v1", HANDOFF_SOCKET_CAPABILITY];
+
+/// `handoff-socket-v1`: a storage node started with `server.handoff_socket` takes the listening
+/// sockets of the instance that answers on that control socket (or binds its own where none
+/// answers), offers them there in its turn, and drains when a successor takes them; the wait for
+/// the running instance is `server.handoff_wait`.
+pub const HANDOFF_SOCKET_CAPABILITY: &str = "handoff-socket-v1";
 
 /// The text `--capabilities` prints for `names`: each name and a newline, nothing for none.
 #[must_use]

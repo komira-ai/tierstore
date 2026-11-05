@@ -6,6 +6,7 @@ use super::{
     RESTART_MODE, Reason, SERVICE_MANAGER_KEY, STAGED_RELEASE_KEY, STATE_DIR, Step,
     TARGET_VERSION_KEY,
 };
+use crate::server::build_info::CAPABILITIES;
 
 /// The operator's page of the hook.
 const PAGE: &str = include_str!("../../../docs/update-hook.md");
@@ -100,4 +101,29 @@ fn the_design_marks_the_redirect_sections_superseded() {
     assert!(DESIGN.contains("## 1. Shape (superseded)"));
     assert!(DESIGN.contains("## 10. Test plan (superseded)"));
     assert!(DESIGN.contains("`crates/tierstore/docs/update-hook.md`"));
+}
+
+/// Asserts that the build lists `handover-v1` and then the capability the hook's `prepare` step
+/// looks for, and that the page names it with the two configuration keys of the hand-off and no
+/// longer says the binary lacks it. It would catch a build whose name for the capability is not
+/// the one the hook reads, and a page telling an operator that every update is a restart.
+#[test]
+fn the_page_says_the_build_lists_the_hand_off() {
+    assert_eq!(CAPABILITIES, ["handover-v1", HANDOFF_CAPABILITY]);
+    for needle in [
+        "`handoff-socket-v1`",
+        "`server.handoff_socket`",
+        "`server.handoff_wait`",
+    ] {
+        assert!(
+            PAGE.contains(needle),
+            "update-hook.md does not name {needle}"
+        );
+    }
+    for stale in [
+        "does not yet implement the hand-over socket",
+        "does not use it yet",
+    ] {
+        assert!(!PAGE.contains(stale), "update-hook.md still says {stale:?}");
+    }
 }

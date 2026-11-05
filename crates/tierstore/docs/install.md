@@ -164,5 +164,5 @@ On Linux an instance starts only when its marker file, `/var/lib/tierstore/run-a
 
 ### What this does not do yet
 
-- An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` and the configuration names a `handoff_socket`; otherwise it is a restart, with a gap. This binary lists `handover-v1` and not `handoff-socket-v1`, so every update is a restart for now ([the hand-over socket](update-hook.md#the-hand-over-socket)).
+- An update is a hand-over only when both releases list `handoff-socket-v1` in `tierstore --capabilities` and the configuration names a `handoff_socket`; otherwise it is a restart, with a gap. This binary lists `handoff-socket-v1`, so the first update that hands over is the one from this release to a later one ([the hand-over socket](update-hook.md#the-hand-over-socket)).
 - An instance stops in at most 975 s (the 70 s `--drain-lb-wait`, the 900 s drain and 5 s for the lease); the unit's `TimeoutStopSec=` is above it, so a `cleanup` that finds the old instance still draining is deferred and run again.

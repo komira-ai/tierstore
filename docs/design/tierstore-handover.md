@@ -20,6 +20,11 @@ is one JSON object; every step idempotent.
 
 This replaces the port-forward of sections 1 to 4 and the slot ports. The hook uses it (`server/handoff/`, entered through
 `run_handing`, with the control socket named by `server.handoff_socket`), on Linux; macOS has no hand-over and restarts.
+The binary calls it: `run_serving` passes the hand-off of the settings, `server.handoff_socket` and `server.handoff_wait`
+(default 10s, 1ms to 1h), to `run_handing`; without `server.handoff_socket` it binds as before and makes no control socket.
+A build node and a storage node with `[local_cache]` refuse both keys, so the hook updates such a node only with
+`mode = "restart"`. A build with it lists `handoff-socket-v1` in `tierstore --capabilities`, beside `handover-v1`, which the
+hook no longer reads.
 
 Problem: an update must not drop a connection, must not need root, and must work the same on Linux and on macOS. A redirect
 (`nft`, `pf`) needs root and differs per OS; two instances on two ports need a fixed port pair.
@@ -56,6 +61,9 @@ Edge cases, each proved by a test in `server/handoff/` or `tests/s3_front/handof
 - Settings that name other addresses than the running instance serves do not take its sockets, since a live update cannot
   change them (`settings_that_name_other_addresses_take_nothing`).
 - A taker of another user is refused (`a_taker_of_another_user_is_refused`).
+
+Not built yet: the proxy id that does not derive from a port. No package sets either key, and the macOS package is not to
+set `server.handoff_socket`: an update on a Mac is a restart.
 
 ### The hook on top of it
 
