@@ -159,3 +159,76 @@ pub(crate) fn parse_complete(body: &[u8]) -> Option<Vec<(u32, String)>> {
         })
         .collect()
 }
+
+/// One `Object` of a `Delete` document.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteObject {
+    pub(crate) key: String,
+    /// Whether the object names a version.
+    pub(crate) versioned: bool,
+}
+
+/// What a `Delete` document asks for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct DeleteRequest {
+    /// Whether the answer leaves out the keys that were deleted.
+    pub(crate) quiet: bool,
+    pub(crate) objects: Vec<DeleteObject>,
+}
+
+/// The objects and the `Quiet` flag a `Delete` body names, in its order. `None` if the body is not
+/// that document: not XML, another root, an object with no key or an empty one, or a `Quiet` that
+/// is not `true` or `false`.
+pub(crate) fn parse_delete(body: &[u8]) -> Option<DeleteRequest> {
+    let text = std::str::from_utf8(body).ok()?;
+    let doc = Document::parse(text).ok()?;
+    let root = doc.root_element();
+    (root.tag_name().name() == "Delete").then_some(())?;
+    let quiet = match child_text(root, "Quiet").map(str::trim) {
+        None => false,
+        Some("true") => true,
+        Some("false") => false,
+        Some(_) => return None,
+    };
+    let objects = root
+        .children()
+        .filter(|node| node.tag_name().name() == "Object")
+        .map(|node| {
+            let key = child_text(node, "Key").filter(|key| !key.is_empty())?;
+            let versioned = child_text(node, "VersionId").is_some();
+            Some(DeleteObject {
+                key: key.to_owned(),
+                versioned,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(DeleteRequest { quiet, objects })
+}
+
+/// What became of one key of a `Delete` call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Deleted,
+    Failed { code: &'static str, message: String },
+}
+
+/// The answer of DeleteObjects: a `Deleted` for each key that was deleted (none if `quiet`) and
+/// an `Error` for each that was not, in the order of the call.
+pub(crate) fn delete_result(results: &[(&str, Outcome)], quiet: bool) -> String {
+    let mut xml = format!("{PROLOG}<DeleteResult xmlns=\"{NAMESPACE}\">");
+    for (key, outcome) in results {
+        let key = escape(key);
+        match outcome {
+            Outcome::Deleted if quiet => {}
+            Outcome::Deleted => xml.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>")),
+            Outcome::Failed { code, message } => {
+                let message = escape(message);
+                xml.push_str(&format!(
+                    "<Error><Key>{key}</Key><Code>{code}</Code><Message>{message}</Message></Error>"
+                ));
+            }
+        }
+    }
+    xml.push_str("</DeleteResult>");
+    xml
+}

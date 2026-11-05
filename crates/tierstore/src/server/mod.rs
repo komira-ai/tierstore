@@ -15,7 +15,9 @@
 //!   exists is `PreconditionFailed`. `If-Match` is answered `PreconditionFailed` for another
 //!   content tag and `NotImplemented` for the right one (an immutable object cannot be
 //!   replaced);
-//! - DeleteObject, which succeeds for a key that is not there;
+//! - DeleteObject, which succeeds for a key that is not there, and DeleteObjects (`POST
+//!   /<bucket>?delete`, up to 1000 keys, `Quiet`, `Content-MD5` or an `x-amz-checksum-*` header
+//!   needed), a result for each key (see [`delete_objects`]), for the full key only;
 //! - ListObjectsV2 with `prefix`, `max-keys`, `continuation-token` and `start-after`, without
 //!   `delimiter`;
 //! - CreateMultipartUpload, UploadPart, CompleteMultipartUpload and AbortMultipartUpload, which
@@ -214,6 +216,7 @@ mod config_tuning;
 mod config_units;
 mod config_unknown;
 mod counted;
+mod delete_objects;
 mod deprecated;
 mod door;
 mod drain;
@@ -281,6 +284,8 @@ mod config_cache_tests;
 mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
+#[cfg(test)]
+mod delete_objects_tests;
 #[cfg(test)]
 mod docs_tests;
 #[cfg(test)]
@@ -422,6 +427,8 @@ pub struct ServerConfig {
     /// a put or of a part is streamed to the backend and is never held whole. (The body of a
     /// request that is not streamed, the XML of a completion, is held, up to this many bytes.)
     pub max_request_bytes: usize,
+    /// The most keys of one DeleteObjects call that are deleted at once (`server.delete_concurrency`).
+    pub delete_concurrency: usize,
     /// How long a request body may go without a byte arriving, and how long the client may
     /// go without taking a byte of an answer, before the request ends: a body that arrives
     /// slowly but steadily is not cut, and neither is a slow reader that keeps taking bytes.
@@ -525,6 +532,7 @@ impl ServerConfig {
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
             max_concurrent_puts: 32,
+            delete_concurrency: 16,
             put_permit_wait: Duration::from_secs(15),
             put_min_bytes_per_sec: 1024,
             put_rate_grace: Duration::from_secs(30),
@@ -902,12 +910,15 @@ impl Server {
                 .role
                 .permit_list_uploads(query.get("prefix").unwrap_or_default())?;
         }
-        let data = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        let deleting = ops::deletes_many(&parts.method, &target, &query);
+        let puts = matches!((&parts.method, &target), (&Method::PUT, Target::Object(_)));
+        // The checksum headers of a put, and of DeleteObjects, are those of the body.
+        let data = puts || deleting;
         let check = Check::new(&signed.payload, &parts.headers, data)?;
         if let Role::Scoped(scopes) = &signed.role {
             scoped::permit(scopes, parts, &target, &query)?;
         }
-        let limit = self.config.max_request_bytes;
+        let limit = ops::body_limit(self.config.max_request_bytes, deleting);
         let limit = signed.presign.as_ref().map_or(limit, |grant| {
             limit.min(usize::try_from(grant.max_object_bytes).unwrap_or(usize::MAX))
         });
