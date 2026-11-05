@@ -773,6 +773,9 @@ The registry front). The params of the entry:
 | `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
 | `params.stage_read` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.max_manifest_bytes` | the largest manifest the front stores, serves or pulls, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.read_chunk_bytes` | the most bytes asked of the store in one call when a blob is served, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.echo_bytes` | the longest piece of a request an error answer repeats, 256 if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
 | `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Without it the front is read-only. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a
