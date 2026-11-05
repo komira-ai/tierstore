@@ -262,6 +262,37 @@ pub struct OpenUpload {
     pub initiated: u64,
 }
 
+/// A part stored in an open upload, as [`Backend::list_parts`] lists it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct UploadedPart {
+    /// The number of the part, from 1.
+    pub number: u32,
+    /// The content tag of the part, as [`Backend::upload_part`] gave it (the tag a completion
+    /// names).
+    pub tag: String,
+    /// The size of the part in bytes.
+    pub size: u64,
+    /// When the part was stored, in milliseconds since the Unix epoch, as the backend's clock
+    /// counts them (as for [`Meta::modified`]).
+    pub modified: u64,
+}
+
+/// The parts of `parts` that a page of [`Backend::list_parts`] holds: those numbered above
+/// `after`, in ascending order of number, at most `max_parts`.
+pub(crate) fn part_page(
+    parts: impl IntoIterator<Item = UploadedPart>,
+    after: Option<u32>,
+    max_parts: usize,
+) -> Vec<UploadedPart> {
+    let mut page: Vec<UploadedPart> = parts
+        .into_iter()
+        .filter(|part| after.is_none_or(|number| part.number > number))
+        .collect();
+    page.sort_by_key(|part| part.number);
+    page.truncate(max_parts);
+    page
+}
+
 /// Where a page of [`Backend::list_uploads`] starts: after this key and, if there is one, this
 /// upload id, which is the last upload of the page before.
 pub type UploadsAfter<'a> = (&'a str, Option<&'a str>);
@@ -736,5 +767,27 @@ pub trait Backend: Send + Sync {
         _max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
         Err(not_supported("list_uploads"))
+    }
+
+    /// A page of the parts stored in the open upload `id` of `key`: those numbered above
+    /// `after` (all of them when it is `None`), in ascending order of number, at most
+    /// `max_parts`. A part sent again with a number replaces the one before, so each number is
+    /// there once, with the tag, the size and the time of the part that stays.
+    ///
+    /// A page of fewer than `max_parts` parts is the last. A part stored or an upload ended
+    /// while the listing is read may or may not be in it. Like the other multipart calls, this
+    /// one is [`Error::Unsupported`] unless the backend overrides it.
+    ///
+    /// # Errors
+    /// [`Error::NotFound`] if no upload `id` of `key` is open. [`Error::Unsupported`] unless the
+    /// backend does multipart uploads.
+    async fn list_parts(
+        &self,
+        _key: &str,
+        _id: &str,
+        _after: Option<u32>,
+        _max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        Err(not_supported("list_parts"))
     }
 }

@@ -18,7 +18,7 @@ use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::stream;
 use objstore_s3::s3::fake::{Failure, FakeS3, part_etag};
-use objstore_s3::s3::{Credentials, OpenUpload, S3Config, S3Store, UploadsPage};
+use objstore_s3::s3::{Credentials, OpenUpload, PartsPage, S3Config, S3Store, UploadsPage};
 use objstore_s3::{
     BodyStream, ByteRange, Capabilities, KeyPrefix, ObjectKey, ObjectStore, ObjectStoreError,
     PageSize,
@@ -767,5 +767,141 @@ async fn a_listing_of_uploads_the_store_refuses_or_garbles_is_an_error() {
     assert!(
         matches!(garbled, Err(ObjectStoreError::Protocol(_))),
         "{garbled:?}"
+    );
+}
+
+/// The numbers and sizes of the parts of a page.
+fn numbered(page: &PartsPage) -> Vec<(u32, u64)> {
+    page.parts.iter().map(|p| (p.number, p.size)).collect()
+}
+
+/// Asserts what `list_parts` sends and reads: a GET of the key with `uploadId`, `max-parts` and
+/// the `part-number-marker`, and a page whose parts carry number, `ETag` (quotes kept), size and
+/// time, with the marker of the next page.
+#[tokio::test]
+async fn a_listing_of_parts_sends_the_request_of_its_name() {
+    let page = "<ListPartsResult><IsTruncated>true</IsTruncated>\
+                <NextPartNumberMarker>4</NextPartNumberMarker>\
+                <Part><PartNumber>3</PartNumber><LastModified>2009-10-12T17:50:30.000Z</LastModified>\
+                <ETag>\"aa\"</ETag><Size>11</Size></Part>\
+                <Part><PartNumber>4</PartNumber><LastModified>2009-10-12T17:50:31.000Z</LastModified>\
+                <ETag>\"bb\"</ETag><Size>12</Size></Part></ListPartsResult>";
+    let (endpoint, seen) = script(vec![answer("200 OK", &[], page)]).await;
+    let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
+    let size = PageSize::new(2).unwrap();
+    let listed = store
+        .list_parts(&key("k"), "u-1", Some(2), size)
+        .await
+        .unwrap();
+    assert_eq!(numbered(&listed), [(3, 11), (4, 12)]);
+    assert_eq!(listed.parts[0].etag, "\"aa\"");
+    assert_eq!(listed.parts[0].modified_millis, 1_255_369_830_000);
+    assert_eq!(listed.next, Some(4));
+    let head = seen.lock().unwrap()[0].head.to_ascii_lowercase();
+    assert!(head.starts_with("get /test-bucket/cas/k?"), "{head}");
+    for piece in ["uploadid=u-1", "max-parts=2", "part-number-marker=2"] {
+        assert!(head.contains(piece), "{piece}: {head}");
+    }
+}
+
+/// Asserts that a listing of parts without a marker sends none, and that the last page has no
+/// next marker.
+#[tokio::test]
+async fn a_listing_of_parts_sends_only_the_marker_it_has() {
+    let last = "<ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>";
+    let (endpoint, seen) = script(vec![answer("200 OK", &[], last)]).await;
+    let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
+    let page = store
+        .list_parts(&key("k"), "u-1", None, PageSize::MAX)
+        .await
+        .unwrap();
+    assert!(page.parts.is_empty() && page.next.is_none());
+    let head = seen.lock().unwrap()[0].head.to_ascii_lowercase();
+    assert!(!head.contains("part-number-marker"), "{head}");
+    assert!(head.contains("max-parts=1000"), "{head}");
+}
+
+/// Asserts, against the loopback service, that the parts of an open upload are listed in
+/// ascending order of number whatever the order they were sent in, with the tag a part was
+/// given when it was sent, its size and the service's time; that a part sent again replaces the
+/// earlier one; that pages follow the marker; and that a listing of an upload that is not
+/// there, one of another key, and one of an ended upload are `NoSuchUpload`.
+#[tokio::test]
+async fn the_parts_of_an_open_upload_are_listed_in_order_and_page_by_number() {
+    let s3 = FakeS3::start().await;
+    s3.set_min_part_bytes(0);
+    s3.set_time(1_255_369_830);
+    let store = s3.store(CONDITIONAL);
+    let (a, b) = (key("a"), key("b"));
+    let id = store.create_multipart(&a).await.unwrap();
+    let three = part(&store, &a, &id, 3, "ccc").await.unwrap();
+    let one = part(&store, &a, &id, 1, "a").await.unwrap();
+    let two = part(&store, &a, &id, 2, "bb").await.unwrap();
+    let whole = store
+        .list_parts(&a, &id, None, PageSize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(numbered(&whole), [(1, 1), (2, 2), (3, 3)]);
+    let tags: Vec<&str> = whole.parts.iter().map(|p| p.etag.as_str()).collect();
+    assert_eq!(tags, [one.as_str(), two.as_str(), three.as_str()]);
+    assert_eq!(whole.parts[0].modified_millis, 1_255_369_830_000);
+    assert!(whole.next.is_none());
+
+    let size = PageSize::new(2).unwrap();
+    let first = store.list_parts(&a, &id, None, size).await.unwrap();
+    assert_eq!(numbered(&first), [(1, 1), (2, 2)]);
+    assert_eq!(first.next, Some(2));
+    let rest = store.list_parts(&a, &id, first.next, size).await.unwrap();
+    assert_eq!(numbered(&rest), [(3, 3)]);
+    assert!(rest.next.is_none());
+
+    let again = part(&store, &a, &id, 2, "zzzz").await.unwrap();
+    let replaced = store
+        .list_parts(&a, &id, Some(1), PageSize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(numbered(&replaced), [(2, 4), (3, 3)]);
+    assert_eq!(replaced.parts[0].etag, again);
+
+    for (key, id) in [(&a, "no-such"), (&b, id.as_str())] {
+        let refused = store.list_parts(key, id, None, PageSize::MAX).await;
+        assert_eq!(refusal(refused), s3_error(404, "NoSuchUpload"));
+    }
+    store.abort_multipart(&a, &id).await.unwrap();
+    let ended = store.list_parts(&a, &id, None, PageSize::MAX).await;
+    assert_eq!(refusal(ended), s3_error(404, "NoSuchUpload"));
+}
+
+/// Asserts that a refusal of the store to a listing of parts is its error, and an answer that
+/// is not a listing of parts is a protocol error.
+#[tokio::test]
+async fn a_listing_of_parts_the_store_refuses_or_garbles_is_an_error() {
+    let denied = "<Error><Code>AccessDenied</Code><Message>m</Message></Error>";
+    let (endpoint, _) = script(vec![
+        answer("403 Forbidden", &[], denied),
+        answer("200 OK", &[], "<ListBucketResult/>"),
+    ])
+    .await;
+    let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
+    let refused = store.list_parts(&key("k"), "u", None, PageSize::MAX).await;
+    assert_eq!(refusal(refused), s3_error(403, "AccessDenied"));
+    let garbled = store.list_parts(&key("k"), "u", None, PageSize::MAX).await;
+    assert!(
+        matches!(garbled, Err(ObjectStoreError::Protocol(_))),
+        "{garbled:?}"
+    );
+}
+
+/// Asserts that a store that cannot be reached gives a transport error for a listing of parts.
+#[tokio::test]
+async fn a_listing_of_parts_on_a_store_that_cannot_be_reached_is_a_transport_error() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
+    let listed = store.list_parts(&key("k"), "u", None, PageSize::MAX).await;
+    assert!(
+        matches!(listed, Err(ObjectStoreError::Transport(_))),
+        "{listed:?}"
     );
 }

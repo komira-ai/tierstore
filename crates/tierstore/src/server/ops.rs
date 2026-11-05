@@ -22,7 +22,7 @@ use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
 use super::time::http_date;
-use super::xml::{self, Listing, UploadListing};
+use super::xml::{self, Listing, PartListing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
 /// `delimiter` and `encoding-type` are parameters of ListObjectsV2 and of ListMultipartUploads,
@@ -30,7 +30,7 @@ use super::xml::{self, Listing, UploadListing};
 /// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 15] = [
+const SUPPORTED: [&str; 17] = [
     "continuation-token",
     "delimiter",
     "encoding-type",
@@ -38,7 +38,9 @@ const SUPPORTED: [&str; 15] = [
     "key-marker",
     "list-type",
     "max-keys",
+    "max-parts",
     "max-uploads",
+    "part-number-marker",
     "partNumber",
     "prefix",
     "start-after",
@@ -303,6 +305,9 @@ impl Server {
             }
             ("GET", Target::Bucket, false) => self.list_objects(query).await,
             ("GET", Target::Bucket, true) if query.has("uploads") => self.list_uploads(query).await,
+            ("GET", Target::Object(key), true) if query.has("uploadId") => {
+                self.list_parts(query, &key).await
+            }
             ("GET", Target::Object(key), false) => self.get_object(parts, &key).await,
             ("HEAD", Target::Object(key), false) => self.head_object(parts, &key).await,
             ("PUT", Target::Object(key), false) => self.put_conditional(parts, &key).await,
@@ -555,6 +560,45 @@ impl Server {
             max_uploads,
             uploads: &page.uploads,
             prefixes: &page.prefixes,
+            next,
+        };
+        Ok(xml_answer(StatusCode::OK, listing.to_xml()))
+    }
+
+    /// ListParts (`GET /<key>?uploadId=`): a page of the parts stored in the upload, in ascending
+    /// order of number, after `part-number-marker` (0 if there is none), at most `max-parts`.
+    /// The backend is asked for one part more than the page, which tells whether the listing goes
+    /// on; a page of no parts is not truncated. An upload the backend does not hold is
+    /// `NoSuchUpload`, also for a page of no parts.
+    async fn list_parts(&self, query: &Query, key: &str) -> Result<Answer, S3Error> {
+        refuse_reserved(key)?;
+        let id = query.get("uploadId").unwrap_or_default();
+        let max_parts = page_size(query, "max-parts", "max-parts")?;
+        let marker = match query.get("part-number-marker") {
+            None => 0,
+            Some(text) => text
+                .parse::<i32>()
+                .ok()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| {
+                    S3Error::invalid(
+                        "Argument part-number-marker must be an integer between 0 and 2147483647",
+                    )
+                })?,
+        };
+        let after = (marker > 0).then_some(marker);
+        let listing = self.backend.list_parts(key, id, after, max_parts + 1);
+        let mut found = listing.await.map_err(upload_error)?;
+        let more = max_parts > 0 && found.len() > max_parts;
+        found.truncate(max_parts);
+        let next = more.then(|| found.last().map(|part| part.number)).flatten();
+        let listing = PartListing {
+            bucket: &self.config.bucket,
+            key,
+            upload_id: id,
+            marker,
+            max_parts,
+            parts: &found,
             next,
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))

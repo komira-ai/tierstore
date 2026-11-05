@@ -13,7 +13,7 @@ use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadsAfter, Window,
+    PartBody, ReadBody, Span, UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -649,6 +649,19 @@ impl Backend for Proxy {
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
         self.inner.cold.abort_upload(key, id).await
+    }
+
+    /// The parts of an open upload are the cold tier's own (see the type), so this asks it.
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        refuse_reserved(key)?;
+        let cold = &self.inner.cold;
+        cold.list_parts(key, id, after, max_parts).await
     }
 
     /// The open uploads are the cold tier's own (see the type), so this asks the cold tier, and

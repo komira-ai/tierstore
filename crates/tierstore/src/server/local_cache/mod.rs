@@ -187,7 +187,8 @@ use tokio::sync::Semaphore;
 use crate::journal::is_reserved;
 use crate::server::lock;
 use crate::{
-    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, PartBody, ReadBody, UploadedPart,
+    UploadsAfter,
 };
 
 pub use disk::{Disk, Space, SystemDisk};
@@ -775,5 +776,19 @@ impl Backend for LocalCache {
     ) -> Result<Vec<OpenUpload>, Error> {
         let found = self.inner.list_data_uploads(prefix, after, max_uploads);
         found.await
+    }
+
+    /// The parts of an upload are the upstream's, listed as its uploads are (also by a node
+    /// that does not write: a listing changes nothing).
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        refuse_reserved(key)?;
+        let upstream = &self.inner.upstream;
+        upstream.list_parts(key, id, after, max_parts).await
     }
 }

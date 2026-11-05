@@ -28,7 +28,7 @@
 //!   starts with a list prefix, and a header-signed HeadObject of such a key, but never GetObject;
 //! - **write**: a create-only PutObject (no `If-Match`, and `If-None-Match` absent or `*`), and
 //!   the calls of a multipart upload of such a key: CreateMultipartUpload, UploadPart,
-//!   CompleteMultipartUpload and AbortMultipartUpload;
+//!   CompleteMultipartUpload, AbortMultipartUpload and ListParts (`GET ?uploadId=`);
 //! - **delete**: DeleteObject of such a key. A delete prefix does not allow an abort: a key that
 //!   can delete an object cannot cancel another client's upload;
 //! - **abort** (a GC key only, never a key file): AbortMultipartUpload of such a key.
@@ -361,6 +361,11 @@ pub(super) fn permit(
             scopes.may_list(listed)
         }
         (&Method::GET, Target::Object(key), false) => covers(&scopes.read, key, true),
+        // ListParts: the right of the key that sends the parts (S3 asks for the permission
+        // `s3:ListMultipartUploadParts`, which goes with the writes of an upload).
+        (&Method::GET, Target::Object(key), true) if query.has("uploadId") => {
+            covers(&scopes.write, key, true)
+        }
         (&Method::HEAD, Target::Object(key), false) => {
             // A presigned URL (no `authorization` header) is held to the read prefixes.
             let signed = parts.headers.contains_key("authorization");

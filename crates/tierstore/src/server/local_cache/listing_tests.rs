@@ -152,6 +152,38 @@ async fn a_listing_inside_a_reserved_prefix_asks_the_upstream_nothing() {
     assert_eq!(rig.calls(Op::ListUploads), 0);
 }
 
+/// Asserts that a cache lists the parts of an upload from its upstream, as it lists the uploads,
+/// whether or not it writes (a listing changes nothing), and refuses the keys the storage node
+/// keeps for itself without a call to the upstream.
+#[tokio::test]
+async fn list_parts_is_the_upstreams_and_leaves_out_the_reserved_keys() {
+    for rig in [
+        Rig::new("tscache-parts-read"),
+        Rig::writing("tscache-parts-write"),
+    ] {
+        let id = rig.tamper.create_upload("jobs/a").await.unwrap();
+        let part: crate::PartBody =
+            futures::StreamExt::boxed(futures::stream::iter(vec![Ok(Bytes::from_static(b"abc"))]));
+        let tag = rig
+            .tamper
+            .upload_part("jobs/a", &id, 1, part)
+            .await
+            .unwrap();
+        let listed = rig.cache.list_parts("jobs/a", &id, None, 10).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!((listed[0].number, listed[0].size), (1, 3));
+        assert_eq!(listed[0].tag, tag);
+        assert_eq!(rig.calls(Op::ListParts), 1);
+        let past = rig.cache.list_parts("jobs/a", &id, Some(1), 10).await;
+        assert!(past.unwrap().is_empty());
+        for key in ["_journal/p1/0", "_tiering/lease"] {
+            let refused = rig.cache.list_parts(key, &id, None, 10).await;
+            assert!(matches!(refused, Err(Error::Reserved(_))), "{key}");
+        }
+        assert_eq!(rig.calls(Op::ListParts), 2);
+    }
+}
+
 /// Asserts that a large reserved range costs about one call of the upstream and not one for each
 /// page of it: two thousand keys under `_journal/` and some under `_tiering/`, between data keys
 /// and the data keys `_journal0` and `_tiering0` that sort right after each range (which the jump

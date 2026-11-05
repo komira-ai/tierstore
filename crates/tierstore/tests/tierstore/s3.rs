@@ -14,6 +14,7 @@ use tierstore::s3::{Capabilities, Credentials, S3Config};
 use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, SystemClock};
 
 use crate::conformance;
+use crate::list_parts::contract as parts_contract;
 use crate::list_uploads::contract as uploads_contract;
 use crate::multipart::{contract, large};
 use crate::support::{body, keys, page};
@@ -456,6 +457,121 @@ async fn a_listing_of_uploads_that_fails_is_an_error() {
     let store = S3Backend::new(config(&endpoint)).unwrap();
     assert_other(store.list_uploads("", Some(("", None)), 10).await);
     assert_other(store.list_uploads("a//b", None, 10).await);
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+/// Asserts that the S3 backend lists the parts of an open upload as the trait says, held to the
+/// same checks as the in-memory and the directory backend (ListParts with `max-parts` and the
+/// `part-number-marker`), that the tag of a part is the `ETag` of the service without quotes, as
+/// the upload of the part gave it, and that the time of a part is the service's in milliseconds.
+#[tokio::test]
+async fn the_s3_backend_lists_the_parts_of_an_open_upload() {
+    let (s3, backend) = backend().await;
+    s3.set_min_part_bytes(0);
+    s3.set_time(1_255_369_830);
+    let id = backend.create_upload("when").await.unwrap();
+    let uploading = backend.upload_part("when", &id, 1, chunks(&["abcd"]));
+    let tag = uploading.await.unwrap();
+    let listed = backend.list_parts("when", &id, None, 10).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tag, tag);
+    assert_eq!(listed[0].tag, part_etag(b"abcd").trim_matches('"'));
+    assert_eq!((listed[0].number, listed[0].size), (1, 4));
+    assert_eq!(listed[0].modified, 1_255_369_830_000);
+    backend.abort_upload("when", &id).await.unwrap();
+
+    parts_contract(&backend).await;
+    assert_eq!(s3.incomplete_uploads(), 0);
+}
+
+/// Asserts that the S3 backend asks for the pages of a listing of parts until it has the number
+/// asked for or the listing ends, from the marker of each page, asks for no more than it needs,
+/// and ends with an error when a page names a marker that does not advance.
+#[tokio::test]
+async fn the_s3_backend_follows_the_pages_of_a_listing_of_parts() {
+    const FIRST: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n\
+                         <ListPartsResult><IsTruncated>true</IsTruncated>\
+                         <NextPartNumberMarker>1</NextPartNumberMarker>\
+                         <Part><PartNumber>1</PartNumber>\
+                         <LastModified>2009-10-12T17:50:30.000Z</LastModified>\
+                         <ETag>\"a\"</ETag><Size>5</Size></Part></ListPartsResult>";
+    const LAST: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n\
+                        <ListPartsResult><IsTruncated>false</IsTruncated>\
+                        <Part><PartNumber>2</PartNumber>\
+                        <LastModified>2009-10-12T17:50:31.000Z</LastModified>\
+                        <ETag>\"b\"</ETag><Size>6</Size></Part>\
+                        <Part><PartNumber>3</PartNumber>\
+                        <LastModified>2009-10-12T17:50:31.000Z</LastModified>\
+                        <ETag>\"c\"</ETag><Size>7</Size></Part></ListPartsResult>";
+    let (endpoint, seen) = scripted(vec![FIRST, LAST]);
+    let backend = S3Backend::new(config(&endpoint)).unwrap();
+    let listed = backend.list_parts("k", "u", None, 2).await.unwrap();
+    let numbers: Vec<(u32, &str)> = listed.iter().map(|p| (p.number, p.tag.as_str())).collect();
+    assert_eq!(numbers, [(1, "a"), (2, "b")]);
+    {
+        let heads = seen.lock().unwrap();
+        assert_eq!(heads.len(), 2);
+        assert!(!heads[0].contains("part-number-marker"), "{}", heads[0]);
+        assert!(heads[0].contains("max-parts=2"), "{}", heads[0]);
+        assert!(heads[1].contains("part-number-marker=1"), "{}", heads[1]);
+        assert!(heads[1].contains("max-parts=1"), "{}", heads[1]);
+    }
+
+    const STUCK: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n\
+                         <ListPartsResult><IsTruncated>true</IsTruncated>\
+                         <NextPartNumberMarker>4</NextPartNumberMarker></ListPartsResult>";
+    let (endpoint, seen) = scripted(vec![STUCK, STUCK]);
+    let backend = S3Backend::new(config(&endpoint)).unwrap();
+    let error = backend.list_parts("k", "u", Some(4), 10).await.unwrap_err();
+    assert!(error.to_string().contains("did not advance"), "{error}");
+    assert_other(Err::<(), Error>(error));
+    assert_eq!(seen.lock().unwrap().len(), 1);
+
+    let (endpoint, seen) = scripted(vec![STUCK, STUCK]);
+    let backend = S3Backend::new(config(&endpoint)).unwrap();
+    let error = backend.list_parts("k", "u", None, 10).await.unwrap_err();
+    assert_other(Err::<(), Error>(error));
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+/// Asserts that a listing of parts that the service refuses, or answers with something that is
+/// not a listing of parts, is an `Other` error, that an upload the service does not hold is
+/// `NotFound`, that a key the client cannot name asks nothing of the service, and that a page
+/// size above what S3 serves is asked for as the most S3 serves.
+#[tokio::test]
+async fn a_listing_of_parts_that_fails_is_an_error() {
+    let (endpoint, _) = scripted(vec!["HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n<html/>"]);
+    let store = S3Backend::new(config(&endpoint)).unwrap();
+    assert_other(store.list_parts("k", "u", None, 10).await);
+
+    let refusal = "HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n";
+    let (endpoint, _) = scripted(vec![refusal]);
+    let store = S3Backend::new(config(&endpoint)).unwrap();
+    assert_other(store.list_parts("k", "u", None, 10).await);
+
+    const MISSING: &str = "HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n\
+                           <Error><Code>NoSuchUpload</Code><Message>m</Message></Error>";
+    let (endpoint, _) = scripted(vec![MISSING]);
+    let store = S3Backend::new(config(&endpoint)).unwrap();
+    let missing = store.list_parts("k", "u", None, 10).await;
+    assert!(matches!(missing, Err(Error::NotFound(_))), "{missing:?}");
+
+    const EMPTY: &str = "HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n\
+                         <ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>";
+    let (endpoint, seen) = scripted(vec![EMPTY]);
+    let store = S3Backend::new(config(&endpoint)).unwrap();
+    assert!(
+        store
+            .list_parts("k", "u", None, 1 << 20)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(seen.lock().unwrap()[0].contains("max-parts=1000"));
+
+    let (endpoint, seen) = scripted(vec![]);
+    let store = S3Backend::new(config(&endpoint)).unwrap();
+    assert_other(store.list_parts("a//b", "u", None, 10).await);
     assert!(seen.lock().unwrap().is_empty());
 }
 

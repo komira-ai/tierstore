@@ -9,7 +9,8 @@ use bytes::Bytes;
 use tokio::sync::{oneshot, watch};
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, Op, OpenUpload, PartBody, ReadBody, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, Op, OpenUpload, PartBody, ReadBody, UploadedPart,
+    UploadsAfter,
 };
 
 /// Where in a call a [`Gate`] parks it.
@@ -343,5 +344,16 @@ impl Backend for GateBackend {
     ) -> Result<Vec<OpenUpload>, Error> {
         let call = self.inner.list_uploads(prefix, after, max_uploads);
         self.through(Op::ListUploads, prefix, call).await
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        let call = self.inner.list_parts(key, id, after, max_parts);
+        self.through(Op::ListParts, key, call).await
     }
 }

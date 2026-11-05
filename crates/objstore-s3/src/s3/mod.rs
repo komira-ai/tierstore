@@ -42,7 +42,7 @@ mod xml;
 pub use multipart::{
     MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, MULTIPART_THRESHOLD, PART_BYTES, part_size,
 };
-pub use parts::{OpenUpload, UploadsPage};
+pub use parts::{OpenUpload, PartsPage, StoredPart, UploadsPage};
 pub use streamed::{ObjectBody, ObjectRead};
 pub use tagged::{ObjectHead, StampedObject, StampedPage};
 pub use tuning::{READ_RETRIES, S3Tuning};

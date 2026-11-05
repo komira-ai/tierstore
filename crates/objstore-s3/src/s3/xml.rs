@@ -3,7 +3,7 @@
 
 use roxmltree::{Document, Node};
 
-use super::parts::{OpenUpload, UploadsPage};
+use super::parts::{OpenUpload, PartsPage, StoredPart, UploadsPage};
 use super::tagged::{StampedObject, StampedPage};
 use super::times;
 use crate::types::Token;
@@ -171,6 +171,49 @@ pub(crate) fn uploads_page(body: &[u8]) -> Result<UploadsPage, ObjectStoreError>
         None
     };
     Ok(UploadsPage { uploads, next })
+}
+
+/// A ListParts answer as a [`PartsPage`]: every part must carry a number, an `ETag`, a size and
+/// a readable `<LastModified>`, and a truncated answer must say where it goes on.
+pub(crate) fn parts_page(body: &[u8]) -> Result<PartsPage, ObjectStoreError> {
+    let bad = |what: String| ObjectStoreError::Protocol(format!("ListParts answer: {what}"));
+    let text = std::str::from_utf8(body).map_err(|e| bad(e.to_string()))?;
+    let doc = Document::parse(text).map_err(|e| bad(e.to_string()))?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "ListPartsResult" {
+        return Err(bad(format!("root element is <{}>", root.tag_name().name())));
+    }
+    let number_of = |entry: Node<'_, '_>, name: &str| child_text(entry, name)?.trim().parse().ok();
+    let mut parts = Vec::new();
+    for entry in root.children().filter(|n| is_named(*n, "Part")) {
+        let number = number_of(entry, "PartNumber")
+            .ok_or_else(|| bad("<Part> without a readable <PartNumber>".into()))?;
+        let etag = child_text(entry, "ETag").filter(|tag| !tag.is_empty());
+        let etag = etag.ok_or_else(|| bad(format!("part {number}: no <ETag>")))?;
+        let size = child_text(entry, "Size").and_then(|size| size.trim().parse().ok());
+        let size = size.ok_or_else(|| bad(format!("part {number}: missing or bad <Size>")))?;
+        let modified = child_text(entry, "LastModified").and_then(times::iso8601_millis);
+        let modified_millis =
+            modified.ok_or_else(|| bad(format!("part {number}: missing or bad <LastModified>")))?;
+        parts.push(StoredPart {
+            number,
+            etag: etag.to_owned(),
+            size,
+            modified_millis,
+        });
+    }
+    let truncated = match child_text(root, "IsTruncated") {
+        Some("true") => true,
+        Some("false") | None => false,
+        Some(other) => return Err(bad(format!("<IsTruncated> is {other:?}"))),
+    };
+    let next = if truncated {
+        let next = number_of(root, "NextPartNumberMarker");
+        Some(next.ok_or_else(|| bad("truncated without <NextPartNumberMarker>".into()))?)
+    } else {
+        None
+    };
+    Ok(PartsPage { parts, next })
 }
 
 /// The body of CompleteMultipartUpload: each part's number and ETag, in order.
@@ -569,5 +612,87 @@ mod tests {
         assert!(uploads_page(&[0xff, 0xfe]).is_err());
         let fine = wrap(&format!("<Upload>{whole}</Upload>"));
         assert_eq!(uploads_page(fine.as_bytes()).unwrap().uploads.len(), 1);
+    }
+
+    /// Asserts that a ListParts page carries each part's number, `ETag` as sent (quotes
+    /// kept), size and time, and the marker of the next page when truncated, whatever the
+    /// namespace and the extra elements around (`Initiator`, `Owner`, `StorageClass`); and that
+    /// the last page has no next marker.
+    #[test]
+    fn a_parts_page_carries_numbers_etags_sizes_times_and_the_next_marker() {
+        let body = format!(
+            "<ListPartsResult {NS}><Bucket>b</Bucket><Key>k</Key><StorageClass>STANDARD</StorageClass>\
+             <IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker>\
+             <Part><PartNumber>1</PartNumber><LastModified>2009-10-12T17:50:30.000Z</LastModified>\
+             <ETag>&quot;aa&quot;</ETag><Size>5</Size></Part>\
+             <Part><PartNumber>2</PartNumber><LastModified>2009-10-12T17:50:31.500Z</LastModified>\
+             <ETag>&quot;bb&quot;</ETag><Size>6</Size></Part></ListPartsResult>"
+        );
+        let page = parts_page(body.as_bytes()).unwrap();
+        let got: Vec<_> = page
+            .parts
+            .iter()
+            .map(|p| (p.number, p.etag.as_str(), p.size, p.modified_millis))
+            .collect();
+        let want = [
+            (1, "\"aa\"", 5, 1_255_369_830_000),
+            (2, "\"bb\"", 6, 1_255_369_831_500),
+        ];
+        assert_eq!(got, want);
+        assert_eq!(page.next, Some(2));
+
+        let last = "<ListPartsResult><IsTruncated>false</IsTruncated></ListPartsResult>";
+        let page = parts_page(last.as_bytes()).unwrap();
+        assert_eq!((page.parts.len(), page.next), (0, None));
+    }
+
+    /// Asserts that a ListParts page that breaks the contract is a protocol error: a part
+    /// without a readable number, an `ETag`, a size or a time, a flag that is not true or false,
+    /// a truncated page that says nowhere it goes on, and a document of another kind.
+    #[test]
+    fn parts_answers_that_break_the_contract_are_protocol_errors() {
+        let wrap = |inner: &str| format!("<ListPartsResult>{inner}</ListPartsResult>");
+        let at = "<LastModified>2009-10-12T17:50:30.000Z</LastModified>";
+        let whole = format!("<PartNumber>1</PartNumber>{at}<ETag>\"a\"</ETag><Size>1</Size>");
+        let broken = [
+            wrap("<IsTruncated>true</IsTruncated>"),
+            wrap("<IsTruncated>true</IsTruncated><NextPartNumberMarker>x</NextPartNumberMarker>"),
+            wrap("<IsTruncated>maybe</IsTruncated>"),
+            wrap(&format!(
+                "<Part>{at}<ETag>\"a\"</ETag><Size>1</Size></Part>"
+            )),
+            wrap(&format!(
+                "<Part><PartNumber>one</PartNumber>{at}<ETag>\"a\"</ETag><Size>1</Size></Part>"
+            )),
+            wrap(&format!(
+                "<Part><PartNumber>1</PartNumber>{at}<Size>1</Size></Part>"
+            )),
+            wrap(&format!(
+                "<Part><PartNumber>1</PartNumber>{at}<ETag></ETag><Size>1</Size></Part>"
+            )),
+            wrap(&format!(
+                "<Part><PartNumber>1</PartNumber>{at}<ETag>\"a\"</ETag></Part>"
+            )),
+            wrap(&format!(
+                "<Part><PartNumber>1</PartNumber>{at}<ETag>\"a\"</ETag><Size>big</Size></Part>"
+            )),
+            wrap("<Part><PartNumber>1</PartNumber><ETag>\"a\"</ETag><Size>1</Size></Part>"),
+            wrap(
+                "<Part><PartNumber>1</PartNumber><LastModified>soon</LastModified>\
+                 <ETag>\"a\"</ETag><Size>1</Size></Part>",
+            ),
+            "<ListBucketResult></ListBucketResult>".to_owned(),
+            "not xml".to_owned(),
+        ];
+        for body in broken {
+            let err = parts_page(body.as_bytes()).unwrap_err();
+            assert!(
+                matches!(err, ObjectStoreError::Protocol(_)),
+                "{body}: {err:?}"
+            );
+        }
+        assert!(parts_page(&[0xff, 0xfe]).is_err());
+        let fine = wrap(&format!("<Part>{whole}</Part>"));
+        assert_eq!(parts_page(fine.as_bytes()).unwrap().parts.len(), 1);
     }
 }
