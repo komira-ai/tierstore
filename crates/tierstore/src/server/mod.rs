@@ -38,7 +38,14 @@
 //!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
 //! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
 //!   filters and `max-buckets` checked; it has the epoch for a creation date, since the server
-//!   does not know when the bucket was made, and `tierstore` for the owner.
+//!   does not know when the bucket was made, and `tierstore` for the owner;
+//! - the reads of the settings of the bucket (`GET /<bucket>?versioning`, `object-lock`, `acl`,
+//!   `policy`, `lifecycle`, `cors`, `encryption`, `tagging`, `replication`, `website`,
+//!   `notification`, `accelerate`, `logging`, `requestPayment`, `ownershipControls`,
+//!   `publicAccessBlock`, `policyStatus`), each answered as S3 answers a bucket on which that
+//!   is not set: an empty document, the owner's `FULL_CONTROL` for the ACL, or the 404 code S3
+//!   gives (`NoSuchBucketPolicy`, `ObjectLockConfigurationNotFoundError`, ...). The writes of
+//!   them are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
@@ -257,6 +264,8 @@ mod xml;
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+#[cfg(test)]
+mod bucket_config_tests;
 #[cfg(test)]
 mod bucket_tests;
 #[cfg(test)]

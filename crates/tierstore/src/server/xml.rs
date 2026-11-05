@@ -42,6 +42,31 @@ pub(crate) fn location(region: &str) -> String {
     format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
+/// The answer to a read of a setting that S3 answers with an empty document when it is not set.
+pub(crate) fn empty_setting(root: &str) -> String {
+    format!("{PROLOG}<{root} xmlns=\"{NAMESPACE}\"/>")
+}
+
+/// The answer of GetBucketRequestPayment: the bucket owner pays.
+pub(crate) fn payer() -> String {
+    format!(
+        "{PROLOG}<RequestPaymentConfiguration xmlns=\"{NAMESPACE}\">\
+         <Payer>BucketOwner</Payer></RequestPaymentConfiguration>"
+    )
+}
+
+/// The answer of GetBucketAcl: the owner, with full control, and no other grant.
+pub(crate) fn acl() -> String {
+    let who = format!("<ID>{OWNER}</ID><DisplayName>{OWNER}</DisplayName>");
+    let schema = "http://www.w3.org/2001/XMLSchema-instance";
+    format!(
+        "{PROLOG}<AccessControlPolicy xmlns=\"{NAMESPACE}\"><Owner>{who}</Owner>\
+         <AccessControlList><Grant><Grantee xmlns:xsi=\"{schema}\" xsi:type=\"CanonicalUser\">\
+         {who}</Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList>\
+         </AccessControlPolicy>"
+    )
+}
+
 /// The owner of the bucket in the answers that name one. The server has no accounts: every key of
 /// it acts for the one owner, so the id and the display name are fixed, and say what holds it.
 pub(crate) const OWNER: &str = "tierstore";

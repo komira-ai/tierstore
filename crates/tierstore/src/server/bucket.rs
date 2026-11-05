@@ -8,10 +8,119 @@ use super::reply::{Answer, S3Error, xml_answer};
 use super::request::{Query, Target};
 use super::xml;
 
-/// Whether the request is GetBucketLocation: a `GET` of the bucket with `location` (S3 reads
-/// `?location` and `?location=` alike).
-pub(super) fn asks_location(method: &str, target: &Target, query: &Query) -> bool {
-    method == "GET" && *target == Target::Bucket && query.has("location")
+/// How S3 answers a read of a setting of a bucket on which nothing is set.
+pub(super) enum Unset {
+    /// 200 and an empty document with this root element.
+    Empty(&'static str),
+    /// 200 and the payer, the bucket owner.
+    Payer,
+    /// 200 and the ACL that gives the owner full control.
+    Acl,
+    /// 404 with this S3 error code and text.
+    Missing(&'static str, &'static str),
+}
+
+/// The settings of a bucket that can be read (`GET /<bucket>?<name>`), and what S3 answers for a
+/// bucket on which none is set. This server keeps none: the bucket is made by configuration and
+/// a setting cannot be written (a write of one is `NotImplemented`), so every read gets this.
+/// The encryption is among them on purpose: S3 now encrypts every bucket with its own keys and
+/// says so, but tierstore does not encrypt what it stores, and does not say it does.
+const UNSET: [(&str, Unset); 17] = [
+    ("versioning", Unset::Empty("VersioningConfiguration")),
+    ("notification", Unset::Empty("NotificationConfiguration")),
+    ("accelerate", Unset::Empty("AccelerateConfiguration")),
+    ("logging", Unset::Empty("BucketLoggingStatus")),
+    ("requestPayment", Unset::Payer),
+    ("acl", Unset::Acl),
+    (
+        "object-lock",
+        Unset::Missing(
+            "ObjectLockConfigurationNotFoundError",
+            "Object Lock configuration does not exist for this bucket",
+        ),
+    ),
+    (
+        "policy",
+        Unset::Missing("NoSuchBucketPolicy", "The bucket policy does not exist"),
+    ),
+    (
+        "policyStatus",
+        Unset::Missing("NoSuchBucketPolicy", "The bucket policy does not exist"),
+    ),
+    (
+        "lifecycle",
+        Unset::Missing(
+            "NoSuchLifecycleConfiguration",
+            "The lifecycle configuration does not exist",
+        ),
+    ),
+    (
+        "cors",
+        Unset::Missing(
+            "NoSuchCORSConfiguration",
+            "The CORS configuration does not exist",
+        ),
+    ),
+    (
+        "encryption",
+        Unset::Missing(
+            "ServerSideEncryptionConfigurationNotFoundError",
+            "The server side encryption configuration was not found",
+        ),
+    ),
+    (
+        "tagging",
+        Unset::Missing("NoSuchTagSet", "The TagSet does not exist"),
+    ),
+    (
+        "replication",
+        Unset::Missing(
+            "ReplicationConfigurationNotFoundError",
+            "The replication configuration was not found",
+        ),
+    ),
+    (
+        "website",
+        Unset::Missing(
+            "NoSuchWebsiteConfiguration",
+            "The specified bucket does not have a website configuration",
+        ),
+    ),
+    (
+        "ownershipControls",
+        Unset::Missing(
+            "OwnershipControlsNotFoundError",
+            "The bucket ownership controls were not found",
+        ),
+    ),
+    (
+        "publicAccessBlock",
+        Unset::Missing(
+            "NoSuchPublicAccessBlockConfiguration",
+            "The public access block configuration was not found",
+        ),
+    ),
+];
+
+/// The setting of the bucket that a request reads.
+pub(super) enum Setting {
+    Location,
+    Unset(&'static Unset),
+}
+
+/// The setting of the bucket that the request reads, if it is a `GET` of the bucket with
+/// `location` (GetBucketLocation) or one of the names of [`UNSET`], with or without a value, as
+/// S3 reads them. When it names more than one, `location` comes first and then the order of
+/// [`UNSET`].
+pub(super) fn asks_setting(method: &str, target: &Target, query: &Query) -> Option<Setting> {
+    if method != "GET" || *target != Target::Bucket {
+        return None;
+    }
+    if query.has("location") {
+        return Some(Setting::Location);
+    }
+    let found = UNSET.iter().find(|(name, _)| query.has(name));
+    found.map(|(_, unset)| Setting::Unset(unset))
 }
 
 /// Whether the request is ListBuckets: a `GET` of the service root.
@@ -64,10 +173,22 @@ impl Server {
         ))
     }
 
-    /// GetBucketLocation: the region of the server. S3 gives an empty `LocationConstraint` for
-    /// `us-east-1`, and the name of the region for every other.
-    pub(super) fn location(&self) -> Answer {
-        let region = self.config.region.as_str();
-        xml_answer(StatusCode::OK, xml::location(region))
+    /// A read of a setting of the bucket: GetBucketLocation, which is the region of the server
+    /// (S3 gives an empty `LocationConstraint` for `us-east-1`, and the name of the region for
+    /// every other), or what S3 answers for a setting that is not set.
+    pub(super) fn setting(&self, setting: &Setting) -> Result<Answer, S3Error> {
+        let unset = match setting {
+            Setting::Location => {
+                let region = self.config.region.as_str();
+                return Ok(xml_answer(StatusCode::OK, xml::location(region)));
+            }
+            Setting::Unset(unset) => unset,
+        };
+        match unset {
+            Unset::Empty(root) => Ok(xml_answer(StatusCode::OK, xml::empty_setting(root))),
+            Unset::Payer => Ok(xml_answer(StatusCode::OK, xml::payer())),
+            Unset::Acl => Ok(xml_answer(StatusCode::OK, xml::acl())),
+            Unset::Missing(code, text) => Err(S3Error::new(StatusCode::NOT_FOUND, code, *text)),
+        }
     }
 }
