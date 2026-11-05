@@ -397,6 +397,7 @@ impl Backend for Overrides {
             key: "from-list-page".to_owned(),
             size: 0,
             modified: 0,
+            tag: String::new(),
         };
         Ok(vec![page])
     }

@@ -231,6 +231,29 @@ async fn a_stamped_listing_pages_with_times_a_start_after_key_and_tokens() {
     assert_eq!(rest.next, None);
 }
 
+/// Asserts that the tag a stamped listing gives for an object is the tag a HEAD of it gives.
+#[tokio::test]
+async fn a_stamped_listing_gives_the_tag_of_a_head() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    for name in ["a/1", "a/2"] {
+        store
+            .put_new(&key(name), Bytes::from(name), None)
+            .await
+            .unwrap();
+    }
+    let prefix = KeyPrefix::new("a/").unwrap();
+    let page = store
+        .list_stamped(&prefix, None, PageSize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(page.objects.len(), 2);
+    for object in &page.objects {
+        let head = store.head(&object.key).await.unwrap();
+        assert_eq!(object.etag, head.etag);
+    }
+}
+
 /// Asserts that `len` is the size a HEAD gives, for a one-byte, an empty and a larger
 /// object, and `None` for a key with no object (a 404 is an answer, not an error), also
 /// after a delete.

@@ -116,9 +116,12 @@ impl Listing<'_> {
         for object in self.objects {
             let key = text(&object.key);
             let (size, modified) = (object.size, iso8601(object.modified));
+            // The tag in quotes, as the `ETag` header of a HEAD of the object has it.
+            let etag = escape(&format!("\"{}\"", object.tag));
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
-                 <Size>{size}</Size>{owner}<StorageClass>STANDARD</StorageClass></Contents>"
+                 <ETag>{etag}</ETag><Size>{size}</Size>{owner}\
+                 <StorageClass>STANDARD</StorageClass></Contents>"
             ));
         }
         for prefix in self.prefixes {

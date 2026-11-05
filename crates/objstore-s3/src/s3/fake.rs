@@ -923,9 +923,10 @@ fn list(state: &State, request: &Request) -> Vec<u8> {
     for (key, stored) in page {
         body.push_str(&format!(
             "<Contents><Key>{key}</Key><Size>{}</Size>\
-             <LastModified>{}</LastModified></Contents>",
+             <LastModified>{}</LastModified><ETag>{}</ETag></Contents>",
             stored.kept.len,
-            iso_date(stored.modified)
+            iso_date(stored.modified),
+            stored.etag()
         ));
     }
     let more = page.last().filter(|_| matching.len() > page.len());

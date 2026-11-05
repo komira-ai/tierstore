@@ -283,6 +283,7 @@ impl Backend for MemoryBackend {
                 key: key.clone(),
                 size: stored.body.len() as u64,
                 modified: stored.modified,
+                tag: tag_of(&stored.body),
             })
             .collect();
         Ok(listed)

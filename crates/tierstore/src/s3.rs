@@ -322,6 +322,7 @@ fn listed_of(object: StampedObject) -> Listed {
         key: object.key.as_str().to_owned(),
         size: object.size,
         modified: object.modified_millis,
+        tag: unquoted(&object.etag),
     }
 }
 

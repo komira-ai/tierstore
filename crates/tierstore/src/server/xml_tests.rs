@@ -12,6 +12,7 @@ fn listed(key: &str, size: u64, modified: u64) -> Listed {
         key: key.to_owned(),
         size,
         modified,
+        tag: format!("tag-{key}"),
     }
 }
 
@@ -271,4 +272,51 @@ fn a_page_with_common_prefixes_counts_and_echoes_them() {
     assert_eq!(texts(&xml, "Key"), ["a+b"]);
     assert_eq!(texts(&xml, "StartAfter"), ["a%26"]);
     assert_eq!(texts(&xml, "ContinuationToken"), ["6162"]);
+}
+
+/// Asserts that an object of a listing carries its tag in quotes, as the `ETag` header of an
+/// object read has it, between `LastModified` and `Size`, with `Owner` after the size and
+/// `StorageClass` last, and that `encoding-type=url` leaves the tag as it is (it is no name).
+#[test]
+fn a_listed_object_carries_its_quoted_tag_in_the_position_of_s3() {
+    let mut object = listed("a b", 7, 0);
+    object.tag = "d41d8cd9&8f".to_owned();
+    let objects = [object];
+    let mut listing = Listing {
+        bucket: "bkt",
+        prefix: "",
+        delimiter: None,
+        url: false,
+        start_after: None,
+        continuation_token: None,
+        max_keys: 1000,
+        owner: true,
+        objects: &objects,
+        prefixes: &[],
+        next: None,
+    };
+    for url in [false, true] {
+        listing.url = url;
+        let xml = listing.to_xml();
+        assert_eq!(texts(&xml, "ETag"), ["\"d41d8cd9&8f\""]);
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let contents = doc
+            .descendants()
+            .find(|node| node.tag_name().name() == "Contents")
+            .unwrap();
+        let names: Vec<_> = contents
+            .children()
+            .filter(|node| node.is_element())
+            .map(|node| node.tag_name().name())
+            .collect();
+        let want = [
+            "Key",
+            "LastModified",
+            "ETag",
+            "Size",
+            "Owner",
+            "StorageClass",
+        ];
+        assert_eq!(names, want);
+    }
 }

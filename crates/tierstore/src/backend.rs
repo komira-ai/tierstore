@@ -243,6 +243,9 @@ pub struct Listed {
     pub size: u64,
     /// When the object was last written, as in [`Meta::modified`].
     pub modified: u64,
+    /// The object's content tag, as [`Backend::head`] gives it in [`Meta::tag`] (the tier that
+    /// answers the HEAD is the one whose listing entry is kept; see each backend).
+    pub tag: String,
 }
 
 /// A multipart upload that was started and is neither completed nor aborted, as

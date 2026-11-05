@@ -139,6 +139,13 @@ async fn a_listing_holds_the_keys_under_a_prefix_in_order() {
     conformance::a_listing_holds_the_keys_under_a_prefix_in_order(&backend).await;
 }
 
+/// Asserts that the tag of a listed object is the tag a HEAD of it gives.
+#[tokio::test]
+async fn a_listing_gives_the_tag_a_head_gives() {
+    let (_s3, backend) = backend().await;
+    conformance::a_listing_gives_the_tag_a_head_gives(&backend).await;
+}
+
 /// Asserts that a page of a listing holds at most `max_keys` keys that sort after the
 /// start-after key, in key order, that a page shorter than `max_keys` is the last, and that
 /// a page of none holds none.
