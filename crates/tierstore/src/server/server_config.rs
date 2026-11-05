@@ -4,7 +4,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{AccessKey, GcKey, LocalCache, PresignKey, ScopedKey, oci};
+use super::handover::PIECES_QUEUED;
+use super::{
+    AccessKey, GcKey, ListenTuning, LocalCache, OCI_HANDSHAKE, PresignKey, ScopedKey, oci,
+};
 use crate::{Clock, MonotonicClock, Proxy};
 
 /// The settings of a [`Server`].
@@ -80,6 +83,12 @@ pub struct ServerConfig {
     /// keeps an idle connection in its pool, and how long the drain waits for a client to close
     /// a connection that the server has shut for writing.
     pub header_timeout: Duration,
+    /// The listening sockets and the pauses of the accept loop and of the closing door.
+    pub listen: ListenTuning,
+    /// How many pieces of a streamed put's body wait for the backend to take them.
+    pub put_pieces_queued: usize,
+    /// How long a client has to finish the TLS handshake with the OCI front.
+    pub oci_handshake_timeout: Duration,
     /// The settle: how long the server goes on accepting and serving after the drain began and
     /// `/readyz` said 503.
     pub drain_lb_wait: Duration,
@@ -155,6 +164,9 @@ impl ServerConfig {
             put_min_bytes_per_sec: 1024,
             put_rate_grace: Duration::from_secs(30),
             header_timeout: Duration::from_secs(60),
+            listen: ListenTuning::default(),
+            put_pieces_queued: PIECES_QUEUED,
+            oci_handshake_timeout: OCI_HANDSHAKE,
             drain_lb_wait: Duration::from_secs(10),
             drain_deadline: Duration::from_secs(900),
             proxy: None,

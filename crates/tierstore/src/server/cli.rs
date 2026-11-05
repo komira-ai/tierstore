@@ -98,24 +98,25 @@ use super::ServerConfig;
 use super::build_info::{CAPABILITIES, COMMIT, RELEASE_VERSION, VERSION, capabilities_text};
 use super::cache_cli::serve_cache_until_signalled;
 use super::cli_heartbeat::HeartbeatFlags;
+pub(super) use super::cli_oci::{DEFAULT_OCI_PREFIX, oci_setup, oci_setup_of};
 pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
-use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config::{Settings, keys_for_flags};
 use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
+use super::config_io::IoTuning;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
 #[cfg(test)]
 use super::front::read_key;
-use super::front::{InvalidFlags, S3Tls, refuse, server_config};
+use super::front::{InvalidFlags, S3Tls, server_config};
 use super::handoff::Handoff;
 use super::keys::read_credentials;
 use super::launch::{Launch, Refused, resolve};
 use super::listen::joined;
 use super::local_cache::LocalTierFailure;
 use super::lock::check_lock_path;
-use super::oci::{self, OciAuth, OciError, OciLimits, OciMetrics, OciMode, OciPrefix, Upstream};
-use super::oci_upstream_setup::upstream_of;
+use super::oci::{self, OciAuth, OciLimits, OciMetrics, OciPrefix, Upstream};
 
 /// A start-up error, for the operator.
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -247,6 +248,8 @@ pub struct Cli {
     pub s3_client: S3Client,
     /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
     pub hot_tuning: HotTuning,
+    /// The sockets, the pauses and the piece queue that `[server]` tunes.
+    pub io_tuning: IoTuning,
     /// The waits, delays and limits of the entry protocol that `[hot_store]` sets.
     pub entry_tuning: EntryTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
@@ -584,7 +587,7 @@ pub(super) fn open_tier(
             let why = "its endpoint, region and credentials flags are for an `s3:<bucket>` tier";
             Err(format!("{flag} {spec:?}: {why}"))
         }
-        None => tier(flag, spec),
+        None => tier_tuned(flag, spec, client),
     }
 }
 
@@ -616,6 +619,18 @@ fn s3_tier(
     s3: &S3Flags<'_>,
     limits: (Duration, &S3Client),
 ) -> Result<Arc<dyn Backend>, String> {
+    let backend = s3_backend(flag, spec, bucket, s3, limits)?;
+    Ok(Arc::new(backend))
+}
+
+/// The backend of [`s3_tier`], before it is shared.
+pub(super) fn s3_backend(
+    flag: &str,
+    spec: &str,
+    bucket: &str,
+    s3: &S3Flags<'_>,
+    limits: (Duration, &S3Client),
+) -> Result<S3Backend, String> {
     let (timeout, client) = limits;
     let fail = |why: String| format!("{flag} {spec:?}: {why}");
     let Some(endpoint) = s3.endpoint else {
@@ -640,15 +655,23 @@ fn s3_tier(
     let backend = built.map_err(|why| fail(why.to_string()))?;
     // Off unless set: a read of the tag before the DELETE is right on every store. The store is
     // not asked whether it enforces `If-Match` on a DELETE; the setting says.
-    let backend = backend.with_conditional_delete(s3.conditional_delete.unwrap_or(false));
-    Ok(Arc::new(backend))
+    let backend = backend
+        .with_conditional_delete(s3.conditional_delete.unwrap_or(false))
+        .with_chunks_waiting(client.chunks_waiting);
+    Ok(backend)
 }
 
 /// The tier a flag names, of the kinds that need no flags besides the tier's own.
+#[cfg(test)]
 fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
+    tier_tuned(flag, spec, &S3Client::default())
+}
+
+/// [`tier`], a `dir:<path>` tier with the chunk sizes `client` gives.
+fn tier_tuned(flag: &str, spec: &str, client: &S3Client) -> Result<Arc<dyn Backend>, String> {
     match (spec, spec.strip_prefix("dir:")) {
         ("memory", _) => Ok(Arc::new(MemoryBackend::new())),
-        (_, Some(path)) => match DirBackend::open(path) {
+        (_, Some(path)) => match dir_tier(path, client) {
             Ok(dir) => Ok(Arc::new(dir)),
             Err(why) => Err(format!("{flag} {spec:?}: {why}")),
         },
@@ -657,6 +680,15 @@ fn tier(flag: &str, spec: &str) -> Result<Arc<dyn Backend>, String> {
             Err(format!("{flag} {spec:?}: {why}"))
         }
     }
+}
+
+/// The directory tier at `path`, with the chunk sizes `client` gives.
+///
+/// # Errors
+/// The directory cannot be opened.
+pub(super) fn dir_tier(path: &str, client: &S3Client) -> Result<DirBackend, Error> {
+    let dir = DirBackend::open(path)?;
+    Ok(dir.with_chunks(client.dir_copy_chunk, client.dir_read_chunk))
 }
 
 /// Checks the flags that depend on each other, and makes the settings they stand for.
@@ -719,122 +751,6 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
         cold,
         oci,
     })
-}
-
-/// The default of `params.prefix`.
-pub(super) const DEFAULT_OCI_PREFIX: &str = "oci/";
-
-/// The default of `params.max_connections`.
-const DEFAULT_OCI_CONNECTIONS: u32 = 64;
-
-/// The default of `params.connection_lifetime`.
-const DEFAULT_OCI_LIFETIME: Duration = Duration::from_secs(3600);
-
-/// How long a client has to finish the TLS handshake with the OCI front.
-const OCI_HANDSHAKE: Duration = Duration::from_secs(10);
-
-/// Checks the OCI front's flags and files, and makes its TLS, if an `oci` interface is given. A prefix,
-/// certificate or key that cannot work is an `InvalidFlags` (exit 2, as a restart cannot mend it);
-/// a file that cannot be read is exit 1. `warn` says whether the warning for a plain-text listener
-/// is printed; `--check-config` leaves it out, as it prints nothing when the file is fine.
-fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciSetup>, Error> {
-    let flags = OciFlags {
-        listen: cli.oci_listen.clone(),
-        tls_cert: cli.oci_tls_cert.clone(),
-        tls_key: cli.oci_tls_key.clone(),
-        prefix: cli.oci_prefix.clone(),
-        max_connections: cli.oci_max_connections,
-        connection_lifetime: cli.oci_connection_lifetime,
-        require_auth: cli.oci_require_auth,
-        stage_read: cli.oci_stage_read,
-        max_manifest_bytes: cli.oci_max_manifest_bytes,
-        read_chunk_bytes: cli.oci_read_chunk_bytes,
-        echo_bytes: cli.oci_echo_bytes,
-        upstream: cli.oci_upstream.clone(),
-    };
-    oci_setup_of(&flags, server, warn)
-}
-
-/// [`oci_setup`] for the values the flags or the `[oci]` table of a file make: the one place the
-/// front's rules are applied, for a storage node and for a build node.
-pub(super) fn oci_setup_of(
-    flags: &OciFlags,
-    server: &ServerConfig,
-    warn: bool,
-) -> Result<Option<OciSetup>, Error> {
-    if flags.listen.is_empty() {
-        return Ok(None);
-    }
-    let listen = flags.listen.clone();
-    let lifetime = flags.connection_lifetime.unwrap_or(DEFAULT_OCI_LIFETIME);
-    if lifetime.is_zero() {
-        return Err(
-            InvalidFlags("--oci-connection-lifetime must be longer than zero".into()).into(),
-        );
-    }
-    let prefix = flags.prefix.as_deref().unwrap_or(DEFAULT_OCI_PREFIX);
-    let prefix = OciPrefix::new(prefix).map_err(refuse)?;
-    let plain = flags.tls_cert.is_none() && flags.tls_key.is_none();
-    let in_the_clear = listen
-        .iter()
-        .find(|addr| oci::plain_warning(**addr).is_some());
-    if let (true, true, Some(addr)) = (flags.require_auth, plain, in_the_clear) {
-        let why = format!(
-            "--oci-require-auth sends each client's secret as HTTP Basic, which plain HTTP at \
-             {addr} would carry in the clear: give --oci-tls-cert and --oci-tls-key, or listen \
-             on loopback"
-        );
-        return Err(InvalidFlags(why).into());
-    }
-    let acceptor = match (&flags.tls_cert, &flags.tls_key) {
-        (Some(cert), Some(key)) => Some(oci::acceptor_for(cert, key, &listen).map_err(refuse)?),
-        (None, None) => {
-            let warnings = listen.iter().filter_map(|addr| oci::plain_warning(*addr));
-            for warning in warnings.filter(|_| warn) {
-                tracing::warn!("{warning}");
-            }
-            None
-        }
-        _ => {
-            let why = "--oci-tls-cert and --oci-tls-key go together: give both, or neither";
-            return Err(refuse(OciError::Missing(why.to_owned())));
-        }
-    };
-    let defaults = oci::OciSizes::default();
-    let sizes = oci::OciSizes {
-        manifest_bytes: flags.max_manifest_bytes.unwrap_or(defaults.manifest_bytes),
-        chunk_bytes: flags.read_chunk_bytes.unwrap_or(defaults.chunk_bytes),
-        echo_bytes: flags.echo_bytes.map_or(defaults.echo_bytes, |bytes| {
-            usize::try_from(bytes).unwrap_or(usize::MAX)
-        }),
-    };
-    let upstream = flags.upstream.as_ref().map(upstream_of).transpose()?;
-    let upstream = upstream.map(|upstream| upstream.with_body_limit(sizes.manifest_bytes));
-    let mode = if acceptor.is_some() {
-        OciMode::Https
-    } else {
-        OciMode::Http
-    };
-    let connections = flags.max_connections.unwrap_or(DEFAULT_OCI_CONNECTIONS);
-    let limits = OciLimits {
-        max_connections: connections as usize,
-        handshake_timeout: OCI_HANDSHAKE,
-        header_timeout: server.header_timeout,
-        write_idle: server.body_idle_timeout,
-        lifetime,
-        drain_deadline: server.drain_deadline,
-    };
-    Ok(Some(OciSetup {
-        listen,
-        acceptor,
-        prefix,
-        metrics: Arc::new(OciMetrics::with_mode(mode)),
-        limits,
-        auth: flags.require_auth.then(|| OciAuth::from_server(server)),
-        stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
-        sizes,
-        upstream,
-    }))
 }
 
 /// Resolves on SIGTERM or SIGINT. The handlers are in place when this returns.

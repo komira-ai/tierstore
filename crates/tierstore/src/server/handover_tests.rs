@@ -27,7 +27,7 @@ fn the_carrier_ends_when_the_stream_is_dropped_while_it_waits_to_send() {
             counted.fetch_add(1, Ordering::SeqCst);
         })
         .boxed();
-    let (carry, body) = hand_over(pieces);
+    let (carry, body) = hand_over(pieces, PIECES_QUEUED);
     let mut carry = pin!(carry);
     assert!(
         carry.as_mut().now_or_never().is_none(),
@@ -40,4 +40,24 @@ fn the_carrier_ends_when_the_stream_is_dropped_while_it_waits_to_send() {
         "ends once the stream is gone"
     );
     assert_eq!(taken.load(Ordering::SeqCst), PIECES_QUEUED + 1);
+}
+
+/// Asserts that the queue depth given is the number of pieces that wait: the carrier takes that
+/// many pieces and one more (blocked, in hand) before it waits for the backend, for a depth of one
+/// and for a depth of nine; a depth of zero is taken as one.
+#[test]
+fn the_queue_depth_given_is_how_many_pieces_wait_for_the_backend() {
+    for (queued, waits) in [(1, 1), (9, 9), (0, 1)] {
+        let taken = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&taken);
+        let pieces: PartBody<'static> = stream::iter((0..40).map(|_| Ok(Bytes::from_static(b"x"))))
+            .inspect(move |_| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .boxed();
+        let (carry, _body) = hand_over(pieces, queued);
+        let mut carry = pin!(carry);
+        assert!(carry.as_mut().now_or_never().is_none(), "{queued}");
+        assert_eq!(taken.load(Ordering::SeqCst), waits + 1, "{queued}");
+    }
 }
