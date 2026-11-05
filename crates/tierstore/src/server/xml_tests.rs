@@ -5,7 +5,7 @@ use roxmltree::Document;
 use crate::Listed;
 
 use super::testing::texts;
-use super::xml::{Listing, completed, error_body, escape, initiate, parse_complete};
+use super::xml::{Listing, completed, error_body, escape, initiate, parse_complete, url_encode};
 
 fn listed(key: &str, size: u64, modified: u64) -> Listed {
     Listed {
@@ -41,6 +41,11 @@ fn a_listing_that_goes_on_carries_the_next_token() {
     let listing = Listing {
         bucket: "bkt",
         prefix: "p/",
+        delimiter: None,
+        url: false,
+        start_after: None,
+        continuation_token: None,
+        prefixes: &[],
         max_keys: 2,
         objects: &objects,
         next: Some("6322".to_owned()),
@@ -65,6 +70,11 @@ fn the_last_page_has_no_token() {
     let listing = Listing {
         bucket: "bkt",
         prefix: "",
+        delimiter: None,
+        url: false,
+        start_after: None,
+        continuation_token: None,
+        prefixes: &[],
         max_keys: 1000,
         objects: &[],
         next: None,
@@ -128,4 +138,54 @@ fn a_body_that_is_not_a_completion_is_refused() {
     assert_eq!(parse_complete(bad_number.as_bytes()), None);
     let no_etag = part("<PartNumber>1</PartNumber>");
     assert_eq!(parse_complete(no_etag.as_bytes()), None);
+}
+
+/// Asserts the encoding of `encoding-type=url`: letters, digits, `-`, `.`, `_`, `~` and `/` stay,
+/// a space is `+`, and every other byte is `%` and two capital hexadecimal digits (a character
+/// outside ASCII as the bytes of its UTF-8, `+` and `%` themselves as `%2B` and `%25`).
+#[test]
+fn url_encoding_keeps_unreserved_characters_and_slashes_only() {
+    assert_eq!(url_encode("Az09-._~/"), "Az09-._~/");
+    assert_eq!(url_encode("a b"), "a+b");
+    assert_eq!(url_encode("a+b%c"), "a%2Bb%25c");
+    assert_eq!(url_encode("caf\u{e9}"), "caf%C3%A9");
+    assert_eq!(url_encode("a&b<c>\"'\u{1}"), "a%26b%3Cc%3E%22%27%01");
+    assert_eq!(url_encode(""), "");
+}
+
+/// Asserts that a page with common prefixes writes them after the objects, counts them in
+/// `KeyCount`, and echoes the delimiter, the start key and the token of the request, and that a
+/// listing that asked for url encoding encodes the prefix, delimiter, start key, keys and
+/// common prefixes (and names the encoding) but not the tokens.
+#[test]
+fn a_page_with_common_prefixes_counts_and_echoes_them() {
+    let objects = [listed("a b", 1, 0)];
+    let prefixes = ["a b/".to_owned(), "c&d/".to_owned()];
+    let mut listing = Listing {
+        bucket: "bkt",
+        prefix: "a b",
+        delimiter: Some("/"),
+        url: false,
+        start_after: Some("a&"),
+        continuation_token: Some("6162"),
+        max_keys: 3,
+        objects: &objects,
+        prefixes: &prefixes,
+        next: None,
+    };
+    let xml = listing.to_xml();
+    assert_eq!(texts(&xml, "KeyCount"), ["3"]);
+    assert_eq!(texts(&xml, "Delimiter"), ["/"]);
+    assert_eq!(texts(&xml, "StartAfter"), ["a&"]);
+    assert_eq!(texts(&xml, "ContinuationToken"), ["6162"]);
+    assert_eq!(texts(&xml, "Prefix"), ["a b", "a b/", "c&d/"]);
+    assert!(texts(&xml, "EncodingType").is_empty());
+    assert!(xml.find("</Contents>").unwrap() < xml.find("<CommonPrefixes>").unwrap());
+    listing.url = true;
+    let xml = listing.to_xml();
+    assert_eq!(texts(&xml, "EncodingType"), ["url"]);
+    assert_eq!(texts(&xml, "Prefix"), ["a+b", "a+b/", "c%26d/"]);
+    assert_eq!(texts(&xml, "Key"), ["a+b"]);
+    assert_eq!(texts(&xml, "StartAfter"), ["a%26"]);
+    assert_eq!(texts(&xml, "ContinuationToken"), ["6162"]);
 }

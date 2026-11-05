@@ -34,35 +34,87 @@ pub(crate) fn error_body(code: &str, message: &str, resource: &str, request_id: 
     )
 }
 
+/// `text` as S3 writes it for `encoding-type=url`: every byte but the unreserved characters of
+/// RFC 3986 (letters, digits, `-`, `.`, `_`, `~`) and `/` as `%` and two capital hexadecimal
+/// digits, and a space as `+`.
+pub(crate) fn url_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                out.push(char::from(byte));
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
 /// One page of a ListObjectsV2 answer.
 pub(crate) struct Listing<'a> {
     pub(crate) bucket: &'a str,
     pub(crate) prefix: &'a str,
+    /// The `delimiter` of the request, if it had one that is not empty.
+    pub(crate) delimiter: Option<&'a str>,
+    /// Whether the request asked for `encoding-type=url`.
+    pub(crate) url: bool,
+    /// The `start-after` and the `continuation-token` of the request, as they were sent.
+    pub(crate) start_after: Option<&'a str>,
+    pub(crate) continuation_token: Option<&'a str>,
     pub(crate) max_keys: usize,
     pub(crate) objects: &'a [Listed],
+    /// The common prefixes of the page (none without a delimiter).
+    pub(crate) prefixes: &'a [String],
     /// The continuation token of the next page, if the listing goes on.
     pub(crate) next: Option<String>,
 }
 
 impl Listing<'_> {
     pub(crate) fn to_xml(&self) -> String {
-        let (bucket, prefix) = (escape(self.bucket), escape(self.prefix));
-        let (count, max_keys) = (self.objects.len(), self.max_keys);
+        // The text of a name field: percent-encoded if the request asked, escaped as XML.
+        let text = |name: &str| {
+            escape(&if self.url {
+                url_encode(name)
+            } else {
+                name.to_owned()
+            })
+        };
+        let bucket = escape(self.bucket);
+        let (count, max_keys) = (self.objects.len() + self.prefixes.len(), self.max_keys);
         let truncated = self.next.is_some();
         let mut xml = format!("{PROLOG}<ListBucketResult xmlns=\"{NAMESPACE}\">");
         xml.push_str(&element("Name", &bucket));
-        xml.push_str(&element("Prefix", &prefix));
+        xml.push_str(&element("Prefix", &text(self.prefix)));
+        if let Some(delimiter) = self.delimiter {
+            xml.push_str(&element("Delimiter", &text(delimiter)));
+        }
+        if self.url {
+            xml.push_str(&element("EncodingType", "url"));
+        }
         xml.push_str(&format!(
             "<KeyCount>{count}</KeyCount><MaxKeys>{max_keys}</MaxKeys>"
         ));
         xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+        if let Some(sent) = self.continuation_token {
+            xml.push_str(&element("ContinuationToken", &escape(sent)));
+        }
         xml.push_str(&next_token(self.next.as_deref()));
+        if let Some(sent) = self.start_after {
+            xml.push_str(&element("StartAfter", &text(sent)));
+        }
         for object in self.objects {
-            let key = escape(&object.key);
+            let key = text(&object.key);
             let (size, modified) = (object.size, iso8601(object.modified));
             xml.push_str(&format!(
                 "<Contents><Key>{key}</Key><LastModified>{modified}</LastModified>\
                  <Size>{size}</Size><StorageClass>STANDARD</StorageClass></Contents>"
+            ));
+        }
+        for prefix in self.prefixes {
+            let prefix = text(prefix);
+            xml.push_str(&format!(
+                "<CommonPrefixes><Prefix>{prefix}</Prefix></CommonPrefixes>"
             ));
         }
         xml.push_str("</ListBucketResult>");

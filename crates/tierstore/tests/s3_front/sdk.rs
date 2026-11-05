@@ -327,23 +327,16 @@ async fn sdk_multipart_upload_completes() {
 }
 
 /// Asserts what the settings stand on: a client whose region is not the server's is refused with
-/// 403 `InvalidAccessKeyId`, because the region is part of what the signature covers, and a
-/// listing that asks for `encoding-type=url`, which some SDKs send by default, is 501
-/// `NotImplemented` (the Rust SDK sends it only when asked to).
+/// 403 `InvalidAccessKeyId`, because the region is part of what the signature covers. (This test
+/// also pinned a listing with `encoding-type=url` as 501 `NotImplemented`; the front now serves
+/// it, and `sdk_list_with_a_delimiter_and_url_encoding_is_served` asserts what it answers.)
 #[tokio::test]
-async fn sdk_region_and_encoding_type_are_what_the_front_refuses() {
+async fn sdk_region_is_what_the_front_refuses() {
     let h = serving().await;
     let elsewhere = settings(&h, (KEY_ID, SECRET)).region(Region::new("eu-west-1"));
     let sdk = Client::from_conf(elsewhere.build());
     let listed = sdk.list_objects_v2().bucket(BUCKET).send().await;
     assert_eq!(refusal(listed), (403, "InvalidAccessKeyId".to_owned()));
-    let encoded = client(&h)
-        .list_objects_v2()
-        .bucket(BUCKET)
-        .encoding_type(EncodingType::Url)
-        .send()
-        .await;
-    assert_eq!(refusal(encoded), (501, "NotImplemented".to_owned()));
 }
 
 /// Asserts that the options an SDK's listing may carry without meaning anything are served: an
@@ -368,8 +361,61 @@ async fn sdk_list_with_an_empty_delimiter_and_fetch_owner_is_served() {
     let keys: Vec<_> = listed.contents().iter().filter_map(|o| o.key()).collect();
     assert_eq!(keys, ["out/a", "out/b"]);
     assert_eq!(listed.key_count(), Some(2));
-    let delimited = sdk.list_objects_v2().bucket(BUCKET).delimiter("/").send();
-    assert_eq!(refusal(delimited.await), (501, "NotImplemented".to_owned()));
+}
+
+/// Asserts what the SDK gets of a listing with a `delimiter` and with `encoding_type(Url)`: over
+/// `d e/f`, `d e/g` and `h+i`, a page of one entry with `/` is the prefix `d e/`, truncated, and
+/// its token gives the object `h+i` and ends the listing; with the encoding the same names come
+/// back percent-encoded (`d+e/`, `h%2Bi`), the delimiter and `EncodingType` are echoed, and an
+/// encoding type S3 does not know is 400. (The SDK leaves the names as they came; decoding them
+/// is up to the caller.)
+#[tokio::test]
+async fn sdk_list_with_a_delimiter_and_url_encoding_is_served() {
+    let h = serving().await;
+    let sdk = client(&h);
+    for name in ["d e/f", "d e/g", "h+i"] {
+        put(&sdk, name, b"x").await.unwrap();
+    }
+    let list = || sdk.list_objects_v2().bucket(BUCKET).delimiter("/");
+    let first = list().max_keys(1).send().await.unwrap();
+    let common: Vec<_> = first
+        .common_prefixes()
+        .iter()
+        .filter_map(|p| p.prefix())
+        .collect();
+    assert_eq!(common, ["d e/"]);
+    assert!(first.contents().is_empty());
+    assert_eq!(first.is_truncated(), Some(true));
+    assert_eq!(first.key_count(), Some(1));
+    assert_eq!(first.delimiter(), Some("/"));
+    let token = first.next_continuation_token().unwrap();
+    let second = list().continuation_token(token).send().await.unwrap();
+    let keys: Vec<_> = second.contents().iter().filter_map(|o| o.key()).collect();
+    assert_eq!(keys, ["h+i"]);
+    assert!(second.common_prefixes().is_empty());
+    assert_eq!(second.is_truncated(), Some(false));
+    let encoded = list()
+        .encoding_type(EncodingType::Url)
+        .send()
+        .await
+        .unwrap();
+    let common: Vec<_> = encoded
+        .common_prefixes()
+        .iter()
+        .filter_map(|p| p.prefix())
+        .collect();
+    assert_eq!(common, ["d+e/"]);
+    let keys: Vec<_> = encoded.contents().iter().filter_map(|o| o.key()).collect();
+    assert_eq!(keys, ["h%2Bi"]);
+    assert_eq!(encoded.encoding_type(), Some(&EncodingType::Url));
+    assert_eq!(encoded.key_count(), Some(2));
+    let other = sdk
+        .list_objects_v2()
+        .bucket(BUCKET)
+        .encoding_type(EncodingType::from("base64"))
+        .send()
+        .await;
+    assert_eq!(refusal(other), (400, "InvalidArgument".to_owned()));
 }
 
 /// Asserts that `x-id` is the one name the front's list of query parameters gained: a put with

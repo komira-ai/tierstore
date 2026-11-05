@@ -159,7 +159,7 @@ async fn requests_that_are_not_properly_signed_are_refused() {
 }
 
 /// Asserts that the health and readiness probes need no signature, and that a bucket the server
-/// does not serve, a parameter it does not know and a listing with a delimiter are refused with
+/// does not serve, a parameter it does not know (`versionId`, and `versions` on a listing) are refused with
 /// 404 and 501.
 #[tokio::test]
 async fn the_probes_are_open_and_the_unknown_is_refused() {
@@ -176,10 +176,10 @@ async fn the_probes_are_open_and_the_unknown_is_refused() {
     let versioned = call(&h, "GET", "k", &[("versionId", "1")], &[], b"").await;
     assert_eq!(versioned.status(), 501);
     let path = format!("/{BUCKET}");
-    let query = [("list-type", "2"), ("delimiter", "/")];
+    let query = [("list-type", "2"), ("versions", "")];
     let signed = h.signed("GET", &path, &query, &[], b"");
-    let delimited = send(&h, "GET", &path, &query, &signed, b"").await;
-    assert_eq!(delimited.status(), 501);
+    let unknown = send(&h, "GET", &path, &query, &signed, b"").await;
+    assert_eq!(unknown.status(), 501);
 }
 
 /// The base64 of the big-endian CRC-32 of `bytes`, the value of an `x-amz-checksum-crc32` header.

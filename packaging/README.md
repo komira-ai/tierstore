@@ -656,7 +656,7 @@ what "tested" means below.
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
 | checksum algorithm | none, or CRC-32, CRC-32C, SHA-1 or SHA-256 | read from the front's code, not tested with an SDK: CRC-64/NVMe, `aws-chunked` and trailing checksums are refused with 501; `Content-MD5` is checked |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
-| listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
+| listing | nothing to set | `delimiter` and `encoding-type=url` are served; the Rust SDK leaves the names percent-encoded when it is asked for `url`, and decoding them is the caller's (a space is `+`) |
 
 Payload signing, read from the front's code and not tested as such (not checked: whether the Rust
 SDK signs the hex hash or `UNSIGNED-PAYLOAD` for an in-memory body): a body whose signed `x-amz-content-sha256` is its hex SHA-256 is checked against it;
@@ -721,17 +721,16 @@ s3 = boto3.client(
 )
 ```
 
-One thing is known from the front and not from those clients: boto3 and the aws CLI are said to
-add `encoding-type=url` to a ListObjects or ListObjectsV2 call on their own, with no setting to
-stop it, and the front answers that parameter with 501 `NotImplemented`. If that is so, `aws s3
-ls` and `list_objects_v2` fail against the front, and the calls that name a key (`get_object`,
-`put_object`, `head_object`, `delete_object`, multipart) are not affected. Check it with a real
-client before relying on either.
+boto3 and the aws CLI are said to add `encoding-type=url` to a ListObjects or ListObjectsV2 call on
+their own, with no setting to stop it. The front serves it (and `delimiter`, which `aws s3 ls` sends),
+and answers with percent-encoded names, as S3 does; that is read from the front's code and tested
+with the Rust SDK, and not checked with a real boto3 or aws CLI.
 
 A put or a CreateMultipartUpload of a key with a character XML 1.0 forbids (U+0000-U+0008, U+000B,
 U+000C, U+000E-U+001F, U+FFFE or U+FFFF) is answered 400 `InvalidArgument` and stores nothing: the
-front's listings are XML 1.0, which cannot carry those characters, and with no `encoding-type=url`
-there is no other way to list such a key. Tab, line feed, U+007F and the C1 controls are allowed.
+front's listings are XML 1.0, which cannot carry those characters, and a client that does not ask
+for `encoding-type=url` gets keys as they are. (A listing with `encoding-type=url` carries such a
+key, if a store holds one.) Tab, line feed, U+007F and the C1 controls are allowed.
 
 ## The OCI read front
 

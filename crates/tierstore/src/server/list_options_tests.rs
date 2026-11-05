@@ -43,13 +43,3 @@ async fn fetch_owner_is_accepted_and_changes_nothing() {
         assert!(texts(&reply.body, "Owner").is_empty(), "{query}");
     }
 }
-
-/// Asserts that a non-empty `delimiter` is still 501 `NotImplemented` in this change, so that
-/// nothing answers it with a listing that ignores it.
-#[tokio::test(start_paused = true)]
-async fn a_delimiter_with_text_is_still_not_implemented() {
-    let rig = stocked().await;
-    let reply = rig.list("delimiter=%2F").await;
-    assert_eq!(reply.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reply.code(), "NotImplemented");
-}

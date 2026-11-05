@@ -16,6 +16,7 @@ use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
 use super::handover::hand_over;
+use super::listing;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
@@ -23,14 +24,16 @@ use super::time::http_date;
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
-/// `delimiter` is understood only empty (which is no delimiter: [`refuse_delimiter`]), and
-/// `fetch-owner` is accepted and ignored: the listing has no owner to give, and S3 itself only
-/// adds an `Owner` to the entries of a listing when it is asked to.
+/// `delimiter` and `encoding-type` are parameters of ListObjectsV2 (ListMultipartUploads refuses
+/// a `delimiter` with text: [`refuse_delimiter`]), and `fetch-owner` is accepted and ignored:
+/// the listing has no owner to give, and S3 itself only adds an `Owner` to the entries of a
+/// listing when it is asked to.
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 14] = [
+const SUPPORTED: [&str; 15] = [
     "continuation-token",
     "delimiter",
+    "encoding-type",
     "fetch-owner",
     "key-marker",
     "list-type",
@@ -60,7 +63,7 @@ const PRESIGN_PARAMS: [&str; 6] = [
 pub(super) const MULTIPART: [&str; 3] = ["partNumber", "uploadId", "uploads"];
 
 /// The most keys in a page of a listing, and the number of parts of an upload.
-const PAGE_LIMIT: usize = 1000;
+pub(super) const PAGE_LIMIT: usize = 1000;
 const PART_LIMIT: u32 = 10_000;
 
 /// The range a `Range` header asks for, if it is one valid single range (`bytes=<first>-<last>`,
@@ -122,8 +125,10 @@ fn refuse_reserved(key: &str) -> Result<(), S3Error> {
 
 /// A key that is stored must be one a listing can carry: the answers of a listing are XML 1.0,
 /// which has no character for U+0000-U+0008, U+000B, U+000C, U+000E-U+001F, U+FFFE and U+FFFF
-/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed), and this front does
-/// not support `encoding-type=url`. A key with one would make every page that lists it malformed.
+/// (tab, line feed, carriage return, U+007F and the C1 controls are allowed). A client that does
+/// not ask for `encoding-type=url` gets keys as they are, so a key with one would make every page
+/// that lists it malformed for such a client; a listing with `encoding-type=url` could carry the
+/// key, and the set of characters a key may have is the narrow one all the same.
 fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
     let bad = |c: char| {
         matches!(c, '\u{0}'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
@@ -136,6 +141,18 @@ fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
         ));
     }
     Ok(())
+}
+
+/// Whether the listing asked for `encoding-type=url`. S3 knows no other encoding type, and says
+/// so for any other text; an empty one is none.
+fn encoded(query: &Query) -> Result<bool, S3Error> {
+    match query.get("encoding-type") {
+        None | Some("") => Ok(false),
+        Some("url") => Ok(true),
+        Some(_) => Err(S3Error::invalid(
+            "Invalid Encoding Method specified in Request",
+        )),
+    }
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
@@ -154,8 +171,8 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
     Ok(())
 }
 
-/// A listing that names a `delimiter` is not supported; an empty one is no delimiter, as it is
-/// for S3.
+/// A listing of uploads that names a `delimiter` is not supported; an empty one is no
+/// delimiter, as it is for S3.
 fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
     if query.get("delimiter").is_some_and(|text| !text.is_empty()) {
         return Err(S3Error::unsupported("a delimiter is not supported"));
@@ -175,18 +192,6 @@ fn page_size(query: &Query, name: &str) -> Result<usize, S3Error> {
             "{name} must be a positive whole number"
         ))),
     }
-}
-
-/// The token of the page that follows the page that ends with `key`.
-fn token(key: &str) -> String {
-    hex::encode(key)
-}
-
-/// The key a token stands for.
-fn untoken(token: &str) -> Result<String, S3Error> {
-    let bad = || S3Error::invalid("the continuation token is not one this server gave");
-    let bytes = hex::decode(token).map_err(|_| bad())?;
-    String::from_utf8(bytes).map_err(|_| bad())
 }
 
 /// Whether the header `name` of the request names `tag` among its entity tags (`*` names every
@@ -260,15 +265,6 @@ fn upload_error(error: Error) -> S3Error {
     match error {
         Error::NotFound(_) => S3Error::no_such_upload(),
         other => S3Error::from(other),
-    }
-}
-
-/// The key a listing starts after: the one its continuation token stands for, else
-/// `start-after`.
-fn start_after(query: &Query) -> Result<Option<String>, S3Error> {
-    match query.get("continuation-token") {
-        Some(text) => untoken(text).map(Some),
-        None => Ok(query.get("start-after").map(str::to_owned)),
     }
 }
 
@@ -489,26 +485,40 @@ impl Server {
         Ok(answer(StatusCode::NO_CONTENT, &[], Bytes::new()))
     }
 
+    /// ListObjectsV2: a page of the objects under `prefix`, after the token or `start-after`.
+    /// With a `delimiter` the keys that have it after the prefix are folded into common
+    /// prefixes, and both kinds of entry count against `max-keys` ([`listing::page`]).
     async fn list_objects(&self, query: &Query) -> Result<Answer, S3Error> {
-        refuse_delimiter(query)?;
         if query.get("list-type") != Some("2") {
             return Err(S3Error::unsupported(
                 "only ListObjectsV2 (list-type=2) is supported",
             ));
         }
         let prefix = query.get("prefix").unwrap_or_default();
+        let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
+        let url = encoded(query)?;
         let max_keys = page_size(query, "max-keys")?;
-        let after = start_after(query)?;
-        let after = after.as_deref();
-        let listed = self.backend.list_page(prefix, after, max_keys + 1).await?;
-        let page = &listed[..listed.len().min(max_keys)];
-        let next = (listed.len() > max_keys).then(|| token(&page[max_keys - 1].key));
+        // Without a delimiter every key is an entry: one read of the page and one key more
+        // tells whether the listing goes on. With one, a prefix may hold any number of keys, and
+        // they are read a page at a time.
+        let batch = if delimiter.is_some() {
+            PAGE_LIMIT + 1
+        } else {
+            max_keys + 1
+        };
+        let backend = self.backend.as_ref();
+        let page = listing::page(backend, query, prefix, delimiter, max_keys, batch).await?;
         let listing = Listing {
             bucket: &self.config.bucket,
             prefix,
+            delimiter,
+            url,
+            start_after: query.get("start-after"),
+            continuation_token: query.get("continuation-token"),
             max_keys,
-            objects: page,
-            next,
+            objects: &page.objects,
+            prefixes: &page.prefixes,
+            next: page.next,
         };
         Ok(xml_answer(StatusCode::OK, listing.to_xml()))
     }
