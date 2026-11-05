@@ -14,8 +14,9 @@ use tokio::sync::Semaphore;
 
 use super::pause;
 use crate::faulty::{FaultyBackend, Op};
-use crate::journal::{FORMAT_KEY, proxy_key};
+use crate::journal::{FORMAT_KEY, PROXIES_PREFIX, proxy_key};
 use crate::registration::{PROTO, Registration};
+use crate::registrations::Registrations;
 use crate::{
     Backend, Error, GateBackend, MemoryBackend, Mono, Phase, Proxy, ProxyConfig, Sleeper, TestClock,
 };
@@ -497,4 +498,195 @@ async fn a_request_that_comes_during_a_look_at_the_format_waits_for_it_and_uses_
     look.await.unwrap();
 
     request.await.unwrap().unwrap();
+}
+
+/// One of the two processes of an update that hold one `proxy_id`: a proxy with its own monotonic
+/// clock and its own stepped heartbeat, over the hot tier both share.
+struct Process {
+    mono: Arc<Mono>,
+    proxy: Proxy,
+    sleeper: Arc<Stepped>,
+}
+
+impl Process {
+    /// Opens a proxy `p1` over `hot` and `cold` and starts its heartbeat; returns when it has made
+    /// its first beat.
+    async fn start(
+        hot: &Arc<MemoryBackend>,
+        cold: &Arc<MemoryBackend>,
+        clock: &Arc<TestClock>,
+    ) -> Self {
+        let mono = Arc::new(Mono::new());
+        let mut settings = ProxyConfig::new("p1", 1 << 20, clock.clone());
+        settings.mono = mono.clone();
+        settings.usage_refresh = Duration::ZERO;
+        settings.format_refresh = Duration::ZERO;
+        let proxy = Proxy::open(hot.clone(), cold.clone(), settings)
+            .await
+            .unwrap();
+        let sleeper = Stepped::new();
+        assert!(proxy.start_heartbeat(sleeper.clone()));
+        sleeper.beat_done().await;
+        Self {
+            mono,
+            proxy,
+            sleeper,
+        }
+    }
+
+    /// Lets one period pass on this process's clock and makes its next beat.
+    async fn beat(&self) {
+        self.mono.advance(PERIOD);
+        self.sleeper.next();
+        self.sleeper.beat_done().await;
+    }
+}
+
+async fn raw_registration(memory: &MemoryBackend) -> bytes::Bytes {
+    memory.get(&proxy_key("p1"), None).await.unwrap()
+}
+
+/// Asserts (T20) that two processes with one `proxy_id` over one shared hot tier, both beating
+/// while they put and delete entries, do each stay live (no beat in which either is not live, so
+/// no refusal longer than one beat), and that every put and delete either answers `Ok` with the
+/// object or its absence in the tier, so nothing is acknowledged that did not happen.
+#[tokio::test]
+async fn two_processes_with_one_proxy_id_stay_live_and_every_acknowledged_write_happened() {
+    let clock = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    let cold = Arc::new(MemoryBackend::new());
+    hot.put(
+        FORMAT_KEY,
+        bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#),
+    )
+    .await
+    .unwrap();
+    let old = Process::start(&hot, &cold, &clock).await;
+    let new = Process::start(&hot, &cold, &clock).await;
+
+    let mut not_live = [0u32; 2];
+    let mut worst = [0u32; 2];
+    for round in 0..8 {
+        clock.advance(10_000);
+        for (n, process) in [&old, &new].into_iter().enumerate() {
+            process.beat().await;
+            not_live[n] = if process.proxy.is_live() {
+                0
+            } else {
+                not_live[n] + 1
+            };
+            worst[n] = worst[n].max(not_live[n]);
+            let key = format!("k{n}-{round}");
+            process.proxy.put(&key, body(&key)).await.unwrap();
+            assert_eq!(hot.get(&key, None).await.unwrap(), body(&key));
+            if round > 0 {
+                let before = format!("k{n}-{}", round - 1);
+                process.proxy.delete(&before).await.unwrap();
+                assert!(hot.get(&before, None).await.is_err(), "{before}");
+            }
+        }
+    }
+    assert_eq!(worst, [0, 0]);
+}
+
+fn body(text: &str) -> bytes::Bytes {
+    bytes::Bytes::copy_from_slice(text.as_bytes())
+}
+
+/// Asserts (T20) that the stop of the old process of two with one `proxy_id` neither rewrites nor
+/// deletes the registration (its bytes are the same before and after, and still carry the boot
+/// nonce of the new process), that the new process stays live and keeps changing the registration
+/// through the beats after, that the leader's view does not call the shared id departed while the
+/// new process beats (so entries it has in flight are not taken), and that the id is departed once
+/// the new process has stopped and the departure has passed.
+#[tokio::test]
+async fn the_stop_of_the_old_process_leaves_the_registration_to_the_new_one() {
+    let clock = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    let cold = Arc::new(MemoryBackend::new());
+    let old = Process::start(&hot, &cold, &clock).await;
+    let new = Process::start(&hot, &cold, &clock).await;
+    let new_boot = registration(&hot).await.unwrap().boot;
+    let departure = Duration::from_secs(60);
+    let mut leader = Registrations::default();
+    let mut now = 0u64;
+    let mut watch = async |hot: &MemoryBackend, clock: &TestClock| {
+        clock.advance(10_000);
+        now += 10_000;
+        leader.observe(now, &hot.list(PROXIES_PREFIX).await.unwrap());
+        leader.departed("p1", now, departure)
+    };
+
+    for _ in 0..3 {
+        old.beat().await;
+        new.beat().await;
+        assert!(!watch(&hot, &clock).await);
+    }
+    assert!(old.proxy.is_live() && new.proxy.is_live());
+    // The new process wrote last, so the registration is its own.
+    assert_eq!(registration(&hot).await.unwrap().boot, new_boot);
+
+    let before = raw_registration(&hot).await;
+    old.proxy.stop_heartbeat().await;
+    assert_eq!(raw_registration(&hot).await, before);
+    assert_eq!(registration(&hot).await.unwrap().boot, new_boot);
+
+    let mut last = before;
+    let mut changed = 0;
+    for _ in 0..4 {
+        new.beat().await;
+        assert!(new.proxy.is_live());
+        assert!(!watch(&hot, &clock).await);
+        let now_bytes = raw_registration(&hot).await;
+        changed += usize::from(now_bytes != last);
+        last = now_bytes;
+        assert_eq!(registration(&hot).await.unwrap().boot, new_boot);
+    }
+    assert!(changed >= 3, "{changed}");
+
+    new.proxy.stop_heartbeat().await;
+    for _ in 0..5 {
+        assert!(!watch(&hot, &clock).await);
+    }
+    assert!(watch(&hot, &clock).await);
+}
+
+/// Asserts (T20) that the old process of two with one `proxy_id`, once stopped and past its
+/// `live_until`, refuses a put and a delete with `Unavailable` and writes nothing to the shared
+/// tier, while the new process, which beats, still puts and deletes: a process that is not live
+/// acknowledges nothing, and its refusal does not reach the other.
+#[tokio::test]
+async fn a_stopped_old_process_acknowledges_nothing_while_the_new_one_serves() {
+    let clock = Arc::new(TestClock::new());
+    let hot = Arc::new(MemoryBackend::with_clock(clock.clone()));
+    let cold = Arc::new(MemoryBackend::new());
+    hot.put(
+        FORMAT_KEY,
+        bytes::Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#),
+    )
+    .await
+    .unwrap();
+    let old = Process::start(&hot, &cold, &clock).await;
+    let new = Process::start(&hot, &cold, &clock).await;
+    new.proxy.put("kept", body("v")).await.unwrap();
+    old.proxy.stop_heartbeat().await;
+    old.mono.advance(Duration::from_secs(3600));
+    assert!(!old.proxy.is_live());
+
+    assert!(matches!(
+        old.proxy.put("refused", body("v")).await,
+        Err(Error::Unavailable(_))
+    ));
+    assert!(matches!(
+        old.proxy.delete("kept").await,
+        Err(Error::Unavailable(_))
+    ));
+    assert!(hot.get("refused", None).await.is_err());
+    assert_eq!(hot.get("kept", None).await.unwrap(), body("v"));
+
+    new.beat().await;
+    new.proxy.put("next", body("w")).await.unwrap();
+    new.proxy.delete("kept").await.unwrap();
+    assert!(hot.get("kept", None).await.is_err());
+    new.proxy.stop_heartbeat().await;
 }

@@ -317,3 +317,80 @@ fn the_keys_are_known() {
         assert!(fields.contains(&key), "{key}");
     }
 }
+
+/// Asserts (T01) that on both cache shapes a `handoff_wait` outside 1ms to 1h is refused by name
+/// with the exact words, and that the ends of the range load.
+#[test]
+fn a_wait_out_of_range_is_refused_by_name_on_both_cache_shapes() {
+    for (given, ms) in [("0s", "0"), ("61m", "3660000")] {
+        let line = format!("{SOCKET_LINE}\nhandoff_wait = \"{given}\"");
+        let words = format!("server.handoff_wait: {ms}ms is not between 1ms and 3600000ms");
+        assert_eq!(refusal(&build_node(&line)), words, "{given}");
+        assert_eq!(refusal(&combined_at("/c", &line)), words, "{given}");
+    }
+    for (given, wait) in [("1ms", 1), ("1h", 3_600_000)] {
+        let line = format!("{SOCKET_LINE}\nhandoff_wait = \"{given}\"");
+        let expected = Some(Duration::from_millis(wait));
+        assert_eq!(
+            cache_handoff(&build_node(&line)).map(|h| h.wait),
+            expected,
+            "{given}"
+        );
+        assert_eq!(
+            combined_handoff(&combined_at("/c", &line)).map(|h| h.wait),
+            expected,
+            "{given}"
+        );
+    }
+}
+
+/// Asserts (T01) that on both cache shapes a socket path that is relative, empty or a directory is
+/// refused with the path and the reason in the exact words.
+#[test]
+fn a_socket_that_is_not_an_absolute_file_path_is_refused_on_both_cache_shapes() {
+    for (path, why) in [
+        ("handoff.sock", "must be an absolute path"),
+        ("", "must be an absolute path"),
+        ("/", "must name a file, not a directory"),
+    ] {
+        let line = format!("handoff_socket = \"{path}\"");
+        let words = format!("server.handoff_socket: \"{path}\" {why}");
+        assert_eq!(refusal(&build_node(&line)), words, "{path:?}");
+        assert_eq!(refusal(&combined_at("/c", &line)), words, "{path:?}");
+    }
+}
+
+/// Asserts (T01) that on both cache shapes a socket path of 103 bytes loads and one of 104 bytes is
+/// refused naming its length.
+#[test]
+fn a_socket_path_over_103_bytes_is_refused_on_both_cache_shapes() {
+    let longest = format!("/{}", "a".repeat(102));
+    let line = format!("handoff_socket = \"{longest}\"");
+    for taken in [
+        cache_handoff(&build_node(&line)),
+        combined_handoff(&combined_at("/c", &line)),
+    ] {
+        assert_eq!(taken.expect("a hand-off").socket.as_os_str().len(), 103);
+    }
+    let over = format!("/{}", "a".repeat(103));
+    let line = format!("handoff_socket = \"{over}\"");
+    let words = format!(
+        "server.handoff_socket: \"{over}\" is 104 bytes; the path of a Unix socket is at most 103"
+    );
+    assert_eq!(refusal(&build_node(&line)), words);
+    assert_eq!(refusal(&combined_at("/c", &line)), words);
+}
+
+/// Asserts (T01) that a plain storage node, the control, still loads with both keys and reads the
+/// socket and the wait.
+#[test]
+fn a_plain_storage_node_reads_both_keys_as_the_control() {
+    let text = with_server(&format!("{SOCKET_LINE}\nhandoff_wait = \"3s\""));
+    assert_eq!(
+        handoff_of(&text),
+        Some(Handoff {
+            socket: PathBuf::from("/var/lib/tierstore/handoff.sock"),
+            wait: Duration::from_secs(3),
+        })
+    );
+}
