@@ -28,7 +28,7 @@ pub(super) enum Unset {
 /// a setting cannot be written (a write of one is `NotImplemented`), so every read gets this.
 /// The encryption is among them on purpose: S3 now encrypts every bucket with its own keys and
 /// says so, but tierstore does not encrypt what it stores, and does not say it does.
-const UNSET: [(&str, Unset); 17] = [
+pub(super) const UNSET: [(&str, Unset); 17] = [
     ("versioning", Unset::Empty("VersioningConfiguration")),
     ("notification", Unset::Empty("NotificationConfiguration")),
     ("accelerate", Unset::Empty("AccelerateConfiguration")),

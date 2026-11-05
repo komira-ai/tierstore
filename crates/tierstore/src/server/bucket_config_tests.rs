@@ -4,6 +4,8 @@
 use hyper::StatusCode;
 
 use super::AccessKey;
+use super::bucket::UNSET;
+use super::bucket_tests::{rig_with_every_role, statuses};
 use super::testing::{BUCKET, Reply, Rig, texts};
 
 const MEBIBYTE: u64 = 1 << 20;
@@ -183,4 +185,19 @@ async fn the_settings_are_read_by_signed_requests_on_the_bucket_only() {
     let beside = get(&rig, "versioning&prefix=a%2F").await;
     assert_eq!(texts(&beside.body, "Key"), Vec::<String>::new());
     assert!(beside.body.contains("VersioningConfiguration"));
+}
+
+/// Asserts which role may read each setting of the bucket: the full key and a read-only key get
+/// the answer of S3 for an unset setting (the same status for both, never 403), and a scoped key
+/// and a GC key, which name no object, are `403 AccessDenied`.
+#[tokio::test(start_paused = true)]
+async fn only_the_full_and_the_read_only_key_may_read_the_settings_of_the_bucket() {
+    let rig = rig_with_every_role().await;
+    for (name, _) in UNSET.iter() {
+        let uri = format!("/{BUCKET}?{name}");
+        let [full, read_only, scoped, gc] = statuses(&rig, "GET", &uri).await;
+        assert!(full == 200 || full == 404, "{name}: {full}");
+        assert_eq!(read_only, full, "{name}");
+        assert_eq!((scoped, gc), (403, 403), "{name}");
+    }
 }
