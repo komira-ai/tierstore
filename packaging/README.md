@@ -3,8 +3,10 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
-silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); there is
-no package and no container image. These files, for Linux hosts, go beside the binary.
+silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); no
+package and no container image is released (`cargo xtask release hostkeeper-package` builds a
+hostkeeper package from `hostkeeper/`, see its README, but no workflow runs it yet). These files,
+for Linux hosts, go beside the binary.
 
 | file | what |
 |---|---|
@@ -12,7 +14,7 @@ no package and no container image. These files, for Linux hosts, go beside the b
 | `tierstore.conf` | the sysusers.d entry of the `tierstore` account (no login, no home) |
 | `tierstore.toml` | the configuration file of `tierstore.service`: one `s3` interface, the keys, and an S3 bucket for each tier |
 | `hostkeeper/units/tierstore@.service` | the instance template of the update hook on Linux: `tierstore@a.service` and `tierstore@b.service`, each running `bin/tierstore` of hostkeeper's release link `current` and starting only under its marker file ([Moving to the update hook](#moving-to-the-update-hook)) |
-| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, `com.komira.tierstore`, running `bin/tierstore` of the same link |
+| `hostkeeper/units/tierstore.plist` | the LaunchDaemon of the update hook on a Mac: one job, labelled `tierstore`, running `bin/tierstore` of the same link |
 
 The values in the unit are examples (`192.0.2.10`, `s3-hot.example`, the bucket names, the
 sizes): edit them to the setup's. `crates/tierstore/tests/packaging.rs` reads `tierstore.service`
@@ -124,7 +126,7 @@ units enabled, only the one the hook's record names starts. A host whose release
 tier cannot hand over (a `dir:` hot tier, say) sets `mode = "restart"` in the package's params:
 the update then stops the live instance and starts the other, with a gap in serving.
 
-On a Mac the package has one job, `tierstore.plist` (label `com.komira.tierstore`, installed as
+On a Mac the package has one job, `tierstore.plist` (label `tierstore`, installed as
 `/Library/LaunchDaemons/tierstore.plist`), and an update is a restart with a gap: `launchctl
 bootout`, then `launchctl bootstrap`.
 
