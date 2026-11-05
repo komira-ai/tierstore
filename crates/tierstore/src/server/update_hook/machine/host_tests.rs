@@ -78,8 +78,9 @@ fn a_config_that_is_absent_is_none() {
     );
 }
 
-/// Asserts that a configuration file that cannot be read (a directory), one that is not UTF-8
-/// and one larger than the cap are errors that name the path; one of exactly the cap is read.
+/// Asserts that a configuration file that cannot be read (a directory), one that cannot be
+/// opened (its parent is a file), one that is not UTF-8 and one larger than the cap are errors
+/// that name the path; one of exactly the cap is read.
 #[test]
 fn a_config_that_cannot_be_read_is_an_error() {
     let (_guard, root) = scratch("host-config-bad");
@@ -93,6 +94,14 @@ fn a_config_that_cannot_be_read_is_an_error() {
     );
     fs::write(root.join("binary"), [0xff, 0xfe]).unwrap();
     assert!(message(host.config(Path::new("/binary")).unwrap_err()).contains("UTF-8"));
+    let text = message(host.config(Path::new("/binary/config.toml")).unwrap_err());
+    assert!(
+        text.starts_with(&format!(
+            "read {}",
+            root.join("binary/config.toml").display()
+        )),
+        "{text}"
+    );
     let cap = usize::try_from(CONFIG_MAX).unwrap();
     fs::write(root.join("exact"), "a".repeat(cap)).unwrap();
     assert_eq!(

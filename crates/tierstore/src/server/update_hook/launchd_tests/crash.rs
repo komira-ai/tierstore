@@ -87,11 +87,13 @@ fn check_reversible(s: &Scenario, fake: &Fake, first: &Done, n: usize, from_log:
         && fake.log()[from_log..]
             .iter()
             .any(|call| call == "state.save");
-    assert!(
-        first.report.reversible != committed || undecided,
-        "{} at {n}: {first:?}",
-        s.name
-    );
+    if !undecided {
+        assert_ne!(
+            first.report.reversible, committed,
+            "{} at {n}: {first:?}",
+            s.name
+        );
+    }
 }
 
 /// How a call goes wrong in the sweep.
@@ -135,7 +137,8 @@ fn each_step_converges_after_a_failure_at_every_call() {
                 let first = fake.host_run(s.act);
                 let line: serde_json::Value = serde_json::from_str(&first.report.to_line())
                     .expect("the report is one JSON object");
-                assert!(line["reversible"].is_boolean() && line["class"].is_string());
+                assert!(line["reversible"].is_boolean());
+                assert!(line["class"].is_string());
                 assert_eq!(fake.live_locks(), 0, "{} at {n} {fault:?}", s.name);
                 if matches!(fault, Fault::Halts) {
                     assert_ne!(first.outcome, Outcome::Success, "{} at {n}", s.name);

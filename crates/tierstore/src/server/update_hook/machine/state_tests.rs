@@ -77,7 +77,8 @@ fn only_the_mode_0700_is_accepted() {
     assert!(files(&dir).lock().is_ok());
 }
 
-/// Asserts that a symbolic link to a good directory is refused, as is a file.
+/// Asserts that a symbolic link to a good directory is refused, as is a file, and a path under a
+/// file, which cannot be looked at and is not made.
 #[test]
 fn a_link_a_file_and_a_missing_path_are_refused() {
     let (guard, dir) = scratch_state("state-kinds");
@@ -87,6 +88,7 @@ fn a_link_a_file_and_a_missing_path_are_refused() {
     let file = guard.path().join("file");
     fs::write(&file, "x").unwrap();
     assert!(refused(&files(&file)).contains("is not a directory"));
+    assert!(refused(&files(&file.join("state"))).contains("is not a directory"));
 }
 
 /// Asserts that a lock file that is a symbolic link is not followed: the lock is refused.

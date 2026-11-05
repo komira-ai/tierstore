@@ -51,7 +51,8 @@ fn an_update_boots_the_job_out_and_in_and_touches_no_other_label() {
 
     let verified = fake.host_run(Verify);
     assert_ok(&verified);
-    assert!(verified.report.reversible && !verified.report.promotion_pending);
+    assert!(verified.report.reversible);
+    assert!(!verified.report.promotion_pending);
     let cleaned = fake.host_run(Cleanup);
     assert_ok(&cleaned);
     assert!(!cleaned.report.reversible);
@@ -158,7 +159,8 @@ fn a_first_install_bootstraps_without_any_bootout() {
     fake.advance(&[Verify, Cleanup]);
     assert!(fake.launchd_calls().iter().all(|call| *call != bootout()));
     assert_eq!(fake.record().from, None);
-    assert!(fake.record().committed() && !fake.record().updating);
+    assert!(fake.record().committed());
+    assert!(!fake.record().updating);
 }
 
 /// Asserts that a first install whose job is already loaded but does not serve the target is
@@ -242,11 +244,8 @@ fn verify_after_the_commit_only_observes() {
     assert_ok(&done);
     assert!(done.report.promotion_pending);
     let calls = fake.log()[before..].to_vec();
-    assert!(
-        calls
-            .iter()
-            .all(|c| !c.starts_with("launchd.") && c != "state.save")
-    );
+    assert!(calls.iter().all(|c| !c.starts_with("launchd.")));
+    assert!(calls.iter().all(|c| c != "state.save"));
     fake.lie(NEW, "9.9.9");
     assert_failed(&fake.host_run(Verify), Reason::WrongBuild);
 }

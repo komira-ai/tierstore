@@ -117,5 +117,6 @@ fn the_fake_answers_only_for_a_loaded_job_on_the_public_port() {
         &fake.run_with(Cutover, &fake.params(), LABEL),
         Reason::OutOfOrder,
     );
-    assert!(fake.pauses() == 0 && fake.calls() > 0);
+    assert_eq!(fake.pauses(), 0);
+    assert!(fake.calls() > 0);
 }

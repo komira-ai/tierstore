@@ -175,7 +175,8 @@ fn cleanup_that_cannot_confirm_the_release_does_not_commit() {
     fake.lie(NEW, "9.9.9");
     let wrong = fake.host_run(Cleanup);
     assert_failed(&wrong, Reason::NotConfirmed);
-    assert!(wrong.report.reversible && !fake.record().committed());
+    assert!(wrong.report.reversible);
+    assert!(!fake.record().committed());
 }
 
 /// Asserts that when the write of `stopping` fails before it reaches the disk, the record read
@@ -198,7 +199,8 @@ fn a_failed_write_of_stopping_is_read_back_to_say_whether_it_committed() {
     let written = fake.host_run(Cleanup);
     assert_failed(&written, Reason::StateIo);
     assert!(!written.report.reversible);
-    assert!(fake.record().committed() && fake.record().updating);
+    assert!(fake.record().committed());
+    assert!(fake.record().updating);
     fake.heal();
     assert_ok(&fake.host_run(Cleanup));
     assert!(!fake.record().updating);
@@ -219,7 +221,9 @@ fn a_failed_write_of_stopping_is_read_back_to_say_whether_it_committed() {
 }
 
 /// Asserts that a failure of the write that ends the update, after `stopping` was written, is
-/// irreversible, and the next `cleanup` finishes. Catches a cleanup that cannot finish a commit.
+/// irreversible; that a `cutover` of the committed update still in flight is out of order and
+/// changes nothing; and that the next `cleanup` finishes. Catches a cleanup that cannot finish a
+/// commit, and a cutover that restarts the job of an update already committed.
 #[test]
 fn a_failure_after_the_commit_is_irreversible_and_cleanup_finishes_it() {
     let fake = Fake::new();
@@ -228,8 +232,14 @@ fn a_failure_after_the_commit_is_irreversible_and_cleanup_finishes_it() {
     let done = fake.host_run(Cleanup);
     assert_failed(&done, Reason::StateIo);
     assert!(!done.report.reversible);
-    assert!(fake.record().committed() && fake.record().updating);
+    assert!(fake.record().committed());
+    assert!(fake.record().updating);
     fake.heal();
+    let committed = fake.record();
+    let launchd = fake.launchd_calls().len();
+    assert_failed(&fake.run(Cutover), Reason::OutOfOrder);
+    assert_eq!(fake.record(), committed);
+    assert_eq!(fake.launchd_calls().len(), launchd);
     assert_ok(&fake.host_run(Cleanup));
     assert!(!fake.record().updating);
 }

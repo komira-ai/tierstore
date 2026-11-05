@@ -38,7 +38,7 @@ pub const NEW_VERSION: &str = "0.4.0+000000000004";
 /// A failure picked by what a call's log line starts with.
 struct Fault {
     prefix: String,
-    /// Which matching call fails, from 1; 0 fails every matching call.
+    /// Which matching call fails, from 1.
     nth: usize,
     seen: usize,
     late: bool,
@@ -272,7 +272,7 @@ impl Fake {
         w.late_at = Some(w.calls + n);
     }
 
-    /// The `nth` call (from 1; 0 for every call) from now whose log line starts with `prefix`
+    /// The `nth` call (from 1) from now whose log line starts with `prefix`
     /// fails without effect.
     pub fn fail_nth(&self, prefix: &str, nth: usize) {
         self.set_fault(prefix, nth, false);
@@ -375,7 +375,7 @@ impl Fake {
         let picked = match &mut w.fault {
             Some(fault) if what.starts_with(&fault.prefix) => {
                 fault.seen += 1;
-                (fault.nth == 0 || fault.seen == fault.nth).then_some(fault.late)
+                (fault.seen == fault.nth).then_some(fault.late)
             }
             _ => None,
         };

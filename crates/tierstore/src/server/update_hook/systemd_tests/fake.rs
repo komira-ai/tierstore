@@ -166,11 +166,13 @@ impl World {
                 .get(release)
                 .is_some_and(|list| list.iter().any(|word| word == HANDOFF_CAPABILITY))
         };
-        self.config
+        let configured = self
+            .config
             .as_deref()
-            .is_some_and(|text| text.contains(HANDOFF_SOCKET_KEY))
-            && old.is_some_and(capable)
-            && capable(new)
+            .is_some_and(|text| text.contains(HANDOFF_SOCKET_KEY));
+        // Both releases, checked together: an instance serving is always one that was started
+        // from a release.
+        configured && [old, Some(new)].into_iter().all(|r| r.is_some_and(capable))
     }
 
     /// systemd starting `instance`.

@@ -44,7 +44,7 @@ use super::look::Look;
 use super::params::Params;
 use super::ports::{Instance, Lock, SystemdPorts};
 use super::record::Record;
-use super::report::{Done, Outcome, Reason};
+use super::report::{Done, Reason};
 
 /// What a step works with.
 struct Ctx<'a, 'b> {
@@ -148,7 +148,9 @@ pub(super) fn run_step(step: Step, params: &Params, ports: &SystemdPorts<'_>) ->
         commit_written: Cell::new(false),
     };
     let mut done = dispatch(&c, step, params, record.as_ref()).unwrap_or_else(identity);
-    if c.commit_written.get() && !c.committed.get() && done.outcome != Outcome::Success {
+    // Not committed after the write of `stopping` began means the write failed, and so did the
+    // step: a write that succeeds commits the record.
+    if c.commit_written.get() && !c.committed.get() {
         // The write of `stopping` failed, and may have reached the disk all the same (a rename
         // made, its sync failed): the record on disk says what was decided. A record that cannot
         // be read leaves it undecided, which counts as committed: hostkeeper then goes forward
