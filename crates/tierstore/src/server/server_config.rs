@@ -21,6 +21,10 @@ pub struct ServerConfig {
     /// `<bucket>.<domain>` names the bucket in its host and the key in its path. None by default,
     /// and then every request is path-style.
     pub domains: Vec<String>,
+    /// When the bucket was made, in milliseconds since the Unix epoch, for the `CreationDate` of
+    /// ListBuckets: the time [`ServerConfig::new`] was called at, and in the binary the time the
+    /// store's `_tiering/format` was written, where it has one.
+    pub bucket_created: u64,
     /// The id of the full key, which may do everything the server serves.
     pub access_key_id: String,
     /// The secret of the full key.
@@ -149,6 +153,7 @@ impl ServerConfig {
             bucket: bucket.to_owned(),
             region: "us-east-1".to_owned(),
             domains: Vec::new(),
+            bucket_created: clock.now(),
             access_key_id: access_key_id.to_owned(),
             secret_access_key: secret_access_key.to_owned(),
             read_only_keys: Vec::new(),

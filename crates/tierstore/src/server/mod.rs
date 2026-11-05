@@ -46,7 +46,11 @@
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
-//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls.
+//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
+//! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
+//!   filters and `max-buckets` checked; its creation date is the time `_tiering/format` was last
+//!   written (the server does not know when the bucket was made; see
+//!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`versionId`), and a `delimiter` with text, is answered `NotImplemented`. A request with a key under
@@ -99,8 +103,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket and GetBucketLocation
-//! and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation
+//! and ListBuckets and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
