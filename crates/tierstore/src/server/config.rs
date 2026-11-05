@@ -307,11 +307,11 @@ pub(super) struct ServerTable {
     pub door_look: Option<Dur>,
     pub put_pieces_queued: Option<u32>,
     pub oci_handshake_timeout: Option<Dur>,
-    pub s3_part_bytes: Option<Size>,
-    pub s3_multipart_threshold: Option<Size>,
     pub s3_chunks_waiting: Option<u32>,
     pub dir_copy_chunk: Option<Size>,
     pub dir_read_chunk: Option<Size>,
+    pub s3_single_put_max: Option<Size>,
+    pub s3_part_bytes: Option<Size>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,

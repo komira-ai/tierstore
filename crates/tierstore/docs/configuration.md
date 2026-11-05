@@ -232,11 +232,11 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.door_look` | duration, `10ms`, or `door_grace` if that is shorter (1ms to 10s, not over `door_grace`) | how far apart the two looks are that must both find no handshake in flight before the door closes |
 | `server.put_pieces_queued` | count, 4 (1 to 4096) | how many pieces of a streamed put's body wait for the backend to take them; with the piece in hand and the one the backend has, all a put holds between the client and the backend |
 | `server.oci_handshake_timeout` | duration, `10s` (1ms to 1h) | how long a client has to finish the TLS handshake with the OCI front before the connection is closed to free its slot |
-| `server.s3_part_bytes` | bytes, 16 MiB (5 MiB to 1 GiB) | the part size of a multipart upload to an `s3` tier (a larger object gets larger parts, to fit 10000), and the most one part holds in memory while it is sent |
-| `server.s3_multipart_threshold` | bytes, 16 MiB (1 to `s3_part_bytes`) | the largest object written to an `s3` tier with one PUT; a larger one is a multipart upload. Left out, it is 16 MiB or `s3_part_bytes` if that is smaller |
 | `server.s3_chunks_waiting` | count, 1 (1 to 1024) | how many chunks of a part wait for the request to an `s3` tier that sends them |
 | `server.dir_copy_chunk` | bytes, 1 MiB (1 to 1 GiB) | the size of the pieces in which a `dir` tier joins the parts of a multipart upload |
 | `server.dir_read_chunk` | bytes, 64 KiB (1 to 1 GiB) | the size of the chunks in which a `dir` tier gives a streamed read |
+| `server.s3_single_put_max` | size, `5GiB` (1MiB to 5GiB) | the longest object of known length that an `s3` tier (both tiers, or the upstream of a cache) is written with one PUT, whose body is streamed and never held whole; a longer one, and a body of unknown length, is a multipart upload. 5GiB is the most S3 takes in one PUT. Lower it for a store or a proxy that takes a long PUT worse than several short ones |
+| `server.s3_part_bytes` | size, `16MiB` (5MiB to 1GiB) | the size of a part of a multipart upload to an `s3` tier. One part is held in memory while it is sent, so a write holds this much; an object too large for 10,000 parts of this size gets larger parts |
 | `server.handoff_socket` | path, none | The control socket of the hand-off of the listening sockets (see [Live update by hand-off of the sockets](operations.md#live-update-by-hand-off-of-the-sockets)): an absolute path of at most 103 bytes, in a directory only the node's user may write, and not `hot_store.lock_file`. With it a start takes the sockets of the instance that answers there, or binds its own where none answers, and then answers there itself; without it, the default, a start binds its own sockets and makes no control socket. Every shape reads it. On a node with `[local_cache]` it must not be inside `local_cache.path` (refused, exit 2), and for a build node `local_cache.path` must then be an absolute path, so that the two can be compared (refused, exit 2) |
 | `server.handoff_wait` | duration, `10s` (1ms to 1h) | how long a start waits for the instance that answers on `server.handoff_socket` to hand its sockets over, from the connection to the end of the hand-off; a start that is not answered in that time fails (exit 1) and binds nothing. Refused without `server.handoff_socket` |
 
@@ -366,7 +366,7 @@ A value of the code is a key when it is a tuning choice: an interval, a timeout,
 - the sizes of the formats the program writes: the 32-byte tag of a directory tier's file, the file-system limits of a directory tier's names and mode bits;
 - the bounds a grant token and a key file are held to (a token's size, the number of keys of a grant, the shortest grant secret), which keep hostile input from using memory.
 
-These tuning values are fixed in this release and have no key: the intervals of the cache's passes and of the scrub, the sizes of the OCI front's buffers and limits, and the timeouts of the update hook's calls.
+These tuning values are fixed in this release and have no key: the intervals of the cache's passes and of the scrub, the buffer sizes of the OCI front, and the timeouts of the update hook's calls.
 
 ## The flags of a run
 

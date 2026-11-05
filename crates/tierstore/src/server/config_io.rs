@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use crate::dir::{COPY_CHUNK, READ_CHUNK};
 use crate::s3::CHUNKS_WAITING;
-use objstore_s3::s3::{MAX_PART_BYTES, MIN_PART_BYTES};
 
 use super::config::{ConfigError, ServerTable, invalid, within};
 use super::config_tuning::{S3Client, span};
@@ -139,18 +138,6 @@ pub(super) fn io_tuning(
         old.oci_handshake_timeout,
         (MS, HOUR),
     )?;
-    let part_bytes = bytes(
-        "s3_part_bytes",
-        server.s3_part_bytes,
-        client.tuning.part_bytes,
-        (MIN_PART_BYTES, MAX_PART_BYTES.min(MOST_BUFFER)),
-    )?;
-    let threshold = bytes(
-        "s3_multipart_threshold",
-        server.s3_multipart_threshold,
-        client.tuning.multipart_threshold.min(part_bytes),
-        (1, part_bytes),
-    )?;
     let copy = bytes(
         "dir_copy_chunk",
         server.dir_copy_chunk,
@@ -163,8 +150,6 @@ pub(super) fn io_tuning(
         READ_CHUNK,
         (1, MOST_BUFFER),
     )?;
-    client.tuning.part_bytes = part_bytes;
-    client.tuning.multipart_threshold = threshold;
     client.chunks_waiting = count(
         "s3_chunks_waiting",
         server.s3_chunks_waiting,

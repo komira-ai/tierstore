@@ -46,8 +46,6 @@ fn without_the_keys_the_settings_are_the_values_the_code_had() {
     };
     assert_eq!(cli.io_tuning, want);
     assert_eq!(cli.io_tuning, IoTuning::default());
-    assert_eq!(cli.s3_client.tuning.part_bytes, 16 << 20);
-    assert_eq!(cli.s3_client.tuning.multipart_threshold, 16 << 20);
     assert_eq!(cli.s3_client.chunks_waiting, 1);
     assert_eq!(cli.s3_client.dir_copy_chunk, 1 << 20);
     assert_eq!(cli.s3_client.dir_read_chunk, 64 << 10);
@@ -64,8 +62,6 @@ door_grace             = "5s"
 door_look              = "20ms"
 put_pieces_queued      = 9
 oci_handshake_timeout  = "15s"
-s3_part_bytes          = "8MiB"
-s3_multipart_threshold = "6MiB"
 s3_chunks_waiting      = 3
 dir_copy_chunk         = "2MiB"
 dir_read_chunk         = "128KiB"
@@ -79,8 +75,6 @@ dir_read_chunk         = "128KiB"
     assert_eq!(io.put_pieces_queued, 9);
     assert_eq!(io.oci_handshake_timeout, Duration::from_secs(15));
     let client = cli.s3_client;
-    assert_eq!(client.tuning.part_bytes, 8 << 20);
-    assert_eq!(client.tuning.multipart_threshold, 6 << 20);
     assert_eq!(client.chunks_waiting, 3);
     assert_eq!(client.dir_copy_chunk, 2 << 20);
     assert_eq!(client.dir_read_chunk, 128 << 10);
@@ -100,10 +94,6 @@ fn a_value_outside_its_range_is_refused_naming_the_key() {
         ("door_look", "\"10ms\""),
         ("put_pieces_queued", "4096"),
         ("oci_handshake_timeout", "\"1h\""),
-        ("s3_part_bytes", "\"5MiB\""),
-        ("s3_part_bytes", "\"1GiB\""),
-        ("s3_multipart_threshold", "1"),
-        ("s3_multipart_threshold", "\"16MiB\""),
         ("s3_chunks_waiting", "1024"),
         ("dir_copy_chunk", "1"),
         ("dir_copy_chunk", "\"1GiB\""),
@@ -131,10 +121,6 @@ fn a_value_outside_its_range_is_refused_naming_the_key() {
         ("put_pieces_queued", "4097"),
         ("oci_handshake_timeout", "\"0s\""),
         ("oci_handshake_timeout", "\"2h\""),
-        ("s3_part_bytes", "5242879"),
-        ("s3_part_bytes", "\"1025MiB\""),
-        ("s3_multipart_threshold", "0"),
-        ("s3_multipart_threshold", "\"17MiB\""),
         ("s3_chunks_waiting", "0"),
         ("s3_chunks_waiting", "1025"),
         ("dir_copy_chunk", "0"),
@@ -169,26 +155,12 @@ fn a_door_look_longer_than_the_grace_is_refused() {
     assert_eq!(long.io_tuning.listen.door_look, Duration::from_millis(10));
 }
 
-/// Asserts the pair `s3_multipart_threshold` and `s3_part_bytes`: a threshold over the part size
-/// is refused, and a threshold that is left out is the default, or the part size if that is
-/// smaller, so that a file that lowers the part size alone loads.
-#[test]
-fn the_multipart_threshold_may_not_pass_the_part_size_and_follows_a_smaller_one() {
-    let why = refusal("s3_part_bytes = \"8MiB\"\ns3_multipart_threshold = \"9MiB\"");
-    assert!(why.contains("server.s3_multipart_threshold"), "{why}");
-    let smaller = cli("s3_part_bytes = \"8MiB\"");
-    assert_eq!(smaller.s3_client.tuning.multipart_threshold, 8 << 20);
-    let larger = cli("s3_part_bytes = \"32MiB\"");
-    assert_eq!(larger.s3_client.tuning.multipart_threshold, 16 << 20);
-}
-
 /// Asserts that a value of the wrong type is refused and never shows the text written.
 #[test]
 fn a_value_of_the_wrong_type_is_refused_without_showing_it() {
     for (line, shown) in [
         ("header_timeout = 4242", "4242"),
         ("listen_backlog = \"bigbacklog\"", "bigbacklog"),
-        ("s3_part_bytes = \"sixteenmeg\"", "sixteenmeg"),
         ("put_pieces_queued = -7731", "7731"),
     ] {
         let why = refusal(line);

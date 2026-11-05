@@ -19,7 +19,7 @@ use futures::stream::{self, BoxStream};
 use reqwest::{Response, StatusCode};
 
 use super::tagged::{header, retrying};
-use super::{Conn, S3Store, failure, multipart, times, transport};
+use super::{Conn, S3Store, SINGLE_PUT_MAX, failure, multipart, times, transport};
 use crate::body::Unsized;
 use crate::{BodyStream, ByteRange, ObjectKey, ObjectStoreError};
 
@@ -130,8 +130,8 @@ impl S3Store {
     /// with `len` bytes taken from `body` as they are sent, and gives the tag of the new object as
     /// the store sends it.
     ///
-    /// A body of at most the `multipart_threshold` of the tuning ([`MULTIPART_THRESHOLD`](super::MULTIPART_THRESHOLD) by default) bytes is gathered and sent as one PUT, as
-    /// [`put_stream`](crate::ObjectStore::put_stream) does; a longer one is a multipart upload
+    /// A body of at most [`S3Tuning::single_put_max`](super::S3Tuning::single_put_max) bytes is
+    /// streamed as one PUT, as [`put_stream`](crate::ObjectStore::put_stream) does; a longer one is a multipart upload
     /// whose completion carries `If-Match`, so the object is replaced only in the last request,
     /// after the whole body was read, and the upload is aborted on any failure. A body that fails
     /// or has another length than `len` replaces nothing. The write is sent once.
@@ -146,20 +146,21 @@ impl S3Store {
         body: BodyStream,
         etag: &str,
     ) -> Result<String, ObjectStoreError> {
-        if len <= self.conn.tuning.multipart_threshold {
-            let bytes = crate::gather(body, len).await?;
-            return self.put_if_match(key, bytes, etag).await;
-        }
-        let done = multipart::put(&self.conn, key, len, body, Some(etag)).await?;
-        done.ok_or_else(|| bad(key, "the completion carries no ETag"))
+        let done = if self.sends_whole(len) {
+            let condition = Some(("if-match", etag.to_owned()));
+            self.put_whole(key, len, body, condition).await?
+        } else {
+            multipart::put(&self.conn, key, len, body, Some(etag)).await?
+        };
+        done.ok_or_else(|| bad(key, "the answer carries no ETag"))
     }
 
     /// Creates the object, unmarked, only if the key has none, with `len` bytes taken from `body`
     /// as they are sent, and gives the tag of the new object as the store sends it (the `ETag` of
     /// the answer to the write that made it, as [`put_new_tagged`](Self::put_new_tagged) does).
     ///
-    /// A body of at most the `multipart_threshold` of the tuning ([`MULTIPART_THRESHOLD`](super::MULTIPART_THRESHOLD) by default) bytes is gathered and sent as one PUT with
-    /// `If-None-Match: *`; a longer one is a multipart upload whose completion carries it, so the
+    /// A body of at most [`S3Tuning::single_put_max`](super::S3Tuning::single_put_max) bytes is
+    /// streamed as one PUT with `If-None-Match: *`; a longer one is a multipart upload whose completion carries it, so the
     /// object appears only in the last request, after the whole body was read, and the upload is
     /// aborted on any failure. A body that fails or has another length than `len` creates
     /// nothing.
@@ -173,12 +174,56 @@ impl S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<String, ObjectStoreError> {
-        if len <= self.conn.tuning.multipart_threshold {
-            let bytes = crate::gather(body, len).await?;
-            return self.put_new_tagged(key, bytes).await;
+        let done = if self.sends_whole(len) {
+            self.put_whole(key, len, body, self.create_only()).await?
+        } else {
+            multipart::put(&self.conn, key, len, body, None).await?
+        };
+        done.ok_or_else(|| bad(key, "the answer carries no ETag"))
+    }
+
+    /// Whether a body of `len` bytes is sent as one PUT: it is no longer than the store's
+    /// `single_put_max`, which is kept to what S3 takes in one.
+    pub(super) fn sends_whole(&self, len: u64) -> bool {
+        len <= self.conn.tuning.single_put_max.min(SINGLE_PUT_MAX)
+    }
+
+    /// The condition of a create-only write: `If-None-Match: *`, if the store claims conditional
+    /// writes.
+    pub(super) fn create_only(&self) -> Option<(&'static str, String)> {
+        let conditional = self.conn.capabilities.conditional_put;
+        conditional.then(|| ("if-none-match", "*".to_owned()))
+    }
+
+    /// One PUT of `len` bytes taken from `body` as they are sent, never held whole, with
+    /// `condition` (`If-Match` or `If-None-Match`) if given. Gives the `ETag` of the answer, quotes
+    /// included, if it has one. Sent once. The request is signed `UNSIGNED-PAYLOAD` (see
+    /// `parts.rs`, whose watchdog and rules for the body it shares): a body that fails or has
+    /// another length than `len` stores nothing, since the store takes a request whose body has
+    /// its `Content-Length` bytes as whole.
+    pub(super) async fn put_whole(
+        &self,
+        key: &ObjectKey,
+        len: u64,
+        body: BodyStream,
+        condition: Option<(&'static str, String)>,
+    ) -> Result<Option<String>, ObjectStoreError> {
+        let create_only = condition
+            .as_ref()
+            .is_some_and(|(name, _)| *name == "if-none-match");
+        let headers = condition.into_iter().collect();
+        let resp = self
+            .conn
+            .send_streamed(key, &[], headers, len, body)
+            .await?;
+        match resp.status() {
+            StatusCode::OK => Ok(header(&resp, "etag").map(str::to_owned)),
+            StatusCode::NOT_FOUND => Err(ObjectStoreError::NotFound(key.clone())),
+            StatusCode::PRECONDITION_FAILED if create_only => {
+                Err(ObjectStoreError::AlreadyExists(key.clone()))
+            }
+            _ => Err(self.conn.within(failure(resp)).await?),
         }
-        let done = multipart::put(&self.conn, key, len, body, None).await?;
-        done.ok_or_else(|| bad(key, "the completion carries no ETag"))
     }
 
     /// [`put_stream_if_match`](Self::put_stream_if_match) for a body whose length is not known,
@@ -198,9 +243,7 @@ impl S3Store {
         etag: &str,
     ) -> Result<String, ObjectStoreError> {
         let mut rest = Unsized::new(body);
-        let first = rest
-            .next(multipart::part_len(self.conn.tuning.part_bytes))
-            .await?;
+        let first = rest.next(multipart::part_len(&self.conn.tuning)).await?;
         if !rest.more().await? {
             return self.put_if_match(key, first, etag).await;
         }

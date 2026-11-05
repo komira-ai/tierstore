@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 use objstore_s3::s3::fake::{Failure, FakeS3};
-use objstore_s3::s3::{MIN_PART_BYTES, MULTIPART_THRESHOLD, PART_BYTES, S3Tuning};
+use objstore_s3::s3::{PART_BYTES, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 
 const CONDITIONAL: Capabilities = Capabilities {
@@ -22,6 +22,19 @@ const CONDITIONAL: Capabilities = Capabilities {
 
 /// Pieces of a size that does not divide the part size.
 const PIECE: usize = (1 << 20) + 7;
+
+/// A store that sends an object of more than one part's worth as a multipart upload, so that a
+/// test of the parts need not write 5 GiB: `single_put_max` is the part size.
+fn cut_at_a_part(s3: &FakeS3) -> S3Store {
+    s3.store_tuned(CONDITIONAL, cut_at_a_part_tuning())
+}
+
+fn cut_at_a_part_tuning() -> S3Tuning {
+    S3Tuning {
+        single_put_max: PART_BYTES,
+        ..S3Tuning::default()
+    }
+}
 
 fn key(name: &str) -> ObjectKey {
     ObjectKey::new(format!("cas/{name}")).unwrap()
@@ -53,7 +66,7 @@ fn body(bytes: &Bytes, tail: Option<ObjectStoreError>) -> BodyStream {
 #[tokio::test]
 async fn a_large_object_goes_in_parts_of_the_part_size_and_reads_back() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let bytes = pattern(2 * PART_BYTES as usize + 1000);
     let k = key("large");
     store
@@ -95,18 +108,18 @@ async fn a_large_object_goes_in_parts_of_the_part_size_and_reads_back() {
 }
 
 /// Catches: the threshold off by one either way: an object of exactly
-/// [`MULTIPART_THRESHOLD`] bytes is one PUT, one byte more is a multipart upload.
+/// `single_put_max` bytes is one PUT, one byte more is a multipart upload.
 #[tokio::test]
 async fn the_threshold_is_the_largest_single_put() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
-    let at = pattern(MULTIPART_THRESHOLD as usize);
+    let store = cut_at_a_part(&s3);
+    let at = pattern(PART_BYTES as usize);
     store
         .put_stream(&key("at"), at.len() as u64, body(&at, None))
         .await
         .unwrap();
     assert_eq!((s3.stats().single_puts, s3.stats().parts), (1, 0));
-    let over = pattern(MULTIPART_THRESHOLD as usize + 1);
+    let over = pattern(PART_BYTES as usize + 1);
     store
         .put_stream(&key("over"), over.len() as u64, body(&over, None))
         .await
@@ -120,7 +133,7 @@ async fn the_threshold_is_the_largest_single_put() {
 #[tokio::test]
 async fn a_failed_part_aborts_the_upload() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     s3.fail(Failure::Part(2));
     let bytes = pattern(3 * PART_BYTES as usize);
     let k = key("part-fails");
@@ -141,7 +154,7 @@ async fn a_failed_part_aborts_the_upload() {
 #[tokio::test]
 async fn a_broken_body_aborts_the_upload() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let bytes = pattern(2 * PART_BYTES as usize + 5);
     let len = bytes.len() as u64;
     let broke = ObjectStoreError::Body("the source broke".into());
@@ -169,7 +182,7 @@ async fn a_broken_body_aborts_the_upload() {
 #[tokio::test]
 async fn a_completion_that_fails_late_aborts_the_upload() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     s3.fail(Failure::CompleteLate);
     let bytes = pattern(PART_BYTES as usize + 1);
     let k = key("late");
@@ -190,7 +203,7 @@ async fn a_completion_that_fails_late_aborts_the_upload() {
 #[tokio::test]
 async fn a_conditional_completion_over_an_existing_key_is_refused_and_aborted() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let k = key("taken");
     store
         .put_new(&k, Bytes::from_static(b"first"), None)
@@ -220,7 +233,7 @@ async fn a_conditional_completion_over_an_existing_key_is_refused_and_aborted() 
 #[tokio::test]
 async fn a_write_dropped_mid_upload_aborts_it() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let first = pattern(PART_BYTES as usize + 3);
     // One part's worth and more, then a body that never ends.
     let pending = stream::iter(vec![Ok(first)]).chain(stream::pending());
@@ -249,7 +262,7 @@ async fn a_write_dropped_mid_upload_aborts_it() {
 #[tokio::test]
 async fn a_write_dropped_while_its_abort_is_in_flight_aborts_the_upload_again() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     s3.hold_next_abort();
     let failing = stream::iter(vec![Err(ObjectStoreError::Body("cut".to_owned()))]);
     let k = key("abort-in-flight");
@@ -271,7 +284,7 @@ async fn a_write_dropped_while_its_abort_is_in_flight_aborts_the_upload_again() 
 #[tokio::test]
 async fn every_failed_step_fails_the_write_and_leaves_no_upload() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let bytes = pattern(PART_BYTES as usize + 1);
     for (failure, name) in [
         (Failure::Create, "create"),
@@ -302,7 +315,7 @@ async fn every_failed_step_fails_the_write_and_leaves_no_upload() {
 #[tokio::test]
 async fn an_abort_that_fails_leaves_the_write_failed_with_its_own_error() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     s3.fail(Failure::Part(1));
     s3.fail(Failure::Abort);
     let bytes = pattern(PART_BYTES as usize + 1);
@@ -322,7 +335,7 @@ async fn an_abort_that_fails_leaves_the_write_failed_with_its_own_error() {
 #[tokio::test]
 async fn missing_objects_ranges_past_the_end_and_taken_keys_are_told_apart() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(CONDITIONAL);
+    let store = cut_at_a_part(&s3);
     let k = key("small");
     let one = ByteRange::new(0, 1).unwrap();
     let missing = store.get_range(&k, one).await;
@@ -418,7 +431,7 @@ async fn the_fake_refuses_what_s3_refuses() {
 #[tokio::test]
 async fn a_store_without_conditional_writes_replaces_a_key() {
     let s3 = FakeS3::start().await;
-    let store = s3.store(Capabilities::default());
+    let store = s3.store_tuned(Capabilities::default(), cut_at_a_part_tuning());
     let k = key("replaced");
     store
         .put_new(&k, Bytes::from_static(b"one"), None)
@@ -466,73 +479,160 @@ async fn the_fake_lists_uploads_of_a_bucket_and_not_of_a_key() {
     assert!(key.text().await.unwrap().contains("NotImplemented"));
 }
 
-/// `tuning` with a part of `part_bytes` and a single PUT of at most `threshold`.
-fn sized(part_bytes: u64, threshold: u64) -> S3Tuning {
-    S3Tuning {
-        part_bytes,
-        multipart_threshold: threshold,
-        ..S3Tuning::default()
-    }
-}
-
-/// An object of two and a bit parts of the configured part size goes in three parts of that
-/// size, not of the default 16 MiB, and reads back whole.
+/// Asserts that the default store sends a 20 MiB body of known length as exactly one PutObject and
+/// no multipart call (two parts and a completion before), that the body reaches the service whole
+/// in that one request, and that it reads back whole.
 #[tokio::test]
-async fn the_part_bytes_of_the_tuning_is_the_size_of_a_part() {
+async fn a_known_length_body_over_one_part_is_one_put_by_default() {
     let s3 = FakeS3::start().await;
-    let store = s3.store_tuned(CONDITIONAL, sized(MIN_PART_BYTES, MIN_PART_BYTES));
-    let bytes = pattern(2 * MIN_PART_BYTES as usize + 1000);
-    let k = key("small-parts");
+    let store = s3.store(CONDITIONAL);
+    let bytes = pattern(20 << 20);
+    let k = key("twenty");
     store
         .put_stream(&k, bytes.len() as u64, body(&bytes, None))
         .await
-        .expect("streamed");
+        .unwrap();
     let stats = s3.stats();
     assert_eq!(
-        (stats.single_puts, stats.parts, stats.completed),
-        (0, 3, 1),
-        "{stats:?}"
+        (
+            stats.single_puts,
+            stats.parts,
+            stats.completed,
+            stats.aborted
+        ),
+        (1, 0, 0, 0)
     );
-    assert!(stats.largest_body <= MIN_PART_BYTES, "{stats:?}");
-    let all = ByteRange::new(0, bytes.len() as u64).unwrap();
-    assert_eq!(store.get_range(&k, all).await.unwrap(), bytes);
+    assert_eq!(stats.largest_body, bytes.len() as u64);
+    assert_eq!(s3.requests(), vec!["PUT /tierstore-fake/cas/twenty?"]);
+    let read = store
+        .get_range(&k, ByteRange::new(0, bytes.len() as u64).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(read, bytes);
 }
 
-/// The threshold of the tuning is the largest object of one PUT: one byte over it is a
-/// multipart upload, though it is far under the default threshold.
+/// Asserts that a body one byte over the configured `single_put_max` is a multipart upload (a
+/// create, parts of the default size, a completion) and one at the limit is one PUT.
 #[tokio::test]
-async fn the_multipart_threshold_of_the_tuning_is_the_largest_single_put() {
+async fn a_body_over_the_configured_single_put_max_is_multipart() {
     let s3 = FakeS3::start().await;
-    let store = s3.store_tuned(CONDITIONAL, sized(MIN_PART_BYTES, MIN_PART_BYTES));
-    let at = pattern(MIN_PART_BYTES as usize);
+    let tuning = S3Tuning {
+        single_put_max: 8 << 20,
+        ..S3Tuning::default()
+    };
+    let store = s3.store_tuned(CONDITIONAL, tuning);
+    let at = pattern(8 << 20);
     store
         .put_stream(&key("at"), at.len() as u64, body(&at, None))
         .await
         .unwrap();
-    assert_eq!((s3.stats().single_puts, s3.stats().parts), (1, 0));
-    let over = pattern(MIN_PART_BYTES as usize + 1);
+    let stats = s3.stats();
+    assert_eq!((stats.single_puts, stats.parts, stats.completed), (1, 0, 0));
+    let over = pattern((8 << 20) + 1);
     store
         .put_stream(&key("over"), over.len() as u64, body(&over, None))
         .await
         .unwrap();
-    assert_eq!((s3.stats().single_puts, s3.stats().parts), (1, 2));
+    let stats = s3.stats();
+    assert_eq!((stats.single_puts, stats.parts, stats.completed), (1, 1, 1));
+    assert_eq!(s3.object_len(&key("over")), Some(over.len() as u64));
 }
 
-/// A body of unknown length is cut into parts of the configured size too: its first part is
-/// read at that size, and a body that ends inside it is one PUT.
+/// Asserts that the configured `part_bytes` is the size of the parts: 12 MiB with 5 MiB parts is
+/// three parts (5, 5, 2), none larger than 5 MiB, and the object reads back whole.
 #[tokio::test]
-async fn an_unsized_body_is_cut_at_the_part_bytes_of_the_tuning() {
+async fn the_configured_part_size_cuts_the_parts() {
     let s3 = FakeS3::start().await;
-    let store = s3.store_tuned(CONDITIONAL, sized(MIN_PART_BYTES, MIN_PART_BYTES));
-    let k = key("unsized");
-    let first = pattern(10);
-    let tag = store.put_new_tagged(&k, first.clone()).await.unwrap();
-    let bytes = pattern(MIN_PART_BYTES as usize + 5);
+    let tuning = S3Tuning {
+        single_put_max: 5 << 20,
+        part_bytes: 5 << 20,
+        ..S3Tuning::default()
+    };
+    let store = s3.store_tuned(CONDITIONAL, tuning);
+    let bytes = pattern(12 << 20);
+    let k = key("cut");
     store
-        .put_stream_if_match_unsized(&k, body(&bytes, None), &tag)
+        .put_stream(&k, bytes.len() as u64, body(&bytes, None))
         .await
         .unwrap();
     let stats = s3.stats();
-    assert_eq!((stats.parts, stats.completed), (2, 1), "{stats:?}");
-    assert!(stats.largest_body <= MIN_PART_BYTES, "{stats:?}");
+    assert_eq!((stats.single_puts, stats.parts, stats.completed), (0, 3, 1));
+    assert!(stats.largest_body <= 5 << 20, "{}", stats.largest_body);
+    let read = store
+        .get_range(&k, ByteRange::new(0, bytes.len() as u64).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(read, bytes);
+}
+
+/// Asserts that a body of unknown length is cut into parts of the configured `part_bytes` and
+/// completed with `If-Match`, as it was with the fixed size (here 12 MiB in 5 MiB parts: three).
+#[tokio::test]
+async fn a_body_of_unknown_length_is_cut_at_the_configured_part_size() {
+    let s3 = FakeS3::start().await;
+    let tuning = S3Tuning {
+        part_bytes: 5 << 20,
+        ..S3Tuning::default()
+    };
+    let store = s3.store_tuned(CONDITIONAL, tuning);
+    let k = key("unsized");
+    let tag = store
+        .put_new_tagged(&k, Bytes::from_static(b"old"))
+        .await
+        .unwrap();
+    let bytes = pattern(12 << 20);
+    let new = store
+        .put_stream_if_match_unsized(&k, body(&bytes, None), &tag)
+        .await
+        .unwrap();
+    assert_ne!(new, tag);
+    let stats = s3.stats();
+    assert_eq!((stats.parts, stats.completed), (3, 1));
+    assert_eq!(s3.object_len(&k), Some(bytes.len() as u64));
+}
+
+/// Asserts that the one streamed PUT of a known length is create-only (`If-None-Match: *`): a
+/// second write of the key is `AlreadyExists` and leaves the first object as it was; and that a
+/// replacement by tag over the same single PUT replaces only the object that has the tag.
+#[tokio::test]
+async fn the_single_streamed_put_is_create_only_and_the_replacement_names_its_tag() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let first = pattern(3 << 20);
+    let k = key("once");
+    let tag = store
+        .put_stream_new_tagged(&k, first.len() as u64, body(&first, None))
+        .await
+        .unwrap();
+    let second = pattern(2 << 20);
+    let again = store
+        .put_stream(&k, second.len() as u64, body(&second, None))
+        .await;
+    assert!(
+        matches!(again, Err(ObjectStoreError::AlreadyExists(_))),
+        "{again:?}"
+    );
+    assert_eq!(s3.object_len(&k), Some(first.len() as u64));
+    let wrong = store
+        .put_stream_if_match(&k, second.len() as u64, body(&second, None), "\"other\"")
+        .await;
+    assert!(wrong.is_err(), "{wrong:?}");
+    assert_eq!(s3.object_len(&k), Some(first.len() as u64));
+    store
+        .put_stream_if_match(&k, second.len() as u64, body(&second, None), &tag)
+        .await
+        .unwrap();
+    assert_eq!(s3.object_len(&k), Some(second.len() as u64));
+    assert_eq!(s3.stats().parts, 0);
+}
+
+/// Asserts that a part size outside what S3 takes is held to the nearest size it does (never
+/// under 5 MiB or over 5 GiB), and that a size in range is kept.
+#[test]
+fn a_part_size_outside_what_s3_takes_is_held_to_it() {
+    use objstore_s3::s3::{MAX_PART_BYTES, MIN_PART_BYTES, part_size_of};
+    assert_eq!(part_size_of(1, 1), Some(MIN_PART_BYTES));
+    assert_eq!(part_size_of(1, u64::MAX), Some(MAX_PART_BYTES));
+    assert_eq!(part_size_of(1, 64 << 20), Some(64 << 20));
+    assert_eq!(part_size_of(u64::MAX, 64 << 20), None);
 }

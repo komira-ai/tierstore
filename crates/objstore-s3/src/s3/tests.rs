@@ -364,3 +364,24 @@ fn partial_answers_with_malformed_or_inverted_ranges_are_refused() {
     let why = check_partial(Some("bytes 0-9/10"), r(0, 10), 9).unwrap_err();
     assert!(why.contains("the body has 9 bytes"), "{why}");
 }
+
+/// Asserts the length at which a write stops being one PUT: the store's `single_put_max` is the
+/// longest one-PUT body (one byte more is multipart), and a `single_put_max` past S3's 5 GiB limit
+/// of one PUT is held to that limit.
+#[test]
+fn a_body_is_one_put_up_to_the_single_put_max_and_never_past_s3s_limit() {
+    let c = config("http://127.0.0.1:9000", "test-bucket");
+    let tuned = |single_put_max| S3Tuning {
+        single_put_max,
+        ..S3Tuning::default()
+    };
+    let small = S3Store::new_tuned(c.clone(), tuned(8 << 20)).unwrap();
+    assert!(small.sends_whole(8 << 20));
+    assert!(!small.sends_whole((8 << 20) + 1));
+    let past = S3Store::new_tuned(c.clone(), tuned(u64::MAX)).unwrap();
+    assert!(past.sends_whole(SINGLE_PUT_MAX));
+    assert!(!past.sends_whole(SINGLE_PUT_MAX + 1));
+    let default = S3Store::new(c).unwrap();
+    assert!(default.sends_whole(SINGLE_PUT_MAX));
+    assert!(!default.sends_whole(SINGLE_PUT_MAX + 1));
+}

@@ -323,12 +323,16 @@ impl FakeS3 {
     }
 
     /// A store for bucket `tierstore-fake` on this service, claiming `capabilities`.
+    ///
+    /// # Panics
+    /// Never: the configuration is valid.
     #[must_use]
     pub fn store(&self, capabilities: Capabilities) -> S3Store {
         self.store_tuned(capabilities, S3Tuning::default())
     }
 
-    /// As [`store`](Self::store), with the settings `tuning` gives.
+    /// As [`FakeS3::store`], with the settings `tuning` (a small `single_put_max` or
+    /// `part_bytes` makes a small object a multipart upload).
     ///
     /// # Panics
     /// Never: the configuration is valid.
