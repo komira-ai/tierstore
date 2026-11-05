@@ -250,10 +250,10 @@ async fn a_hot_tier_that_answers_full_sends_a_put_to_cold_and_refuses_a_presigne
     assert!(!rig.cold_has("presigned").await);
 }
 
-/// Asserts that the completion of a multipart upload makes the object in the cold tier and leaves
-/// a `(PUT, PENDING)` entry, with nothing in the hot tier.
+/// Asserts that the completion of a multipart upload makes the object in the hot tier and leaves
+/// a `(PUT, PENDING)` entry, with nothing in the cold tier.
 #[tokio::test]
-async fn a_multipart_completion_lands_in_cold_and_leaves_a_pending_entry() {
+async fn a_multipart_completion_lands_in_hot_and_leaves_a_pending_entry() {
     let rig = Rig::active().await;
     let id = rig.proxy.create_upload("k").await.unwrap();
     let tag = rig
@@ -265,13 +265,13 @@ async fn a_multipart_completion_lands_in_cold_and_leaves_a_pending_entry() {
         .complete_upload("k", &id, &[(1, tag)])
         .await
         .unwrap();
-    assert_eq!(rig.cold_mem.get("k", None).await.unwrap(), body("ab"));
-    assert!(!rig.hot_has("k").await);
+    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("ab"));
+    assert!(!rig.cold_has("k").await);
     assert_eq!(rig.shape("k").await, pending());
 }
 
-/// Asserts that a completion the cold tier refuses (a part it does not know) is answered with the
-/// cold tier's error and removes its entry, and that a completion the cold tier did not answer is
+/// Asserts that a completion the hot tier refuses (a part it does not know) is answered with the
+/// hot tier's error and removes its entry, and that a completion the hot tier did not answer is
 /// answered `Unavailable` and leaves the entry pending, for the reconciler to find the object or
 /// none.
 #[tokio::test]
@@ -285,14 +285,15 @@ async fn a_multipart_completion_that_fails_removes_its_entry_and_one_without_an_
         .await
         .unwrap();
     let invalid = Error::InvalidPart("1".to_owned());
-    rig.cold.fail_next_with(Op::CompleteUpload, invalid.clone());
+    rig.hot_faults
+        .fail_next_with(Op::CompleteUpload, invalid.clone());
     let done = rig
         .proxy
         .complete_upload("k", &id, &[(1, tag.clone())])
         .await;
     assert_eq!(done, Err(invalid));
     assert_eq!(rig.shape("k").await, None);
-    rig.cold.fail_next(Op::CompleteUpload, 1);
+    rig.hot_faults.fail_next(Op::CompleteUpload, 1);
     let lost = rig.proxy.complete_upload("k", &id, &[(1, tag)]).await;
     assert!(matches!(lost, Err(Error::Unavailable(_))), "{lost:?}");
     assert_eq!(rig.shape("k").await, pending());

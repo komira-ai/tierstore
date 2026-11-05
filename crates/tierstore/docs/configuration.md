@@ -232,7 +232,7 @@ Both tables have `kind` and the keys it needs. `kind` is `memory` (no other key)
 | Key | Type, default | What |
 |---|---|---|
 | `hot_store.kind`, `hot_store.path`, `hot_store.bucket` | required | the hot tier |
-| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go straight to it, so it must do them (all three kinds do) |
+| `cold_store.kind`, `cold_store.path`, `cold_store.bucket` | required | the cold tier. Multipart uploads go to it when the hot tier is full, and it is where the reconciler copies them, so it must do them (all three kinds do) |
 | `hot_store.endpoint` | `http://host[:port]`, required for `s3` | the hot tier's store. No path; TLS is not built yet |
 | `hot_store.region` | string, `us-east-1` | the signing region of the hot tier's store |
 | `hot_store.credentials_file` | path, required for `s3` | the key file of the hot tier's store |
@@ -257,7 +257,7 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.usage_refresh` | duration, `1s` (1ms to 1h) | how long the usage object that was read is used before it is read again, and how long the hot tier is taken to be full after it said so |
 | `hot_store.compare_range` | size, `1MiB` (4KiB to 1GiB) | the most bytes of an object that one read of the reconciler's comparison of the two tiers holds |
 | `hot_store.listing_heads` | count | no longer read: the key is still accepted, so a file that sets it loads, and it changes nothing (and the start says nothing of it) |
-| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to the cold tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
+| `hot_store.upload_listing_calls` | count, 100 (1 to 100000) | the most calls to one tier that one listing of open uploads makes to fill a page that the filter of reserved keys cut short |
 | `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
 | `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. |
 | `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |

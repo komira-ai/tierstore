@@ -38,9 +38,11 @@
 //!   is acknowledged when the journal entry of its key (below) says so. A delete removes the
 //!   object from the cold tier at once and finishes on the entry. A listing merges the two tiers.
 //!   When the hot tier is full the proxy writes new objects straight to the cold tier. A multipart
-//!   upload goes straight to the cold tier, part by part, never staged in the proxy: it creates
-//!   the object there only when the upload is completed (create-only: a key that exists in either
-//!   tier is refused), on the entry of the key. A read that finds an object in the cold tier asks
+//!   upload is made in the hot tier whenever it has room, and in the cold tier only when it is
+//!   full, part by part, never staged in the proxy: the tier is chosen when the upload is
+//!   created and is named in the upload id the client holds. The object is made there only when
+//!   the upload is completed (create-only: a key that exists in either tier is refused), on the
+//!   entry of the key, and the reconciler copies it to the cold tier like any put. A read that finds an object in the cold tier asks
 //!   for its copy into the hot tier on an entry and does not copy it itself. Writes are made
 //!   only while the format object says `{"epoch": 2, "phase": "active"}`; before that they are
 //!   answered with [`Error::Unavailable`] and reads are served.

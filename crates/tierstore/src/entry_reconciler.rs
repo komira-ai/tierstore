@@ -52,7 +52,9 @@
 //!    cold copy is adopted by a pending put entry instead.
 //! 6. Sweeps the hot tier for strays, now and every [`EntryReconcilerConfig::stray_interval`]: a
 //!    hot object older than [`EntryReconcilerConfig::stray_grace`] with no cold object and no entry
-//!    gets a `(PUT, PENDING)` entry, which the next step copies.
+//!    gets a `(PUT, PENDING)` entry, which the next step copies. The same sweep aborts the multipart
+//!    uploads of the hot tier that have stood open longer than
+//!    [`EntryReconcilerConfig::abandoned_upload_after`].
 //!
 //! An item that fails (a store call that fails, or less than the lease margin left) is tried again
 //! after a delay that starts at [`EntryReconcilerConfig::retry_min`] and doubles to
@@ -125,6 +127,11 @@ pub struct EntryReconcilerConfig {
     pub stray_grace: Duration,
     /// How often the stray sweep runs, after the one at takeover.
     pub stray_interval: Duration,
+    /// How long a multipart upload may stand open in the hot tier, by the wall clock of `base` and
+    /// the time the hot tier gives for its start, before the stray sweep aborts it. An upload takes
+    /// no entry until its completion, so nothing else finds one that its client has left. Zero
+    /// turns the abort off.
+    pub abandoned_upload_after: Duration,
     /// How long a copy-back that was asked for may wait, on this process's monotonic clock from
     /// the first step that sees it, before it is dropped without a copy.
     pub copy_back_ttl: Duration,
@@ -155,7 +162,8 @@ pub struct EntryReconcilerConfig {
 impl EntryReconcilerConfig {
     /// The settings over `base`, with a departure of 60 seconds, an idle wait of 1 to 10 seconds,
     /// a retry delay of 1 to 60 seconds, comparisons in ranges of `base.compare_range` (1 MiB), a stray grace of 10
-    /// minutes, a sweep every 24 hours at up to 100 lookups a second, copy-backs kept for 10
+    /// minutes, a sweep every 24 hours at up to 100 lookups a second that also aborts the uploads
+    /// of the hot tier left open for 7 days, copy-backs kept for 10
     /// minutes and at most 1000 of them, the usage published every 10 seconds and measured by a
     /// listing every 24 hours, 100 pages of a listing a step, 10000 candidates of the eviction,
     /// 100000 remembered tags, and a [`TokioSleeper`].
@@ -172,6 +180,7 @@ impl EntryReconcilerConfig {
             compare_range,
             stray_grace: Duration::from_secs(600),
             stray_interval: Duration::from_secs(24 * 3600),
+            abandoned_upload_after: Duration::from_secs(7 * 24 * 3600),
             copy_back_ttl: Duration::from_secs(600),
             copy_back_max: 1000,
             stray_rate: 100,
@@ -202,6 +211,8 @@ pub struct StepReport {
     pub mismatched: Vec<String>,
     /// The stray objects that got an entry.
     pub strays_adopted: usize,
+    /// The abandoned multipart uploads of the hot tier that were aborted.
+    pub uploads_aborted: usize,
     /// The hot objects evicted.
     pub evicted: usize,
     /// Whether the hot tier is still above the low water of its budget after an eviction that ran
@@ -218,7 +229,7 @@ impl StepReport {
     /// not wait after one that did.
     #[must_use]
     pub fn progress(&self) -> bool {
-        self.changed > 0 || self.strays_adopted > 0 || self.scanning
+        self.changed > 0 || self.strays_adopted > 0 || self.uploads_aborted > 0 || self.scanning
     }
 }
 
