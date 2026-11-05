@@ -27,6 +27,7 @@ use super::request::{
     BoxError, Check, Query, Reader, Refused, Target, header, pieces, query_pairs,
 };
 use super::time::{http_date, parse_http_date};
+use super::xml::{self, Listing, ListingV1, PartListing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
 /// `delimiter` and `encoding-type` are parameters of ListObjectsV2, ListObjects (which also
@@ -34,6 +35,7 @@ use super::time::{http_date, parse_http_date};
 /// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
+const SUPPORTED: [&str; 19] = [
     "continuation-token",
     "delete",
     "delimiter",
