@@ -15,11 +15,13 @@ fn listed(key: &str, size: u64, modified: u64) -> Listed {
     }
 }
 
-/// Asserts that the five characters XML gives meaning to are escaped, and no other is.
+/// Asserts that the five characters XML gives meaning to are escaped, a carriage return is
+/// written as a character reference (a parser reads a bare one as a line feed), and no other is.
 #[test]
 fn text_is_escaped() {
     assert_eq!(escape("a&b<c>d\"e'f"), "a&amp;b&lt;c&gt;d&quot;e&apos;f");
     assert_eq!(escape("plain/key-1_2.3~"), "plain/key-1_2.3~");
+    assert_eq!(escape("a\rb\tc\nd"), "a&#13;b\tc\nd");
 }
 
 /// Asserts that an error body is a well-formed document with the code, the escaped message and
@@ -42,6 +44,7 @@ fn a_listing_that_goes_on_carries_the_next_token() {
         bucket: "bkt",
         prefix: "p/",
         max_keys: 2,
+        owner: false,
         objects: &objects,
         next: Some("6322".to_owned()),
     };
@@ -58,6 +61,29 @@ fn a_listing_that_goes_on_carries_the_next_token() {
     assert_eq!(texts(&xml, "LastModified"), times);
 }
 
+/// Asserts that a listing asked to fetch the owner gives each object an `Owner` with an `ID` and
+/// a `DisplayName` between its `Size` and its `StorageClass` (where S3 puts it), and that one
+/// that did not ask has none.
+#[test]
+fn the_owner_of_each_object_is_written_when_asked() {
+    let objects = [listed("a", 1, 0), listed("b", 2, 0)];
+    let mut listing = Listing {
+        bucket: "bkt",
+        prefix: "",
+        max_keys: 10,
+        owner: true,
+        objects: &objects,
+        next: None,
+    };
+    let xml = listing.to_xml();
+    assert_eq!(texts(&xml, "ID"), ["tierstore", "tierstore"]);
+    assert_eq!(texts(&xml, "DisplayName"), ["tierstore", "tierstore"]);
+    assert!(xml.contains("</Size><Owner><ID>tierstore</ID>"), "{xml}");
+    assert!(xml.contains("</Owner><StorageClass>"), "{xml}");
+    listing.owner = false;
+    assert!(texts(&listing.to_xml(), "Owner").is_empty());
+}
+
 /// Asserts that the last page has `IsTruncated` false and no token, and that an empty page is a
 /// well-formed document with no object.
 #[test]
@@ -66,6 +92,7 @@ fn the_last_page_has_no_token() {
         bucket: "bkt",
         prefix: "",
         max_keys: 1000,
+        owner: false,
         objects: &[],
         next: None,
     };

@@ -11,6 +11,8 @@ use crate::testdir::TestDir;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const REPO: &str = "example/tierstore";
+/// The version of the hostkeeper packages of `COMMIT`.
+const HK_VERSION: &str = "0.4.0+0123456789ab";
 
 fn scratch(name: &str) -> TestDir {
     let beside = std::env::current_exe().expect("test binary");
@@ -104,13 +106,21 @@ fn bundle(sha: &Sha256) -> String {
     format!("{bundle}\n")
 }
 
-/// `dir` holding the assets of `COMMIT`, their sums and a bundle per tarball.
+/// The assets of `COMMIT` with the hostkeeper packages of `HK_VERSION`, sorted.
+fn all_assets() -> Vec<String> {
+    let mut names = expected_assets(COMMIT);
+    names.extend(hostkeeper_assets(HK_VERSION));
+    names.sort();
+    names
+}
+
+/// `dir` holding the assets of `COMMIT`, their sums and a bundle per tarball and package.
 fn assets(dir: &Path) {
-    assets_of(dir, &expected_assets(COMMIT));
+    assets_of(dir, &all_assets());
 }
 
 /// `dir` holding the files `names` (assets of any commit), a `SHA256SUMS` that lists exactly
-/// them and a bundle per tarball among them: a directory that passes `verify-assets sums`
+/// them and a bundle per tarball and package among them: a directory that passes `verify-assets sums`
 /// whatever the set is, so that `check` is what judges the set.
 fn assets_of(dir: &Path, names: &[String]) {
     let mut sums = String::new();
@@ -121,7 +131,7 @@ fn assets_of(dir: &Path, names: &[String]) {
         std::fs::write(dir.join(name), &bytes).expect("asset");
         let sha = Sha256::of(bytes.as_bytes());
         sums.push_str(&format!("{sha}  {name}\n"));
-        if name.ends_with(".tar.gz") {
+        if bundles::needs_bundle(name) {
             std::fs::write(dir.join(bundles::name_of(name)), bundle(&sha)).expect("bundle");
         }
     }
@@ -153,6 +163,105 @@ fn the_assets_of_a_commit_are_a_tarball_and_an_sbom_per_platform() {
 }
 
 #[test]
+fn the_hostkeeper_assets_of_a_version_are_a_package_per_platform_and_the_index_sorted() {
+    // Catches: a platform's package left out of the release set, a package name that drifts
+    // from `tierstore-<version>-<platform>.tar.zst`, or the index missing or out of order.
+    assert_eq!(
+        hostkeeper_assets(HK_VERSION),
+        [
+            "index.json".to_owned(),
+            "tierstore-0.4.0+0123456789ab-linux-arm64.tar.zst".to_owned(),
+            "tierstore-0.4.0+0123456789ab-linux-x86_64.tar.zst".to_owned(),
+            "tierstore-0.4.0+0123456789ab-macos-arm64.tar.zst".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_release_without_a_hostkeeper_package_the_index_or_a_package_bundle_is_refused() {
+    // Catches: a release that ships without the macOS package or the release index (each with
+    // sums that match their files, so the check of the set refuses them), or with a package
+    // whose provenance bundle was never downloaded.
+    let mac = format!("tierstore-{HK_VERSION}-macos-arm64.tar.zst");
+    let without =
+        |gone: &str| -> Vec<String> { all_assets().into_iter().filter(|n| n != gone).collect() };
+
+    let dir = scratch("check-no-macos-package");
+    assets_of(&dir, &without(&mac));
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{SUMS} does not list {mac}")]
+    );
+
+    let dir = scratch("check-no-index");
+    assets_of(&dir, &without("index.json"));
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{SUMS} does not list index.json")]
+    );
+
+    let dir = scratch("check-no-package-bundle");
+    assets(&dir);
+    std::fs::remove_file(dir.join(bundles::name_of(&mac))).expect("rm");
+    assert_eq!(
+        refused(check(&dir, COMMIT)),
+        [format!("{mac}: no provenance bundle {mac}.sigstore.json")]
+    );
+}
+
+#[test]
+fn a_directory_whose_packages_are_of_another_commit_is_refused_with_every_file_named() {
+    // Catches: packages of another commit accepted because their version is well formed, or
+    // the missing package set going unreported.
+    let other = "fedcba9876543210fedcba9876543210fedcba98";
+    let other_version = "0.4.0+fedcba987654";
+    let mut names = expected_assets(other);
+    names.extend(hostkeeper_assets(other_version));
+    names.sort();
+    let dir = scratch("check-packages-of-other-commit");
+    assets_of(&dir, &names);
+    let mut want = vec![format!("{SUMS} lists no hostkeeper package of {COMMIT}")];
+    want.extend(
+        expected_assets(COMMIT)
+            .iter()
+            .map(|n| format!("{SUMS} does not list {n}")),
+    );
+    want.extend(
+        names
+            .iter()
+            .map(|n| format!("{SUMS} lists {n}, which is not an asset of {COMMIT}")),
+    );
+    assert_eq!(refused(check(&dir, COMMIT)), want);
+}
+
+#[test]
+fn packages_of_two_versions_of_the_commit_are_refused_as_a_set() {
+    // Catches: a release holding the packages of two builds of one commit, one of which the
+    // index would silently not describe.
+    let second = "0.5.0+0123456789ab";
+    let mut names = all_assets();
+    names.extend(
+        hostkeeper_assets(second)
+            .into_iter()
+            .filter(|n| n != "index.json"),
+    );
+    names.sort();
+    let dir = scratch("check-two-versions");
+    assets_of(&dir, &names);
+    let mut want = vec![format!(
+        "{SUMS} lists hostkeeper packages of 2 versions of {COMMIT}: {HK_VERSION}, {second}"
+    )];
+    let own = expected_assets(COMMIT);
+    want.extend(
+        names
+            .iter()
+            .filter(|n| !own.contains(n))
+            .map(|n| format!("{SUMS} lists {n}, which is not an asset of {COMMIT}")),
+    );
+    assert_eq!(refused(check(&dir, COMMIT)), want);
+}
+
+#[test]
 fn a_release_without_the_macos_arm64_tarball_or_sbom_or_with_an_extra_file_is_refused() {
     // Catches: a release check that passes a dist directory built for the Linux platforms
     // alone (the macos-arm64 job's files never downloaded), one that lacks only the Mac SBOM,
@@ -160,7 +269,7 @@ fn a_release_without_the_macos_arm64_tarball_or_sbom_or_with_an_extra_file_is_re
     // match their files, so the check of the set, not of the digests, is what refuses them.
     let mac = format!("tierstore-{COMMIT}-macos-arm64.tar.gz");
     let mac_sbom = format!("tierstore-{COMMIT}-macos-arm64.cdx.json");
-    let all = expected_assets(COMMIT);
+    let all = all_assets();
     let without = |gone: &[&String]| -> Vec<String> {
         all.iter().filter(|n| !gone.contains(n)).cloned().collect()
     };
@@ -230,7 +339,7 @@ fn a_complete_directory_passes_the_check() {
     assets(&dir);
     let printed = check(&dir, COMMIT).expect("check");
     assert!(
-        printed.last().is_some_and(|l| l.contains("6 files")),
+        printed.last().is_some_and(|l| l.contains("10 files")),
         "{printed:?}"
     );
 }
@@ -476,13 +585,14 @@ fn publish_creates_a_draft_with_every_file_reads_it_back_and_publishes_it() {
         "{create:?}"
     );
     assert!(create.contains(&"--draft".to_owned()));
-    // 6 assets (a tarball and an SBOM per platform) + 3 bundles + the sums.
+    // 6 assets (a tarball and an SBOM per platform) + 4 (a package per platform and the index)
+    // + 6 bundles (a tarball and a package per platform) + the sums.
     assert_eq!(
         create
             .iter()
             .filter(|a| Path::new(a).starts_with(&*dir))
             .count(),
-        10
+        17
     );
     assert_eq!(ran[1][..3], ["release", "edit", "v0.3.0"]);
     assert!(ran[1].contains(&"--draft=false".to_owned()));

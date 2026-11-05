@@ -9,9 +9,11 @@
 //! store with Object Lock, so a retained object is refused rather than hidden behind a
 //! delete marker.
 //!
-//! [`ObjectStore::put_stream`] of an object over [`MULTIPART_THRESHOLD`] is a multipart
-//! upload (`multipart.rs`): parts of [`part_size`] sent one at a time, each held in
-//! memory only while it is sent, and the upload aborted on any failure.
+//! [`ObjectStore::put_stream`] of an object of a known length is one PUT whose body is streamed
+//! as it is given (never held whole), up to [`S3Tuning::single_put_max`] (by default
+//! [`SINGLE_PUT_MAX`], 5 GiB, S3's limit for one PUT); a longer one is a multipart upload
+//! (`multipart.rs`): parts of [`part_size_of`] the store's [`S3Tuning::part_bytes`] sent one at a
+//! time, each held in memory only while it is sent, and the upload aborted on any failure.
 //!
 //! Beyond the trait, [`S3Store`] has the calls an object used for coordination needs
 //! (`tagged.rs`): [`S3Store::head`] (size, entity tag, time of last write),
@@ -40,7 +42,7 @@ mod tuning;
 mod xml;
 
 pub use multipart::{
-    MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, MULTIPART_THRESHOLD, PART_BYTES, part_size,
+    MAX_PART_BYTES, MAX_PARTS, MIN_PART_BYTES, PART_BYTES, SINGLE_PUT_MAX, part_size, part_size_of,
 };
 pub use parts::{OpenUpload, UploadsPage};
 pub use streamed::{ObjectBody, ObjectRead};
@@ -408,10 +410,10 @@ impl Conn {
         mut headers: Vec<(&'static str, String)>,
         payload: &str,
     ) -> reqwest::RequestBuilder {
-        // `ObjectKey` holds only unreserved characters and `/`, so the path needs no
-        // encoding and is signed exactly as sent.
+        // The key is percent-encoded here, once, and that text is both signed and sent: `Url`
+        // keeps an escape it is given as it is (it would leave a bare `%` or `+` alone).
         let path = match key {
-            Some(k) => format!("/{}/{}", self.bucket, k.as_str()),
+            Some(k) => format!("/{}/{}", self.bucket, sigv4::encode_key_path(k.as_str())),
             None => format!("/{}", self.bucket),
         };
         #[expect(
@@ -589,17 +591,17 @@ impl ObjectStore for S3Store {
         }
     }
 
-    /// One PUT for a body of at most [`MULTIPART_THRESHOLD`] bytes, gathered first; a
-    /// multipart upload for a larger one, aborted on any failure.
+    /// One streamed PUT for a body of at most [`S3Tuning::single_put_max`] bytes (create-only
+    /// where the store claims it); a multipart upload for a larger one, aborted on any failure.
     async fn put_stream(
         &self,
         key: &ObjectKey,
         len: u64,
         body: BodyStream,
     ) -> Result<(), ObjectStoreError> {
-        if len <= MULTIPART_THRESHOLD {
-            let bytes = crate::gather(body, len).await?;
-            return self.put_new(key, bytes, None).await;
+        if self.sends_whole(len) {
+            let sent = self.put_whole(key, len, body, self.create_only()).await;
+            return sent.map(drop);
         }
         multipart::put(&self.conn, key, len, body, None)
             .await

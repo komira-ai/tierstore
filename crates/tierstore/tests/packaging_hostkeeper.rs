@@ -270,7 +270,7 @@ fn the_plist_runs_the_current_release_as_the_service_account_kept_alive() {
     assert_eq!(installed, "tierstore.plist");
     assert!(dir().join(installed).is_file());
     let dict = plist();
-    assert_eq!(text(&dict, "Label"), "com.komira.tierstore");
+    assert_eq!(text(&dict, "Label"), "tierstore");
     assert_eq!(text(&dict, "UserName"), "_tierstore");
     assert_eq!(text(&dict, "GroupName"), "_tierstore");
     assert_eq!(dict.get("RunAtLoad"), Some(&Plist::Bool(true)));

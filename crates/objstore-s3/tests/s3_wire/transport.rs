@@ -76,12 +76,13 @@ async fn an_answer_cut_short_is_a_transport_error_for_reads_and_listings() {
     assert!(matches!(err, ObjectStoreError::Transport(_)), "{err}");
 }
 
-/// Catches: a small streamed write whose body fails still sent (an object stored from a
-/// broken source): the body's own error comes back and nothing reaches the wire.
+/// Catches: a small streamed write whose body fails still stored (an object stored from a
+/// broken source): the body's own error comes back and the service holds no object, since the
+/// request it was sent in never had its whole body.
 #[tokio::test]
-async fn a_small_streamed_write_with_a_failing_body_sends_nothing() {
-    let (endpoint, seen) = script(vec![]).await;
-    let s = store(endpoint, Capabilities::default());
+async fn a_small_streamed_write_with_a_failing_body_stores_nothing() {
+    let s3 = objstore_s3::s3::fake::FakeS3::start().await;
+    let s = s3.store(Capabilities::default());
     let body: objstore_s3::BodyStream = futures::stream::iter(vec![
         Ok(Bytes::from("ab")),
         Err(ObjectStoreError::Body("the source broke".into())),
@@ -92,7 +93,8 @@ async fn a_small_streamed_write_with_a_failing_body_sends_nothing() {
         matches!(&err, ObjectStoreError::Body(m) if m == "the source broke"),
         "{err}"
     );
-    assert!(seen.lock().unwrap().is_empty());
+    assert_eq!(s3.keys(), Vec::<String>::new());
+    assert_eq!(s3.stats().single_puts, 0);
 }
 
 /// Catches a ranged read that gives up on the first dropped connection: a store (or the

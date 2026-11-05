@@ -23,8 +23,8 @@
 //! read, in the form of `server.access_key_file` below; a secret in the config file would be
 //! readable by more users). The two tiers have a table of their own, so they may be two stores. These
 //! keys are refused for a tier that is not an S3 bucket, since they would do nothing. A request
-//! to an S3 tier is bounded by `server.s3_request_timeout`. The cold tier must do multipart uploads,
-//! which all three kinds do, and the proxy passes them to it.
+//! to an S3 tier is bounded by `server.s3_request_timeout`. Both tiers must do multipart uploads,
+//! which all three kinds do, and the proxy passes them to the tier that holds the upload.
 //!
 //! The clients of the S3 front sign with one of its access keys. `server.access_key_file` is the full
 //! key, which may do everything the front serves; `server.read_only_key_files` is an array of key-file paths, each a key that may only read objects and list the bucket (see the
@@ -101,6 +101,7 @@ use super::cli_heartbeat::HeartbeatFlags;
 pub use super::cli_serve::{Addresses, HandingError, run, run_handing, run_serving};
 use super::combined_cli::serve_combined_until_signalled;
 use super::config::{OciFlags, Settings, keys_for_flags};
+use super::config_entry::EntryTuning;
 use super::config_interface::UpstreamTable;
 use super::config_tuning::{HotTuning, S3Client};
 use super::deprecated;
@@ -123,6 +124,9 @@ pub(super) const DEFAULT_MAX_REQUEST_BYTES: u64 = 256 << 20;
 
 /// The streamed bodies taken at once: 32 of them hold at most 32 x (16 MiB + a few pieces).
 pub(super) const DEFAULT_MAX_CONCURRENT_PUTS: u32 = 32;
+
+/// The keys of one DeleteObjects call deleted at once (`server.delete_concurrency`'s default).
+pub(super) const DEFAULT_DELETE_CONCURRENCY: u32 = 16;
 
 /// How long a put that finds all the slots taken waits for one before it is answered 503
 /// (`server.put_permit_wait`'s default, `15s`).
@@ -243,6 +247,8 @@ pub struct Cli {
     pub s3_client: S3Client,
     /// The counts, rounds and sizes of the proxy and the reconciler that `[hot_store]` sets.
     pub hot_tuning: HotTuning,
+    /// The waits, delays and limits of the entry protocol that `[hot_store]` sets.
+    pub entry_tuning: EntryTuning,
     /// The bytes the hot tier is meant to hold; the water marks are shares of it.
     pub hot_bytes: u64,
     /// The percent of `hot_store.budget` above which the oldest copied objects are evicted from the
@@ -345,6 +351,12 @@ pub struct Cli {
     /// more, so 32 bodies hold about half a GiB at most, with S3 tiers, and a few MiB with
     /// directory tiers.
     pub max_concurrent_puts: u32,
+    /// The most keys of one DeleteObjects call (`POST /<bucket>?delete`, up to 1000 keys) that are
+    /// deleted at once, each by the same path as a single DeleteObject. The call as a whole is not
+    /// limited by this, only how many of its deletes run together, so that one call cannot take
+    /// every connection of the tiers' stores; raise it for a store that deletes fast, lower it for
+    /// one that throttles. At least 1.
+    pub delete_concurrency: u32,
     /// How long a put body or upload part that arrives when `server.max_concurrent_puts` bodies are
     /// already being taken waits for one of them to end: a number and `ms`, `s`, `m` or `h`. If a
     /// slot is free in that time the body is taken; if not, it is answered 503 `SlowDown` with
@@ -424,6 +436,15 @@ pub struct Cli {
     /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
     /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
     pub oci_stage_read: Option<u64>,
+    /// `params.max_manifest_bytes`: the largest manifest the OCI front stores, serves or pulls
+    /// (4194304, 4 MiB, if not given; at least 1).
+    pub oci_max_manifest_bytes: Option<u64>,
+    /// `params.read_chunk_bytes`: the most bytes the OCI front asks of the store at once when it
+    /// serves a blob (4194304, 4 MiB, if not given; at least 1).
+    pub oci_read_chunk_bytes: Option<u64>,
+    /// `params.echo_bytes`: the longest piece of a request that an OCI error repeats (256 if not
+    /// given; at least 1).
+    pub oci_echo_bytes: Option<u64>,
     /// `params.upstream`: the registry the OCI front pulls a missing object from.
     pub(super) oci_upstream: Option<UpstreamTable>,
 }
@@ -472,6 +493,7 @@ pub(super) struct Built {
     pub(super) server: ServerConfig,
     pub(super) proxy: ProxyConfig,
     pub(super) reconciler: ReconcilerConfig,
+    pub(super) entry: EntryTuning,
     pub(super) hot: Arc<dyn Backend>,
     pub(super) cold: Arc<dyn Backend>,
     pub(super) oci: Option<OciSetup>,
@@ -490,6 +512,8 @@ pub(super) struct OciSetup {
     pub(super) auth: Option<OciAuth>,
     /// The most bytes of a stored chunk read in one call at the end of a push.
     pub(super) stage_read: u64,
+    /// The manifest limit, the blob read chunk and the error echo length.
+    pub(super) sizes: oci::OciSizes,
     /// The registry a missing manifest or blob is pulled from; `None` pulls nothing.
     pub(super) upstream: Option<Upstream>,
 }
@@ -673,13 +697,16 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     reconciler.parallel = cli.copy_parallel as usize;
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
+    reconciler.abandoned_upload_after = tuning.abandoned_upload_after;
     cli.heartbeat.apply(&mut proxy);
+    cli.entry_tuning.apply_proxy(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
     server.oci_metrics = oci.as_ref().map(|setup| Arc::clone(&setup.metrics));
     Ok(Built {
         server,
         proxy,
         reconciler,
+        entry: cli.entry_tuning,
         hot,
         cold,
         oci,
@@ -712,6 +739,9 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
         stage_read: cli.oci_stage_read,
+        max_manifest_bytes: cli.oci_max_manifest_bytes,
+        read_chunk_bytes: cli.oci_read_chunk_bytes,
+        echo_bytes: cli.oci_echo_bytes,
         upstream: cli.oci_upstream.clone(),
     };
     oci_setup_of(&flags, server, warn)
@@ -762,7 +792,16 @@ pub(super) fn oci_setup_of(
             return Err(refuse(OciError::Missing(why.to_owned())));
         }
     };
+    let defaults = oci::OciSizes::default();
+    let sizes = oci::OciSizes {
+        manifest_bytes: flags.max_manifest_bytes.unwrap_or(defaults.manifest_bytes),
+        chunk_bytes: flags.read_chunk_bytes.unwrap_or(defaults.chunk_bytes),
+        echo_bytes: flags.echo_bytes.map_or(defaults.echo_bytes, |bytes| {
+            usize::try_from(bytes).unwrap_or(usize::MAX)
+        }),
+    };
     let upstream = flags.upstream.as_ref().map(upstream_of).transpose()?;
+    let upstream = upstream.map(|upstream| upstream.with_body_limit(sizes.manifest_bytes));
     let mode = if acceptor.is_some() {
         OciMode::Https
     } else {
@@ -785,6 +824,7 @@ pub(super) fn oci_setup_of(
         limits,
         auth: flags.require_auth.then(|| OciAuth::from_server(server)),
         stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
+        sizes,
         upstream,
     }))
 }

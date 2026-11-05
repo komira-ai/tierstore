@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use objstore_s3::s3::MULTIPART_THRESHOLD;
+use objstore_s3::s3::PART_BYTES;
 use objstore_s3::{BodyStream, KeyPrefix, ObjectStore, ObjectStoreError, PageSize};
 use reqwest::Response;
 use tierstore::server::AccessKey;
@@ -44,7 +44,7 @@ async fn with_readers_fixed() -> Harness {
 
 /// A body that goes up in parts, and its length.
 fn big() -> (u64, BodyStream) {
-    let len = MULTIPART_THRESHOLD + 1;
+    let len = PART_BYTES + 1;
     let bytes = Bytes::from(vec![9_u8; usize::try_from(len).unwrap()]);
     let parts: BodyStream = stream::iter(vec![Ok(bytes)]).boxed();
     (len, parts)
@@ -222,7 +222,7 @@ async fn a_read_only_key_signed_by_hand_is_denied_every_write_and_changes_nothin
     let xml = format!("<CompleteMultipartUpload>{part}</CompleteMultipartUpload>");
     let done = call(&h, "POST", "big", &upload, &[], xml.as_bytes()).await;
     assert_eq!(done.status(), 200);
-    assert_eq!(h.cold_mem.get("big", None).await.unwrap(), "part one");
+    assert_eq!(h.hot_mem.get("big", None).await.unwrap(), "part one");
 }
 
 /// Asserts that a request signed by hand with an id that no key has is 403 `InvalidAccessKeyId`,

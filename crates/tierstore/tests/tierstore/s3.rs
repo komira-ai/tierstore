@@ -10,7 +10,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures::stream;
 use objstore_s3::s3::fake::{FakeS3, part_etag};
-use tierstore::s3::{Capabilities, Credentials, S3Config};
+use tierstore::s3::{Capabilities, Credentials, S3Config, S3Tuning};
 use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, SystemClock};
 
 use crate::conformance;
@@ -39,6 +39,23 @@ pub async fn backend() -> (FakeS3, S3Backend) {
     let s3 = FakeS3::start().await;
     let backend = S3Backend::new(config(s3.endpoint())).unwrap();
     (s3, backend)
+}
+
+/// A backend over a service of its own that sends a body of more than 16 MiB as a multipart upload
+/// (the default is one PUT up to 5 GiB), for the tests of the upload, which write 17 MiB and not 5 GiB.
+pub async fn backend_cut_at_a_part() -> (FakeS3, S3Backend) {
+    let s3 = FakeS3::start().await;
+    let tuning = S3Tuning {
+        single_put_max: 16 << 20,
+        ..S3Tuning::default()
+    };
+    let backend = S3Backend::new_tuned(config(s3.endpoint()), tuning).unwrap();
+    (s3, backend)
+}
+
+/// Asserts that a call failed with `Error::InvalidKey`.
+fn assert_invalid<T: std::fmt::Debug>(result: Result<T, Error>) {
+    assert!(matches!(result, Err(Error::InvalidKey(_))), "{result:?}");
 }
 
 /// Asserts that a call failed with `Error::Other`.
@@ -322,26 +339,29 @@ async fn a_listing_of_more_than_one_s3_page_is_followed_across_pages() {
     assert_eq!(page(&backend, Some("k0001"), 2).await, ["k0002", "k0003"]);
 }
 
-/// Asserts that a key the client cannot name (it needs escaping) is refused as `Other` by
-/// every call that takes one, in a prefix and in a start-after key, and that no request
-/// reaches the service.
+/// Asserts that a key S3's rules refuse (a `..` segment, which the client cannot send; the
+/// empty key; one over 1024 bytes) is `InvalidKey` for every call that takes one, also as a
+/// start-after key, that a prefix over 1024 bytes is too, and that no request reaches the
+/// service. (Replaces the test that pinned `a b` as a key the client cannot name.)
 #[tokio::test]
 async fn a_key_the_client_cannot_name_is_refused_before_any_request() {
     let (s3, backend) = backend().await;
-    let key = "a b";
     let range = Some(ByteRange::new(0, 1));
-    assert_other(backend.put(key, body("v")).await);
-    assert_other(backend.put_if_match(key, body("v"), "tag").await);
-    assert_other(backend.get(key, None).await);
-    assert_other(backend.get(key, range).await);
-    assert_other(backend.head(key).await);
-    assert_other(backend.delete(key).await);
-    assert_other(backend.list(key).await);
-    assert_other(backend.list_page("", Some(key), 5).await);
-    assert_other(backend.create_upload(key).await);
-    assert_other(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
-    assert_other(backend.complete_upload(key, "u", &[]).await);
-    assert_other(backend.abort_upload(key, "u").await);
+    let long = "k".repeat(1025);
+    for key in ["a/../b", "", long.as_str()] {
+        assert_invalid(backend.put(key, body("v")).await);
+        assert_invalid(backend.put_if_match(key, body("v"), "tag").await);
+        assert_invalid(backend.get(key, None).await);
+        assert_invalid(backend.get(key, range).await);
+        assert_invalid(backend.head(key).await);
+        assert_invalid(backend.delete(key).await);
+        assert_invalid(backend.list_page("", Some(key), 5).await);
+        assert_invalid(backend.create_upload(key).await);
+        assert_invalid(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
+        assert_invalid(backend.complete_upload(key, "u", &[]).await);
+        assert_invalid(backend.abort_upload(key, "u").await);
+    }
+    assert_invalid(backend.list(&long).await);
     assert_eq!(s3.requests(), Vec::<String>::new());
 }
 
@@ -474,9 +494,9 @@ async fn the_s3_backend_follows_the_pages_of_a_listing_of_uploads() {
 }
 
 /// Asserts that a listing of uploads that the service refuses, or answers with something that is
-/// not a listing of uploads, or that names a prefix or a marker the client cannot name, is an
-/// `Other` error, as the other calls of the backend give for them, and that the last of these
-/// asks nothing of the service.
+/// not a listing of uploads is an `Other` error, that one with a marker or a prefix the client cannot
+/// name (an empty marker, a prefix over 1024 bytes) is `InvalidKey`, as the other calls of the backend give for it, and that the last of these asks
+/// nothing of the service.
 #[tokio::test]
 async fn a_listing_of_uploads_that_fails_is_an_error() {
     let (endpoint, _) = scripted(vec!["HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n<html/>"]);
@@ -490,8 +510,8 @@ async fn a_listing_of_uploads_that_fails_is_an_error() {
 
     let (endpoint, seen) = scripted(vec![]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_other(store.list_uploads("", Some(("", None)), 10).await);
-    assert_other(store.list_uploads("a//b", None, 10).await);
+    assert_invalid(store.list_uploads("", Some(("", None)), 10).await);
+    assert_invalid(store.list_uploads(&"k".repeat(1025), None, 10).await);
     assert!(seen.lock().unwrap().is_empty());
 }
 
@@ -599,7 +619,7 @@ fn generated(count: usize, end: Option<Error>) -> PartBody<'static> {
 /// is refused after the upload was aborted, and a whole body makes one object of its length.
 #[tokio::test]
 async fn a_large_streamed_put_is_completed_only_after_the_last_chunk() {
-    let (s3, backend) = backend().await;
+    let (s3, backend) = backend_cut_at_a_part().await;
     let len = Some(17 * MEBIBYTE as u64);
     let cut = Error::Other("cut".to_owned());
 
