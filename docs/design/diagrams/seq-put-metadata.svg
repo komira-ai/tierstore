@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 736" width="1000" height="736" role="img" aria-label="Sequence diagram of a put: Client, S3 front, Proxy, Hot tier, Cold tier. The front reads the content headers, user metadata, tags and declared checksums, hashes the body once for every digest, hands the proxy the body with a slot that fills at the last chunk, the tier publishes the object and its record, the entry moves to PENDING, the answer carries the ETag; later the leader copies the object with its record to cold.">
+<title>A put with metadata and checksums: one pass, the record lands with the object</title>
+<defs><marker id="seq-put-metadata-ak" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0B0B0A"/></marker><marker id="seq-put-metadata-ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#FD4F1D"/></marker></defs>
+<style>
+.box{fill:#FFFFFF;stroke:#0B0B0A;stroke-width:1.4}
+.box-b{fill:#E8EEF4;stroke:#0B0B0A;stroke-width:1.4}
+.box-o{fill:#FFFAF5;stroke:#FD4F1D;stroke-width:1.4}
+.act{fill:#F3F3F1;stroke:#5A5A57;stroke-width:1.2}
+.ln{stroke:#0B0B0A;fill:none;stroke-width:1.4}
+.ln-d{stroke:#0B0B0A;fill:none;stroke-width:1.4;stroke-dasharray:6 4}
+.ln-o{stroke:#FD4F1D;fill:none;stroke-width:1.6}
+.ln-od{stroke:#FD4F1D;fill:none;stroke-width:1.6;stroke-dasharray:6 4}
+text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font-size:13px}
+.b{font-weight:600}
+.t-m{fill:#5A5A57;font-size:12px}
+.lbl{paint-order:stroke;stroke:#FFFFFF;stroke-width:4px;stroke-linejoin:round}
+</style>
+<rect x="0" y="0" width="1000" height="736" fill="#FFFFFF"/>
+<text x="20" y="28" class="b" font-size="16">A put with metadata and checksums: one pass, the record lands with the object</text>
+<rect x="50.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="110.0" y="65" class="b" text-anchor="middle">Client</text>
+<line x1="110.0" y1="76" x2="110.0" y2="654" class="ln-d"/>
+<rect x="245.0" y="44" width="120" height="32" rx="5" class="box-b"/>
+<text x="305.0" y="65" class="b" text-anchor="middle">S3 front</text>
+<line x1="305.0" y1="76" x2="305.0" y2="654" class="ln-d"/>
+<rect x="440.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="500.0" y="65" class="b" text-anchor="middle">Proxy</text>
+<line x1="500.0" y1="76" x2="500.0" y2="654" class="ln-d"/>
+<rect x="635.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="695.0" y="65" class="b" text-anchor="middle">Hot tier</text>
+<line x1="695.0" y1="76" x2="695.0" y2="654" class="ln-d"/>
+<rect x="830.0" y="44" width="120" height="32" rx="5" class="box"/>
+<text x="890.0" y="65" class="b" text-anchor="middle">Cold tier</text>
+<line x1="890.0" y1="76" x2="890.0" y2="654" class="ln-d"/>
+<text x="120.0" y="100" class="t-m lbl">0  PUT key: Content-Type, x-amz-meta-*, x-amz-tagging, x-amz-checksum-*</text>
+<line x1="110.0" y1="112" x2="305.0" y2="112" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<rect x="311.0" y="134" width="544.8" height="46" rx="4" class="act"/>
+<text x="321.0" y="151" class="t-m">1  Attrs = content headers, user metadata, tags, declared checksums.</text>
+<text x="321.0" y="169" class="t-m">Too large or malformed: 400 before any byte is read (MetadataTooLarge, InvalidTag)</text>
+<rect x="311.0" y="194" width="672.8" height="28" rx="4" class="act"/>
+<text x="321.0" y="211" class="t-m">2  Accumulator over each chunk as it passes: md5, crc64nvme, the declared one (and sha256 when signed)</text>
+<text x="315.0" y="240" class="t-m lbl">3  put_stream_with(key, len, body, Landing { attrs, digest slot })</text>
+<line x1="305.0" y1="252" x2="500.0" y2="252" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<text x="510.0" y="278" class="t-m lbl">4  take entry, HEAD both tiers (unchanged, section 5 Put)</text>
+<line x1="500.0" y1="290" x2="695.0" y2="290" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<text x="510.0" y="316" class="t-m lbl">5  chunks, streamed (the tier hashes its own tag as before)</text>
+<line x1="500.0" y1="328" x2="695.0" y2="328" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<rect x="311.0" y="350" width="506.4" height="46" rx="4" class="act"/>
+<text x="321.0" y="367" class="t-m">6  Last chunk: declared checksums, Content-MD5 and signed sha256 compared.</text>
+<text x="321.0" y="385" class="t-m">Mismatch: 400 BadDigest, nothing published. Match: the digest slot is filled</text>
+<text x="510.0" y="414" class="t-m lbl">7  publish object create-only, then its record (sidecar on dir:)</text>
+<line x1="500.0" y1="426" x2="695.0" y2="426" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<text x="510.0" y="452" class="t-m lbl">8  CAS entry (PUT, HELD) to (PUT, PENDING): the acknowledgement</text>
+<line x1="500.0" y1="464" x2="695.0" y2="464" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<text x="120.0" y="490" class="t-m lbl">9  200, ETag: "md5 hex", x-amz-checksum-* of the object</text>
+<line x1="305.0" y1="502" x2="110.0" y2="502" class="ln-od" marker-end="url(#seq-put-metadata-ao)"/>
+<line x1="20" y1="530" x2="980" y2="530" class="ln-d"/>
+<text x="20" y="552" class="b lbl">Later: the leader copies the object, and the record goes with it</text>
+<text x="510.0" y="574" class="t-m lbl">10  open_read key: size, tag, record (one call, as for a get)</text>
+<line x1="500.0" y1="586" x2="695.0" y2="586" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<text x="446.0" y="612" class="t-m lbl">11  put_stream_with(key, body, Landing { record }): headers and record up front on S3</text>
+<line x1="500.0" y1="624" x2="890.0" y2="624" class="ln" marker-end="url(#seq-put-metadata-ak)"/>
+<rect x="30" y="660" width="940" height="72" rx="5" class="box-o"/>
+<text x="40" y="680" class="t-m">The record is published after the object it describes and is trusted only when its tag and size equal the object's; a put that cannot publish</text>
+<text x="40" y="700" class="t-m">its record removes the object, as for a failed sync.</text>
+<text x="40" y="720" class="t-m">The digests are computed once, in the front, while the bytes pass. No tier re-reads the object for them.</text>
+</svg>

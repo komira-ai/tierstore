@@ -5,7 +5,9 @@
   hostkeeper's package of tierstore (hostkeeper links it from the package's units/). root:wheel,
   mode 0644. One job, which the update hook (`tierstore update-hook`,
   crates/tierstore/docs/update-hook.md) boots out and bootstraps by the label below; an update is
-  a restart with a gap in serving. The program is the binary of the release link `current`, so it
+  a restart with a gap in serving. The label is the service name, `tierstore`: hostkeeper takes a
+  package's job from units/<label>.plist and watches it by the label its manifest's run entry and
+  the hook's `launchd_label` param name, so the file name, the label and both entries agree. The program is the binary of the release link `current`, so it
   is always the binary of the release that link names; the hook never moves the link.
 
   Configuration is the file and the two flags of the drain, nothing else. The file holds no
@@ -26,7 +28,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.komira.tierstore</string>
+  <string>tierstore</string>
   <key>ProgramArguments</key>
   <array>
     <string>/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore</string>

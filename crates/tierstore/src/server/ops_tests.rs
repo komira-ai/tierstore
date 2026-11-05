@@ -279,7 +279,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
     assert_eq!(texts(&empty.body, "KeyCount"), ["0"]);
 }
 
-/// Asserts that a listing is refused when its size is not a positive whole number or its token
+/// Asserts that a listing is refused when its size is not a whole number from 0 to 2147483647 or its token
 /// is not one the server gave (not hex, or hex of bytes that are not text), and that anything
 /// but ListObjectsV2 or with a parameter this server does not know (`delimiter`) is
 /// `NotImplemented`.
@@ -287,7 +287,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
 async fn a_listing_with_a_bad_argument_is_refused() {
     let rig = Rig::new(MEBIBYTE).await;
     let bad = [
-        "max-keys=0",
+        "max-keys=-1",
         "max-keys=many",
         "continuation-token=zz",
         "continuation-token=ff",
@@ -589,8 +589,8 @@ async fn read_with(rig: &Rig, method: &str, name: &str, value: &str) -> Reply {
 /// Asserts the conditions of a read, for a get and for a head: `If-Match` of another tag is
 /// `PreconditionFailed`, and of the tag of the object (also among others, and as `*`) is
 /// served; `If-None-Match` of the tag of the object (also among others, and as `*`) is 304 with
-/// the tag and no body, and of another tag is served; the conditions on the time are
-/// `NotImplemented`.
+/// the tag and no body, and of another tag is served. (The conditions on the time are in
+/// `conditional_date_tests`.)
 #[tokio::test(start_paused = true)]
 async fn a_read_with_conditions_is_served_or_refused_as_s3_does() {
     let rig = Rig::new(MEBIBYTE).await;
@@ -616,11 +616,6 @@ async fn a_read_with_conditions_is_served_or_refused_as_s3_does() {
             assert_eq!(same.status, StatusCode::NOT_MODIFIED, "{method} {value}");
             assert_eq!(same.header("etag"), own);
             assert_eq!(same.body, "");
-        }
-        for name in ["if-modified-since", "if-unmodified-since"] {
-            let date = "Fri, 15 Jan 2027 08:00:00 GMT";
-            let timed = read_with(&rig, method, name, date).await;
-            assert_eq!(timed.status, StatusCode::NOT_IMPLEMENTED, "{method} {name}");
         }
     }
 }
