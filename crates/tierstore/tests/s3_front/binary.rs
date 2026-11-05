@@ -596,6 +596,79 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert_eq!(running.exit_code().await, Some(0));
 }
 
+/// Asserts that a PUT through the binary over two S3 tiers of a key the S3 client refuses (a
+/// parenthesis is outside its charset) is answered 400 `KeyTooLongError` (the code the front
+/// gives every invalid key), which an SDK does not retry, and not 500 `InternalError`, which it
+/// does, and that a key it accepts is still put. Catches: a refused
+/// key mapped to an other error, which the front answers 500.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_put_of_a_key_the_s3_tier_refuses_is_a_400() {
+    let hot = FakeS3::start().await;
+    let cold = FakeS3::start().await;
+    let active = Bytes::from_static(br#"{"epoch":2,"phase":"active"}"#);
+    let capabilities = Capabilities {
+        conditional_put: true,
+        object_lock: false,
+    };
+    let format = ObjectKey::new("_tiering/format").unwrap();
+    hot.store(capabilities)
+        .put_new(&format, active, None)
+        .await
+        .unwrap();
+    let files = Files::new("bin-s3-refused-key");
+    let key = files.key.display().to_string();
+    let tables = Tables {
+        hot: format!(
+            "kind = \"s3\"\nbucket = \"hot-bucket\"\nendpoint = \"{}\"\ncredentials_file = {key:?}\nbudget = 1048576\nlease_ttl = \"1s\"",
+            hot.endpoint()
+        ),
+        cold: format!(
+            "kind = \"s3\"\nbucket = \"cold-bucket\"\nendpoint = \"{}\"\ncredentials_file = {key:?}",
+            cold.endpoint()
+        ),
+        ..Tables::default()
+    };
+    let flags = files.flags_of(&tables, &["--drain-lb-wait", "50ms"]);
+    let mut running = start(&flags);
+    let sdk = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .http_client(aws_smithy_http_client::Builder::new().build_http())
+            .endpoint_url(format!("http://{}", running.addr()))
+            .force_path_style(true)
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                BIN_KEY_ID, BIN_SECRET, None, None, "static",
+            ))
+            .request_checksum_calculation(
+                aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired,
+            )
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled())
+            .build(),
+    );
+    let put = |name: &'static str| {
+        sdk.put_object()
+            .bucket("tier-bucket")
+            .key(name)
+            .if_none_match("*")
+            .body(aws_sdk_s3::primitives::ByteStream::from_static(b"v"))
+            .send()
+    };
+    let refused = put("a(b)").await.unwrap_err();
+    let status = refused.raw_response().expect("an answer").status().as_u16();
+    let code = aws_sdk_s3::error::ProvideErrorMetadata::code(&refused);
+    assert_eq!(
+        (status, code),
+        (400, Some("KeyTooLongError")),
+        "{refused:?}"
+    );
+    put("cas/ok").await.unwrap();
+    assert!(hot.keys().contains(&"cas/ok".to_owned()));
+
+    running.signal(Signal::TERM);
+    assert_eq!(running.exit_code().await, Some(0));
+}
+
 /// A loopback listener that takes every connection and closes it at once, so that a client of it
 /// meets a transport failure and not a refusal, and that counts the connections it took. It stays
 /// bound until it is dropped, so its port is never another process's meanwhile.

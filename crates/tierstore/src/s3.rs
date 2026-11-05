@@ -311,9 +311,10 @@ fn client_range(range: ByteRange) -> Option<objstore_s3::ByteRange> {
     objstore_s3::ByteRange::new(range.offset(), len)
 }
 
-/// The key as the client names it, or [`Error::Other`] if it cannot be named.
+/// The key as the client names it, or [`Error::InvalidKey`] if it cannot be named: the caller
+/// sent a key this store cannot hold, which no retry changes, so it is not an other error.
 fn object_key(key: &str) -> Result<ObjectKey, Error> {
-    ObjectKey::new(key).map_err(|e| Error::Other(e.to_string()))
+    ObjectKey::new(key).map_err(|_| Error::InvalidKey(key.to_owned()))
 }
 
 /// An object of a listing of the client as one of this crate.

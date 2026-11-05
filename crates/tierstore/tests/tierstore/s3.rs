@@ -46,6 +46,11 @@ fn assert_other<T: std::fmt::Debug>(result: Result<T, Error>) {
     assert!(matches!(result, Err(Error::Other(_))), "{result:?}");
 }
 
+/// Asserts that a call failed with `Error::InvalidKey`.
+fn assert_invalid<T: std::fmt::Debug>(result: Result<T, Error>) {
+    assert!(matches!(result, Err(Error::InvalidKey(_))), "{result:?}");
+}
+
 /// A 416 to a ranged read.
 const REFUSED: &str = "HTTP/1.1 416 Range Not Satisfiable\r\nconnection: close\r\n\
                        content-length: 0\r\n\r\n";
@@ -279,7 +284,7 @@ async fn a_listing_of_more_than_one_s3_page_is_followed_across_pages() {
     assert_eq!(page(&backend, Some("k0001"), 2).await, ["k0002", "k0003"]);
 }
 
-/// Asserts that a key the client cannot name (it needs escaping) is refused as `Other` by
+/// Asserts that a key the client cannot name (it needs escaping) is refused as `InvalidKey` by
 /// every call that takes one, in a prefix and in a start-after key, and that no request
 /// reaches the service.
 #[tokio::test]
@@ -287,18 +292,29 @@ async fn a_key_the_client_cannot_name_is_refused_before_any_request() {
     let (s3, backend) = backend().await;
     let key = "a b";
     let range = Some(ByteRange::new(0, 1));
-    assert_other(backend.put(key, body("v")).await);
-    assert_other(backend.put_if_match(key, body("v"), "tag").await);
-    assert_other(backend.get(key, None).await);
-    assert_other(backend.get(key, range).await);
-    assert_other(backend.head(key).await);
-    assert_other(backend.delete(key).await);
-    assert_other(backend.list(key).await);
-    assert_other(backend.list_page("", Some(key), 5).await);
-    assert_other(backend.create_upload(key).await);
-    assert_other(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
-    assert_other(backend.complete_upload(key, "u", &[]).await);
-    assert_other(backend.abort_upload(key, "u").await);
+    assert_invalid(backend.put(key, body("v")).await);
+    assert_invalid(backend.put_if_match(key, body("v"), "tag").await);
+    assert_invalid(backend.get(key, None).await);
+    assert_invalid(backend.get(key, range).await);
+    assert_invalid(backend.head(key).await);
+    assert_invalid(backend.delete(key).await);
+    assert_invalid(backend.list(key).await);
+    assert_invalid(backend.list_page("", Some(key), 5).await);
+    assert_invalid(backend.create_upload(key).await);
+    assert_invalid(backend.upload_part(key, "u", 1, chunks(&["x"])).await);
+    assert_invalid(backend.complete_upload(key, "u", &[]).await);
+    assert_invalid(backend.abort_upload(key, "u").await);
+    assert_eq!(s3.requests(), Vec::<String>::new());
+}
+
+/// Asserts that a put of a key whose character the client refuses (a parenthesis) is
+/// `InvalidKey` naming the key, not `Other`, which a caller retries, and that no request reaches
+/// the service.
+#[tokio::test]
+async fn a_put_of_a_key_with_a_refused_character_is_an_invalid_key() {
+    let (s3, backend) = backend().await;
+    let refused = backend.put("a(b)", body("v")).await;
+    assert_eq!(refused, Err(Error::InvalidKey("a(b)".to_owned())));
     assert_eq!(s3.requests(), Vec::<String>::new());
 }
 
