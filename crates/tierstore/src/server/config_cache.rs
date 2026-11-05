@@ -67,6 +67,7 @@ use super::config::{
     ConfigError, OciFlags, PerRun, ServerTable, TierParts, TierTable, duration, front_of, invalid,
     refuse, refuse_hot_keys, require, tier, within,
 };
+use super::config_cache_tuning;
 use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
@@ -165,6 +166,31 @@ pub(super) struct LocalCacheTable {
     /// if not given); `"0s"` lets a round start as soon as the last is done.
     #[serde(default)]
     pub scrub_min_round: Option<Dur>,
+    /// How often the eviction pass runs (1ms to 1h, default `10s`).
+    #[serde(default)]
+    pub pass_interval: Option<Dur>,
+    /// How often a cache that does not hold the lock of its directory tries it, and one that holds
+    /// it checks the lock file (1ms to 1h, default `1s`).
+    #[serde(default)]
+    pub lock_interval: Option<Dur>,
+    /// The time between two ticks of the scrub (1ms to 1h, default `1s`).
+    #[serde(default)]
+    pub scrub_tick: Option<Dur>,
+    /// The most pages of the upstream one listing reads to make up for the names it leaves out
+    /// (1 to 1000000, default 100).
+    #[serde(default)]
+    pub listing_calls: Option<u32>,
+    /// The most keys a read-only cache remembers it deleted or replaced (1 to 100000000, default
+    /// 65536).
+    #[serde(default)]
+    pub forget_limit: Option<u32>,
+    /// The bytes a fill reads from the upstream at a time (4KiB to 1GiB, default 8MiB).
+    #[serde(default)]
+    pub fill_chunk: Option<Size>,
+    /// The most bytes of a put's body that wait for the disk before its copy is dropped (1 byte
+    /// to 1GiB, default 4MiB).
+    #[serde(default)]
+    pub keep_queue_bytes: Option<Size>,
 }
 
 /// What a build-node file stands for.
@@ -305,7 +331,7 @@ impl CachePart {
             .iter()
             .map(|policy| (policy.prefix.clone(), policy.cache))
             .collect();
-        let mut cache = CacheConfig::new(table.path, budget, policies);
+        let mut cache = CacheConfig::new(table.path.clone(), budget, policies);
         cache.high_water = high;
         cache.low_water = low;
         cache.critical = critical;
@@ -337,9 +363,19 @@ impl CachePart {
             return Err(invalid("local_cache.keep_deadline", why));
         }
         cache.write_through = table.write_through.unwrap_or(false);
+        config_cache_tuning::apply(&table, &mut cache)?;
         let scrub_min_round = duration(table.scrub_min_round, SCRUB_MIN_ROUND);
-        if !scrub_min_round.is_zero() && scrub_min_round < Duration::from_secs(1) {
-            let why = "must be at least 1s (the scrub ticks once a second), or 0s for no minimum";
+        if !scrub_min_round.is_zero() && scrub_min_round < cache.scrub_tick {
+            let tick = cache.scrub_tick;
+            let shown = if tick.subsec_millis() == 0 {
+                format!("{}s", tick.as_secs())
+            } else {
+                format!("{}ms", tick.as_millis())
+            };
+            let why = format!(
+                "must be at least {shown} (scrub_tick: the scrub ticks that often), or 0s for no \
+                 minimum"
+            );
             return Err(invalid("local_cache.scrub_min_round", why));
         }
         if let Some(limit) = table.whole_fill_limit {

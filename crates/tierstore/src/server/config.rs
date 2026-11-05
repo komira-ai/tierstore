@@ -59,6 +59,7 @@ use super::config_interface::{
 };
 use super::config_io::io_tuning;
 use super::config_policy::{Policy, check_policies};
+use super::config_reconcile::reconcile_tuning;
 pub(super) use super::config_tier::{TierParts, tier};
 use super::config_tuning::{S3Client, hot_tuning, s3_client};
 use super::config_units::{Dur, Size};
@@ -358,6 +359,22 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub lock_file: Option<PathBuf>,
     #[serde(default)]
+    pub idle_min: Option<Dur>,
+    #[serde(default)]
+    pub idle_max: Option<Dur>,
+    #[serde(default)]
+    pub lease_renew: Option<Dur>,
+    #[serde(default)]
+    pub lease_margin: Option<Dur>,
+    #[serde(default)]
+    pub listing_page_size: Option<u32>,
+    #[serde(default)]
+    pub stop_wait: Option<Dur>,
+    #[serde(default)]
+    pub lock_retry: Option<Dur>,
+    #[serde(default)]
+    pub first_beat_poll: Option<Dur>,
+    #[serde(default)]
     pub usage_stale_after: Option<Dur>,
     #[serde(default)]
     pub journal_linger: Option<Dur>,
@@ -592,6 +609,14 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
             "registration_retention",
             cold.registration_retention.is_some(),
         ),
+        ("idle_min", cold.idle_min.is_some()),
+        ("idle_max", cold.idle_max.is_some()),
+        ("lease_renew", cold.lease_renew.is_some()),
+        ("lease_margin", cold.lease_margin.is_some()),
+        ("listing_page_size", cold.listing_page_size.is_some()),
+        ("stop_wait", cold.stop_wait.is_some()),
+        ("lock_retry", cold.lock_retry.is_some()),
+        ("first_beat_poll", cold.first_beat_poll.is_some()),
     ];
     refuse("cold_store", "only [hot_store] has it", &cold_has)
 }
@@ -741,6 +766,8 @@ pub(super) fn storage(
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
+    let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
+    let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;
@@ -781,8 +808,9 @@ pub(super) fn storage(
         drain_deadline: front.drain_deadline,
         tls: front.tls,
         copy_parallel,
-        lease_ttl: duration(hot.lease_ttl, Duration::from_secs(30)),
+        lease_ttl,
         lock_file,
+        reconcile_tuning,
         handoff,
         usage_stale_after: duration(hot.usage_stale_after, Duration::from_secs(120)),
         heartbeat: HeartbeatFlags::from_table(&hot),

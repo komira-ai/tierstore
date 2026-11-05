@@ -281,7 +281,7 @@ async fn a_listing_starts_where_it_is_told_and_merges_the_tiers() {
 
 /// Asserts that a listing is refused when its size is not a whole number from 0 to 2147483647 or its token
 /// is not one the server gave (not hex, or hex of bytes that are not text), and that anything
-/// but ListObjectsV2 or with a parameter this server does not know (`delimiter`) is
+/// but ListObjectsV2 or with a parameter this server does not know (`versions`) is
 /// `NotImplemented`.
 #[tokio::test(start_paused = true)]
 async fn a_listing_with_a_bad_argument_is_refused() {
@@ -297,7 +297,7 @@ async fn a_listing_with_a_bad_argument_is_refused() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{query}");
         assert_eq!(reply.code(), "InvalidArgument", "{query}");
     }
-    let unsupported = rig.list("delimiter=%2F").await;
+    let unsupported = rig.list("versions").await;
     assert_eq!(unsupported.status, StatusCode::NOT_IMPLEMENTED);
     let bucket = format!("/{BUCKET}");
     let old = rig.send("GET", &bucket, &[], b"").await;
