@@ -217,6 +217,7 @@ pub mod cli;
 mod cli_heartbeat;
 mod cli_reconcile;
 mod cli_serve;
+mod cli_text;
 mod combined_cli;
 mod config;
 mod config_cache;
