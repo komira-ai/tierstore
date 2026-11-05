@@ -192,8 +192,8 @@ async fn an_object_is_put_read_and_deleted_on_the_bucket_host() {
 }
 
 /// Asserts the calls on the bucket itself on its host: `GET /?list-type=2` lists the bucket, with
-/// the prefix, the same keys as the path-style listing; `GET /` without a list type is the 501 of
-/// the path-style `GET /<bucket>`; `HEAD /` and `PUT /` are the 200 of HeadBucket and CreateBucket;
+/// the prefix, the same keys as the path-style listing; `GET /` without a list type is the ListObjects
+/// (version 1) of the path-style `GET /<bucket>`; `HEAD /` and `PUT /` are the 200 of HeadBucket and CreateBucket;
 /// and `GET /?uploads` lists the open uploads.
 #[tokio::test(start_paused = true)]
 async fn the_bucket_calls_are_on_the_slash_of_its_host() {
@@ -210,7 +210,8 @@ async fn the_bucket_calls_are_on_the_slash_of_its_host() {
     let path_style = rig.list("prefix=dir%2F").await;
     assert_eq!(texts(&path_style.body, "Key"), texts(&listed.body, "Key"));
     let bare = rig.send_on(HOST, "GET", "/", &[], b"").await;
-    assert_eq!(bare.status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(bare.status, StatusCode::OK);
+    assert_eq!(texts(&bare.body, "Name"), [BUCKET]);
     assert_eq!(
         rig.send_on(HOST, "HEAD", "/", &[], b"").await.status,
         StatusCode::OK
