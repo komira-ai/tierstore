@@ -42,7 +42,8 @@
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
 //!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
 //! - ListBuckets (`GET /`): the one bucket, with `prefix` and `bucket-region` as filters and
-//!   `max-buckets` checked; its creation date is the epoch (not known) and its owner `tierstore`;
+//!   `max-buckets` checked; its creation date is the time `_tiering/format` was last written (see
+//!   [`ServerConfig::bucket_created`]) and its owner `tierstore`;
 //! - the reads of the settings of the bucket (`?versioning`, `?object-lock`, `?acl`, `?policy`
 //!   and the rest of the table in `bucket`), each as S3 answers a bucket with none set: an empty
 //!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
