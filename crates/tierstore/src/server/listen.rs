@@ -240,19 +240,32 @@ impl Listeners {
     }
 }
 
+/// Notes a failed `TCP_NODELAY` on an accepted socket. It is not fatal: the connection is served,
+/// only with its small writes held by Nagle's algorithm until the peer acknowledges the one
+/// before.
+fn note_nodelay(set: io::Result<()>) {
+    if let Err(why) = set {
+        tracing::warn!("cannot set TCP_NODELAY on an accepted connection: {why}");
+    }
+}
+
 impl Incoming for Listeners {
     type Stream = TcpStream;
 
-    /// Takes the next connection of any of the sockets. The ask begins at the socket after the
-    /// one that was last taken from, so that a busy socket does not leave another unserved; a
-    /// socket that has none registers the waker, which any of them wakes.
+    /// Takes the next connection of any of the sockets, with `TCP_NODELAY` set on it (a response
+    /// head and a small body are separate writes, and Nagle's algorithm would hold the second
+    /// until the peer's delayed ACK of the first). The ask begins at the socket after the one
+    /// that was last taken from, so that a busy socket does not leave another unserved; a socket
+    /// that has none registers the waker, which any of them wakes.
     fn poll_incoming(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<(TcpStream, SocketAddr)>> {
         let count = self.listeners.len();
         for step in 0..count {
             let at = (self.next + step) % count;
             if let Poll::Ready(accepted) = self.listeners[at].poll_accept(cx) {
                 self.next = (at + 1) % count;
-                return Poll::Ready(accepted);
+                return Poll::Ready(
+                    accepted.inspect(|(stream, _)| note_nodelay(stream.set_nodelay(true))),
+                );
             }
         }
         Poll::Pending
