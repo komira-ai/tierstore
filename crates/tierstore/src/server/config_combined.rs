@@ -93,6 +93,9 @@ fn oci_flags(node: &Cli) -> OciFlags {
         connection_lifetime: node.oci_connection_lifetime,
         require_auth: node.oci_require_auth,
         stage_read: node.oci_stage_read,
+        max_manifest_bytes: node.oci_max_manifest_bytes,
+        read_chunk_bytes: node.oci_read_chunk_bytes,
+        echo_bytes: node.oci_echo_bytes,
         upstream: node.oci_upstream.clone(),
     }
 }

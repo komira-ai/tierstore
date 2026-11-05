@@ -431,6 +431,15 @@ pub struct Cli {
     /// The most bytes of a stored chunk that the end of an OCI push reads in one call (1048576,
     /// 1 MiB, if not given; at least 1), so that a chunk of any size is held a piece at a time.
     pub oci_stage_read: Option<u64>,
+    /// `params.max_manifest_bytes`: the largest manifest the OCI front stores, serves or pulls
+    /// (4194304, 4 MiB, if not given; at least 1).
+    pub oci_max_manifest_bytes: Option<u64>,
+    /// `params.read_chunk_bytes`: the most bytes the OCI front asks of the store at once when it
+    /// serves a blob (4194304, 4 MiB, if not given; at least 1).
+    pub oci_read_chunk_bytes: Option<u64>,
+    /// `params.echo_bytes`: the longest piece of a request that an OCI error repeats (256 if not
+    /// given; at least 1).
+    pub oci_echo_bytes: Option<u64>,
     /// `params.upstream`: the registry the OCI front pulls a missing object from.
     pub(super) oci_upstream: Option<UpstreamTable>,
 }
@@ -498,6 +507,8 @@ pub(super) struct OciSetup {
     pub(super) auth: Option<OciAuth>,
     /// The most bytes of a stored chunk read in one call at the end of a push.
     pub(super) stage_read: u64,
+    /// The manifest limit, the blob read chunk and the error echo length.
+    pub(super) sizes: oci::OciSizes,
     /// The registry a missing manifest or blob is pulled from; `None` pulls nothing.
     pub(super) upstream: Option<Upstream>,
 }
@@ -723,6 +734,9 @@ fn oci_setup(cli: &Cli, server: &ServerConfig, warn: bool) -> Result<Option<OciS
         connection_lifetime: cli.oci_connection_lifetime,
         require_auth: cli.oci_require_auth,
         stage_read: cli.oci_stage_read,
+        max_manifest_bytes: cli.oci_max_manifest_bytes,
+        read_chunk_bytes: cli.oci_read_chunk_bytes,
+        echo_bytes: cli.oci_echo_bytes,
         upstream: cli.oci_upstream.clone(),
     };
     oci_setup_of(&flags, server, warn)
@@ -773,7 +787,16 @@ pub(super) fn oci_setup_of(
             return Err(refuse(OciError::Missing(why.to_owned())));
         }
     };
+    let defaults = oci::OciSizes::default();
+    let sizes = oci::OciSizes {
+        manifest_bytes: flags.max_manifest_bytes.unwrap_or(defaults.manifest_bytes),
+        chunk_bytes: flags.read_chunk_bytes.unwrap_or(defaults.chunk_bytes),
+        echo_bytes: flags.echo_bytes.map_or(defaults.echo_bytes, |bytes| {
+            usize::try_from(bytes).unwrap_or(usize::MAX)
+        }),
+    };
     let upstream = flags.upstream.as_ref().map(upstream_of).transpose()?;
+    let upstream = upstream.map(|upstream| upstream.with_body_limit(sizes.manifest_bytes));
     let mode = if acceptor.is_some() {
         OciMode::Https
     } else {
@@ -796,6 +819,7 @@ pub(super) fn oci_setup_of(
         limits,
         auth: flags.require_auth.then(|| OciAuth::from_server(server)),
         stage_read: flags.stage_read.unwrap_or(oci::DEFAULT_STAGE_READ),
+        sizes,
         upstream,
     }))
 }
