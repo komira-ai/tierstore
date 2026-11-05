@@ -87,8 +87,8 @@ fn count(key: &str, value: Option<u32>, default: u32, high: u32) -> Result<u32, 
     within("hot_store", key, value.unwrap_or(default), 1, high)
 }
 
-const MS: Duration = Duration::from_millis(1);
-const HOUR: Duration = Duration::from_secs(3600);
+pub(super) const MS: Duration = Duration::from_millis(1);
+pub(super) const HOUR: Duration = Duration::from_secs(3600);
 
 /// The client settings `[server]` gives, or the defaults of those it leaves out.
 pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
