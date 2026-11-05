@@ -4,8 +4,8 @@
 //! access keys (the key is picked by the id in the credential), signed over `host`,
 //! `x-amz-content-sha256` and `x-amz-date` at least, made within 15 minutes of the server's
 //! clock, with the signature that the secret of that key gives. The role of the key comes with
-//! the answer, for the caller to hold the call to it. A request with no `Authorization` header is checked as a presigned URL (see `presign`); signed
-//! streams are not accepted.
+//! the answer, for the caller to hold the call to it. A request with no `Authorization` header is checked as a presigned URL (see `presign`). The
+//! signatures of the chunks of a signed stream are checked from the material of [`stream`].
 
 use hmac::{Hmac, KeyInit, Mac};
 use hyper::StatusCode;
@@ -76,6 +76,33 @@ pub(crate) const READ_ONLY: Refusal = Refusal {
     code: "AccessDenied",
     message: "Access Denied: this access key may read objects and list the bucket only.",
 };
+
+/// What the chunks of a signed stream (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`) are signed with,
+/// from a request whose own signature was checked.
+pub(crate) struct StreamAuth {
+    /// The signing key of the request's day.
+    pub(crate) key: Vec<u8>,
+    /// The `x-amz-date` of the request.
+    pub(crate) stamp: String,
+    /// The credential scope, `<date>/<region>/s3/aws4_request`.
+    pub(crate) scope: String,
+    /// The signature of the request's head, in lower case hex: what the first chunk covers.
+    pub(crate) seed: String,
+}
+
+/// The material for the chunk signatures of a request whose signature [`verify`] accepted;
+/// `None` for a request that is not signed with a key of the server in its `Authorization`
+/// header.
+pub(crate) fn stream(config: &ServerConfig, parts: &Parts) -> Option<StreamAuth> {
+    let auth = Authorization::parse(header(&parts.headers, "authorization")?)?;
+    let (secret, _) = config.key(auth.key_id)?;
+    Some(StreamAuth {
+        key: signing_key(secret, auth.date, auth.region),
+        stamp: header(&parts.headers, "x-amz-date")?.to_owned(),
+        scope: format!("{}/{}/s3/aws4_request", auth.date, auth.region),
+        seed: auth.signature.to_ascii_lowercase(),
+    })
+}
 
 /// A request whose signature is good: the hash of its body that the signature covers, and the
 /// role of the key that signed it.

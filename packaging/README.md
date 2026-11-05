@@ -652,16 +652,19 @@ what "tested" means below.
 | bucket | the `server.bucket` name | there is one; other names are not served |
 | region | tierstore's own `server.region` (not `hot_store.region` or `cold_store.region`, which are for the tiers' stores), `us-east-1` by default | the region is in the credential scope of the signature, and a client with another is refused 403 `InvalidAccessKeyId` |
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
-| request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
-| response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
-| checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs and is checked, as the others and `Content-MD5` are; `aws-chunked` and trailing checksums are refused with 501 |
+| request checksums | the SDK's defaults, or only when an operation requires one | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body; the front takes both and checks the checksum against the data it decodes |
+| response checksums | the SDK's defaults, or only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing for the SDK to validate |
+| checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs; each is checked, as `Content-MD5` is, in the one pass that stores the body |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
 | listing | no `encoding-type` | `encoding-type=url` is refused with 501 (aws-sdk-rust sends it only when asked to) |
 
 Payload signing, read from the front's code and not tested as such (not checked: whether the Rust
 SDK signs the hex hash or `UNSIGNED-PAYLOAD` for an in-memory body): a body whose signed `x-amz-content-sha256` is its hex SHA-256 is checked against it;
-`UNSIGNED-PAYLOAD` with no checksum header is accepted unchecked; a `STREAMING-` payload is
-refused with 501.
+`UNSIGNED-PAYLOAD` with no checksum header is accepted unchecked. The three streaming payloads
+(`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` and
+`STREAMING-UNSIGNED-PAYLOAD-TRAILER`, with `Content-Encoding: aws-chunked`) are decoded on a put and on a part: the
+signature of each chunk is checked against the one before it, the trailing checksum against the decoded data, and the
+length of the object is `x-amz-decoded-content-length`. The tests drive the SDK on its defaults, which sends the unsigned trailer.
 
 aws-sdk-rust, as the test sets it (the test also passes the SDK's HTTP client built without TLS,
 `aws_smithy_http_client::Builder::new().build_http()`, which the lines below leave out):
@@ -686,9 +689,11 @@ and a continuation token, deletes it, uploads in parts (create, two parts, compl
 upload. A second put of a key, with `If-None-Match: *` or without, comes back as an error with
 status 412 and code `PreconditionFailed`. A read-only key gets, heads and lists, and its put and
 delete come back as 403 `AccessDenied`.
-The aws CLI and boto3 are **not tested**: the lines below are from their documentation, and
-whether they are enough is not shown. They need a version that has the checksum settings (aws CLI
-2.23 or later, boto3 1.36 or later).
+The aws CLI and boto3 are **not tested** by the repository's tests: the lines below are from their
+documentation. The checksum settings are not needed (the aws CLI 2.23 on its defaults puts and
+gets a 1 KiB and a 20 MB file against the front, by hand, not in a test); they only keep the client
+from sending a checksum with every upload. They need a version that has the checksum settings (aws
+CLI 2.23 or later, boto3 1.36 or later).
 
 ```ini
 # ~/.aws/config

@@ -121,10 +121,12 @@
 //!   bytes):
 //!   `BadDigest` for a body that does not match, `InvalidDigest` for a value that is not the
 //!   base64 of a hash of the right length;
-//! - a trailing checksum or a signed stream (`STREAMING-` payloads, `aws-chunked`) is answered
-//!   `NotImplemented`. The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
-//!   body for a streamed upload, so such a client is refused with 501 until it sends a
-//!   checksum only when an operation requires one (see `packaging/README.md`).
+//! - a body in `aws-chunked` framing (`STREAMING-AWS4-HMAC-SHA256-PAYLOAD`, `...-PAYLOAD-TRAILER`
+//!   or `STREAMING-UNSIGNED-PAYLOAD-TRAILER`, which the AWS SDKs send by default for a streamed
+//!   upload) is decoded as it arrives, on a put and on a part: see [`chunked`]. The signatures of
+//!   its chunks are checked (`SignatureDoesNotMatch`), its trailing checksum is held to the
+//!   decoded data like a header one (`BadDigest`), and the length of the object is
+//!   `x-amz-decoded-content-length`. Any other `STREAMING-` payload is `NotImplemented`.
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
@@ -199,6 +201,7 @@
 mod auth;
 pub mod build_info;
 mod cache_cli;
+mod chunked;
 pub mod cli;
 mod cli_heartbeat;
 mod cli_reconcile;
@@ -265,6 +268,8 @@ mod cache_handoff_tests;
 mod cache_handoff_traffic_tests;
 #[cfg(test)]
 mod cache_lock_tests;
+#[cfg(test)]
+mod chunked_tests;
 #[cfg(test)]
 mod cli_heartbeat_tests;
 #[cfg(test)]
@@ -379,6 +384,7 @@ pub use local_cache::LocalCache;
 pub use presign::{Grant, PresignKey, PresignRequest, presign_get, presign_put};
 pub use scoped::{Prefixes, ScopedKey};
 
+use chunked::Decoder;
 use counted::{Connected, Flight};
 use drain::Drain;
 #[cfg(test)]
@@ -429,6 +435,9 @@ pub struct ServerConfig {
     /// slowly but steadily is not cut, and neither is a slow reader that keeps taking bytes.
     /// See the module docs.
     pub body_idle_timeout: Duration,
+    /// The longest line of an `aws-chunked` body that is held to be read: a chunk header or a
+    /// line of the trailer (`server.aws_chunked_max_line_bytes`). The data of a chunk is not held.
+    pub aws_chunked_max_line_bytes: usize,
     /// The most streamed bodies (puts and parts of uploads) taken at once. A request over the
     /// limit waits up to `put_permit_wait` for one to end, and is then answered 503 `SlowDown`
     /// with a `Retry-After`; its body is not read either way. Each
@@ -526,6 +535,7 @@ impl ServerConfig {
             presign_max_expires: Duration::from_secs(900),
             max_request_bytes: 256 << 20,
             body_idle_timeout: Duration::from_secs(30),
+            aws_chunked_max_line_bytes: 1024,
             max_concurrent_puts: 32,
             put_permit_wait: Duration::from_secs(15),
             put_min_bytes_per_sec: 1024,
@@ -915,11 +925,17 @@ impl Server {
         });
         let config = &self.config;
         let floor = (config.put_min_bytes_per_sec, config.put_rate_grace);
-        let reader = Reader::new(body, limit, config.body_idle_timeout).with_floor(
-            floor.0,
-            floor.1,
-            Arc::clone(&config.rate_clock),
-        );
+        let stream = check
+            .framing()
+            .filter(|framing| framing.signed())
+            .and_then(|_| auth::stream(config, parts));
+        let decoder = check
+            .framing()
+            .map(|framing| Decoder::new(framing, stream, config.aws_chunked_max_line_bytes))
+            .transpose()?;
+        let reader = Reader::new(body, limit, config.body_idle_timeout)
+            .with_decoder(decoder)
+            .with_floor(floor.0, floor.1, Arc::clone(&config.rate_clock));
         let grant = signed.presign.as_ref();
         self.dispatch(parts, target, &query, reader, check, grant)
             .await

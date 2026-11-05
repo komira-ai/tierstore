@@ -111,6 +111,7 @@ fn the_keys_have_their_defaults() {
     assert_eq!(cli.put_min_bytes_per_sec, 1024);
     assert_eq!(cli.put_rate_grace, Duration::from_secs(30));
     assert_eq!(cli.body_idle_timeout, Duration::from_secs(30));
+    assert_eq!(cli.aws_chunked_max_line_bytes, 1024);
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(60));
     let s3_flags = [
         cli.hot_endpoint.is_some(),

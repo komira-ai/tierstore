@@ -13,6 +13,7 @@
 
 mod binary;
 mod cache_node;
+mod chunked;
 mod client;
 mod combined_node;
 mod config_file;

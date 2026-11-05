@@ -42,6 +42,26 @@ pub fn encode(text: &str, keep: &[u8]) -> String {
 /// and `authorization`, all in lower case.
 pub fn sign(request: &Request<'_>, key_id: &str, secret: &str) -> Vec<(String, String)> {
     let payload = hex::encode(Sha256::digest(request.body));
+    sign_claiming(request, &payload, key_id, secret)
+}
+
+/// The signing key of `day` (`YYYYMMDD`), in the region and the service of the tests.
+pub fn signing_key(secret: &str, day: &str) -> Vec<u8> {
+    let k_date = hmac(format!("AWS4{secret}").as_bytes(), day.as_bytes());
+    let k_region = hmac(&k_date, b"us-east-1");
+    let k_service = hmac(&k_region, b"s3");
+    hmac(&k_service, b"aws4_request")
+}
+
+/// As [`sign`], for a request that claims `payload` as the value of `x-amz-content-sha256`
+/// whatever its body is (`STREAMING-...` for a body in `aws-chunked` framing).
+pub fn sign_claiming(
+    request: &Request<'_>,
+    payload: &str,
+    key_id: &str,
+    secret: &str,
+) -> Vec<(String, String)> {
+    let payload = payload.to_owned();
     let mut headers: Vec<(String, String)> = request
         .headers
         .iter()
@@ -71,11 +91,7 @@ pub fn sign(request: &Request<'_>, key_id: &str, secret: &str) -> Vec<(String, S
     let scope = format!("{day}/us-east-1/s3/aws4_request");
     let digest = hex::encode(Sha256::digest(canonical.as_bytes()));
     let to_sign = format!("AWS4-HMAC-SHA256\n{}\n{scope}\n{digest}", request.stamp);
-    let k_date = hmac(format!("AWS4{secret}").as_bytes(), day.as_bytes());
-    let k_region = hmac(&k_date, b"us-east-1");
-    let k_service = hmac(&k_region, b"s3");
-    let k_signing = hmac(&k_service, b"aws4_request");
-    let signature = hex::encode(hmac(&k_signing, to_sign.as_bytes()));
+    let signature = hex::encode(hmac(&signing_key(secret, day), to_sign.as_bytes()));
     let credential = format!("Credential={key_id}/{scope}");
     let authorization =
         format!("AWS4-HMAC-SHA256 {credential}, SignedHeaders={signed}, Signature={signature}");

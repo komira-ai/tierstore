@@ -215,6 +215,7 @@ When the file has a `[local_cache]` table (a build node, or a storage node with 
 | `server.put_min_bytes_per_sec` | bytes a second, 1024 | the least average rate of a body, counted over the time spent waiting for the client; 0 turns it off |
 | `server.put_rate_grace` | duration, `30s` | the time spent waiting for the client before that rate is held |
 | `server.body_idle_timeout` | duration, `30s` | how long a body or an answer may go without a byte; more than zero |
+| `server.aws_chunked_max_line_bytes` | bytes, 1024 | the longest line of an `aws-chunked` body that the server holds to read it: the header of a chunk, with its signature, and a line of the trailer. The data of a chunk is passed on as it arrives and is not held, so a chunk may be of any length. A body with a longer line is refused with 400 `InvalidRequest` |
 | `server.min_secret_bytes` | bytes, 16 | the fewest bytes of the secret of any access key (full, read-only, presigning, GC, scoped); a key file with a shorter secret refuses the start |
 | `server.s3_request_timeout` | duration, `60s` | the limit on a request to an `s3` tier (both tiers); more than zero. Set it longer than the longest multipart completion your store takes |
 | `server.s3_connect_timeout` | duration, `5s` (1ms to 10m) | how long a connection to an `s3` tier (both tiers, or the upstream of a cache) may take to be opened |

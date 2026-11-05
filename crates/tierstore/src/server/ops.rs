@@ -15,6 +15,7 @@ use crate::journal::is_reserved;
 use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
+use super::chunked::Framing;
 use super::handover::hand_over;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
@@ -131,6 +132,14 @@ fn refuse_unlistable(key: &str) -> Result<(), S3Error> {
         ));
     }
     Ok(())
+}
+
+/// The length of the data of a body, if the request says: the `x-amz-decoded-content-length` of
+/// an `aws-chunked` body, otherwise the `Content-Length`.
+fn body_len(parts: &Parts, check: &Check) -> Option<u64> {
+    let decoded = check.framing().map(Framing::decoded);
+    let declared = header(&parts.headers, "content-length");
+    decoded.or_else(|| declared.and_then(|text| text.parse().ok()))
 }
 
 /// Refuses what this front does not do whatever the call is: a query parameter it does not
@@ -282,15 +291,13 @@ impl Server {
         let method = parts.method.as_str();
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
-            let declared = header(&parts.headers, "content-length");
-            let len = declared.and_then(|text| text.parse().ok());
+            let len = body_len(parts, &check);
             return self.upload_part(query, key, len, reader, check).await;
         }
         if let ("PUT", Target::Object(key), false) = (method, &target, multipart)
             && creates_only(&parts.headers)
         {
-            let declared = header(&parts.headers, "content-length");
-            let len = declared.and_then(|text| text.parse().ok());
+            let len = body_len(parts, &check);
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;

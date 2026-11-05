@@ -236,6 +236,22 @@ impl S3Error {
         Self::new(StatusCode::BAD_REQUEST, "InvalidArgument", message)
     }
 
+    /// A request whose framing or headers are not what the call needs.
+    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "InvalidRequest", message)
+    }
+
+    /// A body that is shorter or longer than the request said it would be.
+    pub(crate) fn incomplete_body(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "IncompleteBody", message)
+    }
+
+    /// An `aws-chunked` body whose request did not give the length of what it decodes to.
+    pub(crate) fn decoded_length_required() -> Self {
+        let text = "x-amz-decoded-content-length is needed with an aws-chunked body.";
+        Self::new(StatusCode::LENGTH_REQUIRED, "MissingContentLength", text)
+    }
+
     /// A request for something this server does not do.
     pub(crate) fn unsupported(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_IMPLEMENTED, "NotImplemented", message)

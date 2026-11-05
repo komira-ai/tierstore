@@ -47,6 +47,7 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.server.put_min_bytes_per_sec, 1024);
     assert_eq!(built.server.put_rate_grace, Duration::from_secs(30));
     assert_eq!(built.server.body_idle_timeout, Duration::from_secs(30));
+    assert_eq!(built.server.aws_chunked_max_line_bytes, 1024);
     assert_eq!(built.server.drain_lb_wait, Duration::from_secs(7));
     assert_eq!(built.server.drain_deadline, Duration::from_secs(11));
     assert_eq!(built.server.usage_stale_after, Duration::from_secs(120));

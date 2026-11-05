@@ -16,6 +16,7 @@ use tokio::time::Instant;
 
 use crate::Error;
 
+use super::chunked::{Decoder, TRAILABLE};
 use super::reply::S3Error;
 use super::request::{Check, Query, Reader, Refused, Target, header, pieces, query_pairs, resolve};
 use super::testing::{CHECKSUMS, Scripted, Step, checksum, crc64nvme};
@@ -223,7 +224,7 @@ async fn a_body_that_is_slow_but_steady_is_read_whole() {
 /// Asserts that a body is checked against the hash the signature covers, in either case and
 /// however it is cut into pieces, that an unsigned payload is not checked, that another hash and
 /// a claim that is not a hash are `XAmzContentSHA256Mismatch`, and that a signed stream is
-/// `NotImplemented`.
+/// `NotImplemented` for a body that is not the data of an object or of a part.
 #[test]
 fn a_body_is_checked_against_the_hash_the_signature_covers() {
     let none = HeaderMap::new();
@@ -238,7 +239,7 @@ fn a_body_is_checked_against_the_hash_the_signature_covers() {
     let no_hash = verdict("not hex", &none, &[b"abc"]).unwrap_err();
     assert_eq!(no_hash.kind(), mismatch);
     let claim = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
-    let streaming = verdict(claim, &none, &[b"abc"]).unwrap_err();
+    let streaming = verdict_of(false, claim, &none, &[b"abc"]).unwrap_err();
     let not_done = (StatusCode::NOT_IMPLEMENTED, "NotImplemented");
     assert_eq!(streaming.kind(), not_done);
 }
@@ -410,4 +411,134 @@ async fn a_body_that_stalls_or_is_too_large_ends_its_stream_with_an_error() {
     let answer = refused.take().unwrap();
     let too_large = (StatusCode::PAYLOAD_TOO_LARGE, "EntityTooLarge");
     assert_eq!(answer.kind(), too_large);
+}
+
+/// The head of an unsigned stream with a trailing checksum `name` of `length` bytes of data.
+fn trailer_head(name: &str, length: usize) -> HeaderMap {
+    let length = length.to_string();
+    with(&[
+        ("x-amz-decoded-content-length", &length),
+        ("x-amz-trailer", name),
+    ])
+}
+
+/// The body of an unsigned stream of `data` in two chunks with the trailer `name:value`.
+fn trailer_body(data: &[u8], name: &str, value: &str) -> Scripted {
+    let (first, second) = data.split_at(data.len() / 2);
+    let mut wire = Vec::new();
+    for part in [first, second] {
+        wire.extend(format!("{:x}\r\n", part.len()).bytes());
+        wire.extend_from_slice(part);
+        wire.extend_from_slice(b"\r\n");
+    }
+    wire.extend(format!("0\r\n{name}:{value}\r\n\r\n").bytes());
+    let wire: &'static [u8] = Box::leak(wire.into_boxed_slice());
+    let (head, tail) = wire.split_at(wire.len() / 3);
+    Scripted::new(vec![Step::Data(head), Step::Data(tail)])
+}
+
+/// A reader of `body` that decodes it as the framing of `check` says.
+fn decoding(body: Scripted, check: &Check) -> Reader<Scripted> {
+    let decoder = Decoder::new(check.framing().unwrap(), None, 1024).unwrap();
+    Reader::new(body, 1000, IDLE).with_decoder(Some(decoder))
+}
+
+/// Asserts that the trailing checksum of an `aws-chunked` body is held to the decoded data, for
+/// each algorithm S3 takes in a trailer: a body whose trailer is the data's checksum is read as
+/// the data and nothing else, one whose trailer is another's is `BadDigest` naming the header,
+/// and one whose trailer is not a hash of the right length is `InvalidDigest`.
+#[tokio::test]
+async fn a_trailing_checksum_is_held_to_the_data_of_the_body() {
+    let data: &[u8] = b"hello world, hello world";
+    let claim = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+    for name in TRAILABLE {
+        let head = trailer_head(name, data.len());
+        let check = Check::new(claim, &head, true).unwrap();
+        assert_eq!(
+            check.framing().map(|f| f.decoded()),
+            Some(data.len() as u64)
+        );
+        let good = trailer_body(data, name, &checksum(name, data));
+        let read = decoding(good, &check).read_all(check).await;
+        assert_eq!(read.unwrap(), data, "{name}");
+
+        let check = Check::new(claim, &head, true).unwrap();
+        let wrong = trailer_body(data, name, &checksum(name, b"another body"));
+        let refused = decoding(wrong, &check).read_all(check).await.unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            (StatusCode::BAD_REQUEST, "BadDigest"),
+            "{name}"
+        );
+        assert!(refused.message().contains(name), "{name}");
+
+        let check = Check::new(claim, &head, true).unwrap();
+        let short = trailer_body(data, name, "AAAA");
+        let refused = decoding(short, &check).read_all(check).await.unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            (StatusCode::BAD_REQUEST, "InvalidDigest"),
+            "{name}"
+        );
+    }
+}
+
+/// Asserts that the pieces of an `aws-chunked` body are the stream of its data, without the
+/// framing and the trailer, which ends cleanly when the trailer is the data's checksum, and ends
+/// with an error and the answer `BadDigest` when it is not.
+#[tokio::test]
+async fn the_pieces_of_an_aws_chunked_body_are_its_data() {
+    let data: &[u8] = b"hello world, hello world";
+    let name = "x-amz-checksum-crc64nvme";
+    let claim = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+    let head = trailer_head(name, data.len());
+    let check = Check::new(claim, &head, true).unwrap();
+    let body = trailer_body(data, name, &checksum(name, data));
+    let refused = Refused::default();
+    let items = collected(pieces(decoding(body, &check), check, refused.clone())).await;
+    let got: Vec<u8> = items
+        .iter()
+        .flat_map(|piece| piece.clone().unwrap())
+        .collect();
+    assert_eq!(got, data);
+    assert!(refused.take().is_none());
+
+    let check = Check::new(claim, &head, true).unwrap();
+    let body = trailer_body(data, name, &checksum(name, b"another body"));
+    let items = collected(pieces(decoding(body, &check), check, refused.clone())).await;
+    assert!(matches!(items.last(), Some(Err(Error::Other(_)))));
+    let answer = refused.take().unwrap();
+    assert_eq!(answer.kind(), (StatusCode::BAD_REQUEST, "BadDigest"));
+}
+
+/// Asserts that a reader that has given the end of an `aws-chunked` body goes on giving the end,
+/// and keeps the trailer it read.
+#[tokio::test]
+async fn a_reader_at_the_end_of_an_aws_chunked_body_stays_there() {
+    let name = "x-amz-checksum-crc32";
+    let claim = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+    let check = Check::new(claim, &trailer_head(name, 4), true).unwrap();
+    let value = checksum(name, b"abcd");
+    let mut reader = decoding(trailer_body(b"abcd", name, &value), &check);
+    assert_eq!(reader.trailer(), None);
+    while reader.next().await.unwrap().is_some() {}
+    assert_eq!(reader.trailer(), Some(value.as_str()));
+    assert_eq!(reader.next().await.unwrap(), None);
+    assert_eq!(reader.trailer(), Some(value.as_str()));
+}
+
+/// Asserts that a streaming payload on a call that takes no data is `NotImplemented`, that one
+/// without the length of its data is `MissingContentLength`, and that a payload that is not
+/// streamed has no framing.
+#[test]
+fn a_streamed_body_needs_a_length_and_a_call_that_takes_data() {
+    let claim = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+    let head = trailer_head("x-amz-checksum-crc32", 1);
+    let refused = Check::new(claim, &head, false).err().unwrap();
+    let not_done = (StatusCode::NOT_IMPLEMENTED, "NotImplemented");
+    assert_eq!(refused.kind(), not_done);
+    let refused = Check::new(claim, &HeaderMap::new(), true).err().unwrap();
+    let required = (StatusCode::LENGTH_REQUIRED, "MissingContentLength");
+    assert_eq!(refused.kind(), required);
+    assert!(unchecked().framing().is_none());
 }
