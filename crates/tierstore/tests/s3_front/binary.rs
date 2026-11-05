@@ -381,7 +381,10 @@ cache  = true
 #[test]
 fn check_config_accepts_the_handoff_keys_of_a_build_node_and_a_combined_node() {
     let files = Files::new("bin-check-handoff-good");
-    let socket = files.key.with_file_name("handoff.sock");
+    // The path of a Unix socket is short (103 bytes at most): its directory is one under the
+    // system's temporary directory, not the scratch directory of the build, whose path is long.
+    let state = tierstore_testkit::dir::TestDir::under(std::env::temp_dir(), "bin-handoff");
+    let socket = state.path().join("handoff.sock");
     let extra = format!(
         "handoff_socket = {:?}\nhandoff_wait = \"5s\"",
         socket.display().to_string()
