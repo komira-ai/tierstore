@@ -46,8 +46,8 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use super::cli::{
-    Cli, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES, DEFAULT_PUT_MIN_BYTES_PER_SEC,
-    DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
+    Cli, DEFAULT_DELETE_CONCURRENCY, DEFAULT_MAX_CONCURRENT_PUTS, DEFAULT_MAX_REQUEST_BYTES,
+    DEFAULT_PUT_MIN_BYTES_PER_SEC, DEFAULT_PUT_PERMIT_WAIT, DEFAULT_REGION,
 };
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
@@ -286,6 +286,7 @@ pub(super) struct ServerTable {
     pub max_concurrent_puts: Option<u32>,
     #[serde(default)]
     pub domains: Vec<String>,
+    pub delete_concurrency: Option<u32>,
     pub put_permit_wait: Option<Dur>,
     pub put_min_bytes_per_sec: Option<u64>,
     pub put_rate_grace: Option<Dur>,
@@ -301,6 +302,8 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    pub s3_single_put_max: Option<Size>,
+    pub s3_part_bytes: Option<Size>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,
@@ -777,6 +780,7 @@ pub(super) fn storage(
         max_request_bytes: front.max_request_bytes,
         max_concurrent_puts: front.max_concurrent_puts,
         domains: front.domains,
+        delete_concurrency: front.delete_concurrency,
         put_permit_wait: front.put_permit_wait,
         put_min_bytes_per_sec: front.put_min_bytes_per_sec,
         put_rate_grace: front.put_rate_grace,
@@ -859,6 +863,16 @@ pub(super) fn front_of(
         u32::MAX,
     )?;
     let domains = domains_of(&server.domains)?;
+    let delete_concurrency = server
+        .delete_concurrency
+        .unwrap_or(DEFAULT_DELETE_CONCURRENCY);
+    let delete_concurrency = within(
+        "server",
+        "delete_concurrency",
+        delete_concurrency,
+        1,
+        u32::MAX,
+    )?;
     let front = FrontSettings {
         listen,
         proxy_id: server.proxy_id,
@@ -880,6 +894,7 @@ pub(super) fn front_of(
         max_request_bytes,
         max_concurrent_puts,
         domains,
+        delete_concurrency,
         put_permit_wait: duration(server.put_permit_wait, DEFAULT_PUT_PERMIT_WAIT),
         put_min_bytes_per_sec: server
             .put_min_bytes_per_sec

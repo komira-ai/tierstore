@@ -45,6 +45,7 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.server.secret_access_key, "secret-0123456789");
     assert_eq!(built.server.max_request_bytes, 256 << 20);
     assert_eq!(built.server.max_concurrent_puts, 32);
+    assert_eq!(built.server.delete_concurrency, 16);
     assert_eq!(built.server.put_permit_wait, Duration::from_secs(4));
     assert_eq!(built.server.put_min_bytes_per_sec, 1024);
     assert_eq!(built.server.put_rate_grace, Duration::from_secs(30));

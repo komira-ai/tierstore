@@ -103,6 +103,7 @@ pub(super) struct FrontSettings {
     pub max_request_bytes: u64,
     pub max_concurrent_puts: u32,
     pub domains: Vec<String>,
+    pub delete_concurrency: u32,
     pub put_permit_wait: Duration,
     pub put_min_bytes_per_sec: u64,
     pub put_rate_grace: Duration,
@@ -133,6 +134,7 @@ impl Cli {
             max_request_bytes: self.max_request_bytes,
             max_concurrent_puts: self.max_concurrent_puts,
             domains: self.domains.clone(),
+            delete_concurrency: self.delete_concurrency,
             put_permit_wait: self.put_permit_wait,
             put_min_bytes_per_sec: self.put_min_bytes_per_sec,
             put_rate_grace: self.put_rate_grace,
@@ -234,6 +236,7 @@ pub(super) fn server_config(
     server.body_idle_timeout = front.body_idle_timeout;
     server.max_concurrent_puts = front.max_concurrent_puts as usize;
     server.domains = front.domains.clone();
+    server.delete_concurrency = front.delete_concurrency as usize;
     server.put_permit_wait = front.put_permit_wait;
     server.put_min_bytes_per_sec = front.put_min_bytes_per_sec;
     server.put_rate_grace = front.put_rate_grace;

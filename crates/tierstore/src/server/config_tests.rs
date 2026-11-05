@@ -47,6 +47,7 @@ fn a_storage_node_file_makes_the_settings_it_says() {
     assert_eq!(cli.read_only_key_file.len(), 2);
     assert_eq!(cli.max_request_bytes, 134_217_728);
     assert_eq!(cli.domains, ["s3.example.com", "objects.example.org"]);
+    assert_eq!(cli.delete_concurrency, 4);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(25));
     assert_eq!(cli.s3_request_timeout, Duration::from_secs(120));
     assert_eq!(cli.lease_ttl, Duration::from_secs(40));
@@ -92,6 +93,7 @@ fn a_key_that_is_left_out_has_its_default() {
     assert_eq!(cli.max_request_bytes, 256 << 20);
     assert_eq!(cli.max_concurrent_puts, 32);
     assert!(cli.domains.is_empty());
+    assert_eq!(cli.delete_concurrency, 16);
     assert_eq!(cli.put_permit_wait, Duration::from_secs(15));
     assert_eq!(cli.put_min_bytes_per_sec, 1024);
     assert_eq!(cli.put_rate_grace, Duration::from_secs(30));
@@ -509,6 +511,8 @@ fn a_value_out_of_range_is_refused_with_its_key() {
             "\"tier-bucket\"",
             "\"tier-bucket\"\ndomains = [\"s3.example.com\", \"http://s3.example.com\"]",
             "server.domains: entry 2 is not a domain name",
+            "\"tier-bucket\"\ndelete_concurrency = 0",
+            "server.delete_concurrency",
         ),
         (
             "\"tier-bucket\"",

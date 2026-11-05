@@ -35,6 +35,7 @@ scoped_key_files      = ["/etc/tierstore/scoped.key"]
 presign_max_expires   = "10m"
 max_concurrent_puts   = 8
 domains               = ["s3.example.com", "Objects.Example.ORG"]
+delete_concurrency    = 4
 put_permit_wait       = "25s"
 put_min_bytes_per_sec = 2048
 put_rate_grace        = "45s"
