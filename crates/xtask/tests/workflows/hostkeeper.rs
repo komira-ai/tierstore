@@ -96,7 +96,7 @@ fn runs_problems(name: &str, job: Option<&Node>, command: &str) -> Vec<String> {
 }
 
 /// The steps of `job`.
-fn steps(job: Option<&Node>) -> &[Node] {
+pub fn steps(job: Option<&Node>) -> &[Node] {
     match job.and_then(|j| entry(j, "steps")).map(|s| &s.value) {
         Some(Value::Seq(items)) => items,
         _ => &[],
@@ -104,7 +104,7 @@ fn steps(job: Option<&Node>) -> &[Node] {
 }
 
 /// The text at `path` (keys, one level each) under `node`.
-fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
+pub fn at<'a>(node: &'a Node, path: &[&str]) -> Option<&'a str> {
     let mut here = node;
     for key in path {
         here = entry(here, key)?;
