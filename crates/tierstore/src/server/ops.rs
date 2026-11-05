@@ -35,7 +35,7 @@ use super::xml::{self, Listing, ListingV1, UploadListing};
 /// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 16] = [
+const SUPPORTED: [&str; 17] = [
     "continuation-token",
     "delete",
     "delimiter",
