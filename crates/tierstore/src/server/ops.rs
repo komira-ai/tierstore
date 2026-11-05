@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use hyper::StatusCode;
 use hyper::body::Body;
-use hyper::header::HeaderMap;
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::request::Parts;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinError;
@@ -15,11 +15,14 @@ use crate::journal::is_reserved;
 use crate::{Error, Meta, Opened, ReadBody, Span, Window};
 
 use super::Server;
+use super::bucket;
 use super::chunked::Framing;
 use super::handover::hand_over;
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
-use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
+use super::request::{
+    BoxError, Check, Query, Reader, Refused, Target, header, pieces, query_pairs,
+};
 use super::time::{http_date, parse_http_date};
 use super::xml::{self, Listing, UploadListing};
 
@@ -55,6 +58,17 @@ const PRESIGN_PARAMS: [&str; 6] = [
     "X-Amz-Expires",
     "X-Amz-SignedHeaders",
     "X-Amz-Signature",
+];
+
+/// The query parameters of a read that set a header of the answer, each with the header it sets
+/// (the `response-*` parameters of GetObject and HeadObject).
+pub(super) const RESPONSE_OVERRIDES: [(&str, &str); 6] = [
+    ("response-cache-control", "cache-control"),
+    ("response-content-disposition", "content-disposition"),
+    ("response-content-encoding", "content-encoding"),
+    ("response-content-language", "content-language"),
+    ("response-content-type", "content-type"),
+    ("response-expires", "expires"),
 ];
 
 /// The query parameters that make a request part of a multipart upload.
@@ -151,7 +165,13 @@ fn body_len(parts: &Parts, check: &Check) -> Option<u64> {
 /// know, and a copy.
 fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(), S3Error> {
     let extra: &[&str] = if presigned { &PRESIGN_PARAMS } else { &[] };
-    let allowed: Vec<&str> = SUPPORTED.iter().chain(extra).copied().collect();
+    let overrides = RESPONSE_OVERRIDES.iter().map(|(param, _)| param);
+    let allowed: Vec<&str> = SUPPORTED
+        .iter()
+        .chain(extra)
+        .chain(overrides)
+        .copied()
+        .collect();
     if !query.only(&allowed) {
         return Err(S3Error::unsupported(
             "this query parameter is not supported",
@@ -161,6 +181,51 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
         return Err(S3Error::unsupported("copying an object is not supported"));
     }
     Ok(())
+}
+
+/// Refuses a GET or HEAD that carries a `response-*` parameter and is not signed (no
+/// `Authorization` header and no SigV4 parameter in the query): S3 answers it 400
+/// `InvalidRequest`, since a reader who is not known may not choose the headers of an answer.
+pub(super) fn refuse_unsigned_overrides(parts: &Parts) -> Result<(), S3Error> {
+    let signed = parts.headers.contains_key("authorization");
+    let pairs = query_pairs(parts.uri.query()).unwrap_or_default();
+    let presigned = pairs.iter().any(|(name, _)| name == "X-Amz-Algorithm");
+    let overridden = pairs
+        .iter()
+        .any(|(name, _)| RESPONSE_OVERRIDES.iter().any(|(param, _)| param == name));
+    if signed || presigned || !overridden {
+        return Ok(());
+    }
+    Err(S3Error::new(
+        StatusCode::BAD_REQUEST,
+        "InvalidRequest",
+        "Request specific response headers cannot be used for anonymous GET requests.",
+    ))
+}
+
+/// The headers that the `response-*` parameters of `query` set, in the order of
+/// [`RESPONSE_OVERRIDES`]. A parameter with an empty value sets nothing.
+fn overrides(query: &Query) -> Result<Vec<(&'static str, HeaderValue)>, S3Error> {
+    let mut set = Vec::new();
+    for (param, name) in RESPONSE_OVERRIDES {
+        let Some(text) = query.get(param).filter(|text| !text.is_empty()) else {
+            continue;
+        };
+        let value = HeaderValue::from_str(text)
+            .map_err(|_| S3Error::invalid(format!("{param} is not a valid header value")))?;
+        set.push((name, value));
+    }
+    Ok(set)
+}
+
+/// `answer` with the headers of `set` in place of its own.
+fn overridden(mut answer: Answer, set: Vec<(&'static str, HeaderValue)>) -> Answer {
+    for (name, value) in set {
+        answer
+            .headers_mut()
+            .insert(HeaderName::from_static(name), value);
+    }
+    answer
 }
 
 /// A listing that names a `delimiter` is not supported; an empty one is no delimiter, as it is
@@ -317,8 +382,11 @@ impl Server {
     {
         // A request with no `Authorization` header is a presigned URL: its SigV4 parameters are
         // not parameters of the call.
-        refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         let method = parts.method.as_str();
+        let location = bucket::asks_location(method, &target, query);
+        if !location {
+            refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
+        }
         let multipart = query.has_any(&MULTIPART);
         if let ("PUT", Target::Object(key), true) = (method, &target, multipart) {
             let len = body_len(parts, &check);
@@ -331,14 +399,17 @@ impl Server {
             return self.put_streamed(key, len, reader, check, presign).await;
         }
         let body = reader.read_all(check).await?;
+        if location {
+            return Ok(self.location());
+        }
         match (method, target, multipart) {
             ("PUT" | "HEAD", Target::Bucket, false) => {
                 Ok(answer(StatusCode::OK, &[], Bytes::new()))
             }
             ("GET", Target::Bucket, false) => self.list_objects(query).await,
             ("GET", Target::Bucket, true) if query.has("uploads") => self.list_uploads(query).await,
-            ("GET", Target::Object(key), false) => self.get_object(parts, &key).await,
-            ("HEAD", Target::Object(key), false) => self.head_object(parts, &key).await,
+            ("GET", Target::Object(key), false) => self.get_object(parts, query, &key).await,
+            ("HEAD", Target::Object(key), false) => self.head_object(parts, query, &key).await,
             ("PUT", Target::Object(key), false) => self.put_conditional(parts, &key).await,
             ("DELETE", Target::Object(key), false) => self.delete_object(&key).await,
             ("DELETE", Target::Object(key), true) => self.abort_upload(query, &key).await,
@@ -355,8 +426,9 @@ impl Server {
     /// One call to the backend, which gives the object's meta and the body as it arrives: the
     /// headers are made from the meta and the status from the window the body holds. A
     /// condition that is not met, or a range that is not satisfiable, drops the body unread.
-    async fn get_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
+    async fn get_object(&self, parts: &Parts, query: &Query, key: &str) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        let set = overrides(query)?;
         let span = asked(header(&parts.headers, "range"));
         let Opened { meta, window, body } = self.backend.open_read(key, span).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
@@ -364,31 +436,39 @@ impl Server {
         }
         let mut headers = object_headers(&meta);
         match window {
-            Window::Whole => Ok(read_answer(StatusCode::OK, &headers, meta.size, body)),
+            Window::Whole => {
+                let whole = read_answer(StatusCode::OK, &headers, meta.size, body);
+                Ok(overridden(whole, set))
+            }
             Window::Part(range) => {
                 let (start, len) = (range.offset(), range.size());
                 let (last, size) = (start + len - 1, meta.size);
                 headers.push(("content-range", format!("bytes {start}-{last}/{size}")));
-                Ok(read_answer(
-                    StatusCode::PARTIAL_CONTENT,
-                    &headers,
-                    len,
-                    body,
-                ))
+                let part = read_answer(StatusCode::PARTIAL_CONTENT, &headers, len, body);
+                Ok(overridden(part, set))
             }
             Window::Unsatisfiable => Err(S3Error::invalid_range(meta.size)),
         }
     }
 
-    async fn head_object(&self, parts: &Parts, key: &str) -> Result<Answer, S3Error> {
+    async fn head_object(
+        &self,
+        parts: &Parts,
+        query: &Query,
+        key: &str,
+    ) -> Result<Answer, S3Error> {
         refuse_reserved(key)?;
+        let set = overrides(query)?;
         let meta = self.backend.head(key).await?;
         if let Some(early) = conditional(parts, key, &meta)? {
             return Ok(early);
         }
         let mut headers = object_headers(&meta);
         headers.push(("content-length", meta.size.to_string()));
-        Ok(answer(StatusCode::OK, &headers, Bytes::new()))
+        Ok(overridden(
+            answer(StatusCode::OK, &headers, Bytes::new()),
+            set,
+        ))
     }
 
     /// A put that is not a plain create (see [`creates_only`]): `If-Match`, which is refused

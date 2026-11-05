@@ -146,13 +146,15 @@ async fn a_reap_that_loses_to_the_owner_leaves_the_entry_as_the_owner_made_it() 
     );
 }
 
-/// Asserts that a destructive step is refused when less than the margin of the lease is left, at
-/// the margin and a millisecond under it: the copy publish of a put and the deletes of a handed-over
-/// delete are made with exactly the margin left, and refused (the item fails, and nothing is
-/// published or deleted) with a millisecond less; a later step renews the lease and does the work.
+/// Asserts what a destructive step does when less than the margin of the lease is left: the copy
+/// publish of a put and the deletes of a handed-over delete are made with exactly the margin left
+/// without a write to the lease, and with a millisecond less the lease (still held) is renewed
+/// with one write and the work is done in the same step; when that renewal fails, the item fails
+/// with `Unavailable` and nothing is published or deleted.
 #[tokio::test]
-async fn a_cold_publish_and_a_delete_need_the_margin_of_the_lease() {
-    for (left, allowed) in [(10_000, true), (10_001, false)] {
+async fn a_cold_publish_and_a_delete_renew_a_held_lease_that_is_short_of_the_margin() {
+    for (left, writes, renewal_fails) in [(10_000, 0, false), (10_001, 1, false), (10_001, 1, true)]
+    {
         for delete in [false, true] {
             let rig = Rig::new();
             rig.activate().await;
@@ -167,7 +169,12 @@ async fn a_cold_publish_and_a_delete_need_the_margin_of_the_lease() {
             }
             let gated = Arc::new(GateBackend::new(rig.hot.clone()));
             let gate = gated.gate(Op::PutIfMatch, ENTRIES_PREFIX, Phase::Pre);
-            let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
+            let faulty = Arc::new(FaultyBackend::new(gated));
+            if renewal_fails {
+                let error = Error::Unavailable("lease".to_owned());
+                faulty.fail_next_on(Op::PutIfMatch, LEASE_KEY, error);
+            }
+            let mut r = rig.over(faulty.clone(), rig.cold.clone(), "r1", |_| {});
             let mut step = Box::pin(r.step());
             park(&mut step, &gate).await;
             // The lease was written at time zero: it is valid for 20 s (ttl less margin).
@@ -179,68 +186,191 @@ async fn a_cold_publish_and_a_delete_need_the_margin_of_the_lease() {
             } else {
                 rig.cold_has("k").await
             };
-            assert_eq!(moved, allowed, "left {left}, delete {delete}");
-            assert_eq!(done.failed.len(), usize::from(!allowed));
-            if !allowed {
+            let case = format!("left {left}, delete {delete}, renewal fails {renewal_fails}");
+            assert_eq!(moved, !renewal_fails, "{case}");
+            assert_eq!(faulty.calls_on(Op::PutIfMatch, LEASE_KEY), writes, "{case}");
+            assert_eq!(done.failed.len(), usize::from(renewal_fails), "{case}");
+            if renewal_fails {
                 assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
-                let again = r.step().await;
-                assert_eq!((again.backed_off, again.changed), (1, 0));
-                rig.mono.advance(Duration::from_secs(1));
-                assert_eq!(r.step().await.changed, 1);
-                let moved = if delete {
-                    !rig.hot_has("k").await
-                } else {
-                    rig.cold_has("k").await
-                };
-                assert!(moved);
             }
         }
     }
 }
 
-/// Asserts that the lease is looked at again after the hot read that a copy streams from: with the
-/// hot read parked and the margin of the lease used up meanwhile, the read completes, the cold put
-/// is never sent (the cold tier does not get the object), and the item fails with `Unavailable`.
+/// Asserts that a copy whose lease has less than the margin left after the hot read it streams
+/// from is published when the lease can be renewed (the renewal is one write), and is not
+/// published when it cannot: the read completes, the cold put is never sent, and the item fails
+/// with `Unavailable`.
 #[tokio::test]
-async fn a_copy_whose_lease_margin_runs_out_during_the_hot_read_is_not_published() {
+async fn a_copy_whose_lease_margin_runs_out_during_the_hot_read_is_published_only_if_renewed() {
+    for renewal_fails in [false, true] {
+        let rig = Rig::new();
+        rig.activate().await;
+        rig.hot.put("k", bytes("v")).await.unwrap();
+        rig.register("p1").await;
+        land(&rig, "p1", "k").await;
+        let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+        let gate = gated.gate(Op::Get, "k", Phase::Pre);
+        let faulty = Arc::new(FaultyBackend::new(gated));
+        if renewal_fails {
+            let error = Error::Unavailable("lease".to_owned());
+            faulty.fail_next_on(Op::PutIfMatch, LEASE_KEY, error);
+        }
+        let mut r = rig.over(faulty.clone(), rig.cold.clone(), "r1", |_| {});
+        let mut step = Box::pin(r.step());
+        park(&mut step, &gate).await;
+        rig.mono.advance(Duration::from_millis(10_001));
+        gate.release();
+        let done = step.await;
+        assert_eq!(rig.cold_has("k").await, !renewal_fails);
+        assert!(rig.hot_has("k").await);
+        if renewal_fails {
+            assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+        } else {
+            assert!(done.failed.is_empty());
+        }
+    }
+}
+
+/// Asserts that a handed-over delete whose lease has less than the margin left after the cold
+/// delete goes on to the hot delete when the lease can be renewed, and when it cannot the cold
+/// delete has been made, the hot delete is never sent (the hot object stays), and the item fails
+/// with `Unavailable`.
+#[tokio::test]
+async fn a_delete_whose_lease_margin_runs_out_during_the_cold_delete_goes_on_only_if_renewed() {
+    for renewal_fails in [false, true] {
+        let rig = Rig::new();
+        rig.activate().await;
+        rig.hot.put("k", bytes("v")).await.unwrap();
+        rig.cold.put("k", bytes("v")).await.unwrap();
+        rig.plant("k", EntryOp::Del, EntryState::Pending, None)
+            .await;
+        let gated = Arc::new(GateBackend::new(rig.cold.clone()));
+        let gate = gated.gate(Op::Delete, "k", Phase::Pre);
+        let faulty = Arc::new(FaultyBackend::new(rig.hot.clone()));
+        if renewal_fails {
+            let error = Error::Unavailable("lease".to_owned());
+            faulty.fail_next_on(Op::PutIfMatch, LEASE_KEY, error);
+        }
+        let mut r = rig.over(faulty, gated, "r1", |_| {});
+        let mut step = Box::pin(r.step());
+        park(&mut step, &gate).await;
+        rig.mono.advance(Duration::from_millis(10_001));
+        gate.release();
+        let done = step.await;
+        assert!(!rig.cold_has("k").await);
+        assert_eq!(rig.hot_has("k").await, renewal_fails);
+        if renewal_fails {
+            assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
+        } else {
+            assert!(done.failed.is_empty());
+        }
+    }
+}
+
+/// A wait of the renewal timer that ends when the test says so, once: the renewal then starts as
+/// the timer's would after one `renew`, and the waits after it never end.
+struct Wake(tokio::sync::Notify);
+
+#[async_trait]
+impl Sleeper for Wake {
+    async fn sleep(&self, _duration: Duration) {
+        self.0.notified().await;
+    }
+}
+
+/// Asserts the default setting of the lease, `renew` equal to the margin: an item that starts a
+/// copy while the timer's renewal is in flight (the clock is just past `renew`, so less than the
+/// margin is left) is copied in that same step, after the renewal's answer and with no second
+/// write to the lease: the cold tier has the object, nothing fails, and the lease object was
+/// replaced by one put. Catches the item refused with "less than the margin of the lease is left"
+/// for the whole latency of every renewal while the lease is held.
+#[tokio::test]
+async fn an_item_started_while_the_timers_renewal_is_in_flight_is_copied_in_that_step() {
     let rig = Rig::new();
     rig.activate().await;
     rig.hot.put("k", bytes("v")).await.unwrap();
     rig.register("p1").await;
     land(&rig, "p1", "k").await;
     let gated = Arc::new(GateBackend::new(rig.hot.clone()));
-    let gate = gated.gate(Op::Get, "k", Phase::Pre);
-    let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
+    let item = gated.gate(Op::Head, "k", Phase::Pre);
+    let renewal = gated.gate(Op::PutIfMatch, LEASE_KEY, Phase::Pre);
+    let counted = Arc::new(FaultyBackend::new(gated));
+    let wake = Arc::new(Wake(tokio::sync::Notify::new()));
+    let timer = wake.clone();
+    let mut r = rig.over(counted.clone(), rig.cold.clone(), "r1", move |config| {
+        config.base.lease_ttl = Duration::from_secs(30);
+        config.base.lease_renew = Some(Duration::from_secs(10));
+        config.base.lease_margin = Some(Duration::from_secs(10));
+        config.base.sleeper = timer;
+    });
     let mut step = Box::pin(r.step());
-    park(&mut step, &gate).await;
+    park(&mut step, &item).await;
     rig.mono.advance(Duration::from_millis(10_001));
-    gate.release();
+    wake.0.notify_one();
+    park(&mut step, &renewal).await;
+    assert!(item.release());
+    assert!(renewal.release());
     let done = step.await;
-    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
-    assert!(!rig.cold_has("k").await);
-    assert!(rig.hot_has("k").await);
+    assert_eq!(done, report(1));
+    assert!(rig.cold_has("k").await);
+    assert!(rig.entry("k").await.is_none());
+    assert_eq!(counted.calls_on(Op::PutIfMatch, LEASE_KEY), 1);
 }
 
-/// Asserts that the lease is looked at again after the cold delete of a handed-over delete: with
-/// the cold delete parked and the margin of the lease used up meanwhile, the cold delete completes,
-/// the hot delete is never sent (the hot object stays), and the item fails with `Unavailable`.
+/// Asserts that a lease that is genuinely lost is still refused, and is not taken again: another
+/// holder replaced the lease object, or it is gone, or the holder's own clock is at the end of the
+/// ttl; the item fails with `Unavailable`, the cold tier does not get the object, the entry is
+/// left as it was, and the lease object is as the other holder left it. A lease past the ttl on
+/// the holder's clock is not renewed either, so no write is made to it.
 #[tokio::test]
-async fn a_delete_whose_lease_margin_runs_out_during_the_cold_delete_leaves_the_hot_object() {
-    let rig = Rig::new();
-    rig.activate().await;
-    rig.hot.put("k", bytes("v")).await.unwrap();
-    rig.cold.put("k", bytes("v")).await.unwrap();
-    rig.plant("k", EntryOp::Del, EntryState::Pending, None)
-        .await;
-    let gated = Arc::new(GateBackend::new(rig.cold.clone()));
-    let gate = gated.gate(Op::Delete, "k", Phase::Pre);
-    let mut r = rig.over(rig.hot.clone(), gated, "r1", |_| {});
-    let mut step = Box::pin(r.step());
-    park(&mut step, &gate).await;
-    rig.mono.advance(Duration::from_millis(10_001));
-    gate.release();
-    let done = step.await;
-    assert!(matches!(done.failed.as_slice(), [Error::Unavailable(_)]));
-    assert!(!rig.cold_has("k").await);
-    assert!(rig.hot_has("k").await);
+async fn an_item_is_still_refused_when_the_lease_was_lost() {
+    // What happens to the lease object, and the time that passes after the lease was written.
+    let cases = [
+        (true, false, 10_001),
+        (false, true, 10_001),
+        (false, false, 30_000),
+    ];
+    for (n, (replaced, gone, passed)) in cases.into_iter().enumerate() {
+        let rig = Rig::new();
+        rig.activate().await;
+        rig.hot.put("k", bytes("v")).await.unwrap();
+        rig.register("p1").await;
+        land(&rig, "p1", "k").await;
+        let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+        let item = gated.gate(Op::Head, "k", Phase::Pre);
+        let counted = Arc::new(FaultyBackend::new(gated));
+        let mut r = rig.over(counted.clone(), rig.cold.clone(), "r1", |_| {});
+        let mut step = Box::pin(r.step());
+        park(&mut step, &item).await;
+        if replaced {
+            rig.hot.delete(LEASE_KEY).await.unwrap();
+            rig.hot.put(LEASE_KEY, bytes("other\nn\n1")).await.unwrap();
+        }
+        if gone {
+            rig.hot.delete(LEASE_KEY).await.unwrap();
+        }
+        rig.mono.advance(Duration::from_millis(passed));
+        item.release();
+        let done = step.await;
+        assert!(
+            matches!(done.failed.as_slice(), [Error::Unavailable(_)]),
+            "case {n}"
+        );
+        assert!(!rig.cold_has("k").await, "case {n}");
+        assert_eq!(
+            rig.shape("k").await,
+            Some((EntryOp::Put, EntryState::Held, Some("r1".to_owned()))),
+            "case {n}"
+        );
+        let writes = counted.calls_on(Op::PutIfMatch, LEASE_KEY);
+        assert_eq!(writes, u64::from(passed < 30_000), "case {n}");
+        // The one create-only put is the take at the start of the step.
+        assert_eq!(counted.calls_on(Op::Put, LEASE_KEY), 1, "case {n}");
+        let body = rig.hot.get(LEASE_KEY, None).await.ok();
+        assert_eq!(body.is_some(), !gone, "case {n}");
+        if replaced {
+            assert_eq!(body, Some(bytes("other\nn\n1")), "case {n}");
+        }
+    }
 }

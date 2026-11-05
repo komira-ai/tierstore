@@ -93,7 +93,7 @@ use super::auth::{
     hmac, keyed, signing_key, string_to_sign_for,
 };
 use super::keys::{AccessKey, Role, read_private_text};
-use super::ops::MULTIPART;
+use super::ops::{MULTIPART, RESPONSE_OVERRIDES};
 use super::request::{Query, Target, header, query_pairs};
 use super::time::{amz_date, parse_amz_date};
 
@@ -545,7 +545,9 @@ const READ_QUERY: [&str; 7] = [
 /// [`READ_URL_ONLY`] for a call on the bucket or the service, or one with another parameter (a
 /// listing of parts, a part, `uploads`).
 pub(super) fn permit_read(target: &Target, query: &Query) -> Result<(), Refusal> {
-    if !matches!(target, Target::Object(_)) || !query.only(&READ_QUERY) {
+    let overrides = RESPONSE_OVERRIDES.iter().map(|(param, _)| param);
+    let allowed: Vec<&str> = READ_QUERY.iter().chain(overrides).copied().collect();
+    if !matches!(target, Target::Object(_)) || !query.only(&allowed) {
         return Err(READ_URL_ONLY);
     }
     Ok(())
