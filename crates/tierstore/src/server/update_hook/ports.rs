@@ -245,6 +245,15 @@ pub trait Host {
     /// # Errors
     /// The release's binary is missing, is not one to run, or cannot be run at all.
     fn capabilities(&self, release: &Path) -> Result<Vec<String>, PortError>;
+
+    /// Has the release in `release` check the node's configuration file `config`
+    /// (`bin/tierstore --config <config> --check-config`), as the service account would start it.
+    /// `None` is a configuration the release accepts; `Some` is the line it refuses it with.
+    ///
+    /// # Errors
+    /// The release's binary is missing, is not one to run, cannot be run at all, or ended any way
+    /// but accepting or refusing; or the service account is not known to the host.
+    fn check_config(&self, release: &Path, config: &Path) -> Result<Option<String>, PortError>;
 }
 
 /// Time, and waiting for it to pass.

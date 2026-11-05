@@ -67,12 +67,13 @@ use super::config::{
     ConfigError, OciFlags, PerRun, ServerTable, TierParts, TierTable, duration, front_of, invalid,
     refuse, refuse_hot_keys, require, tier, within,
 };
-use super::config_handoff::refuse_handoff;
+use super::config_handoff::{check_outside_cache, handoff_of};
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
 use super::config_tuning::S3Client;
 use super::config_units::{Dur, Size, parse_size};
 use super::front::FrontSettings;
+use super::handoff::Handoff;
 use super::local_cache::{CacheConfig, SCRUB_MIN_ROUND, SCRUB_RATE};
 
 /// The only layout of the cache directory.
@@ -187,6 +188,9 @@ pub(super) struct CacheSettings {
     pub scrub_rate: Option<u64>,
     /// The least time between the starts of two rounds of the scrub.
     pub scrub_min_round: Duration,
+    /// The hand-off of the listening sockets (`server.handoff_socket` and `server.handoff_wait`),
+    /// or none without `server.handoff_socket`.
+    pub handoff: Option<Handoff>,
 }
 
 /// The `endpoint` of the upstream: `endpoint`, or the one entry of `endpoints`.
@@ -363,12 +367,13 @@ impl CacheSettings {
         require_keeping(policy)?;
         let unused = [("backend_check_wait", server.backend_check_wait.is_some())];
         refuse("server", "not used by a build node", &unused)?;
-        refuse_handoff(&server, "a build node")?;
+        let handoff = handoff_of(&server, None)?;
         refuse_hot_keys(&cold)?;
         let skipping = [("skip_checks", cold.skip_checks.is_some())];
         refuse("cold_store", "not for a build node", &skipping)?;
         let upstream = tier("cold_store", &upstream_table(cold)?)?;
         let part = CachePart::new(table, policy)?;
+        check_outside_cache(handoff.as_ref(), &part.config.path)?;
         let oci = fronts.oci;
         if oci.upstream.is_some() {
             let why =
@@ -386,6 +391,7 @@ impl CacheSettings {
             scrub_min_round: part.scrub_min_round,
             oci,
             scrub_rate: part.scrub_rate,
+            handoff,
         })
     }
 }

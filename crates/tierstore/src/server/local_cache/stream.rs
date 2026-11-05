@@ -28,7 +28,7 @@ use tokio::sync::watch;
 use crate::{ByteRange, Error, Meta, ReadBody};
 
 use super::fill::{Filled, Live, Pending, tagged, written_over};
-use super::layout::{Name, data_path};
+use super::layout::{Name, Sidecar, data_path, meta_path};
 use super::metrics::{add, bump};
 use super::{Inner, gone, locked, window};
 
@@ -67,6 +67,35 @@ fn open_whole(path: &std::path::Path, need: u64) -> io::Result<File> {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }
     Ok(file)
+}
+
+/// What a read-only cache's index says of an object, to check against the directory: the holder
+/// may have deleted the object and put it again since the scan.
+pub(super) struct Believed {
+    pub size: u64,
+    pub tag: String,
+}
+
+/// The file at `path` as [`open_whole`] opens it, if it is the object that `believed` describes:
+/// exactly the size of the index, and the sidecar of `root` says the size and tag of the index.
+/// The sidecar is read after the file is opened: the holder renames a new sidecar into place
+/// before it links the new data file, so a file that is a new version has a sidecar that is a
+/// new version too, and a file that is the old version is whole and still the one the index
+/// describes. A mismatch is `InvalidData`.
+fn open_believed(root: &std::path::Path, hex: &str, believed: &Believed) -> io::Result<File> {
+    let file = open_whole(&data_path(root, hex), believed.size)?;
+    if file.metadata()?.len() != believed.size || !same_version_on_disk(root, hex, believed) {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(file)
+}
+
+/// Whether the sidecar of `hex` under `root` reads and says the size and tag of `believed`.
+pub(super) fn same_version_on_disk(root: &std::path::Path, hex: &str, believed: &Believed) -> bool {
+    std::fs::read(meta_path(root, hex))
+        .ok()
+        .and_then(|text| serde_json::from_slice::<Sidecar>(&text).ok())
+        .is_some_and(|sidecar| sidecar.size == believed.size && sidecar.tag == believed.tag)
 }
 
 /// `body` with its first chunk taken, so that a read that fails at once (the object is not
@@ -165,9 +194,25 @@ impl Inner {
         let Some(size) = used else {
             return Ok(None);
         };
-        let (offset, len) = window(range, size)?;
-        let path = data_path(&self.config.path, &name.hex);
-        let opening = tokio::task::spawn_blocking(move || open_whole(&path, offset + len));
+        // A read-only cache's index is its scan, and the holder may have put the object again
+        // since: the file and its sidecar are checked against the index. The bytes of a key named
+        // by its content cannot change.
+        let believed = (!self.read_write() && name.content.is_none())
+            .then(|| self.believed(&name.hex))
+            .flatten();
+        let checked = believed.is_some();
+        let (offset, len) = match window(range, size) {
+            Ok(window) => window,
+            // The object may be longer now, so the range may not be past its end.
+            Err(_) if checked => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let root = self.config.path.clone();
+        let hex = name.hex.clone();
+        let opening = tokio::task::spawn_blocking(move || match believed {
+            Some(believed) => open_believed(&root, &hex, &believed),
+            None => open_whole(&data_path(&root, &hex), offset + len),
+        });
         match opening.await.expect("an open does not panic") {
             Ok(file) => {
                 if hit {
@@ -186,6 +231,16 @@ impl Inner {
             // Out of descriptors, a failing disk: the object may be fine, so it stays.
             Err(_) => Ok(None),
         }
+    }
+
+    /// What the index says of the object `hex`: the size and the tag.
+    pub(super) fn believed(&self, hex: &str) -> Option<Believed> {
+        let index = locked(&self.index);
+        let entry = index.get(hex)?;
+        Some(Believed {
+            size: entry.size,
+            tag: entry.tag.clone(),
+        })
     }
 
     /// `len` bytes of `file` from `offset`, a chunk at a time.

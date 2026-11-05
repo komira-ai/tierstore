@@ -21,7 +21,7 @@ use super::listing::{self, UploadsNext};
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{BoxError, Check, Query, Reader, Refused, Target, header, pieces};
-use super::time::http_date;
+use super::time::{http_date, parse_http_date};
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
@@ -195,28 +195,42 @@ fn names(parts: &Parts, name: &str, tag: &str) -> Option<bool> {
     Some(listed.any(|item| ["*", tag].contains(&item)))
 }
 
-/// The answer that the conditions of a read give in place of the object, if they do:
-/// `PreconditionFailed` when `If-Match` does not name the tag of the object, and 304 when
-/// `If-None-Match` does. `None` when the read goes on. The conditions on the time are not
-/// supported.
+/// The time, in whole seconds, that the header `name` of the request holds, if it has the header
+/// and it is an HTTP date. S3 ignores a date that is not one, and so does this.
+fn date_of(parts: &Parts, name: &str) -> Option<u64> {
+    parse_http_date(header(&parts.headers, name)?).map(|millis| millis / 1000)
+}
+
+/// The answer that the conditions of a read give in place of the object, if they do, in the order
+/// of RFC 7232 (section 6): `PreconditionFailed` when `If-Match` does not name the tag of the
+/// object, or, without an `If-Match`, when `If-Unmodified-Since` is before the time of the
+/// object; then 304 when `If-None-Match` names the tag, or, without an `If-None-Match`, when
+/// `If-Modified-Since` is not before the time of the object. A date is compared to the second,
+/// as `Last-Modified` shows it, and one that is not a date is ignored. `None` when the read goes
+/// on.
 fn conditional(parts: &Parts, key: &str, meta: &Meta) -> Result<Option<Answer>, S3Error> {
-    let since = ["if-modified-since", "if-unmodified-since"];
-    if since.iter().any(|name| parts.headers.contains_key(*name)) {
-        return Err(S3Error::unsupported(
-            "only If-Match and If-None-Match are supported",
-        ));
+    let modified = meta.modified / 1000;
+    let unmodified_since = || date_of(parts, "if-unmodified-since").is_some_and(|at| modified > at);
+    let failed = match names(parts, "if-match", &meta.tag) {
+        Some(named) => !named,
+        None => unmodified_since(),
+    };
+    if failed {
+        return Err(S3Error::from(Error::PreconditionFailed(key.to_owned())));
     }
-    let if_match = names(parts, "if-match", &meta.tag);
-    let if_none_match = names(parts, "if-none-match", &meta.tag);
-    match (if_match, if_none_match) {
-        (Some(false), _) => Err(S3Error::from(Error::PreconditionFailed(key.to_owned()))),
-        (_, Some(true)) => {
-            let headers = object_headers(meta);
-            let not_modified = answer(StatusCode::NOT_MODIFIED, &headers, Bytes::new());
-            Ok(Some(not_modified))
-        }
-        _ => Ok(None),
+    let not_modified = match names(parts, "if-none-match", &meta.tag) {
+        Some(named) => named,
+        None => date_of(parts, "if-modified-since").is_some_and(|at| modified <= at),
+    };
+    if not_modified {
+        let headers = object_headers(meta);
+        return Ok(Some(answer(
+            StatusCode::NOT_MODIFIED,
+            &headers,
+            Bytes::new(),
+        )));
     }
+    Ok(None)
 }
 
 /// Runs a call that changes the store to its end on a task of its own. The server drops the
