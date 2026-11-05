@@ -25,6 +25,8 @@ use super::{
 mod settings;
 #[path = "cli_tests/startup.rs"]
 mod startup;
+#[path = "cli_tests/tiers.rs"]
+mod tiers;
 
 /// The JSON form of a key file with the id `JSONID` and the secret `json-secret-0123456789`.
 const JSON_KEY: &str =

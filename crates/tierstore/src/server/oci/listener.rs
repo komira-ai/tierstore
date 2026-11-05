@@ -29,7 +29,7 @@ use crate::server::drain::{self, Drain};
 use crate::server::idle::Watched;
 use crate::server::linger::{Lingering, OnWire};
 use crate::server::listen::{self, Listeners};
-use crate::server::{ACCEPT_PAUSE, Incoming};
+use crate::server::{Incoming, ListenTuning};
 
 /// A connection's byte stream, whichever way it is carried: one code path serves HTTP over it.
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -57,6 +57,9 @@ pub struct OciLimits {
     /// How long, after a stop or at the end of a connection's lifetime, the answer being sent is
     /// waited for before the connection is cut.
     pub drain_deadline: Duration,
+    /// The backlog of the sockets, the pause after a failed accept and the times of the closing
+    /// door.
+    pub listen: ListenTuning,
 }
 
 /// The bound sockets of the front, ready to serve it over TLS, or over plain HTTP. They share
@@ -144,7 +147,7 @@ impl OciListener {
         front: Arc<OciFront>,
         limits: OciLimits,
     ) -> Result<Self, OciError> {
-        let bound = listen::bind_all(addrs);
+        let bound = listen::bind_all_with(addrs, limits.listen.backlog);
         let bound = bound.map_err(|(addr, source)| OciError::Bind { addr, source })?;
         Ok(Self::over(bound, acceptor, front, limits))
     }
@@ -323,7 +326,7 @@ where
         tokio::select! {
             accepted = poll_fn(|cx| incoming.poll_incoming(cx)) => {
                 if let Err(error) = take(accepted, slot, &mut connections) {
-                    accept_failed(&error).await;
+                    accept_failed(&error, limits.listen.accept_pause).await;
                 }
             }
             Some(_) = connections.join_next() => {}
@@ -335,7 +338,7 @@ where
     // then taken before it closes (see `door`), each in a slot as before, for as long as the door
     // waits.
     drain.settle();
-    let mut door = Closing::begin(incoming);
+    let mut door = Closing::begin(incoming, limits.listen);
     loop {
         let slot = tokio::select! {
             slot = Arc::clone(&slots).acquire_owned() => slot,
@@ -345,7 +348,7 @@ where
             break;
         };
         if let Err(error) = take(accepted, slot, &mut connections) {
-            accept_failed(&error).await;
+            accept_failed(&error, limits.listen.accept_pause).await;
         }
     }
     drop(door);
@@ -363,9 +366,9 @@ where
 }
 
 /// Says that an accept failed, and waits a moment before the next.
-async fn accept_failed(error: &io::Error) {
+async fn accept_failed(error: &io::Error, pause: Duration) {
     tracing::warn!("tierstore: oci: accept: {error}");
-    tokio::time::sleep(ACCEPT_PAUSE).await;
+    tokio::time::sleep(pause).await;
 }
 
 /// One plain connection served as the accept loop serves one, holding `permit`, for a test that
@@ -482,7 +485,7 @@ impl Serving {
                 () = &mut lifetime => true,
                 // The settle is over, and the connection has no request on the wire, or has just
                 // answered it: it closes, and its stream lingers (see `OciDrain`).
-                () = drain::time_to_close(&wire, settled) => false,
+                () = drain::time_to_close(&wire, settled, limits.listen.door_grace) => false,
             };
             // The request being answered is finished, and then the connection closes.
             serving.as_mut().graceful_shutdown();

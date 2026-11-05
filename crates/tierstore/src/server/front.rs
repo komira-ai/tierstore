@@ -11,6 +11,7 @@ use crate::Clock;
 
 use super::ServerConfig;
 use super::cli::{Cli, Error};
+use super::config_io::IoTuning;
 use super::gc::{ensure_distinct as gc_distinct, gc_keys, ids as gc_ids};
 use super::keys::{ensure_distinct, ensure_secrets_long_enough, read_credentials, read_only_keys};
 use super::listen::joined;
@@ -112,6 +113,8 @@ pub(super) struct FrontSettings {
     pub drain_lb_wait: Duration,
     pub drain_deadline: Duration,
     pub tls: S3Tls,
+    /// The sockets, the pauses and the piece queue that `[server]` tunes.
+    pub io: IoTuning,
 }
 
 impl Cli {
@@ -143,6 +146,7 @@ impl Cli {
             drain_lb_wait: self.drain_lb_wait,
             drain_deadline: self.drain_deadline,
             tls: self.tls.clone(),
+            io: self.io_tuning,
         }
     }
 }
@@ -243,6 +247,7 @@ pub(super) fn server_config(
     server.put_rate_grace = front.put_rate_grace;
     server.drain_lb_wait = front.drain_lb_wait;
     server.drain_deadline = front.drain_deadline;
+    front.io.apply(&mut server);
     Ok(server)
 }
 

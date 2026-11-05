@@ -42,20 +42,24 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::Incoming;
+use super::listen::ListenTuning;
 
-/// How long a new connection has, from the end of the settle, to finish its handshake and to send
-/// its first request: the first retransmit of the server's SYN-ACK (one second), for a handshake
+/// The default of how long a new connection has, from the end of the settle, to finish its
+/// handshake and to send its first request ([`ListenTuning::door_grace`]): the first retransmit of the server's SYN-ACK (one second), for a handshake
 /// whose last segment was lost, and some round trips.
-pub(super) const GRACE: Duration = Duration::from_secs(3);
+pub(crate) const GRACE: Duration = Duration::from_secs(3);
 
-/// How far apart the two looks are that must both find nothing in flight before the door closes:
+/// The default of how far apart the two looks are ([`ListenTuning::door_look`]) that must both find
+/// nothing in flight before the door closes:
 /// far longer than the moment between the end of a handshake and its connection's place in the
 /// accept queue, and a round trip on a local network.
-const LOOK: Duration = Duration::from_millis(10);
+pub(crate) const LOOK: Duration = Duration::from_millis(10);
 
 /// The door of a front, closing: its listening sockets, from the end of the settle.
 pub(super) struct Closing<I> {
     incoming: I,
+    /// The grace of the door, and the time between its looks.
+    tuning: ListenTuning,
     /// When the door closes on the handshakes still in flight.
     deadline: Instant,
     /// The looks in a row that found nothing in flight and nothing queued.
@@ -66,10 +70,11 @@ pub(super) struct Closing<I> {
 
 impl<I: Incoming> Closing<I> {
     /// The door of `incoming`, from the end of its settle.
-    pub(super) fn begin(incoming: I) -> Self {
+    pub(super) fn begin(incoming: I, tuning: ListenTuning) -> Self {
         Self {
             incoming,
-            deadline: Instant::now() + GRACE,
+            tuning,
+            deadline: Instant::now() + tuning.door_grace,
             quiet: 0,
             told: false,
         }
@@ -105,7 +110,7 @@ impl<I: Incoming> Closing<I> {
                     self.quiet = 0;
                     return Some(accepted);
                 }
-                () = tokio::time::sleep(LOOK) => {}
+                () = tokio::time::sleep(self.tuning.door_look) => {}
                 () = tokio::time::sleep_until(self.deadline) => return None,
             }
         }
@@ -126,7 +131,8 @@ impl<I: Incoming> Closing<I> {
                 if !self.told {
                     self.told = true;
                     tracing::warn!(
-                        "tierstore: the end of the settle: cannot count the handshakes in flight, so the listener waits {GRACE:?}: {error}"
+                        "tierstore: the end of the settle: cannot count the handshakes in flight, so the listener waits {:?}: {error}",
+                        self.tuning.door_grace
                     );
                 }
                 true
