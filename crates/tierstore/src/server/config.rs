@@ -369,6 +369,7 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub upload_listing_calls: Option<u32>,
     #[serde(default)]
+    pub abandoned_upload_after: Option<Dur>,
     pub retry_min: Option<Dur>,
     #[serde(default)]
     pub retry_max: Option<Dur>,
@@ -545,6 +546,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("delete_rounds", cold.delete_rounds.is_some()),
         ("listing_heads", cold.listing_heads.is_some()),
         ("upload_listing_calls", cold.upload_listing_calls.is_some()),
+        (
+            "abandoned_upload_after",
+            cold.abandoned_upload_after.is_some(),
+        ),
         ("retry_min", cold.retry_min.is_some()),
         ("retry_max", cold.retry_max.is_some()),
         ("stray_grace", cold.stray_grace.is_some()),

@@ -259,9 +259,9 @@ fn pieces(bytes: &Bytes) -> BodyStream {
 }
 
 /// Asserts that an object over the size of one put goes up as a multipart upload with the
-/// client's own parts, is made in the cold tier and not in the hot tier, reads back byte for byte
-/// (the read asks for its copy into the hot tier and makes none itself), and that a second upload of
-/// the key fails at its completion with `AlreadyExists` and leaves the first object.
+/// client's own parts, is made in the hot tier and not in the cold tier, reads back byte for byte,
+/// and that a second upload of the key fails at its completion with `AlreadyExists` and leaves
+/// the first object.
 #[tokio::test]
 async fn a_large_object_goes_up_in_parts_and_reads_back() {
     let h = Harness::start(|_| {}).await;
@@ -270,12 +270,12 @@ async fn a_large_object_goes_up_in_parts_and_reads_back() {
     let k = key("cas/large");
     let len = bytes.len() as u64;
     store.put_stream(&k, len, pieces(&bytes)).await.unwrap();
-    assert_eq!(h.cold_mem.get("cas/large", None).await.unwrap(), bytes);
-    assert!(h.hot_mem.get("cas/large", None).await.is_err());
+    assert_eq!(h.hot_mem.get("cas/large", None).await.unwrap(), bytes);
+    assert!(h.cold_mem.get("cas/large", None).await.is_err());
     assert_eq!(store.get_range(&k, window(0, len)).await.unwrap(), bytes);
     let tail = store.get_range(&k, window(len - 10, 10)).await.unwrap();
     assert_eq!(tail, bytes.slice(bytes.len() - 10..));
     let again = store.put_stream(&k, len, pieces(&bytes)).await;
     assert!(matches!(again, Err(ObjectStoreError::AlreadyExists(_))));
-    assert_eq!(h.cold_mem.get("cas/large", None).await.unwrap(), bytes);
+    assert_eq!(h.hot_mem.get("cas/large", None).await.unwrap(), bytes);
 }
