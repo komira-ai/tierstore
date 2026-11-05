@@ -3,9 +3,10 @@
 `tierstore` (`crates/tierstore`) is an S3 server over a hot and a cold tier of S3-compatible
 stores: it writes new objects to the hot tier, copies them to the cold tier in the background, and
 frees the hot tier when it fills. It is a release asset for Linux (x86_64, arm64) and macOS (Apple
-silicon), as a tarball with its SBOM and its provenance bundle (`docs/ci-and-release.md`); no
-package and no container image is released (`cargo xtask release hostkeeper-package` builds a
-hostkeeper package from `hostkeeper/`, see its README, but no workflow runs it yet). These files,
+silicon), as a tarball with its SBOM and its provenance bundle, and as a hostkeeper package of each
+of those platforms with its provenance bundle and one release index, `index.json`
+(`docs/ci-and-release.md`; `cargo xtask release hostkeeper-package` builds the package from
+`hostkeeper/`, see its README); no system package and no container image is released. These files,
 for Linux hosts, go beside the binary.
 
 | file | what |
@@ -71,7 +72,8 @@ refuses a key file that its group or others can read):
   list, delete, and the calls of a multipart upload;
 - `/etc/tierstore/daemons.key`: a read-only key (`server.read_only_key_files`), for the daemons that
   read blobs and must not write or delete them. A request signed with it may get and head an
-  object, list the bucket (objects, and the open multipart uploads) and head the bucket; a put, a
+  object, list the bucket (objects, and the open multipart uploads), head the bucket and read its region
+  (GetBucketLocation); a put, a
   delete, CreateBucket or any call that starts, feeds, completes or aborts a multipart upload is
   answered 403 `AccessDenied`, before its body is read, and changes nothing.
   List one file for each read-only key, to give each reader a key of its own. The access key
@@ -180,7 +182,7 @@ and is longer than it:
 | DeleteObject | yes: from both tiers, on the entry of the key as for any delete |
 | AbortMultipartUpload | of an upload of such a key |
 | GetObject | no: a GC key never reads a body |
-| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket | no |
+| put, part, start or completion of an upload, copy, CreateBucket, HeadBucket, GetBucketLocation | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the prefix, the prefix itself | no |
 
 A call the key may not do is refused with 403 `AccessDenied` without its body being read. The
@@ -233,7 +235,7 @@ A key or a listing `prefix` that has `..` anywhere in it, even inside a prefix, 
 | AbortMultipartUpload | `write_prefixes` (a GC key: its abort prefix) | of an upload of such a key (a delete prefix does not allow an abort) |
 | DeleteObject | `delete_prefixes` | from both tiers, on the entry of the key as for any delete |
 | a put with `If-Match` or any other `If-None-Match`, a copy (`x-amz-copy-source`, also on a part) | none | no: a scoped key never replaces or copies |
-| the calls on the bucket (CreateBucket, HeadBucket, delete) and the root, any other method | none | no |
+| the calls on the bucket (CreateBucket, HeadBucket, GetBucketLocation, delete) and the root, any other method | none | no |
 | `_journal/`, `_tiering/`, `_entries/`, any key outside the list the call needs | none | no |
 
 The lists are not interchangeable: a write prefix does not let the key read what it wrote (add the
@@ -299,12 +301,27 @@ AccessDenied` before any body is read:
 | a scoped key's URL for an object outside its read prefixes | 403 |
 | PUT, POST or DELETE of anything (parts too) with the URL of a key that reads | 403 |
 | a listing, a call on the bucket or the root | 403 |
-| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above and `x-id` | 403 |
+| GET or HEAD with `response-content-type`, `-disposition`, `-encoding`, `-language`, `-cache-control` or `-expires` signed into the URL | served, with that header set (see Response headers of a GET) |
+| GET with `partNumber`, `uploadId`, `uploads` or any other parameter than the seven above, `x-id` and the six `response-*` ones | 403 |
 | a URL that is expired, has `X-Amz-Expires` of zero or over the cap, is malformed, is signed with another secret, names a key id the server does not have, or was edited after it was signed | 403 |
 
 A program in Rust that links the `tierstore` library with its `server` feature makes the URL with
 `tierstore::server::presign_get(&key, &request)`, as `presign_put` makes a PUT URL (see Presigned
 PUT URLs); any SDK presigner makes the same URL.
+
+### Response headers of a GET
+
+A GET or HEAD of an object, signed in the header or in a presigned URL, may carry `response-content-type`,
+`response-content-disposition`, `response-content-encoding`, `response-content-language`,
+`response-cache-control` and `response-expires` in its query, and the answer (200 or 206, and the
+HEAD) carries that header with the value given, in place of the object's own (the content type of an
+object is `application/octet-stream`), as S3 answers. The value is sent as it was given; a value that
+is not a header value (a line feed, a NUL) is `400 InvalidArgument`, and a parameter with an empty value
+is not applied. A 304, a 412 and every error answer carry none of them. A presigned URL signs the
+parameters with the rest of its query, so one added after the URL was made is `SignatureDoesNotMatch`.
+A GET or HEAD with one of the parameters and no signature at all (no `Authorization` header and no SigV4
+parameter in the query) is `400 InvalidRequest` ("Request specific response headers cannot be used for
+anonymous GET requests."), as S3 answers, and not the `403` of an unsigned request without them.
 
 ## The configuration file
 
@@ -656,7 +673,7 @@ what "tested" means below.
 | credentials | a static key id and secret: the full key, or a read-only key | the front has no session tokens, no STS and no presigned URLs |
 | request checksums | only when an operation requires one (`request_checksum_calculation = when_required`) | the SDK default sends a checksum with every upload, and for a streamed body sends it as a trailer in an `aws-chunked` body, which the front refuses with 501 |
 | response checksums | only when required (`response_checksum_validation = when_required`) | the front sends no checksum on a download, so there is nothing to validate; this keeps the SDK from asking |
-| checksum algorithm | none, or CRC-32, CRC-32C, SHA-1 or SHA-256 | read from the front's code, not tested with an SDK: CRC-64/NVMe, `aws-chunked` and trailing checksums are refused with 501; `Content-MD5` is checked |
+| checksum algorithm | none, or CRC-32, CRC-32C, CRC-64/NVMe, SHA-1 or SHA-256 | CRC-64/NVMe is the default of the AWS CLI and current SDKs and is checked, as the others and `Content-MD5` are; `aws-chunked` and trailing checksums are refused with 501 |
 | `x-id` | nothing to set | the AWS SDKs add `x-id=<Operation>` to the query of the calls of an object, and no setting stops it; S3 ignores it, and so does the front |
 | listing | nothing to set | `delimiter` and `encoding-type=url` are served, on ListObjectsV2 and ListMultipartUploads; the Rust SDK leaves the names percent-encoded when it is asked for `url`, and decoding them is the caller's (a space is `+`) |
 
@@ -756,6 +773,9 @@ The registry front). The params of the entry:
 | `params.max_connections` | connections open at once, 64 if not given; the others wait in the kernel's backlog. Memory is bounded by connections times the buffer a connection holds (up to 4 MiB), about 256 MiB at the default |
 | `params.connection_lifetime` | the longest a connection lives, 1h if not given; a request being answered is finished first |
 | `params.stage_read` | the most bytes of a stored chunk that the end of a push reads in one call, 1048576 (1 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.max_manifest_bytes` | the largest manifest the front stores, serves or pulls, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.read_chunk_bytes` | the most bytes asked of the store in one call when a blob is served, 4194304 (4 MiB) if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
+| `params.echo_bytes` | the longest piece of a request an error answer repeats, 256 if not given; at least 1. On main, not in v0.0.41, which refuses a file with it |
 | `params.require_auth` | `true`: every request must carry `Authorization: Basic` with an access key id of the server and its secret, else 401 with `WWW-Authenticate: Basic realm="tierstore"`. The full key and the read-only keys pull; scoped keys pull with a read prefix and push with a write prefix over `<prefix>blobs/sha256/`; the full key pushes; a key without the right is 403. Without it the front is read-only. Refused at start (exit 2) on plain HTTP off loopback. `false` if not given: anonymous |
 
 A client has 10 seconds to finish the TLS handshake and then the S3 front's header timeout (a

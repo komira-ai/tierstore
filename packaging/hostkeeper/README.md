@@ -24,8 +24,8 @@ The units are the update hook's (`crates/tierstore/docs/update-hook.md`), which
 `crates/tierstore/tests/packaging_hostkeeper.rs` checks against the hook and the binary; the
 tests here check the package that carries them.
 
-hostkeeper's main manifest loader takes a launchd plist as a unit file and a launchd label as a
-`run` entry, and the tests load the macOS manifest and plist with it. Its unpacker on main does not
-yet know the manifest's `platform` key (komira-ai/hostkeeper#23, open), and #23's unpacker predates
-launchd jobs, so the test that unpacks the macOS package with hostkeeper waits, ignored, until one
-commit of hostkeeper has both.
+hostkeeper's manifest loader takes a launchd plist as a unit file and a launchd label as a `run`
+entry, and the tests load the macOS manifest and plist with it. The unpacker and loader the tests
+and `artifacts.yml` use are those of the commit that merged komira-ai/hostkeeper#23, which know
+both the manifest's `platform` key and launchd jobs, so every platform's package is unpacked with
+hostkeeper's own code, in the tests and in the build job of its platform.

@@ -33,12 +33,15 @@
 #          lists the titles of the commits since that tag.
 # verify   refuses a commit that is not on main, or that lacks a successful push run of
 #          artifacts.yml (the files and their signatures) or of ci.yml (the lint and the tests)
-#          (cargo xtask release locate), downloads the files of that run, checks them against
-#          SHA256SUMS and against the assets of the commit (cargo xtask release check), and verifies
-#          every attestation as a deployment does and every bundle offline as a host does. Read-only,
-#          and it runs before anything is tagged.
+#          (cargo xtask release locate), downloads the files of that run, makes the release index
+#          of the hostkeeper packages again, checks them against SHA256SUMS and against the assets
+#          of the commit (cargo xtask release check), verifies every attestation as a deployment
+#          does and every bundle offline as a host does, and takes each hostkeeper package from the
+#          index and unpacks it as hostkeeper does. Read-only, and it runs before anything is
+#          tagged.
 # publish  the one job that holds `contents: write`. It checks the same files again, creates the
-#          release as a draft at the commit with those files, reads the draft's assets back, and
+#          release as a draft at the commit with those files (the tarballs, SBOMs, hostkeeper
+#          packages, bundles, index.json and SHA256SUMS), reads the draft's assets back, and
 #          only then publishes it, which is when GitHub creates the tag (cargo xtask release
 #          publish). A tag or a release that exists is refused; a draft a failed run left is
 #          replaced. Re-run the failed jobs of a run, not the whole run.
@@ -193,15 +196,20 @@ jobs:
           path: dist
           run-id: ${{ steps.locate.outputs.run-id }}
           github-token: ${{ github.token }}
+      # The release index of the hostkeeper packages, made again from them as the build's sums job
+      # made it, with its sums line (dist/SHA256SUMS.index): the published SHA256SUMS lists it, so
+      # the assembly below holds it to the bytes the build signed.
+      - name: The release index, made again from the packages
+        run: cargo xtask release hostkeeper-index dist --commit "$COMMIT" --event "$GITHUB_EVENT_NAME"
       # The assets artifacts carry the SHA256SUMS.<platform> files the sums were made from;
-      # assembling them must give the published SHA256SUMS, and removes them from dist (they
-      # are not release assets).
+      # assembling them (and the index's) must give the published SHA256SUMS, and removes them
+      # from dist (they are not release assets).
       - name: Assemble SHA256SUMS, which must be the published one
         run: cargo xtask sums assemble dist --expect published/SHA256SUMS
       - name: Check the files against SHA256SUMS
         working-directory: dist
         run: sha256sum --check --strict SHA256SUMS
-      - name: The files are exactly the assets of this commit, each tarball with its bundle
+      - name: The files are exactly the assets of this commit, each tarball and package with its bundle
         run: cargo xtask release check dist --commit "$COMMIT"
       # The runner is linux-x86_64: the binary of that tarball is run, and refused unless it says
       # the tag (without the v) and the commit. Unpacked outside dist, which holds the assets.
@@ -217,6 +225,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: cargo xtask verify-assets attestations dist --repo "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/artifacts.yml" --source-ref refs/heads/main --commit "$COMMIT" --trusted-root "$RUNNER_TEMP/trusted_root.jsonl"
+      # As hostkeeper takes the release: the index lists a package for every platform, each the
+      # size and SHA-256 of its file, and each unpacks under hostkeeper's rules (outside dist).
+      - name: Each hostkeeper package as a host takes it from the release index
+        run: cargo xtask verify-assets hostkeeper-index dist --commit "$COMMIT" --scratch "$RUNNER_TEMP/hostkeeper"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets
@@ -252,7 +264,7 @@ jobs:
       - name: Check the files against SHA256SUMS
         working-directory: dist
         run: sha256sum --check --strict SHA256SUMS
-      - name: The files are exactly the assets of this commit, each tarball with its bundle
+      - name: The files are exactly the assets of this commit, each tarball and package with its bundle
         run: cargo xtask release check dist --commit "$COMMIT"
       - name: Fetch the Sigstore trusted root, for the offline check of the bundles
         env:
@@ -262,6 +274,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: cargo xtask verify-assets attestations dist --repo "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/artifacts.yml" --source-ref refs/heads/main --commit "$COMMIT" --trusted-root "$RUNNER_TEMP/trusted_root.jsonl"
+      - name: Each hostkeeper package as a host takes it from the release index
+        run: cargo xtask verify-assets hostkeeper-index dist --commit "$COMMIT" --scratch "$RUNNER_TEMP/hostkeeper"
       - name: Create the release and publish it
         env:
           GH_TOKEN: ${{ github.token }}

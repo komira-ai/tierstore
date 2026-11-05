@@ -1,8 +1,9 @@
-//! The provenance bundle of a release tarball: `<tarball>.sigstore.json`,
-//! the Sigstore bundle of the one build provenance attestation the `attest-*` job signed
-//! for that tarball alone, so a host can verify the tarball offline
-//! (`gh attestation verify <tarball> --bundle <bundle>`) without fetching anything from
-//! GitHub.
+//! The provenance bundle of a release tarball or hostkeeper package: `<file>.sigstore.json`,
+//! the Sigstore bundle of the one build provenance attestation the `attest` job signed
+//! for that file alone, so a host can verify the file offline
+//! (`gh attestation verify <file> --bundle <bundle>`) without fetching anything from
+//! GitHub. (Below, "tarball" stands for either: a `.tar.gz` of the binary or a `.tar.zst`
+//! hostkeeper package.)
 //!
 //! A bundle is made after `SHA256SUMS` (the attestation signs the sums' files), so the
 //! sums cannot list it: [`is_bundle`] is how `verify-assets sums` knows to leave it
@@ -52,10 +53,10 @@ pub fn is_bundle(name: &str) -> bool {
     name.ends_with(SUFFIX)
 }
 
-/// Whether the asset `name` has a provenance bundle: a tarball, but not an SBOM, which is a
-/// subject of the sums' attestation only.
+/// Whether the asset `name` has a provenance bundle: a tarball or a hostkeeper package, but not
+/// an SBOM or the release index, which are subjects of the sums' attestation only.
 pub fn needs_bundle(name: &str) -> bool {
-    name.ends_with(".tar.gz")
+    name.ends_with(".tar.gz") || name.ends_with(".tar.zst")
 }
 
 /// `commit` with its last hex digit changed: a commit the bundle was not made for.

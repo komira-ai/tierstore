@@ -8,9 +8,20 @@
 # `macos-arm64`. Each build job runs on a GitHub-hosted runner of its own platform, so each
 # binary is run where it is built and must say the commit and the version there.
 #
-# A pull request builds, packages and sums the Linux files and attests nothing; the macOS job
-# does not run for a pull request (no macOS runner is part of a pull request's checks), so the
-# pull request's sums cover the Linux files alone. A push to main builds every platform, also
+# Beside them, the hostkeeper packages of the same binaries: `tierstore-<version>-<platform>.tar.zst`
+# (`cargo xtask release hostkeeper-package`, where `<version>` is what `tierstore --version`
+# prints, `X.Y.Z+<12 hex>`), each with the bundle of its own provenance attestation,
+# `tierstore-<version>-<platform>.tar.zst.sigstore.json`, and one release index, `index.json`
+# (`cargo xtask release hostkeeper-index`, in the sums job), which lists the package of every
+# platform: hostkeeper refuses a host whose platform the index lacks. Each build job unpacks its
+# package with hostkeeper's own unpacker (`cargo xtask verify-assets hostkeeper-package`), and the
+# macOS job checks the code signature of the binary it unpacked (`codesign --verify --strict`).
+# SHA256SUMS lists the packages and the index; the attest job signs them as it signs the tarballs.
+#
+# A pull request builds, packages and sums the Linux files, their hostkeeper packages included,
+# and attests nothing; the macOS job does not run for a pull request (no macOS runner is part of a
+# pull request's checks), so the pull request's sums cover the Linux files alone and it has no
+# release index. A push to main builds every platform, also
 # signs, in the `attest` job, and then checks what it signed (`verify`), as a deployment does. A
 # run by hand (workflow_dispatch) on a branch builds every platform, the macOS one included, and
 # sums them, and signs nothing: it is how a change to the macOS build is tried before it merges.
@@ -35,8 +46,9 @@
 # crate (`cargo xtask release set-version`, from RELEASE_VERSION) before building, so
 # `tierstore --version` prints `X.Y.Z+<12 hex>`. The release plan (release.yml) names its tag
 # with the same computation, and the release is refused
-# unless the downloaded binary says that tag. File names carry the commit, not the version, and
-# are unchanged. A pull request builds under the version its base would release next.
+# unless the downloaded binary says that tag. The names of the tarballs and SBOMs carry the commit,
+# not the version, and are unchanged; the hostkeeper packages are named by the version the binary
+# reports, which holds both. A pull request builds under the version its base would release next.
 #
 # The files are kept as workflow artifacts for 90 days, GitHub's limit. release.yml, started by
 # the completion of this workflow and ci.yml on a push to main (or by hand), attaches these exact
@@ -164,6 +176,15 @@ jobs:
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
         run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      # The hostkeeper package of the same binary, tierstore-<version>-linux-x86_64.tar.zst, named
+      # by the version the binary reports, with its line in dist/SHA256SUMS.linux-x86_64. It needs
+      # hostkeeper 0.1.0, whose loader reads the manifest's `platform` key.
+      - name: The hostkeeper package
+        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --min-hostkeeper 0.1.0 --platform linux-x86_64 --out dist
+      # The package as a host takes it: unpacked by hostkeeper's own unpacker, under its rules,
+      # with no extended attribute.
+      - name: The hostkeeper package unpacks as a host unpacks it
+        run: cargo xtask verify-assets hostkeeper-package dist --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --platform linux-x86_64 --scratch "$RUNNER_TEMP/hostkeeper"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-x86_64
@@ -242,6 +263,15 @@ jobs:
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-linux-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
         run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      # The hostkeeper package of the same binary, tierstore-<version>-linux-arm64.tar.zst, named
+      # by the version the binary reports, with its line in dist/SHA256SUMS.linux-arm64. It needs
+      # hostkeeper 0.1.0, whose loader reads the manifest's `platform` key.
+      - name: The hostkeeper package
+        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --min-hostkeeper 0.1.0 --platform linux-arm64 --out dist
+      # The package as a host takes it: unpacked by hostkeeper's own unpacker, under its rules,
+      # with no extended attribute.
+      - name: The hostkeeper package unpacks as a host unpacks it
+        run: cargo xtask verify-assets hostkeeper-package dist --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --platform linux-arm64 --scratch "$RUNNER_TEMP/hostkeeper"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-linux-arm64
@@ -330,6 +360,20 @@ jobs:
       - run: tar -xzf "dist/tierstore-${GITHUB_SHA}-macos-arm64.tar.gz" -C "$RUNNER_TEMP/unpacked" tierstore
       - name: The packaged tierstore names the commit and the version
         run: cargo xtask build-commit "$RUNNER_TEMP/unpacked/tierstore" "$GITHUB_SHA" --version "$RELEASE_VERSION"
+      # The hostkeeper package of the same binary, tierstore-<version>-macos-arm64.tar.zst, named
+      # by the version the binary reports, with its line in dist/SHA256SUMS.macos-arm64. It needs
+      # hostkeeper 0.1.0, whose loader reads the manifest's `platform` key.
+      - name: The hostkeeper package
+        run: cargo xtask release hostkeeper-package --binary "target/$TARGET/release/tierstore" --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --min-hostkeeper 0.1.0 --platform macos-arm64 --out dist
+      # The package as a host takes it: unpacked by hostkeeper's own unpacker, under its rules,
+      # with no extended attribute.
+      - name: The hostkeeper package unpacks as a host unpacks it
+        run: cargo xtask verify-assets hostkeeper-package dist --version "$RELEASE_VERSION+${GITHUB_SHA::12}" --platform macos-arm64 --scratch "$RUNNER_TEMP/hostkeeper"
+      # The signature the linker gave the binary (ad hoc: an arm64 Mac runs no binary without a
+      # valid one) is intact in the package as a host unpacks it, checked here, where a Mach-O
+      # can be.
+      - name: The packaged binary carries a valid code signature
+        run: codesign --verify --strict "$RUNNER_TEMP/hostkeeper/packages/tierstore/$RELEASE_VERSION+${GITHUB_SHA::12}/bin/tierstore"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: assets-macos-arm64
@@ -345,10 +389,12 @@ jobs:
             target
           key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
-  # SHA256SUMS over every platform's files, checked against the files and a flipped copy. The
-  # attest job signs these sums, so they are the one list of what a release holds.
-  # For a pull request the macOS job is skipped, and the sums are those of the Linux files; for a
-  # push or a run by hand every build job must have succeeded.
+  # SHA256SUMS over every platform's files and the release index of the hostkeeper packages,
+  # checked against the files and a flipped copy. The attest job signs these sums, so they are the
+  # one list of what a release holds.
+  # For a pull request the macOS job is skipped, the sums are those of the Linux files, and no
+  # index is written (an index lists every platform); for a push or a run by hand every build job
+  # must have succeeded, and the index is refused without the macOS package.
   sums:
     needs: [linux-x86_64, linux-arm64, macos-arm64]
     if: ${{ !cancelled() && needs.linux-x86_64.result == 'success' && needs.linux-arm64.result == 'success' && (needs.macos-arm64.result == 'success' || (github.event_name == 'pull_request' && needs.macos-arm64.result == 'skipped')) }}
@@ -357,9 +403,10 @@ jobs:
     permissions:
       contents: read
     # The SHA-256 of the SHA256SUMS this job uploads, for the attest job to hold the sums it
-    # downloads to.
+    # downloads to, and the version of the hostkeeper packages, which the attest job names them by.
     outputs:
       sha256: ${{ steps.assemble.outputs.sha256 }}
+      package-version: ${{ steps.index.outputs.package-version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -372,19 +419,30 @@ jobs:
           path: dist
           merge-multiple: true
       - run: rustup toolchain install
+      # index.json, hostkeeper's release index of the three packages (each one's file, size and
+      # SHA-256, canonical JSON), and its line in dist/SHA256SUMS.index. For a pull request it
+      # checks the two Linux packages are there and writes nothing.
+      - name: The release index of the hostkeeper packages
+        id: index
+        run: cargo xtask release hostkeeper-index dist --commit "$GITHUB_SHA" --event "$GITHUB_EVENT_NAME" --output "$GITHUB_OUTPUT"
       - name: Assemble SHA256SUMS
         id: assemble
         run: cargo xtask sums assemble dist --summary "$GITHUB_STEP_SUMMARY" --digest-output "$GITHUB_OUTPUT"
       - run: cargo xtask verify-assets sums dist
+      # The sums and the index (none for a pull request): the attest job checks the index against
+      # the sums before it signs, so it must have it.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sha256sums
-          path: dist/SHA256SUMS
+          path: |
+            dist/SHA256SUMS
+            dist/index.json
           retention-days: 90
           if-no-files-found: error
 
   # Push to main only: build provenance for every file, an SBOM attestation for every tarball, and
-  # a provenance attestation (and its bundle) of each tarball alone. See the top of this file.
+  # a provenance attestation (and its bundle) of each tarball and each hostkeeper package alone.
+  # See the top of this file.
   attest:
     needs: [sums]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -455,6 +513,35 @@ jobs:
         env:
           BUNDLE: ${{ steps.provenance-tierstore-macos-arm64.outputs.bundle-path }}
         run: cp "$BUNDLE" "dist/tierstore-${GITHUB_SHA}-macos-arm64.tar.gz.sigstore.json"
+      # Each hostkeeper package too, as its own subject, its bundle beside it as
+      # `<package>.sigstore.json`: the file hostkeeper verifies a package with, offline.
+      - id: provenance-hostkeeper-linux-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ needs.sums.outputs.package-version }}-linux-x86_64.tar.zst
+      - name: Name the bundle of the hostkeeper package for linux-x86_64
+        env:
+          BUNDLE: ${{ steps.provenance-hostkeeper-linux-x86_64.outputs.bundle-path }}
+          PACKAGE_VERSION: ${{ needs.sums.outputs.package-version }}
+        run: cp "$BUNDLE" "dist/tierstore-${PACKAGE_VERSION}-linux-x86_64.tar.zst.sigstore.json"
+      - id: provenance-hostkeeper-linux-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ needs.sums.outputs.package-version }}-linux-arm64.tar.zst
+      - name: Name the bundle of the hostkeeper package for linux-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-hostkeeper-linux-arm64.outputs.bundle-path }}
+          PACKAGE_VERSION: ${{ needs.sums.outputs.package-version }}
+        run: cp "$BUNDLE" "dist/tierstore-${PACKAGE_VERSION}-linux-arm64.tar.zst.sigstore.json"
+      - id: provenance-hostkeeper-macos-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/tierstore-${{ needs.sums.outputs.package-version }}-macos-arm64.tar.zst
+      - name: Name the bundle of the hostkeeper package for macos-arm64
+        env:
+          BUNDLE: ${{ steps.provenance-hostkeeper-macos-arm64.outputs.bundle-path }}
+          PACKAGE_VERSION: ${{ needs.sums.outputs.package-version }}
+        run: cp "$BUNDLE" "dist/tierstore-${PACKAGE_VERSION}-macos-arm64.tar.zst.sigstore.json"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bundles
@@ -464,9 +551,11 @@ jobs:
 
   # Push to main only, after attest: the checks a deployment makes (cargo xtask verify-assets,
   # crates/xtask/src/sums.rs), for the branch that was pushed (`--source-ref "$GITHUB_REF"`),
-  # with read-only scopes. The files are assembled again into a SHA256SUMS that must be byte for
-  # byte the one the sums job published and the attest job signed, then checked against it, then
-  # each verified; the set must be exactly the assets of this commit (cargo xtask release check).
+  # with read-only scopes. The release index is made again and the files are assembled again into
+  # a SHA256SUMS that must be byte for byte the one the sums job published and the attest job
+  # signed, then checked against it, then each verified, each bundle offline as a host does; the
+  # set must be exactly the assets of this commit (cargo xtask release check); and the hostkeeper
+  # packages are taken as hostkeeper takes them (cargo xtask verify-assets hostkeeper-index).
   verify:
     needs: [attest]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -497,6 +586,10 @@ jobs:
         with:
           name: bundles
           path: dist
+      # The release index is made again from the packages, as the sums job made it; the sums
+      # below, which list it, must then be the published ones byte for byte.
+      - name: The release index, made again from the packages
+        run: cargo xtask release hostkeeper-index dist --commit "$GITHUB_SHA" --event "$GITHUB_EVENT_NAME"
       - name: Assemble SHA256SUMS, which must be the published one
         run: cargo xtask sums assemble dist --expect published/SHA256SUMS
       - name: Check the files against SHA256SUMS
@@ -509,5 +602,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: cargo xtask verify-assets attestations dist --repo "$GITHUB_REPOSITORY" --workflow-ref "$GITHUB_REPOSITORY/.github/workflows/artifacts.yml" --source-ref "$GITHUB_REF" --commit "$GITHUB_SHA" --trusted-root "$RUNNER_TEMP/trusted_root.jsonl"
-      - name: The files are exactly the assets of this commit, each tarball with its bundle
+      - name: The files are exactly the assets of this commit, each tarball and package with its bundle
         run: cargo xtask release check dist --commit "$GITHUB_SHA"
+      # As hostkeeper takes a release: the index lists a package for every platform, each the size
+      # and SHA-256 of its file, and each unpacks under hostkeeper's rules.
+      - name: Each hostkeeper package as a host takes it from the release index
+        run: cargo xtask verify-assets hostkeeper-index dist --commit "$GITHUB_SHA" --scratch "$RUNNER_TEMP/hostkeeper"

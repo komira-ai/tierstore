@@ -50,6 +50,13 @@ pub(crate) fn url_encode(text: &str) -> String {
         }
     }
     out
+
+/// The answer of GetBucketLocation: the `LocationConstraint` of the bucket, which S3 leaves
+/// empty for `us-east-1`.
+pub(crate) fn location(region: &str) -> String {
+    let named = if region == "us-east-1" { "" } else { region };
+    let text = escape(named);
+    format!("{PROLOG}<LocationConstraint xmlns=\"{NAMESPACE}\">{text}</LocationConstraint>")
 }
 
 /// The `Owner` S3 adds to the objects of a listing that asked for `fetch-owner=true`. The proxy
