@@ -11,6 +11,7 @@ use tokio::sync::Notify;
 
 use crate::{Backend, Proxy, TokioSleeper};
 
+use super::bucket::created_at;
 use super::cli::{Cli, Error, OciSetup, build};
 use super::cli_reconcile::{Gate, reconcile, reconcile_gated};
 use super::drain::late_of;
@@ -154,6 +155,7 @@ pub async fn run_handing(
     let mut built = build(cli)?;
     let gate = open_gate(cli).map_err(Error::from)?;
     start_format(cli, built.hot.as_ref()).await?;
+    built.server.bucket_created = created_at(built.hot.as_ref(), built.server.bucket_created).await;
     let (hot, cold) = (Arc::clone(&built.hot), Arc::clone(&built.cold));
     let departure = built.proxy.departure;
     let heartbeat = built.proxy.heartbeat;

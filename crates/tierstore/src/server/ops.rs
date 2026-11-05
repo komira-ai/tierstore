@@ -402,7 +402,8 @@ impl Server {
         // not parameters of the call.
         let method = parts.method.as_str();
         let location = bucket::asks_location(method, &target, query);
-        if !location {
+        let buckets = bucket::asks_buckets(method, &target);
+        if !location && !buckets {
             refuse_unsupported(parts, query, !parts.headers.contains_key("authorization"))?;
         }
         let deleting = deletes_many(&parts.method, &target, query);
@@ -428,6 +429,9 @@ impl Server {
         let body = reader.read_all(check).await?;
         if location {
             return Ok(self.location());
+        }
+        if buckets {
+            return self.list_buckets(query);
         }
         match (method, target, multipart) {
             ("PUT" | "HEAD", Target::Bucket, false) => {
