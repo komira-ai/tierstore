@@ -9,10 +9,10 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 
-use crate::backend::upload_page;
+use crate::backend::{part_page, upload_page};
 use crate::{
     Backend, ByteRange, Clock, Error, Listed, Meta, OpenUpload, Opened, PartBody, Span,
-    UploadsAfter, Window,
+    UploadedPart, UploadsAfter, Window,
 };
 
 /// A clock a test sets by hand, for the times a [`MemoryBackend`] gives its objects. It starts
@@ -77,7 +77,14 @@ async fn collect(body: &mut PartBody<'_>) -> Result<Bytes, Error> {
 struct Upload {
     key: String,
     initiated: u64,
-    parts: BTreeMap<u32, (Bytes, String)>,
+    parts: BTreeMap<u32, Part>,
+}
+
+/// A part of an upload: its bytes, its content tag and when it was stored.
+struct Part {
+    bytes: Bytes,
+    tag: String,
+    modified: u64,
 }
 
 /// The multipart uploads in progress, by upload id.
@@ -312,10 +319,16 @@ impl Backend for MemoryBackend {
         self.check_upload(key, id)?;
         let part = collect(&mut body).await?;
         let tag = tag_of(&part);
+        let modified = self.clock.now();
         let mut uploads = self.uploads();
         let upload = uploads.open.get_mut(id).filter(|up| up.key == key);
         let upload = upload.ok_or_else(|| Error::NotFound(id.to_owned()))?;
-        upload.parts.insert(number, (part, tag.clone()));
+        let stored = Part {
+            bytes: part,
+            tag: tag.clone(),
+            modified,
+        };
+        upload.parts.insert(number, stored);
         Ok(tag)
     }
 
@@ -331,11 +344,11 @@ impl Backend for MemoryBackend {
             let upload = uploads.open.get(id).filter(|up| up.key == key);
             let upload = upload.ok_or_else(|| Error::NotFound(id.to_owned()))?;
             for (number, tag) in parts {
-                let named = upload.parts.get(number).filter(|(_, held)| held == tag);
-                let Some((bytes, _)) = named else {
+                let named = upload.parts.get(number).filter(|held| held.tag == *tag);
+                let Some(part) = named else {
                     return Err(Error::InvalidPart(format!("part {number}")));
                 };
-                whole.extend_from_slice(bytes);
+                whole.extend_from_slice(&part.bytes);
             }
         }
         let object = whole.freeze();
@@ -364,5 +377,24 @@ impl Backend for MemoryBackend {
             initiated: upload.initiated,
         });
         Ok(upload_page(open, prefix, after, max_uploads))
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        let uploads = self.uploads();
+        let upload = uploads.open.get(id).filter(|up| up.key == key);
+        let upload = upload.ok_or_else(|| Error::NotFound(id.to_owned()))?;
+        let stored = upload.parts.iter().map(|(number, part)| UploadedPart {
+            number: *number,
+            tag: part.tag.clone(),
+            size: part.bytes.len() as u64,
+            modified: part.modified,
+        });
+        Ok(part_page(stored, after, max_parts))
     }
 }

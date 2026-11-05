@@ -148,7 +148,7 @@ use tokio::sync::mpsc;
 use crate::backend::open_by_head;
 use crate::{
     Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
-    Span, UploadsAfter, Window,
+    Span, UploadedPart, UploadsAfter, Window,
 };
 
 pub use objstore_s3::Capabilities;
@@ -356,6 +356,17 @@ fn open_of(upload: objstore_s3::s3::OpenUpload) -> OpenUpload {
         key: upload.key.as_str().to_owned(),
         id: upload.upload_id,
         initiated: upload.initiated_millis,
+    }
+}
+
+/// A part of a listing of the client as one of this crate: its tag is the `ETag` without quotes,
+/// as [`Backend::upload_part`] gives it.
+fn part_of(part: objstore_s3::s3::StoredPart) -> UploadedPart {
+    UploadedPart {
+        number: part.number,
+        tag: unquoted(&part.etag),
+        size: part.size,
+        modified: part.modified_millis,
     }
 }
 
@@ -831,6 +842,34 @@ impl Backend for S3Backend {
         }
         open.truncate(max_uploads);
         Ok(open)
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        let object = object_key(key)?;
+        let mut marker = after;
+        let mut stored: Vec<UploadedPart> = Vec::new();
+        while stored.len() < max_parts {
+            let room = max_parts - stored.len();
+            let size = u16::try_from(room).ok().and_then(PageSize::new);
+            let size = size.unwrap_or(PageSize::MAX);
+            let page = self.store.list_parts(&object, id, marker, size);
+            let page = page.await.map_err(|e| upload_error(e, key, id))?;
+            stored.extend(page.parts.into_iter().map(part_of));
+            let Some(next) = page.next else { break };
+            if marker.is_some_and(|before| next <= before) {
+                let why = format!("{key:?} listing of parts stalled: the marker did not advance");
+                return Err(Error::Other(why));
+            }
+            marker = Some(next);
+        }
+        stored.truncate(max_parts);
+        Ok(stored)
     }
 }
 

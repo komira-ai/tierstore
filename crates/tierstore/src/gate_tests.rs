@@ -352,6 +352,15 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     let aborted = held(gated, Op::CreateUpload, gated.create_upload("v")).await;
     let open = held(gated, Op::ListUploads, gated.list_uploads("", None, 10)).await;
     assert_eq!(open.len(), 1);
+    let stored = gated.upload_part("v", &aborted, 1, chunks("p"));
+    held(gated, Op::UploadPart, stored).await;
+    let parts = held(
+        gated,
+        Op::ListParts,
+        gated.list_parts("v", &aborted, None, 10),
+    )
+    .await;
+    assert_eq!(parts.len(), 1);
     held(gated, Op::AbortUpload, gated.abort_upload("v", &aborted)).await;
     assert!(
         rig.memory

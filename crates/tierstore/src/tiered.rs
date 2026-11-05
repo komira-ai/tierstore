@@ -13,7 +13,7 @@ use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadsAfter, Window,
+    PartBody, ReadBody, Span, UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -656,6 +656,20 @@ impl Backend for Proxy {
 
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         self.inner.drop_upload(key, id).await
+    }
+
+    /// The parts of an open upload are in the tier its id names (see the type), so this asks that
+    /// tier.
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        self.inner
+            .list_upload_parts(key, id, after, max_parts)
+            .await
     }
 
     /// The open uploads of both tiers (see the type): the proxy keeps no state of an upload, so

@@ -1,7 +1,8 @@
 //! An S3 service on loopback, for tests (feature `testkit`): PUT, GET (whole or one range),
 //! HEAD, ListObjectsV2 (prefix, `max-keys`, `continuation-token`, `start-after`), and
 //! multipart upload (create, parts, complete, abort, and ListMultipartUploads with `prefix`,
-//! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id), with S3's rules on
+//! `max-uploads`, `key-marker` and `upload-id-marker`, in the order of key and id; and ListParts
+//! with `max-parts` and `part-number-marker`), with S3's rules on
 //! part sizes enforced at completion and conditional writes (`If-None-Match: *`) on a
 //! PUT and a completion, a PUT that replaces an object only if it has the entity tag in
 //! `If-Match`, as does a completion (412 for another tag, 404 if there is no object), and DELETE, which with `If-Match`
@@ -52,8 +53,8 @@ mod escape;
 mod uploads;
 
 use self::dates::{http_date, iso_date, system_seconds};
-use self::escape::xml_text;
-use self::uploads::list_uploads;
+use self::escape::{unescape, xml_text};
+use self::uploads::{list_parts, list_uploads};
 use super::sigv4::{Request as Signed, Signer};
 use super::{Credentials, S3Config, S3Store, S3Tuning};
 use crate::{Capabilities, ObjectKey};
@@ -226,6 +227,8 @@ struct Upload {
     /// The second the upload was started, by the clock of the service.
     initiated: u64,
     parts: BTreeMap<u32, (String, Kept)>,
+    /// The second each part was stored, by the clock of the service.
+    stored_at: BTreeMap<u32, u64>,
 }
 
 /// An object held, with the second it was last written.
@@ -629,6 +632,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
                 key,
                 initiated,
                 parts,
+                stored_at: BTreeMap::new(),
             };
             state.uploads.insert(id.clone(), upload);
             let body = format!(
@@ -646,12 +650,14 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             if failed {
                 return error("500 Internal Server Error", "InternalError");
             }
+            let stored_at = state.time.unwrap_or_else(system_seconds);
             let upload = state.uploads.get_mut(&id).filter(|up| up.key == key);
             let Some(upload) = upload else {
                 return error("404 Not Found", "NoSuchUpload");
             };
             let kept = Kept::of(&request.body);
             let etag = part_tag(&kept);
+            upload.stored_at.insert(number, stored_at);
             upload.parts.insert(number, (etag.clone(), kept));
             state.stats.parts += 1;
             let headers = if no_etag {
@@ -675,6 +681,7 @@ fn handle(state: &mut State, request: &Request) -> Vec<u8> {
             answer("204 No Content", &[], b"")
         }
         ("GET", Some(_), None, None) if key.is_empty() => list_uploads(state, request),
+        ("GET", None, Some(id), None) => list_parts(state, request, &key, &id),
         ("PUT", None, None, None) => put_object(state, key, conditional, request),
         ("DELETE", None, None, None) => {
             state.deletes += 1;
@@ -801,31 +808,6 @@ fn signed_with(request: &Request, access_key_id: &str, secret_access_key: &str) 
         date,
     );
     expected == authorization
-}
-
-/// `text` with its `%XX` escapes decoded (an escape that is not one stays as it is).
-fn unescape(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut at = 0;
-    while at < bytes.len() {
-        let escaped = bytes
-            .get(at + 1..at + 3)
-            .and_then(|hex| std::str::from_utf8(hex).ok())
-            .filter(|_| bytes[at] == b'%')
-            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-        match escaped {
-            Some(byte) => {
-                out.push(byte);
-                at += 3;
-            }
-            None => {
-                out.push(bytes[at]);
-                at += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// The object an upload's completion names, and its entity tag: its parts, in the order the
