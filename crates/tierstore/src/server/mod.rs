@@ -68,21 +68,20 @@
 //!   `NextPartNumberMarker`; `max-parts` is at most 1000 and `0` is an empty page; an upload
 //!   that is not open (never given, of another key, aborted, completed) is `NoSuchUpload`. A
 //!   full key, a read-only key and a scoped key with a write prefix over the key may list parts;
-//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
-//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
+//! - HeadBucket of the served bucket, with `x-amz-bucket-region`; CreateBucket of it, which
+//!   exists, so it is answered as S3 answers a create of a bucket one owns (200 in `us-east-1`,
+//!   409 `BucketAlreadyOwnedByYou` elsewhere; a `LocationConstraint` other than the server's
+//!   region is `IllegalLocationConstraintException`); and DeleteBucket, `BucketNotEmpty` if it
+//!   has an object and `AccessDenied` if not, since a call does not remove a bucket the
+//!   configuration sets up. A bucket of another name is `NoSuchBucket` for each;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
 //!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
-//! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
-//!   filters and `max-buckets` checked; its creation date is the time `_tiering/format` was last
-//!   written (the server does not know when the bucket was made; see
-//!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner;
-//! - the reads of the settings of the bucket (`GET /<bucket>?versioning`, `object-lock`, `acl`,
-//!   `policy`, `lifecycle`, `cors`, `encryption`, `tagging`, `replication`, `website`,
-//!   `notification`, `accelerate`, `logging`, `requestPayment`, `ownershipControls`,
-//!   `publicAccessBlock`, `policyStatus`), each answered as S3 answers a bucket on which that
-//!   is not set: an empty document, the owner's `FULL_CONTROL` for the ACL, or the 404 code S3
-//!   gives (`NoSuchBucketPolicy`, `ObjectLockConfigurationNotFoundError`, ...). The writes of
-//!   them are `NotImplemented`.
+//! - ListBuckets (`GET /`): the one bucket, with `prefix` and `bucket-region` as filters and
+//!   `max-buckets` checked; its creation date is the time `_tiering/format` was last written (see
+//!   [`ServerConfig::bucket_created`]) and its owner `tierstore`;
+//! - the reads of the settings of the bucket (`?versioning`, `?object-lock`, `?acl`, `?policy`
+//!   and the rest of the table in `bucket`), each as S3 answers a bucket with none set: an empty
+//!   document, the owner's `FULL_CONTROL`, or S3's 404 code. Their writes are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`versionId`), is answered `NotImplemented`.
@@ -137,8 +136,8 @@
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
 //! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation,
 //! ListBuckets and the reads of the settings of the bucket, and nothing else.
-//! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
-//! multipart upload but the listing, which reads) is
+//! Any other call signed by a read-only key (a put, a delete, CreateBucket, DeleteBucket, and
+//! every call of a multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
 //! nothing. The roles of those keys are of the key and not of a prefix. A put by the full key
 //! is create-only but, when the hot tier is full, can race another put of the same key into the
@@ -318,6 +317,8 @@ mod auth_tests;
 mod body_stall_tests;
 #[cfg(test)]
 mod bucket_config_tests;
+#[cfg(test)]
+mod bucket_life_tests;
 #[cfg(test)]
 mod bucket_tests;
 #[cfg(test)]
