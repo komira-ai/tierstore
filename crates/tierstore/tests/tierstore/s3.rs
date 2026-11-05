@@ -556,7 +556,8 @@ async fn the_s3_backend_follows_the_pages_of_a_listing_of_parts() {
 
 /// Asserts that a listing of parts that the service refuses, or answers with something that is
 /// not a listing of parts, is an `Other` error, that an upload the service does not hold is
-/// `NotFound`, that a key the client cannot name asks nothing of the service, and that a page
+/// `NotFound`, that a key the client cannot name (a `.` or `..` segment, since S3's own rules take
+/// `//`) asks nothing of the service, and that a page
 /// size above what S3 serves is asked for as the most S3 serves.
 #[tokio::test]
 async fn a_listing_of_parts_that_fails_is_an_error() {
@@ -591,7 +592,7 @@ async fn a_listing_of_parts_that_fails_is_an_error() {
 
     let (endpoint, seen) = scripted(vec![]);
     let store = S3Backend::new(config(&endpoint)).unwrap();
-    assert_other(store.list_parts("a//b", "u", None, 10).await);
+    assert_invalid(store.list_parts("a/../b", "u", None, 10).await);
     assert!(seen.lock().unwrap().is_empty());
 }
 
