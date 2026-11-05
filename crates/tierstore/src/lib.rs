@@ -149,7 +149,7 @@ mod tiered;
 
 pub use backend::{
     Backend, ByteRange, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Span,
-    UploadsAfter, Window,
+    UploadedPart, UploadsAfter, Window,
 };
 pub use bounded::Bounded;
 pub use cache::CachedStore;

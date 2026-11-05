@@ -17,7 +17,7 @@ use std::sync::Arc;
 use super::entry_put::landing;
 use super::{Inner, Level, refuse_reserved};
 use crate::journal::is_reserved;
-use crate::{Backend, Error, OpenUpload, PartBody, UploadsAfter};
+use crate::{Backend, Error, OpenUpload, PartBody, UploadedPart, UploadsAfter};
 
 /// What an upload id of the hot tier starts with, in the id the proxy gives a client. The ids of
 /// the stores (S3 services, the directory and memory backends) have no `~`.
@@ -129,6 +129,21 @@ impl Inner {
         match route(id) {
             Route::Hot(inner) => self.hot.abort_upload(key, inner).await,
             Route::Cold(id) => self.cold.abort_upload(key, id).await,
+        }
+    }
+
+    /// A page of the parts of an open upload, from the tier the id names.
+    pub(super) async fn list_upload_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        refuse_reserved(key)?;
+        match route(id) {
+            Route::Hot(inner) => self.hot.list_parts(key, inner, after, max_parts).await,
+            Route::Cold(id) => self.cold.list_parts(key, id, after, max_parts).await,
         }
     }
 

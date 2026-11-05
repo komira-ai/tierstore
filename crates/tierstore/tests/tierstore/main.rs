@@ -22,6 +22,7 @@ mod faults;
 mod format_pause;
 mod hold;
 mod killed_put;
+mod list_parts;
 mod list_uploads;
 mod list_uploads_reserved;
 mod multipart;
