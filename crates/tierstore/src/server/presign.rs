@@ -619,6 +619,19 @@ pub(crate) fn presign_url(
     request: &PresignRequest<'_>,
     extra: &[(&str, &str)],
 ) -> Result<String, PresignError> {
+    let path = format!("/{}/{}", request.bucket, request.key);
+    presign_path(method, key, request, extra, &path)
+}
+
+/// [`presign_url`] for a URL whose path is `path`: the key alone (`/<key>`) in the URL of a
+/// virtual-hosted-style host, where the host of `request.endpoint` names the bucket.
+pub(crate) fn presign_path(
+    method: &str,
+    key: &AccessKey,
+    request: &PresignRequest<'_>,
+    extra: &[(&str, &str)],
+    path: &str,
+) -> Result<String, PresignError> {
     let (scheme, host) = request
         .endpoint
         .split_once("://")
@@ -629,8 +642,7 @@ pub(crate) fn presign_url(
     let stamp = amz_date(request.now);
     let (date, region) = (&stamp[..8], request.region);
     let credential = format!("{}/{date}/{region}/s3/aws4_request", key.id);
-    let path = format!("/{}/{}", request.bucket, request.key);
-    let path = utf8_percent_encode(&path, PATH).to_string();
+    let path = utf8_percent_encode(path, PATH).to_string();
     let mut pairs: Vec<(String, String)> = vec![
         ("X-Amz-Algorithm".to_owned(), "AWS4-HMAC-SHA256".to_owned()),
         ("X-Amz-Credential".to_owned(), credential),
