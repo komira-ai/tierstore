@@ -176,7 +176,7 @@ async fn the_probes_are_open_and_the_unknown_is_refused() {
     let tagged = call(&h, "GET", "k", &[("acl", "")], &[], b"").await;
     assert_eq!(tagged.status(), 501);
     let path = format!("/{BUCKET}");
-    let query = [("list-type", "2"), ("tagging", "")];
+    let query = [("list-type", "2"), ("unheard-of", "")];
     let signed = h.signed("GET", &path, &query, &[], b"");
     let unknown = send(&h, "GET", &path, &query, &signed, b"").await;
     assert_eq!(unknown.status(), 501);

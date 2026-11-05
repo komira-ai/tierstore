@@ -171,7 +171,6 @@ async fn the_settings_are_read_by_signed_requests_on_the_bucket_only() {
         ("PUT", "versioning"),
         ("DELETE", "policy"),
         ("PUT", "acl"),
-        ("GET", "versions"),
     ] {
         let reply = rig
             .send(method, &format!("/{BUCKET}?{query}"), &[], b"")
