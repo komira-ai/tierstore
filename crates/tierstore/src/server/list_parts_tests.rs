@@ -201,7 +201,10 @@ async fn the_keys_of_the_proxy_are_refused_and_a_key_is_escaped() {
         let reply = list(&rig, key, "u", "").await;
         assert_eq!(reply.code(), "AccessDenied", "{key}");
     }
-    assert_eq!(rig.hot.calls(Op::ListParts) + rig.cold.calls(Op::ListParts), 0);
+    assert_eq!(
+        rig.hot.calls(Op::ListParts) + rig.cold.calls(Op::ListParts),
+        0
+    );
     let id = start(&rig, "a&b").await;
     upload(&rig, "a&b", &id, 1, b"x").await;
     let reply = list(&rig, "a%26b", &id, "").await;
