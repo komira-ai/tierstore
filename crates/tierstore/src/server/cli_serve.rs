@@ -202,7 +202,13 @@ pub async fn run_handing(
         halting.notify_one();
         ended
     };
-    let reconciler = Rounds::new(built.hot, built.cold, built.reconciler, departure);
+    let reconciler = Rounds::tuned(
+        built.hot,
+        built.cold,
+        built.reconciler,
+        departure,
+        &built.entry,
+    );
     let reconciling = async move {
         match gate {
             Some(gate) => reconcile_gated(reconciler, halt, gate).await,

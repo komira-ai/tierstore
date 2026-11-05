@@ -7,7 +7,10 @@
 //! room, and so on):
 //!
 //! - GetObject (whole, `bytes=a-b`, `bytes=a-` or `bytes=-n`; the object is asked for its size
-//!   first, so a ranged read costs a head) and HeadObject, with `If-Match` (another content tag
+//!   first, so a ranged read costs a head) and HeadObject, with the `response-content-type`,
+//!   `-disposition`, `-encoding`, `-language`, `-cache-control` and `-expires` parameters of a
+//!   signed request or a presigned URL, which set the header of the answer (a request with one
+//!   and no signature is 400 `InvalidRequest`), and with `If-Match` (another content tag
 //!   is `PreconditionFailed`), `If-None-Match` (the content tag is a 304), `If-Unmodified-Since`
 //!   (a time before the object's is `PreconditionFailed`) and `If-Modified-Since` (a time not
 //!   before the object's is a 304), in the order of RFC 7232 and to the second; a date that is
@@ -121,20 +124,22 @@
 //!
 //! - the hash the signature covers (`x-amz-content-sha256`, as hex): `XAmzContentSHA256Mismatch`
 //!   for a body that is not that;
-//! - `Content-MD5`, `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1` and
-//!   `x-amz-checksum-sha256`, each the base64 of the hash (the CRCs as four big-endian bytes):
+//! - `Content-MD5`, `x-amz-checksum-crc32`, `x-amz-checksum-crc32c`, `x-amz-checksum-sha1`,
+//!   `x-amz-checksum-sha256` and `x-amz-checksum-crc64nvme` (the default of the AWS CLI and the
+//!   SDKs), each the base64 of the hash (the CRCs as four or, for CRC-64/NVMe, eight big-endian
+//!   bytes):
 //!   `BadDigest` for a body that does not match, `InvalidDigest` for a value that is not the
 //!   base64 of a hash of the right length;
-//! - `x-amz-checksum-crc64nvme` is answered `NotImplemented` (the crate depends on no CRC-64
-//!   implementation), and so is a trailing checksum or a signed stream (`STREAMING-` payloads,
-//!   `aws-chunked`). The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
+//! - a trailing checksum or a signed stream (`STREAMING-` payloads, `aws-chunked`) is answered
+//!   `NotImplemented`. The default of the AWS SDKs sends a checksum trailer in an `aws-chunked`
 //!   body for a streamed upload, so such a client is refused with 501 until it sends a
 //!   checksum only when an operation requires one (see `packaging/README.md`).
 //!
 //! The `x-amz-checksum-*` headers are read on the body of a put of an object or of a part, which
 //! is the data they are the checksums of. On any other request they are not: those of a
-//! CompleteMultipartUpload are the checksums of the whole object it makes, not of its XML body,
-//! so they are ignored there. `Content-MD5` and the signed hash are held to every body.
+//! CompleteMultipartUpload are the checksums of the whole object it makes (for CRC-64/NVMe, S3's
+//! full-object checksum, not a checksum of the parts' checksums), not of its XML body, so they
+//! are ignored there; the checksum of a part is checked when the part is sent. `Content-MD5` and the signed hash are held to every body.
 //!
 //! A body with no checksum header and the signed hash `UNSIGNED-PAYLOAD` is accepted unchecked.
 //!
@@ -212,6 +217,7 @@ mod combined_cli;
 mod config;
 mod config_cache;
 mod config_combined;
+mod config_entry;
 mod config_handoff;
 mod config_interface;
 mod config_policy;
@@ -334,6 +340,8 @@ mod reply_tests;
 mod request_tests;
 #[cfg(test)]
 mod reserved_tests;
+#[cfg(test)]
+mod response_override_tests;
 #[cfg(test)]
 mod role_tests;
 #[cfg(test)]
@@ -894,6 +902,9 @@ impl Server {
     {
         if let Some(answer) = self.probe(parts).await {
             return Ok(answer);
+        }
+        if matches!(parts.method, Method::GET | Method::HEAD) {
+            ops::refuse_unsigned_overrides(parts)?;
         }
         let signed = auth::verify(&self.config, parts)?;
         let reads = matches!(parts.method, Method::GET | Method::HEAD);
