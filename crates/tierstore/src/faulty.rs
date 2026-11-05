@@ -10,7 +10,7 @@ use bytes::Bytes;
 
 use crate::{
     Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, PutAnswer, ReadBody,
-    Span, UploadsAfter,
+    Span, UploadedPart, UploadsAfter,
 };
 
 /// The kinds of call a [`FaultyBackend`] tells apart.
@@ -41,6 +41,8 @@ pub enum Op {
     AbortUpload,
     /// [`Backend::list_uploads`].
     ListUploads,
+    /// [`Backend::list_parts`].
+    ListParts,
 }
 
 /// The error of a call that fails because its backend is down or was told to fail it.
@@ -427,6 +429,18 @@ impl Backend for FaultyBackend {
     ) -> Result<Vec<OpenUpload>, Error> {
         self.enter(Op::ListUploads, prefix).await?;
         let listing = self.inner.list_uploads(prefix, after, max_uploads);
+        listing.await
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        self.enter(Op::ListParts, key).await?;
+        let listing = self.inner.list_parts(key, id, after, max_parts);
         listing.await
     }
 }

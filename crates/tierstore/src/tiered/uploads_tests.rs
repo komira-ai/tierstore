@@ -90,6 +90,30 @@ async fn an_upload_with_room_in_hot_lands_in_hot_and_the_reconciler_copies_it() 
     assert_eq!(cold_upload_calls(&rig), [0; 4]);
 }
 
+/// Asserts that ListParts follows the id: the parts of an upload made in the hot tier are listed
+/// through the proxy with the numbers and tags they were given, and so are those of an upload made
+/// in the cold tier, and an upload of the other tier's id is `NoSuchUpload`. Catches ListParts
+/// that asks the cold tier whatever the id says, which answers `NoSuchUpload` for every upload
+/// made in the hot tier (`ts-hot~` ids).
+#[tokio::test]
+async fn the_parts_of_an_upload_are_listed_from_the_tier_its_id_names() {
+    let rig = Rig::active().await;
+    let hot = rig.proxy.create_upload("k").await.unwrap();
+    assert!(hot.starts_with(HOT_PREFIX), "{hot}");
+    let tag = part(&rig, "k", &hot, 1, "hello").await;
+    let listed = rig.proxy.list_parts("k", &hot, None, 10).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].number, &listed[0].tag), (1, &tag));
+    rig.fill_hot().await;
+    let cold = rig.proxy.create_upload("c").await.unwrap();
+    assert!(!cold.starts_with(HOT_PREFIX), "{cold}");
+    let tag = part(&rig, "c", &cold, 2, "world").await;
+    let listed = rig.proxy.list_parts("c", &cold, None, 10).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!((listed[0].number, &listed[0].tag), (2, &tag));
+    assert!(rig.proxy.list_parts("c", &hot, None, 10).await.is_err());
+}
+
 /// Asserts that with the hot tier full an upload goes to the cold tier only, with the cold tier's
 /// own id, and its completion leaves the object in the cold tier and a `(PUT, PENDING)` entry that
 /// the reconciler only removes. The hot tier is asked for no upload call.

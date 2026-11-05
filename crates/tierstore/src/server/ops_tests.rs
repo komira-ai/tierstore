@@ -321,7 +321,7 @@ async fn the_bucket_calls_and_the_calls_that_are_not_done() {
     let not_done = [
         rig.send("PATCH", &patch, &[], b"").await,
         rig.call("GET", "k?acl", b"").await,
-        rig.call("GET", "k?uploadId=u", b"").await,
+        rig.call("GET", "k?partNumber=1", b"").await,
         rig.send("GET", &format!("{bucket}?uploadId=u"), &[], b"")
             .await,
         rig.call("POST", "k", b"").await,

@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::{
-    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, UploadsAfter,
+    Backend, ByteRange, Error, Listed, Meta, OpenUpload, PartBody, PutAnswer, UploadedPart,
+    UploadsAfter,
 };
 
 /// What a cached read was asked for: an object, and a range of it or the whole of it.
@@ -336,5 +337,15 @@ impl Backend for CachedStore {
         max_uploads: usize,
     ) -> Result<Vec<OpenUpload>, Error> {
         self.inner.list_uploads(prefix, after, max_uploads).await
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        self.inner.list_parts(key, id, after, max_parts).await
     }
 }

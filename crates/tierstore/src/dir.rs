@@ -24,10 +24,10 @@ use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-use crate::backend::upload_page;
+use crate::backend::{part_page, upload_page};
 use crate::{
     Backend, ByteRange, Error, Listed, Meta, OpenUpload, Opened, PartBody, ReadBody, Span,
-    UploadsAfter, Window,
+    UploadedPart, UploadsAfter, Window,
 };
 
 #[path = "dir_entries.rs"]
@@ -958,6 +958,32 @@ impl Backend for DirBackend {
             open.push(OpenUpload { key, id, initiated });
         }
         Ok(upload_page(open, prefix, after, max_uploads))
+    }
+
+    async fn list_parts(
+        &self,
+        key: &str,
+        id: &str,
+        after: Option<u32>,
+        max_parts: usize,
+    ) -> Result<Vec<UploadedPart>, Error> {
+        let dir = self.upload_dir(key, id).await?;
+        let mut stored = Vec::new();
+        for part in stored_parts(&dir).await? {
+            // A part replaced or an upload completed while this is read has no file: left out.
+            let Ok(meta) = fs::metadata(dir.join(&part.name)).await else {
+                continue;
+            };
+            let (number, tag) = (part.number, part.tag);
+            let (size, modified) = (meta.len(), modified_of(&meta));
+            stored.push(UploadedPart {
+                number,
+                tag,
+                size,
+                modified,
+            });
+        }
+        Ok(part_page(stored, after, max_parts))
     }
 }
 

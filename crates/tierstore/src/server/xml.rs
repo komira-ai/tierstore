@@ -3,7 +3,7 @@
 
 use roxmltree::{Document, Node};
 
-use crate::{Listed, OpenUpload};
+use crate::{Listed, OpenUpload, UploadedPart};
 
 use super::time::iso8601;
 
@@ -320,6 +320,54 @@ impl UploadListing<'_> {
             xml.push_str(&element("EncodingType", "url"));
         }
         xml.push_str("</ListMultipartUploadsResult>");
+        xml
+    }
+}
+
+/// One page of a ListParts answer.
+pub(crate) struct PartListing<'a> {
+    pub(crate) bucket: &'a str,
+    pub(crate) key: &'a str,
+    pub(crate) upload_id: &'a str,
+    /// The `part-number-marker` of the request (0 if it had none).
+    pub(crate) marker: u32,
+    pub(crate) max_parts: usize,
+    pub(crate) parts: &'a [UploadedPart],
+    /// The number of the last part of the page, if the listing goes on.
+    pub(crate) next: Option<u32>,
+}
+
+impl PartListing<'_> {
+    pub(crate) fn to_xml(&self) -> String {
+        let (key, max_parts, marker) = (escape(self.key), self.max_parts, self.marker);
+        let mut xml = format!("{PROLOG}<ListPartsResult xmlns=\"{NAMESPACE}\">");
+        xml.push_str(&element("Bucket", &escape(self.bucket)));
+        xml.push_str(&element("Key", &key));
+        xml.push_str(&element("UploadId", &escape(self.upload_id)));
+        let account = "<ID>tierstore</ID><DisplayName>tierstore</DisplayName>";
+        xml.push_str(&element("Initiator", account));
+        xml.push_str(&element("Owner", account));
+        xml.push_str("<StorageClass>STANDARD</StorageClass>");
+        xml.push_str(&format!("<PartNumberMarker>{marker}</PartNumberMarker>"));
+        if let Some(next) = self.next {
+            xml.push_str(&format!(
+                "<NextPartNumberMarker>{next}</NextPartNumberMarker>"
+            ));
+        }
+        xml.push_str(&format!("<MaxParts>{max_parts}</MaxParts>"));
+        let truncated = self.next.is_some();
+        xml.push_str(&format!("<IsTruncated>{truncated}</IsTruncated>"));
+        for part in self.parts {
+            let (number, size) = (part.number, part.size);
+            let modified = iso8601(part.modified);
+            // The tag in quotes, as the answer to the upload of the part has it.
+            let etag = escape(&format!("\"{}\"", part.tag));
+            xml.push_str(&format!(
+                "<Part><PartNumber>{number}</PartNumber><LastModified>{modified}</LastModified>\
+                 <ETag>{etag}</ETag><Size>{size}</Size></Part>"
+            ));
+        }
+        xml.push_str("</ListPartsResult>");
         xml
     }
 }

@@ -104,6 +104,10 @@ async fn attempt(rig: &Rig, key: (&str, &str), op: &str, prefix: &str, upload: &
             let uri = format!("/{BUCKET}/{prefix}start?uploads");
             rig.send_as(key, "POST", &uri, &[], b"").await
         }
+        "list_parts" => {
+            let uri = format!("/{BUCKET}/{prefix}up?uploadId={upload}");
+            rig.send_as(key, "GET", &uri, &[], b"").await
+        }
         "abort" => {
             let uri = format!("/{BUCKET}/{prefix}up?uploadId={upload}");
             rig.send_as(key, "DELETE", &uri, &[], b"").await
@@ -118,7 +122,7 @@ async fn attempt(rig: &Rig, key: (&str, &str), op: &str, prefix: &str, upload: &
 /// own prefix, and every other pair of key, call and prefix is 403 `AccessDenied` with the full
 /// out-of-scope message and changes nothing. Read gives get, head, list and list of uploads; the
 /// GC key gives head, list, list of uploads, delete and abort and never get; write gives a
-/// create-only put, the start of an upload and its abort; a delete prefix gives a delete and not an
+/// create-only put, the start of an upload, the listing of its parts and its abort; a delete prefix gives a delete and not an
 /// abort (as before: a key that deletes cannot cancel another client's upload). The status of each
 /// call that is allowed is the one S3 answers.
 #[tokio::test(start_paused = true)]
@@ -138,7 +142,11 @@ async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
             "b/",
             vec!["head", "list", "list_uploads", "delete", "abort"],
         ),
-        (WRITE, "c/", vec!["put", "start_upload", "abort"]),
+        (
+            WRITE,
+            "c/",
+            vec!["put", "start_upload", "list_parts", "abort"],
+        ),
         (DELETE, "d/", vec!["delete"]),
     ];
     let status = |op: &str| match op {
@@ -152,6 +160,7 @@ async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
         "list_uploads",
         "put",
         "start_upload",
+        "list_parts",
         "abort",
         "delete",
     ];
@@ -180,6 +189,22 @@ async fn each_right_allows_its_calls_on_its_own_prefix_and_no_other() {
     for prefix in ["a/", "b/", "d/"] {
         let stored = rig.get(&format!("{prefix}new"), None).await;
         assert_eq!(stored.status, StatusCode::NOT_FOUND, "{prefix}");
+    }
+}
+
+/// Asserts that only `uploadId` makes a GET of a key a listing of parts: a GET with a part number
+/// (the read of one part of an object, which this server does not do) or `uploads` on a key is
+/// 403 `AccessDenied` for the key that writes and for the key that reads, on their own prefixes.
+#[tokio::test(start_paused = true)]
+async fn a_get_of_a_key_with_a_part_number_is_not_a_listing_of_parts() {
+    let rig = rig().await;
+    for (key, prefix) in [(WRITE, "c/"), (READ, "a/")] {
+        for query in ["partNumber=1", "uploads"] {
+            let uri = format!("/{BUCKET}/{prefix}obj?{query}");
+            let reply = rig.send_as(key, "GET", &uri, &[], b"").await;
+            assert_eq!(reply.status, StatusCode::FORBIDDEN, "{} {query}", key.0);
+            assert_eq!(reply.code(), "AccessDenied", "{} {query}", key.0);
+        }
     }
 }
 

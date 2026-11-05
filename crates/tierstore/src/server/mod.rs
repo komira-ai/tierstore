@@ -59,7 +59,16 @@
 //!   with one are the prefix and no upload id): the open uploads of the backend (for the
 //!   [`Proxy`](crate::Proxy), those of both its tiers), by key and then by id, paged by the two
 //!   markers, so that a janitor can find the uploads a job left open and abort them. Uploads of
-//!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
+//!   a reserved key are not listed;
+//! - ListParts (`GET /<key>?uploadId=`) with `max-parts` and `part-number-marker`: the parts
+//!   stored in the open upload (for the [`Proxy`](crate::Proxy), those of the tier the upload id names), in ascending
+//!   order of number, each with its `ETag` (the one its UploadPart answered), `Size` and
+//!   `LastModified`, and the `Initiator`, `Owner` and `StorageClass` of the upload. A part sent
+//!   again with a number is there once. A page that is cut says so and gives
+//!   `NextPartNumberMarker`; `max-parts` is at most 1000 and `0` is an empty page; an upload
+//!   that is not open (never given, of another key, aborted, completed) is `NoSuchUpload`. A
+//!   full key, a read-only key and a scoped key with a write prefix over the key may list parts;
+//! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
 //!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
@@ -369,6 +378,8 @@ mod list_delimiter_tests;
 mod list_objects_v1_tests;
 #[cfg(test)]
 mod list_options_tests;
+#[cfg(test)]
+mod list_parts_tests;
 #[cfg(test)]
 mod list_uploads_delimiter_tests;
 #[cfg(test)]
