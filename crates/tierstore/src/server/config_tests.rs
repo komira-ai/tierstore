@@ -511,6 +511,9 @@ fn a_value_out_of_range_is_refused_with_its_key() {
             "\"tier-bucket\"",
             "\"tier-bucket\"\ndomains = [\"s3.example.com\", \"http://s3.example.com\"]",
             "server.domains: entry 2 is not a domain name",
+        ),
+        (
+            "\"tier-bucket\"",
             "\"tier-bucket\"\ndelete_concurrency = 0",
             "server.delete_concurrency",
         ),
