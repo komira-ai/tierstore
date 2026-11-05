@@ -57,7 +57,14 @@
 //! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
 //!   filters and `max-buckets` checked; its creation date is the time `_tiering/format` was last
 //!   written (the server does not know when the bucket was made; see
-//!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner.
+//!   [`ServerConfig::bucket_created`]), and `tierstore` is the owner;
+//! - the reads of the settings of the bucket (`GET /<bucket>?versioning`, `object-lock`, `acl`,
+//!   `policy`, `lifecycle`, `cors`, `encryption`, `tagging`, `replication`, `website`,
+//!   `notification`, `accelerate`, `logging`, `requestPayment`, `ownershipControls`,
+//!   `publicAccessBlock`, `policyStatus`), each answered as S3 answers a bucket on which that
+//!   is not set: an empty document, the owner's `FULL_CONTROL` for the ACL, or the 404 code S3
+//!   gives (`NoSuchBucketPolicy`, `ObjectLockConfigurationNotFoundError`, ...). The writes of
+//!   them are `NotImplemented`.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`versionId`), is answered `NotImplemented`.
@@ -110,8 +117,8 @@
 //!
 //! The server has one full key, which may do everything above, and any number of read-only
 //! keys ([`ServerConfig::read_only_keys`], `--read-only-key-file` in the binary), which may do
-//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation
-//! and ListBuckets and nothing else.
+//! GetObject, HeadObject, ListObjectsV2, ListMultipartUploads, HeadBucket, GetBucketLocation,
+//! ListBuckets and the reads of the settings of the bucket, and nothing else.
 //! Any other call signed by a read-only key (a put, a delete, CreateBucket, and every call of a
 //! multipart upload but the listing, which reads) is
 //! answered 403 `AccessDenied` with the S3 error document before its body is read, and changes
@@ -290,6 +297,8 @@ mod xml;
 mod auth_tests;
 #[cfg(test)]
 mod body_stall_tests;
+#[cfg(test)]
+mod bucket_config_tests;
 #[cfg(test)]
 mod bucket_tests;
 #[cfg(test)]
