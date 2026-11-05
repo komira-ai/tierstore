@@ -256,6 +256,11 @@ impl S3Store {
         len: u64,
         body: BodyStream,
     ) -> Result<PutAnswer, ObjectStoreError> {
+        if !self.conn.capabilities.conditional_put {
+            return Err(ObjectStoreError::Unsupported(
+                "a create-only write on a store without conditional puts",
+            ));
+        }
         if self.sends_whole(len) {
             return self
                 .put_whole_answered(key, len, body, self.create_only())

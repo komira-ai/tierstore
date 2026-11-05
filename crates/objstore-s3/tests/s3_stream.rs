@@ -760,7 +760,7 @@ async fn a_multipart_create_gives_the_etag_of_the_completion_and_no_time() {
     let ok =
         "<CompleteMultipartUploadResult><ETag>\"joined-2\"</ETag></CompleteMultipartUploadResult>";
     let (endpoint, _) = script(upload_answers(answer("200 OK", &[], ok), false)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_new_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     let got = put.await.unwrap();
     assert_eq!(got.etag.as_deref(), Some("\"joined-2\""));
@@ -768,7 +768,7 @@ async fn a_multipart_create_gives_the_etag_of_the_completion_and_no_time() {
 
     let bare = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
     let (endpoint, _) = script(upload_answers(answer("200 OK", &[], bare), false)).await;
-    let s = store(endpoint);
+    let s = store_cut_at_a_part(endpoint);
     let put = s.put_stream_new_answered(key(), OVER_ONE_PUT, zeros(OVER_ONE_PUT, None));
     let got = put.await.unwrap();
     assert_eq!((got.etag, got.modified_millis), (None, None));
