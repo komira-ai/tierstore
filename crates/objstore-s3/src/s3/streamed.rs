@@ -241,7 +241,6 @@ impl S3Store {
             _ => Err(self.conn.within(failure(resp)).await?),
         }
     }
-    }
 
     /// [`put_stream_new_tagged`](Self::put_stream_new_tagged) for a caller that can do without the
     /// tag: gives what the answer to the write that made the object says (a PUT's answer, or the
