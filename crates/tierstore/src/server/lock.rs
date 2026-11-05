@@ -47,6 +47,7 @@ pub(super) fn try_take(path: &Path) -> io::Result<Option<LockFile>> {
         file,
         path: path.to_owned(),
     };
+    tracing::debug!("tierstore: lock file taken: {}", path.display());
     // The name may have been given to another file between the open and the lock: a lock on a
     // file nothing else will look at. It is dropped, and the caller tries again.
     Ok(taken.is_current().then_some(taken))
@@ -82,6 +83,7 @@ impl Drop for LockFile {
         // Unlocked before the close, so a copy of the descriptor that a forked child still has
         // does not keep the lock. An error leaves the close to release it.
         let _ = self.file.unlock();
+        tracing::debug!("tierstore: lock file released: {}", self.path.display());
     }
 }
 

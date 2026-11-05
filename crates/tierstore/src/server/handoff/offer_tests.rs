@@ -323,3 +323,24 @@ async fn a_taker_gone_after_done_has_taken_the_sockets() {
     serving.await.unwrap();
     assert!(!path.exists());
 }
+
+/// Asserts the check of the control socket's path made before a start asks anything: a path in a
+/// writable directory passes, with or without a file left there; a path whose directory is a file
+/// is refused, naming the directory.
+#[tokio::test]
+async fn the_control_path_check_names_what_is_wrong() {
+    let (dir, path) = scratch();
+    super::check_control_path(&path).unwrap();
+    std::fs::write(&path, b"left by an instance that is gone").unwrap();
+    super::check_control_path(&path).unwrap();
+    let under_a_file = path.join("control.sock");
+    let error = super::check_control_path(&under_a_file).err().unwrap();
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "hand-off: the directory of the control socket {}: Not a directory (os error 20)",
+            path.display()
+        )
+    );
+    drop(dir);
+}

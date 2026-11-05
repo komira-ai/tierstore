@@ -60,7 +60,7 @@ use super::config_cache::CacheSettings;
 use super::drain::late_of;
 use super::front::{InvalidFlags, server_config};
 use super::handoff::Handoff;
-use super::listen::{LoopbackBind, bind, bind_set, joined, local_addrs};
+use super::listen::{LoopbackBind, bind, bind_set, joined};
 use super::local_cache::{
     CacheConfig, Disk, Every, LocalCache, Mode, SCRUB_TICK, SystemDisk, check_local,
 };
@@ -261,6 +261,7 @@ pub(super) async fn serve_front(
     let Bound {
         s3: listeners,
         oci,
+        addresses,
         offer,
     } = bind_fronts(
         fronts.handoff,
@@ -272,7 +273,7 @@ pub(super) async fn serve_front(
     .await
     .map_err(super::cli::HandingError::into_boxed)?;
     let stop = stopped_by(stop, offer);
-    ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
+    ready(addresses);
     let oci_drain = oci.as_ref().map(OciListener::drain);
     let (late_s3, late_oci) = (Arc::clone(&server), oci_drain.clone());
     let (watcher, oci_stopped) = stop_watcher(stop, Arc::clone(&server), oci_drain, fronts.lb_wait);
@@ -298,20 +299,28 @@ pub(super) async fn serve_front(
             after,
         )
         .await;
+        tracing::debug!("tierstore: fronts drained");
         for halting in &halts {
             halting.notify_one();
         }
         ended
     };
-    let maintaining = cache.maintain(PASS_INTERVAL, halt);
-    let holding = cache.hold(LOCK_INTERVAL, lock_halt);
+    let maintaining = async {
+        cache.maintain(PASS_INTERVAL, halt).await;
+        tracing::debug!("tierstore: maintain ended");
+    };
+    let holding = async {
+        cache.hold(LOCK_INTERVAL, lock_halt).await;
+        tracing::debug!("tierstore: hold ended");
+    };
     let min_round = fronts.scrub_min_round.as_secs() / SCRUB_TICK.as_secs();
-    let scrubbing = cache.scrub(
-        fronts.scrub_rate,
-        min_round,
-        Every::new(SCRUB_TICK),
-        scrub_halt,
-    );
+    let scrubbing = async {
+        let every = Every::new(SCRUB_TICK);
+        cache
+            .scrub(fronts.scrub_rate, min_round, every, scrub_halt)
+            .await;
+        tracing::debug!("tierstore: scrub ended");
+    };
     let ((drained, oci_cut), (), (), (), ()) =
         tokio::join!(serving, beside, maintaining, holding, scrubbing);
     watcher.abort();

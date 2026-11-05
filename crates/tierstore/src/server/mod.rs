@@ -264,6 +264,8 @@ mod combined_cli_tests;
 #[cfg(test)]
 mod combined_handoff_tests;
 #[cfg(test)]
+mod combined_order_tests;
+#[cfg(test)]
 mod completion_tests;
 #[cfg(test)]
 mod conditional_delete_tests;

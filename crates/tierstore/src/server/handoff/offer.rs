@@ -30,6 +30,18 @@ impl Socket {
     pub(crate) fn new(front: Front, listener: TcpListener) -> Self {
         Self { front, listener }
     }
+
+    /// The front of the socket.
+    #[cfg(test)]
+    pub(crate) fn front(&self) -> Front {
+        self.front
+    }
+
+    /// The address of the socket.
+    #[cfg(test)]
+    pub(crate) fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
 }
 
 /// The control socket of a running instance, and the sockets it offers.
@@ -203,6 +215,32 @@ async fn accept(
         Some(listener) => listener.accept().await,
         None => std::future::pending().await,
     }
+}
+
+/// Checks, before a start asks the running instance anything, that a control socket can be made
+/// at `path` once the hand-off is over: its directory is a directory this user may write and
+/// search, and the path is not a directory. A file left at the path is no obstacle: it is
+/// replaced.
+///
+/// # Errors
+/// [`HandoffError::ControlDirectory`] or [`HandoffError::ControlIsDirectory`].
+pub(crate) fn check_control_path(path: &Path) -> Result<(), HandoffError> {
+    // The settings hold the path to an absolute path of a file, which has a directory.
+    let dir = path.parent().unwrap_or(Path::new("/"));
+    let refused = |source| HandoffError::ControlDirectory {
+        dir: dir.to_owned(),
+        source,
+    };
+    let meta = std::fs::metadata(dir).map_err(refused)?;
+    if !meta.is_dir() {
+        return Err(refused(std::io::Error::from(rustix::io::Errno::NOTDIR)));
+    }
+    let may = rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK;
+    rustix::fs::access(dir, may).map_err(|errno| refused(errno.into()))?;
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
+        return Err(HandoffError::ControlIsDirectory(path.to_owned()));
+    }
+    Ok(())
 }
 
 /// A control socket at `path`, mode 0600: a file left at the path (by an instance that is gone,

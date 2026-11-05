@@ -85,6 +85,7 @@ pub(super) async fn serve_combined(
             Some(gate) => reconcile_gated(reconciler, halt, gate).await,
             None => reconcile(reconciler, halt).await,
         }
+        tracing::debug!("tierstore: reconciler ended");
     };
     let fronts = Fronts {
         listen: &cli.listen,

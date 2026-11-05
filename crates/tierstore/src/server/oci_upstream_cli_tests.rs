@@ -231,7 +231,9 @@ async fn the_bound_front_pulls_a_missing_blob_from_the_upstream() {
     flags.oci_upstream = Some(table(&registry.url()));
     let built = build(&flags).expect("built");
     let backend: Arc<dyn Backend> = Arc::new(MemoryBackend::new());
-    let bound = bind_fronts(None, &[], || Ok(Vec::new()), built.oci, backend)
+    let s3: Vec<std::net::SocketAddr> = vec!["127.0.0.1:0".parse().expect("an address")];
+    let own = || crate::server::cli_serve::bind_s3(&s3);
+    let bound = bind_fronts(None, &s3, own, built.oci, backend)
         .await
         .expect("bound");
     let listener = bound.oci.expect("a front");
