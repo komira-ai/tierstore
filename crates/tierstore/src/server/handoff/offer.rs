@@ -110,7 +110,12 @@ impl Offer {
                     pause_after(failed).await;
                 }
                 Some(ended) = sessions.next() => match ended {
-                    Ended::Handed => return,
+                    Ended::Handed => {
+                        // The path is the successor's now, even if another session made it
+                        // this instance's again meanwhile: the drop must not remove it.
+                        self.linked.store(false, Ordering::SeqCst);
+                        return;
+                    }
                     Ended::Kept => {}
                     Ended::Unlinked => self.remake(),
                 },
@@ -151,22 +156,25 @@ impl Offer {
 
     /// One taker's conversation, and how it ended.
     async fn session(&self, stream: UnixStream) -> Ended {
-        match self.converse(&stream).await {
+        let mut unlinked = false;
+        match self.converse(&stream, &mut unlinked).await {
             Ok(true) => Ended::Handed,
             Ok(false) => Ended::Kept,
             Err(why) => {
                 tracing::warn!("tierstore: a hand-off request failed: {why}");
-                if self.linked.load(Ordering::SeqCst) {
-                    Ended::Kept
-                } else {
+                if unlinked {
                     Ended::Unlinked
+                } else {
+                    Ended::Kept
                 }
             }
         }
     }
 
-    /// Reads the request, offers the sockets, and on `ack` gives up the control socket.
-    async fn converse(&self, stream: &UnixStream) -> std::io::Result<bool> {
+    /// Reads the request, offers the sockets, and on `ack` gives up the control socket. Sets
+    /// `unlinked` once this conversation has removed the control socket's file, so that a
+    /// failure after it is told from one before it by this conversation alone.
+    async fn converse(&self, stream: &UnixStream, unlinked: &mut bool) -> std::io::Result<bool> {
         let request = wire::recv(stream).await?;
         if request.lines != ["take 1"] {
             return refuse(stream, "the request is not understood").await;
@@ -190,7 +198,12 @@ impl Offer {
         // if `done` cannot be sent, the taker is gone and took nothing: the session ends in an
         // error with the file unlinked, and `serve` makes the control socket again.
         self.linked.store(false, Ordering::SeqCst);
-        std::fs::remove_file(&self.path)?;
+        if let Err(why) = std::fs::remove_file(&self.path) {
+            // The file is still this instance's control socket.
+            self.linked.store(true, Ordering::SeqCst);
+            return Err(why);
+        }
+        *unlinked = true;
         wire::send(stream, &["done".to_owned()], &[]).await?;
         Ok(true)
     }

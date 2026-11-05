@@ -8,7 +8,9 @@
 //! node with `[local_cache]` get their sockets through the same hand-off (`bind_fronts`). A build
 //! node has no `hot_store.lock_file`, so only the other checks apply to it. The keys are in
 //! `[server]`, a table that the releases before them read and warn of the keys they do not know
-//! (see `config_unknown`), so a file with these keys still starts there, without a hand-off.
+//! (see `config_unknown`), so a storage node's file with these keys still starts on a release
+//! that predates them, without a hand-off; v0.3.47 refuses them on a build node and on a storage
+//! node with `[local_cache]`.
 
 use std::path::Path;
 use std::time::Duration;

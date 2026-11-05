@@ -27,8 +27,10 @@ use super::config_testing::oci_interface;
 use super::local_cache::{Disk, SystemDisk};
 use crate::server::build_info::stderr_log::LineLog;
 
-/// How many looks a wait for an event makes, with [`PAUSE`] between two.
-const TRIES: u32 = 1_000;
+/// How many looks a wait for an event makes, with [`PAUSE`] between two: 120s of them, the bound
+/// the other hand-off tests give a step, so that only a step that never comes fails, however
+/// loaded the host is. No test passes or fails by how long a step took.
+const TRIES: u32 = 6_000;
 
 /// A short pause between two looks at the events.
 const PAUSE: Duration = Duration::from_millis(20);

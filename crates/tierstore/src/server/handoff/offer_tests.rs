@@ -344,3 +344,32 @@ async fn the_control_path_check_names_what_is_wrong() {
     );
     drop(dir);
 }
+
+/// Asserts that a connection that closes without a request leaves the control socket as it was:
+/// the file at the path is the same socket (not made again), and a taker after it takes the
+/// sockets and ends the serve, the path then being the taker's to make. Catches an instance that
+/// takes any failed conversation for a taker gone after the file was removed, and so makes its
+/// control socket again, or later removes the one its successor made.
+#[tokio::test]
+async fn a_connection_that_closes_without_a_request_changes_nothing() {
+    let (_dir, path) = scratch();
+    let (s3, a) = listening();
+    let serving = tokio::spawn(
+        Offer::bind(&path, vec![socket(Front::S3, &s3)])
+            .unwrap()
+            .serve(),
+    );
+    let was = inode(&path);
+    drop(connect(&path).await);
+    let taker = connect(&path).await;
+    let offer = ask(&taker, &["take 1"]).await;
+    assert_eq!(
+        texts(&offer.lines),
+        vec!["offer".to_owned(), format!("s3 {a}")]
+    );
+    assert_eq!(inode(&path), was, "the control socket was not made again");
+    let done = ask(&taker, &["ack"]).await;
+    assert_eq!(texts(&done.lines), vec!["done"]);
+    serving.await.unwrap();
+    assert!(!path.exists());
+}

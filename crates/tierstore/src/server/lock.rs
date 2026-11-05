@@ -47,10 +47,13 @@ pub(super) fn try_take(path: &Path) -> io::Result<Option<LockFile>> {
         file,
         path: path.to_owned(),
     };
-    tracing::debug!("tierstore: lock file taken: {}", path.display());
     // The name may have been given to another file between the open and the lock: a lock on a
     // file nothing else will look at. It is dropped, and the caller tries again.
-    Ok(taken.is_current().then_some(taken))
+    let current = taken.is_current();
+    if current {
+        tracing::debug!("tierstore: lock file taken: {}", path.display());
+    }
+    Ok(current.then_some(taken))
 }
 
 /// Why `path` cannot be a lock file, if it cannot: the words that follow its name in a refusal.
