@@ -50,6 +50,11 @@ pub struct ReconcilerConfig {
     /// The most bytes of one object that a comparison of the hot and the cold copy reads at once;
     /// the [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
     pub compare_range: NonZeroU64,
+    /// How long a multipart upload may stand open in the hot tier before the stray sweep aborts
+    /// it; zero, the default, never aborts one, as S3 keeps an incomplete upload until its client
+    /// aborts it or a lifecycle rule does. The
+    /// [`EntryReconcilerConfig`](crate::EntryReconcilerConfig) starts from it.
+    pub abandoned_upload_after: Duration,
     /// The time, for the usage object and the age of the objects of the hot tier. It must agree
     /// with the times the hot tier gives its objects. The lease does not use it.
     pub clock: Arc<dyn Clock>,
@@ -85,6 +90,7 @@ impl ReconcilerConfig {
             idle_max: Duration::from_secs(10),
             stop_wait: Duration::from_secs(5),
             compare_range: COMPARE_RANGE,
+            abandoned_upload_after: Duration::ZERO,
             clock,
             mono: Arc::new(MonotonicClock::new()),
             sleeper: Arc::new(TokioSleeper),

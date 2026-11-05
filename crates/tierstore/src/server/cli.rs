@@ -23,8 +23,8 @@
 //! read, in the form of `server.access_key_file` below; a secret in the config file would be
 //! readable by more users). The two tiers have a table of their own, so they may be two stores. These
 //! keys are refused for a tier that is not an S3 bucket, since they would do nothing. A request
-//! to an S3 tier is bounded by `server.s3_request_timeout`. The cold tier must do multipart uploads,
-//! which all three kinds do, and the proxy passes them to it.
+//! to an S3 tier is bounded by `server.s3_request_timeout`. Both tiers must do multipart uploads,
+//! which all three kinds do, and the proxy passes them to the tier that holds the upload.
 //!
 //! The clients of the S3 front sign with one of its access keys. `server.access_key_file` is the full
 //! key, which may do everything the front serves; `server.read_only_key_files` is an array of key-file paths, each a key that may only read objects and list the bucket (see the
@@ -693,6 +693,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     cli.reconcile_tuning.apply(&mut reconciler);
     reconciler.lease_ttl = cli.lease_ttl;
     reconciler.compare_range = tuning.compare_range;
+    reconciler.abandoned_upload_after = tuning.abandoned_upload_after;
     cli.heartbeat.apply(&mut proxy);
     cli.entry_tuning.apply_proxy(&mut proxy);
     let oci = oci_setup(cli, &server, true)?;
