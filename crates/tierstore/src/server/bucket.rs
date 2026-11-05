@@ -4,7 +4,7 @@
 use hyper::StatusCode;
 
 use super::Server;
-use super::reply::{Answer, xml_answer};
+use super::reply::{Answer, S3Error, xml_answer};
 use super::request::{Query, Target};
 use super::xml;
 
@@ -14,7 +14,56 @@ pub(super) fn asks_location(method: &str, target: &Target, query: &Query) -> boo
     method == "GET" && *target == Target::Bucket && query.has("location")
 }
 
+/// Whether the request is ListBuckets: a `GET` of the service root.
+pub(super) fn asks_buckets(method: &str, target: &Target) -> bool {
+    method == "GET" && *target == Target::Root
+}
+
+/// The parameters of ListBuckets that this front answers; `x-id` is the name the SDKs add.
+const BUCKET_PARAMS: [&str; 5] = [
+    "bucket-region",
+    "continuation-token",
+    "max-buckets",
+    "prefix",
+    "x-id",
+];
+
+/// The most buckets a page of ListBuckets may be asked to have (`max-buckets`, from 1 to this).
+const MAX_BUCKETS: usize = 10_000;
+
 impl Server {
+    /// ListBuckets: the one bucket the server serves, narrowed as S3 narrows a list: `prefix`
+    /// keeps the bucket if its name starts with it, `bucket-region` if it is in that region.
+    /// `max-buckets` is checked and changes nothing, since one bucket never fills a page; the
+    /// list is never cut, so the server gives no continuation token and refuses one.
+    pub(super) fn list_buckets(&self, query: &Query) -> Result<Answer, S3Error> {
+        if !query.only(&BUCKET_PARAMS) {
+            return Err(S3Error::unsupported(
+                "this query parameter is not supported",
+            ));
+        }
+        let page = query.get("max-buckets").map(str::parse::<usize>);
+        if !matches!(page, Some(Ok(1..=MAX_BUCKETS)) | None) {
+            return Err(S3Error::invalid(
+                "max-buckets must be a whole number from 1 to 10000",
+            ));
+        }
+        if query.has("continuation-token") {
+            return Err(S3Error::invalid(
+                "the continuation token is not one this server gave",
+            ));
+        }
+        let (bucket, region) = (&self.config.bucket, &self.config.region);
+        let named = bucket.starts_with(query.get("prefix").unwrap_or_default());
+        let placed = query
+            .get("bucket-region")
+            .is_none_or(|asked| asked == region);
+        Ok(xml_answer(
+            StatusCode::OK,
+            xml::buckets(bucket, region, named && placed),
+        ))
+    }
+
     /// GetBucketLocation: the region of the server. S3 gives an empty `LocationConstraint` for
     /// `us-east-1`, and the name of the region for every other.
     pub(super) fn location(&self) -> Answer {

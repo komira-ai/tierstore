@@ -35,7 +35,10 @@
 //!   a reserved key are not listed. ListParts (`GET /<key>?uploadId=`) is `NotImplemented`;
 //! - CreateBucket and HeadBucket of the served bucket (always successful), for setup tools;
 //! - GetBucketLocation (`GET /<bucket>?location`): the region of the server, empty for
-//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls.
+//!   `us-east-1` as in S3, which `mc`, `s3cmd` and Hadoop send before their other calls;
+//! - ListBuckets (`GET /`): the one bucket the server serves, with `prefix` and `bucket-region` as
+//!   filters and `max-buckets` checked; it has the epoch for a creation date, since the server
+//!   does not know when the bucket was made, and `tierstore` for the owner.
 //!
 //! Every other call, a copy (`x-amz-copy-source`), and a query parameter this front does not
 //! know (`delimiter`, `versionId`), is answered `NotImplemented`. A request with a key under
