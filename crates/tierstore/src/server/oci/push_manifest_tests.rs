@@ -4,7 +4,7 @@
 use hyper::{Method, StatusCode};
 use serde_json::{Value, json};
 
-use super::MAX_MANIFEST_BYTES;
+use super::DEFAULT_MANIFEST_BYTES;
 use super::manifest::references;
 use super::push_tests::{Rig, digest_of, full, scripted};
 use crate::server::testing::Step;
@@ -181,7 +181,7 @@ async fn a_body_that_is_not_a_manifest_is_refused() {
 #[tokio::test]
 async fn a_manifest_over_the_limit_or_cut_is_refused() {
     let rig = Rig::new();
-    let limit = usize::try_from(MAX_MANIFEST_BYTES).expect("a size");
+    let limit = usize::try_from(DEFAULT_MANIFEST_BYTES).expect("a size");
     let big = vec![b' '; limit + 1];
     let put = rig
         .ask(Method::PUT, "/v2/app/manifests/latest", &[], full(&big))
@@ -298,4 +298,36 @@ async fn a_manifest_with_a_descriptor_that_has_no_digest_text_is_refused() {
         .expect("a listing")
         .len();
     assert_eq!(now, kept);
+}
+
+/// Asserts `params.max_manifest_bytes` bounds a pushed manifest: with it at 50 a body of 50
+/// bytes is read (not 413) and one of 51 is 413 `MANIFEST_INVALID`
+/// naming the limit.
+#[tokio::test]
+async fn a_lowered_manifest_limit_refuses_a_pushed_manifest_just_over_it() {
+    let sizes = super::OciSizes {
+        manifest_bytes: 50,
+        ..super::OciSizes::default()
+    };
+    let mut rig = Rig::new();
+    rig.front = rig.front.with_sizes(sizes);
+    let at = rig
+        .ask(
+            Method::PUT,
+            "/v2/app/manifests/latest",
+            &[],
+            full(&[b' '; 50]),
+        )
+        .await;
+    assert_ne!(at.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", at.text());
+    let over = rig
+        .ask(
+            Method::PUT,
+            "/v2/app/manifests/latest",
+            &[],
+            full(&[b' '; 51]),
+        )
+        .await;
+    let (message, _) = over.assert_error(StatusCode::PAYLOAD_TOO_LARGE, "MANIFEST_INVALID");
+    assert_eq!(message, "The request body is over the limit of 50 bytes.");
 }
