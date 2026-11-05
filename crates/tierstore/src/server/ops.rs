@@ -23,10 +23,15 @@ use super::time::http_date;
 use super::xml::{self, Listing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
+/// `delimiter` is understood only empty (which is no delimiter: [`refuse_delimiter`]), and
+/// `fetch-owner` is accepted and ignored: the listing has no owner to give, and S3 itself only
+/// adds an `Owner` to the entries of a listing when it is asked to.
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 12] = [
+const SUPPORTED: [&str; 14] = [
     "continuation-token",
+    "delimiter",
+    "fetch-owner",
     "key-marker",
     "list-type",
     "max-keys",
@@ -145,6 +150,15 @@ fn refuse_unsupported(parts: &Parts, query: &Query, presigned: bool) -> Result<(
     }
     if header(&parts.headers, "x-amz-copy-source").is_some() {
         return Err(S3Error::unsupported("copying an object is not supported"));
+    }
+    Ok(())
+}
+
+/// A listing that names a `delimiter` is not supported; an empty one is no delimiter, as it is
+/// for S3.
+fn refuse_delimiter(query: &Query) -> Result<(), S3Error> {
+    if query.get("delimiter").is_some_and(|text| !text.is_empty()) {
+        return Err(S3Error::unsupported("a delimiter is not supported"));
     }
     Ok(())
 }
@@ -476,6 +490,7 @@ impl Server {
     }
 
     async fn list_objects(&self, query: &Query) -> Result<Answer, S3Error> {
+        refuse_delimiter(query)?;
         if query.get("list-type") != Some("2") {
             return Err(S3Error::unsupported(
                 "only ListObjectsV2 (list-type=2) is supported",
@@ -502,6 +517,7 @@ impl Server {
     /// (and `upload-id-marker`, which S3 ignores without a key marker), at most `max-uploads`.
     /// The uploads of a key under the proxy's reserved prefixes are never listed.
     async fn list_uploads(&self, query: &Query) -> Result<Answer, S3Error> {
+        refuse_delimiter(query)?;
         let prefix = query.get("prefix").unwrap_or_default();
         let max_uploads = page_size(query, "max-uploads")?;
         let key_marker = query.get("key-marker").unwrap_or_default();
