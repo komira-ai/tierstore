@@ -1,0 +1,69 @@
+# tierstore (crates/tierstore) as one of the two instances of the update hook on Linux: the
+# template of tierstore@a.service and tierstore@b.service, installed by hostkeeper's package of
+# tierstore. %i is the instance's letter. Both run the binary of the release link `current`, both
+# serve port 9300, and the update hook (`tierstore update-hook`, crates/tierstore/docs/update-hook.md)
+# alternates between them: an update starts the idle one, which takes the listening sockets of the
+# live one over the hand-over socket, and the live one drains and exits 0, which this unit does
+# not restart (Restart=on-failure).
+#
+# An instance starts only when its marker file, /var/lib/tierstore/run-%i, exists
+# (ConditionPathExists= below). The hook writes the marker before it starts the instance and
+# removes it when it retires the instance, so at boot, when both units are enabled, only the one
+# the hook's record names starts. A skipped condition is not a failure: the unit stays inactive.
+#
+# The hand-over socket lives in the StateDirectory: `server.handoff_socket` in
+# /etc/tierstore/config.toml names it, for example /var/lib/tierstore/handoff.sock. Without it
+# (or with `mode = "restart"` in the package's params) an update stops the live instance before it
+# starts the other, with a gap in serving.
+#
+# hostkeeper's own Force, which starts every `run` unit and waits for all of them, finds the
+# standby instance inactive by design and reports it; the service is up all the same.
+#
+# /etc/tierstore/config.toml is edited before use, as tierstore.toml for tierstore.service; its
+# key files are owned by the account of User=, mode 0600, and the keys of the file that name them
+# are the only way the process is given a secret (it reads no environment variable).
+[Unit]
+Description=tierstore instance %i, an S3 server over a hot and a cold tier
+Documentation=https://github.com/komira-ai/tierstore/blob/main/packaging/README.md
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/var/lib/tierstore/run-%i
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tierstore
+StateDirectory=tierstore
+StateDirectoryMode=0700
+ExecStart=/var/lib/hostkeeper/packages/tierstore/current/bin/tierstore \
+  --config /etc/tierstore/config.toml \
+  --drain-lb-wait 10s \
+  --drain-deadline 15m
+KillSignal=SIGTERM
+TimeoutStopSec=960
+Restart=on-failure
+RestartSec=30
+RestartPreventExitStatus=2 3
+LimitNOFILE=65536
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

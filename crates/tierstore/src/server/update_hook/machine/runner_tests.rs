@@ -83,8 +83,8 @@ fn a_program_that_does_not_exist_cannot_be_run() {
 /// characters and trimmed.
 #[test]
 fn a_call_and_its_stderr_read_as_words() {
-    let call = Call::new("nft", &["-f", "-"], LIMIT);
-    assert_eq!(call.describe(), "nft -f -");
+    let call = Call::new("systemctl", &["stop", "--"], LIMIT);
+    assert_eq!(call.describe(), "systemctl stop --");
     let long = format!("  {}\n", "e".repeat(500));
     let output = Output {
         code: Some(1),
@@ -95,7 +95,7 @@ fn a_call_and_its_stderr_read_as_words() {
 }
 
 /// Asserts that the child has an environment of its own: nothing of the test's, only the fixed
-/// `PATH` and `LC_ALL=C` (so nft's and systemctl's words do not depend on the host's locale).
+/// `PATH` and `LC_ALL=C` (so systemctl's words do not depend on the host's locale).
 #[test]
 fn the_child_gets_a_clean_environment() {
     let output = SystemRunner
@@ -284,4 +284,23 @@ fn dropping_the_group_kills_and_reaps_the_child() {
     let pid = Pid::from_child(&group.child);
     drop(group);
     assert_eq!(test_kill_process(pid), Err(Errno::SRCH));
+}
+
+/// Asserts that a call with `run_as` runs the program under those user and group ids: the ids
+/// of this process are given back by `id`, and `id` of a call with none says the same. (A test
+/// that is not root can only run as itself.)
+#[test]
+fn a_call_runs_as_the_user_and_group_it_names() {
+    let uid = rustix::process::geteuid().as_raw();
+    let gid = rustix::process::getegid().as_raw();
+    for flag in ["-u", "-g"] {
+        let call = Call::new("id", &[flag], LIMIT).running_as(uid, gid);
+        let output = SystemRunner.run(&call).unwrap();
+        let want = if flag == "-u" { uid } else { gid };
+        assert_eq!(output.code, Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            want.to_string()
+        );
+    }
 }
