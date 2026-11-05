@@ -5,7 +5,9 @@ use super::super::params::{CONFIG_FILE_KEY, Params};
 use super::super::ports::Instance;
 use super::super::record::{Mode, Record};
 use super::super::report::{Done, Reason};
-use super::super::{HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY};
+use super::super::{
+    CACHE_HANDOFF_CAPABILITY, HANDOFF_CAPABILITY, HANDOFF_SOCKET_KEY, LOCAL_CACHE_TABLE,
+};
 use super::{Ctx, unit_name};
 
 /// How long hostkeeper waits before it asks again when both instances run.
@@ -26,8 +28,10 @@ pub(super) fn prepare(
         ));
     }
     let update = params.previous.as_ref();
-    if update.is_some() && !params.declared_restart {
-        check_handoff_socket(c, params)?;
+    // A node with a local cache hands over only between releases whose cache shapes do.
+    let mut needed = vec![HANDOFF_CAPABILITY];
+    if update.is_some() && !params.declared_restart && check_handoff_socket(c, params)? {
+        needed.push(CACHE_HANDOFF_CAPABILITY);
     }
     // The staged binary is asked on a first install too: it proves `bin/tierstore` is there and
     // runs.
@@ -37,7 +41,11 @@ pub(super) fn prepare(
         Some(_) if params.declared_restart => Some(Mode::Restart),
         Some(previous) => {
             let before = c.ports.host.capabilities(&previous.release)?;
-            let can = |list: &[String]| list.iter().any(|word| word == HANDOFF_CAPABILITY);
+            let can = |list: &[String]| {
+                needed
+                    .iter()
+                    .all(|need| list.iter().any(|word| word == need))
+            };
             Some(if can(&staged) && can(&before) {
                 Mode::Handover
             } else {
@@ -94,8 +102,9 @@ fn serving(
 }
 
 /// Holds the node's configuration to naming the hand-over socket: without it the new instance
-/// could not take the old one's listening sockets.
-fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<(), Done> {
+/// could not take the old one's listening sockets. Says whether the configuration has a
+/// `[local_cache]` table (a build node, or a storage node with a cache).
+fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<bool, Done> {
     let path = params.config_file.as_deref().ok_or_else(|| {
         Done::fail(
             Reason::BadParams,
@@ -121,7 +130,7 @@ fn check_handoff_socket(c: &Ctx<'_, '_>, params: &Params) -> Result<(), Done> {
         .and_then(toml::Value::as_str)
         .is_some_and(|socket| !socket.is_empty());
     if named {
-        return Ok(());
+        return Ok(table.contains_key(LOCAL_CACHE_TABLE));
     }
     Err(Done::fail(
         Reason::HandoffNotConfigured,

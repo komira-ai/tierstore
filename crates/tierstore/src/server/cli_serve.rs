@@ -148,32 +148,18 @@ pub async fn run_handing(
     built.server.proxy = Some(Arc::clone(&proxy));
     let oci_backend: Arc<dyn Backend> = proxy.clone();
     let server = Server::new(proxy, built.server);
-    let oci_addrs = built
-        .oci
-        .as_ref()
-        .map_or_else(Vec::new, |setup| setup.listen.clone());
-    let taken = match handoff {
-        Some(handoff) => {
-            take(
-                handoff,
-                &Want {
-                    s3: &cli.listen,
-                    oci: &oci_addrs,
-                },
-            )
-            .await?
-        }
-        None => None,
-    };
-    let (listeners, inherited_oci) = match taken {
-        Some(Inherited { s3, oci }) => (s3, Some(oci)),
-        None => (bind_s3(&cli.listen)?, None),
-    };
-    let oci = bind_oci_from(built.oci, oci_backend, inherited_oci).await?;
-    let offer = match handoff {
-        Some(handoff) => Some(offer_of(handoff, &listeners, oci.as_ref())?),
-        None => None,
-    };
+    let Bound {
+        s3: listeners,
+        oci,
+        offer,
+    } = bind_fronts(
+        handoff,
+        &cli.listen,
+        || bind_s3(&cli.listen),
+        built.oci,
+        oci_backend,
+    )
+    .await?;
     let stop = stopped_by(stop, offer);
     ready(Addresses::of(local_addrs(&listeners)?, oci.as_ref())?);
     let oci_drain = oci.as_ref().map(OciListener::drain);
@@ -281,20 +267,9 @@ pub(super) fn cut_note(drained: Drained) -> String {
     }
 }
 
-/// Binds the OCI front over `backend` as `setup` says: none when there is no setup. The backend
-/// is whatever the node reads from: the proxy of a storage node, the cache of a build node.
-///
-/// # Errors
-/// An address that cannot be bound.
-pub(super) async fn bind_oci(
-    setup: Option<OciSetup>,
-    backend: Arc<dyn Backend>,
-) -> Result<Option<OciListener>, Error> {
-    Ok(bind_oci_from(setup, backend, None).await?)
-}
-
-/// [`bind_oci`], over the sockets of a running instance (`inherited`) in place of new ones: none
-/// is bound.
+/// The OCI front over `backend` as `setup` says, none when there is no setup, on the sockets of a
+/// running instance (`inherited`) or, without them, on sockets it binds. The backend is whatever
+/// the node reads from: the proxy of a storage node, the cache of a node with a local cache.
 ///
 /// # Errors
 /// An address that cannot be bound ([`OciError::Bind`]).
@@ -316,6 +291,68 @@ async fn bind_oci_from(
         None => OciListener::bind_all(&setup.listen, setup.acceptor, front, setup.limits).await?,
     };
     Ok(Some(listener))
+}
+
+/// The listening sockets of the fronts of a start, and the control socket that offers them to a
+/// successor.
+pub(super) struct Bound {
+    /// The S3 front's sockets, in the order of the addresses it was asked for.
+    pub(super) s3: Vec<TcpListener>,
+    /// The OCI front, if there is a setup.
+    pub(super) oci: Option<OciListener>,
+    /// The control socket, with a hand-off; [`stopped_by`] waits on it.
+    pub(super) offer: Option<Offer>,
+}
+
+/// The sockets of both fronts, as every start with a hand-off gets them: with `handoff`, it first
+/// takes the sockets of the instance that answers on the control socket, if their addresses are
+/// `s3` and the OCI setup's, and binds with `bind_own` (and binds the OCI front) only where none
+/// answers; then it makes the control socket, offering a copy of each. Without `handoff` it binds
+/// and makes no control socket. `s3` is every address the S3 front serves, in the order
+/// `bind_own` binds them: a node with a local cache adds loopback sockets to the configured ones.
+/// `backend` is what the OCI front reads from.
+///
+/// # Errors
+/// A hand-off that is refused, mismatched or not ended in time ([`HandingError::Handoff`]); an
+/// address that `bind_own` cannot bind ([`HandingError::Start`]) or the OCI front cannot
+/// ([`HandingError::Oci`]); a socket that cannot be copied ([`HandingError::Sockets`]).
+pub(super) async fn bind_fronts(
+    handoff: Option<&Handoff>,
+    s3: &[SocketAddr],
+    bind_own: impl FnOnce() -> Result<Vec<TcpListener>, Error>,
+    oci: Option<OciSetup>,
+    backend: Arc<dyn Backend>,
+) -> Result<Bound, HandingError> {
+    let oci_addrs = oci
+        .as_ref()
+        .map_or_else(Vec::new, |setup| setup.listen.clone());
+    let taken = match handoff {
+        Some(handoff) => {
+            take(
+                handoff,
+                &Want {
+                    s3,
+                    oci: &oci_addrs,
+                },
+            )
+            .await?
+        }
+        None => None,
+    };
+    let (listeners, inherited_oci) = match taken {
+        Some(Inherited { s3, oci }) => (s3, Some(oci)),
+        None => (bind_own()?, None),
+    };
+    let oci = bind_oci_from(oci, backend, inherited_oci).await?;
+    let offer = match handoff {
+        Some(handoff) => Some(offer_of(handoff, &listeners, oci.as_ref())?),
+        None => None,
+    };
+    Ok(Bound {
+        s3: listeners,
+        oci,
+        offer,
+    })
 }
 
 /// The control socket of `handoff`, offering a copy of each socket of the S3 front and of the OCI
@@ -344,7 +381,7 @@ fn offer_of(
 }
 
 /// `stop`, or the moment a successor has taken the sockets of `offer`, whichever is first.
-async fn stopped_by(stop: impl Future<Output = ()> + Send + 'static, offer: Option<Offer>) {
+pub(super) async fn stopped_by(stop: impl Future<Output = ()> + Send + 'static, offer: Option<Offer>) {
     match offer {
         Some(offer) => tokio::select! {
             () = stop => {}

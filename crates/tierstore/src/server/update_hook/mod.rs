@@ -86,6 +86,12 @@ pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/tierstore.plist";
 /// The capability (`tierstore --capabilities`) of a release that offers and takes listening
 /// sockets over `server.handoff_socket`. Both releases need it for a hand-over.
 pub const HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_SOCKET_CAPABILITY;
+/// The capability of a release whose build node and storage node with `[local_cache]` hand their
+/// sockets over too. Both releases need it, beside [`HANDOFF_CAPABILITY`], for a hand-over of a
+/// node whose configuration has `[local_cache]`.
+pub const CACHE_HANDOFF_CAPABILITY: &str = crate::server::build_info::HANDOFF_CACHE_CAPABILITY;
+/// The table of the configuration that makes a node one with a local cache.
+pub const LOCAL_CACHE_TABLE: &str = "local_cache";
 /// The configuration key of the hand-over socket, in the `[server]` table.
 pub const HANDOFF_SOCKET_KEY: &str = "handoff_socket";
 
