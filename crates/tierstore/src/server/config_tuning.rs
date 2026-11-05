@@ -52,6 +52,9 @@ pub struct HotTuning {
     /// `hot_store.upload_listing_calls`: the most calls to the cold tier one listing of uploads
     /// makes.
     pub upload_listing_calls: u32,
+    /// `hot_store.abandoned_upload_after`: how long a multipart upload may stand open in the hot
+    /// tier before the reconciler's stray sweep aborts it; zero turns the abort off.
+    pub abandoned_upload_after: Duration,
 }
 
 impl Default for HotTuning {
@@ -60,6 +63,7 @@ impl Default for HotTuning {
             usage_refresh: Duration::from_secs(1),
             compare_range: COMPARE_RANGE,
             upload_listing_calls: 100,
+            abandoned_upload_after: Duration::ZERO,
         }
     }
 }
@@ -96,6 +100,7 @@ const MIB: u64 = 1 << 20;
 /// at 1 GiB, not at the 5 GiB that S3 takes.
 const MAX_PART_BYTES_HELD: u64 = 1 << 30;
 pub(super) const HOUR: Duration = Duration::from_secs(3600);
+const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// The client settings `[server]` gives, or the defaults of those it leaves out.
 pub(super) fn s3_client(server: &ServerTable) -> Result<S3Client, ConfigError> {
@@ -185,6 +190,12 @@ pub(super) fn hot_tuning(hot: &TierTable) -> Result<HotTuning, ConfigError> {
             old.upload_listing_calls,
             100_000,
         )?,
+        abandoned_upload_after: span(
+            ("hot_store", "abandoned_upload_after"),
+            hot.abandoned_upload_after,
+            old.abandoned_upload_after,
+            (Duration::ZERO, YEAR),
+        )?,
     })
 }
 
@@ -267,11 +278,13 @@ cache  = true
         assert_eq!(hot.usage_refresh, Duration::from_secs(1));
         assert_eq!(hot.compare_range.get(), 1 << 20);
         assert_eq!(hot.upload_listing_calls, 100);
+        assert_eq!(hot.abandoned_upload_after, Duration::ZERO);
         assert_eq!(hot, HotTuning::default());
         let built = built(&mut cli);
         assert_eq!(built.proxy.usage_refresh, Duration::from_secs(1));
         assert_eq!(built.proxy.upload_listing_calls, 100);
         assert_eq!(built.reconciler.compare_range.get(), 1 << 20);
+        assert_eq!(built.reconciler.abandoned_upload_after, Duration::ZERO);
     }
 
     /// Every key of `[server]` and `[hot_store]` of this change parses, and a value that is not
@@ -286,7 +299,7 @@ cache  = true
         let text = text.replacen(
             "budget = 1000",
             "budget = 1000\nusage_refresh = \"250ms\"\ncompare_range = \"64KiB\"\n\
-             upload_listing_calls = 7",
+             upload_listing_calls = 7\nabandoned_upload_after = \"36h\"",
             1,
         );
         let mut cli = from_text(&text, DEFAULTS).unwrap();
@@ -302,6 +315,21 @@ cache  = true
         assert_eq!(built.proxy.usage_refresh, Duration::from_millis(250));
         assert_eq!(built.proxy.upload_listing_calls, 7);
         assert_eq!(built.reconciler.compare_range.get(), 64 << 10);
+        let day_and_half = Duration::from_secs(36 * 3600);
+        assert_eq!(built.reconciler.abandoned_upload_after, day_and_half);
+    }
+
+    /// `hot_store.abandoned_upload_after = "0s"` (also the default) is accepted and reaches the
+    /// reconciler as zero, which turns the abort of abandoned uploads off; a year is the longest.
+    #[test]
+    fn an_abandoned_upload_limit_of_zero_turns_the_abort_off() {
+        let zero = with_hot("abandoned_upload_after = \"0s\"");
+        let mut cli = from_text(&zero, DEFAULTS).unwrap();
+        assert_eq!(cli.hot_tuning.abandoned_upload_after, Duration::ZERO);
+        let built = built(&mut cli);
+        assert_eq!(built.reconciler.abandoned_upload_after, Duration::ZERO);
+        let year = with_hot("abandoned_upload_after = \"8760h\"");
+        assert!(from_text(&year, DEFAULTS).is_ok());
     }
 
     /// `server.s3_min_bytes_per_sec = 0` turns the stretch of a write's time limit off.
@@ -387,6 +415,10 @@ cache  = true
             (
                 "upload_listing_calls = 100001",
                 "hot_store.upload_listing_calls: 100001 is not between 1 and 100000",
+            ),
+            (
+                "abandoned_upload_after = \"8784h\"",
+                "hot_store.abandoned_upload_after: 31622400000ms is not between 0ms and 31536000000ms",
             ),
         ];
         for (line, want) in hot {

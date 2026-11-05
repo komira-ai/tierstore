@@ -89,6 +89,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.compare_range",
     "hot_store.listing_heads",
     "hot_store.upload_listing_calls",
+    "hot_store.abandoned_upload_after",
     "hot_store.retry_min",
     "hot_store.retry_max",
     "hot_store.stray_grace",
