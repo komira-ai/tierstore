@@ -21,22 +21,22 @@ use super::chunked::Framing;
 use super::delete_objects::DELETE_BODY_LIMIT;
 use super::handover::hand_over;
 use super::list_token;
-use super::listing::{self, UploadsNext};
+use super::listing::{self, Start, UploadsNext};
 use super::presign::Grant;
 use super::reply::{Answer, S3Error, answer, streamed_answer, xml_answer};
 use super::request::{
     BoxError, Check, Query, Reader, Refused, Target, header, pieces, query_pairs,
 };
 use super::time::{http_date, parse_http_date};
-use super::xml::{self, Listing, PartListing, UploadListing};
+use super::xml::{self, Listing, ListingV1, PartListing, UploadListing};
 
 /// The query parameters this front understands. A request with another is not served.
-/// `delimiter` and `encoding-type` are parameters of ListObjectsV2 and of ListMultipartUploads,
-/// and with `fetch-owner=true` the objects of a listing carry the `Owner` that S3 adds then
+/// `delimiter` and `encoding-type` are parameters of ListObjectsV2, ListObjects (which also
+/// has `marker`) and ListMultipartUploads, and with `fetch-owner=true` the objects of a listing carry the `Owner` that S3 adds then
 /// ([`xml::OWNER`]).
 /// `x-id` names the operation (`?x-id=PutObject`) and S3 ignores it; the AWS SDKs add it to
 /// the calls of an object, so a request with it is served as one without.
-const SUPPORTED: [&str; 18] = [
+const SUPPORTED: [&str; 19] = [
     "continuation-token",
     "delete",
     "delimiter",
@@ -44,6 +44,7 @@ const SUPPORTED: [&str; 18] = [
     "fetch-owner",
     "key-marker",
     "list-type",
+    "marker",
     "max-keys",
     "max-parts",
     "max-uploads",
@@ -624,15 +625,13 @@ impl Server {
         Ok(answer(StatusCode::NO_CONTENT, &[], Bytes::new()))
     }
 
-    /// ListObjectsV2: a page of the objects under `prefix`, after the token or `start-after`.
+    /// ListObjectsV2 (`list-type=2`), or ListObjects, version 1, for a request with any other
+    /// `list-type` or none (which is how S3 tells them apart): a page of the objects under
+    /// `prefix`, after the token or `start-after` (version 2) or after `marker` (version 1).
     /// With a `delimiter` the keys that have it after the prefix are folded into common
     /// prefixes, and both kinds of entry count against `max-keys` ([`listing::page`]).
     async fn list_objects(&self, query: &Query) -> Result<Answer, S3Error> {
-        if query.get("list-type") != Some("2") {
-            return Err(S3Error::unsupported(
-                "only ListObjectsV2 (list-type=2) is supported",
-            ));
-        }
+        let version2 = query.get("list-type") == Some("2");
         let prefix = query.get("prefix").unwrap_or_default();
         let delimiter = query.get("delimiter").filter(|text| !text.is_empty());
         let url = encoded(query)?;
@@ -646,8 +645,32 @@ impl Server {
             max_keys + 1
         };
         let backend = self.backend.as_ref();
-        let start = list_token::start(query)?;
+        let marker = query.get("marker").unwrap_or_default();
+        let start = if version2 {
+            list_token::start(query)?
+        } else {
+            (!marker.is_empty()).then(|| Start::After(marker.to_owned()))
+        };
         let page = listing::page(backend, prefix, delimiter, start, max_keys, batch).await?;
+        if !version2 {
+            // The marker of the next page is the last key of this one, or the common prefix
+            // that ends it (a marker inside a prefix passes the whole prefix).
+            let next = page.next.as_ref().map(|start| match start {
+                Start::After(text) | Start::PastPrefix(text) => text.as_str(),
+            });
+            let listing = ListingV1 {
+                bucket: &self.config.bucket,
+                prefix,
+                delimiter,
+                url,
+                marker,
+                max_keys,
+                objects: &page.objects,
+                prefixes: &page.prefixes,
+                next,
+            };
+            return Ok(xml_answer(StatusCode::OK, listing.to_xml()));
+        }
         let listing = Listing {
             bucket: &self.config.bucket,
             prefix,
