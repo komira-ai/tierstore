@@ -40,7 +40,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="230" y1="92" x2="330" y2="130" class="ln"/><line x1="230" y1="142" x2="330" y2="150" class="ln"/><line x1="230" y1="192" x2="330" y2="180" class="ln"/><line x1="230" y1="242" x2="330" y2="210" class="ln"/>
 <line x1="610" y1="122" x2="710" y2="122" class="ln"/><line x1="610" y1="242" x2="710" y2="242" class="ln"/>
 <rect x="30" y="340" width="900" height="64" rx="5" class="box-p"/>
-<text x="40" y="360" class="t-m">Left of the core: how clients reach us, their API, key rules, auth, errors, listing format. Right of it: how we reach a store. Neither side knows the other's kind.</text>
+<text x="40" y="360" class="t-m">Left of the core: how clients reach us, their API, auth, errors, listing format. Right of it: how we reach a store. Each declares its capabilities; the core serves the intersection.</text>
 <text x="40" y="378" class="t-m">An s3 front over a gcs cold tier, an fs front over an s3 hot tier, and the same store behind two fronts all work, because only the core is shared.</text>
 <text x="40" y="396" class="t-m">Chaining (local_cache over a hot+cold proxy) is another Backend behind the right seam, in the process or across processes.</text>
 </svg>

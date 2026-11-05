@@ -30,7 +30,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="110" y1="124" x2="290" y2="124" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
 <text x="380.0" y="150" class="t-m lbl" text-anchor="middle">1  FUSE LOOKUP, OPEN, READ on the /dev/fuse fd</text>
 <line x1="290" y1="162" x2="470" y2="162" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
-<text x="560.0" y="188" class="t-m lbl" text-anchor="middle">2  path rules; path to store key K'; Proxy::open_read(K', span)</text>
+<text x="560.0" y="188" class="t-m lbl" text-anchor="middle">2  path to store key K'; Proxy::open_read(K', span)</text>
 <line x1="470" y1="200" x2="650" y2="200" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
 <text x="750.0" y="226" class="t-m lbl" text-anchor="middle">3  hot open_read; on a miss cold open_read (streamed range)</text>
 <line x1="650" y1="238" x2="850" y2="238" class="ln" marker-end="url(#seq-iface-fs-read-ak)"/>
@@ -44,5 +44,5 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="290" y1="390" x2="110" y2="390" class="ln-o" marker-end="url(#seq-iface-fs-read-ao)"/>
 <rect x="30" y="426" width="900" height="48" rx="5" class="box-o"/>
 <text x="40" y="446" class="t-m">No port and no tierstore auth: the owner and mode of the mount decide who may read. Directories are prefixes: READDIR is the shared listing walk with delimiter / and a cursor token.</text>
-<text x="40" y="462" class="t-m">A key with no path form (an empty segment, '.' or '..', a name that is both a file and a directory) is not shown and is counted in a metric. Writes, later, are create-only files closed whole.</text>
+<text x="40" y="462" class="t-m">The effective key rule keeps keys without a path form (an empty segment, '.', '..') from being written on any front. Writes, later, are create-only files closed whole.</text>
 </svg>

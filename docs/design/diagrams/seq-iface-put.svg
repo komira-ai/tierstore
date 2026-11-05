@@ -28,7 +28,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <line x1="860" y1="76" x2="860" y2="518" class="ln-d"/>
 <text x="205.0" y="112" class="t-m lbl" text-anchor="middle">0  PUT /bucket/K (signed)</text>
 <line x1="110" y1="124" x2="300" y2="124" class="ln" marker-end="url(#seq-iface-put-ak)"/>
-<text x="395.0" y="150" class="t-m lbl" text-anchor="middle">1  verify signature; S3 key rules; store key K'</text>
+<text x="395.0" y="150" class="t-m lbl" text-anchor="middle">1  verify signature; effective key rule; store key K'</text>
 <text x="395.0" y="166" class="t-m lbl" text-anchor="middle">(if either fails: 403 or 400, no store is touched)</text>
 <line x1="300" y1="178" x2="490" y2="178" class="ln" marker-end="url(#seq-iface-put-ak)"/>
 <text x="590.0" y="204" class="t-m lbl" text-anchor="middle">2  create-only write of the entry (If-None-Match: *)</text>
