@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
-use objstore_s3::s3::MULTIPART_THRESHOLD;
+use objstore_s3::s3::PART_BYTES;
 use objstore_s3::{BodyStream, KeyPrefix, ObjectStore, ObjectStoreError, PageSize};
 use reqwest::Response;
 use tierstore::server::AccessKey;
@@ -44,7 +44,7 @@ async fn with_readers_fixed() -> Harness {
 
 /// A body that goes up in parts, and its length.
 fn big() -> (u64, BodyStream) {
-    let len = MULTIPART_THRESHOLD + 1;
+    let len = PART_BYTES + 1;
     let bytes = Bytes::from(vec![9_u8; usize::try_from(len).unwrap()]);
     let parts: BodyStream = stream::iter(vec![Ok(bytes)]).boxed();
     (len, parts)

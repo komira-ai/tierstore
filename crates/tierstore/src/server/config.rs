@@ -296,6 +296,8 @@ pub(super) struct ServerTable {
     pub s3_pool_idle_timeout: Option<Dur>,
     pub s3_read_retries: Option<u32>,
     pub s3_read_retry_wait: Option<Dur>,
+    pub s3_single_put_max: Option<Size>,
+    pub s3_part_bytes: Option<Size>,
     // The keys of `config_handoff`.
     #[serde(default)]
     pub handoff_socket: Option<PathBuf>,

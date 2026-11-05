@@ -81,6 +81,8 @@ const FLAGLESS_KEYS: &[&str] = &[
     "server.s3_pool_idle_timeout",
     "server.s3_read_retries",
     "server.s3_read_retry_wait",
+    "server.s3_single_put_max",
+    "server.s3_part_bytes",
     "server.handoff_socket",
     "server.handoff_wait",
     "hot_store.usage_refresh",

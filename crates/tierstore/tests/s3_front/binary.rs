@@ -12,7 +12,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 use objstore_s3::s3::fake::FakeS3;
-use objstore_s3::s3::{Credentials, MULTIPART_THRESHOLD, S3Config, S3Store};
+use objstore_s3::s3::{Credentials, PART_BYTES, S3Config, S3Store, S3Tuning};
 use objstore_s3::{BodyStream, ByteRange, Capabilities, ObjectKey, ObjectStore, ObjectStoreError};
 use reqwest::Client;
 use rustix::process::{Pid, Signal, kill_process};
@@ -104,7 +104,12 @@ impl Running {
             request_timeout: Duration::from_secs(30),
             min_body_rate: None,
         };
-        S3Store::new(config).unwrap()
+        // The threshold of the client before it was a setting (see `support.rs`).
+        let tuning = S3Tuning {
+            single_put_max: PART_BYTES,
+            ..S3Tuning::default()
+        };
+        S3Store::new_tuned(config, tuning).unwrap()
     }
 
     pub(crate) fn signal(&self, signal: Signal) {
@@ -677,7 +682,7 @@ async fn it_serves_over_two_s3_tiers_and_lands_a_multipart_upload_in_the_cold_on
     assert!(copied.is_ok(), "not copied");
 
     let big = ObjectKey::new("cas/big").unwrap();
-    let len = MULTIPART_THRESHOLD + 1;
+    let len = PART_BYTES + 1;
     let bytes = Bytes::from(vec![9_u8; usize::try_from(len).unwrap()]);
     let body: BodyStream = stream::iter(vec![Ok(bytes)]).boxed();
     store.put_stream(&big, len, body).await.unwrap();
