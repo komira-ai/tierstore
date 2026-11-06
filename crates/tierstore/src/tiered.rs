@@ -12,8 +12,9 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, Meta, MonotonicClock, OpenUpload,
+    Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter,
+    Window,
 };
 
 mod copy_back;
@@ -32,6 +33,15 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod marked_put;
+#[cfg(test)]
+mod marked_put_crash_tests;
+#[cfg(test)]
+mod marked_put_rig;
+#[cfg(test)]
+mod marked_put_tests;
+#[cfg(test)]
+mod marked_put_wave_tests;
 mod pause;
 mod put;
 mod read;
@@ -42,6 +52,7 @@ mod uploads_tests;
 pub use entry_delete::DeleteWait;
 pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
+pub use marked_put::MarkedPutConfig;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -95,10 +106,19 @@ pub struct ProxyConfig {
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
-    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
-    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
-    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    /// store, for the markers of `docs/design/put-without-lock.md`. The proxy calls it only while
+    /// the format object says `active-marks` and records [`ProxyConfig::marks_name`]; `None` is a
+    /// proxy with no marks bucket (every proxy of a library user, and a server over a `dir` hot
+    /// tier, whose directory of markers is opened by the release that uses it), which makes no
+    /// write under that phase.
     pub marks: Option<Arc<dyn Backend>>,
+    /// The name of the marks bucket `marks` is the handle on, as the format object records it
+    /// (`marks_bucket`): a proxy whose name is not the recorded one makes no write under
+    /// `active-marks`, so that two names are never in use at once. `None` is no name, which is
+    /// never the recorded one.
+    pub marks_name: Option<String>,
+    /// The waits and limits of the puts made on markers.
+    pub marks_put: MarkedPutConfig,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -132,6 +152,8 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            marks_name: None,
+            marks_put: MarkedPutConfig::new(),
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -256,6 +278,16 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   no state of an upload. The reconciler aborts an upload of the hot tier that has stood open
 ///   for `abandoned_upload_after`.
 ///
+/// **Markers.** While the format object says `{"phase": "active-marks"}` and records the marks
+/// bucket this proxy has ([`ProxyConfig::marks_name`]), the puts (a put, a streamed put, a
+/// presigned put, and the parts and the completion of a multipart upload) are made on markers
+/// instead of entries, by the fast path of `docs/design/put-without-lock.md` section 5.1
+/// (`marked_put.rs`): a hot, a cold and a marker read together, then the object (to the hot tier
+/// alone, at any level) and a `DIRTY` marker together. A key that exists is [`Error::AlreadyExists`]
+/// after one more look at its marker, which makes it [`Error::Conflict`] while a delete holds or
+/// has just removed the key. A delete, and a put by a proxy with another marks bucket or none, is
+/// answered [`Error::Unavailable`], as for any format that is not active. Reads are as they are.
+///
 /// **Capacity.** The proxy reads the usage that the reconciler publishes (`_tiering/usage`,
 /// at most every [`ProxyConfig::usage_refresh`]); a usage that is missing, unreadable or
 /// unchanged for [`ProxyConfig::usage_stale_after`] counts as not full (a dead reconciler thus
@@ -292,6 +324,8 @@ struct Inner {
     pause: Arc<Mutex<pause::Pause>>,
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
+    /// The calls on the markers of keys, as this proxy: present when `config.marks` is.
+    markers: Option<Markers>,
     /// One caller reads the format object at a time, so that a caller that waited uses the read of
     /// the caller before it. The heartbeat's look at the format goes through it too.
     format_gate: Arc<AsyncMutex<()>>,
@@ -322,6 +356,7 @@ impl Proxy {
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
+        let markers = Self::markers(&config)?;
         let inner = Inner {
             hot,
             cold,
@@ -329,6 +364,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
+            markers,
             format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,
@@ -336,6 +372,25 @@ impl Proxy {
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// The calls on the markers of `config.marks`, if it has any, after the settings of the puts
+    /// made on markers were checked.
+    fn markers(config: &ProxyConfig) -> Result<Option<Markers>, Error> {
+        config.marks_put.check().map_err(Error::Other)?;
+        let Some(marks) = &config.marks else {
+            return Ok(None);
+        };
+        let markers = Markers::new(
+            Arc::clone(marks),
+            config.proxy_id.as_str(),
+            config.marks_put.markers.clone(),
+            Arc::clone(&config.mono),
+            Arc::clone(&config.sleeper),
+        );
+        markers
+            .map(Some)
+            .map_err(|error| Error::Other(format!("invalid marker settings: {error}")))
     }
 
     /// How long the usage object (`_tiering/usage`) has stood unchanged, by the monotonic clock
