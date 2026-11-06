@@ -212,10 +212,11 @@ async fn a_put_that_fails_when_its_proxy_is_not_live_leaves_its_entry() {
 
 /// Asserts that the removal of a put's entry is cut when the hot tier does not answer it: the put
 /// answers with its own error (the cold tier was down) and the entry stays held, for the
-/// reconciler. The runtime's clock is paused, so the cut happens when nothing else can run.
+/// reconciler. The runtime's clock is paused, so the cut happens when nothing else can run. The
+/// removal is tried once (`step_attempts = 1`): a second try would not meet the gate.
 #[tokio::test(start_paused = true)]
 async fn the_removal_of_an_entry_that_does_not_answer_is_cut() {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     let _gate = rig.hot.gate(Op::DeleteIfMatch, &entry_key("k"), Phase::Pre);
     rig.cold.set_down(true);
     let answer = rig.proxy.put("k", body("v")).await;
