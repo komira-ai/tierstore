@@ -123,7 +123,7 @@ Body (JSON, `v: 1`; **a reader keeps the fields and the `st` and `why` values it
 | `dirty` | bool. True: hot has a change cold does not have yet (always true in `DIRTY`). |
 | `why` | for `LOCK`: `OVERWRITE`, `DELETE`, `EVICT`, `COPYBACK`, `COLDLAND` |
 | `owner` | proxy id or leader id for `LOCK` and `CLEARING`; the registration (`departure`) says whether it lives |
-| `nonce` | random 128 bit, fresh at every write, so the object's ETag (MD5 of the body) is unique per write and **the marker's version is its ETag**; ambiguity is read back by nonce, as for entries |
+| `nonce` | `<boot>.<counter>`: 128 random bits drawn once for each `Markers` (the actor's handle on the markers), a dot, and the count of that `Markers`'s writes; unique per write, so the object's ETag (MD5 of the body) is unique per write and **the marker's version is its ETag**; ambiguity is read back by nonce, as for entries |
 
 ### 4.2 States
 
@@ -164,10 +164,11 @@ Write modes: *create* = create-only PUT; *CAS* = PUT with `If-Match` on the mark
 
 The table above is the definition of the state machine.
 
-**Where it is built (pull request 2, `crates/tierstore/src/marks.rs`).** `MarkBirth` makes the creations (M1, M3, M10, M12), `MarkMove::apply` is the guard of every other row and refuses a move where the table does not allow it, and `Markers` makes the store calls. Two things the table leaves open are decided there, in the model's direction:
+**Where it is built (pull request 2, `crates/tierstore/src/marks.rs`).** `MarkBirth` makes the creations (M1, M3, M10, M12), `MarkMove::apply` is the guard of every other row and refuses a move where the table does not allow it, and `Markers` makes the store calls. Three things the table leaves open are decided there, in the model's direction:
 
 - **`dirty` of a lock is set by its reason.** A lock owes cold a copy (`dirty = true`) for `OVERWRITE`, `DELETE`, `COLDLAND` and a reason this release does not know, and not for `EVICT` and `COPYBACK`, which leave hot and cold equal; a lock taken over a `DIRTY` marker keeps owing (`dirty` is kept, not cleared). The release (M5, M6) and the reap (M9) then end in `DIRTY` if the lock owes a copy and `CLEARING` if it does not, which is the table of 5.13 whatever the reason; a holder that changed hot though its reason does not say so (an eviction whose compare found other bytes, 5.10) releases with `changed` and ends `DIRTY`. The model gives every lock `dirty = true` except the leader's copy-back lock, and reaps by reason; the two agree on every row of 5.13. They differ in one case the table does not list: a `LOCK(DELETE)` whose holder died before it wrote `gone = true` (M4'). The move keeps the `gone` it finds (`false`), so that delete rolls back (hot was not touched: the hot DELETE follows M4', and the delete was never acknowledged); the model's reap writes `gone = true` there and rolls it forward. Pull request 7 decides which one the leader takes, with the model beside it.
 - **A `CLEARING` marker has `dirty = false`** and `why` is written only for a lock; the model keeps both from the marker it replaced, and neither is read in `CLEARING`.
+- **The nonce is `<boot>.<counter>`.** The `boot` is 128 random bits drawn once for each `Markers`, and the counter is that `Markers`'s count of writes, so a restart under one actor id does not repeat a nonce and the marker's tag is unique per write (4.1).
 
 A marker whose `st` this release does not know is reaped (M9) to `DIRTY`, keeping `gone`, so that nothing it may owe is dropped; a writer treats it as a lock and waits (`MarkerState::is_held`).
 
