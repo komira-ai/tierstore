@@ -4,22 +4,31 @@
 //! The candidates are the oldest objects of the last listing of the hot tier (see the usage
 //! module), taken oldest first, a batch at a time on the pool. For one candidate:
 //!
-//! 1. An entry for the key, of any operation and state, means the key is being worked on: it is
-//!    never evicted while it has one.
-//! 2. No hot object means nothing to evict. No cold object means the hot object is the only copy:
+//! 1. No hot object means nothing to evict. No cold object means the hot object is the only copy:
 //!    it is adopted by a pending put entry instead, which the next step copies, and it is not
 //!    evicted.
-//! 3. Both tiers have it. The bytes are compared (ranges of
-//!    [`EntryReconcilerConfig::compare_range`](super::EntryReconcilerConfig), outside any entry),
-//!    unless this leader copied or compared the key itself and both content tags are still the
-//!    ones it recorded: a tag is a function of the content, so the bytes are the same. A
-//!    difference is counted ([`StepReport::mismatched`](super::StepReport)) and the hot object is
-//!    kept.
-//! 4. An `(EVICT, SEALED)` entry is created, create-only. It fails if any entry exists, and the
-//!    key is skipped. Under it both objects are looked at again: if either tag is not the one the
-//!    compare saw, nothing is deleted. Otherwise, with at least the margin of the lease left, the
-//!    hot object is deleted on its tag where the store honours that, and the entry is removed. An
-//!    entry whose removal failed is sealed, and a later step removes it.
+//! 2. Both tiers have it. Unless this leader copied or compared the key itself and both content
+//!    tags are still the ones it recorded (a tag is a function of the content, so the bytes are
+//!    the same), the key is first looked up for an entry, and an entry of any operation and state
+//!    means the key is being worked on: it is left alone, and its bytes are not read, since a put
+//!    that has landed over a cold object leaves the tiers different for a while. Then the bytes
+//!    are compared (ranges of
+//!    [`EntryReconcilerConfig::compare_range`](super::EntryReconcilerConfig), outside any entry).
+//!    A difference is counted ([`StepReport::mismatched`](super::StepReport)) and the hot object
+//!    is kept.
+//! 3. An `(EVICT, SEALED)` entry is created, create-only. It fails if any entry exists, and the
+//!    key is skipped: for a key whose tags are recorded this is the only look at the entries,
+//!    since there is no compare for an entry to spoil. Under the entry the cold object is looked
+//!    at again: if its tag is not the one the compare saw, nothing is deleted. Otherwise, with at
+//!    least the margin of the lease left, the hot object is deleted on its tag, and the entry is
+//!    removed. The delete on a tag is what looks at the hot object again: if its tag is not the
+//!    one the compare saw, the object stays. That call is one step only on a store that enforces
+//!    `If-Match` on a DELETE (`conditional_delete` on). On the default S3 backend it is a HEAD, a
+//!    comparison and a plain DELETE, with a window that eviction has always had, which the entry
+//!    closes for the writers that follow the protocol: they find it and wait. A store that cannot
+//!    delete on a tag at all gets a head of the hot object and, if the tag is still the one the
+//!    compare saw, a plain delete. An entry whose removal failed is sealed, and a later step
+//!    removes it.
 //!
 //! Only the active-format puts take an entry today, so while the eviction's entry stands they find
 //! it and wait or fail instead of acting on an object that is going. A delete and a copy-back do
@@ -157,9 +166,6 @@ impl EntryReconciler {
 
     /// Evicts the hot object of `key` by the rules of the module.
     async fn evict_one(&self, key: &str) -> Result<Evicted, Error> {
-        if self.entries.read(key).await?.is_some() {
-            return Ok(Evicted::Kept);
-        }
         let hot = match self.hot.head(key).await {
             Ok(hot) => hot,
             Err(Error::NotFound(_)) => return Ok(Evicted::Gone),
@@ -170,10 +176,15 @@ impl EntryReconciler {
             Err(Error::NotFound(_)) => return self.adopt_unreplicated(key, hot.size).await,
             Err(error) => return Err(error),
         };
-        if !self.remembered(key, &hot, &cold)
-            && let Replicated::Differs = self.compare(key, &hot, &cold).await?
-        {
-            return Ok(Evicted::Mismatched);
+        if !self.remembered(key, &hot, &cold) {
+            // Only a compare needs the key to have no entry (see the module); the create below
+            // is what shuts the others out, for a key that is not compared as for one that is.
+            if self.entries.read(key).await?.is_some() {
+                return Ok(Evicted::Kept);
+            }
+            if let Replicated::Differs = self.compare(key, &hot, &cold).await? {
+                return Ok(Evicted::Mismatched);
+            }
         }
         let Created::Taken(taken) = self.entries.create(key, Take::Evict).await? else {
             return Ok(Evicted::Kept);
@@ -209,31 +220,21 @@ impl EntryReconciler {
         }
     }
 
-    /// Under the eviction's entry: looks at both objects again, and deletes the hot one if they
-    /// are the ones the compare saw and the lease has its margin left.
+    /// Under the eviction's entry: looks at the cold object again, and deletes the hot one if the
+    /// cold object is the one the compare saw, the hot one is too (see [`Self::delete_hot`]), and
+    /// the lease has its margin left.
     async fn delete_under_entry(
         &self,
         key: &str,
         hot: &Meta,
         cold: &Meta,
     ) -> Result<Evicted, Error> {
-        match self.hot.head(key).await {
-            Ok(now) if now.tag == hot.tag => {}
-            Ok(_) => return Ok(Evicted::Kept),
-            Err(Error::NotFound(_)) => return Ok(Evicted::Gone),
-            Err(error) => return Err(error),
-        }
         match self.cold.head(key).await {
             Ok(now) if now.tag == cold.tag => {}
             Ok(_) | Err(Error::NotFound(_)) => return Ok(Evicted::Kept),
             Err(error) => return Err(error),
         }
-        self.require_lease().await?;
-        let deleted = match self.hot.delete_if_match(key, &hot.tag).await {
-            Err(Error::Unsupported(_)) => self.hot.delete(key).await,
-            answer => answer,
-        };
-        match deleted {
+        match self.delete_hot(key, hot).await {
             Ok(()) => {
                 self.tags().forget(key);
                 self.tally.evicted(key, hot.size, hot.modified);
@@ -243,5 +244,23 @@ impl EntryReconciler {
             Err(Error::PreconditionFailed(_)) => Ok(Evicted::Kept),
             Err(error) => Err(error),
         }
+    }
+
+    /// Deletes the hot object of `key` if it has the tag of `hot`, with the margin of the lease
+    /// left before the delete. The delete on a tag is the look at the hot object: it answers that
+    /// the object is gone or is not the one named, and the S3 backend that has no conditional
+    /// delete of its own heads the object in it. Only a backend that cannot delete on a tag is
+    /// given a head of its own here, and a plain delete after it.
+    async fn delete_hot(&self, key: &str, hot: &Meta) -> Result<(), Error> {
+        self.require_lease().await?;
+        match self.hot.delete_if_match(key, &hot.tag).await {
+            Err(Error::Unsupported(_)) => {}
+            answer => return answer,
+        }
+        if self.hot.head(key).await?.tag != hot.tag {
+            return Err(Error::PreconditionFailed(key.to_owned()));
+        }
+        self.require_lease().await?;
+        self.hot.delete(key).await
     }
 }

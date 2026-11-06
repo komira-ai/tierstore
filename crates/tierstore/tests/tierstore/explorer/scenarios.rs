@@ -35,7 +35,9 @@ fn run(seed: Seed, budget: u64, clients: Vec<Vec<ClientOp>>, reconcile: usize) -
 
 /// Runs every schedule within `bound` preemptions. `at_least` is the number the exploration ran when
 /// it was written: fewer means the actors no longer reach as many store calls, and a run that
-/// visits less cannot pass for a clean one.
+/// visits less cannot pass for a clean one. A change that removes store calls from the actors (a
+/// read of an entry that is one call and not two) lowers it, and the number is set again to what
+/// the exploration now runs.
 async fn explored(scenario: Scenario, bound: u32, at_least: usize) {
     let schedules = exhaust(&scenario, bound).await;
     assert!(
@@ -50,7 +52,7 @@ async fn explored(scenario: Scenario, bound: u32, at_least: usize) {
 #[tokio::test(start_paused = true)]
 async fn a_delete_then_a_get_against_a_copy_in_flight_break_no_rule() {
     let scenario = run(Seed::Pending(OLD), ROOMY, vec![vec![DELETE, GET]], 2);
-    explored(scenario, 3, 1466).await;
+    explored(scenario, 3, 824).await;
 }
 
 /// Asserts that two puts of one key and a reconciler break no rule in any schedule of up to 2
@@ -63,7 +65,7 @@ async fn two_puts_of_one_key_against_the_reconciler_break_no_rule() {
         vec![vec![ClientOp::Put(NEW)], vec![ClientOp::Put(OTHER)]],
         2,
     );
-    explored(scenario, 2, 578).await;
+    explored(scenario, 2, 454).await;
 }
 
 /// Asserts that a put, a delete followed by a get, and the reconciler break no rule in any
@@ -77,7 +79,7 @@ async fn a_put_against_a_delete_and_a_get_break_no_rule() {
         vec![vec![ClientOp::Put(NEW)], vec![DELETE, GET]],
         2,
     );
-    explored(scenario, 2, 847).await;
+    explored(scenario, 2, 759).await;
 }
 
 /// Asserts that a get of a cold-only object (which asks for a copy-back) against a delete and the
@@ -86,7 +88,7 @@ async fn a_put_against_a_delete_and_a_get_break_no_rule() {
 #[tokio::test(start_paused = true)]
 async fn a_copy_back_against_a_delete_breaks_no_rule() {
     let scenario = run(Seed::ColdOnly(OLD), ROOMY, vec![vec![GET], vec![DELETE]], 2);
-    explored(scenario, 2, 354).await;
+    explored(scenario, 2, 270).await;
 }
 
 /// Asserts that a copy-back, a delete followed by a put of new bytes and a get, and the reconciler
@@ -100,7 +102,7 @@ async fn a_copy_back_against_a_delete_and_a_new_put_breaks_no_rule() {
         vec![vec![GET], vec![DELETE, ClientOp::Put(NEW), GET]],
         3,
     );
-    explored(scenario, 2, 1177).await;
+    explored(scenario, 2, 974).await;
 }
 
 /// Asserts that two deletes of a put the reconciler is copying, the second followed by a get,
@@ -114,13 +116,13 @@ async fn two_deletes_against_a_copy_in_flight_break_no_rule() {
         vec![vec![DELETE], vec![DELETE, GET]],
         2,
     );
-    explored(scenario, 2, 2925).await;
+    explored(scenario, 2, 2081).await;
 }
 
 /// Asserts that the eviction of a replicated object against a delete and a re-put of identical
 /// bytes breaks no rule in any schedule of up to 3 preemptions: the eviction takes its entry
-/// create-only and looks at both tags again under it, so it never removes the new object, which
-/// is acknowledged and read back.
+/// create-only, heads the cold object again under it and deletes the hot object on the tag it
+/// compared, so it never removes the new object, which is acknowledged and read back.
 #[tokio::test(start_paused = true)]
 async fn an_eviction_against_a_delete_and_an_identical_put_breaks_no_rule() {
     let scenario = run(
@@ -129,7 +131,7 @@ async fn an_eviction_against_a_delete_and_an_identical_put_breaks_no_rule() {
         vec![vec![DELETE, ClientOp::Put(OLD), GET]],
         2,
     );
-    explored(scenario, 3, 776).await;
+    explored(scenario, 3, 634).await;
 }
 
 /// Asserts that the eviction of a replicated object against a get and a delete breaks no rule in
@@ -143,7 +145,7 @@ async fn an_eviction_against_a_get_and_a_delete_breaks_no_rule() {
         vec![vec![GET], vec![DELETE]],
         2,
     );
-    explored(scenario, 2, 515).await;
+    explored(scenario, 2, 510).await;
 }
 
 /// Asserts that 200 walks of seed 1 over four actors (a delete and a get, a delete, a get, the

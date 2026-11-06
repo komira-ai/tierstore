@@ -72,6 +72,10 @@ pub(super) struct Books {
     scan_at: Option<u64>,
     /// When the figure is published next, on the monotonic clock; none for at once.
     publish_at: Option<u64>,
+    /// The content tag of the usage object as this leader last wrote it, so that the next
+    /// publication is one conditional put and no HEAD; none until it has written, and again
+    /// after a write that failed.
+    usage_tag: Option<String>,
     /// The objects the last listing offered for eviction, oldest first.
     pub(super) candidates: VecDeque<Candidate>,
     /// Whether an eviction cycle is open: it opened when the figure passed the high water and
@@ -373,8 +377,11 @@ impl EntryReconciler {
             copy_lag: self.tally.lag(),
             time: self.config.base.clock.now(),
         };
-        match write_object(self.hot.as_ref(), USAGE_KEY, to_body(&usage)).await {
-            Ok(()) => {
+        let known = self.books.usage_tag.take();
+        let body = to_body(&usage);
+        match write_object(self.hot.as_ref(), USAGE_KEY, body, known.as_deref()).await {
+            Ok(tag) => {
+                self.books.usage_tag = Some(tag);
                 let wait = millis(self.config.usage_interval);
                 self.books.publish_at = Some(now.saturating_add(wait));
             }

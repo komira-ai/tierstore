@@ -329,3 +329,82 @@ async fn this_branch_reads_lists_replaces_and_deletes_an_entry_key_the_previous_
         Err(tierstore::Error::NotFound("_entries/gone".to_owned()))
     );
 }
+
+/// Asserts that this branch reads, lists, replaces and deletes what the previous release put under
+/// a key of exactly 255 encoded bytes (the longest it took), and under a key whose plain name has
+/// the shape of a hashed one (100 bytes, `~`, 64 hex digits): each has the size, the tag and the
+/// bytes the previous release gives it and is listed once under its own key; the previous release
+/// refuses a key of 256 bytes, which this branch takes, and reads the 255-byte key's replacement.
+#[tokio::test]
+async fn this_branch_reads_lists_replaces_and_deletes_the_longest_keys_the_previous_release_put() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-old-long");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    let longest = "x".repeat(255);
+    let shaped = format!("{}/{}", "s".repeat(100), "0123456789abcdef".repeat(4));
+    before.put(&longest, body(1, 30)).await.unwrap();
+    before.put(&shaped, body(2, 31)).await.unwrap();
+    let over = "y".repeat(256);
+    let refused = before.put(&over, body(3, 5)).await;
+    assert!(matches!(refused, Err(PrevError::Other(_))), "{refused:?}");
+
+    for (key, seed, len) in [(&longest, 1, 30), (&shaped, 2, 31)] {
+        let read = before.head(key).await.unwrap();
+        let seen = now.head(key).await.unwrap();
+        assert_eq!((seen.size, &seen.tag), (read.size, &read.tag), "{key}");
+        assert_eq!(now.get(key, None).await.unwrap(), body(seed, len), "{key}");
+    }
+    let (seen, read) = listings(&now, &before).await;
+    assert_eq!(seen, read);
+    assert_eq!(seen.len(), 2);
+
+    let tag = now.head(&longest).await.unwrap().tag;
+    now.put_if_match(&longest, body(4, 12), &tag).await.unwrap();
+    assert_eq!(before.get(&longest, None).await.unwrap(), body(4, 12));
+    now.put(&over, body(5, 6)).await.unwrap();
+    assert_eq!(now.get(&over, None).await.unwrap(), body(5, 6));
+    now.delete(&longest).await.unwrap();
+    now.delete(&shaped).await.unwrap();
+    now.delete(&over).await.unwrap();
+    assert!(now.list("").await.unwrap().is_empty());
+    assert!(before.list("").await.unwrap().is_empty());
+}
+
+/// Asserts that the previous release, over a directory in which this branch wrote a key whose name
+/// is over 255 bytes beside plain keys, reads, replaces and deletes the plain keys as before and
+/// lists them; it does not find the long key (a head by that key is an error of the kind it gave
+/// for any key too long for a file name) and lists the long key's file once, under the key its
+/// 165-byte name decodes to, without an error; and this branch still finds the long key and the
+/// plain keys.
+#[tokio::test]
+async fn the_previous_release_reads_the_plain_keys_beside_a_long_key_this_branch_wrote() {
+    let dir = TestDir::under(env!("CARGO_TARGET_TMPDIR"), "compat-dir-new-long");
+    let now = DirBackend::open(dir.path()).unwrap();
+    let before = PrevDir::open(dir.path()).unwrap();
+
+    let body = |seed, len| Bytes::from(patterned(seed, len));
+    let long = "l".repeat(400);
+    now.put("a", body(1, 10)).await.unwrap();
+    now.put(&long, body(2, 11)).await.unwrap();
+    now.put("z", body(3, 12)).await.unwrap();
+
+    assert_eq!(before.get("a", None).await.unwrap(), body(1, 10));
+    assert_eq!(before.get("z", None).await.unwrap(), body(3, 12));
+    let refused = before.head(&long).await;
+    assert!(matches!(refused, Err(PrevError::Other(_))), "{refused:?}");
+    let listed = keys(before.list("").await.unwrap(), |object| object.key);
+    assert_eq!(listed.len(), 3);
+    assert_eq!((listed[0].as_str(), listed[2].as_str()), ("a", "z"));
+    assert_eq!(listed[1].len(), 165);
+    assert!(listed[1].starts_with(&"l".repeat(100)));
+    let tag = before.head("a").await.unwrap().tag;
+    before.put_if_match("a", body(4, 9), &tag).await.unwrap();
+    before.delete("z").await.unwrap();
+
+    assert_eq!(now.get("a", None).await.unwrap(), body(4, 9));
+    assert_eq!(now.get(&long, None).await.unwrap(), body(2, 11));
+    let now_keys = keys(now.list("").await.unwrap(), |object| object.key);
+    assert_eq!(now_keys, ["a", long.as_str()]);
+}

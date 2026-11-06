@@ -171,8 +171,8 @@ pub use clock::{Clock, Mono, MonotonicClock, SystemClock};
 pub use deadline::Deadline;
 pub use dir::DirBackend;
 pub use entry::{
-    Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, decode_entry,
-    encode_entry, entry_key,
+    Attempt, Created, Entries, Entry, EntryOp, EntryState, Outcome, Seen, Step, Take, Unsettled,
+    decode_entry, encode_entry, entry_key,
 };
 pub use entry_reconciler::{EntryReconciler, EntryReconcilerConfig, StepReport};
 pub use error::Error;
@@ -192,4 +192,4 @@ pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]
 pub use s3::S3Backend;
 pub use sleeper::{RecordingSleeper, Sleeper, TokioSleeper};
-pub use tiered::{DeleteWait, Proxy, ProxyConfig};
+pub use tiered::{DeleteWait, Proxy, ProxyConfig, StepRetry};
