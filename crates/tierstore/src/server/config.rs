@@ -53,7 +53,7 @@ use super::cli::{
 use super::cli_heartbeat::HeartbeatFlags;
 use super::config_cache::{CacheSettings, LocalCacheTable};
 use super::config_combined::{CombinedSettings, combined};
-use super::config_entry::entry_tuning;
+use super::config_entry::{entry_tuning, refuse_marks_keys};
 use super::config_handoff::handoff_of;
 use super::config_interface::{
     InterfaceTable, Interfaces, OciTable, UpstreamTable, interfaces, with_legacy,
@@ -453,6 +453,11 @@ pub(super) struct TierTable {
     pub departure: Option<Dur>,
     #[serde(default)]
     pub held_ttl: Option<Dur>,
+    pub copy_concurrency: Option<u32>,
+    pub marks_page: Option<u32>,
+    pub orphan_after: Option<Dur>,
+    pub tombstone_hold: Option<Dur>,
+    pub lock_lease: Option<Dur>,
     #[serde(default)]
     pub step_attempts: Option<u32>,
     #[serde(default)]
@@ -644,7 +649,8 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("lock_retry", cold.lock_retry.is_some()),
         ("first_beat_poll", cold.first_beat_poll.is_some()),
     ];
-    refuse("cold_store", "only [hot_store] has it", &cold_has)
+    refuse("cold_store", "only [hot_store] has it", &cold_has)?;
+    refuse_marks_keys(cold)
 }
 
 /// The retired keys of `[hot_store]` that `hot` sets, as `hot_store.<key>`: the keys of the
@@ -792,8 +798,8 @@ pub(super) fn storage(
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
     let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
-    let entry_tuning = entry_tuning(&hot, lease_ttl)?;
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
+    let entry_tuning = entry_tuning(&hot, lease_ttl, reconcile_tuning.lease_margin)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;
     let shared = front_of(server, fronts.s3, per_run)?;

@@ -134,3 +134,17 @@ async fn the_second_handle_is_a_store_of_its_own_and_a_dir_hot_tier_makes_no_dir
         "--hot \"s3:tier-hot-marks\": it needs --hot-credentials-file"
     );
 }
+
+/// Asserts the name the reconciler gives the marks bucket it was handed, which is the name a
+/// format record must carry for its markers to be worked: the bucket of an `s3` tier without its
+/// `s3:`, and the spec itself for a `memory` or a `dir` tier.
+#[test]
+fn the_marks_bucket_is_named_by_its_s3_bucket_or_by_its_spec() {
+    use crate::server::cli::marks_name;
+    assert_eq!(marks_name("s3:tier-hot-marks"), "tier-hot-marks");
+    assert_eq!(marks_name("memory"), "memory");
+    assert_eq!(
+        marks_name("dir:/var/tierstore/hot-marks"),
+        "dir:/var/tierstore/hot-marks"
+    );
+}

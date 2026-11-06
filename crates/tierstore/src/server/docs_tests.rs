@@ -133,6 +133,11 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.step_attempts",
     "hot_store.step_retry_min",
     "hot_store.step_retry_max",
+    "hot_store.copy_concurrency",
+    "hot_store.marks_page",
+    "hot_store.orphan_after",
+    "hot_store.tombstone_hold",
+    "hot_store.lock_lease",
 ];
 
 /// Keys of the table the pages need not name.

@@ -10,10 +10,10 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig, StepRetry};
+use crate::{DeleteWait, EntryReconcilerConfig, MarkersConfig, ProxyConfig, StepRetry};
 
 use super::cli_heartbeat::DEPARTURE;
-use super::config::{ConfigError, TierTable, duration, invalid, within};
+use super::config::{ConfigError, TierTable, duration, invalid, refuse, within};
 use super::config_tuning::{HOUR, MS, span};
 use super::config_units::Dur;
 
@@ -89,6 +89,20 @@ pub struct EntryTuning {
     /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
     /// lease left held while it copied is not reaped before that lease would have lapsed.
     pub held_ttl: Duration,
+    /// `hot_store.copy_concurrency`: the keys the copier works at once under the markers.
+    pub copy_concurrency: u32,
+    /// `hot_store.marks_page`: the markers in one listing page of the marks bucket.
+    pub marks_page: u32,
+    /// `hot_store.orphan_after`: how long a `DIRTY` marker with no hot object behind it stands
+    /// unchanged before the leader clears it.
+    pub orphan_after: Duration,
+    /// `hot_store.tombstone_hold`: how long a `gone` marker is kept after its cold object was
+    /// deleted or overwritten; at least `lease_ttl` plus `lease_margin`.
+    pub tombstone_hold: Duration,
+    /// `hot_store.lock_lease`: how long a lock stands unchanged before the leader reaps it
+    /// though its holder lives; at least twice the default `lock_refresh` plus the default
+    /// `queued_call_margin`.
+    pub lock_lease: Duration,
 }
 
 impl Default for EntryTuning {
@@ -116,6 +130,11 @@ impl Default for EntryTuning {
             step_retry_min: StepRetry::new().delay,
             step_retry_max: StepRetry::new().delay_max,
             held_ttl: Duration::from_secs(3600),
+            copy_concurrency: 128,
+            marks_page: 1000,
+            orphan_after: Duration::from_secs(120),
+            tombstone_hold: Duration::from_secs(120),
+            lock_lease: MarkersConfig::default().lock_lease,
         }
     }
 }
@@ -136,6 +155,11 @@ impl EntryTuning {
         config.candidate_limit = self.candidate_limit as usize;
         config.tag_record_limit = self.tag_record_limit as usize;
         config.held_ttl = self.held_ttl;
+        config.copy_concurrency = self.copy_concurrency as usize;
+        config.marks_page = self.marks_page as usize;
+        config.orphan_after = self.orphan_after;
+        config.tombstone_hold = self.tombstone_hold;
+        config.markers.lock_lease = self.lock_lease;
     }
 
     /// Gives the values to the settings of the proxy.
@@ -200,11 +224,54 @@ fn longer_than(held_ttl: Duration, key: &str, longer: Duration) -> Result<(), Co
     Ok(())
 }
 
+/// Refuses the settings of the markers that do not hold together: a `tombstone_hold` below
+/// `lease_ttl` plus `lease_margin` (a stalled leader's late cold write could land after the hold),
+/// and a `lock_lease` below two refreshes plus the margin of a queued call (checked by the
+/// markers' own settings, with the defaults of the keys not yet in the file).
+fn marks_checks(
+    tuning: &EntryTuning,
+    lease_ttl: Duration,
+    lease_margin: Option<Duration>,
+) -> Result<(), ConfigError> {
+    let margin = lease_margin.unwrap_or(lease_ttl / 3);
+    let least = lease_ttl.saturating_add(margin);
+    if tuning.tombstone_hold < least {
+        let why = format!(
+            "{}ms must be at least lease_ttl plus lease_margin, which is {}ms, or a late cold \
+             write of a stalled leader can land after the hold",
+            tuning.tombstone_hold.as_millis(),
+            least.as_millis()
+        );
+        return Err(invalid("hot_store.tombstone_hold", why));
+    }
+    let markers = MarkersConfig {
+        lock_lease: tuning.lock_lease,
+        ..MarkersConfig::default()
+    };
+    markers
+        .check()
+        .map_err(|error| invalid("hot_store.lock_lease", error.to_string()))
+}
+
+/// Refuses the keys of the leader's pass over the markers that `cold` sets: only `[hot_store]`
+/// has them.
+pub(super) fn refuse_marks_keys(cold: &TierTable) -> Result<(), ConfigError> {
+    let set = [
+        ("copy_concurrency", cold.copy_concurrency.is_some()),
+        ("marks_page", cold.marks_page.is_some()),
+        ("orphan_after", cold.orphan_after.is_some()),
+        ("tombstone_hold", cold.tombstone_hold.is_some()),
+        ("lock_lease", cold.lock_lease.is_some()),
+    ];
+    refuse("cold_store", "only [hot_store] has it", &set)
+}
+
 /// The entry settings `[hot_store]` gives, or the defaults of those it leaves out, checked against
 /// `lease_ttl`.
 pub(super) fn entry_tuning(
     hot: &TierTable,
     lease_ttl: Duration,
+    lease_margin: Option<Duration>,
 ) -> Result<EntryTuning, ConfigError> {
     let old = EntryTuning::default();
     let tuning = EntryTuning {
@@ -290,7 +357,23 @@ pub(super) fn entry_tuning(
             HOUR,
         )?,
         held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
+        copy_concurrency: count(
+            "copy_concurrency",
+            hot.copy_concurrency,
+            old.copy_concurrency,
+            100_000,
+        )?,
+        marks_page: count("marks_page", hot.marks_page, old.marks_page, 100_000)?,
+        orphan_after: time("orphan_after", hot.orphan_after, old.orphan_after, YEAR)?,
+        tombstone_hold: time(
+            "tombstone_hold",
+            hot.tombstone_hold,
+            old.tombstone_hold,
+            YEAR,
+        )?,
+        lock_lease: time("lock_lease", hot.lock_lease, old.lock_lease, YEAR)?,
     };
+
     let low = ("retry_min", tuning.retry_min);
     ordered("retry_max", low, tuning.retry_max)?;
     let low = ("delete_poll_min", tuning.delete_poll_min);
@@ -312,9 +395,14 @@ pub(super) fn entry_tuning(
         longer_than(tuning.held_ttl, "lease_ttl", lease_ttl)?;
         longer_than(tuning.held_ttl, "departure", departure)?;
     }
+    marks_checks(&tuning, lease_ttl, lease_margin)?;
     Ok(tuning)
 }
 
 #[cfg(test)]
 #[path = "config_entry_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_marks_tests.rs"]
+mod marks_tests;

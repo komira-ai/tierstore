@@ -18,9 +18,12 @@
 //! - `active-marks`: the phase of the protocol of `docs/design/put-without-lock.md`, which keeps a
 //!   marker in the marks bucket in place of the entry of a key. This release reads and writes the
 //!   word and the optional `marks_bucket` that names the bucket, and acts on neither: it makes no
-//!   write under it (503, as for a phase it does not take as active), pauses nothing, and its
-//!   entry reconciler does nothing. A release before it takes the phase to be one it does not
-//!   know, which is the same.
+//!   write under it (503, as for a phase it does not take as active) and pauses nothing. Its
+//!   reconciler works the markers (`docs/design/put-without-lock.md`, 5.9, 5.13 and 5.14: the
+//!   copy to cold, the reap and the usage) only if it was given the marks bucket and its name is
+//!   the record's `marks_bucket`, and does nothing otherwise, and it never works the entries
+//!   under this phase. A release before it takes the phase to be one it does not know, which is
+//!   the same as doing nothing.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
@@ -88,6 +91,15 @@ impl Format {
     /// epoch is [`ENTRIES_EPOCH`] or later.
     pub(crate) fn runs_entries(&self) -> bool {
         self.phase == FormatPhase::Active && self.epoch.is_some_and(|epoch| epoch >= ENTRIES_EPOCH)
+    }
+}
+
+impl Format {
+    /// Whether a reconciler has a pass to make under this: it works the entries (`runs_entries`),
+    /// or the phase is `active-marks`, where it works the markers if it has the marks bucket the
+    /// record names.
+    pub(crate) fn runs_a_pass(&self) -> bool {
+        self.runs_entries() || self.phase == FormatPhase::ActiveMarks
     }
 }
 

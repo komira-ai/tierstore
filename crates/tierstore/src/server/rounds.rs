@@ -2,8 +2,9 @@
 //! wait before the next.
 //!
 //! A round does nothing until the format object (`_tiering/format`) says
-//! `{"epoch": 2, "phase": "active"}`, and a format that cannot be read makes the round fail and do
-//! nothing. The wait is the idle wait of the entry reconciler's own loop: none while a round makes
+//! `{"epoch": 2, "phase": "active"}` or `{"phase": "active-marks"}` (the reconciler then works the
+//! markers if it was given the marks bucket the record names, and does nothing otherwise), and a
+//! format that cannot be read makes the round fail and do nothing. The wait is the idle wait of the entry reconciler's own loop: none while a round makes
 //! progress, and otherwise one that doubles from `idle_min` to `idle_max`.
 
 use std::sync::Arc;
@@ -34,23 +35,34 @@ pub(crate) struct Rounds {
 impl Rounds {
     /// A reconciler over `hot` and `cold` with the settings `config` and `tuning` (`[hot_store]`'s
     /// entry keys); it counts a proxy as departed after `departure`, which is the proxies' own
-    /// `--departure`.
+    /// `--departure`. `marks` is the name and the handle of the marks bucket of the hot store, if
+    /// the node has one: the markers are worked only under a format that names it.
+    ///
+    /// # Errors
+    /// The text of the refusal of the markers' settings, which the loader has checked already.
     pub(crate) fn tuned(
         hot: Arc<dyn Backend>,
         cold: Arc<dyn Backend>,
+        marks: Option<(String, Arc<dyn Backend>)>,
         config: ReconcilerConfig,
         departure: Duration,
         tuning: &EntryTuning,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut entry_config = EntryReconcilerConfig::new(config);
         entry_config.departure = departure;
         tuning.apply_reconciler(&mut entry_config);
         let idle = Idle::new(entry_config.idle_min, entry_config.idle_max);
-        Self {
-            reconciler: EntryReconciler::new(Arc::clone(&hot), cold, entry_config),
+        let mut reconciler = EntryReconciler::new(Arc::clone(&hot), cold, entry_config);
+        if let Some((bucket, store)) = marks {
+            reconciler = reconciler
+                .with_marks(store, bucket)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(Self {
+            reconciler,
             hot,
             idle,
-        }
+        })
     }
 
     /// [`Rounds::tuned`] with the default settings of the entry reconciler.
@@ -61,15 +73,17 @@ impl Rounds {
         config: ReconcilerConfig,
         departure: Duration,
     ) -> Self {
-        Self::tuned(hot, cold, config, departure, &EntryTuning::default())
+        let tuning = EntryTuning::default();
+        Self::tuned(hot, cold, None, config, departure, &tuning).expect("no marks, no refusal")
     }
 
     /// Does one round, as the module says.
     pub(crate) async fn round(&mut self) -> Round {
         // The entry reconciler goes on any `active` format; a node works the entries only from
-        // epoch 2, so the epoch is looked at here.
+        // epoch 2, so the epoch is looked at here. It goes on `active-marks` too, and decides
+        // there whether it has the marks bucket the record names.
         match read_format(self.hot.as_ref()).await {
-            Ok(format) if format.as_ref().is_some_and(Format::runs_entries) => {}
+            Ok(format) if format.as_ref().is_some_and(Format::runs_a_pass) => {}
             Ok(_) => return self.waiting(Vec::new()),
             Err(error) => return self.waiting(vec![error]),
         }
@@ -101,3 +115,7 @@ impl Rounds {
 #[cfg(test)]
 #[path = "rounds_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rounds_marks_tests.rs"]
+mod marks_tests;
