@@ -181,7 +181,8 @@ async fn a_reap_for_age_that_loses_to_the_live_owner_leaves_the_entry_as_the_own
         Some((EntryOp::Put, EntryState::Pending, None))
     );
     assert_eq!(r.step().await, report(1));
-    assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
+    assert!(rig.cold_has("k").await);
+    assert!(rig.entry("k").await.is_none());
 }
 
 /// Asserts that an owner that comes back after its held entry was reaped for age loses: a put's
@@ -204,8 +205,9 @@ async fn an_owner_that_returns_after_the_reap_for_age_changes_nothing() {
         } else {
             Take::Del
         };
-        let Created::Taken(taken) = client.create("k", take).await.unwrap() else {
-            panic!("the entry is free");
+        let taken = match client.create("k", take).await.unwrap() {
+            Created::Taken(seen) => seen,
+            Created::Exists => panic!("the entry is free"),
         };
         let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
             config.held_ttl = Duration::from_secs(100);
