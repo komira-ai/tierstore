@@ -204,6 +204,48 @@ async fn a_completion_never_replaces_an_object_where_writes_are_conditional() {
     assert_eq!(s3.object_len(&k), Some(6));
 }
 
+/// Asserts that a completion with `If-Match` replaces the object only if it has that entity tag:
+/// the tag of the object gives the object of the parts and the tag of the answer, another tag is
+/// a 412 and an absent key is `NotFound`, and each refusal leaves the object as it was and the
+/// upload open, so the same completion with the right tag still succeeds.
+#[tokio::test]
+async fn a_completion_with_if_match_replaces_only_the_object_with_that_tag() {
+    let s3 = FakeS3::start().await;
+    let store = s3.store(CONDITIONAL);
+    let k = key("matched");
+    let first = Bytes::from_static(b"first");
+    let held = store.put_new_tagged(&k, first).await.unwrap();
+    let id = store.create_multipart(&k).await.unwrap();
+    let tag = part(&store, &k, &id, 1, "second").await.unwrap();
+    let parts = [(1, tag)];
+
+    let wrong = store
+        .complete_multipart_if_match(&k, &id, &parts, "\"not-the-tag\"")
+        .await;
+    assert_eq!(refusal(wrong), s3_error(412, "PreconditionFailed"));
+    assert_eq!((s3.object_len(&k), s3.incomplete_uploads()), (Some(5), 1));
+
+    let absent = key("absent");
+    let elsewhere = store.create_multipart(&absent).await.unwrap();
+    let kept = part(&store, &absent, &elsewhere, 1, "x").await.unwrap();
+    let missing = store
+        .complete_multipart_if_match(&absent, &elsewhere, &[(1, kept)], &held)
+        .await;
+    assert!(
+        matches!(missing, Err(ObjectStoreError::NotFound(_))),
+        "{missing:?}"
+    );
+    assert_eq!(s3.incomplete_uploads(), 2);
+
+    let made = store
+        .complete_multipart_if_match(&k, &id, &parts, &held)
+        .await
+        .unwrap();
+    assert_eq!(store.head(&k).await.unwrap().etag, made);
+    assert_ne!(made, held);
+    assert_eq!((s3.object_len(&k), s3.incomplete_uploads()), (Some(6), 1));
+}
+
 /// Asserts that a part whose body fails, also after its last byte, or whose body is shorter
 /// or longer than its length, fails the call with the error of the body and is not stored: the
 /// service holds no part afterwards. A body that fails after all its bytes must not be taken

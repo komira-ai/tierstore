@@ -326,6 +326,19 @@ impl Backend for CachedStore {
         self.inner.complete_upload(key, id, parts).await
     }
 
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let inner = &self.inner;
+        let tag = inner.complete_upload_if_match(key, id, parts, etag).await?;
+        self.cache().drop_key(key);
+        Ok(tag)
+    }
+
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         self.inner.abort_upload(key, id).await
     }

@@ -16,7 +16,7 @@ use tierstore::{Backend, ByteRange, Error, PartBody, ProxyConfig, S3Backend, Sys
 use crate::conformance;
 use crate::list_parts::contract as parts_contract;
 use crate::list_uploads::contract as uploads_contract;
-use crate::multipart::{contract, large};
+use crate::multipart::{conditional_contract, contract, large};
 use crate::support::{body, keys, page};
 use futures::StreamExt;
 use std::io::Read;
@@ -427,6 +427,19 @@ async fn the_s3_backend_does_multipart_uploads() {
     large(&backend).await;
     assert_eq!(s3.incomplete_uploads(), 0);
     assert_eq!(s3.stats().completed, 2);
+}
+
+/// Asserts that the S3 backend completes an upload over an existing object only if the object has
+/// the tag named, held to the same checks as the in-memory and the directory backend, with the
+/// tags without quotes; the completion that succeeds was sent with `If-Match`, and every upload
+/// the checks left open was aborted.
+#[tokio::test]
+async fn the_s3_backend_completes_an_upload_over_the_object_with_the_tag() {
+    let (s3, backend) = backend().await;
+    s3.set_min_part_bytes(0);
+    conditional_contract(&backend).await;
+    assert_eq!(s3.incomplete_uploads(), 0);
+    assert_eq!(s3.stats().completed, 1);
 }
 
 /// Asserts that the S3 backend lists the open uploads of the service as the trait says, held to

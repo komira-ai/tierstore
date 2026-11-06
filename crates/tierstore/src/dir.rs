@@ -249,6 +249,23 @@ async fn write_stream(path: &Path, body: &mut PartBody<'_>) -> Result<[u8; TAG_L
     Ok(finish(hasher))
 }
 
+/// The files of the parts of the upload in `dir` that `parts` names, in the order given.
+///
+/// # Errors
+/// [`Error::InvalidPart`] if a part named is not stored, or is stored with another content tag.
+async fn named_part_files(dir: &Path, parts: &[(u32, String)]) -> Result<Vec<PathBuf>, Error> {
+    let stored = stored_parts(dir).await?;
+    let mut files = Vec::new();
+    for (number, tag) in parts {
+        let found = stored.iter().find(|part| part.is(*number, tag));
+        let Some(found) = found else {
+            return Err(Error::InvalidPart(format!("part {number}")));
+        };
+        files.push(dir.join(&found.name));
+    }
+    Ok(files)
+}
+
 /// Writes the contents of `files`, one after the other, to a new file at `path` behind the
 /// content tag of the whole, which is written last, and gives the tag.
 async fn join_files(path: &Path, files: &[PathBuf], chunk: usize) -> Result<[u8; TAG_LEN], Error> {
@@ -904,15 +921,7 @@ impl Backend for DirBackend {
     ) -> Result<String, Error> {
         let dir = self.upload_dir(key, id).await?;
         let path = self.path(key)?;
-        let stored = stored_parts(&dir).await?;
-        let mut files = Vec::new();
-        for (number, tag) in parts {
-            let found = stored.iter().find(|part| part.is(*number, tag));
-            let Some(found) = found else {
-                return Err(Error::InvalidPart(format!("part {number}")));
-            };
-            files.push(dir.join(&found.name));
-        }
+        let files = named_part_files(&dir, parts).await?;
         if fs::try_exists(&path).await.unwrap_or(false) {
             return Err(Error::AlreadyExists(key.to_owned()));
         }
@@ -925,6 +934,34 @@ impl Backend for DirBackend {
             }
         };
         self.publish(&temp, &path, key).await?;
+        let _ = fs::remove_dir_all(&dir).await;
+        Ok(hex::encode(tag))
+    }
+
+    /// Joins the parts into a temporary file outside the lock, as [`Backend::put_stream_if_match`]
+    /// writes its chunks, and then, under the lock and the tag check of
+    /// [`Backend::put_if_match`], moves the file over the object and removes the upload. A part
+    /// that is not stored, a key with no object and a tag that does not match leave the object
+    /// and the upload as they were and remove the temporary file.
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let dir = self.upload_dir(key, id).await?;
+        let files = named_part_files(&dir, parts).await?;
+        self.locate(key)
+            .await
+            .map_err(|_| Error::NotFound(key.to_owned()))?;
+        let temp = self.temp(&self.root);
+        let _scratch = Scratch(temp.clone());
+        let tag = join_files(&temp, &files, self.copy_chunk).await?;
+        let _entry = self.entry_lock(key).await?;
+        let _replacing = self.replacing.lock().await;
+        let path = self.matching(key, etag).await?.path;
+        self.install(&temp, &path).await?;
         let _ = fs::remove_dir_all(&dir).await;
         Ok(hex::encode(tag))
     }
