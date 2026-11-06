@@ -16,11 +16,13 @@
 //!   lease, has seen `drain` for the settle time, and every journal it knows is applied to its end.
 //!   Writes stay paused. This release's reconciler never writes it.
 //! - `active-marks`: the phase of the protocol of `docs/design/put-without-lock.md`, which keeps a
-//!   marker in the marks bucket in place of the entry of a key. This release reads and writes the
-//!   word and the optional `marks_bucket` that names the bucket, and acts on neither: it makes no
-//!   write under it (503, as for a phase it does not take as active), pauses nothing, and its
-//!   entry reconciler does nothing. A release before it takes the phase to be one it does not
-//!   know, which is the same.
+//!   marker in the marks bucket in place of the entry of a key. This release reads the word and the
+//!   optional `marks_bucket` that names the bucket. A read that misses the hot tier reads the marker
+//!   of its key beside the cold read (and a listing reads the marker names) in this phase, in
+//!   `drain` and `drained`, and in a phase it does not know; it writes only the `WANT` marker of a
+//!   read that asks for a copy-back, in this phase alone. It makes no other write under it (503, as
+//!   for a phase it does not take as active), pauses nothing, and its entry reconciler does
+//!   nothing. A release before it takes the phase to be one it does not know, which is the same.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
