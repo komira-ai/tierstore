@@ -25,6 +25,8 @@ use crate::{
 mod copy_back;
 #[path = "entry_reconciler_tests/evict.rs"]
 mod evict;
+#[path = "entry_reconciler_tests/evict_calls.rs"]
+mod evict_calls;
 #[path = "entry_reconciler_tests/races.rs"]
 mod races;
 #[path = "entry_reconciler_tests/sweep.rs"]

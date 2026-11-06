@@ -119,8 +119,8 @@ async fn two_deletes_against_a_copy_in_flight_break_no_rule() {
 
 /// Asserts that the eviction of a replicated object against a delete and a re-put of identical
 /// bytes breaks no rule in any schedule of up to 3 preemptions: the eviction takes its entry
-/// create-only and looks at both tags again under it, so it never removes the new object, which
-/// is acknowledged and read back.
+/// create-only, heads the cold object again under it and deletes the hot object on the tag it
+/// compared, so it never removes the new object, which is acknowledged and read back.
 #[tokio::test(start_paused = true)]
 async fn an_eviction_against_a_delete_and_an_identical_put_breaks_no_rule() {
     let scenario = run(
