@@ -21,11 +21,14 @@
 //!    since there is no compare for an entry to spoil. Under the entry the cold object is looked
 //!    at again: if its tag is not the one the compare saw, nothing is deleted. Otherwise, with at
 //!    least the margin of the lease left, the hot object is deleted on its tag, and the entry is
-//!    removed. The delete on a tag is what looks at the hot object again, in one call that
-//!    nothing can come between: if its tag is not the one the compare saw, the object stays. A
-//!    store that cannot delete on a tag gets a head of the hot object and, if the tag is still
-//!    the one the compare saw, a plain delete. An entry whose removal failed is sealed, and a
-//!    later step removes it.
+//!    removed. The delete on a tag is what looks at the hot object again: if its tag is not the
+//!    one the compare saw, the object stays. That call is one step only on a store that enforces
+//!    `If-Match` on a DELETE (`conditional_delete` on). On the default S3 backend it is a HEAD, a
+//!    comparison and a plain DELETE, with a window that eviction has always had, which the entry
+//!    closes for the writers that follow the protocol: they find it and wait. A store that cannot
+//!    delete on a tag at all gets a head of the hot object and, if the tag is still the one the
+//!    compare saw, a plain delete. An entry whose removal failed is sealed, and a later step
+//!    removes it.
 //!
 //! Only the active-format puts take an entry today, so while the eviction's entry stands they find
 //! it and wait or fail instead of acting on an object that is going. A delete and a copy-back do
