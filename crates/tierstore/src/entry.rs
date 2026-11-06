@@ -336,7 +336,7 @@ impl Unsettled {
 }
 
 /// An answer of a read, with a missing object as `None`.
-fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
+pub(crate) fn found<T>(answer: Result<T, Error>) -> Result<Option<T>, Error> {
     match answer {
         Ok(value) => Ok(Some(value)),
         Err(Error::NotFound(_)) => Ok(None),

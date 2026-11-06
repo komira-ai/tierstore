@@ -123,7 +123,7 @@ Body (JSON, `v: 1`; **a reader keeps the fields and the `st` and `why` values it
 | `dirty` | bool. True: hot has a change cold does not have yet (always true in `DIRTY`). |
 | `why` | for `LOCK`: `OVERWRITE`, `DELETE`, `EVICT`, `COPYBACK`, `COLDLAND` |
 | `owner` | proxy id or leader id for `LOCK` and `CLEARING`; the registration (`departure`) says whether it lives |
-| `nonce` | random 128 bit, fresh at every write, so the object's ETag (MD5 of the body) is unique per write and **the marker's version is its ETag**; ambiguity is read back by nonce, as for entries |
+| `nonce` | `<boot>.<counter>`: 128 random bits drawn once for each `Markers` (the actor's handle on the markers), a dot, and the count of that `Markers`'s writes; unique per write, so the object's ETag (MD5 of the body) is unique per write and **the marker's version is its ETag**; ambiguity is read back by nonce, as for entries |
 
 ### 4.2 States
 
@@ -163,6 +163,14 @@ Write modes: *create* = create-only PUT; *CAS* = PUT with `If-Match` on the mark
 **Who may write which state.** `none`, `DIRTY` and `WANT` are written by anyone (create or CAS). `LOCK` and `CLEARING` are written only by their owner, or by the leader reaping an owner that has departed or a holder whose lease ran out (M9). A writer that finds `LOCK` or `CLEARING` and is not its owner **waits** (section 5.2) and writes nothing. This one rule removes every marker race: a stale writer's CAS fails on the ETag; a waiting writer never changes what the holder reads back.
 
 The table above is the definition of the state machine.
+
+**Where it is built (pull request 2, `crates/tierstore/src/marks.rs`).** `MarkBirth` makes the creations (M1, M3, M10, M12), `MarkMove::apply` is the guard of every other row and refuses a move where the table does not allow it, and `Markers` makes the store calls. Three things the table leaves open are decided there, in the model's direction:
+
+- **`dirty` of a lock is set by its reason.** A lock owes cold a copy (`dirty = true`) for `OVERWRITE`, `DELETE`, `COLDLAND` and a reason this release does not know, and not for `EVICT` and `COPYBACK`, which leave hot and cold equal; a lock taken over a `DIRTY` marker keeps owing (`dirty` is kept, not cleared). The release (M5, M6) and the reap (M9) then end in `DIRTY` if the lock owes a copy and `CLEARING` if it does not, which is the table of 5.13 whatever the reason; a holder that changed hot though its reason does not say so (an eviction whose compare found other bytes, 5.10) releases with `changed` and ends `DIRTY`. The model gives every lock `dirty = true` except the leader's copy-back lock, and reaps by reason; the two agree on every row of 5.13. They differ in one case the table does not list: a `LOCK(DELETE)` whose holder died before it wrote `gone = true` (M4'). The move keeps the `gone` it finds (`false`), so that delete rolls back (hot was not touched: the hot DELETE follows M4', and the delete was never acknowledged); the model's reap writes `gone = true` there and rolls it forward. Pull request 7 decides which one the leader takes, with the model beside it.
+- **A `CLEARING` marker has `dirty = false`** and `why` is written only for a lock; the model keeps both from the marker it replaced, and neither is read in `CLEARING`.
+- **The nonce is `<boot>.<counter>`.** The `boot` is 128 random bits drawn once for each `Markers`, and the counter is that `Markers`'s count of writes, so a restart under one actor id does not repeat a nonce and the marker's tag is unique per write (4.1).
+
+A marker whose `st` this release does not know is reaped (M9) to `DIRTY`, keeping `gone`, so that nothing it may owe is dropped; a writer treats it as a lock and waits (`MarkerState::is_held`).
 
 ## 5. Every operation
 
@@ -229,7 +237,7 @@ A multipart completion differs only in the object write (`complete_upload`) and 
 
 ### 5.2 Waiting for a lock, and keeping one (used by 5.1, 5.3, 5.5, 5.6, 5.10, 5.11)
 
-*Plan: pull request 2 of 10.4.*
+*Built in part by pull request 2 of 10.4 (`Markers::wait`, `Markers::refresh_due`, `Markers::may_destroy` and `MarkMove::Refresh` in `marks.rs`, with `MarkersConfig` holding `lock_wait`, `lock_poll_min`, `lock_poll_max`, `lock_poll_factor`, `lock_lease`, `lock_refresh` and `queued_call_margin` and refusing values that do not hold together). Plan: the detached task and its drop guard and the keeping of a lock after an unknown hot DELETE, which come with the pull requests that take locks (5 and 6), the leader's reap by the lease (7), and the TOML keys of section 9, which come with the first pull request that constructs a `Markers` in the server: until then nothing calls the module.*
 
 A writer that finds `LOCK` or `CLEARING` (not its own) polls the marker with a GET at `lock_poll_min` (20 ms), multiplied by `lock_poll_factor` (2) each time up to `lock_poll_max` (1 s), until the state is not `LOCK`/`CLEARING` or `lock_wait` passes → 503 `SlowDown`. **`lock_wait` defaults to 5 s**, under the 10 to 30 s default timeouts of common S3 SDKs, so the client sees the 503 and not its own timeout. The 503 carries `Retry-After: 1`, and this document states that a `SlowDown` here is **not a throttle**: S3 SDKs apply a global back-off to `SlowDown`, and a deployment whose clients do so should read a lock 503 as an unusual event (a crash or a leak), not as a normal one. A dead owner is reaped by the leader (5.13) within `departure` (60 s), which is longer than `lock_wait`: a crashed owner's key yields a 503 at least once, and `Retry-After` says when to come back. The poll uses the injected clock and a recording sleeper. A writer that finds `DIRTY` or `WANT` does not wait; it locks by CAS. A reader never waits (I12).
 

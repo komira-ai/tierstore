@@ -1,15 +1,14 @@
 //! The marker of one key: the object named exactly by the key in the marks bucket of the hot
 //! store, which says that a change to the key is not yet the cold tier's too, or that someone holds
 //! the key (`docs/design/put-without-lock.md`, section 4). This module is the marker's body: its
-//! fields, its encoding, and what a reader does with what it does not know. No code of this release
-//! reads or writes a marker object yet; the operations on markers come with the pull requests that
-//! use them.
+//! fields, its encoding, and what a reader does with what it does not know. The calls that read and
+//! write marker objects are in the module `marks`; nothing outside it calls them yet.
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a
-//!   clearing) and `nonce`, 128 random bits written afresh by every write, so that the content tag
-//!   of the object, which is the version a conditional write names, is unique per write. `why` and
-//!   `owner` are left out of the body when they are not set.
+//!   clearing) and `nonce`, a value written afresh by every write (see the module `marks`), so that
+//!   the content tag of the object, which is the version a conditional write names, is unique per
+//!   write. `why` and `owner` are left out of the body when they are not set.
 //! - A reader keeps what it does not know and a rewrite carries it over: a field it does not know
 //!   is kept in [`Marker::extra`] (with its value, whatever the shape, ordered by name), and an `st` or a `why` word it does not know is kept as the
 //!   text it was ([`MarkerState::Other`], [`MarkerWhy::Other`]). A later release therefore adds
@@ -43,6 +42,16 @@ pub enum MarkerState {
     Want,
     /// A word a later release adds, kept as it was written.
     Other(String),
+}
+
+impl MarkerState {
+    /// Whether a writer other than the owner must wait for the marker to leave this state: a lock
+    /// or a clearing, and a word this release does not know, which the design treats as a lock
+    /// (writers wait, and the leader reaps it by its lease).
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        !matches!(self, Self::Dirty | Self::Want)
+    }
 }
 
 impl From<String> for MarkerState {
@@ -85,6 +94,17 @@ pub enum MarkerWhy {
     ColdLand,
     /// A word a later release adds, kept as it was written.
     Other(String),
+}
+
+impl MarkerWhy {
+    /// Whether a lock with this reason may leave the hot object different from the cold one, so
+    /// that the key owes the cold tier a copy when the lock ends however it ends. An eviction
+    /// and a copy-back leave the two the same; a word this release does not know is taken to
+    /// change it.
+    #[must_use]
+    pub fn owes_cold_a_copy(&self) -> bool {
+        !matches!(self, Self::Evict | Self::CopyBack)
+    }
 }
 
 impl From<String> for MarkerWhy {
