@@ -58,9 +58,10 @@ struct Stored {
     modified: u64,
 }
 
-/// The content tag of a body: the hex of its SHA-256.
-fn tag_of(body: &Bytes) -> String {
-    hex::encode(Sha256::digest(body))
+/// The content tag of a body: the hex of its SHA-256, or its first 32 digits where `short`.
+fn tag_of(body: &Bytes, short: bool) -> String {
+    let full = hex::encode(Sha256::digest(body));
+    if short { full[..32].to_owned() } else { full }
 }
 
 /// The chunks of `body`, joined.
@@ -105,6 +106,7 @@ pub struct MemoryBackend {
     objects: Mutex<BTreeMap<String, Stored>>,
     uploads: Mutex<Uploads>,
     clock: Arc<TestClock>,
+    short_tags: bool,
 }
 
 impl MemoryBackend {
@@ -122,7 +124,17 @@ impl MemoryBackend {
             objects: Mutex::new(BTreeMap::new()),
             uploads: Mutex::default(),
             clock,
+            short_tags: false,
         }
+    }
+
+    /// This bucket with content tags of 32 hex digits, the shape of the ETag of an S3 object put
+    /// in one piece, so that a test can have two tiers whose tags are comparable. The tag is still
+    /// a function of the bytes, which an MD5 is not here.
+    #[must_use]
+    pub fn with_short_tags(mut self) -> Self {
+        self.short_tags = true;
+        self
     }
 
     /// The clock that stamps the objects.
@@ -163,10 +175,10 @@ impl MemoryBackend {
         let current = objects
             .get(key)
             .ok_or_else(|| Error::NotFound(key.to_owned()))?;
-        if tag_of(&current.body) != etag {
+        if tag_of(&current.body, self.short_tags) != etag {
             return Err(Error::PreconditionFailed(key.to_owned()));
         }
-        let tag = tag_of(&body);
+        let tag = tag_of(&body, self.short_tags);
         let stored = Stored { body, modified };
         objects.insert(key.to_owned(), stored);
         Ok(tag)
@@ -213,7 +225,7 @@ impl Backend for MemoryBackend {
     }
 
     async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
-        let tag = tag_of(&body);
+        let tag = tag_of(&body, self.short_tags);
         self.create(key, body)?;
         Ok(tag)
     }
@@ -240,7 +252,7 @@ impl Backend for MemoryBackend {
         let current = objects
             .get(key)
             .ok_or_else(|| Error::NotFound(key.to_owned()))?;
-        if tag_of(&current.body) != etag {
+        if tag_of(&current.body, self.short_tags) != etag {
             return Err(Error::PreconditionFailed(key.to_owned()));
         }
         objects.remove(key);
@@ -261,7 +273,7 @@ impl Backend for MemoryBackend {
         range: Option<ByteRange>,
     ) -> Result<(Bytes, String), Error> {
         let (body, _) = self.object(key)?;
-        let tag = tag_of(&body);
+        let tag = tag_of(&body, self.short_tags);
         let read = match range {
             Some(range) => range.slice(&body)?,
             None => body,
@@ -274,7 +286,7 @@ impl Backend for MemoryBackend {
         let (body, modified) = self.object(key)?;
         let meta = Meta {
             size: body.len() as u64,
-            tag: tag_of(&body),
+            tag: tag_of(&body, self.short_tags),
             modified,
         };
         let window = Window::of(span, meta.size);
@@ -287,7 +299,7 @@ impl Backend for MemoryBackend {
         let (body, modified) = self.object(key)?;
         Ok(Meta {
             size: body.len() as u64,
-            tag: tag_of(&body),
+            tag: tag_of(&body, self.short_tags),
             modified,
         })
     }
@@ -306,7 +318,7 @@ impl Backend for MemoryBackend {
                 key: key.clone(),
                 size: stored.body.len() as u64,
                 modified: stored.modified,
-                tag: tag_of(&stored.body),
+                tag: tag_of(&stored.body, self.short_tags),
             })
             .collect();
         Ok(listed)
@@ -334,7 +346,7 @@ impl Backend for MemoryBackend {
     ) -> Result<String, Error> {
         self.check_upload(key, id)?;
         let part = collect(&mut body).await?;
-        let tag = tag_of(&part);
+        let tag = tag_of(&part, self.short_tags);
         let modified = self.clock.now();
         let mut uploads = self.uploads();
         let upload = uploads.open.get_mut(id).filter(|up| up.key == key);
@@ -355,7 +367,7 @@ impl Backend for MemoryBackend {
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
         let object = self.joined_parts(key, id, parts)?;
-        let tag = tag_of(&object);
+        let tag = tag_of(&object, self.short_tags);
         self.put(key, object).await?;
         self.uploads().open.remove(id);
         Ok(tag)

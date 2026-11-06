@@ -341,7 +341,13 @@ impl Marks {
                                     0
                                 }
                             }
-                            Why::Delete => 1,
+                            Why::Delete => {
+                                if self.cfg.reap_delete_keeps_gone {
+                                    3
+                                } else {
+                                    1
+                                }
+                            }
                             Why::Evict | Why::CopyBack => 2,
                         };
                         Some(Cop::Reap { a: m.ver, k })

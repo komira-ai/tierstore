@@ -4,7 +4,8 @@
 //! fields, its encoding, and what a reader does with what it does not know. The calls that read and
 //! write marker objects are in the module `marks`; the puts and deletes of the proxy call them while
 //! the format says `active-marks` (and so do its plain puts, `tiered/overwrite.rs` and
-//! `tiered/cold_land.rs`, which no server code calls yet).
+//! `tiered/cold_land.rs`, which no server code calls yet), and so does the leader's pass over the
+//! markers.
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a

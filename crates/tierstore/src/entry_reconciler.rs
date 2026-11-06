@@ -71,6 +71,11 @@
 //! again at `idle_min` after progress. There is no wake-up: a put into an idle system waits for the
 //! wait that is running.
 //!
+//! Under the format `active-marks`, a reconciler that was given the marks bucket the format names
+//! ([`EntryReconciler::with_marks`]) makes a pass over the markers of the put-without-lock design
+//! in place of steps 3 to 6 (the modules `marks`, `copier` and `reap` say what it does); under any
+//! other reading of that phase it does nothing, as it does nothing until the format says `active`.
+//!
 //! No call here probes what a store does: that a hot tier honours `If-Match`, or that a cold tier
 //! writes create-only, is a requirement of the stores (see the design).
 
@@ -90,11 +95,14 @@ use crate::format::{FormatPhase, read_format};
 use crate::journal::PROXIES_PREFIX;
 use crate::lease::Lease;
 use crate::registrations::Registrations;
-use crate::{Error, ReconcilerConfig, Sleeper, TokioSleeper};
+use crate::{Error, MarkersConfig, ReconcilerConfig, Sleeper, TokioSleeper};
 
 mod backoff;
+mod copier;
 mod copy_back;
 mod evict;
+mod marks;
+mod reap;
 mod sweep;
 mod usage;
 mod work;
@@ -102,6 +110,7 @@ mod work;
 pub(crate) use backoff::Idle;
 use backoff::retry_delay;
 use evict::Tags;
+use marks::{MarkBooks, MarkSide};
 use usage::{Books, Tally};
 use work::Verdict;
 
@@ -164,6 +173,20 @@ pub struct EntryReconcilerConfig {
     /// The most keys whose tags of the copies this leader made are remembered, for the eviction
     /// to skip the compare.
     pub tag_record_limit: usize,
+    /// The settings of the markers the leader reads and writes (the part of section 9 that is the
+    /// lease: the leader reaps a lock unchanged for `markers.lock_lease`).
+    pub markers: MarkersConfig,
+    /// How many keys the copier works at once under the markers (`copy_concurrency`, 128).
+    pub copy_concurrency: usize,
+    /// How many markers a listing page of the marks bucket holds (`marks_page`, 1000).
+    pub marks_page: usize,
+    /// How long a `DIRTY` marker with no hot object behind it must have stood unchanged before
+    /// the leader clears it (`orphan_after`, 120 s).
+    pub orphan_after: Duration,
+    /// How long a `gone` marker is kept after the cold object was seen deleted or overwritten
+    /// (`tombstone_hold`, 120 s): at least `lease_ttl` plus `lease_margin`, which the file's
+    /// loader checks.
+    pub tombstone_hold: Duration,
     /// What the loop waits on between steps, and between the lookups of the sweep. The renewal of
     /// the lease waits on `base.sleeper`.
     pub waiter: Arc<dyn Sleeper>,
@@ -202,6 +225,11 @@ impl EntryReconcilerConfig {
             scan_pages: 100,
             candidate_limit: 10_000,
             tag_record_limit: 100_000,
+            markers: MarkersConfig::default(),
+            copy_concurrency: 128,
+            marks_page: 1000,
+            orphan_after: Duration::from_secs(120),
+            tombstone_hold: Duration::from_secs(120),
             waiter: Arc::new(TokioSleeper),
         }
     }
@@ -210,7 +238,8 @@ impl EntryReconcilerConfig {
 /// What one [`EntryReconciler::step`] did.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StepReport {
-    /// Whether `_tiering/format` said `active`. If not, nothing else was done.
+    /// Whether `_tiering/format` said `active`, or `active-marks` with the marks bucket this
+    /// reconciler was given. If not, nothing else was done.
     pub active: bool,
     /// Whether this reconciler held the lease for the step. If not, nothing else was done.
     pub held: bool,
@@ -281,6 +310,10 @@ pub struct EntryReconciler {
     tally: Tally,
     /// The tags of the copies this leader made, for the eviction.
     tags: Mutex<Tags>,
+    /// The marks bucket and the calls on its markers; none until [`EntryReconciler::with_marks`].
+    marks: Option<Arc<MarkSide>>,
+    /// What the pass over the markers noted of them.
+    mark_books: MarkBooks,
 }
 
 impl EntryReconciler {
@@ -320,6 +353,8 @@ impl EntryReconciler {
             books: Books::default(),
             tally: Tally::default(),
             tags: Mutex::default(),
+            marks: None,
+            mark_books: MarkBooks::default(),
         }
     }
 
@@ -354,26 +389,39 @@ impl EntryReconciler {
         self.books = Books::default();
         self.tally.clear();
         self.tags().clear();
+        self.mark_books = MarkBooks::default();
     }
 
     /// Does one step, if the format is active and the lease is held.
     pub async fn step(&mut self) -> StepReport {
         let mut report = StepReport::default();
-        match read_format(self.hot.as_ref()).await {
-            Ok(Some(format)) if format.phase == FormatPhase::Active => report.active = true,
-            Ok(_) => return report,
+        let format = match read_format(self.hot.as_ref()).await {
+            Ok(Some(format)) => format,
+            Ok(None) => return report,
             Err(error) => {
                 report.failed.push(error);
                 return report;
             }
+        };
+        let side = self.runs_marks(&format);
+        if side.is_none() && format.phase != FormatPhase::Active {
+            return report;
         }
+        report.active = true;
         if !self.lease.ensure().await {
             self.forget();
             return report;
         }
         let lease = self.lease.clone();
         let sleeper = Arc::clone(&self.config.base.sleeper);
-        lease.renewing(&*sleeper, self.steps(report)).await
+        match side {
+            Some(side) => {
+                lease
+                    .renewing(&*sleeper, self.mark_steps(side, report))
+                    .await
+            }
+            None => lease.renewing(&*sleeper, self.steps(report)).await,
+        }
     }
 
     /// The steps of a step, once the format is active and the lease is held.
@@ -505,3 +553,7 @@ impl EntryReconciler {
 #[cfg(test)]
 #[path = "entry_reconciler_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "entry_reconciler_marks_tests.rs"]
+mod marks_tests;

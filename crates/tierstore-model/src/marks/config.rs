@@ -178,6 +178,10 @@ pub struct Cfg {
     pub head_before_bump: bool,
     /// Fix, 5.13: a reaped overwrite or cold-landing lock keeps its `gone`.
     pub reap_keeps_gone: bool,
+    /// 5.13, as pull request 7 builds it: a reaped `LOCK(DELETE)` keeps the `gone` it found
+    /// (false before the delete decided, true after), which rolls back a delete that never
+    /// reached its decision; off, the reap writes `gone = true` and rolls it forward on cold.
+    pub reap_delete_keeps_gone: bool,
     /// Fix, 5.1 row 2: a put that finds `DIRTY` bumps it keeping its `gone` (the copier clears it
     /// after it replaced the cold copy), so no reader sees the deleted cold copy.
     pub bump_keeps_gone: bool,
@@ -252,6 +256,7 @@ impl Cfg {
             copier_rechecks_marker: false,
             coldland_503_on_gone: false,
             reap_keeps_gone: false,
+            reap_delete_keeps_gone: false,
             puts_unbounded: false,
             put_reasserts_marker: false,
             timeouts: false,
