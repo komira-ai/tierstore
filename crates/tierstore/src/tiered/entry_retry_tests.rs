@@ -164,10 +164,11 @@ async fn a_landing_the_store_refuses_is_not_tried_again() {
     let refused = Error::Full("x".to_owned());
     rig.hot_faults
         .fail_next_on(Op::PutIfMatch, "_entries/", refused);
-    let Err(Error::Unavailable(text)) = rig.proxy.put("k", body("v")).await else {
-        panic!("not unavailable");
-    };
-    assert!(text.contains("could not be written"), "{text}");
+    let answer = rig.proxy.put("k", body("v")).await;
+    assert!(
+        matches!(&answer, Err(Error::Unavailable(text)) if text.contains("could not be written")),
+        "{answer:?}"
+    );
     assert_eq!(rig.hot_faults.calls_on(Op::PutIfMatch, &entry_key("k")), 1);
     assert!(rig.sleeper.asked().is_empty());
     assert_eq!(rig.shape("k").await, held_by("p1"));
@@ -190,10 +191,11 @@ async fn a_landing_whose_entry_was_reaped_before_the_retry_is_not_acknowledged()
     let held = rig.entry("k").await.unwrap();
     rig.other().advance(&held, Step::Reap).await.unwrap();
     assert!(second.release());
-    let Err(Error::Unavailable(text)) = put.await.unwrap() else {
-        panic!("not unavailable");
-    };
-    assert!(text.contains("the entry changed"), "{text}");
+    let answer = put.await.unwrap();
+    assert!(
+        matches!(&answer, Err(Error::Unavailable(text)) if text.contains("the entry changed")),
+        "{answer:?}"
+    );
     assert_eq!(rig.shape("k").await, pending());
     assert_eq!(rig.sleeper.asked(), vec![ms(100)]);
 }

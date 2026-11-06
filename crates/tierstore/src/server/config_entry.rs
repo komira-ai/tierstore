@@ -79,10 +79,11 @@ pub struct EntryTuning {
     /// reap can cut short is an operation that is still running, so the value must be longer than
     /// any operation holds its entry: a delete holds it for at most four calls, each cut at
     /// `deadline_margin` (which is at most a quarter of `departure`), so `departure` bounds it
-    /// when no step is tried again; with `step_attempts` tries of each of its last steps (three of
-    /// its calls) it holds it for up to `2 + 3 * step_attempts` calls and the sleeps between
-    /// tries, which the default of an hour is far above (a value in the file is checked against
-    /// `departure` and not against that sum);
+    /// when no step is tried again; with `step_attempts` tries of each of two of its calls (the
+    /// removal of its entry and the hand-over; the two `delete_data` calls are not tried again) it
+    /// holds it for up to `2 + 2 * step_attempts` calls and the sleeps between tries, which the
+    /// default of an hour is far above (a value in the file is checked against `departure` and
+    /// not against that sum);
     /// a put holds it for as long as its body takes, and a put that outlives `held_ttl` is not
     /// acknowledged (its landing finds the entry changed and answers 503). A value given in the
     /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
