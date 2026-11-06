@@ -85,7 +85,9 @@ impl Index {
 
     /// Takes the right to check the object `hex` against the upstream, if a check is due at
     /// `now`: it was filled or last checked more than `after` milliseconds ago, or never, or at a
-    /// time after `now` (the clock was set back). The entry's time is set to `now` at once, so
+    /// time after `now` (the clock was set back). With `after` 0 a check is always due, so that
+    /// `revalidate_after = "0s"` checks every hit, also one in the millisecond of the fill or of
+    /// the last check. The entry's time is set to `now` at once, so
     /// that the hits that come while the check is out are served and send none of their own: a
     /// cached object costs one check an interval. Gives what the entry says of the object, and
     /// the time it had before, which [`Index::unclaim`] puts back if the check does not end.
@@ -93,7 +95,7 @@ impl Index {
         let entry = self.entries.get_mut(hex)?;
         let due = entry
             .checked
-            .is_none_or(|then| then > now || now - then > after);
+            .is_none_or(|then| after == 0 || then > now || now - then > after);
         if !due {
             return None;
         }

@@ -22,6 +22,9 @@
 //! cost of a cached object one HEAD an interval. A claim that does not end in a verdict (the HEAD
 //! failed, or the request that made it was dropped) is given back, so the next hit asks again.
 //!
+//! With `revalidate_after = "0s"` every hit is due, also one in the millisecond of the last check,
+//! and the hits that come while a check is out each send their own.
+//!
 //! An entry found on the disk at start has no time: the first hit of each is checked once.
 //! A clock that was set back puts an entry's time in the future, which is a check that is due.
 //! Without the setting nothing here runs, and a hit is what it was before.

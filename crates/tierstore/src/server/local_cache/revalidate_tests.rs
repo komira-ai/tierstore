@@ -73,6 +73,26 @@ async fn a_hit_not_older_than_revalidate_after_makes_no_upstream_call() {
     assert_eq!(checks(&rig), 0);
 }
 
+/// Asserts that `revalidate_after = "0s"` checks every hit: the hit in the very millisecond of the
+/// fill and the ones after it, with the clock not moved, each send one HEAD and no GET, and are
+/// served from the disk.
+#[tokio::test]
+async fn with_revalidate_after_zero_every_hit_is_checked_also_in_the_millisecond_of_the_last_check()
+{
+    let body = pattern(500);
+    let rig = Rig::with("tscache-rv-zero", |config| {
+        config.revalidate_after = Some(Duration::ZERO);
+    });
+    rig.put("cas/b/obj", &body).await;
+    assert_eq!(rig.get("cas/b/obj").await.unwrap(), body);
+    assert_eq!(upstream_calls(&rig), FILL);
+    for hit in 1..=3 {
+        assert_eq!(rig.get("cas/b/obj").await.unwrap(), body);
+        assert_eq!(upstream_calls(&rig), (1, 2 + hit));
+        assert_eq!(found(&rig, Revalidated::Same), hit);
+    }
+}
+
 /// Asserts that a hit older than the setting is checked by one HEAD and served from the disk when
 /// the upstream's answer is the entry's version: the body is not read again, the entry's time is
 /// now, so the next hits send nothing until it is older again, and a ranged GET is checked as a
@@ -364,7 +384,7 @@ async fn the_metrics_count_the_checks_by_result() {
 }
 
 /// Asserts when the index grants a check: never for an absent entry or one not older than the
-/// interval; for one older, for one never checked, and for one stamped after `now`; that a grant
+/// interval; for one older, for any entry when the interval is 0, for one never checked, and for one stamped after `now`; that a grant
 /// sets the entry's time so that a second finds nothing due; and that giving a grant back puts
 /// the time back only while the entry still has the time the grant set.
 #[test]
@@ -388,6 +408,10 @@ fn the_index_grants_one_check_to_an_entry_that_is_due_and_takes_back_only_its_ow
     index.unclaim("absent", 106, None);
     index.unclaim("a", 106, before);
     assert!(index.claim("a", 106, 5).is_some());
+
+    // An interval of 0 is a check for every hit, also one at the time of the entry.
+    assert!(index.claim("a", 106, 0).is_some());
+    assert!(index.claim("a", 106, 0).is_some());
 
     index.insert("never", tagged(1), None);
     assert!(index.claim("never", 0, u64::MAX).is_some());
