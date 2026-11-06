@@ -6,9 +6,9 @@
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a
-//!   clearing) and `nonce`, 128 random bits written afresh by every write, so that the content tag
-//!   of the object, which is the version a conditional write names, is unique per write. `why` and
-//!   `owner` are left out of the body when they are not set.
+//!   clearing) and `nonce`, a value written afresh by every write (see the module `marks`), so that
+//!   the content tag of the object, which is the version a conditional write names, is unique per
+//!   write. `why` and `owner` are left out of the body when they are not set.
 //! - A reader keeps what it does not know and a rewrite carries it over: a field it does not know
 //!   is kept in [`Marker::extra`] (with its value, whatever the shape, ordered by name), and an `st` or a `why` word it does not know is kept as the
 //!   text it was ([`MarkerState::Other`], [`MarkerWhy::Other`]). A later release therefore adds
