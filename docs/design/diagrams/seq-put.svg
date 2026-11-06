@@ -34,7 +34,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="225.0" y="112" class="t-m lbl" text-anchor="middle">0  PUT key (streamed body)</text>
 <text x="225.0" y="128" class="t-m lbl" text-anchor="middle">refuse a reserved key</text>
 <line x1="110" y1="140" x2="340" y2="140" class="ln" marker-end="url(#seq-put-ak)"/>
-<text x="470.0" y="166" class="t-m lbl" text-anchor="middle">1  hot HEAD key, started with step 2: present means 412, entry freed</text>
+<text x="470.0" y="166" class="t-m lbl" text-anchor="middle">1  hot HEAD key: present means 412 at once, no entry</text>
 <line x1="340" y1="178" x2="600" y2="178" class="ln" marker-end="url(#seq-put-ak)"/>
 <text x="470.0" y="204" class="t-m lbl" text-anchor="middle">2  create _entries/&lt;sha256(key)&gt;, create-only</text>
 <text x="470.0" y="220" class="t-m lbl" text-anchor="middle">the entry (PUT, HELD, this node): the key is ours</text>

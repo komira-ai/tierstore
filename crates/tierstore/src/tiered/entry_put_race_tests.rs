@@ -35,14 +35,13 @@ async fn of_two_puts_of_one_key_that_meet_exactly_one_is_acknowledged() {
     assert_eq!(third, Err(Error::AlreadyExists("k".to_owned())));
 }
 
-/// Asserts that a put whose entry create was parked while another put of the key finished (its
-/// look at the hot tier, started with the create, found nothing), and which then met the other's
-/// pending entry, is refused as existing (the object is in the hot tier now) and does not
+/// Asserts that a put that looked at the hot tier before another put finished, and then met the
+/// other's pending entry, is refused as existing (the object is in the hot tier now) and does not
 /// touch the other's object or entry.
 #[tokio::test]
 async fn a_put_that_lost_the_race_to_one_that_finished_is_refused_as_existing() {
     let rig = Rig::active().await;
-    let gate = rig.hot.gate(Op::Put, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Head, "k", Phase::Post);
     let proxy = rig.proxy.clone();
     let slow = tokio::spawn(async move { proxy.put("k", body("slow")).await });
     gate.parked().await;
@@ -65,7 +64,7 @@ async fn an_entry_that_vanishes_between_create_and_read_is_looked_for_again() {
         .await
         .unwrap();
     assert!(matches!(held, crate::entry::Created::Taken(_)));
-    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
     gate.parked().await;
@@ -87,7 +86,7 @@ async fn a_put_that_runs_out_of_looks_at_a_changing_entry_is_unavailable() {
         .create("k", crate::entry::Take::Put)
         .await
         .unwrap();
-    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
     gate.parked().await;
@@ -282,14 +281,14 @@ async fn a_put_that_finds_an_object_with_no_entry_under_its_own_entry_removes_th
     assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("theirs"));
 }
 
-/// Asserts that a put whose look at the hot tier found nothing, and whose entry create is parked
-/// so that it takes its entry only after another put of the key landed in the hot tier and had its entry released, is refused as
+/// Asserts that a put whose look at the hot tier found nothing, and which takes its entry only
+/// after another put of the key landed in the hot tier and had its entry released, is refused as
 /// existing by the look under its entry, even though the tier is full by then and the put would
 /// otherwise land in the cold tier: the key is in one tier only, and the other's object stays.
 #[tokio::test]
 async fn a_put_whose_early_look_at_the_hot_tier_went_stale_is_refused_under_its_entry() {
     let rig = Rig::active().await;
-    let gate = rig.hot.gate(Op::Put, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Head, "k", Phase::Post);
     let proxy = rig.proxy.clone();
     let slow = tokio::spawn(async move { proxy.put("k", body("slow")).await });
     gate.parked().await;
@@ -309,41 +308,4 @@ async fn a_put_whose_early_look_at_the_hot_tier_went_stale_is_refused_under_its_
     assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("fast"));
     assert!(!rig.cold_has("k").await);
     assert_eq!(rig.shape("k").await, None);
-}
-
-/// Asserts that the first look at the hot tier and the taking of the entry are in flight together:
-/// while the look is parked before it reaches the store, the entry of the key is already held by
-/// the proxy, and the put then goes on and is acknowledged. Before the two were started together
-/// the entry was not made until the look had answered.
-#[tokio::test]
-async fn the_first_look_at_the_hot_tier_and_the_taking_of_the_entry_are_in_flight_together() {
-    let rig = Rig::active().await;
-    let gate = rig.hot.gate(Op::Head, "k", Phase::Pre);
-    let proxy = rig.proxy.clone();
-    let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
-    gate.parked().await;
-    assert_eq!(rig.shape("k").await, held_by("p1"));
-    assert!(gate.release());
-    put.await.unwrap().unwrap();
-    assert_eq!(rig.shape("k").await, pending());
-    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("v"));
-}
-
-/// Asserts that a put whose first look at the hot tier finds the key while the entry create is
-/// parked is answered as existing, and removes the entry once the create has gone through: the
-/// entry that was taken meanwhile does not outlive the refusal.
-#[tokio::test]
-async fn an_entry_taken_while_the_hot_tier_had_the_key_is_removed_when_the_create_lands() {
-    let rig = Rig::active().await;
-    rig.hot_mem.put("k", body("old")).await.unwrap();
-    let gate = rig.hot.gate(Op::Put, &entry_key("k"), Phase::Pre);
-    let proxy = rig.proxy.clone();
-    let put = tokio::spawn(async move { proxy.put("k", body("new")).await });
-    gate.parked().await;
-    assert_eq!(rig.shape("k").await, None);
-    assert!(gate.release());
-    let answer = put.await.unwrap();
-    assert_eq!(answer, Err(Error::AlreadyExists("k".to_owned())));
-    assert_eq!(rig.shape("k").await, None);
-    assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("old"));
 }

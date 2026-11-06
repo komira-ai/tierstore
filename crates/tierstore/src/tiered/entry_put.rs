@@ -9,9 +9,8 @@
 //!
 //! 1. The proxy must be live (`Proxy::is_live`): else the put is refused with
 //!    [`Error::Unavailable`], and nothing is read or written.
-//! 2. The hot tier is asked for the key while the entry is taken (step 3), the two started
-//!    together. If the hot tier has the key the put is [`Error::AlreadyExists`] and the entry it
-//!    took is removed again; the answer is only early, since step 4 decides.
+//! 2. The hot tier has the key: [`Error::AlreadyExists`], and no entry is made (a put of a key
+//!    that exists is one request).
 //! 3. The entry is created, create-only, as `(PUT, HELD)` owned by this proxy. If one exists, the
 //!    put is refused: with [`Error::AlreadyExists`] when the entry is settled (pending or sealed)
 //!    and a tier holds the key, and with [`Error::Unavailable`] otherwise (a put, delete or copy
@@ -167,7 +166,10 @@ impl Inner {
         Fut: Future<Output = Result<T, Failed>>,
     {
         self.require_live(key)?;
-        let seen = self.take_unless_held_by_hot(key).await?;
+        if self.hot_has(key).await? {
+            return Err(Error::AlreadyExists(key.to_owned()));
+        }
+        let seen = self.take_put(key).await?;
         let held = self.check_tiers(key).await;
         let landed = match held {
             Ok(()) => land().await,
@@ -187,24 +189,6 @@ impl Inner {
                 ))
             }
         }
-    }
-
-    /// The first look at the hot tier and the taking of the entry, started together: neither
-    /// needs the other's answer, and one serial round trip fewer is on the path of the
-    /// acknowledgement. The look is only an early answer; `check_tiers` decides under the entry. A
-    /// hot tier that has the key (or that cannot be asked) is answered before the entry's own
-    /// refusal, and an entry that was taken meanwhile is removed again.
-    async fn take_unless_held_by_hot(&self, key: &str) -> Result<Seen, Error> {
-        let (hot, taken) = futures::join!(self.hot_has(key), self.take_put(key));
-        let refusal = match hot {
-            Ok(false) => return taken,
-            Ok(true) => Error::AlreadyExists(key.to_owned()),
-            Err(error) => error,
-        };
-        if let Ok(seen) = &taken {
-            self.drop_entry(seen).await;
-        }
-        Err(refusal)
     }
 
     /// Under the entry: neither tier holds the key. The two heads are asked together, since neither
