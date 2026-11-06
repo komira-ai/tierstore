@@ -163,21 +163,22 @@ impl EntryReconciler {
 
     /// Makes the cold tier hold the hot object of `key`: nothing if the hot tier has none, a copy
     /// (create-only) if the cold tier has none, and a comparison of the bytes if it has one.
+    ///
+    /// One read of the hot object gives its size, tag and time with the bytes, and the cold tier
+    /// is asked for the create-only write at once, with no HEAD before it: the write is what
+    /// decides whether the key exists.
     async fn replicate(&self, key: &str) -> Result<Replicated, Error> {
-        let hot = match self.hot.head(key).await {
-            Ok(hot) => hot,
+        let opened = match self.hot.open_read(key, None).await {
+            Ok(opened) => opened,
             Err(Error::NotFound(_)) => {
                 self.tally.caught_up(key);
                 return Ok(Replicated::Same);
             }
             Err(error) => return Err(error),
         };
+        let hot = opened.meta.clone();
         self.tally.copied(key, hot.size, hot.modified);
-        let replicated = match self.cold.head(key).await {
-            Ok(cold) => self.compare(key, &hot, &cold).await,
-            Err(Error::NotFound(_)) => self.publish(key, &hot).await,
-            Err(error) => Err(error),
-        };
+        let replicated = self.publish(key, &hot, opened.body).await;
         match &replicated {
             Ok(_) => self.tally.caught_up(key),
             Err(_) => self.tally.lags(key, hot.size),
@@ -185,26 +186,39 @@ impl EntryReconciler {
         replicated
     }
 
-    /// Streams the hot object to the cold tier, create-only. An object that appeared there since
-    /// the look counts as copied.
-    async fn publish(&self, key: &str, hot: &Meta) -> Result<Replicated, Error> {
+    /// Streams the hot object to the cold tier, create-only, and remembers the tag the answer
+    /// gives (or that a HEAD gives, if the answer has none).
+    ///
+    /// A write that is refused because the key exists, and one whose outcome is not known (the
+    /// connection was reset, or timed out, and a store may reset a refused write of a large body
+    /// where it should answer 412), is resolved by a HEAD of the cold object: if there is one the
+    /// bytes are compared, if there is none the error of the write is the error of the copy, and a HEAD that fails
+    /// fails the copy with its own error.
+    async fn publish(&self, key: &str, hot: &Meta, body: ReadBody) -> Result<Replicated, Error> {
         self.require_lease().await?;
-        let body = match self.hot.get_stream(key, None).await {
-            Ok(body) => body,
-            Err(Error::NotFound(_)) => return Ok(Replicated::Same),
-            Err(error) => return Err(error),
-        };
-        self.require_lease().await?;
-        match self.cold.put_stream(key, Some(hot.size), body).await {
-            Ok(()) => {
-                // The tag of the copy is read to be remembered; a copy that cannot be read back
-                // just has no record, and an eviction compares.
-                if let Ok(cold) = self.cold.head(key).await {
-                    self.remember(key, &hot.tag, &cold.tag);
+        match self
+            .cold
+            .put_stream_answered(key, Some(hot.size), body, false)
+            .await
+        {
+            Ok(answer) => {
+                // A copy whose tag cannot be had just has no record, and an eviction compares.
+                let tag = match answer {
+                    Some(answer) => Some(answer.tag),
+                    None => self.cold.head(key).await.ok().map(|cold| cold.tag),
+                };
+                if let Some(tag) = tag {
+                    self.remember(key, &hot.tag, &tag);
                 }
                 Ok(Replicated::Same)
             }
-            Err(Error::AlreadyExists(_)) => Ok(Replicated::Same),
+            Err(error @ (Error::AlreadyExists(_) | Error::Unavailable(_) | Error::Other(_))) => {
+                match self.cold.head(key).await {
+                    Ok(cold) => self.compare(key, hot, &cold).await,
+                    Err(Error::NotFound(_)) => Err(error),
+                    Err(unread) => Err(unread),
+                }
+            }
             Err(error) => Err(error),
         }
     }

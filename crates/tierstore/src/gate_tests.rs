@@ -302,7 +302,9 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     let hot_only = gated.put_stream_hot_only("n4", None, chunks("4"));
     held(gated, Op::Put, hot_only).await;
     let answered = gated.put_stream_answered("n5", Some(1), chunks("5"), false);
-    assert_eq!(held(gated, Op::Put, answered).await, None);
+    let answer = held(gated, Op::Put, answered).await;
+    let written = rig.memory.head("n5").await.unwrap().tag;
+    assert_eq!(answer.map(|answer| answer.tag), Some(written));
 
     let replaced = gated.put_if_match("o", bytes("abd"), &tag);
     let tag = held(gated, Op::PutIfMatch, replaced).await;
