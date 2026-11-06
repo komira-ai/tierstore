@@ -139,6 +139,8 @@ mod marks;
 mod marks_moves_tests;
 #[cfg(test)]
 mod marks_tests;
+#[cfg(test)]
+mod marks_wait_tests;
 mod memory;
 mod metrics;
 #[cfg(test)]
