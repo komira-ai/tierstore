@@ -644,7 +644,7 @@ async fn a_failing_item_waits_its_own_delay_and_the_delay_doubles() {
     let hot = Arc::new(FaultyBackend::new(rig.hot.clone()));
     rig.plant("again", EntryOp::Cb, EntryState::Pending, None)
         .await;
-    hot.fail_next_on(Op::Head, ENTRIES_PREFIX, unavailable());
+    hot.fail_next_on(Op::Get, ENTRIES_PREFIX, unavailable());
     let mut r = rig.over(hot, rig.cold.clone(), "r1", |_| {});
     assert_eq!(r.step().await.failed.len(), 1);
 }
@@ -656,7 +656,7 @@ async fn an_entry_removed_between_the_listing_and_the_read_is_skipped() {
     rig.activate().await;
     rig.plant("k", EntryOp::Cb, EntryState::Pending, None).await;
     let gated = Arc::new(GateBackend::new(rig.hot.clone()));
-    let gate = gated.gate(Op::Head, ENTRIES_PREFIX, Phase::Pre);
+    let gate = gated.gate(Op::Get, ENTRIES_PREFIX, Phase::Pre);
     let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
     let mut step = Box::pin(r.step());
     park(&mut step, &gate).await;
@@ -797,7 +797,7 @@ async fn a_halt_cuts_a_step_that_is_running_and_gives_the_lease_up() {
     rig.activate().await;
     rig.plant("k", EntryOp::Cb, EntryState::Pending, None).await;
     let gated = Arc::new(GateBackend::new(rig.hot.clone()));
-    let gate = gated.gate(Op::Head, ENTRIES_PREFIX, Phase::Pre);
+    let gate = gated.gate(Op::Get, ENTRIES_PREFIX, Phase::Pre);
     let mut r = rig.over(gated, rig.cold.clone(), "r1", |_| {});
     let halt = Notify::new();
     let watcher = async {

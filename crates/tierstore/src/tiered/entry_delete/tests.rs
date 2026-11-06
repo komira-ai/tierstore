@@ -319,7 +319,7 @@ async fn an_entry_that_vanishes_between_a_deletes_create_and_read_is_looked_for_
     let rig = Rig::active().await;
     seed_both(&rig, "k").await;
     rig.other().create("k", Take::Put).await.unwrap();
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;
@@ -338,7 +338,7 @@ async fn a_delete_allowed_one_look_at_a_vanishing_entry_is_answered_unavailable(
     let rig = Rig::build_waiting(ACTIVE_FORMAT, 1, DeleteWait::new()).await;
     seed_both(&rig, "k").await;
     rig.other().create("k", Take::Put).await.unwrap();
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;

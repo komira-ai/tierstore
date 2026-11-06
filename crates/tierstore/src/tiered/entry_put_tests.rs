@@ -299,15 +299,15 @@ async fn a_multipart_completion_that_fails_removes_its_entry_and_one_without_an_
     assert_eq!(rig.shape("k").await, pending());
 }
 
-/// Asserts that a put of a key the hot tier has is refused as existing before any entry is made:
-/// the hot tier saw no write at an entry, and the object is as it was.
+/// Asserts that a put of a key the hot tier has is refused as existing, that the entry it took
+/// while it asked is removed again, and that the object is as it was.
 #[tokio::test]
-async fn a_put_of_a_key_the_hot_tier_has_is_refused_and_makes_no_entry() {
+async fn a_put_of_a_key_the_hot_tier_has_is_refused_and_leaves_no_entry() {
     let rig = Rig::active().await;
     rig.hot_mem.put("k", body("old")).await.unwrap();
     let put = rig.proxy.put("k", body("new")).await;
     assert_eq!(put, Err(Error::AlreadyExists("k".to_owned())));
-    assert_eq!(rig.hot_faults.calls_on(Op::Put, &entry_key("k")), 0);
+    assert_eq!(rig.shape("k").await, None);
     assert_eq!(rig.hot_mem.get("k", None).await.unwrap(), body("old"));
 }
 
@@ -517,14 +517,14 @@ async fn a_streamed_put_whose_landing_gets_no_answer_hands_its_entry_over() {
 }
 
 /// Asserts that a put whose first look at the hot tier fails is answered with that failure and
-/// makes no entry.
+/// leaves no entry.
 #[tokio::test]
-async fn a_put_whose_first_look_at_the_hot_tier_fails_makes_no_entry() {
+async fn a_put_whose_first_look_at_the_hot_tier_fails_leaves_no_entry() {
     let rig = Rig::active().await;
     let down = Error::Unavailable("down".to_owned());
     rig.hot_faults.fail_next_on(Op::Head, "k", down.clone());
     assert_eq!(rig.proxy.put("k", body("v")).await, Err(down));
-    assert_eq!(rig.hot_faults.calls_on(Op::Put, &entry_key("k")), 0);
+    assert!(!rig.hot_has("k").await);
     assert_eq!(rig.shape("k").await, None);
 }
 
@@ -539,14 +539,14 @@ async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with
         .fail_next_on(Op::PutIfMatch, "_entries/", unanswered.clone());
     let unreadable = Error::Unavailable("no read".to_owned());
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry_key("k"), unreadable);
+        .fail_next_on(Op::Get, &entry_key("k"), unreadable);
     assert_eq!(rig.proxy.put("k", body("v")).await, Err(unanswered));
     assert_eq!(rig.shape("k").await, held_by("p1"));
 }
 
-/// Asserts that a put of a new key asks the cold tier once, and the hot tier twice: once before
-/// the entry (the answer of a put of an existing key, which makes no entry) and once under it
-/// (the one that decides). A streamed put and a held one ask alike.
+/// Asserts that a put of a new key asks the cold tier once, and the hot tier twice: once with the
+/// taking of the entry (the early answer of a put of an existing key) and once under it (the one
+/// that decides). A streamed put and a held one ask alike.
 #[tokio::test]
 async fn a_put_of_a_new_key_asks_the_cold_tier_once_and_the_hot_tier_before_and_under_its_entry() {
     let rig = Rig::active().await;
@@ -563,9 +563,9 @@ async fn a_put_of_a_new_key_asks_the_cold_tier_once_and_the_hot_tier_before_and_
 }
 
 /// Asserts that a put of a key the hot tier has asks the hot tier once, never the cold tier, and
-/// makes no entry.
+/// leaves no entry.
 #[tokio::test]
-async fn a_put_of_an_existing_key_asks_the_hot_tier_once_and_nothing_else() {
+async fn a_put_of_an_existing_key_asks_the_hot_tier_once_and_never_the_cold_tier() {
     let rig = Rig::active().await;
     rig.hot_mem.put("k", body("old")).await.unwrap();
     let put = rig.proxy.put("k", body("v")).await;
