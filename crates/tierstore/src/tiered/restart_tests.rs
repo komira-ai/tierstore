@@ -33,7 +33,8 @@ async fn registered_boot(rig: &Rig) -> String {
     Registration::decode(&stored).unwrap().boot
 }
 
-/// Asserts, from the proxy's own writes to the reconciler's step, that a put that cannot hand its
+/// Asserts, with the last step tried once (`step_attempts = 1`), from the proxy's own writes to
+/// the reconciler's step, that a put that cannot hand its
 /// entry over leaves it held with the boot of its proxy's registration; that a process of the same
 /// proxy id opened after writes a registration with another boot, which names the earlier boot as
 /// a peer (it may be alive), so that the reconciler waits; that the second process drops the
@@ -44,7 +45,7 @@ async fn registered_boot(rig: &Rig) -> String {
 #[tokio::test]
 async fn a_put_left_held_by_a_proxy_that_restarts_is_reaped_at_the_step_after_the_peer_is_dropped()
 {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     let first_boot = registered_boot(&rig).await;
     let down = Error::Unavailable("down".to_owned());
     rig.hot_faults
