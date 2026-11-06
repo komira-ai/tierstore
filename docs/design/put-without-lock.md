@@ -539,13 +539,13 @@ Up to 1000 keys, each as 5.6, `buffer_unordered(delete_concurrency)`. No batchin
 
 ### 5.16 Local cache
 
-*Plan: pull request 9 of 10.4.*
+*Built in part by pull request 9 of 10.4: `local_cache.revalidate_after` (the bullets below, `local_cache/revalidate.rs`; the check compares with the upstream's own `Backend::same_version`, which is the tag and the size for an S3 upstream and the size alone for an in-process proxy, as the fill's check already did; the entry's time is kept in memory, an entry found on the disk at start is checked once by its first hit, hits that arrive while a check is out are served and send none, and a check that does not end is given back; the counter is `tierstore_cache_revalidations_total{result}`). Plan, not built there: `put_through` as a plain or conditional put with no pre-HEAD. The cache's `Backend` has only the create-only put until the proxy has a plain put to call (pull request 5), and with the entry protocol still the only one the pre-HEAD is what keeps a duplicate push of a large blob from being uploaded whole and refused at its end, so removing it before the activation would change the requests of a running farm. It rides with pull request 10. `Proxy::put_stream_answered` and the keep without a HEAD after the put are on main already (pull request 1).* Inert until activation: `revalidate_after` is unset by default, which is today's behaviour.
 
 `put_through` (create-only) becomes `put_through` (plain or conditional, as the request): no pre-HEAD of the upstream (it answered 412 for an existing key, which is no longer S3), the staged file is replayable, and `Proxy::put_stream_answered` is implemented (pull request 1) to return the hot PUT's tag, which removes the post-put HEAD of the keep check. A delete is `forget`, upstream delete, `forget`, as now; a same-node fill against a write is guarded by `forget` (`local_cache/write.rs`), so a fill cannot republish what the node just overwrote or deleted.
 
 **What stays, and is a deliberate exception to "match S3 exactly" (I3):** a hit is served from disk with no upstream call, so another node's delete or overwrite is not seen until the entry is evicted, or until it is revalidated. Plain puts now overwrite where they used to answer 412, so for the first time a build node's cache can serve a stale or deleted object. The build farm's keys are content-addressed, so there overwrites never happen and an entry may stay in the cache indefinitely; the staleness is therefore a config key (decided 2026-11-06, Q17):
 
-- **`local_cache.revalidate_after`** (a duration; **default: never**, which is today's behaviour). The entry records the time it was filled or last revalidated. A hit **older than that** is checked before it is served by **one HEAD through its upstream (the proxy)**, comparing **only the ETag and the size; the body is never downloaded on a match**.
+- **`local_cache.revalidate_after`** (a duration; **default: never**, which is today's behaviour). The entry records the time it was filled or last revalidated. A hit **older than that** (with `0s`, every hit, also one in the millisecond of the fill or of the last check) is checked before it is served by **one HEAD through its upstream (the proxy)**, comparing **only the ETag and the size; the body is never downloaded on a match**.
   - **Match:** the entry's time is set to now and the hit is served from disk.
   - **Mismatch, or the key is gone (404):** the entry is dropped (`forget`) and the request goes upstream as a miss: the new object is fetched and kept, or the 404 is the answer.
   - **The HEAD fails** (error, timeout, upstream down): **the cached copy is served and the failure is logged**, and the entry's time is not refreshed, so the next hit tries again. Reason: the node cached the object to survive exactly this (the build farm must not stop because the proxy is slow); the staleness bound below then reads "while the proxy answers". It is one fixed behaviour, not a second key; a deployment that wants fail-closed adds the key when it has a use for it (tunables are keys, but not before a use).
@@ -558,7 +558,7 @@ The fill's `same_version` check is size only for a proxy upstream; with overwrit
 
 ### 5.17 OCI front
 
-*Plan: pull request 9 of 10.4.*
+*Built by pull request 9 of 10.4, which changes no behaviour of the front: it corrects the header and doc comments of `tags.rs` (a landed version is not removed if its push fails) and adds `a_push_of_every_kind_writes_create_only_and_deletes_only_upload_objects`, which pins what this section rests on (the front writes only create-only objects and deletes only the chunk and session objects of an upload). The costs and the 412 of a blob hot already has are those of pull requests 4 and 6, and `the_oci_front_pushes_blobs_manifests_and_tags_on_the_fast_path_and_discards_by_delete` of 7.4 is written with pull request 4, when there is a fast path to assert.*
 
 All its writes are create-only and take 5.1: blobs (`put_stream`), chunk and session objects, manifests, tag version objects. Each create-only put with a new key costs the create-only row of section 6. **`discard()` deletes chunk and session objects by 5.6, which is not faster than today's: 41.5 ms for a chunk the copier has copied and 50.0 ms for one whose marker is still `DIRTY`, against about 29.5 ms** (section 6; every `discard()` follows a put, so the `DIRTY` case is the common one). Q15 describes the shortcut that would bring the `DIRTY` case to about 27 ms. **While cold is down the OCI front's puts are 503** (they are create-only, I15); a push of a blob that hot already has answers 412 or its OCI equivalent from the hot HEAD, with no cold request. Tag versions: the front's contract (create-only, one winner, listing consistent with writes) is the store's, and holds. The doc comment of `tags.rs` that a landed version "is removed if that push fails" is false today and stays false here (a landed put is never removed); the header is corrected in the same pull request as the front's change (P10).
 
@@ -781,10 +781,10 @@ The tests are written against the in-memory backends under the gate scheduler, t
 | presigned put | `a_presigned_put_is_create_only_and_hot_only_and_503_when_hot_answers_full` (pull request 4, as `a_streamed_put_and_a_presigned_put_land_in_hot_with_a_marker` and `a_put_the_hot_store_refuses_with_full_is_full_and_leaves_nothing`) |
 | level `Full` and a full hot store | `a_put_at_level_full_is_written_to_hot_by_the_fast_path` (pull request 4), `a_put_the_hot_store_refuses_with_full_is_503_with_emergency_cold_landing_off` (pull request 4, as `a_put_the_hot_store_refuses_with_full_is_full_and_leaves_nothing`), `a_put_the_hot_store_refuses_with_full_lands_in_cold_under_the_lock_when_it_is_on` |
 | usage | `a_finished_gone_marker_takes_the_key_out_of_the_tally` and `copy_lag_is_the_dirty_bytes_with_hot_present` |
-| local cache | `a_put_through_makes_no_head_before_and_none_after_when_the_proxy_answers_with_the_tag`, `a_cache_hit_older_than_revalidate_after_is_checked_by_a_head_and_dropped_when_the_key_changed` |
-| OCI | `the_oci_front_pushes_blobs_manifests_and_tags_on_the_fast_path_and_discards_by_delete` |
+| local cache | `a_put_through_makes_no_head_before_and_none_after_when_the_proxy_answers_with_the_tag` (the half "none after" is `a_put_is_a_local_hit_with_the_tag_the_upstream_gave`, on main; "none before" rides with 10), `a_cache_hit_older_than_revalidate_after_is_checked_by_a_head_and_dropped_when_the_key_changed` (built as the tests of the next row) |
+| OCI | `the_oci_front_pushes_blobs_manifests_and_tags_on_the_fast_path_and_discards_by_delete` (with pull request 4; pull request 9 has `a_push_of_every_kind_writes_create_only_and_deletes_only_upload_objects`) |
 | ambiguity | `an_ambiguous_lock_is_not_assumed_taken` |
-| local cache revalidation (5.16) | `a_hit_older_than_revalidate_after_is_checked_by_a_head_and_served_without_a_body_download_on_a_match`, `a_revalidation_that_finds_another_etag_or_a_missing_key_drops_the_entry_and_goes_upstream`, `a_revalidation_whose_head_fails_serves_the_cached_copy_and_logs_it`, `with_revalidate_after_unset_a_hit_never_calls_the_upstream` (time by the injected clock) |
+| local cache revalidation (5.16) | `a_hit_older_than_revalidate_after_is_checked_by_a_head_and_served_without_a_body_download_on_a_match`, `a_revalidation_that_finds_another_etag_drops_the_entry_and_goes_upstream` and `a_revalidation_that_finds_a_missing_key_drops_the_entry_and_answers_not_found` (the design's one test, split in two), `a_revalidation_whose_head_fails_serves_the_cached_copy_counts_it_and_asks_again` (the failure is counted as well as logged), `with_revalidate_after_unset_a_hit_never_calls_the_upstream` (time by the injected clock); also `hits_that_arrive_while_a_check_is_out_are_served_and_send_none_of_their_own`, `a_check_whose_request_is_dropped_is_given_back_and_the_next_hit_asks_again`, `an_entry_found_on_the_disk_at_start_is_checked_by_its_first_hit` and `a_revalidation_over_two_tiers_compares_by_size_and_ignores_a_tag_that_moved` |
 | exhaustive interleavings | the scenarios of Appendix B, in `crates/tierstore-model/tests/scenarios.rs`, one test each (for example `holds_in_slow_put_orphan`, `holds_in_timeout_delete_keeps_lock`, `rejects_a8_in_timeout_release_at_once`) |
 
 ### 7.5 Why the lock is still needed, and when it is not
@@ -919,7 +919,7 @@ Removed: `stray_skew` (no clock is compared, 5.12).
 
 ### 10.3 Code comments and operator docs that go stale (P10)
 
-`evict.rs:24-27` (says delete and copy-back take no entry: already false); `server/oci/tags.rs:16-62`; `crates/tierstore/docs/limits.md` line 9 and the local-cache section; `overview.md:30`; `server/mod.rs:15-23`; `tiered.rs:173,551`; `backend.rs:341`; `cache.rs:188`; `lib.rs:3`; `server/presign.rs` header.
+`evict.rs:24-27` (says delete and copy-back take no entry: already false); `server/oci/tags.rs:16-62` (corrected by pull request 9); `crates/tierstore/docs/limits.md` line 9 and the local-cache section; `overview.md:30`; `server/mod.rs:15-23`; `tiered.rs:173,551`; `backend.rs:341`; `cache.rs:188`; `lib.rs:3`; `server/presign.rs` header.
 
 ### 10.4 Pull requests (P7, one subject each; interfaces before their users)
 
@@ -933,7 +933,7 @@ Removed: `stray_skew` (no clock is compared, 5.12).
 6. Delete and DeleteObjects. (The slower delete and its 4.8-fold hot load, 6.2, are accepted, Q15; the farm's delete rate is still worth measuring to size the hot store.)
 7. The copier, tombstone hold, reap, usage.
 8. Eviction, copy-back, sweep.
-9. Local cache and OCI front adjustments.
+9. Local cache and OCI front adjustments: `local_cache.revalidate_after` and the correction of `tags.rs`. The plain or conditional `put_through` without the pre-HEAD moves to 10 (5.16 says why).
 10. `format-epoch --activate-marks`, `--restore-entries`; docs rewritten (tierstore-design.md, overwrite.md, limits.md); the entry protocol removed.
 
 The activation is the last pull request to merge to a release; before it nothing in a running farm changes. The design is linked from every one of these (B22).

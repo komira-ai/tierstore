@@ -185,6 +185,11 @@ pub(super) struct LocalCacheTable {
     /// 65536).
     #[serde(default)]
     pub forget_limit: Option<u32>,
+    /// How old a hit may be, since it was filled or last checked, before it is checked against
+    /// the upstream with one HEAD, such as `1h` (left out: never, a hit is served from the disk
+    /// until the entry is evicted; `0s` checks every hit).
+    #[serde(default)]
+    pub revalidate_after: Option<Dur>,
     /// The bytes a fill reads from the upstream at a time (4KiB to 1GiB, default 8MiB).
     #[serde(default)]
     pub fill_chunk: Option<Size>,
@@ -364,6 +369,7 @@ impl CachePart {
             return Err(invalid("local_cache.keep_deadline", why));
         }
         cache.write_through = table.write_through.unwrap_or(false);
+        cache.revalidate_after = table.revalidate_after.map(|after| after.0);
         config_cache_tuning::apply(&table, &mut cache)?;
         let scrub_min_round = duration(table.scrub_min_round, SCRUB_MIN_ROUND);
         if !scrub_min_round.is_zero() && scrub_min_round < cache.scrub_tick {
