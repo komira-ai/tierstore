@@ -340,7 +340,8 @@ impl Proxy {
     /// rewrites at each heartbeat.
     ///
     /// # Errors
-    /// [`Error::Other`] if the proxy id is empty or has a `/`; the error of the hot tier if it
+    /// [`Error::Other`] if the proxy id is empty or has a `/`, or if the settings of the puts on
+    /// markers do not hold together (nothing is written then); the error of the hot tier if it
     /// fails the write of the registration.
     pub async fn open(
         hot: Arc<dyn Backend>,
@@ -351,12 +352,12 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
+        let markers = Self::markers(&config)?;
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
-        let markers = Self::markers(&config)?;
         let inner = Inner {
             hot,
             cold,

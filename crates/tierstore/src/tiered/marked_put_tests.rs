@@ -322,6 +322,8 @@ async fn settings_that_do_not_hold_together_are_refused_when_the_proxy_is_opened
     assert!(matches!(opened, Err(Error::Other(_))), "{:?}", opened.err());
     config.marks_put = MarkedPutConfig::default();
     config.marks_put.read_window = zero;
-    let opened = Proxy::open(hot, cold, config).await;
+    let opened = Proxy::open(hot.clone(), cold, config).await;
     assert!(matches!(opened, Err(Error::Other(_))), "{:?}", opened.err());
+    // A refused open writes no registration: the hot store is as it was.
+    assert!(hot.list("").await.unwrap().is_empty());
 }
