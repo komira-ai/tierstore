@@ -75,12 +75,29 @@ pub(crate) struct Usage {
     pub(crate) time: u64,
 }
 
-/// Writes a small object that is rewritten in place (the usage): create-only
-/// the first time, and then only over the object whose content tag a HEAD just gave.
-pub(crate) async fn write_object(hot: &dyn Backend, key: &str, body: Bytes) -> Result<(), Error> {
+/// Writes a small object that is rewritten in place (the usage), and gives the content tag of the
+/// object it wrote.
+///
+/// With the tag of the object as the caller last wrote it (`known`) the write is one conditional
+/// put over that tag and no HEAD. If the object has since changed or gone (the conditional put
+/// answers [`Error::PreconditionFailed`] or [`Error::NotFound`]) the write is what it is without
+/// a tag: a HEAD, then a put over the tag it gave, or a create-only put if there is no object. So
+/// a tag that has gone stale costs one more request and never decides what is written.
+pub(crate) async fn write_object(
+    hot: &dyn Backend,
+    key: &str,
+    body: Bytes,
+    known: Option<&str>,
+) -> Result<String, Error> {
+    if let Some(tag) = known {
+        match hot.put_if_match(key, body.clone(), tag).await {
+            Err(Error::PreconditionFailed(_) | Error::NotFound(_)) => {}
+            answer => return answer,
+        }
+    }
     match hot.head(key).await {
-        Ok(meta) => hot.put_if_match(key, body, &meta.tag).await.map(|_| ()),
-        Err(Error::NotFound(_)) => hot.put(key, body).await,
+        Ok(meta) => hot.put_if_match(key, body, &meta.tag).await,
+        Err(Error::NotFound(_)) => hot.put_tagged(key, body).await,
         Err(error) => Err(error),
     }
 }

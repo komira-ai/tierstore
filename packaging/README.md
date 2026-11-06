@@ -957,7 +957,7 @@ first; no stored object is overwritten, and the tag is the newest version. Of tw
 201 and the other 409 `TAG_CONFLICT` (the loser pushes again); pushes of the same digest are both 201. A pull by tag lists the versions of that tag and
 reads one 71-byte object before the manifest, and `tags/list` reads every version of the name; old versions are kept (nothing deletes them yet),
 one 71-byte object per move. The store must list consistently with the writes before the listing (S3 and MinIO do); on a `dir:` tier the whole
-key, `oci/tags/<name>/<tag>/` and 20 digits, is one file name of at most 255 bytes. The repository name (`library/app`) is any name that
+key, `oci/tags/<name>/<tag>/` and 20 digits, is one file, hashed if its name would be over 255 bytes. The repository name (`library/app`) is any name that
 fits the grammar. Blobs and manifests are shared by digest whatever the name; tags are scoped to the name. A registry on another port than 443 is written
 `192.0.2.10:8443/library/app@sha256:...` and its directory is `certs.d/192.0.2.10:8443`.
 

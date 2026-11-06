@@ -12,7 +12,7 @@ use super::super::config::{TierTable, from_text};
 use super::super::config_testing::{DEFAULTS, MINIMAL};
 use super::super::config_unknown::fields_of;
 use super::EntryTuning;
-use crate::{EntryReconcilerConfig, ProxyConfig, ReconcilerConfig, SystemClock};
+use crate::{EntryReconcilerConfig, ProxyConfig, ReconcilerConfig, StepRetry, SystemClock};
 
 /// `MINIMAL` with `lines` as more keys of `[hot_store]`.
 fn with_hot(lines: &str) -> String {
@@ -47,7 +47,8 @@ const ALL: &str = "retry_min = \"2s\"\nretry_max = \"90s\"\nstray_grace = \"20m\
     usage_interval = \"4s\"\nusage_scan_interval = \"6h\"\nscan_pages = 13\n\
     candidate_limit = 17\ntag_record_limit = 19\nproxy_usage_stale_after = \"45s\"\n\
     format_refresh = \"3s\"\nentry_rounds = 5\ndelete_wait = \"40s\"\ndelete_poll_min = \"2s\"\n\
-    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"";
+    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"\nstep_attempts = 6\n\
+    step_retry_min = \"50ms\"\nstep_retry_max = \"3s\"";
 
 /// A file that gives none of the keys has the values the code had before they were keys, in the
 /// file's settings and in what `build` makes of them: the same as the defaults of the proxy and of
@@ -62,6 +63,8 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     assert_eq!(built.proxy.format_refresh, old.format_refresh);
     assert_eq!(built.proxy.entry_rounds, old.entry_rounds);
     assert_eq!(built.proxy.delete_wait, old.delete_wait);
+    assert_eq!(built.proxy.step_retry, old.step_retry);
+    assert_eq!(built.proxy.step_retry, StepRetry::new());
     let base = ReconcilerConfig::new("p1/reconciler", 1000, std::sync::Arc::new(SystemClock));
     let before = EntryReconcilerConfig::new(base);
     let after = reconciler_of(&built);
@@ -108,6 +111,9 @@ fn every_key_reaches_the_setting_it_stands_for() {
     assert_eq!(built.proxy.delete_wait.wait, secs(40));
     assert_eq!(built.proxy.delete_wait.poll_min, secs(2));
     assert_eq!(built.proxy.delete_wait.poll_max, secs(8));
+    assert_eq!(built.proxy.step_retry.attempts, 6);
+    assert_eq!(built.proxy.step_retry.delay, Duration::from_millis(50));
+    assert_eq!(built.proxy.step_retry.delay_max, secs(3));
 }
 
 /// The key `usage_stale_after`, which sets the limit of `/usagez`, is not the proxy's limit: setting
@@ -157,6 +163,8 @@ fn a_duration_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         ("delete_poll_min", HOURS, "61m"),
         ("delete_poll_max", HOURS, "61m"),
         ("held_ttl", YEAR, "8761h"),
+        ("step_retry_min", HOURS, "61m"),
+        ("step_retry_max", HOURS, "61m"),
     ];
     for (key, high, over) in keys {
         assert_eq!(
@@ -222,6 +230,7 @@ fn a_count_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         ("candidate_limit", 10_000_000),
         ("tag_record_limit", 100_000_000),
         ("entry_rounds", 100),
+        ("step_attempts", 100),
     ];
     for (key, high) in counts {
         let zero = refusal(&with_hot(&format!("{key} = 0")));
@@ -269,6 +278,15 @@ fn the_relations_between_keys_are_refused_by_name() {
         "hot_store.proxy_usage_stale_after: 5000ms must be longer than usage_interval, which is \
          10000ms, or the proxy ignores a usage that is current"
     );
+    assert_eq!(
+        refusal(&with_hot("step_retry_min = \"3s\"")),
+        "hot_store.step_retry_max: 2000ms is below step_retry_min, which is 3000ms"
+    );
+    // Equal retry sleeps are taken, and so are the ends of their range.
+    let same = "step_retry_min = \"1ms\"\nstep_retry_max = \"1ms\"";
+    assert!(from_text(&with_hot(same), DEFAULTS).is_ok());
+    let hour = "step_retry_min = \"1h\"\nstep_retry_max = \"1h\"";
+    assert!(from_text(&with_hot(hour), DEFAULTS).is_ok());
     // Equal polls and a wait equal to a poll are taken.
     let equal = "retry_min = \"60s\"\ndelete_poll_min = \"10s\"\ndelete_wait = \"10s\"";
     assert!(from_text(&with_hot(equal), DEFAULTS).is_ok());
