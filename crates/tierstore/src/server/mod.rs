@@ -274,6 +274,7 @@ mod config_cache_tuning;
 mod config_combined;
 mod config_entry;
 mod config_handoff;
+mod config_hot_only;
 mod config_interface;
 mod config_io;
 mod config_load;
