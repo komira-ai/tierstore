@@ -12,8 +12,9 @@
 //! 4. The hot HEAD under the lock and, if hot holds the key, the hot DELETE. A DELETE that fails
 //!    definitely, or a HEAD that fails, answers 503 and releases the lock as `DIRTY`: hot is the
 //!    truth, the put was not acknowledged, and the copier makes cold agree with it. A DELETE whose
-//!    outcome is unknown may still land at the store, so the lock is kept for `queued_call_margin`
-//!    and then released the same way.
+//!    outcome is unknown (it returned an ambiguous error, or the landing was dropped while it was
+//!    in flight) may still land at the store, so the lock is kept for `queued_call_margin` and
+//!    then released the same way.
 //! 5. The answer follows the delete. The lock is settled to `CLEARING` and the marker removed in a
 //!    task of its own, because hot is absent and cold holds the truth.
 
@@ -75,10 +76,12 @@ impl Inner {
             }
         };
         match written {
-            Err(Error::AlreadyExists(_) | Error::PreconditionFailed(_)) => Err(retry(
-                key,
-                "the cold object changed while the landing began",
-            )),
+            Err(Error::AlreadyExists(_) | Error::PreconditionFailed(_) | Error::NotFound(_)) => {
+                Err(retry(
+                    key,
+                    "the cold object changed while the landing began",
+                ))
+            }
             other => other,
         }
     }
@@ -123,7 +126,7 @@ impl Inner {
         if !held.may_destroy() {
             return Err(retry(key, "the lock was held too long to be used"));
         }
-        match held.lease(self.hot.delete(key)).await {
+        match held.lease_untagged(self.hot.delete(key)).await {
             Err(error) if ambiguous(&error) => {
                 held.keep_for(markers.config().queued_call_margin);
                 Err(error)

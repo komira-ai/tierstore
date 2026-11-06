@@ -367,12 +367,13 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
+        // Before the registration: a proxy that does not open leaves no registration behind.
+        let markers = open_markers(&config)?;
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
-        let markers = open_markers(&config)?;
         let inner = Inner {
             hot,
             cold,

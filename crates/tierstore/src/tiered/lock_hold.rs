@@ -14,7 +14,9 @@
 //!   [`Held::keep_for`] does so after `queued_call_margin`, for a hot DELETE whose outcome
 //!   is unknown and may still land. Dropping a [`Held`] that was not released (the client went
 //!   away and the future was dropped, or the operation returned early) releases the lock the same
-//!   way, as `DIRTY` if it owes cold a copy: the guard of 5.2. A release that keeps failing is
+//!   way, as `DIRTY` if it owes cold a copy: the guard of 5.2. A drop while a hot DELETE
+//!   ([`Held::lease_untagged`]) is in flight keeps the lock for `queued_call_margin` first, as
+//!   `keep_for` does. A release that keeps failing is
 //!   left to the leader, which reaps the lock.
 
 use std::future::Future;
@@ -34,6 +36,9 @@ pub(super) struct Held {
     /// The lock as this proxy last wrote it; `None` once it is released, handed to a task, or
     /// found changed by a refresh.
     lock: Option<Written>,
+    /// Whether a call with no tag to guard it (a hot DELETE) is in flight: if this is dropped
+    /// then, the call may still be queued at the store and the lock is kept for the margin.
+    untagged: bool,
 }
 
 impl Held {
@@ -48,6 +53,7 @@ impl Held {
             sleeper: Arc::clone(sleeper),
             retry,
             lock: Some(lock),
+            untagged: false,
         }
     }
 
@@ -71,6 +77,16 @@ impl Held {
                 Either::Right(((), _)) => self.refresh().await,
             }
         }
+    }
+
+    /// Runs `call` as [`Held::lease`] does, for a call that destroys without a tag to guard it
+    /// (a hot DELETE). If the future is dropped while it is in flight, the call is one of unknown
+    /// outcome, and the lock is released after `queued_call_margin`, not at once.
+    pub(super) async fn lease_untagged<T>(&mut self, call: impl Future<Output = T>) -> T {
+        self.untagged = true;
+        let done = self.lease(call).await;
+        self.untagged = false;
+        done
     }
 
     /// Writes the lock again if it is due, and keeps the new write; a lock that is found changed
@@ -121,9 +137,15 @@ impl Held {
 }
 
 impl Drop for Held {
-    /// The guard: a lock that was not released is released as `DIRTY` if it owes a copy.
+    /// The guard: a lock that was not released is released as `DIRTY` if it owes a copy, after
+    /// `queued_call_margin` if a call with no tag was in flight (see [`Held::lease_untagged`]).
     fn drop(&mut self) {
-        self.hand_over(MarkMove::Release { changed: false }, Duration::ZERO);
+        let margin = if self.untagged {
+            self.markers.config().queued_call_margin
+        } else {
+            Duration::ZERO
+        };
+        self.hand_over(MarkMove::Release { changed: false }, margin);
     }
 }
 

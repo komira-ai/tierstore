@@ -37,6 +37,13 @@ fn log(calls: &[(Op, &str)]) -> Vec<(Op, String)> {
         .collect()
 }
 
+/// How many pauses of `queued_call_margin` were asked (the pauses of the lease between them are
+/// as many as the polls of the test make, so they are not counted).
+fn margins(rig: &Rig) -> usize {
+    let margin = Duration::from_secs(60);
+    rig.pacer.asked().iter().filter(|d| **d == margin).count()
+}
+
 async fn reap(rig: &Rig) {
     let leader = Markers::new(
         rig.marks_mem.clone(),
@@ -192,26 +199,39 @@ async fn a_cold_landing_while_the_cold_tier_is_down_is_unavailable_and_takes_no_
 }
 
 /// Asserts that a cold write the cold tier refuses because cold changed since the HEAD (the key was
-/// created, or its tag moved) is a retry for the client, with hot as it was and the lock released
-/// as `DIRTY`.
+/// created, its tag moved, or it was removed) is a retry for the client and never a missing key,
+/// for a body held whole and for a stream, with hot as it was and the lock released as `DIRTY`.
 #[tokio::test]
 async fn a_cold_write_that_finds_cold_changed_is_unavailable_and_hot_is_kept() {
-    for cold_has in [false, true] {
-        let rig = landing().await;
-        rig.seed_hot("k", "old").await;
-        if cold_has {
-            rig.seed_cold("k", "older").await;
-            let error = Error::PreconditionFailed("k".to_owned());
-            rig.cold_faults.fail_next_with(Op::PutIfMatch, error);
-        } else {
-            let error = Error::AlreadyExists("k".to_owned());
-            rig.cold_faults.fail_next_with(Op::Put, error);
+    let cases = [
+        (false, Op::Put, Error::AlreadyExists("k".to_owned())),
+        (
+            true,
+            Op::PutIfMatch,
+            Error::PreconditionFailed("k".to_owned()),
+        ),
+        (true, Op::PutIfMatch, Error::NotFound("k".to_owned())),
+    ];
+    for stream in [false, true] {
+        for (cold_has, op, error) in &cases {
+            let rig = landing().await;
+            rig.seed_hot("k", "old").await;
+            if *cold_has {
+                rig.seed_cold("k", "older").await;
+            }
+            rig.cold_faults.fail_next_with(*op, error.clone());
+            let body = if stream {
+                streamed(&["ne", "w"])
+            } else {
+                held("new")
+            };
+            let put = rig.proxy.land_in_cold("k", body).await;
+            settle().await;
+            let case = (stream, error);
+            assert!(matches!(put, Err(Error::Unavailable(_))), "{case:?}");
+            assert_eq!(rig.hot_text("k").await.as_deref(), Some("old"), "{case:?}");
+            assert_eq!(rig.shape("k").await, dirty(), "{case:?}");
         }
-        let put = rig.proxy.land_in_cold("k", held("new")).await;
-        settle().await;
-        assert!(matches!(put, Err(Error::Unavailable(_))), "{cold_has}");
-        assert_eq!(rig.hot_text("k").await.as_deref(), Some("old"));
-        assert_eq!(rig.shape("k").await, dirty());
     }
 }
 
@@ -262,6 +282,43 @@ async fn a_cold_landing_whose_hot_delete_is_unknown_keeps_its_lock_for_the_queue
 
     rig.pacer.open();
     settle().await;
+    assert_eq!(rig.shape("k").await, dirty());
+}
+
+/// Asserts that a landing dropped while its hot DELETE is in flight (the client went away) keeps
+/// the lock for `queued_call_margin` before it is released as `DIRTY`: the DELETE has no tag and
+/// may still be queued at the store, so a writer that arrives meanwhile must not get the lock.
+#[tokio::test]
+async fn a_cold_landing_dropped_during_its_hot_delete_keeps_its_lock_for_the_queued_call_margin() {
+    let rig = landing().await;
+    rig.seed_hot("k", "old").await;
+    rig.pacer.hold(Duration::from_secs(60));
+    let delete = rig.hot.gate(Op::Delete, "k", Phase::Pre);
+    let mut put = Box::pin(rig.proxy.land_in_cold("k", held("new")));
+    until_parked(&delete, &mut put).await;
+    drop(put);
+    settle().await;
+    assert_eq!(margins(&rig), 1);
+    assert_eq!(rig.shape("k").await, locked());
+
+    rig.pacer.open();
+    settle().await;
+    assert_eq!(rig.shape("k").await, dirty());
+}
+
+/// Asserts that a landing dropped during a call that has a tag to guard it (the cold write) releases
+/// the lock at once, with no wait for the margin.
+#[tokio::test]
+async fn a_cold_landing_dropped_during_its_cold_write_releases_its_lock_at_once() {
+    let rig = landing().await;
+    rig.seed_hot("k", "old").await;
+    rig.pacer.hold(Duration::from_secs(60));
+    let write = rig.cold.gate(Op::Put, "k", Phase::Pre);
+    let mut put = Box::pin(rig.proxy.land_in_cold("k", held("new")));
+    until_parked(&write, &mut put).await;
+    drop(put);
+    settle().await;
+    assert_eq!(margins(&rig), 0);
     assert_eq!(rig.shape("k").await, dirty());
 }
 

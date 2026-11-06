@@ -2,7 +2,9 @@
 //! store, which says that a change to the key is not yet the cold tier's too, or that someone holds
 //! the key (`docs/design/put-without-lock.md`, section 4). This module is the marker's body: its
 //! fields, its encoding, and what a reader does with what it does not know. The calls that read and
-//! write marker objects are in the module `marks`; the plain puts of the proxy (`tiered/overwrite.rs`, `tiered/cold_land.rs`) are their only callers, and no server code calls those yet.
+//! write marker objects are in the module `marks`; the plain puts of the proxy
+//! (`tiered/overwrite.rs`, `tiered/cold_land.rs`) are their only callers, and no server code calls
+//! those yet.
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a

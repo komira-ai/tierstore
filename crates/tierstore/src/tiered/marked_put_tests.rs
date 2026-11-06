@@ -15,7 +15,7 @@ use tokio::sync::watch;
 
 use super::overwrite::{PlainPut, PutBody, PutClaim};
 use crate::Backend;
-use crate::journal::FORMAT_KEY;
+use crate::journal::{FORMAT_KEY, proxy_key};
 use crate::{
     Error, FaultyBackend, Gate, GateBackend, MARKER_VERSION, Marker, MarkerState, MarkerWhy,
     MemoryBackend, Mono, Op, PartBody, Proxy, ProxyConfig, Sleeper, TestClock, decode_marker,
@@ -420,7 +420,8 @@ async fn a_plain_put_of_a_key_the_hot_tier_does_not_hold_is_unavailable_and_writ
     assert!(rig.cold_faults.call_log().is_empty());
 }
 
-/// Asserts that a proxy whose marker settings do not hold together does not open.
+/// Asserts that a proxy whose marker settings do not hold together does not open, and leaves no
+/// registration in the hot tier (the leader would count it as live until it departed).
 #[tokio::test]
 async fn a_proxy_whose_marker_settings_do_not_hold_together_does_not_open() {
     let hot = Arc::new(MemoryBackend::new());
@@ -428,12 +429,14 @@ async fn a_proxy_whose_marker_settings_do_not_hold_together_does_not_open() {
     let mut config = ProxyConfig::new("p1", 1000, Arc::new(TestClock::new()));
     config.marks = Some(Arc::new(MemoryBackend::new()));
     config.markers.lock_refresh = Duration::ZERO;
-    let opened = Proxy::open(hot, cold, config).await;
+    let opened = Proxy::open(hot.clone(), cold, config).await;
     let error = opened.err().unwrap();
     assert_eq!(
         error,
         Error::Other("markers: lock_refresh must be more than zero".to_owned())
     );
+    let registration = hot.head(&proxy_key("p1")).await;
+    assert_eq!(registration, Err(Error::NotFound(proxy_key("p1"))));
 }
 
 /// Asserts that every request of a put is refused while the marks bucket cannot be read, and that
