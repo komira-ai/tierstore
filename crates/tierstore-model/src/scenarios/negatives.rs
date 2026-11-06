@@ -15,7 +15,7 @@ fn push(
     heavy: bool,
 ) {
     // Every run but the document-as-written ones applies the corrections.
-    let cfg = if id.starts_with("doc/") || id.starts_with("lit/") {
+    let cfg = if id.starts_with("lit/") {
         cfg
     } else {
         fixed(cfg)
@@ -523,6 +523,35 @@ pub(super) fn negatives(v: &mut Vec<Scenario>) {
                 &[Op::Delete, Op::Put(Replay)],
             ),
             |c| c.head_before_bump = true,
+        ),
+        Pass,
+        false,
+    );
+    add(
+        "crash/leader-only",
+        "A4 A18",
+        "only the leader dies, between any two steps, during puts, a delete and gets",
+        with(
+            base(
+                Init::Empty,
+                &[Op::Put(Replay), Op::Get],
+                &[Op::Put(Stream), Op::Delete],
+            ),
+            |c| {
+                c.crash_leader = true;
+                c.max_crashes = 1;
+            },
+        ),
+        Pass,
+        false,
+    );
+    add(
+        "if-match-cold-resolve",
+        "A5",
+        "an If-Match put of an evicted key whose cold copy is replaced and evicted again while it waits",
+        with(
+            base(Init::ColdOnly, &[Op::PutIm(2)], &[Op::Put(Replay), Op::Get]),
+            |c| c.evictions = 2,
         ),
         Pass,
         false,

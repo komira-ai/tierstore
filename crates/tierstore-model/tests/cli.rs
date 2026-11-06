@@ -1,7 +1,7 @@
 //! The command line: verdict lines, traces, the list and the ablation.
 
-use tierstore_model::cli::{run_cli, write_ablation, write_row};
-use tierstore_model::scenarios::Row;
+use tierstore_model::cli::{run_cli, wanted, write_ablation, write_row, write_verdict};
+use tierstore_model::scenarios::{Expect, Row, all};
 
 fn run(args: &[&str]) -> (bool, String) {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -178,4 +178,47 @@ fn the_binary_forwards_to_the_library_and_exits_with_its_verdict() {
         .output()
         .unwrap_or_else(|e| panic!("{e}"));
     assert!(!bad.status.success());
+}
+
+#[test]
+fn four_names_that_do_not_start_with_trace_select_scenarios_by_name() {
+    let (ok, text) = run(&["a", "b", "c", "d"]);
+    assert!(ok);
+    assert!(text.is_empty(), "{text}");
+}
+
+#[test]
+fn the_names_all_and_heavy_and_an_id_select_what_they_say() {
+    let name = |n: &str| n.to_string();
+    let scenarios = all();
+    let find = |id: &str| {
+        scenarios
+            .iter()
+            .find(|s| s.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
+    };
+    let (light, heavy) = (find("if-match-race"), find("heavy/puts-delete-reads"));
+    let all_names = [name("all")];
+    let all_refs: Vec<&String> = all_names.iter().collect();
+    assert!(wanted(&all_refs, light) && wanted(&all_refs, heavy));
+    let heavy_names = [name("heavy")];
+    let heavy_refs: Vec<&String> = heavy_names.iter().collect();
+    assert!(!wanted(&heavy_refs, light) && wanted(&heavy_refs, heavy));
+    let id_names = [name("if-match-race")];
+    let id_refs: Vec<&String> = id_names.iter().collect();
+    assert!(wanted(&id_refs, light) && !wanted(&id_refs, heavy));
+}
+
+#[test]
+fn a_verdict_that_is_not_the_required_one_prints_its_counterexample_without_asking() {
+    let mut sc = all()
+        .into_iter()
+        .find(|s| s.id == "negative/no-marker-on-put")
+        .unwrap_or_else(|| panic!("scenario missing"));
+    sc.expect = Expect::Pass;
+    let mut out = Vec::new();
+    let good = write_verdict(&mut out, &sc, false).unwrap_or_else(|e| panic!("{e}"));
+    let text = String::from_utf8_lossy(&out);
+    assert!(!good);
+    assert!(text.contains("the request arrives"), "{text}");
 }

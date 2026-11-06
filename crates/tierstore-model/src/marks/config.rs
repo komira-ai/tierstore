@@ -207,8 +207,6 @@ pub struct Cfg {
     /// copier has cleared the tombstone (nothing in 5.5 can clear `gone` safely before cold holds
     /// the new object and no read of the old one can still be open).
     pub coldland_503_on_gone: bool,
-    /// 5.5 read the other way: the cold-landing lock keeps `gone` of the marker it took over.
-    pub coldland_keeps_gone: bool,
     /// The world of 5.1 step 5: a put's object write may outlast `orphan_after` and the
     /// tombstone hold (there is no size cap, so no put deadline short of the transfer). The
     /// guards that held the copier back while an object write was pending are gone.
@@ -254,7 +252,6 @@ impl Cfg {
             copier_rechecks_marker: false,
             coldland_503_on_gone: false,
             reap_keeps_gone: false,
-            coldland_keeps_gone: false,
             puts_unbounded: false,
             put_reasserts_marker: false,
             timeouts: false,

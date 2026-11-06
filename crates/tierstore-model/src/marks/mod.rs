@@ -9,5 +9,6 @@ mod config;
 mod leader;
 mod state;
 
+pub use client::Pc;
 pub use config::{Body, Cfg, Flaw, GhostKind, Init, Op, Phase};
-pub use state::{Act, Marks, Resp, State};
+pub use state::{Act, Marks, Mk, Resp, St, State, Why};

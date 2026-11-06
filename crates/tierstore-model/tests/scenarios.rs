@@ -631,3 +631,28 @@ fn holds_in_negative_overwrite_without_lock_damage() {
 fn holds_in_head_before_bump() {
     check("head-before-bump");
 }
+
+/// Both proxies of the entry protocol crash one after the other (A4 A7 A18).
+#[test]
+fn holds_in_baseline_two_client_crashes() {
+    check("baseline/two-client-crashes");
+}
+
+/// The leader of the entry protocol dies and a successor takes over (A4 A18).
+#[test]
+fn holds_in_baseline_leader_crash() {
+    check("baseline/leader-crash");
+}
+
+/// Only the leader dies, at every step, during puts, a delete and gets (A4 A18).
+#[test]
+fn holds_in_crash_leader_only() {
+    check("crash/leader-only");
+}
+
+/// An If-Match put of an evicted key whose cold copy is replaced and evicted while it waits
+/// answers 409 or 200, never an unexplained 412 (A5).
+#[test]
+fn holds_in_if_match_cold_resolve() {
+    check("if-match-cold-resolve");
+}

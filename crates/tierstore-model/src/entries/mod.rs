@@ -61,7 +61,6 @@ pub enum BFlaw {
 #[derive(Clone, Debug)]
 pub struct BCfg {
     pub scripts: [Vec<BOp>; NC],
-    pub leader: bool,
     pub evictions: u8,
     pub copy_back: bool,
     /// Start with the key evicted: cold holds version 2, hot nothing.
@@ -77,7 +76,6 @@ impl BCfg {
     pub fn new(p0: &[BOp], p1: &[BOp]) -> BCfg {
         BCfg {
             scripts: [p0.to_vec(), p1.to_vec()],
-            leader: true,
             evictions: 0,
             copy_back: false,
             cold_only: false,
@@ -140,10 +138,8 @@ pub enum BPc {
     },
     PLand,
     PAck,
-    /// Free the entry, then answer `r` (1 is 412, 2 is 503).
-    PFree {
-        r: u8,
-    },
+    /// Free the entry, then answer 412.
+    PFree,
     DEnt,
     DRead,
     /// Amend or claim the entry read as version `a`; `k`: 1 amend a pending put, 2 amend the
@@ -195,9 +191,7 @@ pub enum LPc {
         a: u8,
     },
     Head,
-    Cold {
-        h: u8,
-    },
+    Cold,
     Get,
     Copy {
         v: u8,
@@ -210,9 +204,7 @@ pub enum LPc {
     Reap {
         a: u8,
     },
-    SealDel {
-        a: u8,
-    },
+    SealDel,
     DelCold,
     DelHot,
     SealCb {
@@ -235,7 +227,7 @@ pub enum LPc {
 impl LPc {
     fn versions(&mut self, f: &mut dyn FnMut(&mut u8)) {
         match self {
-            LPc::Held { a } | LPc::Reap { a } | LPc::SealDel { a } | LPc::SealCb { a } => f(a),
+            LPc::Held { a } | LPc::Reap { a } | LPc::SealCb { a } => f(a),
             LPc::SealPut { n } => f(n),
             _ => {}
         }
@@ -335,7 +327,8 @@ impl Entries {
         out.push(Succ { act, to, bg });
     }
 
-    fn post(&self, s: &mut BState) -> Result<(), String> {
+    /// After every step: the truth of the key must be explained by the acknowledged history.
+    pub fn post(&self, s: &mut BState) -> Result<(), String> {
         let t = s.truth();
         if !s.lin.observe(&self.effs, t) && s.del_open == 0 {
             let conditional = (0..8u8).any(|g| {
@@ -485,9 +478,7 @@ impl Model for Entries {
                 self.client_steps(s, out, c);
             }
         }
-        if self.cfg.leader {
-            self.leader_steps(s, out);
-        }
+        self.leader_steps(s, out);
         if s.crashes < self.cfg.max_crashes {
             if self.cfg.crash_clients {
                 for c in 0..NC {
@@ -520,7 +511,7 @@ impl Model for Entries {
     fn check(&self, s: &BState) -> Option<String> {
         // The entry protocol's no-entry rule: with no entry and nothing in flight, hot and cold agree.
         let quiet = s.cl.iter().all(|c| !c.alive || c.pc == BPc::Idle) && s.pc == LPc::Idle;
-        if s.ent.is_none() && quiet && s.hot != 0 && s.cold != s.hot && s.cold != 0 {
+        if s.ent.is_none() && quiet && s.hot != 0 && s.cold != s.hot {
             return Some(format!(
                 "A7 no entry and nothing in flight, but hot holds {} and cold {}",
                 s.hot, s.cold

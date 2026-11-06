@@ -232,6 +232,27 @@ impl Marks {
         out.push(Succ { act, to, bg });
     }
 
+    /// A9: a marker is deleted only from its owner's own `CLEARING`. `who` names the actor in
+    /// the message; a marker that is already gone is not an error.
+    pub(super) fn delete_own_clearing(
+        &self,
+        ns: &mut State,
+        who: &str,
+        owner: u8,
+    ) -> Result<(), String> {
+        match ns.mk {
+            Some(m) if m.st == St::Clearing && m.owner == owner => {
+                ns.mk = None;
+                Ok(())
+            }
+            Some(m) => Err(format!(
+                "A9 {who} deleted a marker that is {:?} owned by {}, not its own CLEARING",
+                m.st, m.owner
+            )),
+            None => Ok(()),
+        }
+    }
+
     /// After every step: the truth of the key must be explained by the acknowledged history.
     pub fn post(&self, s: &mut State) -> Result<(), String> {
         let infl = self.co_inflight(s);

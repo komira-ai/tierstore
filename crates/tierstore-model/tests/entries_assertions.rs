@@ -117,3 +117,33 @@ fn actions_are_named_by_the_actor_that_takes_them() {
     assert_eq!(m.show_act(&(10, "x")), "leader: x");
     assert_eq!(m.show_act(&(13, "x")), "env: x");
 }
+
+#[test]
+fn a_put_the_history_cannot_explain_is_a_lost_operation_unless_it_wrote_the_bytes_of_a_create_only_put()
+ {
+    // Truth is a version no operation writes: a lost or undone operation (A1), not a broken
+    // condition.
+    let (m, mut s) = start(&[BOp::Put], &[]);
+    s.hot = 6;
+    let msg = failure(m.post(&mut s));
+    assert!(msg.starts_with("A1 truth of the key is version 6"), "{msg}");
+    // Truth is what the create-only put wrote though the history has not applied it (A5).
+    let (m, mut s) = start(&[BOp::Put], &[]);
+    s.hot = m.cfg.value(0);
+    s.lin = Lin::new(0);
+    let msg = failure(m.post(&mut s));
+    assert!(msg.starts_with("A5 truth of the key is version 3"), "{msg}");
+}
+
+#[test]
+fn a_crashed_proxy_is_not_shown_in_a_state() {
+    let (m, mut s) = start(&[BOp::Put], &[BOp::Put]);
+    s.cl[0].pc = tierstore_model::entries::BPc::PHead;
+    s.cl[1].pc = tierstore_model::entries::BPc::PHead;
+    s.cl[1].alive = false;
+    let text = m.show_state(&s);
+    assert!(
+        text.contains("proxy0:PHead") && !text.contains("proxy1"),
+        "{text}"
+    );
+}

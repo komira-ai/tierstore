@@ -68,14 +68,14 @@ impl Marks {
                     self.emit(s, out, Marks::act(w, "wave 1: hot HEAD"), false, |ns| {
                         let hv = ns.hot + 1;
                         ns.cl[c].pc = Pc::P1 { h: hv, c: cc, m };
-                        self.p1_next(ns, c)
+                        self.p1_next(ns, c, (hv, cc, m))
                     });
                 }
                 if cc == 0 {
                     self.emit(s, out, Marks::act(w, "wave 1: cold HEAD"), false, |ns| {
                         let v = ns.cold + 1;
                         ns.cl[c].pc = Pc::P1 { h, c: v, m };
-                        self.p1_next(ns, c)
+                        self.p1_next(ns, c, (h, v, m))
                     });
                 }
                 if m == 0 {
@@ -83,9 +83,9 @@ impl Marks {
                         let v = match ns.mk {
                             None => 1,
                             Some(k)
-                                if self.cfg.flaw == Flaw::CreateOnlyNoRecheck
-                                    && k.st == St::Lock
-                                    && k.why == Why::Delete =>
+                                if (self.cfg.flaw == Flaw::CreateOnlyNoRecheck)
+                                    & (k.st == St::Lock)
+                                    & (k.why == Why::Delete) =>
                             {
                                 4
                             }
@@ -93,7 +93,7 @@ impl Marks {
                             Some(_) => 2,
                         };
                         ns.cl[c].pc = Pc::P1 { h, c: cc, m: v };
-                        self.p1_next(ns, c)
+                        self.p1_next(ns, c, (h, cc, v))
                     });
                 }
             }
@@ -122,7 +122,7 @@ impl Marks {
                             2
                         };
                         ns.cl[c].pc = Pc::P2 { o: r, m };
-                        self.p2_next(ns, c)
+                        self.p2_next(ns, c, (r, m))
                     });
                 }
                 if m == 0 {
@@ -131,7 +131,7 @@ impl Marks {
                         let r = if ns.mk.is_none() {
                             ns.mk = Some(Mk { st: St::Dirty, gone: false, dirty: true, why: Why::Overwrite, owner: ns.cl[c].id, ver });
                             1
-                        } else if self.cfg.flaw == Flaw::GoneClearedFirst && matches!(ns.mk, Some(k) if k.st == St::Dirty) {
+                        } else if (self.cfg.flaw == Flaw::GoneClearedFirst) & ns.mk.is_some_and(|k| k.st == St::Dirty) {
                             // Bump the marker to gone=false before the object has landed.
                             let id = ns.cl[c].id;
                             ns.mk_put(Mk { st: St::Dirty, gone: false, dirty: true, why: Why::Overwrite, owner: id, ver })?;
@@ -140,7 +140,7 @@ impl Marks {
                             2
                         };
                         ns.cl[c].pc = Pc::P2 { o, m: r };
-                        self.p2_next(ns, c)
+                        self.p2_next(ns, c, (o, r))
                     });
                 }
             }
@@ -205,7 +205,7 @@ impl Marks {
                         ns.cl[c].pc = Pc::LkCas { a: m.ver, g: m.gone };
                     }
                     Some(m) => {
-                        if self.cfg.flaw == Flaw::ImmediateLock503 && !self.owner_dead(ns, m.owner) {
+                        if (self.cfg.flaw == Flaw::ImmediateLock503) & !self.owner_dead(ns, m.owner) {
                             return Err("A6 a writer answered 503 at once because a live holder had the lock".into());
                         }
                         ns.cl[c].pc = Pc::LkWait;
@@ -273,14 +273,14 @@ impl Marks {
                             Some(_) => 2,
                         };
                         ns.cl[c].pc = Pc::G1 { m: v, c: cc };
-                        self.g1_next(ns, c)
+                        self.g1_next(ns, c, (v, cc))
                     });
                 }
                 if cc == 0 {
                     self.emit(s, out, Marks::act(w, "hot missed: read cold (in parallel with the marker)"), false, |ns| {
                         let v = ns.cold + 1;
                         ns.cl[c].pc = Pc::G1 { m, c: v };
-                        self.g1_next(ns, c)
+                        self.g1_next(ns, c, (m, v))
                     });
                 }
             }
@@ -353,7 +353,7 @@ impl Marks {
                     ns.cl[c].pc = Pc::DDel;
                 } else {
                     self.ack(ns, c, Resp::Ok)?;
-                    ns.cl[c].pc = Pc::Rel { k: if self.cfg.flaw == Flaw::DeleteNoMarker { 2 } else { 1 } };
+                    ns.cl[c].pc = Pc::Rel { k: 1 + u8::from(self.cfg.flaw == Flaw::DeleteNoMarker) };
                 }
                 Ok(())
             }),
@@ -362,7 +362,7 @@ impl Marks {
                     self.need_lock(ns, c, "hot DELETE")?;
                     ns.hot = 0;
                     self.ack(ns, c, Resp::Ok)?;
-                    ns.cl[c].pc = Pc::Rel { k: if self.cfg.flaw == Flaw::DeleteNoMarker { 2 } else { 1 } };
+                    ns.cl[c].pc = Pc::Rel { k: 1 + u8::from(self.cfg.flaw == Flaw::DeleteNoMarker) };
                     Ok(())
                 });
                 if self.cfg.timeouts && !cl.ghost {
@@ -412,15 +412,16 @@ impl Marks {
             Pc::L1 { h, m } => {
                 if h == 0 {
                     self.emit(s, out, Marks::act(w, "LIST wave 1: hot page"), false, |ns| {
-                        ns.cl[c].pc = Pc::L1 { h: ns.hot + 1, m };
-                        self.l1_next(ns, c)
+                        let hv = ns.hot + 1;
+                        ns.cl[c].pc = Pc::L1 { h: hv, m };
+                        self.l1_next(ns, c, (hv, m))
                     });
                 }
                 if m == 0 {
                     self.emit(s, out, Marks::act(w, "LIST wave 1: marker page"), false, |ns| {
                         let v = if ns.mk.is_some() { 2 } else { 1 };
                         ns.cl[c].pc = Pc::L1 { h, m: v };
-                        self.l1_next(ns, c)
+                        self.l1_next(ns, c, (h, v))
                     });
                 }
             }
@@ -482,29 +483,22 @@ impl Marks {
             }),
             Pc::RelDel => self.emit(s, out, Marks::act(w, "delete the marker (plain DELETE)"), false, |ns| {
                 let id = ns.cl[c].id;
-                match ns.mk {
-                    Some(m) if m.st == St::Clearing && m.owner == id => ns.mk = None,
-                    Some(m) => {
-                        return Err(format!(
-                            "A9 a marker was deleted from {:?} owned by {} by actor {}, not from its own CLEARING",
-                            m.st, m.owner, id
-                        ));
-                    }
-                    None => {}
-                }
+                self.delete_own_clearing(ns, "an actor", id)?;
                 self.finish(ns, c)
             }),
             Pc::OldP1 { h, c: cc } => {
                 if h == 0 {
                     self.emit(s, out, Marks::act(w, "old release: hot HEAD"), false, |ns| {
-                        ns.cl[c].pc = Pc::OldP1 { h: ns.hot + 1, c: cc };
-                        self.oldp1_next(ns, c)
+                        let hv = ns.hot + 1;
+                        ns.cl[c].pc = Pc::OldP1 { h: hv, c: cc };
+                        self.oldp1_next(ns, c, (hv, cc))
                     });
                 }
                 if cc == 0 {
                     self.emit(s, out, Marks::act(w, "old release: cold HEAD"), false, |ns| {
-                        ns.cl[c].pc = Pc::OldP1 { h, c: ns.cold + 1 };
-                        self.oldp1_next(ns, c)
+                        let cv = ns.cold + 1;
+                        ns.cl[c].pc = Pc::OldP1 { h, c: cv };
+                        self.oldp1_next(ns, c, (h, cv))
                     });
                 }
             }

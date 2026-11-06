@@ -272,7 +272,8 @@ fn liveness<M: Model>(m: &M, g: &Graph<M::S, M::A>, out: &mut Outcome) {
         if !can[s as usize] {
             let mut chain = Vec::new();
             let mut at = s;
-            while let Some(&(p, _)) = origin.get(&at) {
+            loop {
+                let (p, _) = origin[&at];
                 if p == u32::MAX {
                     break;
                 }

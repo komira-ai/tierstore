@@ -1,6 +1,6 @@
 //! The command line of `tierstore-model`: run named scenarios and print the verdicts.
 
-use crate::scenarios::{Expect, Row, ablation, all, matrix, run, trace_of, verdict};
+use crate::scenarios::{Expect, Row, Scenario, ablation, all, matrix, run, trace_of, verdict};
 use std::io::Write;
 
 /// Run the scenarios named in `args` (`all`, `heavy`, or ids; `-v` prints every trace;
@@ -51,32 +51,8 @@ pub fn run_cli(args: &[String], out: &mut dyn Write) -> std::io::Result<bool> {
         return write_ablation(out, &ablation());
     }
     for sc in all() {
-        // With no name the PR set runs: every scenario but the heavy ones.
-        let want = if names.is_empty() {
-            !sc.heavy
-        } else {
-            names
-                .iter()
-                .any(|n| *n == "all" || **n == sc.id || (*n == "heavy" && sc.heavy))
-        };
-        if !want {
-            continue;
-        }
-        let o = run(&sc);
-        let (good, text) = verdict(&sc, &o);
-        ok &= good;
-        writeln!(
-            out,
-            "{:<34} {:<9} states={:<9} transitions={:<10} live_starts={:<6} {}",
-            sc.id, sc.claims, o.states, o.transitions, o.live_starts, text
-        )?;
-        if let Some(t) = &o.trace
-            && (verbose || !good)
-        {
-            writeln!(out, "    {}", t.message)?;
-            for (i, (a, s)) in t.steps.iter().enumerate() {
-                writeln!(out, "    {:>2}. {a}\n        => {s}", i + 1)?;
-            }
+        if wanted(&names, &sc) {
+            ok &= write_verdict(out, &sc, verbose)?;
         }
     }
     Ok(ok)
@@ -116,4 +92,36 @@ pub fn write_ablation(
         }
     }
     Ok(ok)
+}
+
+/// Whether the names given on the command line select `sc`. With no name the PR set runs:
+/// every scenario but the heavy ones.
+pub fn wanted(names: &[&String], sc: &Scenario) -> bool {
+    if names.is_empty() {
+        return !sc.heavy;
+    }
+    names
+        .iter()
+        .any(|n| *n == "all" || **n == sc.id || (*n == "heavy" && sc.heavy))
+}
+
+/// Run `sc` and print its verdict line, and its counterexample if it has one and `verbose` or
+/// the verdict is not the required one. Returns whether the verdict is the required one.
+pub fn write_verdict(out: &mut dyn Write, sc: &Scenario, verbose: bool) -> std::io::Result<bool> {
+    let o = run(sc);
+    let (good, text) = verdict(sc, &o);
+    writeln!(
+        out,
+        "{:<34} {:<9} states={:<9} transitions={:<10} live_starts={:<6} {}",
+        sc.id, sc.claims, o.states, o.transitions, o.live_starts, text
+    )?;
+    if let Some(t) = &o.trace
+        && (verbose || !good)
+    {
+        writeln!(out, "    {}", t.message)?;
+        for (i, (a, s)) in t.steps.iter().enumerate() {
+            writeln!(out, "    {:>2}. {a}\n        => {s}", i + 1)?;
+        }
+    }
+    Ok(good)
 }

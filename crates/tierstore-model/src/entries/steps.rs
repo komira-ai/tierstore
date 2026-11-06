@@ -95,17 +95,16 @@ impl Entries {
             BPc::PLock { h, c: cc } => {
                 if h == 0 {
                     self.emit(s, out, (w, "lockless hot HEAD"), false, |ns| {
-                        ns.cl[c].pc = BPc::PLock {
-                            h: ns.hot + 1,
-                            c: cc,
-                        };
-                        self.plock_next(ns, c)
+                        let nh = ns.hot + 1;
+                        ns.cl[c].pc = BPc::PLock { h: nh, c: cc };
+                        self.plock_next(ns, c, nh, cc)
                     });
                 }
                 if cc == 0 {
                     self.emit(s, out, (w, "lockless cold HEAD"), false, |ns| {
-                        ns.cl[c].pc = BPc::PLock { h, c: ns.cold + 1 };
-                        self.plock_next(ns, c)
+                        let nc = ns.cold + 1;
+                        ns.cl[c].pc = BPc::PLock { h, c: nc };
+                        self.plock_next(ns, c, h, nc)
                     });
                 }
             }
@@ -117,11 +116,9 @@ impl Entries {
                         (w, "check under the entry: hot HEAD"),
                         false,
                         |ns| {
-                            ns.cl[c].pc = BPc::PChk {
-                                h: ns.hot + 1,
-                                c: cc,
-                            };
-                            self.pchk_next(ns, c)
+                            let nh = ns.hot + 1;
+                            ns.cl[c].pc = BPc::PChk { h: nh, c: cc };
+                            self.pchk_next(ns, c, nh, cc)
                         },
                     );
                 }
@@ -132,8 +129,9 @@ impl Entries {
                         (w, "check under the entry: cold HEAD"),
                         false,
                         |ns| {
-                            ns.cl[c].pc = BPc::PChk { h, c: ns.cold + 1 };
-                            self.pchk_next(ns, c)
+                            let nc = ns.cold + 1;
+                            ns.cl[c].pc = BPc::PChk { h, c: nc };
+                            self.pchk_next(ns, c, h, nc)
                         },
                     );
                 }
@@ -156,30 +154,26 @@ impl Entries {
                 (w, "CAS the entry to (PUT, PENDING): the acknowledgement"),
                 false,
                 |ns| {
-                    let mine = ns.cl[c].mine;
-                    match ns.ent {
-                        Some(e) if e.ver == mine => {
-                            let ver = ns.fresh();
-                            ns.ent = Some(Ent {
-                                st: ESt::Pending,
-                                ver,
-                                ..e
-                            });
-                            self.ack_end(ns, c, R::Ok)
-                        }
-                        _ => self.ack_end(ns, c, R::Unk503),
-                    }
+                    // The entry is still mine: nothing else touches a HELD entry of a live owner.
+                    let ver = ns.fresh();
+                    ns.ent = ns.ent.map(|e| Ent {
+                        st: ESt::Pending,
+                        ver,
+                        ..e
+                    });
+                    self.ack_end(ns, c, R::Ok)
                 },
             ),
-            BPc::PFree { r } => {
-                self.emit(s, out, (w, "delete my entry, then answer"), false, |ns| {
-                    let mine = ns.cl[c].mine;
-                    if matches!(ns.ent, Some(e) if e.ver == mine) {
-                        ns.ent = None;
-                    }
-                    self.ack_end(ns, c, if r == 1 { R::R412 } else { R::Fail503 })
-                })
-            }
+            BPc::PFree => self.emit(
+                s,
+                out,
+                (w, "delete my entry, then answer 412"),
+                false,
+                |ns| {
+                    ns.ent = None;
+                    self.ack_end(ns, c, R::R412)
+                },
+            ),
             BPc::DEnt => self.emit(
                 s,
                 out,
@@ -279,9 +273,7 @@ impl Entries {
                 |ns| {
                     let mine = ns.cl[c].mine;
                     if k == 0 {
-                        if matches!(ns.ent, Some(e) if e.ver == mine) {
-                            ns.ent = None;
-                        }
+                        ns.ent = None;
                         return self.ack_end(ns, c, R::Ok);
                     }
                     if let Some(e) = ns.ent.filter(|e| e.ver == mine) {
@@ -356,10 +348,7 @@ impl Entries {
         }
     }
 
-    fn plock_next(&self, ns: &mut BState, c: usize) -> Result<(), String> {
-        let BPc::PLock { h, c: cc } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn plock_next(&self, ns: &mut BState, c: usize, h: u8, cc: u8) -> Result<(), String> {
         if h > 1 || cc > 1 {
             return self.ack_end(ns, c, R::R412);
         }
@@ -369,12 +358,9 @@ impl Entries {
         Ok(())
     }
 
-    fn pchk_next(&self, ns: &mut BState, c: usize) -> Result<(), String> {
-        let BPc::PChk { h, c: cc } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn pchk_next(&self, ns: &mut BState, c: usize, h: u8, cc: u8) -> Result<(), String> {
         if h > 1 || cc > 1 {
-            ns.cl[c].pc = BPc::PFree { r: 1 };
+            ns.cl[c].pc = BPc::PFree;
         } else if h == 1 && cc == 1 {
             ns.cl[c].pc = BPc::PLand;
         }
@@ -393,16 +379,12 @@ impl Entries {
                         (EOp::Put | EOp::Del, ESt::Held) if self.owner_dead(s, e.owner) => {
                             Some(LPc::Reap { a: e.ver })
                         }
-                        (EOp::Del, ESt::Pending) => Some(LPc::SealDel { a: e.ver }),
+                        (EOp::Del, ESt::Pending) => Some(LPc::SealDel),
                         (EOp::Cb, ESt::Pending) => Some(LPc::SealCb { a: e.ver }),
-                        (EOp::Put, ESt::Sealed) if self.owner_dead(s, e.owner) => Some(LPc::DelEnt),
-                        (EOp::Del, ESt::Sealed) if self.owner_dead(s, e.owner) => {
-                            Some(LPc::DelCold)
-                        }
-                        (EOp::Cb, ESt::Sealed) if self.owner_dead(s, e.owner) => Some(LPc::CbRead),
-                        (EOp::Evict, ESt::Sealed) if self.owner_dead(s, e.owner) => {
-                            Some(LPc::EvDel)
-                        }
+                        (EOp::Put, ESt::Sealed) => Some(LPc::DelEnt),
+                        (EOp::Del, ESt::Sealed) => Some(LPc::DelCold),
+                        (EOp::Cb, ESt::Sealed) => Some(LPc::CbRead),
+                        (EOp::Evict, ESt::Sealed) => Some(LPc::EvDel),
                         _ => None,
                     };
                     if let Some(n) = next {
@@ -457,7 +439,7 @@ impl Entries {
             ),
             LPc::Head => self.emit(s, out, (w, "hot HEAD"), true, |ns| {
                 ns.pc = if ns.hot != 0 {
-                    LPc::Cold { h: ns.hot }
+                    LPc::Cold
                 } else {
                     LPc::SealPut {
                         n: ns.ent.map_or(0, |e| e.ver),
@@ -465,8 +447,8 @@ impl Entries {
                 };
                 Ok(())
             }),
-            LPc::Cold { h } => self.emit(s, out, (w, "cold HEAD"), true, |ns| {
-                ns.pc = if ns.cold == 0 && h != 0 {
+            LPc::Cold => self.emit(s, out, (w, "cold HEAD"), true, |ns| {
+                ns.pc = if ns.cold == 0 {
                     LPc::Get
                 } else {
                     LPc::SealPut {
@@ -534,23 +516,17 @@ impl Entries {
                     Ok(())
                 },
             ),
-            LPc::SealDel { a } => {
-                self.emit(s, out, (w, "CAS (DEL, PENDING) to SEALED"), true, |ns| {
-                    if let Some(e) = ns.ent.filter(|e| e.ver == a) {
-                        let ver = ns.fresh();
-                        ns.ent = Some(Ent {
-                            st: ESt::Sealed,
-                            owner: me,
-                            ver,
-                            ..e
-                        });
-                        ns.pc = LPc::DelCold;
-                    } else {
-                        ns.pc = LPc::Idle;
-                    }
-                    Ok(())
-                })
-            }
+            LPc::SealDel => self.emit(s, out, (w, "CAS (DEL, PENDING) to SEALED"), true, |ns| {
+                let ver = ns.fresh();
+                ns.ent = ns.ent.map(|e| Ent {
+                    st: ESt::Sealed,
+                    owner: me,
+                    ver,
+                    ..e
+                });
+                ns.pc = LPc::DelCold;
+                Ok(())
+            }),
             LPc::DelCold => self.emit(
                 s,
                 out,
@@ -612,9 +588,7 @@ impl Entries {
                 },
             ),
             LPc::DelEnt => self.emit(s, out, (w, "delete the SEALED entry"), true, |ns| {
-                if matches!(ns.ent, Some(e) if e.st == ESt::Sealed) {
-                    ns.ent = None;
-                }
+                ns.ent = None;
                 ns.pc = LPc::Idle;
                 Ok(())
             }),

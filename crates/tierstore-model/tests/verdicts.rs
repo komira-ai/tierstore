@@ -66,3 +66,16 @@ fn a_run_that_reaches_its_state_bound_is_not_a_pass() {
         (false, "TRUNCATED (state bound reached)".into())
     );
 }
+
+#[test]
+fn an_unknown_scenario_name_is_refused_by_verify() {
+    assert_eq!(
+        tierstore_model::scenarios::verify("no/such"),
+        Err("no scenario called no/such".to_string())
+    );
+    let line = tierstore_model::scenarios::verify("if-match-race");
+    assert!(
+        matches!(&line, Ok(l) if l.starts_with("if-match-race: ") && l.ends_with("PASS")),
+        "{line:?}"
+    );
+}

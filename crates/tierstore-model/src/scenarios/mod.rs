@@ -81,7 +81,7 @@ pub fn verify(id: &str) -> Result<String, String> {
     let o = run(&sc);
     let (good, text) = verdict(&sc, &o);
     let line = format!("{id}: {} states, {text}", o.states);
-    if good { Ok(line) } else { Err(line) }
+    good.then(|| line.clone()).ok_or(line)
 }
 
 fn base(init: Init, p0: &[Op], p1: &[Op]) -> Cfg {
@@ -271,8 +271,14 @@ pub struct Row {
 /// written if `literal`, with the corrections otherwise) judging only that rule, so that a
 /// violation of another rule prunes its path and does not hide this one.
 pub fn matrix(literal: bool) -> Vec<Row> {
+    matrix_of(literal, None)
+}
+
+/// [`matrix`] over the scenarios called in `only`, if given (a small matrix for tests).
+pub fn matrix_of(literal: bool, only: Option<&[&str]>) -> Vec<Row> {
     let sets: Vec<(&'static str, Cfg)> = all()
         .into_iter()
+        .filter(|s| only.is_none_or(|ids| ids.contains(&s.id)))
         .filter(|s| {
             (s.expect == Expect::Pass || (literal && s.id.starts_with("doc/")))
                 && !s.heavy

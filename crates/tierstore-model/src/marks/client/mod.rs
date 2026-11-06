@@ -120,18 +120,16 @@ impl Pc {
 
     /// The object of a put landed but its marker is not confirmed: the window of 7.1 row 3.
     fn landed_unmarked(&self) -> bool {
-        matches!(
-            self,
-            Pc::P2 { o: 1, m } if *m != 1
-        ) || matches!(
-            self,
-            Pc::Pm0
-                | Pc::PmCas { .. }
-                | Pc::PmHead { .. }
-                | Pc::PmWait
-                | Pc::PmWaitHead
-                | Pc::PmCreate
-        )
+        matches!(self, Pc::P2 { o: 1, .. })
+            || matches!(
+                self,
+                Pc::Pm0
+                    | Pc::PmCas { .. }
+                    | Pc::PmHead { .. }
+                    | Pc::PmWait
+                    | Pc::PmWaitHead
+                    | Pc::PmCreate
+            )
     }
 }
 
@@ -142,6 +140,12 @@ enum Out {
     Fail,
     UnkApplied,
     UnkNot,
+}
+
+/// A slot for a stalled proxy's pending call: the first of the two that holds none. A ghost is
+/// always alive, so a slot that is not alive is free; at most two proxies stall in one run.
+fn free_ghost_slot(s: &State) -> usize {
+    (NC..NC + 2).find(|&k| !s.cl[k].alive).unwrap_or(NC)
 }
 
 pub(super) fn ghost_kind_of(a: &State, b: &State) -> Option<GhostKind> {
@@ -172,8 +176,6 @@ pub(super) fn err_kinds_of(msg: &str) -> &'static [GhostKind] {
         &[GhostKind::HotDelete, GhostKind::HotReplace]
     } else if msg.starts_with("A9") {
         &[GhostKind::MarkerDelete]
-    } else if msg.starts_with("A12") {
-        &[GhostKind::MarkerWrite]
     } else {
         &[]
     }
@@ -247,9 +249,7 @@ impl Marks {
     /// the call stays queued at the store and may land later (a ghost of this proxy). With the
     /// correction the proxy keeps its lock until the call can no longer land.
     pub(super) fn timeout_step(&self, s: &State, out: &mut Vec<Succ<State, Act>>, c: usize) {
-        let Some(k) = (NC..NC + 2).find(|&k| !s.cl[k].alive && !s.cl[k].ghost) else {
-            return;
-        };
+        let k = free_ghost_slot(s);
         self.emit(
             s,
             out,
@@ -290,9 +290,8 @@ impl Marks {
                     }
                     ns.cl[c].alive = false;
                     ns.crashes += 1;
-                    if self.cfg.ghost.is_some()
-                        && let Some(k) = (NC..NC + 2).find(|&k| !ns.cl[k].alive && !ns.cl[k].ghost)
-                    {
+                    if self.cfg.ghost.is_some() {
+                        let k = free_ghost_slot(ns);
                         let mut g = ns.cl[c].clone();
                         g.ghost = true;
                         g.alive = true;
@@ -344,8 +343,7 @@ impl Marks {
 
     fn holds(&self, ns: &State, c: usize) -> bool {
         let cl = &ns.cl[c];
-        cl.ln != 0
-            && matches!(ns.mk, Some(m) if m.st == St::Lock && m.ver == cl.ln && m.owner == cl.id)
+        cl.ln != 0 && matches!(ns.mk, Some(m) if m.st == St::Lock && m.ver == cl.ln)
     }
 
     /// A8: a hot DELETE or a plain replace is made by the live holder of the key's lock.
@@ -425,7 +423,7 @@ impl Marks {
                         (self.cfg.flaw != Flaw::DeleteGoneLate && !self.cfg.delete_decides_gone)
                             || prev
                     }
-                    Why::ColdLand => self.cfg.coldland_keeps_gone && prev,
+                    Why::ColdLand => false,
                     _ => prev,
                 };
                 let m = Mk {
@@ -514,10 +512,7 @@ impl Marks {
         }
     }
 
-    fn p1_next(&self, ns: &mut State, c: usize) -> Result<(), String> {
-        let Pc::P1 { h, c: cc, m } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn p1_next(&self, ns: &mut State, c: usize, (h, cc, m): (u8, u8, u8)) -> Result<(), String> {
         let op = self.op_of(&ns.cl[c]);
         let no_recheck = self.cfg.flaw == Flaw::CreateOnlyNoRecheck;
         if h > 1 {
@@ -562,10 +557,7 @@ impl Marks {
         Ok(())
     }
 
-    fn p2_next(&self, ns: &mut State, c: usize) -> Result<(), String> {
-        let Pc::P2 { o, m } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn p2_next(&self, ns: &mut State, c: usize, (o, m): (u8, u8)) -> Result<(), String> {
         if o == 0 || m == 0 {
             return Ok(());
         }
@@ -581,12 +573,11 @@ impl Marks {
                 Ok(())
             }
             _ => match op {
-                Op::PutCo(_) if self.cfg.flaw != Flaw::CreateOnlyNoRecheck => {
+                Op::PutCo(_) => {
                     // The store refused the object: the key was there. Re-check before the 412.
                     ns.cl[c].pc = Pc::Rc;
                     Ok(())
                 }
-                Op::PutCo(_) => self.ack_end(ns, c, Resp::R412),
                 Op::Put(Body::Replay) => {
                     ns.cl[c].pc = Pc::LkCreate;
                     Ok(())
@@ -624,7 +615,7 @@ impl Marks {
             }
             _ => {
                 self.ack(ns, c, Resp::Read(r))?;
-                if from_cold_unmarked && self.cfg.copier {
+                if from_cold_unmarked {
                     ns.cl[c].pc = Pc::Gw;
                 } else {
                     self.end_op(ns, c);
@@ -634,10 +625,7 @@ impl Marks {
         }
     }
 
-    fn oldp1_next(&self, ns: &mut State, c: usize) -> Result<(), String> {
-        let Pc::OldP1 { h, c: cc } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn oldp1_next(&self, ns: &mut State, c: usize, (h, cc): (u8, u8)) -> Result<(), String> {
         if h > 1 || cc > 1 {
             return self.ack_end(ns, c, Resp::R412);
         }
@@ -647,20 +635,14 @@ impl Marks {
         Ok(())
     }
 
-    fn l1_next(&self, ns: &mut State, c: usize) -> Result<(), String> {
-        if let Pc::L1 { h, m } = ns.cl[c].pc
-            && h != 0
-            && m != 0
-        {
+    fn l1_next(&self, ns: &mut State, c: usize, (h, m): (u8, u8)) -> Result<(), String> {
+        if h != 0 && m != 0 {
             ns.cl[c].pc = Pc::L2 { h, m };
         }
         Ok(())
     }
 
-    fn g1_next(&self, ns: &mut State, c: usize) -> Result<(), String> {
-        let Pc::G1 { m, c: cc } = ns.cl[c].pc else {
-            return Ok(());
-        };
+    fn g1_next(&self, ns: &mut State, c: usize, (m, cc): (u8, u8)) -> Result<(), String> {
         if m == 0 || cc == 0 {
             return Ok(());
         }

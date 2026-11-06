@@ -72,6 +72,26 @@ pub(super) fn baseline(v: &mut Vec<Scenario>) {
         Pass,
     );
     addb(
+        "baseline/two-client-crashes",
+        "A4 A7 A18",
+        "both proxies crash, at any step, one after the other",
+        bwith(BCfg::new(&[BOp::Put, BOp::Get], &[BOp::Delete]), &|c| {
+            c.crash_clients = true;
+            c.max_crashes = 2;
+        }),
+        Pass,
+    );
+    addb(
+        "baseline/leader-crash",
+        "A4 A18",
+        "the leader dies between any two steps and a successor takes over",
+        bwith(BCfg::new(&[BOp::Put], &[BOp::Delete, BOp::Get]), &|c| {
+            c.crash_leader = true;
+            c.max_crashes = 1;
+        }),
+        Pass,
+    );
+    addb(
         "baseline-negative/delete-no-wait",
         "A2",
         "a delete that does not wait for the copy it amended",

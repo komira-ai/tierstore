@@ -43,7 +43,7 @@ fn apply(e: Eff, c: u16) -> Option<u16> {
     let nv = match e {
         Eff::Put(x) => x,
         Eff::PutCo(x) if v == 0 => x,
-        Eff::PutIm(x, t) if t != 0 && v == t => x,
+        Eff::PutIm(x, t) if v == t => x,
         Eff::Del => 0,
         Eff::PutCo(_) | Eff::PutIm(..) => return None,
     };
@@ -68,11 +68,10 @@ impl Lin {
         let mut seen = [0u64; 32];
         let mut out = Vec::new();
         let mut stack = Vec::new();
+        // The configurations are kept sorted and without duplicates (`set`).
         for &c in &self.cfgs {
-            if seen[usize::from(c >> 6)] >> (c & 63) & 1 == 0 {
-                seen[usize::from(c >> 6)] |= 1 << (c & 63);
-                stack.push(c);
-            }
+            seen[usize::from(c >> 6)] |= 1 << (c & 63);
+            stack.push(c);
         }
         while let Some(c) = stack.pop() {
             out.push(c);
