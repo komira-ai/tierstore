@@ -13,7 +13,7 @@ use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Skipped, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadedPart, UploadsAfter, Window,
+    PartBody, PutAnswer, ReadBody, Span, UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -536,7 +536,26 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, false).await
+        self.inner
+            .put_object_stream(key, len, body, false)
+            .await
+            .map(drop)
+    }
+
+    /// The put of [`put_stream`](Backend::put_stream) (or of
+    /// [`put_stream_hot_only`](Backend::put_stream_hot_only) for `hot_only`) that gives the tag the
+    /// hot tier's answer names, when the object was written to the hot tier and the tier says it
+    /// (an S3 hot tier does, in the `ETag` of its answer to the PUT, which is the tag a HEAD of
+    /// the object gives while it is there). An object that went to the cold tier gives `None`:
+    /// the tag of a HEAD changes when the object is copied the other way.
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.inner.put_object_stream(key, len, body, hot_only).await
     }
 
     async fn put_stream_hot_only(
@@ -545,7 +564,10 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, true).await
+        self.inner
+            .put_object_stream(key, len, body, true)
+            .await
+            .map(drop)
     }
 
     /// The proxy keeps objects immutable: it never replaces one.

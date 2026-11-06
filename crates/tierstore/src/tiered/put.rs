@@ -9,7 +9,7 @@ use futures::stream;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::Inner;
-use crate::{Error, PartBody};
+use crate::{Error, PartBody, PutAnswer};
 use futures::StreamExt;
 
 /// The body of a streamed put, which more than one tier may be offered in turn: a view of it is
@@ -76,14 +76,15 @@ impl Inner {
     }
 
     /// As `put_object`, for a body that arrives as chunks: it goes to the hot tier, or to the
-    /// cold tier where the hot tier is full, without being held.
+    /// cold tier where the hot tier is full, without being held. Gives the hot tier's answer to
+    /// the write, if the object went there and the answer says what a HEAD of it gives.
     pub(super) async fn put_object_stream(
         &self,
         key: &str,
         len: Option<u64>,
         body: PartBody<'_>,
         hot_only: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<PutAnswer>, Error> {
         self.admit_write(key).await?;
         self.put_streamed_on_entry(key, len, body, hot_only).await
     }
