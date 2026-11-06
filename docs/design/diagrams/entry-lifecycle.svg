@@ -70,7 +70,7 @@ text{fill:#1E1E1D;font-family:system-ui,-apple-system,'Segoe UI',sans-serif;font
 <text x="40" y="722" class="t-m">copy.</text>
 <line x1="20" y1="752" x2="940" y2="752" class="ln-d"/>
 <text x="20" y="776" class="b lbl">C  Later, above high water: eviction takes the key sealed (see the eviction sequence)</text>
-<text x="650.0" y="804" class="t-m lbl" text-anchor="middle">12  create entry (EVICT, SEALED); re-check both tags; hot DELETE key; delete entry</text>
+<text x="650.0" y="804" class="t-m lbl" text-anchor="middle">12  create entry (EVICT, SEALED); re-check cold tag; hot DELETE If-Match tH; delete entry</text>
 <line x1="870" y1="816" x2="430" y2="816" class="ln" marker-end="url(#entry-lifecycle-ak)"/>
 <rect x="30" y="830" width="900" height="48" rx="5" class="box-o"/>
 <text x="40" y="850" class="t-m">Copy-back works the same way: a cold-served GET leaves a (CB, PENDING) entry; the leader seals it, then streams the current cold object into hot</text>

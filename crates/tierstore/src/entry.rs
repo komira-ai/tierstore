@@ -32,12 +32,18 @@
 //! another entry has replaced the one it meant, and the original error if that entry is still
 //! there. When the read itself fails, the original error is returned.
 //!
+//! A caller that retries a step uses [`Entries::try_advance`], which tells a replace that
+//! failed and was read back as not landed ([`Attempt::Unchanged`]) from one that could not be read
+//! back ([`Attempt::Unknown`]), and [`Entries::settle`] to read again. [`Entries::advance`] is the
+//! same call with the first folded into [`Outcome::Lost`] and the second into the error.
+//!
 //! # Reading
 //!
-//! An entry is read with a head (its tag) and then a get (its body). A write may come between the
-//! two, so the body can be newer than the tag. That is safe: the tag is the older one, and a
-//! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
-//! Nobody acts on a body without going through such a call.
+//! An entry is read with one tagged get ([`Backend::get_tagged`]): the body and the tag are those of
+//! one object. A store without that call is read with a head (its tag) and then a get (its body). A
+//! write may come between the two, so the body can be newer than the tag. That is safe: the tag is
+//! the older one, and a replace or delete that names it fails against the newer entry, which is
+//! [`Outcome::Lost`]. Nobody acts on a body without going through such a call.
 //!
 //! The one exception is a store without a delete on the tag: there [`Entries::release`] falls back to
 //! a plain delete, which does not check the tag, so a stale [`Seen`] could remove a newer entry.
@@ -295,9 +301,38 @@ pub enum Outcome<T> {
 }
 
 /// Whether an answer leaves it open that the write was done: the store was unavailable, or it
-/// failed in a way that does not say.
-fn ambiguous(error: &Error) -> bool {
+/// failed in a way that does not say. Such an answer is also the only kind a retry of a step may
+/// follow, since any other says the store refused the call.
+pub(crate) fn ambiguous(error: &Error) -> bool {
     matches!(error, Error::Unavailable(_) | Error::Other(_))
+}
+
+/// How a replace ended for a caller that may try it again ([`Entries::try_advance`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Attempt {
+    /// The replace has an outcome: it was done, the entry changed, or the step did not apply.
+    Settled(Outcome<Seen>),
+    /// The store failed the replace and the entry was read back as it was read before: the
+    /// replace did not land, and the same step on the same [`Seen`] may be tried again.
+    Unchanged(Error),
+    /// The store failed the replace and the entry could not be read back, so whether it landed is
+    /// not known: [`Entries::settle`] reads again.
+    Unknown(Unsettled),
+}
+
+/// A replace whose answer was lost, and the nonce of the body it wrote if it landed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsettled {
+    error: Error,
+    nonce: String,
+}
+
+impl Unsettled {
+    /// The error the store answered with.
+    #[must_use]
+    pub fn into_error(self) -> Error {
+        self.error
+    }
 }
 
 /// An answer of a read, with a missing object as `None`.
@@ -369,16 +404,23 @@ impl Entries {
     /// # Errors
     /// As [`Entries::read`].
     pub async fn read_path(&self, path: &str) -> Result<Option<Seen>, Error> {
-        let Some(meta) = found(self.hot.head(path).await)? else {
-            return Ok(None);
+        let (body, tag) = match self.hot.get_tagged(path, None).await {
+            Ok(read) => read,
+            Err(Error::Unsupported(_)) => {
+                let Some(meta) = found(self.hot.head(path).await)? else {
+                    return Ok(None);
+                };
+                let Some(body) = found(self.hot.get(path, None).await)? else {
+                    return Ok(None);
+                };
+                (body, meta.tag)
+            }
+            Err(Error::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
         };
-        let Some(body) = found(self.hot.get(path, None).await)? else {
-            return Ok(None);
-        };
-        let entry = decode_entry(&body)?;
         Ok(Some(Seen {
-            entry,
-            tag: meta.tag,
+            entry: decode_entry(&body)?,
+            tag,
         }))
     }
 
@@ -447,8 +489,22 @@ impl Entries {
     /// # Errors
     /// The backend's error for a failed write (see the module for the ambiguous ones).
     pub async fn advance(&self, seen: &Seen, step: Step) -> Result<Outcome<Seen>, Error> {
+        match self.try_advance(seen, step).await? {
+            Attempt::Settled(outcome) => Ok(outcome),
+            Attempt::Unchanged(_) => Ok(Outcome::Lost),
+            Attempt::Unknown(unsettled) => Err(unsettled.into_error()),
+        }
+    }
+
+    /// As [`Entries::advance`], for a caller that retries: a replace that failed ambiguously is
+    /// not folded into [`Outcome::Lost`] or an error, but says whether the entry was read back as
+    /// it was ([`Attempt::Unchanged`]) or could not be read back ([`Attempt::Unknown`]).
+    ///
+    /// # Errors
+    /// The backend's error for a failed write that is not ambiguous.
+    pub async fn try_advance(&self, seen: &Seen, step: Step) -> Result<Attempt, Error> {
         let Some((op, st, owner)) = step.apply(&seen.entry, &self.me) else {
-            return Ok(Outcome::Refused);
+            return Ok(Attempt::Settled(Outcome::Refused));
         };
         let next = Entry {
             v: ENTRY_VERSION,
@@ -465,19 +521,31 @@ impl Entries {
             .put_if_match(&path, encode_entry(&next), &seen.tag)
             .await;
         match written {
-            Ok(tag) => Ok(Outcome::Done(Seen { entry: next, tag })),
-            Err(Error::PreconditionFailed(_) | Error::NotFound(_)) => Ok(Outcome::Lost),
-            Err(error) if ambiguous(&error) => self.settle_advance(&next, error).await,
+            Ok(tag) => Ok(Attempt::Settled(Outcome::Done(Seen { entry: next, tag }))),
+            Err(Error::PreconditionFailed(_) | Error::NotFound(_)) => {
+                Ok(Attempt::Settled(Outcome::Lost))
+            }
+            Err(error) if ambiguous(&error) => {
+                let unsettled = Unsettled {
+                    error,
+                    nonce: next.nonce,
+                };
+                Ok(self.settle(seen, unsettled).await)
+            }
             Err(error) => Err(error),
         }
     }
 
-    /// The answer of a replace whose reply was lost, from what is stored.
-    async fn settle_advance(&self, next: &Entry, error: Error) -> Result<Outcome<Seen>, Error> {
-        match self.read(&next.key).await {
-            Ok(Some(seen)) if seen.entry.nonce == next.nonce => Ok(Outcome::Done(seen)),
-            Ok(_) => Ok(Outcome::Lost),
-            Err(_) => Err(error),
+    /// Reads the entry again after a replace of `seen` whose answer was lost: it is
+    /// [`Attempt::Settled`] `Done` if the body stored has the nonce of the replace, `Lost` if
+    /// another body is stored or none is, [`Attempt::Unchanged`] if the entry has the tag of
+    /// `seen` still, and [`Attempt::Unknown`] again if the read fails.
+    pub async fn settle(&self, seen: &Seen, lost: Unsettled) -> Attempt {
+        match self.read(&seen.entry.key).await {
+            Ok(Some(now)) if now.entry.nonce == lost.nonce => Attempt::Settled(Outcome::Done(now)),
+            Ok(Some(now)) if now.tag == seen.tag => Attempt::Unchanged(lost.error),
+            Ok(_) => Attempt::Settled(Outcome::Lost),
+            Err(_) => Attempt::Unknown(lost),
         }
     }
 

@@ -151,12 +151,12 @@ async fn two_directory_backends_over_one_directory_have_one_winner() {
     assert_eq!(one.list(prefix).await.expect("a listing").len(), 1);
 }
 
-/// Asserts that on a directory tier, where the whole key is one file name of at most 255 bytes,
-/// a tag whose key (`oci/tags/<name>/<tag>/` and the 20 digits) is exactly 255 bytes is pushed
-/// and pulled, and one byte more is not taken (500, nothing tagged), so that the 20 digits of a
-/// version are accounted for in the limit the docs state.
+/// Asserts that on a directory tier, whose file name is the key encoded and, over 255 bytes,
+/// hashed, a tag whose key (`oci/tags/<name>/<tag>/` and the 20 digits) is exactly 255 bytes and
+/// one of 256 bytes are both pushed and pulled, and that the pull of the longer lists the version
+/// by the key it was written under. Catches a tag one byte over the old limit answered 500.
 #[tokio::test]
-async fn a_version_key_of_255_bytes_fits_a_directory_tier_and_one_more_does_not() {
+async fn a_version_key_of_255_bytes_and_one_of_256_are_pushed_and_pulled_on_a_directory_tier() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-oci-tags-name");
     let backend = Arc::new(DirBackend::open(dir.path()).expect("a directory"));
     let (front, metrics) = front_over(backend.clone());
@@ -200,7 +200,7 @@ async fn a_version_key_of_255_bytes_fits_a_directory_tier_and_one_more_does_not(
             super::push_tests::full(&manifest),
         )
         .await;
-    put.assert_error(StatusCode::INTERNAL_SERVER_ERROR, "UNKNOWN");
+    assert_eq!(put.status, StatusCode::CREATED, "{}", put.text());
     let got = rig.send(Method::GET, &target).await;
-    got.assert_error(StatusCode::NOT_FOUND, "MANIFEST_UNKNOWN");
+    assert_eq!(got.body, manifest);
 }

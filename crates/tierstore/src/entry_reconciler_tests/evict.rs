@@ -8,20 +8,20 @@ use crate::entry_reconciler::evict::Tags;
 use crate::journal::{USAGE_KEY, Usage};
 
 /// A body of thirty bytes made of `fill`.
-fn thirty(fill: &str) -> Bytes {
+pub(super) fn thirty(fill: &str) -> Bytes {
     Bytes::from(fill.repeat(30))
 }
 
 /// The settings of a reconciler over a hot tier budgeted at 100 bytes (high water 80, low water
 /// 70), with one item at a time so that the order of the calls is the order of the candidates.
-fn small(config: &mut EntryReconcilerConfig) {
+pub(super) fn small(config: &mut EntryReconcilerConfig) {
     config.base.hot_budget = 100;
     config.base.parallel = 1;
 }
 
 /// Puts `a`, `b` and `c` in the hot tier, thirty bytes each, `a` the oldest, and the same bytes in
 /// the cold tier under the keys of `cold`.
-async fn crowded(rig: &Rig, cold: &[&str]) {
+pub(super) async fn crowded(rig: &Rig, cold: &[&str]) {
     for key in ["a", "b", "c"] {
         rig.hot.put(key, thirty(key)).await.unwrap();
         rig.clock.advance(1000);
@@ -32,7 +32,7 @@ async fn crowded(rig: &Rig, cold: &[&str]) {
 }
 
 /// The entry a create made.
-fn took(created: Created) -> Seen {
+pub(super) fn took(created: Created) -> Seen {
     match created {
         Created::Taken(seen) => seen,
         Created::Exists => panic!("the entry exists"),
@@ -427,8 +427,9 @@ async fn an_entry_made_meanwhile_stops_the_adoption_of_an_unreplicated_object() 
 /// Asserts what each answer of a store does to an eviction that is under its entry, after the
 /// compare: a call that fails is the item's failure and the entry is removed all the same; a
 /// delete that answers that the object is gone or is not the one named leaves it; a store that
-/// cannot delete on a tag gets a plain delete; an entry that cannot be removed stays sealed with
-/// the object gone, and the next step removes it.
+/// cannot delete on a tag gets a head of the hot object (the cases of the hot head are that
+/// store's) and a plain delete; an entry that cannot be removed stays sealed with the object gone,
+/// and the next step removes it.
 #[tokio::test]
 async fn every_answer_of_a_store_under_the_eviction_entry_is_judged() {
     let unavailable = || Error::Unavailable("store".to_owned());
@@ -476,6 +477,11 @@ async fn every_answer_of_a_store_under_the_eviction_entry_is_judged() {
         let mut step = Box::pin(parked.reconciler.step());
         park(&mut step, &parked.gate).await;
         let faulty = if on_hot { &parked.hot } else { &parked.cold };
+        if on_hot && op == Op::Head {
+            // The head of the hot object is made only for a store that cannot delete on a tag.
+            let unsupported = Error::Unsupported("tag".to_owned());
+            parked.hot.fail_next_on(Op::DeleteIfMatch, "a", unsupported);
+        }
         faulty.fail_next_on(op, prefix, error);
         parked.gate.release();
         let done = step.await;
@@ -534,7 +540,7 @@ async fn a_call_that_fails_before_the_entry_fails_the_item_and_it_is_tried_again
     let unavailable = || Error::Unavailable("store".to_owned());
     // The tier, the call, the prefix, the answer, whether `a` has a cold copy and the failures.
     let cases = [
-        (true, Op::Head, ENTRIES_PREFIX, unavailable(), true, 1),
+        (true, Op::Get, ENTRIES_PREFIX, unavailable(), true, 1),
         (true, Op::Head, "a", unavailable(), true, 1),
         (
             true,

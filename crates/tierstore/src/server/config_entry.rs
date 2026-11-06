@@ -1,7 +1,8 @@
 //! The keys of `[hot_store]` that set the waits, delays and limits of the entry protocol: the
 //! entry reconciler's retry delays, stray sweep, copy-back limits and usage and listing work, and
 //! the proxy's side of it (how long the usage object stands, how often the format object is read,
-//! how many looks at an entry, and how long a delete waits for the reconciler).
+//! how many looks at an entry, how long a delete waits for the reconciler, and how often and how
+//! fast the last step of a put or a delete is tried again).
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, and a
 //! range, and the relations between keys are checked here once, when the file is read, each
@@ -9,7 +10,7 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig};
+use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig, StepRetry};
 
 use super::cli_heartbeat::DEPARTURE;
 use super::config::{ConfigError, TierTable, duration, invalid, within};
@@ -59,6 +60,14 @@ pub struct EntryTuning {
     pub delete_poll_min: Duration,
     /// `hot_store.delete_poll_max`: the longest sleep of that wait.
     pub delete_poll_max: Duration,
+    /// `hot_store.step_attempts`: the most tries of the last step of a put or a delete (the
+    /// landing of a put, the hand-over of a delete, the removal of an entry), the first included.
+    pub step_attempts: u32,
+    /// `hot_store.step_retry_min`: the sleep before the second try of that step.
+    pub step_retry_min: Duration,
+    /// `hot_store.step_retry_max`: the longest sleep between two tries; each is twice the one
+    /// before.
+    pub step_retry_max: Duration,
     /// `hot_store.held_ttl`: how long a held put or delete of a live owner may stand unchanged
     /// before the reconciler reaps it.
     ///
@@ -69,7 +78,12 @@ pub struct EntryTuning {
     /// owner that comes back after the reap finds the entry changed and writes nothing. What a
     /// reap can cut short is an operation that is still running, so the value must be longer than
     /// any operation holds its entry: a delete holds it for at most four calls, each cut at
-    /// `deadline_margin` (which is at most a quarter of `departure`), so `departure` bounds it;
+    /// `deadline_margin` (which is at most a quarter of `departure`), so `departure` bounds it
+    /// when no step is tried again; with `step_attempts` tries of each of two of its calls (the
+    /// removal of its entry and the hand-over; the two `delete_data` calls are not tried again) it
+    /// holds it for up to `2 + 2 * step_attempts` calls and the sleeps between tries, which the
+    /// default of an hour is far above (a value in the file is checked against `departure` and
+    /// not against that sum);
     /// a put holds it for as long as its body takes, and a put that outlives `held_ttl` is not
     /// acknowledged (its landing finds the entry changed and answers 503). A value given in the
     /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
@@ -98,6 +112,9 @@ impl Default for EntryTuning {
             delete_wait: Duration::from_secs(30),
             delete_poll_min: Duration::from_secs(1),
             delete_poll_max: Duration::from_secs(10),
+            step_attempts: StepRetry::new().attempts,
+            step_retry_min: StepRetry::new().delay,
+            step_retry_max: StepRetry::new().delay_max,
             held_ttl: Duration::from_secs(3600),
         }
     }
@@ -130,6 +147,11 @@ impl EntryTuning {
             wait: self.delete_wait,
             poll_min: self.delete_poll_min,
             poll_max: self.delete_poll_max,
+        };
+        proxy.step_retry = StepRetry {
+            attempts: self.step_attempts,
+            delay: self.step_retry_min,
+            delay_max: self.step_retry_max,
         };
     }
 }
@@ -254,6 +276,19 @@ pub(super) fn entry_tuning(
             old.delete_poll_max,
             HOUR,
         )?,
+        step_attempts: count("step_attempts", hot.step_attempts, old.step_attempts, 100)?,
+        step_retry_min: time(
+            "step_retry_min",
+            hot.step_retry_min,
+            old.step_retry_min,
+            HOUR,
+        )?,
+        step_retry_max: time(
+            "step_retry_max",
+            hot.step_retry_max,
+            old.step_retry_max,
+            HOUR,
+        )?,
         held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
     };
     let low = ("retry_min", tuning.retry_min);
@@ -261,6 +296,8 @@ pub(super) fn entry_tuning(
     let low = ("delete_poll_min", tuning.delete_poll_min);
     ordered("delete_poll_max", low, tuning.delete_poll_max)?;
     ordered("delete_wait", low, tuning.delete_wait)?;
+    let low = ("step_retry_min", tuning.step_retry_min);
+    ordered("step_retry_max", low, tuning.step_retry_max)?;
     if tuning.proxy_usage_stale_after <= tuning.usage_interval {
         let why = format!(
             "{}ms must be longer than usage_interval, which is {}ms, or the proxy ignores a usage \
