@@ -441,6 +441,20 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
         false,
     );
     add(
+        "crash/delete-lock-rolled-back",
+        "A4 A18",
+        "crash holding a DELETE lock, which the leader reaps keeping the gone it found (5.13)",
+        with(
+            crashy(
+                base(Init::Lagging, &[Op::Delete], &[Op::Get, Op::PutCo(Replay)]),
+                None,
+            ),
+            |c| c.reap_delete_keeps_gone = true,
+        ),
+        Pass,
+        false,
+    );
+    add(
         "crash/cold-land-lock",
         "A4 A18",
         "crash holding a COLDLAND lock",
