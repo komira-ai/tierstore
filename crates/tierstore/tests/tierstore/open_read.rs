@@ -146,9 +146,10 @@ fn calls(rig: &Rig) -> [u64; 4] {
     ]
 }
 
-/// The calls made since `before`, as `calls` counts them. A read that misses the hot tier makes
-/// one more get of it than the open read: the one of the usage, which decides whether a copy-back
-/// is asked for.
+/// The calls made since `before`, as `calls` counts them. A read that misses the hot tier and
+/// finds the object in the cold tier makes one more get of the hot tier than the open read: the
+/// one of the usage, which decides whether a copy-back is asked for. A read that neither tier
+/// has makes none.
 fn since(rig: &Rig, before: [u64; 4]) -> [u64; 4] {
     let now = calls(rig);
     [0, 1, 2, 3].map(|at| now[at] - before[at])
@@ -294,9 +295,49 @@ async fn a_missing_key_is_not_found_after_one_call_to_each_tier() {
     let before = calls(&rig);
     let opened = proxy.open_read("absent", None).await;
     assert_eq!(opened.err(), Some(missing.clone()));
-    assert_eq!(since(&rig, before), [2, 0, 1, 0]);
+    assert_eq!(since(&rig, before), [1, 0, 1, 0]);
     let streamed = proxy.get_stream("absent", None).await;
     assert_eq!(streamed.err(), Some(missing));
+}
+
+/// Asserts that a read of a key neither tier holds makes no read of the usage object, whichever
+/// way it is made (`get`, `open_read` or `get_stream`, whole or of a range): the level of the hot
+/// tier is of use only to a read the cold tier has, and each of those reads the usage once.
+#[tokio::test(start_paused = true)]
+async fn a_key_neither_tier_holds_is_read_without_a_read_of_the_usage() {
+    let rig = Rig::new();
+    rig.cold_mem.put("cold", body(TEN)).await.unwrap();
+    let proxy = rig.proxy("p1", 1000).await;
+    let usage = || rig.hot.calls_on(Op::Get, "_tiering/usage");
+    let missing = Error::NotFound("absent".to_owned());
+    let before = usage();
+    for range in [None, Some(ByteRange::new(0, 4))] {
+        assert_eq!(proxy.get("absent", range).await, Err(missing.clone()));
+        assert_eq!(
+            proxy.get_stream("absent", range).await.err(),
+            Some(missing.clone())
+        );
+    }
+    for span in [
+        None,
+        Some(Span::From {
+            first: 0,
+            last: Some(3),
+        }),
+    ] {
+        let opened = proxy.open_read("absent", span).await;
+        assert_eq!(opened.err(), Some(missing.clone()));
+    }
+    assert_eq!(usage(), before);
+
+    for range in [None, Some(ByteRange::new(0, 4))] {
+        let before = usage();
+        proxy.get("cold", range).await.unwrap();
+        assert_eq!(usage(), before + 1, "get {range:?}");
+        let before = usage();
+        drop(proxy.get_stream("cold", range).await.unwrap());
+        assert_eq!(usage(), before + 1, "get_stream {range:?}");
+    }
 }
 
 /// Asserts that a miss in the hot tier is read from the cold tier in one call, with the cold

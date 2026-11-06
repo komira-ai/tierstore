@@ -64,7 +64,7 @@ async fn an_entry_that_vanishes_between_create_and_read_is_looked_for_again() {
         .await
         .unwrap();
     assert!(matches!(held, crate::entry::Created::Taken(_)));
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
     gate.parked().await;
@@ -86,7 +86,7 @@ async fn a_put_that_runs_out_of_looks_at_a_changing_entry_is_unavailable() {
         .create("k", crate::entry::Take::Put)
         .await
         .unwrap();
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
     gate.parked().await;

@@ -24,7 +24,7 @@ async fn delete_waiting(rig: &Rig) -> (tokio::task::JoinHandle<Result<(), Error>
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     before_hot.parked().await;
-    let poll = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let poll = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     assert!(before_hot.release());
     poll.parked().await;
     (delete, poll)
@@ -97,7 +97,7 @@ async fn a_delete_that_meets_a_frozen_reconciler_is_answered_unavailable_at_the_
     assert!(!rig.hot_has("k").await);
     assert!(!rig.cold_has("k").await);
     assert_eq!(rig.shape("k").await, handed_over());
-    let reads = rig.hot_faults.calls_on(Op::Head, &entry_key("k"));
+    let reads = rig.hot_faults.calls_on(Op::Get, &entry_key("k"));
     assert_eq!(reads, 7);
 }
 
@@ -115,7 +115,7 @@ async fn a_poll_of_zero_still_ends_at_the_deadline() {
     held_copy(&rig, "k").await;
     let answer = rig.proxy.delete("k").await;
     assert!(is_unavailable(&answer), "{answer:?}");
-    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 5);
+    assert_eq!(rig.hot_faults.calls_on(Op::Get, &entry_key("k")), 5);
 }
 
 /// Asserts that a waiting delete is acknowledged when the entry it waited on is replaced by
@@ -193,11 +193,11 @@ async fn a_delete_that_meets_a_sealed_copy_back_waits_for_the_release_and_then_d
 {
     let rig = Rig::active().await;
     let sealed = sealed_copy_back(&rig).await;
-    let first = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let first = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     first.parked().await;
-    let poll = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let poll = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     assert!(first.release());
     poll.parked().await;
     assert!(!delete.is_finished());
@@ -239,7 +239,7 @@ async fn a_delete_that_meets_a_sealed_copy_back_that_is_never_released_is_answer
         rig.shape("k").await,
         Some((EntryOp::Cb, EntryState::Sealed, None))
     );
-    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 7);
+    assert_eq!(rig.hot_faults.calls_on(Op::Get, &entry_key("k")), 7);
 }
 
 /// Asserts that all the waits of one delete share its budget: a delete that waits seven seconds
@@ -258,12 +258,12 @@ async fn a_delete_that_waited_on_a_sealed_entry_and_then_claims_a_delete_waits_o
     };
     let rig = Rig::build_waiting(ACTIVE_FORMAT, 3, wait).await;
     let sealed = sealed_copy_back(&rig).await;
-    let mut gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let mut gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;
     for _ in 0..4 {
-        let next = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+        let next = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
         assert!(gate.release());
         next.parked().await;
         gate = next;
@@ -279,7 +279,7 @@ async fn a_delete_that_waited_on_a_sealed_entry_and_then_claims_a_delete_waits_o
     assert!(gate.release());
     let answer = delete.await.unwrap();
     assert!(is_unavailable(&answer), "{answer:?}");
-    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 10);
+    assert_eq!(rig.hot_faults.calls_on(Op::Get, &entry_key("k")), 10);
     assert_eq!(rig.shape("k").await, handed_over());
 }
 
@@ -306,11 +306,11 @@ async fn sealed_entry(rig: &Rig, take: Take) -> Seen {
 async fn waits_then_deletes(take: Take, op: EntryOp) {
     let rig = Rig::active().await;
     let sealed = sealed_entry(&rig, take).await;
-    let first = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let first = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     first.parked().await;
-    let poll = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let poll = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     assert!(first.release());
     poll.parked().await;
     assert!(!delete.is_finished());
@@ -342,7 +342,7 @@ async fn unavailable_at_deadline(take: Take, op: EntryOp) {
     assert!(is_unavailable(&answer), "{answer:?}");
     assert!(rig.cold_has("k").await);
     assert_eq!(rig.shape("k").await, Some((op, EntryState::Sealed, None)));
-    assert_eq!(rig.hot_faults.calls_on(Op::Head, &entry_key("k")), 7);
+    assert_eq!(rig.hot_faults.calls_on(Op::Get, &entry_key("k")), 7);
 }
 
 /// Asserts that a delete that meets a sealed eviction waits for the release and then deletes both

@@ -34,10 +34,11 @@
 //!
 //! # Reading
 //!
-//! An entry is read with a head (its tag) and then a get (its body). A write may come between the
-//! two, so the body can be newer than the tag. That is safe: the tag is the older one, and a
-//! replace or delete that names it fails against the newer entry, which is [`Outcome::Lost`].
-//! Nobody acts on a body without going through such a call.
+//! An entry is read with one tagged get ([`Backend::get_tagged`]): the body and the tag are those of
+//! one object. A store without that call is read with a head (its tag) and then a get (its body). A
+//! write may come between the two, so the body can be newer than the tag. That is safe: the tag is
+//! the older one, and a replace or delete that names it fails against the newer entry, which is
+//! [`Outcome::Lost`]. Nobody acts on a body without going through such a call.
 //!
 //! The one exception is a store without a delete on the tag: there [`Entries::release`] falls back to
 //! a plain delete, which does not check the tag, so a stale [`Seen`] could remove a newer entry.
@@ -369,16 +370,23 @@ impl Entries {
     /// # Errors
     /// As [`Entries::read`].
     pub async fn read_path(&self, path: &str) -> Result<Option<Seen>, Error> {
-        let Some(meta) = found(self.hot.head(path).await)? else {
-            return Ok(None);
+        let (body, tag) = match self.hot.get_tagged(path, None).await {
+            Ok(read) => read,
+            Err(Error::Unsupported(_)) => {
+                let Some(meta) = found(self.hot.head(path).await)? else {
+                    return Ok(None);
+                };
+                let Some(body) = found(self.hot.get(path, None).await)? else {
+                    return Ok(None);
+                };
+                (body, meta.tag)
+            }
+            Err(Error::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error),
         };
-        let Some(body) = found(self.hot.get(path, None).await)? else {
-            return Ok(None);
-        };
-        let entry = decode_entry(&body)?;
         Ok(Some(Seen {
-            entry,
-            tag: meta.tag,
+            entry: decode_entry(&body)?,
+            tag,
         }))
     }
 

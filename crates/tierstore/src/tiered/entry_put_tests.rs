@@ -539,7 +539,7 @@ async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with
         .fail_next_on(Op::PutIfMatch, "_entries/", unanswered.clone());
     let unreadable = Error::Unavailable("no read".to_owned());
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry_key("k"), unreadable);
+        .fail_next_on(Op::Get, &entry_key("k"), unreadable);
     assert_eq!(rig.proxy.put("k", body("v")).await, Err(unanswered));
     assert_eq!(rig.shape("k").await, held_by("p1"));
 }

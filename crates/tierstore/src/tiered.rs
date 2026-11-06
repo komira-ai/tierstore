@@ -10,7 +10,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
-use crate::metrics::{Counters, Read, Skipped, Tier};
+use crate::metrics::{Counters, Read, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
     PartBody, ReadBody, Span, UploadedPart, UploadsAfter, Window,
@@ -461,18 +461,15 @@ impl Inner {
             // A read of a part asks the cold tier for that part alone and copies nothing back: a
             // whole read per chunk of a long blob would be quadratic, and would hold the whole of
             // the object in memory for a read of a part of it.
-            if self.level().await >= Level::Critical {
-                self.counters.skipped(Skipped::Critical);
-            }
             let (body, _) = self.cold_get(key, Some(part)).await?;
+            self.note_critical().await;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
-        let critical = self.level().await >= Level::Critical;
         let (body, _) = self.cold_get(key, None).await?;
-        if critical {
-            self.counters.skipped(Skipped::Critical);
-        } else if self.entries_active().await {
+        // The level is looked at once the cold tier has the object: a key that neither tier has
+        // needs none, and the level can cost a read of the usage object.
+        if !self.note_critical().await && self.entries_active().await {
             self.ask_copy_back(key);
         }
         self.counters.served(Tier::Cold, body.len());
