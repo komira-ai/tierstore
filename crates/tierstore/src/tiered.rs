@@ -12,10 +12,14 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, MarkersConfig, Meta,
+    MonotonicClock, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper,
+    UploadedPart, UploadsAfter, Window,
 };
 
+mod cold_land;
+#[cfg(test)]
+mod cold_land_tests;
 mod copy_back;
 #[cfg(test)]
 mod copy_back_tests;
@@ -32,6 +36,15 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod lock_hold;
+#[cfg(test)]
+mod lock_hold_tests;
+mod marked_put;
+#[cfg(test)]
+mod marked_put_tests;
+mod overwrite;
+#[cfg(test)]
+mod overwrite_tests;
 mod pause;
 mod put;
 mod read;
@@ -42,6 +55,7 @@ mod uploads_tests;
 pub use entry_delete::DeleteWait;
 pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
+pub use overwrite::{PlainPut, PutBody, PutClaim};
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -95,10 +109,20 @@ pub struct ProxyConfig {
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
-    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
-    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
-    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    /// store, for the markers of `docs/design/put-without-lock.md`. Only [`Proxy::put_plain`] and
+    /// [`Proxy::land_in_cold`] use it, under the format `active-marks`, and no server code calls
+    /// them yet; `None` is a proxy with no marks bucket (every proxy of a library user, and a
+    /// server over a `dir` hot tier, whose directory of markers is opened by the release that uses
+    /// it).
     pub marks: Option<Arc<dyn Backend>>,
+    /// The waits and the lease of the locks on the markers (`lock_wait`, `lock_lease` and the
+    /// rest of section 9 of the design). Used only with `marks`, and only under the format
+    /// `active-marks`.
+    pub markers: MarkersConfig,
+    /// Whether a plain put that the hot store refuses with `Full` before it took a byte lands in
+    /// the cold tier under a lock (`emergency_cold_landing`, 5.5 of the design, residual R6');
+    /// false answers it 503. Only under the format `active-marks`.
+    pub emergency_cold_landing: bool,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -132,6 +156,8 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            markers: MarkersConfig::default(),
+            emergency_cold_landing: false,
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -185,6 +211,22 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
     }
 }
 
+/// The calls on the markers as the proxy `config.proxy_id`, if it has a marks bucket.
+fn open_markers(config: &ProxyConfig) -> Result<Option<Arc<Markers>>, Error> {
+    let Some(marks) = &config.marks else {
+        return Ok(None);
+    };
+    let opened = Markers::new(
+        Arc::clone(marks),
+        config.proxy_id.as_str(),
+        config.markers.clone(),
+        Arc::clone(&config.mono),
+        Arc::clone(&config.sleeper),
+    );
+    let markers = opened.map_err(|refused| Error::Other(format!("markers: {refused}")))?;
+    Ok(Some(Arc::new(markers)))
+}
+
 /// A store over a HOT and a COLD [`Backend`] that is itself a [`Backend`].
 ///
 /// The proxy needs no state for correctness: any number of proxies, each with an id of its
@@ -218,6 +260,12 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   A put whose entry cannot be made or kept is refused with [`Error::Unavailable`] and a client
 ///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
 ///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
+/// - **Plain put** ([`Proxy::put_plain`]) and **landing in cold** ([`Proxy::land_in_cold`]) are
+///   not [`Backend`] calls and are made only under the format `active-marks` (`marked_put.rs`): a
+///   plain put of a key the hot tier holds replaces the object under a lock on the key's marker,
+///   and a put the hot tier refused with [`Error::Full`] lands in the cold tier if
+///   [`ProxyConfig::emergency_cold_landing`] is set. Under any other format they are answered
+///   [`Error::Unavailable`] without a request.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the
@@ -292,6 +340,8 @@ struct Inner {
     pause: Arc<Mutex<pause::Pause>>,
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
+    /// The calls on the markers of keys, as this proxy; `None` without a marks bucket.
+    markers: Option<Arc<Markers>>,
     /// One caller reads the format object at a time, so that a caller that waited uses the read of
     /// the caller before it. The heartbeat's look at the format goes through it too.
     format_gate: Arc<AsyncMutex<()>>,
@@ -322,6 +372,7 @@ impl Proxy {
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
+        let markers = open_markers(&config)?;
         let inner = Inner {
             hot,
             cold,
@@ -329,6 +380,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
+            markers,
             format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,

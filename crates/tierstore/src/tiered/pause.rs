@@ -2,7 +2,8 @@
 //! [`ProxyConfig::format_refresh`](super::ProxyConfig::format_refresh)) before each write and
 //! answers it with [`Error::Unavailable`] while the format pauses writes, and until it says
 //! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key. Reads are
-//! never paused.
+//! never paused. It keeps too whether the format says `active-marks`, which only the plain puts of
+//! `marked_put.rs` ask: the writes of the [`Backend`](crate::Backend) trait do not.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -23,6 +24,8 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
+    /// Whether the last object read says that writes are made on markers. Kept when a read fails.
+    marks: bool,
 }
 
 impl Pause {
@@ -30,6 +33,7 @@ impl Pause {
     fn keep(&mut self, format: Option<&Format>) {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
+        self.marks = format.is_some_and(Format::runs_marks);
     }
 }
 
@@ -65,7 +69,7 @@ impl Inner {
     /// the format says that writes are made on entries.
     pub(super) async fn admit_write(&self, key: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
-        let (paused, entries) = self.format_state().await;
+        let (paused, entries, _) = self.format_state().await;
         if paused {
             let why = "writes are paused while the store changes format; retry later";
             return Err(Error::Unavailable(why.to_owned()));
@@ -84,9 +88,15 @@ impl Inner {
         self.format_state().await.1
     }
 
-    /// Whether writes are paused and whether they are made on entries, as of a read of the format
-    /// object that is at most `format_refresh` old.
-    async fn format_state(&self) -> (bool, bool) {
+    /// Whether the format says `active-marks`, as of a read of the format object that is at most
+    /// `format_refresh` old. Nothing that a proxy does under any other format depends on it.
+    pub(super) async fn marks_active(&self) -> bool {
+        self.format_state().await.2
+    }
+
+    /// Whether writes are paused, whether they are made on entries and whether they are made on
+    /// markers, as of a read of the format object that is at most `format_refresh` old.
+    async fn format_state(&self) -> (bool, bool, bool) {
         if let Some(state) = self.fresh_format_state() {
             return state;
         }
@@ -103,14 +113,14 @@ impl Inner {
         if let Ok(format) = found {
             seen.keep(format.as_ref());
         }
-        (seen.paused, seen.entries)
+        (seen.paused, seen.entries, seen.marks)
     }
 
     /// What the last read of the format object says, if it is at most `format_refresh` old.
-    fn fresh_format_state(&self) -> Option<(bool, bool)> {
+    fn fresh_format_state(&self) -> Option<(bool, bool, bool)> {
         let seen = locked(&self.pause);
         seen.read
             .is_some_and(|at| Instant::now().duration_since(at) < self.config.format_refresh)
-            .then_some((seen.paused, seen.entries))
+            .then_some((seen.paused, seen.entries, seen.marks))
     }
 }

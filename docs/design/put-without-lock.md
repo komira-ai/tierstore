@@ -170,6 +170,8 @@ The table above is the definition of the state machine.
 - **A `CLEARING` marker has `dirty = false`** and `why` is written only for a lock; the model keeps both from the marker it replaced, and neither is read in `CLEARING`.
 - **The nonce is `<boot>.<counter>`.** The `boot` is 128 random bits drawn once for each `Markers`, and the counter is that `Markers`'s count of writes, so a restart under one actor id does not repeat a nonce and the marker's tag is unique per write (4.1).
 
+**`MarkMove::Settle` (pull request 5)** is M6 for a lock that owes a copy: it ends the holder's own lock as `CLEARING` whatever `dirty` says, keeping `gone`. The emergency landing needs it (5.5, step 5: hot is absent and cold holds the truth), where `Release` would leave `DIRTY`.
+
 A marker whose `st` this release does not know is reaped (M9) to `DIRTY`, keeping `gone`, so that nothing it may owe is dropped; a writer treats it as a lock and waits (`MarkerState::is_held`).
 
 ## 5. Every operation
@@ -237,7 +239,7 @@ A multipart completion differs only in the object write (`complete_upload`) and 
 
 ### 5.2 Waiting for a lock, and keeping one (used by 5.1, 5.3, 5.5, 5.6, 5.10, 5.11)
 
-*Built in part by pull request 2 of 10.4 (`Markers::wait`, `Markers::refresh_due`, `Markers::may_destroy` and `MarkMove::Refresh` in `marks.rs`, with `MarkersConfig` holding `lock_wait`, `lock_poll_min`, `lock_poll_max`, `lock_poll_factor`, `lock_lease`, `lock_refresh` and `queued_call_margin` and refusing values that do not hold together). Plan: the detached task and its drop guard and the keeping of a lock after an unknown hot DELETE, which come with the pull requests that take locks (5 and 6), the leader's reap by the lease (7), and the TOML keys of section 9, which come with the first pull request that constructs a `Markers` in the server: until then nothing calls the module.*
+*Built in part by pull request 2 of 10.4 (`Markers::wait`, `Markers::refresh_due`, `Markers::may_destroy` and `MarkMove::Refresh` in `marks.rs`, with `MarkersConfig` holding `lock_wait`, `lock_poll_min`, `lock_poll_max`, `lock_poll_factor`, `lock_lease`, `lock_refresh` and `queued_call_margin` and refusing values that do not hold together), and in part by pull request 5 (`tiered/lock_hold.rs`: the refresh of the lock beside a call that may take long, the check before a call that destroys, the release in a task of its own, the guard that releases a lock whose operation was dropped, and the keeping of a lock for `queued_call_margin` after a hot DELETE of unknown outcome, used by the emergency landing). Differences from the text below, for pull request 5: (1) the guard releases when the future of the put is dropped, but the call under way (the replace, the cold write) is dropped with it, because a streamed body is borrowed and cannot move to a task; the "detached" task of a client's request is the S3 front's own task around the backend call (`put_streamed` in `ops.rs`), which this release does not change. A replace that the store still receives names a tag, so it lands only if nothing replaced the object since. (2) A release the store fails is tried again up to `hot_store.step_attempts` times with the pauses of `hot_store.step_retry_min` doubling to `step_retry_max`, reading the marker between tries, as the last step of a put on an entry is; after that the leader's reap is the way out. Plan: the leader's reap by the lease (7), the same keeping of a lock for the delete (6), and the TOML keys of `lock_*` in section 9, which come with the first pull request that builds a `MarkersConfig` from the file: until then the server runs the defaults, and nothing in it calls the module.*
 
 A writer that finds `LOCK` or `CLEARING` (not its own) polls the marker with a GET at `lock_poll_min` (20 ms), multiplied by `lock_poll_factor` (2) each time up to `lock_poll_max` (1 s), until the state is not `LOCK`/`CLEARING` or `lock_wait` passes → 503 `SlowDown`. **`lock_wait` defaults to 5 s**, under the 10 to 30 s default timeouts of common S3 SDKs, so the client sees the 503 and not its own timeout. The 503 carries `Retry-After: 1`, and this document states that a `SlowDown` here is **not a throttle**: S3 SDKs apply a global back-off to `SlowDown`, and a deployment whose clients do so should read a lock 503 as an unusual event (a crash or a leak), not as a normal one. A dead owner is reaped by the leader (5.13) within `departure` (60 s), which is longer than `lock_wait`: a crashed owner's key yields a 503 at least once, and `Retry-After` says when to come back. The poll uses the injected clock and a recording sleeper. A writer that finds `DIRTY` or `WANT` does not wait; it locks by CAS. A reader never waits (I12).
 
@@ -249,7 +251,7 @@ A writer that finds `LOCK` or `CLEARING` (not its own) polls the marker with a G
 
 ### 5.3 Overwrite put (hot holds K)
 
-*Plan: pull request 5 of 10.4.*
+*Built by pull request 5 of 10.4 as `Proxy::put_plain` (`tiered/overwrite.rs`, `tiered/marked_put.rs`). It is not a `Backend` call (a put of the trait is create-only, and is answered as before under every format), only the format `active-marks` admits it, no server code calls it yet, and a plain put of a key that hot does not hold is `Unavailable` until the fast path (5.1, pull request 4) takes that case. Steps 1 to 6 are as written, with these differences: a body held whole uses the tag of wave 1 for the replace (the HEAD under the lock is read only after a 412), a stream reads it; the lock rounds are `entry_rounds` for lost races and for waits, counted apart; a 404 or a refused create on the replace of a held body reads the tag again and tries again, at most `entry_rounds` times, then `Unavailable`; the tests are `overwrite_tests.rs`.*
 
 ```mermaid
 sequenceDiagram
@@ -287,7 +289,7 @@ A second writer that meets the lock waits and then runs the same steps: it wins,
 
 ### 5.4 Same-bytes put and conditional puts
 
-*Plan: pull request 5 of 10.4.*
+*(a) and (c) are built by pull request 5 (a: `PutClaim` in `tiered/overwrite.rs`; c is 5.1). (b) is not: `If-Match` stays 501 until PR #173 (Q4), as 10.4 says, and the front's answers to it are untouched. In (a) the caller names the content tags the body is known to have (`PutClaim::tags`), the library compares them with the tag of the hot object and the size, and reads a stream to its end before it answers so that the check the front makes as the body passes is made. The condition that the request changes no header is always met in this tier: it keeps no content type, user metadata or other header of an object (every GET and HEAD answers the same content type), so a put changes nothing but the bytes. The `Content-MD5` and `x-amz-checksum-sha256` headers become tags in the front, which a later pull request wires.*
 
 **(a) Same bytes.** The shortcut is taken only when all of these hold: the request carries a digest before the body is stored, which is **`Content-MD5`** or one of S3's checksum headers (`x-amz-checksum-sha256`, `-sha1`, `-crc32`, `-crc32c`, `-crc64nvme`; there is no `x-amz-checksum-md5` in S3), compared with the hot object's ETag (a single-part ETag is the MD5 of the body) or with the checksum hot stored for the object (tierstore-design.md section 16); the sizes are equal; and **the request changes nothing else**: no `Content-Type`, user metadata, `Cache-Control`, `Content-Encoding`, `Content-Disposition`, tagging or storage class header, or each equals what the HEAD returned. A multipart ETag `md5-N` never matches and the put is an overwrite. The answer is **200 with no write: one hot HEAD** (about 3 ms). The visible difference from S3 is that `LastModified` does not move (Q3). Without a digest, or with a header that differs, the put is an overwrite. SDKs rarely send `Content-MD5`, so on most clients a re-put is an overwrite (section 6 prices it; Q16 names the query that says how common it is).
 
@@ -304,7 +306,7 @@ N racing `If-Match` puts with one ETag: one takes the lock first and wins; each 
 
 ### 5.5 Landing in cold: the emergency landing
 
-*Plan: pull request 5 of 10.4. Off by default (`emergency_cold_landing = false`).*
+*Built by pull request 5 of 10.4 as `Proxy::land_in_cold` (`tiered/cold_land.rs`), off by default (`hot_store.emergency_cold_landing = false`, 503 when off). The fast path of pull request 4 calls it when its object write answers `Full` before it took a byte; until then nothing does, and the call is for a library caller. Differences from the steps below: wave 1 is the cold HEAD and the marker (the hot HEAD is made under the lock, as the model does, `Pc::ClH`); a cold write refused because cold changed since the HEAD is `Unavailable` and the client retries; the lock is settled by a new move, `MarkMove::Settle` (M6 for a lock that owes a copy: the release of a `COLDLAND` lock would leave `DIRTY` there), and the `CLEARING` marker is then removed.*
 
 **The decision.** Today a put at level `Full` (usage at or above the budget) lands in cold (tierstore-design.md 5). That cannot be kept as it is. A cold landing writes cold before it removes hot, and **no lock orders it against a fast put**, because the fast put (5.1) never takes one: a create-only put whose wave-1 reads preceded the cold write lands in hot afterwards, and the lander's hot DELETE then removes it. Readers see 3, 5, 3 with only two operations (model: `residual/cold-land-vs-create-only`, `residual/cold-land-vs-plain-put`, and a list that missed hot before the landing, `residual/cold-land-vs-stale-list`). The creation of an object in hot is arbitrated by the store; the creation of one in cold is not arbitrated against hot at all, so no protocol that keeps the one-write fast path closes it. The invariants that force the choice are I1 and I5 (an acknowledged create-only put must not be silently replaced). The best correct alternatives cost:
 
@@ -631,7 +633,7 @@ So with a fast cold tier the copier keeps up at 128; with a cold tier that answe
 
 ## 7. Failure and crash cases
 
-Every row is a test; the Test column names it. "Unknown outcome" is a 503 for the client, with no retry inside the proxy. All tests are *to be added* by the pull request that builds the operation (10.4); none exists today.
+Every row is a test; the Test column names it. "Unknown outcome" is a 503 for the client, with no retry inside the proxy. All tests are *to be added* by the pull request that builds the operation (10.4). Pull request 5 adds those of the overwrite, the same-bytes put and the emergency landing under the names below (`tiered/overwrite_tests.rs`, `tiered/cold_land_tests.rs`, `tiered/lock_hold_tests.rs`, `tiered/marked_put_tests.rs`); the rows that need the If-Match code (#173), the fast path, the delete, the copier and the reap wait for their pull requests.
 
 ### 7.1 Fast put (5.1), a crash or error after each step
 
@@ -858,7 +860,7 @@ Every number is a key with a default (decision 11); the keys are the design's pr
 | `copy_back_max_bytes` | 64 MiB | larger objects are not copied back (the lock is held for the whole stream) |
 | `list_marker_pages` | 4 | extensions of the marker page, and probe pages of a prefix, per LIST page |
 | `list_prefix_probe` | 100 | cold keys read to verify a common prefix that only cold lists |
-| `emergency_cold_landing` | false | true: a plain put that the hot store refuses with `Full` lands in cold under the lock (5.5, R6'); false: 503 |
+| `emergency_cold_landing` (built as `hot_store.emergency_cold_landing`) | false | true: a plain put that the hot store refuses with `Full` lands in cold under the lock (5.5, R6'); false: 503 |
 | `abandoned_upload_after` | 7 days | the sweep aborts a hot-tier multipart upload older than this (it was 0, off, and the entry reap aborted a dead put's uploads; 5.13) |
 | `hot_store.marks_bucket` | `<hot bucket>-marks` | the bucket of the markers, named exactly by the key (4.1); created and granted by the operator before `--activate-marks`, which checks it exists and records the name in `_tiering/format` |
 | `local_cache.revalidate_after` | never (unset) | a cache hit older than this (since filled or last revalidated) is checked by one HEAD through the proxy, ETag and size only, no body; a mismatch or a missing key drops the entry; a failed HEAD serves the cached copy and logs it (5.16) |

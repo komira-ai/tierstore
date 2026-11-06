@@ -17,9 +17,11 @@
 //!   Writes stay paused. This release's reconciler never writes it.
 //! - `active-marks`: the phase of the protocol of `docs/design/put-without-lock.md`, which keeps a
 //!   marker in the marks bucket in place of the entry of a key. This release reads and writes the
-//!   word and the optional `marks_bucket` that names the bucket, and acts on neither: it makes no
-//!   write under it (503, as for a phase it does not take as active), pauses nothing, and its
-//!   entry reconciler does nothing. A release before it takes the phase to be one it does not
+//!   word and the optional `marks_bucket` that names the bucket, and the server acts on neither: the
+//!   writes of the [`Backend`] trait are 503 under it (as for a phase it does not take as active),
+//!   it pauses nothing, and its entry reconciler does nothing. Only `Proxy::put_plain` and
+//!   `Proxy::land_in_cold`, which no server code calls yet, write under it (on markers, see
+//!   `tiered/marked_put.rs`). A release before it takes the phase to be one it does not
 //!   know, which is the same.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
@@ -88,6 +90,15 @@ impl Format {
     /// epoch is [`ENTRIES_EPOCH`] or later.
     pub(crate) fn runs_entries(&self) -> bool {
         self.phase == FormatPhase::Active && self.epoch.is_some_and(|epoch| epoch >= ENTRIES_EPOCH)
+    }
+}
+
+impl Format {
+    /// Whether a proxy that reads this makes its writes on markers: the phase is `active-marks`.
+    /// (That the record names the marks bucket the proxy has is checked by the pull request that
+    /// makes the first write under it.)
+    pub(crate) fn runs_marks(&self) -> bool {
+        self.phase == FormatPhase::ActiveMarks
     }
 }
 

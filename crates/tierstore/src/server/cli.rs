@@ -579,7 +579,7 @@ pub(super) fn open_tier(
 }
 
 /// The second handle on the hot store, for its marks bucket: the tier `cli.hot_marks` names, with
-/// the endpoint, region and credentials of the hot tier. Nothing in this release calls it. A bucket
+/// the endpoint, region and credentials of the hot tier. Only `Proxy::put_plain` and `Proxy::land_in_cold` use it, and no server code calls those yet. A bucket
 /// of an S3 store is reached when it is first used, so this asks the store nothing; a `dir` hot
 /// tier has none yet (`None`): opening its directory beside the hot one makes it, and a unit with
 /// `ProtectSystem=strict` and the hot directory alone in `ReadWritePaths=` could not, so the

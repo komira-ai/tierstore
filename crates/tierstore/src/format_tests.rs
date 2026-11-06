@@ -126,6 +126,26 @@ fn only_active_with_epoch_2_or_more_runs_entries() {
     }
 }
 
+/// Asserts that only the phase `active-marks` makes a proxy write on markers: not `active` at any
+/// epoch, not a pause, not a phase it does not know.
+#[test]
+fn only_active_marks_runs_marks() {
+    let cases = [
+        (r#"{"phase":"active-marks"}"#, true),
+        (
+            r#"{"epoch":3,"marks_bucket":"b","phase":"active-marks"}"#,
+            true,
+        ),
+        (r#"{"epoch":3,"phase":"active"}"#, false),
+        (r#"{"phase":"drain"}"#, false),
+        (r#"{"phase":"someday"}"#, false),
+    ];
+    for (json, runs) in cases {
+        let format = decoded(json);
+        assert_eq!(format.runs_marks(), runs, "{json}");
+    }
+}
+
 /// The fixture of the format object of the phase `active-marks`.
 const ACTIVE_MARKS: &str =
     include_str!("../tests/stored_formats/fixtures/format_active_marks.json");
