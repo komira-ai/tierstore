@@ -534,7 +534,7 @@ async fn a_call_that_fails_before_the_entry_fails_the_item_and_it_is_tried_again
     let unavailable = || Error::Unavailable("store".to_owned());
     // The tier, the call, the prefix, the answer, whether `a` has a cold copy and the failures.
     let cases = [
-        (true, Op::Head, ENTRIES_PREFIX, unavailable(), true, 1),
+        (true, Op::Get, ENTRIES_PREFIX, unavailable(), true, 1),
         (true, Op::Head, "a", unavailable(), true, 1),
         (
             true,
