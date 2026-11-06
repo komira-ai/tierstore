@@ -96,7 +96,7 @@ fn base(init: Init, p0: &[Op], p1: &[Op]) -> Cfg {
 /// A named correction: it sets one switch of the configuration.
 pub type Fix = (&'static str, fn(&mut Cfg));
 
-pub const FIXES: [Fix; 9] = [
+pub const FIXES: [Fix; 11] = [
     ("bump_keeps_gone (5.1 row 2, 5.3 release)", |c| {
         c.bump_keeps_gone = true
     }),
@@ -117,6 +117,12 @@ pub const FIXES: [Fix; 9] = [
     }),
     ("coldland_503_on_gone (5.5)", |c| {
         c.coldland_503_on_gone = true
+    }),
+    ("put_reasserts_marker (5.1 step 5)", |c| {
+        c.put_reasserts_marker = true
+    }),
+    ("timeout_keeps_lock (5.2, 5.6)", |c| {
+        c.timeout_keeps_lock = true
     }),
 ];
 
@@ -204,6 +210,8 @@ fn unfix(mut c: Cfg) -> Cfg {
     c.evict_age_from_copy = off.evict_age_from_copy;
     c.copier_rechecks_marker = off.copier_rechecks_marker;
     c.coldland_503_on_gone = off.coldland_503_on_gone;
+    c.put_reasserts_marker = off.put_reasserts_marker;
+    c.timeout_keeps_lock = off.timeout_keeps_lock;
     c
 }
 

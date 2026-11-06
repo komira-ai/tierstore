@@ -348,7 +348,10 @@ impl Marks {
                     Cop::Cold { a, h: ns.hot, g }
                 } else if g {
                     Cop::GDel { a }
-                } else if self.cfg.flaw != Flaw::NoOrphanGuard && self.put_object_pending(ns) {
+                } else if self.cfg.flaw != Flaw::NoOrphanGuard
+                    && !self.cfg.puts_unbounded
+                    && self.put_object_pending(ns)
+                {
                     // orphan_after has not passed: a put whose object is still on its way may
                     // land; the marker is seen again on a later pass.
                     Cop::Idle
@@ -424,7 +427,7 @@ impl Marks {
                 // It also outlasts every put in flight when the cold delete was sent: a put whose
                 // marker landed but whose object has not must have finished (or died) by now.
                 let reads_done = self.cfg.flaw == Flaw::NoHold || !self.pair_in_flight(s);
-                if reads_done && !self.put_marker_landed_object_pending(s) {
+                if reads_done && (self.cfg.puts_unbounded || !self.put_marker_landed_object_pending(s)) {
                     self.emit(s, out, Marks::act(w, "after tombstone_hold: GET the marker again"), true, |ns| {
                         ns.ld.cop = if !ver_is(a) {
                             Cop::Idle

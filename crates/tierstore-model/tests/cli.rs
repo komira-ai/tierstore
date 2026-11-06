@@ -52,7 +52,7 @@ fn every_correction_is_needed_by_some_scenario() {
         text.lines()
             .filter(|l| l.contains("needed: without it"))
             .count(),
-        9,
+        11,
         "{text}"
     );
 }

@@ -43,16 +43,19 @@
 //!
 //! The model has no clock. Each timed rule of the document is a guard that enables a step only
 //! when the requests the timing argument rules out are gone: a marker with hot absent is
-//! cleared as an orphan only when no put has an object write pending (`orphan_after` exceeds a
-//! put's deadline); the tombstone hold passes only when no put has a landed marker and a
-//! pending object, and no parallel read pair or create-only wave 1 or list cold-then-marker
-//! pair is open (`tombstone_hold` exceeds a put's deadline and `read_window`); an eviction
+//! cleared as an orphan only when no put has an object write pending; the tombstone hold passes
+//! only when no put has a landed marker and a pending object, and no parallel read pair or
+//! create-only wave 1 or list cold-then-marker pair is open (`read_window`); both put guards
+//! are dropped in the runs that set `puts_unbounded` (a put has no size cap, so no deadline;
+//! section 5.1 step 5), where the put's own re-assertion of its marker replaces them; an eviction
 //! deletes hot only when no object write is pending and no create-only put that started before
 //! the hot object (or, with the correction, its cold copy) is still in flight (`evict_min_age`);
 //! the sweep runs only when no proxy is mid-operation (`stray_grace`); a lock is reaped only if
 //! its owner is dead, and a waiting writer gives up only behind a dead owner (a live holder
-//! releases within `lock_wait`). Removing a guard is a wrong variant (`NoHold`, `NoOrphanGuard`,
-//! `NoEvictMinAge`) that must be rejected.
+//! releases within `lock_wait`); a hot DELETE that timed out is a ghost call of a live proxy that
+//! the proxy outwaits before it releases its lock (`timeouts`, section 5.2). Removing a guard is
+//! a wrong variant (`NoHold`, `NoOrphanGuard`, `NoEvictMinAge`, `ReleaseOnTimeout`) that must be
+//! rejected.
 //!
 //! # Not modelled
 //!
@@ -69,8 +72,16 @@
 //!
 //! The runs of this check found counterexamples in the document's protocol as written. The
 //! corrections in [`scenarios::FIXES`] remove all of them but one that has none (the cold
-//! landing against a hot creator, scenarios `open/...`); [`scenarios::ablation`] shows each
-//! correction is needed.
+//! landing against a hot creator, scenarios `residual/...`): the revised document does not
+//! remove it either, it removes the cause (a put at level `Full` no longer lands in cold; only
+//! the emergency landing, when the hot store itself answers `Full`, stays, with this residual,
+//! section 5.5). The scenarios `doc/...` are the counterexamples of the first draft.
+//! [`scenarios::ablation`] shows each correction is needed.
+//!
+//! The delete of the revised document is the model's: `delete_decides_gone` is the protocol (a
+//! lock written with the `gone` it found, a HEAD under the lock, one CAS that writes `gone`, the
+//! hot DELETE). The marker read in wave 1 of an overwrite or a delete (5.3, 5.6) is a CAS on an
+//! earlier read of the marker, which the model's lock step already allows to fail.
 
 pub mod cli;
 pub mod entries;

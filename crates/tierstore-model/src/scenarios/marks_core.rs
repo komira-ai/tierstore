@@ -1,7 +1,7 @@
 //! The document as written, with the corrections, its operations, crashes and ghosts.
 
 use super::*;
-use crate::marks::{Body, Cfg, GhostKind, Init, Op, Phase};
+use crate::marks::{Body, Cfg, Flaw, GhostKind, Init, Op, Phase};
 use Body::{Replay, Stream};
 use Expect::{Fail, Pass};
 
@@ -218,7 +218,7 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
         false,
     );
     add(
-        "open/cold-land-vs-create-only",
+        "residual/cold-land-vs-create-only",
         "A15",
         "a put at hot Full against a create-only put: both can win, and the cold landing's hot DELETE then removes the other",
         base(
@@ -230,7 +230,7 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
         false,
     );
     add(
-        "open/cold-land-vs-stale-list",
+        "residual/cold-land-vs-stale-list",
         "A15 A2",
         "a list whose hot page missed before a copy-back reads the cold object a cold landing wrote while hot still holds the older one",
         base(Init::ColdOnly, &[Op::Get, Op::PutCold], &[Op::List]),
@@ -238,7 +238,7 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
         false,
     );
     add(
-        "open/cold-land-vs-plain-put",
+        "residual/cold-land-vs-plain-put",
         "A15",
         "a put at hot Full against a plain put: reads see 3, 5, 3",
         base(
@@ -445,6 +445,68 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
             None,
         ),
         Pass,
+        false,
+    );
+    // A put whose body streams for longer than `orphan_after` (no size cap, so no put deadline).
+    add(
+        "doc/slow-put-orphan",
+        "A7",
+        "the first draft: a slow put's marker is cleared as an orphan before its object lands",
+        with(base(Init::Empty, &[Op::Put(Stream)], &[Op::Get]), |c| {
+            c.puts_unbounded = true
+        }),
+        Fail("A7"),
+        false,
+    );
+    add(
+        "slow-put/orphan",
+        "A7 A4",
+        "a slow put re-asserts its marker after the copier cleared it as an orphan",
+        with(base(Init::Empty, &[Op::Put(Stream)], &[Op::Get]), |c| {
+            c.puts_unbounded = true
+        }),
+        Pass,
+        false,
+    );
+    add(
+        "slow-put/gone-branch",
+        "A7 A2",
+        "a slow put whose marker was created before a delete lands its object during the tombstone hold",
+        with(
+            base(Init::Both, &[Op::Delete], &[Op::Put(Stream), Op::Get]),
+            |c| c.puts_unbounded = true,
+        ),
+        Pass,
+        false,
+    );
+    // A live holder whose hot DELETE times out (5.2, 5.6).
+    add(
+        "timeout/delete-keeps-lock",
+        "A8 A1",
+        "a delete whose hot DELETE times out keeps its lock until the queued call is gone",
+        with(
+            base(Init::Both, &[Op::Delete], &[Op::Put(Replay), Op::Get]),
+            |c| {
+                c.timeouts = true;
+                c.ghost = Some(GhostKind::HotDelete);
+            },
+        ),
+        Pass,
+        false,
+    );
+    add(
+        "timeout/release-at-once",
+        "A8 A1",
+        "a delete whose hot DELETE times out releases its lock at once: the queued call deletes a newer put",
+        with(
+            base(Init::Both, &[Op::Delete], &[Op::Put(Replay), Op::Get]),
+            |c| {
+                c.timeouts = true;
+                c.ghost = Some(GhostKind::HotDelete);
+                c.flaw = Flaw::ReleaseOnTimeout;
+            },
+        ),
+        Fail("A8"),
         false,
     );
     // Ghosts: a stalled actor's call lands late.

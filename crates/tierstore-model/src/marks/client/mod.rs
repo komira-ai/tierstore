@@ -32,6 +32,8 @@ pub enum Pc {
     },
     PmWait,
     PmWaitHead,
+    /// 5.2: the hot DELETE timed out; the lock is kept until the call can no longer land.
+    TWait,
     PmCreate,
     /// 5.2 and the lock steps of 5.3, 5.5, 5.6.
     LkCreate,
@@ -188,6 +190,21 @@ impl Marks {
         }
         // A ghost: a stalled proxy's pending call. It takes one step, and only a step that
         // changes a store is a landing (a read of a ghost is not observable).
+        if self.cfg.timeouts {
+            // The store drops a queued call (its request lifetime ends) without applying it.
+            self.emit(
+                s,
+                out,
+                Marks::act(c as u8, "the queued call is dropped by the store"),
+                false,
+                |ns| {
+                    ns.cl[c].alive = false;
+                    ns.cl[c].ghost = false;
+                    ns.cl[c].pc = Pc::Idle;
+                    Ok(())
+                },
+            );
+        }
         let mut tmp = Vec::new();
         self.pc_steps(s, &mut tmp, c);
         for x in tmp {
@@ -219,6 +236,38 @@ impl Marks {
                 }
             }
         }
+    }
+
+    /// 5.6 step 2: the holder's hot DELETE times out. The proxy answers 503 (unknown outcome);
+    /// the call stays queued at the store and may land later (a ghost of this proxy). With the
+    /// correction the proxy keeps its lock until the call can no longer land.
+    pub(super) fn timeout_step(&self, s: &State, out: &mut Vec<Succ<State, Act>>, c: usize) {
+        let Some(k) = (NC..NC + 2).find(|&k| !s.cl[k].alive && !s.cl[k].ghost) else {
+            return;
+        };
+        self.emit(
+            s,
+            out,
+            Marks::act(
+                c as u8,
+                "the hot DELETE times out: 503, the call stays queued",
+            ),
+            false,
+            |ns| {
+                let mut g = ns.cl[c].clone();
+                g.ghost = true;
+                g.alive = true;
+                ns.cl[k] = g;
+                self.ack(ns, c, Resp::Unk503)?;
+                ns.cl[c].pc =
+                    if self.cfg.timeout_keeps_lock && self.cfg.flaw != Flaw::ReleaseOnTimeout {
+                        Pc::TWait
+                    } else {
+                        Pc::Rel { k: 1 }
+                    };
+                Ok(())
+            },
+        );
     }
 
     pub(super) fn crash_steps(&self, s: &State, out: &mut Vec<Succ<State, Act>>) {
@@ -501,6 +550,10 @@ impl Marks {
         }
         let op = self.op_of(&ns.cl[c]);
         match (o, m) {
+            (1, 1) if self.cfg.puts_unbounded && self.cfg.put_reasserts_marker => {
+                ns.cl[c].pc = Pc::Pm0;
+                Ok(())
+            }
             (1, 1) => self.ack_end(ns, c, Resp::Ok),
             (1, _) => {
                 ns.cl[c].pc = Pc::Pm0;

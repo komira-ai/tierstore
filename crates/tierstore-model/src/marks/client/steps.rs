@@ -338,13 +338,28 @@ impl Marks {
                 }
                 Ok(())
             }),
-            Pc::DDel => self.emit(s, out, Marks::act(w, "hot DELETE (plain) under the lock"), false, |ns| {
-                self.need_lock(ns, c, "hot DELETE")?;
-                ns.hot = 0;
-                self.ack(ns, c, Resp::Ok)?;
-                ns.cl[c].pc = Pc::Rel { k: if self.cfg.flaw == Flaw::DeleteNoMarker { 2 } else { 1 } };
-                Ok(())
-            }),
+            Pc::DDel => {
+                self.emit(s, out, Marks::act(w, "hot DELETE (plain) under the lock"), false, |ns| {
+                    self.need_lock(ns, c, "hot DELETE")?;
+                    ns.hot = 0;
+                    self.ack(ns, c, Resp::Ok)?;
+                    ns.cl[c].pc = Pc::Rel { k: if self.cfg.flaw == Flaw::DeleteNoMarker { 2 } else { 1 } };
+                    Ok(())
+                });
+                if self.cfg.timeouts && !cl.ghost {
+                    self.timeout_step(s, out, c);
+                }
+            }
+            Pc::TWait => {
+                // 5.2: the margin that outlasts the store's request lifetime has passed once no
+                // call of this proxy can land any more.
+                if !s.cl.iter().skip(super::NC).any(|g| g.ghost && g.id == cl.id) {
+                    self.emit(s, out, Marks::act(w, "the margin has passed: release the lock"), false, |ns| {
+                        ns.cl[c].pc = Pc::Rel { k: 1 };
+                        Ok(())
+                    });
+                }
+            }
             Pc::ClC => self.emit(s, out, Marks::act(w, "cold HEAD for the tag"), false, |ns| {
                 ns.cl[c].pc = Pc::ClW { c: ns.cold };
                 Ok(())

@@ -117,6 +117,8 @@ pub enum Flaw {
     CopyBackNoLock,
     /// A21: a create-only put does not ask cold.
     CreateOnlyIgnoresCold,
+    /// A8/A1: a holder whose hot DELETE timed out releases its lock at once.
+    ReleaseOnTimeout,
 }
 
 /// Which stalled calls may land late (the ghost mode of Appendix A).
@@ -203,6 +205,20 @@ pub struct Cfg {
     pub coldland_503_on_gone: bool,
     /// 5.5 read the other way: the cold-landing lock keeps `gone` of the marker it took over.
     pub coldland_keeps_gone: bool,
+    /// The world of 5.1 step 5: a put's object write may outlast `orphan_after` and the
+    /// tombstone hold (there is no size cap, so no put deadline short of the transfer). The
+    /// guards that held the copier back while an object write was pending are gone.
+    pub puts_unbounded: bool,
+    /// Fix, 5.1 step 5 (used when `puts_unbounded`): a put whose object landed re-asserts its
+    /// marker (GET; create, CAS or wait) before it acknowledges, because the copier may have
+    /// cleared the marker as an orphan while the body was still streaming.
+    pub put_reasserts_marker: bool,
+    /// The world of 5.6 step 2 and 5.10: a live holder's hot DELETE may time out and still be
+    /// queued at the store (the proxy answers 503 while the call lands later).
+    pub timeouts: bool,
+    /// Fix, 5.2: a holder whose hot DELETE ended unknown keeps its lock until the call can no
+    /// longer land (a margin longer than the store's request lifetime), then releases.
+    pub timeout_keeps_lock: bool,
     /// Assertion A8 on or off (off: the run shows the damage rather than the call).
     pub a8: bool,
     pub max_states: usize,
@@ -235,6 +251,10 @@ impl Cfg {
             coldland_503_on_gone: false,
             reap_keeps_gone: false,
             coldland_keeps_gone: false,
+            puts_unbounded: false,
+            put_reasserts_marker: false,
+            timeouts: false,
+            timeout_keeps_lock: false,
             a8: true,
             max_states: 30_000_000,
         }

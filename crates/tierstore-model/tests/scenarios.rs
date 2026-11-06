@@ -104,20 +104,20 @@ fn holds_in_cold_land() {
 
 /// A put at hot Full against a create-only put: both can win, and the cold landing's hot DELETE then removes the other (A15).
 #[test]
-fn rejects_a5_in_open_cold_land_vs_create_only() {
-    check("open/cold-land-vs-create-only");
+fn rejects_a5_in_residual_cold_land_vs_create_only() {
+    check("residual/cold-land-vs-create-only");
 }
 
 /// A list whose hot page missed before a copy-back reads the cold object a cold landing wrote while hot still holds the older one (A15 A2).
 #[test]
-fn rejects_a2_in_open_cold_land_vs_stale_list() {
-    check("open/cold-land-vs-stale-list");
+fn rejects_a2_in_residual_cold_land_vs_stale_list() {
+    check("residual/cold-land-vs-stale-list");
 }
 
 /// A put at hot Full against a plain put: reads see 3, 5, 3 (A15).
 #[test]
-fn rejects_a1_in_open_cold_land_vs_plain_put() {
-    check("open/cold-land-vs-plain-put");
+fn rejects_a1_in_residual_cold_land_vs_plain_put() {
+    check("residual/cold-land-vs-plain-put");
 }
 
 /// A put at hot Full over a deleted key whose cold copy remains (A12 A15).
@@ -544,4 +544,34 @@ fn rejects_a1_in_baseline_negative_ack_before_landing() {
 #[test]
 fn rejects_a1_in_baseline_negative_copy_without_held() {
     check("baseline-negative/copy-without-held");
+}
+
+/// The first draft: a slow put's marker is cleared as an orphan before its object lands (A7).
+#[test]
+fn rejects_a7_in_doc_slow_put_orphan() {
+    check("doc/slow-put-orphan");
+}
+
+/// A slow put re-asserts its marker after the copier cleared it as an orphan (A7 A4).
+#[test]
+fn holds_in_slow_put_orphan() {
+    check("slow-put/orphan");
+}
+
+/// A slow put whose marker was created before a delete lands its object during the tombstone hold (A7 A2).
+#[test]
+fn holds_in_slow_put_gone_branch() {
+    check("slow-put/gone-branch");
+}
+
+/// A delete whose hot DELETE times out keeps its lock until the queued call is gone (A8 A1).
+#[test]
+fn holds_in_timeout_delete_keeps_lock() {
+    check("timeout/delete-keeps-lock");
+}
+
+/// A delete whose hot DELETE times out and releases its lock at once: the queued call deletes a newer put (A8).
+#[test]
+fn rejects_a8_in_timeout_release_at_once() {
+    check("timeout/release-at-once");
 }
