@@ -329,3 +329,37 @@ async fn a_fill_of_an_object_replaced_by_one_of_another_size_is_refused_as_writt
     assert!(matches!(refused, Err(Error::Unavailable(_))), "{refused:?}");
     assert_eq!(cache.held(), (0, 0));
 }
+
+/// Asserts that the check of an old hit asks the upstream what "one version" is: over two tiers,
+/// where the tag moves when the object is copied, a changed tag is not a change and the entry
+/// is served without a body download, and an object of another size is one and is read again.
+#[tokio::test]
+async fn a_revalidation_over_two_tiers_compares_by_size_and_ignores_a_tag_that_moved() {
+    use super::metrics::Revalidated;
+
+    let rig = Rig::new("tscache-rv-tiers");
+    let data = pattern(3000);
+    rig.put("cas/b/obj", &data).await;
+    let upstream: Arc<dyn Backend> = rig.upstream.clone();
+    let moving = Probe::two_tiers(upstream);
+    let cache = cache_over(&rig, &moving, |config| {
+        config.revalidate_after = Some(std::time::Duration::from_secs(60));
+    });
+    assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
+    assert_eq!(cache.held(), (3000, 1));
+    let reads = moving.reads.load(Ordering::SeqCst);
+
+    rig.clock.advance(60_001);
+    assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), data);
+    assert_eq!(moving.reads.load(Ordering::SeqCst), reads);
+    assert_eq!(cache.counters().revalidations(Revalidated::Same), 1);
+    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 0);
+
+    let longer = pattern(3001);
+    rig.replace("cas/b/obj", &longer).await;
+    rig.clock.advance(60_001);
+    assert_eq!(cache.get("cas/b/obj", None).await.unwrap(), longer);
+    assert!(moving.reads.load(Ordering::SeqCst) > reads);
+    assert_eq!(cache.counters().revalidations(Revalidated::Changed), 1);
+    assert_eq!(cache.held(), (3001, 1));
+}

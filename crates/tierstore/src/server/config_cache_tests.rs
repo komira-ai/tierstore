@@ -778,7 +778,7 @@ fn the_whole_fill_limit_is_a_size_between_one_byte_and_the_budget() {
 }
 
 /// The keys of `[local_cache]`, which the README of the packaging must document each in a row.
-const LOCAL_CACHE_KEYS: [&str; 23] = [
+const LOCAL_CACHE_KEYS: [&str; 24] = [
     "path",
     "layout",
     "budget",
@@ -802,6 +802,7 @@ const LOCAL_CACHE_KEYS: [&str; 23] = [
     "forget_limit",
     "fill_chunk",
     "keep_queue_bytes",
+    "revalidate_after",
 ];
 
 /// Asserts that the README of the packaging documents the build-node shape: its example loads,
