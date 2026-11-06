@@ -2307,6 +2307,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "tierstore-model"
+version = "0.1.0"
+
+[[package]]
 name = "tierstore-testkit"
 version = "0.1.0"
 dependencies = [
