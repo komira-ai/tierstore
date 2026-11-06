@@ -455,6 +455,8 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub held_ttl: Option<Dur>,
     #[serde(default)]
+    pub emergency_cold_landing: Option<bool>,
+    #[serde(default)]
     pub step_attempts: Option<u32>,
     #[serde(default)]
     pub step_retry_min: Option<Dur>,

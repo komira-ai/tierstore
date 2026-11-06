@@ -7,7 +7,7 @@
 //! from the same kept answer (`mark_reads.rs`). Which of the two a put takes is decided here, once
 //! for the put, from the one read of the format object: [`WriteRoute`].
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -114,7 +114,7 @@ pub(super) enum WriteRoute<'a> {
     /// On the entry of the key (`entry_put.rs`).
     Entries,
     /// On the marker of the key (`marked_put.rs`), by the calls of these markers.
-    Marks(&'a Markers),
+    Marks(&'a Arc<Markers>),
 }
 
 /// Reads the format object of `hot` now, within `limit`, and keeps what it says as a read of a write

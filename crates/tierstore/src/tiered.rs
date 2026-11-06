@@ -17,6 +17,9 @@ use crate::{
     Window,
 };
 
+mod cold_land;
+#[cfg(test)]
+mod cold_land_tests;
 mod copy_back;
 #[cfg(test)]
 mod copy_back_tests;
@@ -33,6 +36,9 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod lock_hold;
+#[cfg(test)]
+mod lock_hold_tests;
 mod mark_listing;
 mod mark_reads;
 #[cfg(test)]
@@ -46,6 +52,12 @@ mod marked_put_rig;
 mod marked_put_tests;
 #[cfg(test)]
 mod marked_put_wave_tests;
+mod overwrite;
+#[cfg(test)]
+mod overwrite_tests;
+mod plain_put;
+#[cfg(test)]
+mod plain_put_tests;
 mod pause;
 mod put;
 mod read;
@@ -59,6 +71,7 @@ use heartbeat::Heartbeat;
 pub use mark_reads::MarkReads;
 use mark_reads::Missed;
 pub use marked_put::MarkedPutConfig;
+pub use overwrite::{PlainPut, PutBody, PutClaim};
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -130,6 +143,10 @@ pub struct ProxyConfig {
     pub marks_put: MarkedPutConfig,
     /// The settings of the reads and listings that read markers.
     pub mark_reads: MarkReads,
+    /// Whether a plain put that the hot store refuses with `Full` before it took a byte lands in
+    /// the cold tier under a lock (`emergency_cold_landing`, 5.5 of the design, residual R6');
+    /// false answers it 503. Only under the format `active-marks`.
+    pub emergency_cold_landing: bool,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -166,6 +183,7 @@ impl ProxyConfig {
             marks_name: None,
             marks_put: MarkedPutConfig::new(),
             mark_reads: MarkReads::default(),
+            emergency_cold_landing: false,
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -259,6 +277,12 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   A put whose entry cannot be made or kept is refused with [`Error::Unavailable`] and a client
 ///   retries it; a key that exists is [`Error::AlreadyExists`]. A cold tier that cannot be asked
 ///   whether it holds the key is [`Error::Unavailable`]: a new key is not accepted while it is down.
+/// - **Plain put** ([`Proxy::put_plain`]) and **landing in cold** ([`Proxy::land_in_cold`]) are
+///   not [`Backend`] calls and are made only under the format `active-marks` (`marked_put.rs`): a
+///   plain put of a key the hot tier holds replaces the object under a lock on the key's marker,
+///   and a put the hot tier refused with [`Error::Full`] lands in the cold tier if
+///   [`ProxyConfig::emergency_cold_landing`] is set. Under any other format they are answered
+///   [`Error::Unavailable`] without a request.
 /// - **Streamed put** ([`Backend::put_stream`]) is a put whose body arrives as chunks and is
 ///   never held whole: the chunks go on to the hot tier's own streamed put (or the cold tier's,
 ///   where the hot tier is full), which makes the object visible, create-only, only after the

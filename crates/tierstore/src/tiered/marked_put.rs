@@ -194,6 +194,24 @@ impl Inner {
     {
         self.require_live(key)?;
         self.require_absent(markers, key).await?;
+        self.land_marked(markers, key, land, true).await
+    }
+
+    /// Wave 2 of 5.1 and what follows it: the object `land` writes create-only and the marker,
+    /// together. A refused creation is answered by the re-check of step 2 for a create-only put
+    /// (`create_only`), and as [`Error::AlreadyExists`] for a plain put, which goes on as an
+    /// overwrite (`plain_put.rs`).
+    pub(super) async fn land_marked<T, F, Fut>(
+        &self,
+        markers: &Markers,
+        key: &str,
+        land: F,
+        create_only: bool,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T, Failed>>,
+    {
         let (object, marker) = futures::join!(land(), markers.create(key, MarkBirth::Dirty));
         match object {
             Ok(value) => {
@@ -201,7 +219,11 @@ impl Inner {
                 Ok(value)
             }
             Err(Failed::Definite(Error::AlreadyExists(_))) => {
-                let answer = self.recheck(markers, key).await;
+                let answer = if create_only {
+                    self.recheck(markers, key).await
+                } else {
+                    Error::AlreadyExists(key.to_owned())
+                };
                 self.forget(markers, marker).await;
                 Err(answer)
             }
