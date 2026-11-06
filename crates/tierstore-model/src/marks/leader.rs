@@ -167,6 +167,10 @@ impl Marks {
                     Pc::G1 { m, c: cc } => m != 0 || cc != 0,
                     // The cold page was read, the marker of the cold-only key is read next.
                     Pc::L3 { .. } => true,
+                    // A create-only put re-checking before its 412 or 409.
+                    Pc::Rc | Pc::RcH => true,
+                    // Its object write was refused: the re-check follows the marker write.
+                    Pc::P2 { o: 2, .. } => matches!(self.op_of(c), Op::PutCo(_)),
                     Pc::P1 { h, c: cc, m } => {
                         matches!(self.op_of(c), Op::PutCo(_)) && (h != 0 || cc != 0 || m != 0)
                     }

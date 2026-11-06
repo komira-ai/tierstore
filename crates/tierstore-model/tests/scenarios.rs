@@ -450,6 +450,37 @@ fn rejects_a5_in_negative_create_only_ignores_cold() {
     check("negative/create-only-ignores-cold");
 }
 
+/// A create-only put that answers 412 from what wave 1 read while a delete completes (A5).
+#[test]
+fn rejects_a5_in_negative_create_only_no_recheck() {
+    check("negative/create-only-no-recheck");
+}
+
+/// The same for a key only cold has (A5).
+#[test]
+fn rejects_a5_in_negative_create_only_no_recheck_cold_only() {
+    check("negative/create-only-no-recheck-cold-only");
+}
+
+/// A create-only put of a copied key against a delete that completes first is 409 or 200, never
+/// 412 for an absent key (A5).
+#[test]
+fn holds_in_create_only_recheck_hot_key() {
+    check("create-only-recheck/hot-key");
+}
+
+/// The same for an evicted key (A5 A21).
+#[test]
+fn holds_in_create_only_recheck_cold_only_key() {
+    check("create-only-recheck/cold-only-key");
+}
+
+/// A gone marker with hot present is a recreate: the re-check answers 412 for it, not 409 (A5).
+#[test]
+fn holds_in_create_only_recheck_recreated_key() {
+    check("create-only-recheck/recreated-key");
+}
+
 /// Four writes and two reads from an empty key, with an eviction (A1 A2 A3 A5 A6 A7).
 #[test]
 fn holds_in_heavy_puts_delete_reads() {

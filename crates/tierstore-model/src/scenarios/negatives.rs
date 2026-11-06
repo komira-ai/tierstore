@@ -450,4 +450,26 @@ pub(super) fn negatives(v: &mut Vec<Scenario>) {
         Fail("A5"),
         false,
     );
+    add(
+        "negative/create-only-no-recheck",
+        "A5",
+        "a create-only put that answers 412 from what wave 1 read while a delete completes",
+        flaw(
+            base(Init::Both, &[Op::PutCo(Replay)], &[Op::Delete, Op::Get]),
+            Flaw::CreateOnlyNoRecheck,
+        ),
+        Fail("A5"),
+        false,
+    );
+    add(
+        "negative/create-only-no-recheck-cold-only",
+        "A5",
+        "the same for a key only cold has, deleted while the put reads",
+        flaw(
+            base(Init::ColdOnly, &[Op::PutCo(Replay)], &[Op::Delete, Op::Get]),
+            Flaw::CreateOnlyNoRecheck,
+        ),
+        Fail("A5"),
+        false,
+    );
 }

@@ -174,6 +174,34 @@ pub(super) fn core(v: &mut Vec<Scenario>) {
         false,
     );
     add(
+        "create-only-recheck/hot-key",
+        "A5",
+        "a create-only put of a copied key against a delete that completes first: 412 only while the key is there, else 409",
+        base(Init::Both, &[Op::PutCo(Replay)], &[Op::Delete, Op::Get]),
+        Pass,
+        false,
+    );
+    add(
+        "create-only-recheck/cold-only-key",
+        "A5 A21",
+        "the same for an evicted key",
+        base(Init::ColdOnly, &[Op::PutCo(Replay)], &[Op::Delete, Op::Get]),
+        Pass,
+        false,
+    );
+    add(
+        "create-only-recheck/recreated-key",
+        "A5",
+        "a create-only put against a delete and a recreate: a gone marker with hot present is a recreate",
+        base(
+            Init::Both,
+            &[Op::PutCo(Replay)],
+            &[Op::Delete, Op::Put(Replay), Op::Get],
+        ),
+        Pass,
+        false,
+    );
+    add(
         "overwrite-vs-delete",
         "A1 A2 A8",
         "an overwrite and a delete of an uncopied key against gets and lists",

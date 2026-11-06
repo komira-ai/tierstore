@@ -82,6 +82,13 @@ impl Marks {
                     self.emit(s, out, Marks::act(w, "wave 1: GET the marker"), false, |ns| {
                         let v = match ns.mk {
                             None => 1,
+                            Some(k)
+                                if self.cfg.flaw == Flaw::CreateOnlyNoRecheck
+                                    && k.st == St::Lock
+                                    && k.why == Why::Delete =>
+                            {
+                                4
+                            }
                             Some(k) if k.gone => 3,
                             Some(_) => 2,
                         };
@@ -90,6 +97,20 @@ impl Marks {
                     });
                 }
             }
+            Pc::Rc => self.emit(s, out, Marks::act(w, "re-check before the 412: GET the marker"), false, |ns| {
+                match ns.mk {
+                    Some(k) if k.st == St::Lock && k.why == Why::Delete => self.ack_end(ns, c, Resp::R409),
+                    Some(k) if k.gone => {
+                        ns.cl[c].pc = Pc::RcH;
+                        Ok(())
+                    }
+                    _ => self.ack_end(ns, c, Resp::R412),
+                }
+            }),
+            Pc::RcH => self.emit(s, out, Marks::act(w, "re-check: the marker says gone, HEAD hot"), false, |ns| {
+                let r = if ns.hot != 0 { Resp::R412 } else { Resp::R409 };
+                self.ack_end(ns, c, r)
+            }),
             Pc::P2 { o, m } => {
                 if o == 0 {
                     self.emit(s, out, Marks::act(w, "wave 2: create the object (create-only)"), false, |ns| {
@@ -290,7 +311,8 @@ impl Marks {
                         ns.cl[c].pc = Pc::ORepl { e: h };
                         Ok(())
                     } else {
-                        self.fail_release(ns, c, 2)
+                        // The tag held at wave 1 and does not now: the key changed during the put.
+                        self.fail_release(ns, c, 4)
                     }
                 } else if ns.cl[c].lg {
                     self.fail_release(ns, c, 1)
@@ -308,7 +330,7 @@ impl Marks {
                 if cv == 0 {
                     self.fail_release(ns, c, 1)
                 } else if cv != t {
-                    self.fail_release(ns, c, 2)
+                    self.fail_release(ns, c, 4)
                 } else {
                     ns.cl[c].pc = Pc::OCreate;
                     Ok(())

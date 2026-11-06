@@ -119,6 +119,10 @@ pub enum Flaw {
     CreateOnlyIgnoresCold,
     /// A8/A1: a holder whose hot DELETE timed out releases its lock at once.
     ReleaseOnTimeout,
+    /// A5: a create-only put that finds the key present answers 412 from what wave 1 read (409
+    /// only for a `LOCK(DELETE)` marker), with no re-check: a delete that completes after the
+    /// reads is answered 412 for a key that is absent.
+    CreateOnlyNoRecheck,
 }
 
 /// Which stalled calls may land late (the ghost mode of Appendix A).

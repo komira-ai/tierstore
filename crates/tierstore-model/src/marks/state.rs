@@ -116,6 +116,9 @@ pub enum Resp {
     /// 200 or 204: the operation took effect.
     Ok,
     R412,
+    /// 409 `ConditionalRequestConflict`: the retryable answer to a conditional put that met a
+    /// concurrent change of the key.
+    R409,
     R404,
     /// 503 that guarantees nothing was done.
     Fail503,
@@ -333,7 +336,33 @@ impl Marks {
                 }
                 1
             }
+            Resp::R409 => {
+                let ok = match op {
+                    Op::PutIm(tag) => poss >> tag & 1 == 1 && poss & !(1 << tag) != 0,
+                    _ => {
+                        poss & 1 != 0
+                            || self.cfg.evictions > 0
+                            || self
+                                .cfg
+                                .scripts
+                                .iter()
+                                .flatten()
+                                .any(|o| matches!(o, Op::Delete | Op::OldDelete))
+                    }
+                };
+                if !ok {
+                    return Err(format!(
+                        "A5 operation {g} ({op:?}) answered 409 but nothing changed the key while it ran (it held {poss:#b})"
+                    ));
+                }
+                9
+            }
             Resp::R412 => {
+                if matches!(op, Op::PutCo(_)) && t == 0 {
+                    return Err(format!(
+                        "A5 operation {g} ({op:?}) answered 412 but the key was absent when the answer was decided (a delete completed first: S3 answers 409)"
+                    ));
+                }
                 let ok = match op {
                     Op::PutIm(tag) => (1..8u8).any(|v| poss >> v & 1 == 1 && v != tag),
                     _ => poss >> 1 != 0,

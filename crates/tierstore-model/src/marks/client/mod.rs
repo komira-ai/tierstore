@@ -22,6 +22,11 @@ pub enum Pc {
         o: u8,
         m: u8,
     },
+    /// 5.1 step 2: a create-only put about to answer 412 re-checks once: GET the marker (409
+    /// for `LOCK(DELETE)`, 412 unless it says `gone`), then, for `gone`, HEAD hot (present: the
+    /// key was recreated, 412; absent: deleted, 409).
+    Rc,
+    RcH,
     /// 5.1 table row 2: GET the marker after the object landed and the marker create said 412.
     Pm0,
     PmCas {
@@ -330,6 +335,7 @@ impl Marks {
             1 => self.ack(ns, c, Resp::R404)?,
             2 => self.ack(ns, c, Resp::R412)?,
             3 => self.ack(ns, c, Resp::Stream503)?,
+            4 => self.ack(ns, c, Resp::R409)?,
             _ => {}
         }
         self.end_op(ns, c);
@@ -513,10 +519,20 @@ impl Marks {
             return Ok(());
         };
         let op = self.op_of(&ns.cl[c]);
+        let no_recheck = self.cfg.flaw == Flaw::CreateOnlyNoRecheck;
         if h > 1 {
             // Hot holds the key.
             if matches!(op, Op::PutCo(_)) {
-                return self.ack_end(ns, c, Resp::R412);
+                if !no_recheck {
+                    ns.cl[c].pc = Pc::Rc;
+                    return Ok(());
+                }
+                // The document before the re-check: wait for the marker read of the wave.
+                if m == 0 {
+                    return Ok(());
+                }
+                let r = if m == 4 { Resp::R409 } else { Resp::R412 };
+                return self.ack_end(ns, c, r);
             }
             ns.cl[c].pc = if self.cfg.flaw == Flaw::OverwriteNoLock {
                 Pc::OHead
@@ -526,7 +542,12 @@ impl Marks {
         } else if h == 1 && cc != 0 && m != 0 {
             let exists = cc > 1 && m != 3 && self.cfg.flaw != Flaw::CreateOnlyIgnoresCold;
             if matches!(op, Op::PutCo(_)) && exists {
-                return self.ack_end(ns, c, Resp::R412);
+                if !no_recheck {
+                    ns.cl[c].pc = Pc::Rc;
+                    return Ok(());
+                }
+                let r = if m == 4 { Resp::R409 } else { Resp::R412 };
+                return self.ack_end(ns, c, r);
             }
             let marker = if self.cfg.flaw == Flaw::NoMarkerOnPut {
                 1
@@ -560,6 +581,11 @@ impl Marks {
                 Ok(())
             }
             _ => match op {
+                Op::PutCo(_) if self.cfg.flaw != Flaw::CreateOnlyNoRecheck => {
+                    // The store refused the object: the key was there. Re-check before the 412.
+                    ns.cl[c].pc = Pc::Rc;
+                    Ok(())
+                }
                 Op::PutCo(_) => self.ack_end(ns, c, Resp::R412),
                 Op::Put(Body::Replay) => {
                     ns.cl[c].pc = Pc::LkCreate;
