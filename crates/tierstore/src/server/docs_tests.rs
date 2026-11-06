@@ -114,6 +114,7 @@ const FLAGLESS_KEYS: &[&str] = &[
     "hot_store.retry_max",
     "hot_store.stray_grace",
     "hot_store.held_ttl",
+    "hot_store.marks_bucket",
     "hot_store.stray_interval",
     "hot_store.stray_rate",
     "hot_store.copy_back_ttl",

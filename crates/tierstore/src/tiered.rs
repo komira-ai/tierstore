@@ -90,6 +90,11 @@ pub struct ProxyConfig {
     pub entry_rounds: u32,
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
+    /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
+    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
+    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
+    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    pub marks: Option<Arc<dyn Backend>>,
 }
 
 impl ProxyConfig {
@@ -115,6 +120,7 @@ impl ProxyConfig {
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
+            marks: None,
         }
     }
 }
