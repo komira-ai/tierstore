@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
-use super::plain_put_tests::{Rig, held, settle};
 use super::overwrite::PutClaim;
+use super::plain_put_tests::{Rig, held, settle};
 use crate::{MarkMove, MarkerState, Markers, MarkersConfig, Op, Phase, RecordingSleeper};
 use std::sync::Arc;
 

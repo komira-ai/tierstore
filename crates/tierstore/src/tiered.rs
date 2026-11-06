@@ -52,13 +52,18 @@ mod marked_put_rig;
 mod marked_put_tests;
 #[cfg(test)]
 mod marked_put_wave_tests;
+mod marks_delete;
+#[cfg(test)]
+mod marks_delete_failure_tests;
+#[cfg(test)]
+pub(crate) mod marks_delete_tests;
 mod overwrite;
 #[cfg(test)]
 mod overwrite_tests;
+mod pause;
 mod plain_put;
 #[cfg(test)]
 mod plain_put_tests;
-mod pause;
 mod put;
 mod read;
 mod uploads;
@@ -72,6 +77,7 @@ pub use mark_reads::MarkReads;
 use mark_reads::Missed;
 pub use marked_put::MarkedPutConfig;
 pub use overwrite::{PlainPut, PutBody, PutClaim};
+use pause::WriteRoute;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -127,8 +133,8 @@ pub struct ProxyConfig {
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
     /// store, for the markers of `docs/design/put-without-lock.md`. A read that misses the hot
     /// tier, and a listing, read it in the phases of the format from which a marker can be in force
-    /// (see `mark_reads.rs`); the proxy writes to it only while the format object says
-    /// `active-marks` and records [`ProxyConfig::marks_name`]. `None` is a proxy with no marks
+    /// (see `mark_reads.rs`); the proxy writes to it (a put, a delete) only while the format
+    /// object says `active-marks` and records [`ProxyConfig::marks_name`]. `None` is a proxy with no marks
     /// bucket (every proxy of a library user, and a server over a `dir` hot tier, whose directory
     /// of markers is opened by the release that uses it): it reads no marker, makes no write under
     /// that phase, and its registration says `proto` 2.
@@ -251,7 +257,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// `drain` or `drained`, a put, a delete, and the create, part upload and completion of a
 /// multipart upload are answered with [`Error::Unavailable`] (a 503 at the S3 front), and reads
 /// are served. The format is read at most every [`ProxyConfig::format_refresh`], and at each
-/// heartbeat.
+/// heartbeat. Under `{"epoch": 3, "phase": "active-marks", "marks_bucket": ..}`, with the bucket
+/// of [`ProxyConfig::marks_bucket`], a delete is made on markers and every other write is still
+/// answered with [`Error::Unavailable`] (the puts of that protocol are not built yet).
 ///
 /// - **Get** reads the hot tier, else the cold tier, and reads no entry. An object it read from
 ///   the cold tier is not copied by the read: when the hot tier is below the critical mark the
@@ -295,7 +303,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Delete** (`entry_delete.rs`) deletes the object from the cold tier at once and amends,
 ///   claims or creates the entry of the key; a delete that meets a copy in flight (an entry the
 ///   reconciler holds or has sealed) waits for the reconciler's release ([`DeleteWait`]) and is
-///   answered 503 at the request deadline.
+///   answered 503 at the request deadline. Under the format phase `active-marks` (and only
+///   there) a delete is made on the marker of the key instead (`marks_delete.rs`): a lock on the
+///   marker, a hot HEAD, `gone` written into the lock, a plain hot DELETE, and the answer, with no
+///   request to the cold tier, which the leader deletes from later.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
 ///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
@@ -648,11 +659,14 @@ impl Inner {
         }
     }
 
-    /// Deletes the object on the entry of its key (see `entry_delete.rs`): refused with
-    /// [`Error::Unavailable`] while writes are paused or the format is not active.
-    async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.delete_on_entry(key).await
+    /// Deletes the object on the entry of its key (see `entry_delete.rs`) under the format
+    /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
+    /// with [`Error::Unavailable`] while writes are paused or the format is neither.
+    async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
+        match self.route_write(key).await? {
+            WriteRoute::Entries => self.delete_on_entry(key).await,
+            WriteRoute::Marks(markers) => self.delete_on_marker(Arc::clone(markers), key).await,
+        }
     }
 }
 

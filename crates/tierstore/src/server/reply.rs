@@ -390,7 +390,7 @@ impl From<Error> for S3Error {
                 (StatusCode::PRECONDITION_FAILED, "PreconditionFailed")
             }
             Error::Conflict(_) => (StatusCode::CONFLICT, "ConditionalRequestConflict"),
-            Error::Full(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
+            Error::Full(_) | Error::SlowDown(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
             Error::Reserved(_) => (StatusCode::FORBIDDEN, "AccessDenied"),
             Error::InvalidKey(_) => (StatusCode::BAD_REQUEST, "KeyTooLongError"),
             Error::InvalidPart(_) => (StatusCode::BAD_REQUEST, "InvalidPart"),
@@ -401,6 +401,7 @@ impl From<Error> for S3Error {
         };
         let generic = match &error {
             Error::Full(_) => Some("The store has no room for this request."),
+            Error::SlowDown(_) => Some("The key is being changed by another request; retry."),
             Error::Unsupported(_) => Some("The store does not do this call."),
             Error::Unavailable(_) => Some("The store did not answer."),
             Error::Other(_) => Some("We encountered an internal error."),
@@ -414,7 +415,7 @@ impl From<Error> for S3Error {
             }
             None => Self::new(status, code, error.to_string()),
         };
-        if matches!(error, Error::Full(_)) {
+        if matches!(error, Error::Full(_) | Error::SlowDown(_)) {
             refusal.headers.push(("retry-after", "1".to_owned()));
         }
         refusal

@@ -6,10 +6,10 @@
 
 use std::time::Duration;
 
+use super::overwrite::{PlainPut, PutBody, PutClaim};
 use super::plain_put_tests::{
     Rig, Shape, body, chunks, held, marker, settle, streamed, until_parked,
 };
-use super::overwrite::{PlainPut, PutBody, PutClaim};
 use crate::Backend;
 use crate::{
     Error, MarkMove, MarkerState, MarkerWhy, Markers, MarkersConfig, Meta, Op, Phase,

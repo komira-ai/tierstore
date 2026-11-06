@@ -264,19 +264,6 @@ async fn a_put_under_the_active_format_is_made_on_its_entry_and_calls_no_marker(
     assert!(rig.marks_mem.list("").await.unwrap().is_empty());
 }
 
-/// Asserts that a delete under `active-marks` is still refused with 503 and changes nothing: no
-/// delete is made on markers yet.
-#[tokio::test]
-async fn a_delete_under_active_marks_is_refused_and_changes_nothing() {
-    let rig = MarkRig::new().await;
-    rig.hot_mem.put("k", body("v")).await.unwrap();
-    let deleted = rig.proxy.delete("k").await;
-    assert!(matches!(deleted, Err(Error::Unavailable(_))), "{deleted:?}");
-    assert!(rig.hot_has("k").await);
-    assert_eq!(rig.marks_ops("k"), []);
-    assert_eq!(rig.cold_ops("k"), []);
-}
-
 /// Asserts that the format object that names the bucket is read the way any write reads it: a
 /// format that changes from `active-marks` to the entries between two puts moves the second put to
 /// its entry, and the first put's marker stays.

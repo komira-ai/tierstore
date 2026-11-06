@@ -597,10 +597,13 @@ pub(super) fn open_marks(cli: &Cli, timeout: Duration) -> Result<Option<Arc<dyn 
     Ok(Some(marks))
 }
 
-/// The name of the marks bucket the format object records for the tier `spec`: the bucket of an
-/// `s3:<bucket>`, and the text of any other form.
-pub(super) fn marks_name(spec: &str) -> String {
-    spec.strip_prefix("s3:").unwrap_or(spec).to_owned()
+/// The name the format record gives the marks bucket that `spec` (`cli.hot_marks`) opens: the bucket
+/// of `s3:<bucket>`, and `memory` for a memory tier's. A `dir` tier has no handle yet, so no name.
+pub(super) fn marks_name(spec: &str) -> Option<String> {
+    let bucket = spec.strip_prefix("s3:");
+    bucket
+        .or_else(|| (spec == "memory").then_some(spec))
+        .map(str::to_owned)
 }
 
 /// Refuses `false` as the conditional-delete setting of a `memory` or `dir:<path>` tier, which
@@ -740,7 +743,7 @@ pub(super) fn build(cli: &Cli) -> Result<Built, Error> {
     let marks = open_marks(cli, timeout)?;
     let mut proxy = ProxyConfig::new(&cli.proxy_id, cli.hot_bytes, Arc::clone(&clock));
     proxy.marks = marks;
-    proxy.marks_name = Some(marks_name(&cli.hot_marks));
+    proxy.marks_name = marks_name(&cli.hot_marks);
     proxy.critical = share(cli.critical);
     let tuning = &cli.hot_tuning;
     proxy.usage_refresh = tuning.usage_refresh;

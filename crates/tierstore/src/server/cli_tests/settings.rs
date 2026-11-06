@@ -58,22 +58,13 @@ fn the_settings_are_made_from_the_flags() {
     assert_eq!(built.proxy.proxy_id, "p1");
     assert_eq!(built.proxy.hot_budget, 1000);
     assert_eq!(built.proxy.critical, 0.95);
-    assert_eq!(built.proxy.marks_name, Some(marks_name(&cli.hot_marks)));
+    assert_eq!(built.proxy.marks_name, marks_name(&cli.hot_marks));
     assert_eq!(built.reconciler.holder, "p1/reconciler");
     assert_eq!(built.reconciler.hot_budget, 1000);
     assert_eq!(built.reconciler.high_water, 0.8);
     assert_eq!(built.reconciler.low_water, 0.7);
     assert_eq!(built.reconciler.parallel, 16);
     assert_eq!(built.reconciler.lease_ttl, Duration::from_secs(30));
-}
-
-/// Asserts that the name a proxy compares with the marks bucket the format object records is the
-/// bucket of an `s3:` tier and the text of any other form.
-#[test]
-fn the_marks_bucket_name_is_the_bucket_of_an_s3_tier_and_the_text_of_the_other_forms() {
-    assert_eq!(marks_name("s3:hot-bucket-marks"), "hot-bucket-marks");
-    assert_eq!(marks_name("memory"), "memory");
-    assert_eq!(marks_name("dir:/srv/hot-marks"), "dir:/srv/hot-marks");
 }
 
 /// Asserts that a file whose `[server] bucket` is the name of a probe path, `metricz` among them,

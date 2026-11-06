@@ -371,6 +371,8 @@ mod config_combined_tests;
 #[cfg(test)]
 mod config_testing;
 #[cfg(test)]
+mod delete_objects_marks_tests;
+#[cfg(test)]
 mod delete_objects_tests;
 #[cfg(test)]
 mod docs_tests;

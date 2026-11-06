@@ -93,7 +93,12 @@ impl Inner {
                 .land_marked(
                     markers,
                     key,
-                    || async { self.hot.put_tagged(key, bytes.clone()).await.map_err(landing) },
+                    || async {
+                        self.hot
+                            .put_tagged(key, bytes.clone())
+                            .await
+                            .map_err(landing)
+                    },
                     false,
                 )
                 .await;
