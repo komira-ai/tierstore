@@ -91,6 +91,14 @@ impl Format {
     }
 }
 
+impl Format {
+    /// Whether the markers of `docs/design/put-without-lock.md` are in force: the phase is
+    /// `active-marks`. Only then does the leader work on markers and a proxy write them.
+    pub(crate) fn runs_marks(&self) -> bool {
+        self.phase == FormatPhase::ActiveMarks
+    }
+}
+
 fn decode(body: &[u8]) -> Result<Format, Error> {
     serde_json::from_slice(body)
         .map_err(|error| Error::Other(format!("corrupt format object: {error}")))
@@ -106,6 +114,17 @@ pub(crate) async fn read_format(hot: &dyn Backend) -> Result<Option<Format>, Err
         Err(Error::NotFound(_)) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Whether the hot tier's format object says `active-marks`: one read of it. A missing object, any
+/// other phase and a phase this release does not know are `false`.
+///
+/// # Errors
+/// As [`read_format`].
+pub(crate) async fn marks_active(hot: &dyn Backend) -> Result<bool, Error> {
+    Ok(read_format(hot)
+        .await?
+        .is_some_and(|format| format.runs_marks()))
 }
 
 /// As [`read_format`], with the content tag of the object. The tag is read first, so that if the

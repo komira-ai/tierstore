@@ -3,7 +3,9 @@
 use bytes::Bytes;
 
 use crate::faulty::{FaultyBackend, Op};
-use crate::format::{Format, FormatPhase, format_body, read_format, read_format_tagged};
+use crate::format::{
+    Format, FormatPhase, format_body, marks_active, read_format, read_format_tagged,
+};
 use crate::journal::FORMAT_KEY;
 use crate::{Backend, Error, MemoryBackend};
 
@@ -124,6 +126,33 @@ fn only_active_with_epoch_2_or_more_runs_entries() {
     for (json, runs) in cases {
         assert_eq!(decoded(json).runs_entries(), runs, "{json}");
     }
+}
+
+/// Asserts that only the phase `active-marks` runs the markers, whatever the epoch, and that
+/// `marks_active` reads it from the hot tier: no object, another phase and a phase this release
+/// does not know are false, and a hot tier that fails the read is that error.
+#[tokio::test]
+async fn only_active_marks_runs_the_markers() {
+    for (json, runs) in [
+        (
+            r#"{"epoch":3,"phase":"active-marks","marks_bucket":"m"}"#,
+            true,
+        ),
+        (r#"{"phase":"active-marks"}"#, true),
+        (r#"{"epoch":3,"phase":"active"}"#, false),
+        (r#"{"phase":"drained"}"#, false),
+        (r#"{"phase":"someday"}"#, false),
+    ] {
+        assert_eq!(decoded(json).runs_marks(), runs, "{json}");
+        let hot = MemoryBackend::new();
+        hot.put(FORMAT_KEY, Bytes::from(json)).await.unwrap();
+        assert_eq!(marks_active(&hot).await, Ok(runs), "{json}");
+    }
+    let empty = MemoryBackend::new();
+    assert_eq!(marks_active(&empty).await, Ok(false));
+    let corrupt = MemoryBackend::new();
+    corrupt.put(FORMAT_KEY, Bytes::from("{")).await.unwrap();
+    assert!(marks_active(&corrupt).await.is_err());
 }
 
 /// The fixture of the format object of the phase `active-marks`.
