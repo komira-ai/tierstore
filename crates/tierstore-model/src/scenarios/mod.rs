@@ -254,6 +254,9 @@ pub struct Row {
     pub states: usize,
     /// The first scenario and message that broke the rule, if any did.
     pub broken: Option<(&'static str, String)>,
+    /// False for the liveness of the protocol as written: pruning the paths that break another
+    /// rule leaves dead ends that are not the protocol's, so the rule is not judged.
+    pub judged: bool,
 }
 
 /// For each rule, run the marker scenarios that expect to pass (the document's protocol as
@@ -282,6 +285,7 @@ pub fn matrix(literal: bool) -> Vec<Row> {
                 scenarios: 0,
                 states: 0,
                 broken: None,
+                judged: !(literal && *rule == "A4"),
             };
             for (id, cfg) in &sets {
                 let mut limits = Limits::new(cfg.max_states, cfg.copier);
@@ -289,11 +293,36 @@ pub fn matrix(literal: bool) -> Vec<Row> {
                 let o = explore(&Marks::new(cfg.clone()), limits);
                 row.scenarios += 1;
                 row.states += o.states;
-                if let (None, Some(t)) = (&row.broken, o.trace) {
+                if let (None, Some(t), true) = (&row.broken, o.trace, row.judged) {
                     row.broken = Some((id, t.message));
                 }
             }
             row
         })
         .collect()
+}
+
+/// The shortest counterexample of `rule` in the marker scenario `id`, with the document's
+/// protocol as written (`literal`) or with the corrections; `None` if the rule holds there.
+pub fn trace_of(
+    id: &str,
+    literal: bool,
+    rule: &str,
+) -> Result<Option<crate::explore::Trace>, String> {
+    let sc = all()
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| format!("no scenario called {id}"))?;
+    let Sys::Marks(cfg) = sc.sys else {
+        return Err(format!("{id} is not a marker scenario"));
+    };
+    let only = RULES
+        .iter()
+        .map(|r| r.0)
+        .find(|r| *r == rule)
+        .ok_or_else(|| format!("no rule called {rule}"))?;
+    let cfg = if literal { unfix(cfg) } else { cfg };
+    let mut limits = Limits::new(cfg.max_states, cfg.copier);
+    limits.only = Some(only);
+    Ok(explore(&Marks::new(cfg), limits).trace)
 }

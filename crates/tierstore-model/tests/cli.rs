@@ -63,3 +63,28 @@ fn an_unknown_name_runs_nothing() {
     assert!(ok);
     assert!(text.is_empty());
 }
+
+#[test]
+fn the_trace_command_prints_the_shortest_counterexample_of_one_rule() {
+    let (ok, text) = run(&["trace", "doc/recreate-read", "literal", "A2"]);
+    assert!(ok);
+    assert!(text.starts_with("A2 a Get returned version 1"), "{text}");
+    assert!(text.contains("hot missed: read cold"), "{text}");
+    let (ok, text) = run(&["trace", "fixed/recreate-read", "corrected", "A2"]);
+    assert!(ok);
+    assert_eq!(text.trim(), "A2 holds in fixed/recreate-read");
+    let (ok, text) = run(&["trace", "no-such", "literal", "A2"]);
+    assert!(!ok);
+    assert!(text.contains("no scenario called"), "{text}");
+}
+
+#[test]
+fn the_corrected_table_passes_every_rule() {
+    let (ok, text) = run(&["corrected"]);
+    assert!(ok);
+    assert_eq!(
+        text.lines().filter(|l| l.contains("PASS")).count(),
+        12,
+        "{text}"
+    );
+}

@@ -19,6 +19,6 @@ fn the_corrected_protocol_breaks_no_rule() {
 
 #[test]
 #[ignore = "re-runs 31 scenarios once per rule (about 12 s); run with --ignored"]
-fn the_protocol_as_written_breaks_six_rules() {
-    assert_eq!(broken(true), ["A1", "A2", "A4", "A5", "A7", "A12"]);
+fn the_protocol_as_written_breaks_five_rules() {
+    assert_eq!(broken(true), ["A1", "A2", "A5", "A7", "A12"]);
 }

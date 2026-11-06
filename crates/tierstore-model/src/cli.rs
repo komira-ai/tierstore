@@ -1,14 +1,33 @@
 //! The command line of `tierstore-model`: run named scenarios and print the verdicts.
 
-use crate::scenarios::{Expect, ablation, all, matrix, run, verdict};
+use crate::scenarios::{Expect, ablation, all, matrix, run, trace_of, verdict};
 use std::io::Write;
 
-/// Run the scenarios named in `args` (`all`, `heavy`, or ids; `-v` prints every trace).
+/// Run the scenarios named in `args` (`all`, `heavy`, or ids; `-v` prints every trace;
+/// `list`, `literal`, `corrected`, `ablation`; `trace <id> <literal|corrected> <rule>`).
 /// Returns false if any verdict is not the required one.
 pub fn run_cli(args: &[String], out: &mut dyn Write) -> std::io::Result<bool> {
     let verbose = args.iter().any(|a| a == "-v");
     let names: Vec<&String> = args.iter().filter(|a| *a != "-v").collect();
     let mut ok = true;
+    if let [cmd, id, mode, rule] = names.as_slice()
+        && *cmd == "trace"
+    {
+        match trace_of(id, *mode == "literal", rule) {
+            Ok(Some(t)) => {
+                writeln!(out, "{}", t.message)?;
+                for (i, (a, s)) in t.steps.iter().enumerate() {
+                    writeln!(out, "{:>3}. {a}\n      => {s}", i + 1)?;
+                }
+            }
+            Ok(None) => writeln!(out, "{rule} holds in {id}")?,
+            Err(e) => {
+                writeln!(out, "{e}")?;
+                ok = false;
+            }
+        }
+        return Ok(ok);
+    }
     if names.iter().any(|n| *n == "list") {
         for sc in all() {
             let expect = match sc.expect {
@@ -27,6 +46,7 @@ pub fn run_cli(args: &[String], out: &mut dyn Write) -> std::io::Result<bool> {
         if names.iter().any(|n| *n == word) {
             for r in matrix(literal) {
                 let verdict = match &r.broken {
+                    None if !r.judged => "NOT JUDGED (every run of the protocol as written breaks another rule first)".to_string(),
                     None => "PASS".to_string(),
                     Some((id, msg)) => format!("FAIL in {id}: {msg}"),
                 };
