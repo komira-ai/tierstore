@@ -377,17 +377,12 @@ async fn keys_that_make_no_file_name_are_replaced_in_place_where_the_previous_re
 }
 
 /// Asserts that the rest of an entry key must make a file name: empty is refused, and 255 encoded
-/// bytes are taken and 256 refused.
+/// bytes are taken as a plain name (a longer rest is hashed: see `dir_long_tests.rs`).
 #[tokio::test]
 async fn the_rest_of_an_entry_key_must_make_a_file_name() {
     let (_dir, backend) = backend();
     let refused = backend.put("_entries/", body("x")).await;
     assert!(matches!(refused, Err(Error::InvalidKey(_))));
-    let long = format!("_entries/{}", "a".repeat(256));
-    assert!(matches!(
-        backend.put(&long, body("x")).await,
-        Err(Error::InvalidKey(_))
-    ));
     let longest = format!("_entries/{}", "a".repeat(255));
     backend.put(&longest, body("x")).await.unwrap();
     assert_eq!(keys(&backend, "_entries/").await, [longest]);

@@ -1,12 +1,13 @@
 //! A [`Backend`] over a directory of the local file system, for a tier that is a disk.
 //!
 //! A key is the name of one file, percent-encoded: every byte but an ASCII letter or digit
-//! (and a few marks) costs three bytes, so a key whose encoded name is empty or over 255 bytes
-//! (about 85 bytes of non-ASCII text) cannot be stored. A write that validates the key itself
-//! (put, create of an upload, streamed puts) is [`Error::InvalidKey`] (S3 answer 400
-//! `KeyTooLongError`); a read, a head, a delete and the held-body conditional write
-//! ([`Backend::put_if_match`], which first looks for the stored object) are [`Error::NotFound`],
-//! since no object can have it.
+//! (and a few marks) costs three bytes. A key whose encoded name is over 255 bytes (255 plain
+//! characters, or about 85 bytes of non-ASCII text) has a file named by the first 100 bytes of
+//! that name and the SHA-256 of the key, and the file holds the key (see the module
+//! `dir_names`). Only a key whose name is empty cannot be stored: a write that validates the key
+//! itself (put, create of an upload, streamed puts) is [`Error::InvalidKey`]; a read, a head, a
+//! delete and the held-body conditional write ([`Backend::put_if_match`], which first looks for
+//! the stored object) are [`Error::NotFound`], since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
 use std::os::unix::fs::DirBuilderExt;
@@ -19,9 +20,8 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use futures::StreamExt;
 use futures::stream;
-use sha2::{Digest, Sha256};
-use tokio::fs::{self, File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
 use crate::backend::{part_page, upload_page};
@@ -40,10 +40,14 @@ mod names;
 mod sync;
 #[path = "dir_tags.rs"]
 mod tags;
+#[path = "dir_write.rs"]
+mod write;
 
-use names::{encode, is_id_byte, parse_part, part_name, unique_nanos};
+use names::unique_nanos;
+use names::{NAME_LIMIT, encode, file_name, header, is_id_byte, parse_part, part_name};
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
+use write::{create_file, join_files, write_object_stream, write_stream};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
@@ -55,9 +59,6 @@ const PLAIN_MODE: u32 = 0o600;
 /// The mode of every directory this backend makes (the tier root, the uploads directory and the
 /// directory of an upload): open to its owner alone.
 const DIR_MODE: u32 = 0o700;
-
-/// The longest file name, in bytes, that a key may be encoded to.
-const NAME_LIMIT: usize = 255;
 
 /// The default of the size of the pieces in which the parts of an upload are joined
 /// ([`DirBackend::with_chunks`]).
@@ -83,11 +84,12 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 /// digits, `_`, `-` and a `.` (but not as the first byte) stay as they are, and every other
 /// byte is written as `%` and two hex digits. So no key can name a file outside the directory
 /// or a file the backend keeps for itself (their names start with `.`). A key whose name is
-/// empty or longer than 255 bytes is refused with [`Error::InvalidKey`] by the writes that
-/// validate the key, and is [`Error::NotFound`] for reads, deletes and the conditional writes
-/// that look for the stored object first (see the module doc). The file holds the SHA-256
-/// of the body, which is the content tag, and then the body, so that a head reads 32 bytes and
-/// not the object.
+/// longer than 255 bytes has a hashed name and its file holds the key; a key whose name is
+/// empty is refused with [`Error::InvalidKey`] by the writes that validate the key, and is
+/// [`Error::NotFound`] for reads, deletes and the conditional writes that look for the stored
+/// object first (see the module doc). The file holds the SHA-256 of the body, which is the
+/// content tag, then, for a hashed name only, the key, and then the body, so that a head reads
+/// 32 bytes and not the object.
 ///
 /// - A put writes a temporary file in the directory, syncs it, and hard-links it to the name,
 ///   which fails where the name is taken: the object appears whole or not at all, and a put of a
@@ -215,103 +217,21 @@ impl Drop for Scratch {
     }
 }
 
-/// Makes the new file at `path`, for writing, with the mode [`PLAIN_MODE`] (less the umask). It is
-/// an error if the name is taken, so that two writers never write to one file.
-async fn create_new(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PLAIN_MODE)
-        .open(path)
-        .await
-}
-
-/// Writes `data` to a new file at `path`, and syncs it to the disk.
-async fn create_file(path: &Path, mut data: impl Buf) -> std::io::Result<()> {
-    let mut file = create_new(path).await?;
-    let written = file.write_all_buf(&mut data).await;
-    let flushed = written.and(file.flush().await);
-    flushed.and(file.sync_all().await)
-}
-
-/// Writes the chunks of `body` to a new file at `path`, and gives their SHA-256.
-async fn write_stream(path: &Path, body: &mut PartBody<'_>) -> Result<[u8; TAG_LEN], Error> {
-    let fail = io_error(path);
-    let mut file = create_new(path).await.map_err(&fail)?;
-    let mut hasher = Sha256::new();
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await.map_err(&fail)?;
-    }
-    let flushed = file.flush().await;
-    flushed.and(file.sync_all().await).map_err(&fail)?;
-    Ok(finish(hasher))
-}
-
-/// Writes the contents of `files`, one after the other, to a new file at `path` behind the
-/// content tag of the whole, which is written last, and gives the tag.
-async fn join_files(path: &Path, files: &[PathBuf], chunk: usize) -> Result<[u8; TAG_LEN], Error> {
-    let fail = io_error(path);
-    let mut out = create_new(path).await.map_err(&fail)?;
-    out.write_all(&[0_u8; TAG_LEN]).await.map_err(&fail)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; chunk];
-    for file in files {
-        let mut input = File::open(file).await.map_err(io_error(file))?;
-        loop {
-            let count = input.read(&mut buffer).await.map_err(io_error(file))?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-            out.write_all(&buffer[..count]).await.map_err(&fail)?;
-        }
-    }
-    seal(&mut out, hasher).await.map_err(&fail)
-}
-
-/// Writes the chunks of `body` to a new file at `path` behind room for the content tag, then
-/// the tag of the whole, which is known only after the last chunk, and syncs the file. A body
-/// that ends with an error leaves a file that is not an object (the caller removes it). Gives
-/// the tag.
-async fn write_object_stream(path: &Path, body: &mut PartBody<'_>) -> Result<[u8; TAG_LEN], Error> {
-    let fail = io_error(path);
-    let mut out = create_new(path).await.map_err(&fail)?;
-    out.write_all(&[0_u8; TAG_LEN]).await.map_err(&fail)?;
-    let mut hasher = Sha256::new();
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        out.write_all(&chunk).await.map_err(&fail)?;
-    }
-    seal(&mut out, hasher).await.map_err(&fail)
-}
-
-/// Writes the tag of the hash `hasher` has come to over the room at the start of `out`, and
-/// syncs the file. Gives the tag.
-async fn seal(out: &mut File, hasher: Sha256) -> std::io::Result<[u8; TAG_LEN]> {
-    let tag = finish(hasher);
-    out.seek(SeekFrom::Start(0)).await?;
-    out.write_all(&tag).await?;
-    out.flush().await?;
-    out.sync_all().await?;
-    Ok(tag)
-}
-
 /// An object's file, opened, with its content tag read.
 struct Stored {
     file: File,
     path: PathBuf,
     tag: [u8; TAG_LEN],
+    /// Where the body starts: behind the content tag, and the key if the file has one.
+    start: u64,
     size: u64,
     modified: u64,
 }
 
 impl Stored {
-    /// Positions the file at `offset` bytes into the body, behind the content tag.
+    /// Positions the file at `offset` bytes into the body.
     async fn seek_body(&mut self, offset: u64) -> Result<(), Error> {
-        let start = SeekFrom::Start(TAG_LEN as u64 + offset);
+        let start = SeekFrom::Start(self.start + offset);
         let sought = self.file.seek(start).await;
         sought.map(drop).map_err(io_error(&self.path))
     }
@@ -379,17 +299,26 @@ fn chunks(stored: Stored, left: u64, chunk: u64) -> ReadBody {
     stream::unfold((stored, left), next).boxed()
 }
 
-/// Opens the file of an object and reads its content tag.
-async fn open_stored(path: &Path) -> std::io::Result<Stored> {
+/// Opens the file of the object `key` and reads its content tag. A file with a hashed name that
+/// holds another key is not found (it is the file of a key whose hashed name is the same).
+async fn open_stored(path: &Path, key: &str) -> std::io::Result<Stored> {
     let mut file = File::open(path).await?;
     let meta = file.metadata().await?;
     let mut tag = [0_u8; TAG_LEN];
     file.read_exact(&mut tag).await?;
+    let expected = header(key);
+    let mut held = vec![0_u8; expected.len()];
+    file.read_exact(&mut held).await?;
+    if held != expected {
+        return Err(ErrorKind::NotFound.into());
+    }
+    let start = (TAG_LEN + expected.len()) as u64;
     Ok(Stored {
         file,
         path: path.to_owned(),
         tag,
-        size: meta.len().saturating_sub(TAG_LEN as u64),
+        start,
+        size: meta.len().saturating_sub(start),
         modified: modified_of(&meta),
     })
 }
@@ -496,14 +425,11 @@ impl DirBackend {
 
     /// The path of the file of the object `key`.
     fn path(&self, key: &str) -> Result<PathBuf, Error> {
-        let (dir, rest) = match entries::rest(key) {
-            Some(rest) => (self.root.join(entries::DIR), rest),
-            None => (self.root.clone(), key),
+        let name = file_name(key).ok_or_else(|| Error::InvalidKey(key.to_owned()))?;
+        let dir = match entries::rest(key) {
+            Some(_) => self.root.join(entries::DIR),
+            None => self.root.clone(),
         };
-        let name = encode(rest);
-        if !(1..=NAME_LIMIT).contains(&name.len()) {
-            return Err(Error::InvalidKey(key.to_owned()));
-        }
         Ok(dir.join(name))
     }
 
@@ -571,7 +497,7 @@ impl DirBackend {
             .locate(key)
             .await
             .map_err(|_| Error::NotFound(key.to_owned()))?;
-        let opened = open_stored(&path).await;
+        let opened = open_stored(&path, key).await;
         opened.map_err(|why| classify(key, &path, &why, ErrorKind::NotFound, Error::NotFound))
     }
 
@@ -622,9 +548,10 @@ impl DirBackend {
     }
 
     /// Writes the file of an object with this body to a new temporary file.
-    async fn write_temp(&self, body: Bytes) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
+    async fn write_temp(&self, key: &str, body: Bytes) -> Result<(PathBuf, [u8; TAG_LEN]), Error> {
         let tag = sha256(&body);
-        let data = Bytes::copy_from_slice(&tag).chain(body);
+        let head = Bytes::copy_from_slice(&tag).chain(Bytes::from(header(key)));
+        let data = head.chain(body);
         let temp = self.temp(&self.root);
         match create_file(&temp, data).await {
             Ok(()) => Ok((temp, tag)),
@@ -689,7 +616,7 @@ impl DirBackend {
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let path = self.matching(key, etag).await?.path;
-        let (temp, tag) = self.write_temp(body).await?;
+        let (temp, tag) = self.write_temp(key, body).await?;
         self.install(&temp, &path).await?;
         Ok(hex::encode(tag))
     }
@@ -720,7 +647,7 @@ impl Backend for DirBackend {
     /// The tag is that of the file this call published: the SHA-256 of the bytes it wrote.
     async fn put_tagged(&self, key: &str, body: Bytes) -> Result<String, Error> {
         let path = self.path(key)?;
-        let (temp, tag) = self.write_temp(body).await?;
+        let (temp, tag) = self.write_temp(key, body).await?;
         self.publish(&temp, &path, key).await?;
         Ok(hex::encode(tag))
     }
@@ -749,7 +676,7 @@ impl Backend for DirBackend {
         let path = self.path(key)?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
-        let tag = write_object_stream(&temp, &mut body).await?;
+        let tag = write_object_stream(&temp, &header(key), &mut body).await?;
         self.publish(&temp, &path, key).await?;
         Ok(hex::encode(tag))
     }
@@ -773,7 +700,7 @@ impl Backend for DirBackend {
         self.locate(key).await?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
-        let tag = write_object_stream(&temp, &mut body).await?;
+        let tag = write_object_stream(&temp, &header(key), &mut body).await?;
         let _entry = self.entry_lock(key).await?;
         let _replacing = self.replacing.lock().await;
         let path = self.matching(key, etag).await?.path;
@@ -917,7 +844,7 @@ impl Backend for DirBackend {
             return Err(Error::AlreadyExists(key.to_owned()));
         }
         let temp = self.temp(&self.root);
-        let tag = match join_files(&temp, &files, self.copy_chunk).await {
+        let tag = match join_files(&temp, &header(key), &files, self.copy_chunk).await {
             Ok(tag) => tag,
             Err(error) => {
                 let _ = fs::remove_file(&temp).await;
@@ -998,3 +925,7 @@ mod sync_tests;
 #[cfg(test)]
 #[path = "dir_entries_tests.rs"]
 mod entries_tests;
+
+#[cfg(test)]
+#[path = "dir_long_tests.rs"]
+mod long_tests;

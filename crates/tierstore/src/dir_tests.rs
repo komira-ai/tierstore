@@ -15,7 +15,9 @@ use tokio::sync::oneshot;
 use crate::{Backend, ByteRange, DirBackend, Error, PartBody};
 
 use super::names::decode;
-use super::{NAME_LIMIT, classify, create_new, encode, failed, part_name};
+use super::names::{MAX_KEY, NAME_LIMIT};
+use super::write::create_new;
+use super::{classify, encode, failed, part_name};
 
 fn backend() -> (TestDir, DirBackend) {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-dir");
@@ -160,18 +162,17 @@ async fn a_tagged_put_gives_the_tag_of_the_file_it_published() {
     assert!(matches!(refused, Err(Error::InvalidKey(_))));
 }
 
-/// Asserts that a key of 255 bytes is stored; that one of 256, and the empty key, and one whose
-/// encoded name passes 255 bytes though the key itself is short (non-ASCII text), are refused by
-/// the writes that validate the key as `InvalidKey`, are `NotFound` for every read, delete and
-/// held-body conditional write (no such object can exist), and that nothing is made for them. Catches a long key answered 500 for a GET.
+/// Asserts that a key of 255 bytes is stored; that the empty key and one over 65536 bytes (the
+/// most a file can hold as its key) are refused by the writes that validate the key as
+/// `InvalidKey`, are `NotFound` for every read, delete and held-body conditional write (no such
+/// object can exist), and that nothing is made for them. Catches a refused key answered 500 for
+/// a GET.
 #[tokio::test]
 async fn a_key_that_cannot_be_a_file_name_is_refused_by_writes_and_absent_for_reads() {
     let (dir, backend) = backend();
     let longest = "a".repeat(NAME_LIMIT);
     backend.put(&longest, body("v")).await.unwrap();
-    let wide = "\u{e9}".repeat(NAME_LIMIT / 6 + 1);
-    assert!(wide.len() < NAME_LIMIT);
-    for key in ["a".repeat(NAME_LIMIT + 1), String::new(), wide] {
+    for key in ["a".repeat(MAX_KEY + 1), String::new()] {
         let invalid = Error::InvalidKey(key.clone());
         assert_eq!(
             backend.put(&key, body("v")).await.err(),
