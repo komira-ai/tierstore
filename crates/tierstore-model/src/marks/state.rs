@@ -629,3 +629,7 @@ impl Model for Marks {
         v
     }
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;

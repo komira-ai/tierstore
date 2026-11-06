@@ -1,6 +1,7 @@
 //! The command line: verdict lines, traces, the list and the ablation.
 
-use tierstore_model::cli::run_cli;
+use tierstore_model::cli::{run_cli, write_ablation, write_row};
+use tierstore_model::scenarios::Row;
 
 fn run(args: &[&str]) -> (bool, String) {
     let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -87,4 +88,94 @@ fn the_corrected_table_passes_every_rule() {
         12,
         "{text}"
     );
+}
+
+#[test]
+fn with_no_name_the_pr_set_runs_and_the_heavy_runs_do_not() {
+    let (ok, text) = run(&[]);
+    assert!(ok, "{text}");
+    assert!(text.contains("if-match-race"), "{text}");
+    assert!(!text.contains("heavy/"), "{text}");
+}
+
+#[test]
+fn the_name_heavy_runs_only_the_heavy_scenarios() {
+    let (ok, text) = run(&["heavy"]);
+    assert!(ok, "{text}");
+    assert!(text.lines().all(|l| l.starts_with("heavy/")), "{text}");
+}
+
+#[test]
+fn a_matrix_row_says_pass_fail_or_not_judged() {
+    let row = |judged, broken| Row {
+        rule: "A4",
+        what: "converges",
+        scenarios: 3,
+        states: 10,
+        broken,
+        judged,
+    };
+    let text = |r: Row| {
+        let mut out = Vec::new();
+        write_row(&mut out, &r).unwrap_or_else(|e| panic!("{e}"));
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    assert_eq!(
+        text(row(true, None)),
+        "A4        scenarios=3   states=10        PASS (converges)\n"
+    );
+    assert!(text(row(false, None)).contains("NOT JUDGED (every run"));
+    assert!(
+        text(row(true, Some(("x/y", "A4 broke".into()))))
+            .contains("FAIL in x/y: A4 broke (converges)")
+    );
+}
+
+#[test]
+fn a_correction_no_scenario_needs_fails_the_ablation_table() {
+    let mut out = Vec::new();
+    let rows = [
+        ("fix_a", Some(("s/1", "A1 broke".to_string()))),
+        ("fix_b", None),
+    ];
+    let ok = write_ablation(&mut out, &rows).unwrap_or_else(|e| panic!("{e}"));
+    let text = String::from_utf8_lossy(&out);
+    assert!(!ok);
+    assert!(
+        text.contains("needed: without it s/1 fails: A1 broke"),
+        "{text}"
+    );
+    assert!(
+        text.contains("fix_b") && text.contains("NOT needed by any scenario"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_trace_command_refuses_a_baseline_scenario_and_an_unknown_rule() {
+    let (ok, text) = run(&["trace", "baseline/crash", "literal", "A2"]);
+    assert!(!ok);
+    assert!(
+        text.contains("baseline/crash is not a marker scenario"),
+        "{text}"
+    );
+    let (ok, text) = run(&["trace", "if-match-race", "literal", "A99"]);
+    assert!(!ok);
+    assert!(text.contains("no rule called A99"), "{text}");
+}
+
+#[test]
+fn the_binary_forwards_to_the_library_and_exits_with_its_verdict() {
+    let exe = env!("CARGO_BIN_EXE_tierstore-model");
+    let good = std::process::Command::new(exe)
+        .arg("if-match-race")
+        .output()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(good.status.success());
+    assert!(String::from_utf8_lossy(&good.stdout).contains("PASS"));
+    let bad = std::process::Command::new(exe)
+        .args(["trace", "no-such", "literal", "A2"])
+        .output()
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(!bad.status.success());
 }

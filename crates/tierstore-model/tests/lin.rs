@@ -97,3 +97,14 @@ fn the_values_a_key_may_hold_are_those_reachable_by_the_pending_operations() {
     l.invoke(1);
     assert_eq!(l.may_hold(&e), (1 << 0) | (1 << 2) | (1 << 3));
 }
+
+/// An operation that was invoked but has no effect (a read) never changes the values the key
+/// may hold.
+#[test]
+fn an_invoked_operation_without_an_effect_explains_nothing() {
+    let effs: Effs = [None; 8];
+    let mut lin = Lin::new(0);
+    lin.invoke(3);
+    assert!(!lin.observe(&effs, 5));
+    assert!(lin.observe(&effs, 0));
+}

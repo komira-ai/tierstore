@@ -202,3 +202,69 @@ fn judging_one_rule_prunes_the_paths_that_break_another() {
         "a violating step of another rule is pruned"
     );
 }
+
+/// Start in a quiescent state from which the leader's steps lead either to convergence (3) or
+/// into a dead end (2).
+struct Fork;
+
+impl Model for Fork {
+    type S = u8;
+    type A = &'static str;
+
+    fn init(&self) -> Vec<u8> {
+        vec![0]
+    }
+
+    fn successors(&self, s: &u8, out: &mut Vec<Succ<u8, &'static str>>) {
+        let to: &[u8] = match s {
+            0 => &[1, 2],
+            1 => &[3],
+            _ => &[],
+        };
+        for t in to {
+            out.push(Succ {
+                act: "step",
+                to: Ok(*t),
+                bg: true,
+            });
+        }
+    }
+
+    fn check(&self, _: &u8) -> Option<String> {
+        None
+    }
+
+    fn terminal(&self, _: &u8) -> Option<String> {
+        None
+    }
+
+    fn quiescent(&self, s: &u8) -> bool {
+        *s == 0
+    }
+
+    fn converged(&self, s: &u8) -> bool {
+        *s == 3
+    }
+
+    fn show_act(&self, a: &&'static str) -> String {
+        (*a).to_string()
+    }
+
+    fn show_state(&self, s: &u8) -> String {
+        format!("n={s}")
+    }
+}
+
+#[test]
+fn a_dead_end_the_leader_can_reach_from_quiescence_is_reported_with_the_leader_steps() {
+    let o = explore(&Fork, Limits::new(100, true));
+    assert_eq!(o.live_starts, 1);
+    let Some(t) = o.trace else {
+        panic!("the dead end was not found");
+    };
+    assert!(t.message.starts_with("A4 liveness"), "{}", t.message);
+    assert_eq!(
+        t.steps,
+        vec![("(leader step)".to_string(), "n=2".to_string())]
+    );
+}
