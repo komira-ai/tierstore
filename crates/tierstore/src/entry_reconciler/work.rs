@@ -166,7 +166,10 @@ impl EntryReconciler {
     ///
     /// One read of the hot object gives its size, tag and time with the bytes, and the cold tier
     /// is asked for the create-only write at once, with no HEAD before it: the write is what
-    /// decides whether the key exists.
+    /// decides whether the key exists. A cold look follows only a refusal or an unknown outcome
+    /// of the write, and comes first for an object too long for one request of the cold backend
+    /// (see [`Backend::single_put_max`]), whose write would otherwise send every part before the
+    /// refusal.
     async fn replicate(&self, key: &str) -> Result<Replicated, Error> {
         let opened = match self.hot.open_read(key, None).await {
             Ok(opened) => opened,
@@ -189,6 +192,12 @@ impl EntryReconciler {
     /// Streams the hot object to the cold tier, create-only, and remembers the tag the answer
     /// gives (or that a HEAD gives, if the answer has none).
     ///
+    /// The write goes first, except for an object longer than the cold backend writes in one
+    /// request ([`Backend::single_put_max`], a multipart upload on S3, whose create-only check
+    /// comes only at its completion, after all the parts): a HEAD of the cold object goes
+    /// before it, and an object found there is compared and not written; one not found is written;
+    /// a HEAD that fails fails the copy with its own error.
+    ///
     /// A write that is refused because the key exists, and one whose outcome is not known (the
     /// connection was reset, or timed out, and a store may reset a refused write of a large body
     /// where it should answer 412), is resolved by a HEAD of the cold object: if there is one the
@@ -196,6 +205,13 @@ impl EntryReconciler {
     /// fails the copy with its own error.
     async fn publish(&self, key: &str, hot: &Meta, body: ReadBody) -> Result<Replicated, Error> {
         self.require_lease().await?;
+        if self.cold.single_put_max().is_some_and(|max| hot.size > max) {
+            match self.cold.head(key).await {
+                Ok(cold) => return self.compare(key, hot, &cold).await,
+                Err(Error::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
         match self
             .cold
             .put_stream_answered(key, Some(hot.size), body, false)

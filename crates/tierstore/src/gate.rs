@@ -203,6 +203,10 @@ impl Backend for GateBackend {
         self.inner.needs_length()
     }
 
+    fn single_put_max(&self) -> Option<u64> {
+        self.inner.single_put_max()
+    }
+
     /// A streamed put is a call of kind [`Op::Put`].
     async fn put_stream(
         &self,

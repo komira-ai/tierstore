@@ -173,6 +173,10 @@ impl Backend for CachedStore {
         self.inner.needs_length()
     }
 
+    fn single_put_max(&self) -> Option<u64> {
+        self.inner.single_put_max()
+    }
+
     fn same_version(&self, a: &Meta, b: &Meta) -> bool {
         self.inner.same_version(a, b)
     }

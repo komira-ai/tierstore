@@ -535,6 +535,11 @@ impl Backend for S3Backend {
         true
     }
 
+    /// The `server.s3_single_put_max` of the store, kept to S3's limit for one PUT.
+    fn single_put_max(&self) -> Option<u64> {
+        Some(self.store.single_put_max())
+    }
+
     async fn put(&self, key: &str, body: Bytes) -> Result<(), Error> {
         let object = object_key(key)?;
         let put = self.store.put_new(&object, body, None);

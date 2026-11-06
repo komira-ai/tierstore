@@ -271,12 +271,12 @@ async fn eviction_compares_when_the_record_of_tags_is_gone_or_stale() {
         land(&rig, "p1", "a").await;
         let parks = case == "tag not read back";
         // The store of the case where the tag is not read back gives none with its answer.
-        let store: Arc<dyn Backend> = if parks {
-            Arc::new(super::copy::Untagged(rig.cold.clone()))
+        let store = FaultyBackend::new(rig.cold.clone());
+        let cold = Arc::new(if parks {
+            store.without_answers()
         } else {
-            rig.cold.clone()
-        };
-        let cold = Arc::new(FaultyBackend::new(store));
+            store
+        });
         let gated = Arc::new(GateBackend::new(cold.clone()));
         let gate = gated.gate(Op::Put, "a", Phase::Pre);
         let tier: Arc<dyn Backend> = if parks { gated } else { cold.clone() };

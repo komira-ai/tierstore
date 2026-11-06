@@ -778,7 +778,11 @@ async fn a_proxy_needs_the_length_of_a_body_when_either_tier_is_s3() {
     let (_s3, s3) = backend().await;
     assert!(s3.needs_length());
     assert!(!tierstore::MemoryBackend::new().needs_length());
+    assert_eq!(s3.single_put_max(), Some(5 << 30));
+    assert_eq!(tierstore::MemoryBackend::new().single_put_max(), None);
     let s3: Arc<dyn Backend> = Arc::new(s3);
+    let cached = tierstore::CachedStore::new(s3.clone(), 1000);
+    assert_eq!(cached.single_put_max(), Some(5 << 30));
     let memory = || -> Arc<dyn Backend> { Arc::new(tierstore::MemoryBackend::new()) };
     let open = |hot: Arc<dyn Backend>, cold: Arc<dyn Backend>| async move {
         let clock = Arc::new(SystemClock);

@@ -50,7 +50,7 @@ async fn explored(scenario: Scenario, bound: u32, at_least: usize) {
 #[tokio::test(start_paused = true)]
 async fn a_delete_then_a_get_against_a_copy_in_flight_break_no_rule() {
     let scenario = run(Seed::Pending(OLD), ROOMY, vec![vec![DELETE, GET]], 2);
-    explored(scenario, 3, 1466).await;
+    explored(scenario, 3, 1089).await;
 }
 
 /// Asserts that two puts of one key and a reconciler break no rule in any schedule of up to 2
@@ -63,7 +63,7 @@ async fn two_puts_of_one_key_against_the_reconciler_break_no_rule() {
         vec![vec![ClientOp::Put(NEW)], vec![ClientOp::Put(OTHER)]],
         2,
     );
-    explored(scenario, 2, 578).await;
+    explored(scenario, 2, 566).await;
 }
 
 /// Asserts that a put, a delete followed by a get, and the reconciler break no rule in any
@@ -100,7 +100,7 @@ async fn a_copy_back_against_a_delete_and_a_new_put_breaks_no_rule() {
         vec![vec![GET], vec![DELETE, ClientOp::Put(NEW), GET]],
         3,
     );
-    explored(scenario, 2, 1177).await;
+    explored(scenario, 2, 1157).await;
 }
 
 /// Asserts that two deletes of a put the reconciler is copying, the second followed by a get,
