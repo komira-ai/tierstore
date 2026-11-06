@@ -472,4 +472,59 @@ pub(super) fn negatives(v: &mut Vec<Scenario>) {
         Fail("A5"),
         false,
     );
+    add(
+        "rollout/old-release-put-delete-beside-markers",
+        "A22",
+        "an old-release put and delete running the entry protocol beside markers",
+        with(base(Init::Both, &[Op::Put(Replay)], &[Op::Get]), |c| {
+            c.scripts[2] = vec![Op::OldPut, Op::OldDelete];
+            c.phase = crate::marks::Phase::ActiveEpoch2;
+        }),
+        Fail("A1"),
+        false,
+    );
+    add(
+        "rollout/old-release-put-beside-markers",
+        "A22",
+        "an old-release put of an absent key beside a delete",
+        with(base(Init::Empty, &[Op::Delete], &[Op::Get]), |c| {
+            c.scripts[2] = vec![Op::OldPut];
+            c.phase = crate::marks::Phase::ActiveEpoch2;
+        }),
+        Fail("A7"),
+        false,
+    );
+    add(
+        "negative/overwrite-without-lock-damage",
+        "A8 A1",
+        "an overwrite without the lock, A8 off: the damage a replace over a moved object does",
+        with(
+            flaw(
+                base(
+                    Init::HotDirty,
+                    &[Op::Put(Stream)],
+                    &[Op::Put(Replay), Op::Delete],
+                ),
+                Flaw::OverwriteNoLock,
+            ),
+            |c| c.a8 = false,
+        ),
+        Pass,
+        false,
+    );
+    add(
+        "head-before-bump",
+        "A12",
+        "a put that finds DIRTY HEADs hot before it bumps gone",
+        with(
+            base(
+                Init::DeletedCold,
+                &[Op::Put(Replay), Op::Get],
+                &[Op::Delete, Op::Put(Replay)],
+            ),
+            |c| c.head_before_bump = true,
+        ),
+        Pass,
+        false,
+    );
 }

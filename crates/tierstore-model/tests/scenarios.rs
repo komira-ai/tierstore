@@ -606,3 +606,28 @@ fn holds_in_timeout_delete_keeps_lock() {
 fn rejects_a8_in_timeout_release_at_once() {
     check("timeout/release-at-once");
 }
+
+/// An old-release put and delete beside markers delete a copied key the copier then rewrites (A22).
+#[test]
+fn rejects_a1_in_rollout_old_release_put_delete_beside_markers() {
+    check("rollout/old-release-put-delete-beside-markers");
+}
+
+/// An old-release put beside markers writes an object no marker covers (A22).
+#[test]
+fn rejects_a7_in_rollout_old_release_put_beside_markers() {
+    check("rollout/old-release-put-beside-markers");
+}
+
+/// An overwrite without the lock, with the lock assertion off, still breaks no acknowledged
+/// operation when its replace finds the object moved (A8 A1).
+#[test]
+fn holds_in_negative_overwrite_without_lock_damage() {
+    check("negative/overwrite-without-lock-damage");
+}
+
+/// A put that HEADs hot before it bumps a DIRTY marker keeps the deleted cold copy hidden (A12).
+#[test]
+fn holds_in_head_before_bump() {
+    check("head-before-bump");
+}
