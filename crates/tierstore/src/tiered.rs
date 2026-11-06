@@ -10,10 +10,10 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
-use crate::metrics::{Counters, Read, Skipped, Tier};
+use crate::metrics::{Counters, Read, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Span, UploadedPart, UploadsAfter, Window,
+    PartBody, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -25,6 +25,9 @@ mod entry_put;
 mod entry_put_race_tests;
 #[cfg(test)]
 mod entry_put_tests;
+mod entry_retry;
+#[cfg(test)]
+mod entry_retry_tests;
 mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
@@ -42,6 +45,7 @@ mod uploads;
 mod uploads_tests;
 
 pub use entry_delete::DeleteWait;
+pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
 
 /// The settings of a [`Proxy`].
@@ -95,6 +99,12 @@ pub struct ProxyConfig {
     pub entry_rounds: u32,
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
+    /// How often and how fast the last step of a put or a delete (the landing of a put, the
+    /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
+    /// ambiguously.
+    pub step_retry: StepRetry,
+    /// Where that retry sleeps: the timer of the runtime, or a test's sleeper.
+    pub sleeper: Arc<dyn Sleeper>,
 }
 
 impl ProxyConfig {
@@ -102,7 +112,8 @@ impl ProxyConfig {
     /// critical share of 0.95, a usage object that is read every second and ignored after 30 seconds, at most 100 calls to the cold tier for one listing
     /// of uploads, a format object that is read every 5 seconds, a heartbeat every 10 seconds, a departure time
     /// of 60 seconds and a margin of 10 seconds, on a [`MonotonicClock`] that reads zero now, and
-    /// 3 looks at an entry, and the [`DeleteWait`] of [`DeleteWait::new`].
+    /// 3 looks at an entry, the [`DeleteWait`] of [`DeleteWait::new`], the [`StepRetry`] of
+    /// [`StepRetry::new`] and the [`TokioSleeper`].
     #[must_use]
     pub fn new(proxy_id: &str, hot_budget: u64, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -120,6 +131,8 @@ impl ProxyConfig {
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
+            step_retry: StepRetry::new(),
+            sleeper: Arc::new(TokioSleeper),
         }
     }
 }
@@ -467,18 +480,15 @@ impl Inner {
             // A read of a part asks the cold tier for that part alone and copies nothing back: a
             // whole read per chunk of a long blob would be quadratic, and would hold the whole of
             // the object in memory for a read of a part of it.
-            if self.level().await >= Level::Critical {
-                self.counters.skipped(Skipped::Critical);
-            }
             let (body, _) = self.cold_get(key, Some(part)).await?;
+            self.note_critical().await;
             self.counters.served(Tier::Cold, body.len());
             return Ok(body);
         }
-        let critical = self.level().await >= Level::Critical;
         let (body, _) = self.cold_get(key, None).await?;
-        if critical {
-            self.counters.skipped(Skipped::Critical);
-        } else if self.entries_active().await {
+        // The level is looked at once the cold tier has the object: a key that neither tier has
+        // needs none, and the level can cost a read of the usage object.
+        if !self.note_critical().await && self.entries_active().await {
             self.ask_copy_back(key);
         }
         self.counters.served(Tier::Cold, body.len());

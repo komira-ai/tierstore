@@ -1,6 +1,8 @@
 //! The entry of a key: its body, the shape of each step, and the store calls, with the races between
 //! actors driven one call at a time through gates.
 
+mod read;
+
 use std::future::Future;
 use std::sync::Arc;
 
@@ -344,21 +346,6 @@ async fn a_key_with_no_entry_reads_as_none() {
     assert_eq!(rig.actor("a").entries.read("k").await.unwrap(), None);
 }
 
-/// Asserts that a failed head and a failed get of a read are the backend's errors, not an absent
-/// entry.
-#[tokio::test]
-async fn a_read_whose_head_or_get_fails_gives_that_error() {
-    for op in [Op::Head, Op::Get] {
-        let rig = Rig::new();
-        let a = rig.actor("a");
-        take(&a, "k", Take::Put).await;
-        rig.store
-            .fail_next_with(op, Error::Unavailable("down".to_owned()));
-        let error = a.entries.read("k").await.unwrap_err();
-        assert_eq!(error, Error::Unavailable("down".to_owned()), "{op:?}");
-    }
-}
-
 /// Asserts that a body that is not an entry is an error of the read that names a corrupt entry.
 #[tokio::test]
 async fn a_read_of_a_body_that_is_not_an_entry_is_an_error() {
@@ -367,40 +354,6 @@ async fn a_read_of_a_body_that_is_not_an_entry_is_an_error() {
     rig.memory.put(&entry_key("k"), body).await.unwrap();
     let error = rig.actor("a").entries.read("k").await.unwrap_err();
     assert!(error.to_string().contains("corrupt entry"), "{error}");
-}
-
-/// Asserts that an entry that is deleted between the head and the get of a read reads as none.
-#[tokio::test]
-async fn an_entry_deleted_between_the_head_and_the_get_of_a_read_reads_as_none() {
-    let rig = Rig::new();
-    let a = rig.actor("a");
-    take(&a, "k", Take::Put).await;
-    let gate = a.gated.gate(Op::Get, "", Phase::Pre);
-    let mut reading = Box::pin(a.entries.read("k"));
-    until_parked(&gate, &mut reading).await;
-    rig.memory.delete(&entry_key("k")).await.unwrap();
-    assert!(gate.release());
-    assert_eq!(reading.await.unwrap(), None);
-}
-
-/// Asserts that when the entry is replaced between the head and the get, the read has the newer
-/// body with the older tag, and a step taken on it is lost and changes nothing.
-#[tokio::test]
-async fn a_read_with_a_newer_body_than_its_tag_is_lost_when_it_acts() {
-    let rig = Rig::new();
-    let (a, b) = (rig.actor("a"), rig.actor("b"));
-    let held = take(&b, "k", Take::Put).await;
-    let gate = a.gated.gate(Op::Get, "", Phase::Pre);
-    let mut reading = Box::pin(a.entries.read("k"));
-    until_parked(&gate, &mut reading).await;
-    let landed = step(&b, &held, Step::LandPut).await;
-    assert!(gate.release());
-    let seen = reading.await.unwrap().unwrap();
-    assert_eq!((seen.entry.st, &seen.tag), (EntryState::Pending, &held.tag));
-
-    let lost = a.entries.advance(&seen, Step::Seal).await.unwrap();
-    assert_eq!(lost, Outcome::Lost);
-    assert_eq!(read(&a, "k").await, landed);
 }
 
 /// Asserts that a create whose reply was lost after the store did it is taken, with the entry read
@@ -458,7 +411,7 @@ async fn a_create_that_failed_ambiguously_and_cannot_read_back_gives_its_error()
     let mut creating = Box::pin(a.entries.create("k", Take::Put));
     until_parked(&gate, &mut creating).await;
     rig.store
-        .fail_next_with(Op::Head, Error::Unavailable("still down".to_owned()));
+        .fail_next_with(Op::Get, Error::Unavailable("still down".to_owned()));
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let error = creating.await.unwrap_err();
     assert_eq!(error, Error::Unavailable("reply lost".to_owned()));
@@ -721,7 +674,7 @@ async fn a_replace_that_failed_ambiguously_and_cannot_read_back_gives_its_error(
     let mut landing = Box::pin(a.entries.advance(&held, Step::LandPut));
     until_parked(&gate, &mut landing).await;
     rig.store
-        .fail_next_with(Op::Head, Error::Unavailable("still down".to_owned()));
+        .fail_next_with(Op::Get, Error::Unavailable("still down".to_owned()));
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let error = landing.await.unwrap_err();
     assert_eq!(error, Error::Unavailable("reply lost".to_owned()));
@@ -907,7 +860,7 @@ async fn a_delete_that_failed_ambiguously_and_cannot_read_back_gives_its_error()
     let mut releasing = Box::pin(a.entries.release(&sealed));
     until_parked(&gate, &mut releasing).await;
     rig.store
-        .fail_next_with(Op::Head, Error::Unavailable("still down".to_owned()));
+        .fail_next_with(Op::Get, Error::Unavailable("still down".to_owned()));
     assert!(gate.release_with(Error::Unavailable("reply lost".to_owned())));
     let error = releasing.await.unwrap_err();
     assert_eq!(error, Error::Unavailable("reply lost".to_owned()));

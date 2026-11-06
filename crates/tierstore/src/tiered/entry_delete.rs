@@ -162,7 +162,7 @@ impl Inner {
 
     /// Runs a call that destroys or changes something if the registration allows a call to start,
     /// cut when it has not answered within the margin.
-    async fn bounded<T>(
+    pub(super) async fn bounded<T>(
         &self,
         key: &str,
         call: impl Future<Output = Result<T, Error>>,
@@ -185,19 +185,19 @@ impl Inner {
     }
 
     /// Hands the entry a delete holds to the reconciler, `(DEL, HELD)` to `(DEL, PENDING)`. A
-    /// handover that fails leaves the entry held, and the reconciler reaps it once this proxy is
-    /// gone.
+    /// handover that fails ambiguously is tried again; one that fails in every try leaves the entry
+    /// held, and the reconciler reaps it once this proxy is gone or the entry has stood unchanged
+    /// for `held_ttl`.
     async fn hand_over(&self, key: &str, seen: &Seen) {
-        let _ = self
-            .bounded(key, self.entries.advance(seen, Step::Handover))
-            .await;
+        let once = || self.bounded(key, self.entries.try_advance(seen, Step::Handover));
+        let _ = self.advance_retrying(seen, once).await;
     }
 
     /// The end of a delete: a fresh one removes its entry (and hands it over if it cannot), one
     /// that amended or claimed hands it over, and one that must wait for the release does.
     async fn end_delete(&self, key: &str, held: &Held, waited: &mut Duration) -> Result<(), Error> {
         let Some(step) = held.step else {
-            let released = self.bounded(key, self.entries.release(&held.seen)).await;
+            let released = self.release_retrying(key, &held.seen).await;
             if released.is_err() {
                 self.hand_over(key, &held.seen).await;
             }
