@@ -413,6 +413,30 @@ async fn a_copy_back_that_fails_releases_its_lock_unless_its_write_may_still_lan
     }
 }
 
+/// Asserts that a hot write the store refused for certain (nothing can land after it) releases the
+/// lock, owing cold nothing, so a writer of the key does not wait out `lock_lease`; and that an
+/// "other failure" answer, which leaves it open whether the write landed, keeps it.
+#[tokio::test]
+async fn a_hot_write_that_the_store_refused_releases_the_lock_and_an_unclear_failure_keeps_it() {
+    let refusals = [
+        (Error::Unsupported("no".into()), false),
+        (Error::Reserved(KEY.to_owned()), false),
+        (Error::InvalidKey(KEY.to_owned()), false),
+        (Error::PreconditionFailed(KEY.to_owned()), false),
+        (Error::Other("unclear".into()), true),
+    ];
+    for (refusal, kept) in refusals {
+        let (rig, mut cb) = asked().await;
+        rig.hot.fail_next_with(Op::Put, refusal.clone());
+        let report = cb.pass(vec![want_seen(&rig, KEY).await], 4).await;
+        assert_eq!(report.failed, [(KEY.to_owned(), refusal.clone())]);
+        assert_eq!(report.landed, 0, "{refusal}");
+        let shape = if kept { Some(copy_back_lock()) } else { None };
+        assert_eq!(shape_of(&rig, KEY).await, shape, "{refusal}");
+        assert!(!rig.hot_has(KEY).await, "{refusal}");
+    }
+}
+
 /// Asserts that a copy-back whose cold read fails releases its lock (7.2): the error is reported
 /// with the key, the marker is removed (a later cold read asks again), and nothing is written to
 /// hot.

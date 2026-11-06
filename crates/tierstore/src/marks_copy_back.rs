@@ -18,7 +18,8 @@
 //!   and released at once, so the marker goes through the rows of the table and no row is added.
 //!   A hot write whose outcome is unknown keeps the lock, because the write may still land and a
 //!   release would let a delete of the key be undone by it; the leader's reap ends the lock
-//!   (5.13). A failure before the write releases it.
+//!   (5.13). A failure before the write, and a hot write the store refused (any answer
+//!   but "unavailable" or "other failure", which leave it open), release it.
 //!
 //! A pass reads the format object once and does nothing unless it says `active-marks`.
 
@@ -30,6 +31,7 @@ use bytes::Bytes;
 use futures::stream::{self, StreamExt};
 
 use crate::deadline::millis;
+use crate::entry::ambiguous;
 use crate::format::marks_active;
 use crate::marks_leader::{LeaderLease, release, renewed};
 use crate::{
@@ -408,7 +410,8 @@ impl CopyBacker {
                 Ok(CopiedBack::Nothing)
             }
             // The write may still land: the lock stays until the reap.
-            Err(error) => Err(error),
+            Err(error) if ambiguous(&error) => Err(error),
+            Err(error) => Err(self.failed(&held, error).await),
         }
     }
 

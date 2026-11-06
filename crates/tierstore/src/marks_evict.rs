@@ -285,12 +285,13 @@ impl MarkEvictor {
         report
     }
 
-    /// Evicts the hot object of `key` by the rules of the module.
+    /// Evicts the hot object of `key` by the rules of the module. It does not read the format:
+    /// [`MarkEvictor::evict_pass`], which does, is the only way in from outside the crate.
     ///
     /// # Errors
     /// The error of a store call that failed. The lock, if one was taken, is released unless a
     /// hot DELETE ended with an outcome that is not known, which keeps it.
-    pub async fn evict_one(&self, key: &str) -> Result<Evicted, Error> {
+    pub(crate) async fn evict_one(&self, key: &str) -> Result<Evicted, Error> {
         let Some(hot) = found(self.hot.head(key).await)? else {
             return Ok(Evicted::Gone);
         };
