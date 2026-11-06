@@ -47,7 +47,7 @@ const ALL: &str = "retry_min = \"2s\"\nretry_max = \"90s\"\nstray_grace = \"20m\
     usage_interval = \"4s\"\nusage_scan_interval = \"6h\"\nscan_pages = 13\n\
     candidate_limit = 17\ntag_record_limit = 19\nproxy_usage_stale_after = \"45s\"\n\
     format_refresh = \"3s\"\nentry_rounds = 5\ndelete_wait = \"40s\"\ndelete_poll_min = \"2s\"\n\
-    delete_poll_max = \"8s\"";
+    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"";
 
 /// A file that gives none of the keys has the values the code had before they were keys, in the
 /// file's settings and in what `build` makes of them: the same as the defaults of the proxy and of
@@ -77,6 +77,8 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     assert_eq!(after.scan_pages, before.scan_pages);
     assert_eq!(after.candidate_limit, before.candidate_limit);
     assert_eq!(after.tag_record_limit, before.tag_record_limit);
+    assert_eq!(after.held_ttl, before.held_ttl);
+    assert_eq!(after.held_ttl, Duration::from_secs(3600));
 }
 
 /// Every key parses, and a value that is not the default reaches the setting of the reconciler or
@@ -99,6 +101,7 @@ fn every_key_reaches_the_setting_it_stands_for() {
     assert_eq!(config.scan_pages, 13);
     assert_eq!(config.candidate_limit, 17);
     assert_eq!(config.tag_record_limit, 19);
+    assert_eq!(config.held_ttl, secs(2 * 3600));
     assert_eq!(built.proxy.usage_stale_after, secs(45));
     assert_eq!(built.proxy.format_refresh, secs(3));
     assert_eq!(built.proxy.entry_rounds, 5);
@@ -153,6 +156,7 @@ fn a_duration_out_of_range_is_refused_by_name_and_the_ends_are_taken() {
         ("delete_wait", HOURS, "61m"),
         ("delete_poll_min", HOURS, "61m"),
         ("delete_poll_max", HOURS, "61m"),
+        ("held_ttl", YEAR, "8761h"),
     ];
     for (key, high, over) in keys {
         assert_eq!(
@@ -268,6 +272,40 @@ fn the_relations_between_keys_are_refused_by_name() {
     // Equal polls and a wait equal to a poll are taken.
     let equal = "retry_min = \"60s\"\ndelete_poll_min = \"10s\"\ndelete_wait = \"10s\"";
     assert!(from_text(&with_hot(equal), DEFAULTS).is_ok());
+}
+
+/// A `held_ttl` the file sets must be longer than `lease_ttl` and than `departure` (the longest a
+/// delete holds its entry), or an entry of a live owner could be reaped while its operation runs:
+/// a value at or below either is refused naming the key, the value and the one it must exceed, one
+/// millisecond over is taken, and a file that leaves it out is not checked against them (the
+/// default of an hour is below a `departure` of two hours, which loads as before).
+#[test]
+fn a_held_ttl_not_longer_than_the_lease_or_the_departure_is_refused() {
+    let lease = "lease_ttl = \"90s\"\nheld_ttl = \"90s\"";
+    assert_eq!(
+        refusal(&with_hot(lease)),
+        "hot_store.held_ttl: 90000ms must be longer than lease_ttl, which is 90000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    assert_eq!(
+        refusal(&with_hot("held_ttl = \"30s\"")),
+        "hot_store.held_ttl: 30000ms must be longer than lease_ttl, which is 30000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    let departure = "departure = \"120s\"\nheld_ttl = \"119s\"";
+    assert_eq!(
+        refusal(&with_hot(&format!("lease_ttl = \"10s\"\n{departure}"))),
+        "hot_store.held_ttl: 119000ms must be longer than departure, which is 120000ms, or an \
+         entry of a live owner is reaped while its operation runs"
+    );
+    let default_departure = "lease_ttl = \"10s\"\nheld_ttl = \"60s\"";
+    assert!(refusal(&with_hot(default_departure)).contains("departure, which is 60000ms"));
+    let just_over = "lease_ttl = \"10s\"\nheld_ttl = \"60001ms\"";
+    let cli = from_text(&with_hot(just_over), DEFAULTS).unwrap();
+    assert_eq!(cli.entry_tuning.held_ttl, Duration::from_millis(60_001));
+    let long_departure = "heartbeat = \"10s\"\ndeparture = \"2h\"";
+    let cli = from_text(&with_hot(long_departure), DEFAULTS).unwrap();
+    assert_eq!(cli.entry_tuning.held_ttl, Duration::from_secs(3600));
 }
 
 /// Every key is a key of `[hot_store]` only: `[cold_store]` refuses it, naming it.

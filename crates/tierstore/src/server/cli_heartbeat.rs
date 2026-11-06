@@ -11,7 +11,7 @@ use crate::ProxyConfig;
 /// The default of `hot_store.heartbeat`.
 const HEARTBEAT: Duration = Duration::from_secs(10);
 /// The default of `hot_store.departure`.
-const DEPARTURE: Duration = Duration::from_secs(60);
+pub(super) const DEPARTURE: Duration = Duration::from_secs(60);
 /// The default of `hot_store.deadline_margin`.
 const MARGIN: Duration = Duration::from_secs(10);
 

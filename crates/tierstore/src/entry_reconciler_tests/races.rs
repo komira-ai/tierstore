@@ -146,6 +146,97 @@ async fn a_reap_that_loses_to_the_owner_leaves_the_entry_as_the_owner_made_it() 
     );
 }
 
+/// Asserts that a held entry of a live owner that is reaped for its age, while the owner lands its
+/// put, is no failure: the owner's replace wins or the reap does, never both, and when the owner
+/// wins the entry is `(PUT, PENDING)` as the owner made it and the next step copies the object.
+#[tokio::test]
+async fn a_reap_for_age_that_loses_to_the_live_owner_leaves_the_entry_as_the_owner_made_it() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.hot.put("k", bytes("v")).await.unwrap();
+    rig.register("p1").await;
+    let client = rig.client("p1");
+    client.create("k", Take::Put).await.unwrap();
+    let gated = Arc::new(GateBackend::new(rig.hot.clone()));
+    let mut r = rig.over(gated.clone(), rig.cold.clone(), "r1", |config| {
+        config.held_ttl = Duration::from_secs(100);
+    });
+    assert_eq!(r.step().await.pinned, 1);
+    for _ in 0..9 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1);
+    }
+    rig.beat("p1", 10).await;
+    let gate = gated.gate(Op::PutIfMatch, ENTRIES_PREFIX, Phase::Pre);
+    let mut step = Box::pin(r.step());
+    park(&mut step, &gate).await;
+    let held = read(&rig, "p1", "k").await;
+    let landed = client.advance(&held, Step::LandPut).await.unwrap();
+    assert!(matches!(landed, Outcome::Done(_)));
+    gate.release();
+    let done = step.await;
+    assert_eq!((done.changed, done.failed.len()), (1, 0));
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Pending, None))
+    );
+    assert_eq!(r.step().await, report(1));
+    assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
+}
+
+/// Asserts that an owner that comes back after its held entry was reaped for age loses: a put's
+/// landing and a delete's handover each find the entry changed and write nothing (the put is not
+/// acknowledged), the entry stays as the reaper made it, and the reconciler goes on with it: it
+/// copies the put's object, and finishes the delete in both tiers, so that no deleted key returns.
+#[tokio::test]
+async fn an_owner_that_returns_after_the_reap_for_age_changes_nothing() {
+    for op in [EntryOp::Put, EntryOp::Del] {
+        let rig = Rig::new();
+        rig.activate().await;
+        rig.hot.put("k", bytes("v")).await.unwrap();
+        if op == EntryOp::Del {
+            rig.cold.put("k", bytes("v")).await.unwrap();
+        }
+        rig.register("p1").await;
+        let client = rig.client("p1");
+        let take = if op == EntryOp::Put {
+            Take::Put
+        } else {
+            Take::Del
+        };
+        let Created::Taken(taken) = client.create("k", take).await.unwrap() else {
+            panic!("the entry is free");
+        };
+        let mut r = rig.over(rig.hot.clone(), rig.cold.clone(), "r1", |config| {
+            config.held_ttl = Duration::from_secs(100);
+        });
+        assert_eq!(r.step().await.pinned, 1);
+        for _ in 0..9 {
+            rig.beat("p1", 10).await;
+            assert_eq!(r.step().await.pinned, 1);
+        }
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await, report(1));
+        let reaped = rig.entry("k").await.unwrap();
+        assert_eq!(
+            (reaped.entry.op, reaped.entry.st),
+            (op, EntryState::Pending)
+        );
+        let late = if op == EntryOp::Put {
+            Step::LandPut
+        } else {
+            Step::Handover
+        };
+        let answer = client.advance(&taken, late).await.unwrap();
+        assert!(matches!(answer, Outcome::Lost));
+        assert_eq!(rig.entry("k").await.unwrap().tag, reaped.tag);
+        assert_eq!(r.step().await, report(1));
+        assert!(rig.entry("k").await.is_none());
+        assert_eq!(rig.cold_has("k").await, op == EntryOp::Put);
+        assert_eq!(rig.hot_has("k").await, op == EntryOp::Put);
+    }
+}
+
 /// Asserts what a destructive step does when less than the margin of the lease is left: the copy
 /// publish of a put and the deletes of a handed-over delete are made with exactly the margin left
 /// without a write to the lease, and with a millisecond less the lease (still held) is renewed

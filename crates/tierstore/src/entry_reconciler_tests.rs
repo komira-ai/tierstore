@@ -570,6 +570,45 @@ async fn a_reap_whose_upload_cleanup_failed_aborts_the_uploads_on_the_retry() {
     );
 }
 
+/// Asserts that the age of a held entry of a live owner survives the steps in which the entry is
+/// not looked at: a reap for age whose upload cleanup fails puts the entry in its retry delay, the
+/// steps inside the delay leave it held, and the first step after the delay reaps it without the
+/// count of `held_ttl` starting again.
+#[tokio::test]
+async fn the_age_of_a_held_entry_is_kept_while_its_retry_delay_runs() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.register("p1").await;
+    rig.client("p1").create("k", Take::Put).await.unwrap();
+    let faulty = Arc::new(FaultyBackend::new(rig.cold.clone()));
+    let mut r = rig.over(rig.hot.clone(), faulty.clone(), "r1", |config| {
+        config.held_ttl = Duration::from_secs(100);
+    });
+    assert_eq!(r.step().await.pinned, 1);
+    for _ in 0..9 {
+        rig.beat("p1", 10).await;
+        assert_eq!(r.step().await.pinned, 1);
+    }
+    faulty.fail_next_with(Op::ListUploads, Error::Unavailable("uploads".to_owned()));
+    rig.beat("p1", 10).await;
+    assert_eq!(r.step().await.failed.len(), 1);
+    let waiting = r.step().await;
+    assert_eq!(
+        (waiting.changed, waiting.pinned, waiting.failed.len()),
+        (0, 0, 0)
+    );
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Held, Some("p1".to_owned())))
+    );
+    rig.beat("p1", 1).await;
+    assert_eq!(r.step().await, report(1));
+    assert_eq!(
+        rig.shape("k").await,
+        Some((EntryOp::Put, EntryState::Pending, None))
+    );
+}
+
 /// Asserts that every store call of a copy that fails fails the item and not the step: the failure
 /// is reported once, the entry stays held by the reconciler, and nothing reached the cold tier.
 #[tokio::test]

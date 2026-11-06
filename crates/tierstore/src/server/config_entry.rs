@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig};
 
-use super::config::{ConfigError, TierTable, invalid, within};
+use super::cli_heartbeat::DEPARTURE;
+use super::config::{ConfigError, TierTable, duration, invalid, within};
 use super::config_tuning::{HOUR, MS, span};
 use super::config_units::Dur;
 
@@ -58,6 +59,22 @@ pub struct EntryTuning {
     pub delete_poll_min: Duration,
     /// `hot_store.delete_poll_max`: the longest sleep of that wait.
     pub delete_poll_max: Duration,
+    /// `hot_store.held_ttl`: how long a held put or delete of a live owner may stand unchanged
+    /// before the reconciler reaps it.
+    ///
+    /// A held entry is only ever written by its owner (create, then one replace or delete to end
+    /// it), so an entry that has not changed for this long was abandoned, or its operation is
+    /// still running. It is reaped by a replace on the tag it was read at, so it can never undo
+    /// an operation that finished: an owner that ends its operation first wins the replace, and an
+    /// owner that comes back after the reap finds the entry changed and writes nothing. What a
+    /// reap can cut short is an operation that is still running, so the value must be longer than
+    /// any operation holds its entry: a delete holds it for at most four calls, each cut at
+    /// `deadline_margin` (which is at most a quarter of `departure`), so `departure` bounds it;
+    /// a put holds it for as long as its body takes, and a put that outlives `held_ttl` is not
+    /// acknowledged (its landing finds the entry changed and answers 503). A value given in the
+    /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
+    /// lease left held while it copied is not reaped before that lease would have lapsed.
+    pub held_ttl: Duration,
 }
 
 impl Default for EntryTuning {
@@ -81,6 +98,7 @@ impl Default for EntryTuning {
             delete_wait: Duration::from_secs(30),
             delete_poll_min: Duration::from_secs(1),
             delete_poll_max: Duration::from_secs(10),
+            held_ttl: Duration::from_secs(3600),
         }
     }
 }
@@ -100,6 +118,7 @@ impl EntryTuning {
         config.scan_pages = self.scan_pages as usize;
         config.candidate_limit = self.candidate_limit as usize;
         config.tag_record_limit = self.tag_record_limit as usize;
+        config.held_ttl = self.held_ttl;
     }
 
     /// Gives the values to the settings of the proxy.
@@ -144,8 +163,27 @@ fn ordered(high_key: &str, low: (&str, Duration), high: Duration) -> Result<(), 
     Ok(())
 }
 
-/// The entry settings `[hot_store]` gives, or the defaults of those it leaves out.
-pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> {
+/// Refuses a `held_ttl` that the file sets at or below `longer` (`lease_ttl` or `departure`, and
+/// its value): a live owner's operation could be reaped while it runs.
+fn longer_than(held_ttl: Duration, key: &str, longer: Duration) -> Result<(), ConfigError> {
+    if held_ttl <= longer {
+        let why = format!(
+            "{}ms must be longer than {key}, which is {}ms, or an entry of a live owner is reaped \
+             while its operation runs",
+            held_ttl.as_millis(),
+            longer.as_millis()
+        );
+        return Err(invalid("hot_store.held_ttl", why));
+    }
+    Ok(())
+}
+
+/// The entry settings `[hot_store]` gives, or the defaults of those it leaves out, checked against
+/// `lease_ttl`.
+pub(super) fn entry_tuning(
+    hot: &TierTable,
+    lease_ttl: Duration,
+) -> Result<EntryTuning, ConfigError> {
     let old = EntryTuning::default();
     let tuning = EntryTuning {
         retry_min: time("retry_min", hot.retry_min, old.retry_min, HOUR)?,
@@ -216,6 +254,7 @@ pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> 
             old.delete_poll_max,
             HOUR,
         )?,
+        held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
     };
     let low = ("retry_min", tuning.retry_min);
     ordered("retry_max", low, tuning.retry_max)?;
@@ -230,6 +269,11 @@ pub(super) fn entry_tuning(hot: &TierTable) -> Result<EntryTuning, ConfigError> 
             tuning.usage_interval.as_millis()
         );
         return Err(invalid("hot_store.proxy_usage_stale_after", why));
+    }
+    if hot.held_ttl.is_some() {
+        let departure = duration(hot.departure, DEPARTURE);
+        longer_than(tuning.held_ttl, "lease_ttl", lease_ttl)?;
+        longer_than(tuning.held_ttl, "departure", departure)?;
     }
     Ok(tuning)
 }
