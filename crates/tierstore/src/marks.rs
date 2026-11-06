@@ -2,8 +2,8 @@
 //! compare-and-swap, read, remove, wait for a lock to end, and keep a lock alive
 //! (`docs/design/put-without-lock.md`, sections 4.3 and 5.2). The body of a marker is the module
 //! `marker`; the marker of K is the object named exactly K in the marks bucket of the hot store,
-//! which is the [`Backend`] handed to [`Markers::new`]. Nothing outside this module and its tests
-//! calls it yet.
+//! which is the [`Backend`] handed to [`Markers::new`]. Only the plain puts of the proxy
+//! (`tiered/overwrite.rs`, `tiered/cold_land.rs`) call it, and no server code calls those yet.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and
@@ -300,6 +300,11 @@ pub enum MarkMove {
         /// Whether the holder left hot different from cold.
         changed: bool,
     },
+    /// End the lock, which is the writer's own, with nothing owed whatever the lock said: to
+    /// `CLEARING` (M6). The holder of an emergency landing uses it once hot is absent and cold
+    /// holds the truth (5.5, step 5), where [`MarkMove::Release`] would leave `DIRTY` because the
+    /// lock of a landing owes cold a copy. `gone` is kept.
+    Settle,
     /// The holder writes its own lock again with a fresh nonce, so that the leader sees it move
     /// (M14).
     Refresh,
@@ -331,6 +336,7 @@ impl MarkMove {
                 Next::lock(MarkerWhy::Delete, true, true, me)
             }
             Self::Release { changed } if own_lock => Next::after_lock(from, changed, me),
+            Self::Settle if own_lock => Next::clearing(from.gone, me),
             Self::Refresh if own_lock => Next {
                 st: MarkerState::Lock,
                 gone: from.gone,
@@ -419,6 +425,12 @@ impl Markers {
             sleeper,
             writes: AtomicU64::new(0),
         })
+    }
+
+    /// The times this actor waits and leases by.
+    #[must_use]
+    pub fn config(&self) -> &MarkersConfig {
+        &self.config
     }
 
     /// A nonce no other write has: this instance's boot and the count of its writes.
