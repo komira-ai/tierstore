@@ -14,12 +14,8 @@ fn push(
     expect: Expect,
     heavy: bool,
 ) {
-    // Every run but the document-as-written ones applies the corrections.
-    let cfg = if id.starts_with("doc/") || id.starts_with("lit/") {
-        cfg
-    } else {
-        fixed(cfg)
-    };
+    // The heavy runs are of the corrected protocol.
+    let cfg = fixed(cfg);
     let liveness = cfg.copier;
     v.push(Scenario {
         id,

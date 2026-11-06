@@ -94,20 +94,14 @@ impl BCfg {
     }
 
     fn value(&self, g: u8) -> u8 {
-        let mut n = 0u8;
-        let mut i = 0u8;
-        for s in &self.scripts {
-            for op in s {
-                if i == g {
-                    return 3 + n;
-                }
-                if *op != BOp::Get {
-                    n += 1;
-                }
-                i += 1;
-            }
-        }
-        3 + n
+        let before = self
+            .scripts
+            .iter()
+            .flatten()
+            .take(usize::from(g))
+            .filter(|op| **op != BOp::Get)
+            .count();
+        3 + before as u8
     }
 
     fn effs(&self) -> Effs {
@@ -144,8 +138,6 @@ pub enum BPc {
         c: u8,
     },
     PLand,
-    /// The flawed order: the object lands after the acknowledgement.
-    PLandLate,
     PAck,
     /// Free the entry, then answer `r` (1 is 412, 2 is 503).
     PFree {
@@ -237,7 +229,6 @@ pub enum LPc {
     },
     EvEnt,
     EvDel,
-    Stray,
 }
 
 impl LPc {
@@ -582,3 +573,6 @@ impl Model for Entries {
         v
     }
 }
+
+#[cfg(test)]
+mod tests;

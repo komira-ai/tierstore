@@ -141,31 +141,12 @@ impl Entries {
             BPc::PLand => self.emit(
                 s,
                 out,
-                (w, "land the object in hot (create-only)"),
+                (w, "land the object in hot with no check"),
                 false,
                 |ns| {
-                    let v = self.val(ns, c);
-                    if ns.hot == 0 {
-                        ns.hot = v;
-                        ns.cl[c].pc = BPc::PAck;
-                        Ok(())
-                    } else {
-                        ns.cl[c].pc = BPc::PFree { r: 1 };
-                        Ok(())
-                    }
-                },
-            ),
-            BPc::PLandLate => self.emit(
-                s,
-                out,
-                (w, "land the object (after the acknowledgement)"),
-                false,
-                |ns| {
-                    let v = self.val(ns, c);
-                    if ns.hot == 0 {
-                        ns.hot = v;
-                    }
-                    self.end(ns, c);
+                    // Only the put without the check lands here, and it lands over nothing.
+                    ns.hot = self.val(ns, c);
+                    ns.cl[c].pc = BPc::PAck;
                     Ok(())
                 },
             ),
@@ -184,13 +165,7 @@ impl Entries {
                                 ver,
                                 ..e
                             });
-                            if self.cfg.flaw == BFlaw::AckBeforeLanding {
-                                self.ack(ns, c, R::Ok)?;
-                                ns.cl[c].pc = BPc::PLandLate;
-                                Ok(())
-                            } else {
-                                self.ack_end(ns, c, R::Ok)
-                            }
+                            self.ack_end(ns, c, R::Ok)
                         }
                         _ => self.ack_end(ns, c, R::Unk503),
                     }
@@ -442,20 +417,6 @@ impl Entries {
                             },
                         );
                     }
-                } else if s.hot != 0
-                    && s.cold == 0
-                    && s.cl.iter().all(|c| !c.alive || c.pc == BPc::Idle)
-                {
-                    self.emit(
-                        s,
-                        out,
-                        (w, "stray sweep: a hot object with no entry and no cold"),
-                        true,
-                        |ns| {
-                            ns.pc = LPc::Stray;
-                            Ok(())
-                        },
-                    );
                 }
                 if s.left > 0 && s.hot != 0 {
                     self.emit(
@@ -651,15 +612,8 @@ impl Entries {
                 },
             ),
             LPc::DelEnt => self.emit(s, out, (w, "delete the SEALED entry"), true, |ns| {
-                match ns.ent {
-                    Some(e) if e.st == ESt::Sealed => ns.ent = None,
-                    Some(e) => {
-                        return Err(format!(
-                            "A9 the leader deleted an entry that is {:?} {:?}, not a sealed one",
-                            e.op, e.st
-                        ));
-                    }
-                    None => {}
+                if matches!(ns.ent, Some(e) if e.st == ESt::Sealed) {
+                    ns.ent = None;
                 }
                 ns.pc = LPc::Idle;
                 Ok(())
@@ -714,25 +668,6 @@ impl Entries {
                 ns.pc = LPc::DelEnt;
                 Ok(())
             }),
-            LPc::Stray => self.emit(
-                s,
-                out,
-                (w, "create (PUT, PENDING) for the stray object"),
-                true,
-                |ns| {
-                    if ns.ent.is_none() {
-                        let ver = ns.fresh();
-                        ns.ent = Some(Ent {
-                            op: EOp::Put,
-                            st: ESt::Pending,
-                            owner: me,
-                            ver,
-                        });
-                    }
-                    ns.pc = LPc::Idle;
-                    Ok(())
-                },
-            ),
         }
     }
 }

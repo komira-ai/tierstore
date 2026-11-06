@@ -205,11 +205,8 @@ impl Marks {
                         ns.cl[c].pc = Pc::LkCas { a: m.ver, g: m.gone };
                     }
                     Some(m) => {
-                        if self.cfg.flaw == Flaw::ImmediateLock503 {
-                            if !self.owner_dead(ns, m.owner) {
-                                return Err("A6 a writer answered 503 at once because a live holder had the lock".into());
-                            }
-                            return self.ack_end(ns, c, Resp::Wait503);
+                        if self.cfg.flaw == Flaw::ImmediateLock503 && !self.owner_dead(ns, m.owner) {
+                            return Err("A6 a writer answered 503 at once because a live holder had the lock".into());
                         }
                         ns.cl[c].pc = Pc::LkWait;
                     }

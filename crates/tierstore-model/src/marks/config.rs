@@ -272,20 +272,14 @@ impl Cfg {
 
     /// The version id operation `g` writes: 3 + the number of mutating operations before it.
     pub(crate) fn value(&self, g: u8) -> u8 {
-        let mut n = 0u8;
-        let mut i = 0u8;
-        for s in &self.scripts {
-            for op in s {
-                if i == g {
-                    return 3 + n;
-                }
-                if op.mutates() {
-                    n += 1;
-                }
-                i += 1;
-            }
-        }
-        3 + n
+        let before = self
+            .scripts
+            .iter()
+            .flatten()
+            .take(usize::from(g))
+            .filter(|op| op.mutates())
+            .count();
+        3 + before as u8
     }
 
     pub(crate) fn effs(&self) -> Effs {
