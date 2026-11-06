@@ -94,7 +94,7 @@ async fn a_landing_that_landed_and_answered_an_error_is_found_by_the_read_and_no
     let entry = entry_key("k");
     let gate = rig.hot.gate(Op::PutIfMatch, &entry, Phase::Post);
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry, down("read-back down"));
+        .fail_next_on(Op::Get, &entry, down("read-back down"));
     let proxy = rig.proxy.clone();
     let put = tokio::spawn(async move { proxy.put("k", body("v")).await });
     gate.parked().await;
@@ -114,9 +114,9 @@ async fn a_landing_whose_reads_fail_twice_is_read_again_before_it_is_sent_again(
     let entry = entry_key("k");
     fail_entries(&rig, Op::PutIfMatch, 1);
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry, down("first read down"));
+        .fail_next_on(Op::Get, &entry, down("first read down"));
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry, down("second read down"));
+        .fail_next_on(Op::Get, &entry, down("second read down"));
     rig.proxy.put("k", body("v")).await.unwrap();
     assert_eq!(rig.shape("k").await, pending());
     assert_eq!(rig.hot_faults.calls_on(Op::PutIfMatch, &entry), 2);
@@ -259,7 +259,7 @@ async fn a_removal_that_landed_and_answered_an_error_is_taken_as_done() {
     let entry = entry_key("k");
     let gate = rig.hot.gate(Op::DeleteIfMatch, &entry, Phase::Post);
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry, down("read-back down"));
+        .fail_next_on(Op::Get, &entry, down("read-back down"));
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;
@@ -312,7 +312,7 @@ async fn a_hand_over_that_landed_and_answered_an_error_is_not_repeated() {
         .fail_next_on(Op::Delete, "k", failure.clone());
     let gate = rig.hot.gate(Op::PutIfMatch, &entry, Phase::Post);
     rig.hot_faults
-        .fail_next_on(Op::Head, &entry, down("read-back down"));
+        .fail_next_on(Op::Get, &entry, down("read-back down"));
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;

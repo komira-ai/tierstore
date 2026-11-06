@@ -92,7 +92,7 @@ async fn a_key_that_is_compared_is_looked_up_for_an_entry_once_before_its_bytes_
     let hot_calls = on_key(hot.call_log(), "a");
     let want = [
         (Op::Head, "object"),
-        (Op::Head, "entry"),
+        (Op::Get, "entry"),
         (Op::Get, "object"),
         (Op::Put, "entry"),
         (Op::DeleteIfMatch, "object"),
