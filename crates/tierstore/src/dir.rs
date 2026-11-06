@@ -496,7 +496,8 @@ impl DirBackend {
     }
 
     /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
-    /// hold (none for any other key), making the subdirectory if it is not there. It is taken
+    /// hold, and that every write holds when the backend was opened `with_locked_keys` (none
+    /// otherwise), making the subdirectory if it is not there. It is taken
     /// before the `replacing` lock, always, so that no two calls wait for each other. The root is
     /// synced, with the lock held, until one sync of it has succeeded: whichever call made the
     /// subdirectory, and whether an earlier sync failed, no entry write returns before the
