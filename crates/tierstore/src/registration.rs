@@ -5,11 +5,14 @@
 //! reconciler, which compares nothing across machines, sees the object change while its owner is
 //! alive. Unknown fields are ignored, and a body that is empty or is not this object (a
 //! registration of a release before this one) reads as none, so both directions of a rolling
-//! update work: an older reconciler lists the names and never reads the body.
+//! update work: an older reconciler lists the names and never reads the body. The two optional
+//! fields `phase` and `writes_in_flight` are left out of the body when they are not set, so that a
+//! registration that does not set them is the bytes it always was.
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::format::FormatPhase;
 use crate::journal::to_body;
 
 /// The `proto` of the registrations this release writes: 2, the protocol of one journal entry for
@@ -29,6 +32,15 @@ pub(crate) struct Registration {
     /// never started the heartbeat): it never changes, and the reconciler must not take it for a
     /// process that has left.
     pub(crate) hb: u64,
+    /// The format phase the proxy acts on, as it last read the format object: what the operator's
+    /// rollback waits for (`drained`) before it empties the marks bucket. Absent in the
+    /// registration of a release that does not write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) phase: Option<FormatPhase>,
+    /// The number of writes the proxy has begun and not ended, so that the rollback can tell that
+    /// none is in flight. Absent in the registration of a release that does not write it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) writes_in_flight: Option<u64>,
 }
 
 impl Registration {

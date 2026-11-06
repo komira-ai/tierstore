@@ -13,7 +13,7 @@ use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
     Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -94,6 +94,11 @@ pub struct ProxyConfig {
     pub entry_rounds: u32,
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
+    /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
+    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
+    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
+    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    pub marks: Option<Arc<dyn Backend>>,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -126,6 +131,7 @@ impl ProxyConfig {
             deadline_margin: Duration::from_secs(10),
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
+            marks: None,
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -546,7 +552,26 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, false).await
+        self.inner
+            .put_object_stream(key, len, body, false)
+            .await
+            .map(drop)
+    }
+
+    /// The put of [`put_stream`](Backend::put_stream) (or of
+    /// [`put_stream_hot_only`](Backend::put_stream_hot_only) for `hot_only`) that gives the tag the
+    /// hot tier's answer names, when the object was written to the hot tier and the tier says it
+    /// (an S3 hot tier does, in the `ETag` of its answer to the PUT, which is the tag a HEAD of
+    /// the object gives while it is there). An object that went to the cold tier gives `None`:
+    /// the tag of a HEAD changes when the object is copied the other way.
+    async fn put_stream_answered(
+        &self,
+        key: &str,
+        len: Option<u64>,
+        body: PartBody<'_>,
+        hot_only: bool,
+    ) -> Result<Option<PutAnswer>, Error> {
+        self.inner.put_object_stream(key, len, body, hot_only).await
     }
 
     async fn put_stream_hot_only(
@@ -555,7 +580,10 @@ impl Backend for Proxy {
         len: Option<u64>,
         body: PartBody<'_>,
     ) -> Result<(), Error> {
-        self.inner.put_object_stream(key, len, body, true).await
+        self.inner
+            .put_object_stream(key, len, body, true)
+            .await
+            .map(drop)
     }
 
     /// The proxy keeps objects immutable: it never replaces one.

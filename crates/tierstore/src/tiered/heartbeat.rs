@@ -67,8 +67,14 @@ impl Heartbeat {
 
     /// The registration of a process that has not beaten yet.
     pub(super) fn first_body(&self) -> Bytes {
-        let (proto, boot, hb) = (PROTO, self.boot.clone(), 0);
-        Registration { proto, boot, hb }.encode()
+        Registration {
+            proto: PROTO,
+            boot: self.boot.clone(),
+            hb: 0,
+            phase: None,
+            writes_in_flight: None,
+        }
+        .encode()
     }
 
     /// Writes this process's registration at open: create-only. One that exists is left as it is,
@@ -126,8 +132,14 @@ impl Beater {
     async fn beat(&mut self) -> Result<(), Error> {
         let sent = self.mono.now();
         let count = self.count + 1;
-        let (proto, boot, hb) = (PROTO, self.boot.clone(), count);
-        let body = Registration { proto, boot, hb }.encode();
+        let body = Registration {
+            proto: PROTO,
+            boot: self.boot.clone(),
+            hb: count,
+            phase: None,
+            writes_in_flight: None,
+        }
+        .encode();
         let tag = match self.etag.take() {
             Some(etag) => self.hot.put_if_match(&self.key, body, &etag).await?,
             None => self.adopt(body).await?,

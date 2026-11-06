@@ -165,6 +165,29 @@ async fn a_hot_tier_with_no_room_for_the_first_byte_sends_a_streamed_put_to_the_
     assert_absent(&*rig.hot_mem, "k2").await;
 }
 
+/// Asserts that when the hot tier has no room for the first byte and the cold tier then fails the
+/// whole body, the put is answered with the cold tier's failure sorted as a landing that may have
+/// happened (`Unavailable`, retry later), and no tier holds an object.
+#[tokio::test(start_paused = true)]
+async fn a_streamed_put_the_cold_tier_fails_after_the_hot_tier_had_no_room_is_not_acknowledged() {
+    let rig = Rig::new();
+    let mut config = rig.config("p1", 1000);
+    config.usage_refresh = Duration::from_secs(10);
+    let proxy = rig.open(config).await.unwrap();
+    rig.hot
+        .fail_next_on(Op::Put, "k1", Error::Full("hot".to_owned()));
+    rig.cold
+        .fail_next_on(Op::Put, "k1", Error::Unavailable("cold".to_owned()));
+
+    let put = proxy.put_stream_answered("k1", None, chunks(&["1"]), false);
+    let Err(Error::Unavailable(text)) = put.await else {
+        panic!("not unavailable");
+    };
+    assert!(text.contains("may not have landed"), "{text}");
+    assert_absent(&*rig.hot_mem, "k1").await;
+    assert_absent(&*rig.cold_mem, "k1").await;
+}
+
 /// A hot tier that takes the first chunk of a streamed put and then has no room.
 struct RunsOut(MemoryBackend);
 

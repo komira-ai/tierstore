@@ -349,6 +349,19 @@ async fn every_call_is_held_under_its_own_kind_and_then_runs() {
     .await;
     assert_eq!(rig.memory.get("u", None).await.unwrap(), bytes("p1p2"));
 
+    let tag_u = rig.memory.head("u").await.unwrap().tag;
+    let over = held(gated, Op::CreateUpload, gated.create_upload("u")).await;
+    let part = gated.upload_part("u", &over, 1, chunks("q1"));
+    let tag_q = held(gated, Op::UploadPart, part).await;
+    let parts = [(1, tag_q)];
+    held(
+        gated,
+        Op::CompleteUpload,
+        gated.complete_upload_if_match("u", &over, &parts, &tag_u),
+    )
+    .await;
+    assert_eq!(rig.memory.get("u", None).await.unwrap(), bytes("q1"));
+
     let aborted = held(gated, Op::CreateUpload, gated.create_upload("v")).await;
     let open = held(gated, Op::ListUploads, gated.list_uploads("", None, 10)).await;
     assert_eq!(open.len(), 1);

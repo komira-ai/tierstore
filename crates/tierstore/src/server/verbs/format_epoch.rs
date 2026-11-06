@@ -53,6 +53,9 @@ const ACTIVE_PROTO: u32 = 2;
 const CHANGED: &str =
     "the format object changed while it was being written; run --check and try again";
 
+/// What to say of the phase `active-marks`, which this release reads and does not leave.
+const MARKS: &str = "the format object says active-marks, a phase this release does not leave; use the tool of the release that wrote it";
+
 /// What to say of a phase that this release does not know.
 const UNKNOWN: &str = "the format object has a phase this release does not know; use the tool of the release that wrote it";
 
@@ -164,6 +167,7 @@ fn phase_name(found: &Found) -> &'static str {
         Some(FormatPhase::Drain) => "drain",
         Some(FormatPhase::Drained) => "drained",
         Some(FormatPhase::Active) => "active",
+        Some(FormatPhase::ActiveMarks) => "active-marks",
         Some(FormatPhase::Unknown) => "unknown",
     }
 }
@@ -181,15 +185,17 @@ async fn count(hot: &dyn Backend, prefix: &str) -> Result<usize, VerbError> {
     Ok(hot.list(prefix).await?.len())
 }
 
-/// What `--drain` checks before it writes: the phase is one this release knows, and every
+/// What `--drain` checks before it writes: the phase is one this release knows and leaves, and every
 /// registration is running or named as departed.
 fn drain_gate(
     found: &Found,
     registrations: &[Registration],
     departed: &[String],
 ) -> Result<(), VerbError> {
-    if phase_name(found) == "unknown" {
-        return Err(VerbError::Refused(UNKNOWN.to_owned()));
+    match phase_name(found) {
+        "unknown" => return Err(VerbError::Refused(UNKNOWN.to_owned())),
+        "active-marks" => return Err(VerbError::Refused(MARKS.to_owned())),
+        _ => {}
     }
     check_departed(registrations, departed, "drain")
 }
@@ -241,6 +247,7 @@ async fn drain(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
             let body = format_body(&Format {
                 phase: FormatPhase::Drain,
                 epoch,
+                marks_bucket: None,
             });
             let wrote = match &found {
                 Some((_, tag)) => work.hot.put_if_match(FORMAT_KEY, body, tag).await.map(drop),
@@ -315,6 +322,7 @@ async fn cancel(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError> {
     let restored = format.epoch.map(|epoch| Format {
         phase: FormatPhase::Active,
         epoch: Some(epoch),
+        marks_bucket: None,
     });
     if !work.cli.apply {
         let what = match &restored {
@@ -348,6 +356,7 @@ async fn activate(work: &Work<'_>, out: &mut dyn Write) -> Result<(), VerbError>
     let active = Format {
         phase: FormatPhase::Active,
         epoch: Some(ACTIVE_EPOCH),
+        marks_bucket: None,
     };
     let tag = match found.as_ref() {
         Some((format, _)) if *format == active => {

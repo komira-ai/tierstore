@@ -127,6 +127,9 @@ mod journal;
 mod lease;
 #[cfg(test)]
 mod lease_tests;
+mod marker;
+#[cfg(test)]
+mod marker_tests;
 mod memory;
 mod metrics;
 #[cfg(test)]
@@ -168,6 +171,7 @@ pub use journal::{
     Checkpoint, JournalEntry, JournalOp, decode_checkpoint, decode_journal, encode_checkpoint,
     encode_journal,
 };
+pub use marker::{MARKER_VERSION, Marker, MarkerState, MarkerWhy, decode_marker, encode_marker};
 pub use memory::{MemoryBackend, TestClock};
 pub use reconciler::ReconcilerConfig;
 #[cfg(feature = "s3")]

@@ -351,6 +351,10 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub conditional_delete: Option<bool>,
     // Only `[hot_store]` has these.
+    /// The bucket of the markers (see `config_tier`); only for kind `s3`, where the default is
+    /// `<bucket>-marks`.
+    #[serde(default)]
+    pub marks_bucket: Option<String>,
     #[serde(default)]
     pub budget: Option<Size>,
     #[serde(default)]
@@ -572,6 +576,7 @@ pub(super) enum Settings {
 /// Refuses the keys only `[hot_store]` has, in `cold`.
 pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
     let cold_has = [
+        ("marks_bucket", cold.marks_bucket.is_some()),
         ("budget", cold.budget.is_some()),
         ("high_water", cold.high_water.is_some()),
         ("low_water", cold.low_water.is_some()),
@@ -798,6 +803,7 @@ pub(super) fn storage(
         proxy_id: front.proxy_id,
         slot: front.slot,
         hot: hot_parts.spec,
+        hot_marks: hot_parts.marks,
         cold: cold_parts.spec,
         hot_endpoint: hot_parts.endpoint,
         hot_region: hot_parts.region,

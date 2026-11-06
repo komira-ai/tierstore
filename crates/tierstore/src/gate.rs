@@ -343,6 +343,18 @@ impl Backend for GateBackend {
         self.through(Op::CompleteUpload, key, call).await
     }
 
+    /// A conditional completion is a call of kind [`Op::CompleteUpload`].
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let call = self.inner.complete_upload_if_match(key, id, parts, etag);
+        self.through(Op::CompleteUpload, key, call).await
+    }
+
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         let call = self.inner.abort_upload(key, id);
         self.through(Op::AbortUpload, key, call).await

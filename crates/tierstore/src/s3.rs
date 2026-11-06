@@ -804,6 +804,26 @@ impl Backend for S3Backend {
         Ok(unquoted(&etag))
     }
 
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let object = object_key(key)?;
+        let named: Vec<(u32, String)> = parts
+            .iter()
+            .map(|(number, tag)| (*number, quoted(tag)))
+            .collect();
+        let etag = quoted(etag);
+        let complete = self
+            .store
+            .complete_multipart_if_match(&object, id, &named, &etag);
+        let made = complete.await.map_err(|e| upload_error(e, key, id))?;
+        Ok(unquoted(&made))
+    }
+
     async fn abort_upload(&self, key: &str, id: &str) -> Result<(), Error> {
         let object = object_key(key)?;
         let abort = self.store.abort_multipart(&object, id);

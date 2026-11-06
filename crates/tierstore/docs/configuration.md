@@ -265,6 +265,7 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 
 | Key | Type, default | What |
 |---|---|---|
+| `hot_store.marks_bucket` | string, `<hot_store.bucket>-marks`; `s3` only | the bucket of the hot tier's store that holds the markers of the put-without-lock design (one object per key, named by the key). This release makes no request to it: no marker exists yet, so the bucket need not exist and the hot tier's credentials need no access to it. The start opens the second handle on it and refuses a name that is empty or is `hot_store.bucket`. A `dir` hot tier keeps its markers in the directory of its `path` with `-marks` added, and a `memory` one in a map of its own, so the key is refused for them. Not for `[cold_store]` |
 | `hot_store.budget` | size, required | the bytes the hot tier is meant to hold. The water marks are shares of it |
 | `hot_store.high_water` | percent, 80 | above this share of the budget, eviction begins |
 | `hot_store.low_water` | percent, 70 | eviction goes on down to this share |

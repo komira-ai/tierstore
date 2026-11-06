@@ -606,6 +606,90 @@ async fn keys_outside_the_entries_prefix_take_no_lock() {
     drop(held);
 }
 
+/// A backend over `dir` that takes the lock for every key and reports on the channel when a write
+/// reaches it.
+fn locking(dir: &TestDir) -> (DirBackend, UnboundedReceiver<()>) {
+    let (backend, receiver) = reporting(dir);
+    (backend.with_locked_keys(), receiver)
+}
+
+/// Asserts that, with the lock taken for every key, a replacement of a key with a `/` and a
+/// create-only put of another wait for the lock held by another process, and a delete of the first
+/// waits too: each has reached the wait while nothing of it is done, and each lands after the lock
+/// is released. The files of the keys are in the root, as any key's are: the subdirectory holds the
+/// lock and nothing else.
+#[tokio::test]
+async fn with_locked_keys_a_plain_key_waits_for_the_lock_in_each_conditional_write() {
+    let (dir, backend) = backend();
+    let tag = backend.put_tagged("a/b", body("one")).await.unwrap();
+    let inside = dir.path().join(DIR);
+    assert!(!inside.exists());
+
+    let (writer, mut receiver) = locking(&dir);
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
+    let writer = Arc::new(writer);
+    let (replacing, creating, deleting) = (writer.clone(), writer.clone(), writer);
+    let replace =
+        tokio::spawn(async move { replacing.put_if_match("a/b", body("two"), &tag).await });
+    reached(&mut receiver).await;
+    let create = tokio::spawn(async move { creating.put("c/d", body("new")).await });
+    reached(&mut receiver).await;
+    let delete = tokio::spawn(async move { deleting.delete("a/b").await });
+    reached(&mut receiver).await;
+    assert_eq!(keys(&backend, "").await, ["a/b"]);
+    assert_eq!(backend.get("a/b", None).await.unwrap(), body("one"));
+    drop(held);
+
+    replace.await.unwrap().unwrap();
+    create.await.unwrap().unwrap();
+    delete.await.unwrap().unwrap();
+    assert_eq!(keys(&backend, "").await, ["c/d"]);
+    assert_eq!(names(&inside), [".lock"]);
+}
+
+/// Asserts that a replacement by the tag of a key a second process deleted under the lock does not
+/// make the key again, with the lock taken for every key: the replacement is asked while the lock
+/// is held and has reached the wait for it, the file is removed behind the lock, and the
+/// replacement fails with not-found and leaves no file. That is the compare-and-swap a marker needs
+/// between two proxies over one `dir:` tier.
+#[tokio::test]
+async fn with_locked_keys_a_replacement_cannot_recreate_what_another_process_deleted() {
+    let (dir, backend) = backend();
+    let tag = backend.put_tagged("a/b", body("one")).await.unwrap();
+    let (other, mut receiver) = locking(&dir);
+    let inside = dir.path().join(DIR);
+
+    let held = entries::take(inside.clone(), || {}).await.unwrap();
+    let asked = tokio::spawn(async move { other.put_if_match("a/b", body("two"), &tag).await });
+    reached(&mut receiver).await;
+    backend.delete("a/b").await.unwrap();
+    drop(held);
+
+    assert_eq!(asked.await.unwrap(), Err(Error::NotFound("a/b".to_owned())));
+    assert_eq!(keys(&backend, "").await, Vec::<String>::new());
+}
+
+/// Asserts that of two replacements by the same tag from two backends over one directory, taking
+/// the lock for every key, exactly one lands and the other is refused for the tag: the second one's
+/// check runs after the first one's move, under the lock.
+#[tokio::test]
+async fn with_locked_keys_of_two_replacements_by_one_tag_exactly_one_lands() {
+    let (dir, first) = backend();
+    let first = first.with_locked_keys();
+    let second = DirBackend::open(dir.path()).unwrap().with_locked_keys();
+    let tag = first.put_tagged("a/b", body("zero")).await.unwrap();
+
+    let (one, two) = tokio::join!(
+        first.put_if_match("a/b", body("one"), &tag),
+        second.put_if_match("a/b", body("two"), &tag),
+    );
+    let mut answers = [one.is_ok(), two.is_ok()];
+    answers.sort_unstable();
+    assert_eq!(answers, [false, true]);
+    let refused = if one.is_ok() { two } else { one };
+    assert_eq!(refused, Err(Error::PreconditionFailed("a/b".to_owned())));
+}
+
 /// Writes the plain key `_entries` and the entry key `_entries/x` to a fresh directory, the
 /// plain one first when `plain_first` is true, and asserts that each reads back its own body by
 /// get and head, that a conditional replacement and a conditional delete of the entry leave the

@@ -48,7 +48,7 @@ use names::unique_nanos;
 use names::{NAME_LIMIT, encode, file_name, header, is_id_byte, parse_part, part_name};
 use sync::{FsyncDir, SyncDir};
 use tags::{finish, modified_of, sha256};
-use write::{create_file, join_files, write_object_stream, write_stream};
+use write::{create_file, join_files, named_part_files, write_object_stream, write_stream};
 
 /// The length of the content tag that starts the file of an object: the SHA-256 of its body.
 const TAG_LEN: usize = 32;
@@ -176,6 +176,9 @@ pub struct DirBackend {
     copy_chunk: usize,
     /// The size of the chunks of a streamed read.
     read_chunk: u64,
+    /// Whether the conditional writes of every key take the lock between processes that those of
+    /// the keys under `_entries/` take (see [`DirBackend::with_locked_keys`]).
+    locked_keys: bool,
 }
 
 /// The error of a failed call on the file `path`.
@@ -400,7 +403,23 @@ impl DirBackend {
             root_synced: AtomicBool::new(false),
             copy_chunk: COPY_CHUNK,
             read_chunk: READ_CHUNK,
+            locked_keys: false,
         })
+    }
+
+    /// This backend taking, for every key, the lock between processes that the create-only puts,
+    /// the replacements by the tag and the deletes of the keys under `_entries/` take, so that
+    /// those calls are atomic among the processes over one directory for any key, as they are
+    /// among the calls of one backend. It is for a directory whose every object is rewritten by
+    /// compare-and-swap by more than one process: the marks bucket of a `dir:` hot tier. The lock
+    /// is the file `.entries/.lock` of the root, made by the first write; the subdirectory
+    /// holds nothing else unless the directory has keys under `_entries/`, and no key is a file of
+    /// it. Without this call only the keys under `_entries/` take it, which is what a
+    /// directory written by an earlier release is read and written as.
+    #[must_use]
+    pub fn with_locked_keys(mut self) -> Self {
+        self.locked_keys = true;
+        self
     }
 
     /// This backend joining the parts of an upload in pieces of `copy` bytes and giving a
@@ -468,13 +487,14 @@ impl DirBackend {
     }
 
     /// Takes the lock between processes that the conditional writes of the keys under `_entries/`
-    /// hold (none for any other key), making the subdirectory if it is not there. It is taken
+    /// hold, and that every write holds when the backend was opened `with_locked_keys` (none
+    /// otherwise), making the subdirectory if it is not there. It is taken
     /// before the `replacing` lock, always, so that no two calls wait for each other. The root is
     /// synced, with the lock held, until one sync of it has succeeded: whichever call made the
     /// subdirectory, and whether an earlier sync failed, no entry write returns before the
     /// subdirectory is durable.
     async fn entry_lock(&self, key: &str) -> Result<Option<entries::EntryLock>, Error> {
-        if entries::rest(key).is_none() {
+        if entries::rest(key).is_none() && !self.locked_keys {
             return Ok(None);
         }
         let syncer = Arc::clone(&self.syncer);
@@ -833,15 +853,7 @@ impl Backend for DirBackend {
     ) -> Result<String, Error> {
         let dir = self.upload_dir(key, id).await?;
         let path = self.path(key)?;
-        let stored = stored_parts(&dir).await?;
-        let mut files = Vec::new();
-        for (number, tag) in parts {
-            let found = stored.iter().find(|part| part.is(*number, tag));
-            let Some(found) = found else {
-                return Err(Error::InvalidPart(format!("part {number}")));
-            };
-            files.push(dir.join(&found.name));
-        }
+        let files = named_part_files(&dir, parts).await?;
         if fs::try_exists(&path).await.unwrap_or(false) {
             return Err(Error::AlreadyExists(key.to_owned()));
         }
@@ -854,6 +866,31 @@ impl Backend for DirBackend {
             }
         };
         self.publish(&temp, &path, key).await?;
+        let _ = fs::remove_dir_all(&dir).await;
+        Ok(hex::encode(tag))
+    }
+
+    /// Joins the parts into a temporary file outside the lock, as [`Backend::put_stream_if_match`]
+    /// writes its chunks, and then, under the lock and the tag check of
+    /// [`Backend::put_if_match`], moves the file over the object and removes the upload. A part
+    /// that is not stored, a key with no object and a tag that does not match leave the object
+    /// and the upload as they were and remove the temporary file.
+    async fn complete_upload_if_match(
+        &self,
+        key: &str,
+        id: &str,
+        parts: &[(u32, String)],
+        etag: &str,
+    ) -> Result<String, Error> {
+        let dir = self.upload_dir(key, id).await?;
+        let files = named_part_files(&dir, parts).await?;
+        let temp = self.temp(&self.root);
+        let _scratch = Scratch(temp.clone());
+        let tag = join_files(&temp, &header(key), &files, self.copy_chunk).await?;
+        let _entry = self.entry_lock(key).await?;
+        let _replacing = self.replacing.lock().await;
+        let path = self.matching(key, etag).await?.path;
+        self.install(&temp, &path).await?;
         let _ = fs::remove_dir_all(&dir).await;
         Ok(hex::encode(tag))
     }

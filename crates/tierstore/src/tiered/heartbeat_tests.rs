@@ -318,6 +318,8 @@ async fn open_fails_with_the_error_of_a_registration_it_cannot_read_or_replace()
         proto: 1,
         boot: "b".into(),
         hb: 4,
+        phase: None,
+        writes_in_flight: None,
     }
     .encode();
     memory.put(&proxy_key("p1"), body.clone()).await.unwrap();

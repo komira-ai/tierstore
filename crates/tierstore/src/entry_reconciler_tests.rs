@@ -95,11 +95,28 @@ impl Rig {
     }
 
     async fn activate(&self) {
-        let body = format_body(&Format {
-            phase: FormatPhase::Active,
+        self.set_phase(FormatPhase::Active).await;
+    }
+
+    /// The format object of the hot store, replaced by one in `phase` with no epoch.
+    async fn set_phase(&self, phase: FormatPhase) {
+        let format = Format {
+            phase,
             epoch: None,
-        });
+            marks_bucket: None,
+        };
+        self.hot.delete(FORMAT_KEY).await.ok();
+        let body = format_body(&format);
         self.hot.put(FORMAT_KEY, body).await.unwrap();
+    }
+
+    /// One heartbeat of the proxy `id` after `secs` seconds: the clocks move on and its
+    /// registration is written again, so that the reconciler sees it change.
+    async fn beat(&self, id: &str, secs: u64) {
+        self.mono.advance(Duration::from_secs(secs));
+        self.clock.advance(secs * 1000);
+        self.hot.delete(&proxy_key(id)).await.unwrap();
+        self.register(id).await;
     }
 
     /// The calls of the proxy `id`, as its entries.
@@ -191,9 +208,7 @@ async fn nothing_is_done_until_the_format_is_active() {
     let mut r = rig.reconciler();
     assert_eq!(r.step().await, StepReport::default());
     for phase in [FormatPhase::Drain, FormatPhase::Drained] {
-        let body = format_body(&Format { phase, epoch: None });
-        rig.hot.delete(FORMAT_KEY).await.ok();
-        rig.hot.put(FORMAT_KEY, body).await.unwrap();
+        rig.set_phase(phase).await;
         assert_eq!(r.step().await, StepReport::default());
     }
     assert!(!rig.cold_has("k").await);
@@ -400,17 +415,6 @@ async fn a_held_entry_is_waited_for_until_its_owner_has_departed_and_then_reaped
     );
     assert_eq!(r.step().await, report(1));
     assert!(rig.cold_has("k").await && rig.entry("k").await.is_none());
-}
-
-impl Rig {
-    /// One heartbeat of the proxy `id` after `secs` seconds: the clocks move on and its
-    /// registration is written again, so that the reconciler sees it change.
-    async fn beat(&self, id: &str, secs: u64) {
-        self.mono.advance(Duration::from_secs(secs));
-        self.clock.advance(secs * 1000);
-        self.hot.delete(&proxy_key(id)).await.unwrap();
-        self.register(id).await;
-    }
 }
 
 /// Asserts that a put left held by a proxy that goes on beating (it could not hand the entry over
