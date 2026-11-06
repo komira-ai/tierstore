@@ -10,4 +10,4 @@ mod leader;
 mod state;
 
 pub use config::{Body, Cfg, Flaw, GhostKind, Init, Op, Phase};
-pub use state::{Act, Marks, State};
+pub use state::{Act, Marks, Resp, State};

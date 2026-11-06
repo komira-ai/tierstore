@@ -1,6 +1,6 @@
 //! The verdict of a scenario against what its claims require, in each of its five outcomes.
 
-use tierstore_model::scenarios::{Expect, Scenario, all, run, verdict};
+use tierstore_model::scenarios::{Expect, Scenario, Sys, all, run, verdict};
 
 fn scenario(id: &str) -> Scenario {
     match all().into_iter().find(|s| s.id == id) {
@@ -52,5 +52,17 @@ fn a_counterexample_of_another_rule_is_rejected_naming_both() {
     assert!(
         text.starts_with("FAIL with A7 where A1 was required: A7 no marker"),
         "{text}"
+    );
+}
+
+#[test]
+fn a_run_that_reaches_its_state_bound_is_not_a_pass() {
+    let mut sc = scenario("if-match-race");
+    if let Sys::Marks(cfg) = &mut sc.sys {
+        cfg.max_states = 10;
+    }
+    assert_eq!(
+        judge(&sc),
+        (false, "TRUNCATED (state bound reached)".into())
     );
 }

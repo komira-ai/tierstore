@@ -1,7 +1,9 @@
 //! The assertion messages of the baseline's properties, reached by handing the model a state
 //! that breaks them.
 
-use super::*;
+use tierstore_model::entries::{BCfg, BOp, BState, Entries, R};
+use tierstore_model::explore::Model;
+use tierstore_model::lin::Lin;
 
 fn start(p0: &[BOp], p1: &[BOp]) -> (Entries, BState) {
     let m = Entries::new(BCfg::new(p0, p1));

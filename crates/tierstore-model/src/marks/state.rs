@@ -133,7 +133,8 @@ pub enum Resp {
 
 pub struct Marks {
     pub cfg: Cfg,
-    pub(super) effs: Effs,
+    /// The effect of each operation of the scripts, for the linearizability tracker.
+    pub effs: Effs,
 }
 
 impl State {
@@ -232,7 +233,7 @@ impl Marks {
     }
 
     /// After every step: the truth of the key must be explained by the acknowledged history.
-    fn post(&self, s: &mut State) -> Result<(), String> {
+    pub fn post(&self, s: &mut State) -> Result<(), String> {
         let infl = self.co_inflight(s);
         s.young &= infl;
         let t = s.truth();
@@ -296,7 +297,7 @@ impl Marks {
     }
 
     /// Deliver an answer to the client and record it against the history.
-    pub(super) fn ack(&self, s: &mut State, c: usize, r: Resp) -> Result<(), String> {
+    pub fn ack(&self, s: &mut State, c: usize, r: Resp) -> Result<(), String> {
         let t = s.truth();
         if s.cl[c].ghost {
             return Ok(());
@@ -629,7 +630,3 @@ impl Model for Marks {
         v
     }
 }
-
-#[cfg(test)]
-#[path = "state_tests.rs"]
-mod tests;

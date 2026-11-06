@@ -271,7 +271,7 @@ impl Cfg {
     }
 
     /// The version id operation `g` writes: 3 + the number of mutating operations before it.
-    pub(crate) fn value(&self, g: u8) -> u8 {
+    pub fn value(&self, g: u8) -> u8 {
         let before = self
             .scripts
             .iter()

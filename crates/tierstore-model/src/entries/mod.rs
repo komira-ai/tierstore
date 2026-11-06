@@ -93,7 +93,8 @@ impl BCfg {
         (self.scripts[..c].iter().map(Vec::len).sum::<usize>() + j) as u8
     }
 
-    fn value(&self, g: u8) -> u8 {
+    /// The version id operation `g` writes: 3 + the number of writing operations before it.
+    pub fn value(&self, g: u8) -> u8 {
         let before = self
             .scripts
             .iter()
@@ -261,12 +262,13 @@ pub struct BState {
 
 pub struct Entries {
     pub cfg: BCfg,
-    effs: Effs,
+    /// The effect of each operation of the scripts.
+    pub effs: Effs,
 }
 
 /// The ways the baseline can end a client operation.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum R {
+pub enum R {
     Ok,
     R412,
     Fail503,
@@ -368,7 +370,8 @@ impl Entries {
         8 + s.era
     }
 
-    fn ack(&self, s: &mut BState, c: usize, r: R) -> Result<(), String> {
+    /// Deliver an answer to client `c` and record it against the history.
+    pub fn ack(&self, s: &mut BState, c: usize, r: R) -> Result<(), String> {
         let t = s.truth();
         s.cl[c].poss |= 1 << t;
         let poss = s.cl[c].poss;
@@ -573,6 +576,3 @@ impl Model for Entries {
         v
     }
 }
-
-#[cfg(test)]
-mod tests;

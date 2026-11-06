@@ -1,8 +1,11 @@
 //! The assertion messages of the marker model's properties, reached by handing the model a
 //! state that breaks them.
 
-use super::*;
-use crate::marks::Body;
+use tierstore_model::explore::Model;
+use tierstore_model::marks::{Act, Body, Cfg, Init, Marks, Op, Resp, State};
+
+/// The version id of the bytes of a stream that lost its creation race.
+const CORRUPT: u8 = 7;
 
 fn start(p0: &[Op], p1: &[Op]) -> (Marks, State) {
     let mut cfg = Cfg::new(Init::Empty);
@@ -121,11 +124,11 @@ fn actions_are_named_by_the_actor_that_takes_them() {
     for (who, name) in [
         (0, "proxy0"),
         (3, "ghost0"),
-        (W_COP, "leader.copier"),
-        (W_EVICT, "leader.evictor"),
-        (W_SWEEP, "leader.sweep"),
-        (W_ENV, "env"),
-        (W_GHOST_LD, "ghost-leader"),
+        (10, "leader.copier"),
+        (11, "leader.evictor"),
+        (12, "leader.sweep"),
+        (13, "env"),
+        (14, "ghost-leader"),
     ] {
         assert_eq!(m.show_act(&Act { who, what: "x" }), format!("{name}: x"));
     }
