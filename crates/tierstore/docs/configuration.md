@@ -58,6 +58,7 @@ low_water          = 70
 critical           = 95
 copy_parallel      = 16
 lease_ttl          = "30s"
+held_ttl           = "1h"
 usage_stale_after  = "2m"
 
 [cold_store]
@@ -303,11 +304,12 @@ Only `[hot_store]` has these, since only a process with a hot tier has them:
 | `hot_store.delete_wait` | duration, `30s` (1ms to 1h) | the most time a delete waits for the reconciler to release an entry, as the sum of its sleeps; keep it under the S3 request timeout of the clients |
 | `hot_store.delete_poll_min` | duration, `1s` (1ms to 1h) | the first sleep of that wait; each sleep after it is twice the one before; not above `delete_poll_max` or `delete_wait` |
 | `hot_store.delete_poll_max` | duration, `10s` (1ms to 1h) | the longest sleep of that wait |
+| `hot_store.held_ttl` | duration, `1h` (1ms to 8760h) | how long a held put or delete of a proxy that is still beating may stand unchanged before the reconciler reaps it, as it does at once for one whose proxy has departed. A proxy that could not hand an entry over (the hot tier failed its write) leaves it held, and every put and delete of that key answers 503 until it is reaped. Counted on the reconciler's own clock from the first step that sees the entry, and again from the start if the entry is written again. When set, it must be longer than `lease_ttl` and `departure`. A put that is still running when its entry is reaped is not acknowledged (its landing finds the entry changed and answers 503), so keep it above the longest put: a body at the rate floor of `put_min_bytes_per_sec` can take hours |
 | `hot_store.heartbeat` | duration, `10s` | how often a proxy rewrites its registration `_tiering/proxies/<proxy id>` in the hot tier, and the longest one such call may take. The puts and deletes made on entries depend on it through `departure` |
 | `hot_store.departure` | duration, `60s` | the time a proxy that is not heard of stays live, less the margin: `Proxy::is_live` is true until the last acknowledged beat plus `departure` less `deadline_margin`. The puts and deletes made on entries read it: one is refused with 503 while the proxy is not live, and a destroying call starts only if the margin is left. |
 | `hot_store.deadline_margin` | duration, `10s` | the time taken off `departure` for `is_live`, and the time `Bounded` must find left before it sends a destroying call, which it also cuts at that time. The puts and deletes made on entries use `Bounded` |
 
-The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It refuses `retry_max` below `retry_min`, `delete_poll_max` or `delete_wait` below `delete_poll_min`, a `proxy_usage_stale_after` at or below `usage_interval`, and a value outside the range of its key, naming the key. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
+The water marks are percents from 1 to 100. The start refuses `low_water` at or above `high_water`, `high_water` above `critical`, and a `usage_stale_after` at or below `lease_ttl`. It refuses `retry_max` below `retry_min`, `delete_poll_max` or `delete_wait` below `delete_poll_min`, a `proxy_usage_stale_after` at or below `usage_interval`, a `held_ttl` that is set at or below `lease_ttl` or `departure`, and a value outside the range of its key, naming the key. It also refuses a `heartbeat` or a `deadline_margin` of zero, a `departure` under six times `heartbeat`, a `deadline_margin` over a quarter of `departure`, naming the values.
 
 ## `[local_cache]`
 

@@ -448,6 +448,8 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub departure: Option<Dur>,
     #[serde(default)]
+    pub held_ttl: Option<Dur>,
+    #[serde(default)]
     pub deadline_margin: Option<Dur>,
     #[serde(default)]
     pub registration_retention: Option<Dur>,
@@ -612,6 +614,7 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("entry_rounds", cold.entry_rounds.is_some()),
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
+        ("held_ttl", cold.held_ttl.is_some()),
         ("deadline_margin", cold.deadline_margin.is_some()),
         ("reconcile_interval", cold.reconcile_interval.is_some()),
         (
@@ -769,13 +772,13 @@ pub(super) fn storage(
     let copy_parallel = hot.copy_parallel.unwrap_or(16);
     let copy_parallel = within("hot_store", "copy_parallel", copy_parallel, 1, u32::MAX)?;
     let hot_tuning = hot_tuning(&hot)?;
-    let entry_tuning = entry_tuning(&hot)?;
     let lock_file = hot.lock_file.clone();
     if let Some(path) = &lock_file {
         check_lock_path(path)
             .map_err(|why| invalid("hot_store.lock_file", format!("{path:?} {why}")))?;
     }
     let lease_ttl = duration(hot.lease_ttl, Duration::from_secs(30));
+    let entry_tuning = entry_tuning(&hot, lease_ttl)?;
     let reconcile_tuning = reconcile_tuning(&hot, lease_ttl)?;
     let handoff = handoff_of(&server, lock_file.as_deref())?;
     let oci = fronts.oci;

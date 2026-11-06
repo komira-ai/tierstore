@@ -165,7 +165,7 @@ The order, once, in a window agreed with the owners of the clients that write:
 4. Roll this release over every node (the update hook hands the sockets over, so no connection is refused). A node of this release serves reads and answers writes 503 while the format says `drained`.
 5. `tierstore format-epoch --check`, then `tierstore format-epoch --activate --apply`. Within seconds every proxy puts and deletes on entries, and writes are accepted again. This ends the pause.
 6. Rotate the write credential as `--activate` prints, so that a process of an older release that is restarted later cannot write: new-release processes get the new credential first. An old binary started after the epoch writes journals nobody reads; that is not supported.
-7. Watch `tierstore entries ls`: entries appear while a put or a delete is in flight and are gone within seconds. An entry that stays names its owner; one whose owner has departed is reaped by the reconciler after `hot_store.departure`.
+7. Watch `tierstore entries ls`: entries appear while a put or a delete is in flight and are gone within seconds. An entry that stays names its owner; one whose owner has departed is reaped by the reconciler after `hot_store.departure`, and one whose owner is still beating but has left it held (a put or delete whose hand-over failed) after `hot_store.held_ttl` (one hour).
 
 A new store has no journal to drain: install this release, run `tierstore format-epoch --activate --apply` once, and the nodes take writes within seconds.
 
