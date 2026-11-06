@@ -10,6 +10,11 @@ pub enum Error {
     /// A create-only put on a key that exists.
     #[error("object {0} already exists")]
     AlreadyExists(String),
+    /// A create-only put on a key that a delete is removing, or has removed by the time the
+    /// answer is decided: neither "exists" nor "created", and a retry gets the true answer (an S3
+    /// 409 `ConditionalRequestConflict`).
+    #[error("object {0} is being deleted or was deleted while the put was decided")]
+    Conflict(String),
     /// A put that replaces an object only if it has a given content tag, and the object has
     /// another.
     #[error("object {0} does not have the expected content tag")]
