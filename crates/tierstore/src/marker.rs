@@ -2,7 +2,7 @@
 //! store, which says that a change to the key is not yet the cold tier's too, or that someone holds
 //! the key (`docs/design/put-without-lock.md`, section 4). This module is the marker's body: its
 //! fields, its encoding, and what a reader does with what it does not know. The calls that read and
-//! write marker objects are in the module `marks`; nothing outside it calls them yet.
+//! write marker objects are in the module `marks`; the leader's pass over the markers is their only caller outside it.
 //!
 //! - The body is JSON: `v` (1), `key`, `st` ([`MarkerState`]), `gone`, `dirty`, `why`
 //!   ([`MarkerWhy`], for a lock), `owner` (the id of the proxy or the leader holding a lock or a

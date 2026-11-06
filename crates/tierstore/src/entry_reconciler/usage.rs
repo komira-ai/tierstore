@@ -175,6 +175,23 @@ impl Tally {
         landing.deducted = landing.deducted.saturating_add(held);
     }
 
+    /// Notes that the key `key` was deleted by a client and its marker is finished: the size
+    /// counted for it (by the copies since the last listing, else by the listing) is taken off the
+    /// figure. A key neither counted leaves the figure to the next listing, which does not read it.
+    pub(super) fn deleted(&self, key: &str) {
+        let mut landing = self.landing();
+        let behind = landing.reached.is_some() && !landing.ahead(key);
+        let known = landing.known(key);
+        landing.counted.remove(key);
+        landing.listed.remove(key);
+        let Some(size) = known else { return };
+        if behind {
+            landing.deducted = landing.deducted.saturating_add(size);
+        } else {
+            landing.shrunk = landing.shrunk.saturating_add(size);
+        }
+    }
+
     /// Starts the count of a listing that starts at `from`.
     pub(super) fn start(&self, from: u64) {
         let mut landing = self.landing();
@@ -219,6 +236,11 @@ impl Tally {
     /// Notes that the cold tier holds the object `key`, or that the hot tier has none.
     pub(super) fn caught_up(&self, key: &str) {
         self.lagging().remove(key);
+    }
+
+    /// Forgets the keys that are not in `listed`: their markers are gone.
+    pub(super) fn keep_lagging(&self, listed: &std::collections::BTreeSet<String>) {
+        self.lagging().retain(|key, _| listed.contains(key));
     }
 
     /// The bytes that the cold tier does not hold yet.

@@ -166,7 +166,7 @@ The table above is the definition of the state machine.
 
 **Where it is built (pull request 2, `crates/tierstore/src/marks.rs`).** `MarkBirth` makes the creations (M1, M3, M10, M12), `MarkMove::apply` is the guard of every other row and refuses a move where the table does not allow it, and `Markers` makes the store calls. Three things the table leaves open are decided there, in the model's direction:
 
-- **`dirty` of a lock is set by its reason.** A lock owes cold a copy (`dirty = true`) for `OVERWRITE`, `DELETE`, `COLDLAND` and a reason this release does not know, and not for `EVICT` and `COPYBACK`, which leave hot and cold equal; a lock taken over a `DIRTY` marker keeps owing (`dirty` is kept, not cleared). The release (M5, M6) and the reap (M9) then end in `DIRTY` if the lock owes a copy and `CLEARING` if it does not, which is the table of 5.13 whatever the reason; a holder that changed hot though its reason does not say so (an eviction whose compare found other bytes, 5.10) releases with `changed` and ends `DIRTY`. The model gives every lock `dirty = true` except the leader's copy-back lock, and reaps by reason; the two agree on every row of 5.13. They differ in one case the table does not list: a `LOCK(DELETE)` whose holder died before it wrote `gone = true` (M4'). The move keeps the `gone` it finds (`false`), so that delete rolls back (hot was not touched: the hot DELETE follows M4', and the delete was never acknowledged); the model's reap writes `gone = true` there and rolls it forward. Pull request 7 decides which one the leader takes, with the model beside it.
+- **`dirty` of a lock is set by its reason.** A lock owes cold a copy (`dirty = true`) for `OVERWRITE`, `DELETE`, `COLDLAND` and a reason this release does not know, and not for `EVICT` and `COPYBACK`, which leave hot and cold equal; a lock taken over a `DIRTY` marker keeps owing (`dirty` is kept, not cleared). The release (M5, M6) and the reap (M9) then end in `DIRTY` if the lock owes a copy and `CLEARING` if it does not, which is the table of 5.13 whatever the reason; a holder that changed hot though its reason does not say so (an eviction whose compare found other bytes, 5.10) releases with `changed` and ends `DIRTY`. The model gives every lock `dirty = true` except the leader's copy-back lock, and reaps by reason; the two agree on every row of 5.13. They differ in one case the table does not list: a `LOCK(DELETE)` whose holder died before it wrote `gone = true` (M4'). The move keeps the `gone` it finds (`false`), so that delete rolls back (hot was not touched: the hot DELETE follows M4', and the delete was never acknowledged); the model's reap writes `gone = true` there and rolls it forward. Pull request 7 decided: the leader takes the move as it is here, keeping `gone` as found, so a `LOCK(DELETE)` that never reached its decision is rolled back (`entry_reconciler/reap.rs`); the model's switch `reap_delete_keeps_gone` runs that choice (scenario `crash/delete-lock-rolled-back`, which passes), and the model's own reap, which writes `gone = true`, stays the default of the other scenarios.
 - **A `CLEARING` marker has `dirty = false`** and `why` is written only for a lock; the model keeps both from the marker it replaced, and neither is read in `CLEARING`.
 - **The nonce is `<boot>.<counter>`.** The `boot` is 128 random bits drawn once for each `Markers`, and the counter is that `Markers`'s count of writes, so a restart under one actor id does not repeat a nonce and the marker's tag is unique per write (4.1).
 
@@ -422,7 +422,7 @@ Requests on the common path: two waves, one more request than today (the marker 
 
 ### 5.9 The copier (the leader's copy to cold)
 
-*Plan: pull request 7 of 10.4.*
+*Built by pull request 7 of 10.4 (`entry_reconciler/marks.rs`, `copier.rs`), inert until the format says `active-marks` and the leader was given the marks bucket the record names. Where it differs from the text below: the waits of `orphan_after`, `lock_lease` and `tombstone_hold` are not sleeps but notes of when the leader first saw a version of the marker (or wrote the cold object) on its monotonic clock, and a pass that finds a wait not over leaves the marker; the leader works a page of markers at a time, `DIRTY` ones before the others of that page; a copy of a key whose marker says `gone` records the tags of the pair it wrote under that version of the marker, so that the pass after the hold does not copy again where the tags of the two tiers cannot be compared; the (hot tag, cold tag) record is made when the clear has won, and the time of the cold write that eviction needs (5.10) is not kept yet.*
 
 Discovery: `list("")` of the marks bucket, in pages of `marks_page` (1000) markers, as the reconciler lists entries now, but the objects listed are only the keys with something pending: markers are deleted when done (M8). Cost is proportional to the backlog, not to the keys ever written; at 120 000 live markers (Q9) a pass is 120 list requests. Ordered: `DIRTY` markers; `LOCK`/`CLEARING` whose owner departed or whose lease ran out (5.13); `WANT` (5.11). The copier works `copy_concurrency` (128) keys at a time; section 6 shows why that figure.
 
@@ -500,7 +500,7 @@ The sweep also aborts **hot-tier multipart uploads** older than `abandoned_uploa
 
 ### 5.13 Reap and crash takeover
 
-*Plan: pull request 7 of 10.4.*
+*Built by pull request 7 of 10.4 (`entry_reconciler/reap.rs`). A `LOCK(DELETE)` whose holder died before it wrote `gone` is reaped keeping `gone = false`, which rolls the delete back; a `CLEARING` is removed by the leader at once if it is the leader's own or its owner is gone, and a marker of a `st` this release does not know is reaped like a lock.*
 
 The leader reads `LOCK` and `CLEARING` markers like entries: a registration absent, or unchanged for `departure` on the leader's monotonic clock, makes the owner departed; **a marker unchanged for `lock_lease` makes its holder presumed stalled whether or not it heartbeats** (5.2). Then (M9):
 
@@ -516,7 +516,7 @@ The leader reads `LOCK` and `CLEARING` markers like entries: a registration abse
 
 ### 5.14 Usage
 
-*Plan: pull request 7 of 10.4.*
+*Built by pull request 7 of 10.4 (`entry_reconciler/marks.rs`, `usage.rs`): the pass reuses the usage listing, the tally and the publication of the entry reconciler; `copy_lag` is kept per key as the pass sees a `DIRTY` marker with hot present, and a key is dropped from it when its marker is cleared or vanishes.*
 
 Unchanged in form: the leader's tally counts an object when it copies it (a replaced key adds the size difference), when it evicts, and at the listing every `usage_scan_interval`. Added: the leader subtracts a key's last counted size when it finishes a `gone` marker (the current figure over-counts deletes until the next listing); `copy_lag` is the sum of the sizes of the objects under `DIRTY` markers with hot present. The proxy's read of `_tiering/usage` and `usage_stale_after` are unchanged. Hot may exceed its budget while the copier is behind (5.5): the level is `Full`, eviction runs, and nothing else changes; a hot store that answers `Full` is 503 `SlowDown`.
 
@@ -638,7 +638,7 @@ Every row is a test; the Test column names it. "Unknown outcome" is a 503 for th
 | After | State left | What happens | Test |
 |---|---|---|---|
 | HEAD, before any write | nothing | the client retries | `a_put_that_dies_after_its_head_leaves_nothing` |
-| marker landed, object not | `DIRTY(gone=false)`, hot absent | **marker with nothing behind it.** Reads: hot miss, marker not `gone` → cold or 404, correct (the put never acknowledged). The copier waits `orphan_after`, HEADs hot again, then clears (M13). | `a_marker_with_no_object_is_cleared_only_after_orphan_after_and_reads_stay_right` |
+| marker landed, object not | `DIRTY(gone=false)`, hot absent | **marker with nothing behind it.** Reads: hot miss, marker not `gone` → cold or 404, correct (the put never acknowledged). The copier waits `orphan_after`, HEADs hot again, then clears (M13). | `a_marker_with_no_object_is_cleared_only_after_orphan_after` (pull request 7, the clear; the reads: `a_read_of_a_key_whose_marker_has_no_object_is_served_by_cold_or_404`, pull request 3) |
 | object landed, marker not | hot object, no marker (if cold had K, hot is newer than cold) | **unmarked landing.** Reads: hot wins. Eviction cannot evict (no matching tag pair; the compare finds a mismatch → `DIRTY`). The sweep adopts it (cold absent, or sizes differ, or tags differ, 5.12). I4 holds after the next sweep or eviction pass. | `an_object_landed_without_its_marker_is_adopted_by_the_sweep_and_never_evicted_unequal` |
 | both, before the 200 is sent | object and marker | the put took effect; the client sees a timeout or reset and retries: a plain put overwrites with the same bytes (or 5.4a), a create-only retry gets 412 (S3 gives the same for a retried create-only that did land). | `a_retried_plain_put_after_a_lost_answer_overwrites_and_a_retried_create_only_is_412` |
 | object landed, marker create answered 412 `LOCK`, then the proxy dies | object, `LOCK` of someone else | the lock's owner finishes or is reaped; the object stands unmarked until the sweep (as the third row). | `a_put_that_dies_after_its_object_landed_and_its_marker_met_a_lock_is_adopted_by_the_sweep` |
@@ -743,11 +743,14 @@ The tests are written against the in-memory backends under the gate scheduler, t
 | LIST filters gone keys by the marker page read before cold | `a_listing_drops_a_cold_only_key_that_has_a_gone_marker` and `a_listing_keeps_a_cold_only_key_that_an_eviction_is_deleting` |
 | a marker that vanishes between the page and the GET is decided by a cold HEAD | `a_listed_marker_that_vanishes_is_decided_by_the_cold_head` |
 | LIST pagination and delimiter | `a_listing_prefixes_the_after_key_for_the_marker_page`, `a_listing_extends_the_marker_page_at_most_list_marker_pages_times_and_truncates`, `a_common_prefix_made_only_of_gone_cold_keys_is_not_listed` |
-| copier: stream, marker re-read, CAS to clear, delete marker, two hot writes | `the_copier_streams_hot_to_cold_by_create_only_or_by_tag_and_clears_by_cas` |
+| copier: stream, marker re-read, CAS to clear, delete marker, two hot writes | `the_copier_streams_hot_to_cold_by_create_only_and_clears_by_cas` (pull request 7; by tag: `the_copier_replaces_a_cold_version_by_its_tag_and_never_shows_a_gap`) |
 | the copier gives up when the marker moved after its cold HEAD | `the_copier_does_not_copy_over_a_cold_landing_when_the_marker_moved_after_its_cold_head` |
 | a write during the copy makes the clear fail and the key is recopied | `an_overwrite_during_a_copy_makes_the_clear_fail_and_the_key_is_copied_again` |
 | copier over a stale cold version replaces by `If-Match`, not delete | `the_copier_replaces_a_cold_version_by_its_tag_and_never_shows_a_gap` |
 | a stale leader's cold write fails | `a_cold_write_by_a_leader_that_lost_the_lease_fails_on_its_condition` |
+| the leader's pass is inert unless the format says `active-marks` with the node's marks bucket; pages; the pool; `DIRTY` before locks; `WANT` left | `the_marker_pass_is_inert_until_the_format_says_active_marks_with_the_configured_bucket`, `a_round_works_the_markers_only_where_the_record_names_the_nodes_marks_bucket`, `the_pass_lists_the_marks_bucket_in_pages_of_marks_page`, `the_copier_works_at_most_copy_concurrency_keys_at_once`, `the_dirty_markers_of_a_page_are_worked_before_its_locks`, `a_want_marker_is_left_alone` (pull request 7) |
+| tags that say the copy is there; a failed copy is backed off; a delete that overtook a copy | `a_cold_copy_with_the_same_plain_md5_tag_and_size_is_not_copied_again`, `a_copy_that_fails_is_tried_again_after_the_retry_delay`, `a_cold_publish_that_lands_after_a_delete_is_deleted_by_the_tombstone_pass`, `a_cold_tier_that_is_down_backs_the_copier_off_and_the_copy_lag_rises` (pull request 7) |
+| the tombstone hold and the orphan wait | `a_gone_marker_with_no_hot_object_deletes_cold_holds_for_the_tombstone_hold_and_clears`, `a_cold_object_that_appears_during_the_hold_is_deleted_again_and_held_again`, `an_object_that_lands_during_the_hold_is_copied_to_cold_and_not_deleted_with_the_tombstone`, `a_marker_written_during_the_hold_starts_the_hold_over`, `an_orphan_marker_that_was_rewritten_starts_its_wait_over`, `an_orphan_clear_that_races_a_write_to_the_marker_loses` (pull request 7) |
 | a recreate over a gone marker holds before clearing | `a_marker_that_said_gone_is_held_after_the_cold_overwrite_before_it_is_cleared` |
 | eviction compares outside the lock, then locks, re-heads, deletes hot, clears | `eviction_compares_before_the_lock_then_checks_the_tags_under_it_deletes_hot_and_clears` |
 | eviction vs an overwrite or put | `an_eviction_never_deletes_a_version_that_replaced_the_one_it_checked` |
@@ -853,7 +856,7 @@ Every number is a key with a default (decision 11); the keys are the design's pr
 | `evict_min_age` | 600 s | an object whose cold copy is younger than this is not evicted |
 | `tag_record_limit` | 100000 | as today |
 | `copy_concurrency` | 128 | keys the copier works at once (6.3) |
-| `marks_page` | 1000 | markers per discovery listing page |
+| `marks_page` | 1000 | markers per discovery listing page (a `[hot_store]` key since pull request 7, as are `copy_concurrency`, `orphan_after`, `tombstone_hold` and `lock_lease`; the rest of the table comes with the pull request that reads it) |
 | `want_retry`, `want_recent_limit` | 60 s, 100000 | a proxy asks for a copy-back of a key at most once per `want_retry`; the in-memory set holds this many keys |
 | `copy_back_max_bytes` | 64 MiB | larger objects are not copied back (the lock is held for the whole stream) |
 | `list_marker_pages` | 4 | extensions of the marker page, and probe pages of a prefix, per LIST page |

@@ -2,8 +2,9 @@
 //! compare-and-swap, read, remove, wait for a lock to end, and keep a lock alive
 //! (`docs/design/put-without-lock.md`, sections 4.3 and 5.2). The body of a marker is the module
 //! `marker`; the marker of K is the object named exactly K in the marks bucket of the hot store,
-//! which is the [`Backend`] handed to [`Markers::new`]. Nothing outside this module and its tests
-//! calls it yet.
+//! which is the [`Backend`] handed to [`Markers::new`]. The only caller outside this module and its
+//! tests is the leader's pass over the markers (`entry_reconciler/marks.rs`), which runs under the
+//! format `active-marks` only; no proxy writes a marker yet.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and
@@ -41,7 +42,7 @@
 //! of the lock is younger than `lock_lease - queued_call_margin`, so that a call it started
 //! cannot land after the leader reaped the lock, unless the process itself was frozen. The
 //! leader's side of the lease (a lock unchanged for `lock_lease` is reaped even if its holder
-//! lives) is the leader's, and uses [`MarkMove::Reap`].
+//! lives) is the leader's, and uses [`MarkMove::Reap`] (`entry_reconciler/reap.rs`).
 //!
 //! # Nonce
 //!
