@@ -109,3 +109,32 @@ fn a_body_that_is_not_a_marker_is_an_error_naming_the_marker() {
         assert!(text.starts_with("corrupt marker: "), "{text}");
     }
 }
+
+/// Asserts which states a writer other than the owner waits for: a lock and a clearing, and a
+/// state this release does not know, which the design treats as a lock; not `DIRTY` and `WANT`.
+#[test]
+fn a_writer_waits_for_a_lock_a_clearing_and_a_state_it_does_not_know() {
+    let held = |st: MarkerState| st.is_held();
+    assert!(!held(MarkerState::Dirty));
+    assert!(!held(MarkerState::Want));
+    assert!(held(MarkerState::Lock));
+    assert!(held(MarkerState::Clearing));
+    assert!(held(MarkerState::Other("FROZEN".to_owned())));
+}
+
+/// Asserts which reasons leave the key owing the cold tier a copy: all but an eviction and a
+/// copy-back, and a reason this release does not know is taken to owe one.
+#[test]
+fn only_an_eviction_and_a_copy_back_leave_the_tiers_equal() {
+    let owes = [
+        (MarkerWhy::Overwrite, true),
+        (MarkerWhy::Delete, true),
+        (MarkerWhy::ColdLand, true),
+        (MarkerWhy::Other("REBALANCE".to_owned()), true),
+        (MarkerWhy::Evict, false),
+        (MarkerWhy::CopyBack, false),
+    ];
+    for (why, owed) in owes {
+        assert_eq!(why.owes_cold_a_copy(), owed, "{why:?}");
+    }
+}
