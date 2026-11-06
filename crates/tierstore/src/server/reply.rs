@@ -389,6 +389,7 @@ impl From<Error> for S3Error {
             Error::AlreadyExists(_) | Error::PreconditionFailed(_) => {
                 (StatusCode::PRECONDITION_FAILED, "PreconditionFailed")
             }
+            Error::Conflict(_) => (StatusCode::CONFLICT, "ConditionalRequestConflict"),
             Error::Full(_) => (StatusCode::SERVICE_UNAVAILABLE, "SlowDown"),
             Error::Reserved(_) => (StatusCode::FORBIDDEN, "AccessDenied"),
             Error::InvalidKey(_) => (StatusCode::BAD_REQUEST, "KeyTooLongError"),

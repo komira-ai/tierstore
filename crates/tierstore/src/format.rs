@@ -16,13 +16,17 @@
 //!   lease, has seen `drain` for the settle time, and every journal it knows is applied to its end.
 //!   Writes stay paused. This release's reconciler never writes it.
 //! - `active-marks`: the phase of the protocol of `docs/design/put-without-lock.md`, which keeps a
-//!   marker in the marks bucket in place of the entry of a key. This release reads the word and the
-//!   optional `marks_bucket` that names the bucket. A read that misses the hot tier reads the marker
-//!   of its key beside the cold read (and a listing reads the marker names) in this phase, in
-//!   `drain` and `drained`, and in a phase it does not know; it writes only the `WANT` marker of a
-//!   read that asks for a copy-back, in this phase alone. It makes no other write under it (503, as
-//!   for a phase it does not take as active), pauses nothing, and its entry reconciler does
-//!   nothing. A release before it takes the phase to be one it does not know, which is the same.
+//!   marker in the marks bucket in place of the entry of a key. This release reads the word and
+//!   the optional `marks_bucket` that names the bucket. A read that misses the hot tier reads the
+//!   marker of its key beside the cold read (and a listing reads the marker names) in this phase,
+//!   in `drain` and `drained`, and in a phase it does not know. Under it a proxy whose own marks
+//!   bucket is the one named makes its puts (a put, a streamed put, a presigned put, and the parts
+//!   and the completion of a multipart upload) on markers, and a read of a key only the cold tier
+//!   has writes the `WANT` marker that asks for a copy-back; every other write (a delete) is
+//!   answered [`Error::Unavailable`], as for a phase it does not take as active; a proxy with
+//!   another marks bucket, or none, answers every write so. Nothing pauses, and the entry
+//!   reconciler does nothing. A release before it takes the phase to be one it does not know,
+//!   which is the same as the second.
 //! - `active`: the change is done. With `"epoch": 2` or more a proxy makes its writes on the
 //!   entries of their keys; it never pauses writes for it. A proxy of this release makes no write
 //!   under any other format: no object, `active` below epoch 2 and a phase it does not know are
@@ -79,6 +83,12 @@ impl Format {
     /// Whether a proxy that reads this answers writes with 503.
     pub(crate) fn pauses_writes(&self) -> bool {
         matches!(self.phase, FormatPhase::Drain | FormatPhase::Drained)
+    }
+
+    /// Whether the markers of the put-without-lock design are in force: the phase is
+    /// `active-marks`. The name of the bucket is [`Format::marks_bucket`].
+    pub(crate) fn runs_marks(&self) -> bool {
+        self.phase == FormatPhase::ActiveMarks
     }
 }
 

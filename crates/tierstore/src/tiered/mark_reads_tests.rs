@@ -531,7 +531,7 @@ async fn a_proxy_whose_marker_settings_do_not_hold_together_does_not_open() {
     let rig = MarkRig::new(ACTIVE_MARKS).await;
     let mut config = crate::ProxyConfig::new("p2", 1000, Arc::new(TestClock::new()));
     config.marks = Some(rig.marks.clone());
-    config.markers.lock_poll_min = Duration::ZERO;
+    config.marks_put.markers.lock_poll_min = Duration::ZERO;
     let opened = Proxy::open(rig.hot_mem.clone(), rig.cold_mem.clone(), config).await;
     let why = "invalid marker settings: lock_poll_min must be more than zero";
     assert_eq!(opened.err(), Some(Error::Other(why.to_owned())));
