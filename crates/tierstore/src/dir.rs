@@ -4,10 +4,11 @@
 //! (and a few marks) costs three bytes. A key whose encoded name is over 255 bytes (255 plain
 //! characters, or about 85 bytes of non-ASCII text) has a file named by the first 100 bytes of
 //! that name and the SHA-256 of the key, and the file holds the key (see the module
-//! `dir_names`). Only a key whose name is empty cannot be stored: a write that validates the key
-//! itself (put, create of an upload, streamed puts) is [`Error::InvalidKey`]; a read, a head, a
-//! delete and the held-body conditional write ([`Backend::put_if_match`], which first looks for
-//! the stored object) are [`Error::NotFound`], since no object can have it.
+//! `dir_names`). Only a key whose name is empty, or that is over 65536 bytes (`MAX_KEY` in
+//! `dir_names`), cannot be stored: a write that validates the key itself (put, create of an
+//! upload, streamed puts) is [`Error::InvalidKey`]; a read, a head, a delete and the held-body
+//! conditional write ([`Backend::put_if_match`], which first looks for the stored object) are
+//! [`Error::NotFound`], since no object can have it.
 
 use std::io::{ErrorKind, SeekFrom};
 use std::os::unix::fs::DirBuilderExt;
@@ -85,7 +86,8 @@ static OPENED: AtomicU64 = AtomicU64::new(0);
 /// byte is written as `%` and two hex digits. So no key can name a file outside the directory
 /// or a file the backend keeps for itself (their names start with `.`). A key whose name is
 /// longer than 255 bytes has a hashed name and its file holds the key; a key whose name is
-/// empty is refused with [`Error::InvalidKey`] by the writes that validate the key, and is
+/// empty, or that is over 65536 bytes (`MAX_KEY` in `dir_names`), is refused with
+/// [`Error::InvalidKey`] by the writes that validate the key, and is
 /// [`Error::NotFound`] for reads, deletes and the conditional writes that look for the stored
 /// object first (see the module doc). The file holds the SHA-256 of the body, which is the
 /// content tag, then, for a hashed name only, the key, and then the body, so that a head reads
