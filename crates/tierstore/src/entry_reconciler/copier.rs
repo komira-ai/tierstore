@@ -95,7 +95,10 @@ impl EntryReconciler {
             let tags = Some((hot.tag.clone(), cold_tag.clone()));
             match (written, &look.held) {
                 (Some(at), _) => return Ok(Marked::Held(Hold { at, tags })),
-                (None, None) => return Ok(Marked::Held(Hold { at: now, tags })),
+                (None, None) => {
+                    let at = self.config.base.mono.now();
+                    return Ok(Marked::Held(Hold { at, tags }));
+                }
                 (None, Some(held)) if self.holding(held.at, now) => return Ok(Marked::Pinned),
                 (None, Some(_)) => {}
             }

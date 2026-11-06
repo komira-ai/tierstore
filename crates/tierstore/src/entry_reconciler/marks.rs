@@ -17,7 +17,9 @@
 //! leader notes the version of each marker it lists and when, on its monotonic clock, it first
 //! saw that version ([`MarkBooks`]); a pass that finds the version unchanged for long enough acts,
 //! and until then the marker is left. A version that changed starts the count again, and so does a
-//! new leader, which counts a wait up to one wait late and never early.
+//! new leader, which counts a wait up to one wait late and never early. A version is first seen
+//! when the page that lists it is listed, by the clock read then, not at the start of the pass: the
+//! work on the pages before it can take longer than a wait.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -205,12 +207,15 @@ impl EntryReconciler {
         report
     }
 
-    /// Lists the marks bucket a page at a time and works each page. Gives the keys listed, or
-    /// `None` if a listing failed (the keys not reached are then not forgotten).
+    /// Lists the marks bucket a page at a time and works each page, reading the monotonic clock
+    /// when each page is listed: the copies of the pages before it may have taken longer than a
+    /// wait, and a version first seen on this page was not seen earlier. Gives the keys listed, or
+    /// `None` if a listing failed (the keys not reached are then not forgotten). The registrations
+    /// were listed at `registered`, the start of the pass, and are judged by that time alone.
     async fn mark_pages(
         &mut self,
         side: &MarkSide,
-        now: u64,
+        registered: u64,
         report: &mut StepReport,
     ) -> Option<BTreeSet<String>> {
         let size = self.config.marks_page.max(1);
@@ -224,24 +229,27 @@ impl EntryReconciler {
                     return None;
                 }
             };
+            let now = self.config.base.mono.now();
             let last = page.len() < size;
             after = page.last().map(|object| object.key.clone());
             listed.extend(page.iter().map(|object| object.key.clone()));
-            self.mark_page(side, page, now, report).await;
+            self.mark_page(side, page, (registered, now), report).await;
             if last {
                 return Some(listed);
             }
         }
     }
 
-    /// Reads the markers of a page and works them: `DIRTY` first, then the others.
+    /// Reads the markers of a page and works them: `DIRTY` first, then the others. `times` are
+    /// the time the registrations were listed at and the time this page was.
     async fn mark_page(
         &mut self,
         side: &MarkSide,
         page: Vec<Listed>,
-        now: u64,
+        times: (u64, u64),
         report: &mut StepReport,
     ) {
+        let now = times.1;
         self.mark_books.observe(&page, now);
         let waiting = |object: &Listed| {
             self.retries
@@ -277,7 +285,7 @@ impl EntryReconciler {
             .collect();
         let this = &*self;
         let steps = stream::iter(items.into_iter().zip(looks)).map(|(seen, look)| async move {
-            let marked = this.mark_one(side, &seen, look, now).await;
+            let marked = this.mark_one(side, &seen, look, times).await;
             (seen, marked)
         });
         let worked: Vec<_> = steps.buffer_unordered(width).collect().await;
@@ -304,19 +312,21 @@ impl EntryReconciler {
         }
     }
 
-    /// Does the step of the design for the marker `seen` in the state it is in.
+    /// Does the step of the design for the marker `seen` in the state it is in, given the times
+    /// of [`EntryReconciler::mark_page`].
     async fn mark_one(
         &self,
         side: &MarkSide,
         seen: &MarkSeen,
         look: Look,
-        now: u64,
+        times: (u64, u64),
     ) -> Result<Marked, Error> {
+        let (registered, now) = times;
         match seen.marker.st {
             MarkerState::Dirty => self.mark_dirty(side, seen, look, now).await,
             MarkerState::Want => Ok(Marked::Left),
             MarkerState::Lock | MarkerState::Clearing | MarkerState::Other(_) => {
-                self.mark_held(side, seen, look, now).await
+                self.mark_held(side, seen, look, registered).await
             }
         }
     }

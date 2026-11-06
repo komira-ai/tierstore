@@ -25,18 +25,20 @@ use crate::{Error, MarkMove, MarkSeen, MarkerState, Outcome};
 
 impl EntryReconciler {
     /// The step for a `LOCK`, a `CLEARING` or a marker of a state this release does not know.
+    /// `registered` is the time the registrations were listed at: a registration is judged by the
+    /// listing, not by a later time.
     pub(super) async fn mark_held(
         &self,
         side: &MarkSide,
         a: &MarkSeen,
         look: Look,
-        now: u64,
+        registered: u64,
     ) -> Result<Marked, Error> {
         let marker = &a.marker;
         let owner = marker.owner.as_deref();
         let departed = owner.is_some_and(|owner| {
             self.registrations
-                .departed(owner, now, self.config.departure)
+                .departed(owner, registered, self.config.departure)
         });
         let own = owner == Some(self.config.base.holder.as_str());
         let dead = departed || look.expired;

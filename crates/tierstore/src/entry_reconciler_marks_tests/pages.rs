@@ -24,8 +24,9 @@ async fn the_pass_lists_the_marks_bucket_in_pages_of_marks_page() {
     }
 }
 
-/// Asserts that a listing that fails stops the pass without forgetting what was noted: the error
-/// is reported, no marker of the pages not reached is touched, and the next pass goes on.
+/// Asserts that a listing that fails ends the work on the markers without forgetting what was
+/// noted: the error is reported, no marker of the pages not reached is touched, and the next pass
+/// goes on. (The usage is still tended and published after it.)
 #[tokio::test]
 async fn a_listing_that_fails_ends_the_pass_with_the_error() {
     let rig = Rig::new();
@@ -103,6 +104,88 @@ async fn the_copier_works_at_most_copy_concurrency_keys_at_once() {
     second.release();
     assert_eq!(step.await, report(3, 0));
     assert_eq!(rig.cold_calls.calls(Op::Put), 3);
+}
+
+/// The leader `r1` over the cold tier `cold`, with a lease of an hour so that it stays held while
+/// the monotonic clock moves minutes in the middle of a step, its settings changed by `tweak`.
+fn long_lived(
+    rig: &Rig,
+    cold: Arc<dyn Backend>,
+    tweak: impl FnOnce(&mut EntryReconcilerConfig),
+) -> EntryReconciler {
+    let mut config = rig.config("r1");
+    config.base.lease_ttl = Duration::from_secs(3600);
+    tweak(&mut config);
+    EntryReconciler::new(rig.hot_calls.clone(), cold, config)
+        .with_marks(rig.marks_calls.clone(), BUCKET)
+        .expect("the settings hold together")
+}
+
+/// Asserts that a marker is first seen when its page is listed, not when the pass began: with
+/// pages of one, the copy on page 1 takes longer than `lock_lease` (the monotonic clock moves
+/// 121 s while its cold write is held), a live owner's lock first listed on page 2 is left by the
+/// next pass, which counts 0 s of the 120 s since it was first seen, and the owner's registration,
+/// rewritten meanwhile, is not departed.
+#[tokio::test]
+async fn a_lock_first_listed_late_in_a_long_pass_is_not_reaped_by_the_next_pass() {
+    let rig = Rig::new();
+    rig.activate().await;
+    rig.register("p1").await;
+    rig.hot.put("a", bytes("v")).await.unwrap();
+    rig.plant(dirty("a")).await;
+    rig.plant(lock("b", MarkerWhy::Overwrite, "p1", false))
+        .await;
+    let gated = Arc::new(GateBackend::new(rig.cold_calls.clone()));
+    let held = gated.gate(Op::Put, "", Phase::Pre);
+    let mut leader = long_lived(&rig, gated, |config| config.marks_page = 1);
+    let mut step = Box::pin(leader.step());
+    park(&mut step, &held).await;
+    rig.pass(Duration::from_secs(121));
+    held.release();
+    assert_eq!(step.await, report(1, 1));
+    rig.clock.advance(1000);
+    rig.hot.delete(&proxy_key("p1")).await.unwrap();
+    rig.register("p1").await;
+    assert_eq!(leader.step().await, report(0, 1));
+    assert_eq!(rig.shape("b").await, Some((MarkerState::Lock, false, true)));
+    rig.pass(Duration::from_secs(120));
+    rig.clock.advance(1000);
+    rig.hot.delete(&proxy_key("p1")).await.unwrap();
+    rig.register("p1").await;
+    assert_eq!(leader.step().await, report(1, 0));
+    assert_eq!(
+        rig.shape("b").await,
+        Some((MarkerState::Dirty, false, true))
+    );
+}
+
+/// Asserts that the hold on a `gone` marker whose cold copy is already the hot object begins when
+/// the leader looks at the cold object, not when the pass began: while the cold write of an
+/// earlier marker of the page is held the monotonic clock moves 120 s, the hold of the second
+/// marker is still on 119 999 ms after that, and over at 120 000.
+#[tokio::test]
+async fn a_hold_begins_when_the_cold_object_is_looked_at_and_not_when_the_pass_began() {
+    let rig = Rig::with_md5_tags();
+    rig.activate().await;
+    rig.hot.put("a", bytes("v")).await.unwrap();
+    rig.plant(dirty("a")).await;
+    rig.hot.put("b", bytes("w")).await.unwrap();
+    rig.cold.put("b", bytes("w")).await.unwrap();
+    rig.plant(gone("b")).await;
+    let gated = Arc::new(GateBackend::new(rig.cold_calls.clone()));
+    let held = gated.gate(Op::Put, "", Phase::Pre);
+    let mut leader = long_lived(&rig, gated, |config| config.copy_concurrency = 1);
+    let mut step = Box::pin(leader.step());
+    park(&mut step, &held).await;
+    rig.pass(Duration::from_secs(120));
+    held.release();
+    assert_eq!(step.await, report(2, 0));
+    rig.pass(Duration::from_secs(120) - Duration::from_millis(1));
+    assert_eq!(leader.step().await, report(0, 1));
+    assert_eq!(rig.shape("b").await, Some((MarkerState::Dirty, true, true)));
+    rig.pass(Duration::from_millis(1));
+    assert_eq!(leader.step().await, report(1, 0));
+    assert_eq!(rig.shape("b").await, None);
 }
 
 /// Asserts that the `DIRTY` markers of a page are worked before its locks: with a pool of one, the
