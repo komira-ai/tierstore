@@ -392,6 +392,8 @@ mod key_rules_tests;
 #[cfg(test)]
 mod list_delimiter_tests;
 #[cfg(test)]
+mod list_marks_tests;
+#[cfg(test)]
 mod list_objects_v1_tests;
 #[cfg(test)]
 mod list_options_tests;

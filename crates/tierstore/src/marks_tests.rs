@@ -593,3 +593,25 @@ async fn a_read_of_a_failed_request_or_a_corrupt_body_is_an_error() {
     let text = "corrupt marker: the object k2 names the key elsewhere";
     assert_eq!(error, Error::Other(text.to_owned()));
 }
+
+/// Asserts that the names of the markers are a page of the listing of the marks bucket: those with
+/// the prefix and after the key, in key order, at most `max_keys` of them, a page of fewer being the
+/// last, and that a failed listing is its error.
+#[tokio::test]
+async fn the_names_of_the_markers_are_a_page_with_the_prefix_and_after_key_of_a_listing() {
+    let rig = Rig::new();
+    let a = rig.actor("a");
+    for key in ["a/1", "p/1", "p/2", "p/3", "q/1"] {
+        rig.seed(&dirty(key)).await;
+    }
+    let page = |prefix: &'static str, after: Option<&'static str>, max| {
+        a.markers.names(prefix, after, max)
+    };
+    assert_eq!(page("p/", None, 2).await.unwrap(), ["p/1", "p/2"]);
+    assert_eq!(page("p/", Some("p/2"), 2).await.unwrap(), ["p/3"]);
+    assert_eq!(page("", Some("p/3"), 9).await.unwrap(), ["q/1"]);
+    assert_eq!(page("r/", None, 9).await.unwrap(), Vec::<String>::new());
+    let down = Error::Unavailable("down".to_owned());
+    rig.store.fail_next_on(Op::List, "p/", down.clone());
+    assert_eq!(page("p/", None, 2).await, Err(down));
+}
