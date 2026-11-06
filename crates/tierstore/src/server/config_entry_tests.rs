@@ -47,7 +47,7 @@ const ALL: &str = "retry_min = \"2s\"\nretry_max = \"90s\"\nstray_grace = \"20m\
     usage_interval = \"4s\"\nusage_scan_interval = \"6h\"\nscan_pages = 13\n\
     candidate_limit = 17\ntag_record_limit = 19\nproxy_usage_stale_after = \"45s\"\n\
     format_refresh = \"3s\"\nentry_rounds = 5\ndelete_wait = \"40s\"\ndelete_poll_min = \"2s\"\n\
-    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"\nstep_attempts = 6\n\
+    delete_poll_max = \"8s\"\nheld_ttl = \"2h\"\nemergency_cold_landing = true\nstep_attempts = 6\n\
     step_retry_min = \"50ms\"\nstep_retry_max = \"3s\"";
 
 /// A file that gives none of the keys has the values the code had before they were keys, in the
@@ -65,6 +65,11 @@ fn a_file_that_gives_none_of_the_keys_has_the_old_values() {
     assert_eq!(built.proxy.delete_wait, old.delete_wait);
     assert_eq!(built.proxy.step_retry, old.step_retry);
     assert_eq!(built.proxy.step_retry, StepRetry::new());
+    assert_eq!(
+        built.proxy.emergency_cold_landing,
+        old.emergency_cold_landing
+    );
+    assert!(!built.proxy.emergency_cold_landing);
     let base = ReconcilerConfig::new("p1/reconciler", 1000, std::sync::Arc::new(SystemClock));
     let before = EntryReconcilerConfig::new(base);
     let after = reconciler_of(&built);
@@ -111,6 +116,7 @@ fn every_key_reaches_the_setting_it_stands_for() {
     assert_eq!(built.proxy.delete_wait.wait, secs(40));
     assert_eq!(built.proxy.delete_wait.poll_min, secs(2));
     assert_eq!(built.proxy.delete_wait.poll_max, secs(8));
+    assert!(built.proxy.emergency_cold_landing);
     assert_eq!(built.proxy.step_retry.attempts, 6);
     assert_eq!(built.proxy.step_retry.delay, Duration::from_millis(50));
     assert_eq!(built.proxy.step_retry.delay_max, secs(3));

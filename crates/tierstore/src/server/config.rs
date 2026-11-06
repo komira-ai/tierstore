@@ -454,6 +454,8 @@ pub(super) struct TierTable {
     #[serde(default)]
     pub held_ttl: Option<Dur>,
     #[serde(default)]
+    pub emergency_cold_landing: Option<bool>,
+    #[serde(default)]
     pub step_attempts: Option<u32>,
     #[serde(default)]
     pub step_retry_min: Option<Dur>,
@@ -626,6 +628,10 @@ pub(super) fn refuse_hot_keys(cold: &TierTable) -> Result<(), ConfigError> {
         ("heartbeat", cold.heartbeat.is_some()),
         ("departure", cold.departure.is_some()),
         ("held_ttl", cold.held_ttl.is_some()),
+        (
+            "emergency_cold_landing",
+            cold.emergency_cold_landing.is_some(),
+        ),
         ("step_attempts", cold.step_attempts.is_some()),
         ("step_retry_min", cold.step_retry_min.is_some()),
         ("step_retry_max", cold.step_retry_max.is_some()),
