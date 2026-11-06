@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use tierstore::{Error, Proxy, ProxyConfig};
+use tierstore::{Error, Proxy, ProxyConfig, StepReport};
 
 use crate::support::Tiers;
 use tierstore::Backend as _;
@@ -79,4 +79,19 @@ async fn the_active_marks_fixture_pauses_nothing_and_makes_no_write() {
     assert_eq!(tiers.hot_keys("k").await, Vec::<String>::new());
     assert_eq!(tiers.cold_keys().await, Vec::<String>::new());
     assert_eq!(tiers.stored(FORMAT).await, ACTIVE_MARKS);
+}
+
+/// Asserts that under the fixture of the phase `active-marks` the entry reconciler does nothing: a
+/// step takes no lease, reads no entry and copies nothing, and reports that the format is not
+/// active, so a release that keeps the entry protocol never works the entries beside the markers.
+#[tokio::test(start_paused = true)]
+async fn the_active_marks_fixture_makes_the_entry_reconciler_do_nothing() {
+    let tiers = Tiers::new();
+    tiers.seed(FORMAT, ACTIVE_MARKS).await;
+    tiers.seed("kept", b"bytes").await;
+    let mut reconciler = tiers.reconciler("r1", 1000);
+    let step = reconciler.step().await;
+    assert_eq!(step, StepReport::default());
+    assert_eq!(tiers.cold_keys().await, Vec::<String>::new());
+    assert_eq!(tiers.hot_keys("").await, ["_tiering/format", "kept"]);
 }
