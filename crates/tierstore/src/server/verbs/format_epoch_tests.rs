@@ -48,6 +48,7 @@ fn drain_format() -> Format {
     Format {
         phase: FormatPhase::Drain,
         epoch: None,
+        marks_bucket: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn drained_format() -> Format {
     Format {
         phase: FormatPhase::Drained,
         epoch: None,
+        marks_bucket: None,
     }
 }
 
@@ -62,6 +64,7 @@ fn active_format(epoch: u64) -> Format {
     Format {
         phase: FormatPhase::Active,
         epoch: Some(epoch),
+        marks_bucket: None,
     }
 }
 
@@ -241,6 +244,40 @@ async fn a_phase_this_release_does_not_know_is_refused() {
     assert!(sleeper.asked().is_empty());
 }
 
+/// Asserts that the phase `active-marks` is named by `--check`, with its epoch, and that `--check`,
+/// `--drain` and `--activate` refuse it with the message exactly and write nothing: this release
+/// does not leave it.
+#[tokio::test]
+async fn the_phase_active_marks_is_named_and_not_left_by_this_release() {
+    let (hot, clock) = tier();
+    let marks = br#"{"phase":"active-marks","epoch":3,"marks_bucket":"tier-hot-marks"}"#;
+    hot.put(FORMAT_KEY, Bytes::from_static(marks))
+        .await
+        .unwrap();
+    let sleeper = RecordingSleeper::new();
+    let message = "the format object says active-marks, a phase this release does not leave; use \
+                   the tool of the release that wrote it";
+    for flags in [&["--check"][..], &["--drain", "--apply"][..]] {
+        let (result, out) = acted(&*hot, &clock, &sleeper, flags).await;
+        assert_eq!(result, Err(message.to_owned()), "{flags:?}");
+        let named = flags == ["--check"];
+        let heading = "format: active-marks (epoch 3)\n";
+        assert_eq!(out.starts_with(heading), named, "{out}");
+    }
+    let (activate, _) = acted(&*hot, &clock, &sleeper, &["--activate", "--apply"]).await;
+    assert_eq!(
+        activate,
+        Err("refusing to activate: the format is active-marks, not drained".to_owned())
+    );
+    let (cancel, _) = acted(&*hot, &clock, &sleeper, &["--cancel", "--apply"]).await;
+    assert_eq!(
+        cancel,
+        Err("nothing to cancel: the format is active-marks, not drain or drained".to_owned())
+    );
+    assert_eq!(hot.get(FORMAT_KEY, None).await.unwrap(), &marks[..]);
+    assert!(sleeper.asked().is_empty());
+}
+
 /// Asserts that `--drain` without `--apply` writes nothing and says so.
 #[tokio::test]
 async fn drain_without_apply_writes_nothing() {
@@ -311,6 +348,7 @@ async fn drain_over_an_active_format_keeps_the_epoch() {
     let drain_over_epoch = Format {
         phase: FormatPhase::Drain,
         epoch: Some(2),
+        marks_bucket: None,
     };
     assert_eq!(*sleeper.seen.lock().unwrap(), vec![Some(drain_over_epoch)]);
 }
@@ -454,6 +492,7 @@ async fn cancel_without_apply_says_what_it_would_do() {
     let over_epoch = Format {
         phase: FormatPhase::Drained,
         epoch: Some(2),
+        marks_bucket: None,
     };
     hot.delete(FORMAT_KEY).await.unwrap();
     set_format(&*hot, &over_epoch).await;
@@ -483,6 +522,7 @@ async fn cancel_puts_back_the_format_that_was_before_the_drain() {
     let over_epoch = Format {
         phase: FormatPhase::Drain,
         epoch: Some(2),
+        marks_bucket: None,
     };
     set_format(&*hot, &over_epoch).await;
     let (result, _) = acted(&*hot, &clock, &sleeper, &["--cancel", "--apply"]).await;
@@ -509,6 +549,7 @@ async fn cancel_refuses_when_the_format_changed_under_it() {
     let over_epoch = Format {
         phase: FormatPhase::Drain,
         epoch: Some(2),
+        marks_bucket: None,
     };
     set_format(&*hot, &over_epoch).await;
     faulty.fail_next_with(Op::PutIfMatch, Error::NotFound(FORMAT_KEY.to_owned()));

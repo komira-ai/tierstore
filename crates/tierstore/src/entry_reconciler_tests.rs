@@ -96,6 +96,7 @@ impl Rig {
         let body = format_body(&Format {
             phase: FormatPhase::Active,
             epoch: None,
+            marks_bucket: None,
         });
         self.hot.put(FORMAT_KEY, body).await.unwrap();
     }
@@ -179,7 +180,7 @@ fn report(changed: usize) -> StepReport {
 }
 
 /// Asserts that nothing is done until the format object says `active`: with no format object, with
-/// `drain` and with `drained`, no lease is taken and no entry is read or changed; a format object
+/// `drain`, `drained` and `active-marks`, no lease is taken and no entry is read or changed; a format object
 /// that cannot be read is a failure of the step.
 #[tokio::test]
 async fn nothing_is_done_until_the_format_is_active() {
@@ -188,8 +189,16 @@ async fn nothing_is_done_until_the_format_is_active() {
     rig.hot.put("k", bytes("v")).await.unwrap();
     let mut r = rig.reconciler();
     assert_eq!(r.step().await, StepReport::default());
-    for phase in [FormatPhase::Drain, FormatPhase::Drained] {
-        let body = format_body(&Format { phase, epoch: None });
+    for phase in [
+        FormatPhase::Drain,
+        FormatPhase::Drained,
+        FormatPhase::ActiveMarks,
+    ] {
+        let body = format_body(&Format {
+            phase,
+            epoch: None,
+            marks_bucket: None,
+        });
         rig.hot.delete(FORMAT_KEY).await.ok();
         rig.hot.put(FORMAT_KEY, body).await.unwrap();
         assert_eq!(r.step().await, StepReport::default());
