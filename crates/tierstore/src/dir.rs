@@ -891,9 +891,6 @@ impl Backend for DirBackend {
     ) -> Result<String, Error> {
         let dir = self.upload_dir(key, id).await?;
         let files = named_part_files(&dir, parts).await?;
-        self.locate(key)
-            .await
-            .map_err(|_| Error::NotFound(key.to_owned()))?;
         let temp = self.temp(&self.root);
         let _scratch = Scratch(temp.clone());
         let tag = join_files(&temp, &files, self.copy_chunk).await?;

@@ -510,6 +510,32 @@ async fn a_completion_answered_without_an_etag_is_a_protocol_error() {
     assert!(text.contains("no ETag"), "{text}");
 }
 
+/// Asserts what a completion with `If-Match` puts on the wire: the header, with the tag as given,
+/// and no `If-None-Match` (the store judges the tag, not the absence of the key) even on a store
+/// that claims conditional writes; and that an answer of 200 with a result that names no `ETag` is
+/// a protocol error that names the key and says the tag is missing (the object is replaced).
+#[tokio::test]
+async fn a_completion_with_if_match_sends_the_header_and_needs_an_etag_in_the_answer() {
+    let bare = "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>";
+    let (endpoint, seen) = script(vec![answer("200 OK", &[], bare)]).await;
+    let store = store(&endpoint, CONDITIONAL, Duration::from_secs(5));
+    let (k, parts) = (key("k"), [(1, "\"a\"".to_owned())]);
+    let completing = store.complete_multipart_if_match(&k, "u-1", &parts, "\"held\"");
+    let error = completing.await.unwrap_err();
+    assert!(matches!(error, ObjectStoreError::Protocol(_)), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("cas/k"), "{text}");
+    assert!(text.contains("no ETag"), "{text}");
+
+    let head = seen.lock().unwrap()[0].head.to_ascii_lowercase();
+    assert!(
+        head.starts_with("post /test-bucket/cas/k?uploadid=u-1 "),
+        "{head}"
+    );
+    assert!(head.contains("\r\nif-match: \"held\"\r\n"), "{head}");
+    assert!(!head.contains("if-none-match"), "{head}");
+}
+
 /// Asserts that a part is on the wire before its stream has ended, which is the reason it is
 /// streamed: the server has the first piece, and only then does the stream go on to give the
 /// last, so a request that held the whole part before it sent any of it would wait for ever
