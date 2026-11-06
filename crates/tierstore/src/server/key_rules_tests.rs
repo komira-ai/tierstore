@@ -307,8 +307,8 @@ impl S3Front {
 
 /// Asserts that through a proxy with a directory hot tier and an S3 cold tier a key of `NAMES` is
 /// put, copied to the cold tier under its name once the reconciler has run, and still read and
-/// listed; and that the directory tier, whose file name is the key percent-encoded and at most 255
-/// bytes, refuses a key of 1024 bytes with 400 `KeyTooLongError`.
+/// listed; and that a key of 1024 bytes, whose file name on the directory tier is over 255 bytes
+/// encoded and so hashed, is put, read, listed and deleted there.
 #[tokio::test]
 async fn a_proxy_over_a_directory_and_an_s3_tier_carries_the_keys() {
     let dir = TestDir::under(std::env::temp_dir(), "tierstore-key-rules-hot");
@@ -354,9 +354,13 @@ async fn a_proxy_over_a_directory_and_an_s3_tier_carries_the_keys() {
     let listed = rig.list("").await;
     assert_eq!(texts(&listed.1, "Key"), sorted(&NAMES));
 
-    let too_long_for_a_file = rig.call("PUT", &of_len(1024), b"x").await;
-    assert_eq!(too_long_for_a_file.0, StatusCode::BAD_REQUEST);
-    assert!(too_long_for_a_file.1.contains("KeyTooLongError"));
+    let longest = of_len(1024);
+    let put = rig.call("PUT", &longest, b"x").await;
+    assert_eq!(put.0, StatusCode::OK, "{}", put.1);
+    let got = rig.call("GET", &longest, b"").await;
+    assert_eq!((got.0, got.1.as_str()), (StatusCode::OK, "x"));
     let backend: &dyn Backend = &*hot;
-    assert!(backend.head(&of_len(1024)).await.is_err());
+    assert_eq!(backend.head(&longest).await.unwrap().size, 1);
+    let listed = rig.list("").await;
+    assert!(texts(&listed.1, "Key").contains(&longest));
 }
