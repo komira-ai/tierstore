@@ -69,7 +69,7 @@ pub(crate) struct Format {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) epoch: Option<u64>,
     /// The name of the marks bucket of the hot store, set with the phase `active-marks`. A proxy
-    /// does not compare it with its own `hot_store.marks_bucket` yet (see [`Format::runs_marks`]).
+    /// whose `hot_store.marks_bucket` is another name refuses its plain puts (`Inner::admit_marked`).
     /// A reader before this field ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) marks_bucket: Option<String>,
@@ -95,10 +95,8 @@ impl Format {
 
 impl Format {
     /// Whether a proxy that reads this makes its writes on markers: the phase is `active-marks`.
-    /// It does not compare the `marks_bucket` of the record with the bucket of the proxy: the
-    /// plain puts of pull request 5 write under `active-marks` without that check, and no server
-    /// code calls them. Pull request 4, which wires the puts of the server to markers, adds it
-    /// (`a_proxy_with_another_marks_bucket_than_the_format_record_refuses_writes`, design 7.2).
+    /// The `marks_bucket` of the record is not looked at here: the proxy compares it with its own
+    /// (`ProxyConfig::marks_bucket`) before a plain put (`Inner::admit_marked`).
     pub(crate) fn runs_marks(&self) -> bool {
         self.phase == FormatPhase::ActiveMarks
     }

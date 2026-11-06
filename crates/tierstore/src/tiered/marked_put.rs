@@ -58,9 +58,17 @@ impl Inner {
     /// The calls on the markers, if the format says `active-marks` and the proxy may write now.
     pub(super) async fn admit_marked(&self, key: &str) -> Result<&Arc<Markers>, Error> {
         refuse_reserved(key)?;
-        if !self.marks_active().await {
-            let why = "writes on markers wait until the format object says active-marks";
-            return Err(Error::Unavailable(why.to_owned()));
+        match self.marks_bucket_agrees().await {
+            None => {
+                let why = "writes on markers wait until the format object says active-marks";
+                return Err(Error::Unavailable(why.to_owned()));
+            }
+            Some(false) => {
+                let why = "the format object names another marks bucket than this proxy's \
+                           hot_store.marks_bucket; writes on markers are refused";
+                return Err(Error::Unavailable(why.to_owned()));
+            }
+            Some(true) => {}
         }
         let Some(markers) = &self.markers else {
             return Err(Error::Unavailable(

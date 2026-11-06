@@ -24,16 +24,35 @@ pub(super) struct Pause {
     paused: bool,
     /// Whether the last object read says that writes are made on entries. Kept when a read fails.
     entries: bool,
-    /// Whether the last object read says that writes are made on markers. Kept when a read fails.
-    marks: bool,
+    /// Whether the last object read says that writes are made on markers, and if so the
+    /// `marks_bucket` it names. Kept when a read fails.
+    marks: Option<Option<String>>,
+}
+
+/// What the proxy knows of the format object at one moment.
+struct FormatState {
+    paused: bool,
+    entries: bool,
+    /// `Some` when the phase is `active-marks`, with the marks bucket the record names.
+    marks: Option<Option<String>>,
 }
 
 impl Pause {
+    fn state(&self) -> FormatState {
+        FormatState {
+            paused: self.paused,
+            entries: self.entries,
+            marks: self.marks.clone(),
+        }
+    }
+
     /// Keeps what `format` (none if there is no object) says.
     fn keep(&mut self, format: Option<&Format>) {
         self.paused = format.is_some_and(Format::pauses_writes);
         self.entries = format.is_some_and(Format::runs_entries);
-        self.marks = format.is_some_and(Format::runs_marks);
+        self.marks = format
+            .filter(|format| format.runs_marks())
+            .map(|format| format.marks_bucket.clone());
     }
 }
 
@@ -69,7 +88,9 @@ impl Inner {
     /// the format says that writes are made on entries.
     pub(super) async fn admit_write(&self, key: &str) -> Result<(), Error> {
         refuse_reserved(key)?;
-        let (paused, entries, _) = self.format_state().await;
+        let FormatState {
+            paused, entries, ..
+        } = self.format_state().await;
         if paused {
             let why = "writes are paused while the store changes format; retry later";
             return Err(Error::Unavailable(why.to_owned()));
@@ -85,18 +106,27 @@ impl Inner {
     /// Whether the format says `active`, so that a read of a cold object asks for a copy-back on
     /// an entry. Reads are never paused.
     pub(super) async fn entries_active(&self) -> bool {
-        self.format_state().await.1
+        self.format_state().await.entries
     }
 
-    /// Whether the format says `active-marks`, as of a read of the format object that is at most
-    /// `format_refresh` old. Nothing that a proxy does under any other format depends on it.
-    pub(super) async fn marks_active(&self) -> bool {
-        self.format_state().await.2
+    /// `None` unless the format says `active-marks` (as of a read of the format object that is at
+    /// most `format_refresh` old; nothing a proxy does under another format depends on it).
+    /// Otherwise whether the marks bucket the record names is the one this proxy was configured
+    /// with (`ProxyConfig::marks_bucket`). A proxy with no configured name
+    /// compares nothing; one with a name refuses a record that names another bucket or none.
+    pub(super) async fn marks_bucket_agrees(&self) -> Option<bool> {
+        let named = self.format_state().await.marks?;
+        Some(
+            self.config
+                .marks_bucket
+                .as_ref()
+                .is_none_or(|own| named.as_ref() == Some(own)),
+        )
     }
 
     /// Whether writes are paused, whether they are made on entries and whether they are made on
     /// markers, as of a read of the format object that is at most `format_refresh` old.
-    async fn format_state(&self) -> (bool, bool, bool) {
+    async fn format_state(&self) -> FormatState {
         if let Some(state) = self.fresh_format_state() {
             return state;
         }
@@ -113,14 +143,14 @@ impl Inner {
         if let Ok(format) = found {
             seen.keep(format.as_ref());
         }
-        (seen.paused, seen.entries, seen.marks)
+        seen.state()
     }
 
     /// What the last read of the format object says, if it is at most `format_refresh` old.
-    fn fresh_format_state(&self) -> Option<(bool, bool, bool)> {
+    fn fresh_format_state(&self) -> Option<FormatState> {
         let seen = locked(&self.pause);
         seen.read
             .is_some_and(|at| Instant::now().duration_since(at) < self.config.format_refresh)
-            .then_some((seen.paused, seen.entries, seen.marks))
+            .then(|| seen.state())
     }
 }

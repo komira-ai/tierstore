@@ -115,6 +115,10 @@ pub struct ProxyConfig {
     /// server over a `dir` hot tier, whose directory of markers is opened by the release that uses
     /// it).
     pub marks: Option<Arc<dyn Backend>>,
+    /// The name of that bucket, as `hot_store.marks_bucket` has it. When it is set, the plain puts
+    /// are made only while the `marks_bucket` of `_tiering/format` is the same name (design 7.2);
+    /// `None` compares nothing.
+    pub marks_bucket: Option<String>,
     /// The waits and the lease of the locks on the markers (`lock_wait`, `lock_lease` and the
     /// rest of section 9 of the design). Used only with `marks`, and only under the format
     /// `active-marks`.
@@ -156,6 +160,7 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            marks_bucket: None,
             markers: MarkersConfig::default(),
             emergency_cold_landing: false,
             step_retry: StepRetry::new(),

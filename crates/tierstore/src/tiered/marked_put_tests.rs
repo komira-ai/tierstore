@@ -408,6 +408,40 @@ async fn a_put_is_refused_without_a_marks_bucket_for_a_reserved_key_and_when_not
     assert!(rig.marks_log().is_empty());
 }
 
+/// Asserts that a proxy configured with a marks bucket other than the one the format record names
+/// (or a record that names none) refuses a plain put and writes to no store, and that the same
+/// name as the record's is admitted.
+#[tokio::test]
+async fn a_proxy_with_another_marks_bucket_than_the_format_record_refuses_writes() {
+    let records = [MARKS_FORMAT, r#"{"epoch":3,"phase":"active-marks"}"#];
+    for record in records {
+        let rig = Rig::with(record, |config| {
+            config.marks_bucket = Some("other-marks".to_owned());
+        })
+        .await;
+        rig.seed_hot("k", "old").await;
+        let seeded = rig.hot_log().len();
+        assert!(is_busy(&rig.put("k", "new").await.unwrap_err()), "{record}");
+        assert_eq!(rig.hot_text("k").await.as_deref(), Some("old"));
+        assert!(rig.marks_log().is_empty(), "{record}");
+        assert!(rig.cold_faults.call_log().is_empty(), "{record}");
+        let after: Vec<_> = rig.hot_log().split_off(seeded);
+        assert!(
+            after
+                .iter()
+                .all(|(op, key)| *op == Op::Get && key == FORMAT_KEY),
+            "{record}: {after:?}"
+        );
+    }
+    let rig = Rig::with(MARKS_FORMAT, |config| {
+        config.marks_bucket = Some("hot-marks".to_owned());
+    })
+    .await;
+    rig.seed_hot("k", "old").await;
+    rig.put("k", "new").await.unwrap();
+    assert_eq!(rig.hot_text("k").await.as_deref(), Some("new"));
+}
+
 /// Asserts that a plain put of a key the hot tier does not hold is not made here: it is the fast
 /// path of a later release, and it is answered as a client retries, with nothing written.
 #[tokio::test]
