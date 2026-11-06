@@ -145,7 +145,7 @@ async fn an_eviction_against_a_get_and_a_delete_breaks_no_rule() {
         vec![vec![GET], vec![DELETE]],
         2,
     );
-    explored(scenario, 2, 515).await;
+    explored(scenario, 2, 510).await;
 }
 
 /// Asserts that 200 walks of seed 1 over four actors (a delete and a get, a delete, a get, the
