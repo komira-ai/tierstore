@@ -382,6 +382,8 @@ mod gc_server_tests;
 #[cfg(test)]
 mod gc_tests;
 #[cfg(test)]
+mod header_timeout_tests;
+#[cfg(test)]
 mod hosted_tests;
 #[cfg(test)]
 mod idle_tests;

@@ -298,10 +298,10 @@ async fn a_delete_call_that_does_not_answer_within_the_margin_is_cut_and_handed_
 }
 
 /// Asserts that a fresh delete that cannot remove its entry hands it over and is acknowledged:
-/// the objects are gone.
+/// the objects are gone. The removal is tried once (`step_attempts = 1`).
 #[tokio::test(start_paused = true)]
 async fn a_fresh_delete_that_cannot_remove_its_entry_hands_it_over_and_is_acknowledged() {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     seed_both(&rig, "k").await;
     let failure = Error::Unavailable("entry delete failed".to_owned());
     rig.hot_faults
@@ -319,7 +319,7 @@ async fn an_entry_that_vanishes_between_a_deletes_create_and_read_is_looked_for_
     let rig = Rig::active().await;
     seed_both(&rig, "k").await;
     rig.other().create("k", Take::Put).await.unwrap();
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;
@@ -338,7 +338,7 @@ async fn a_delete_allowed_one_look_at_a_vanishing_entry_is_answered_unavailable(
     let rig = Rig::build_waiting(ACTIVE_FORMAT, 1, DeleteWait::new()).await;
     seed_both(&rig, "k").await;
     rig.other().create("k", Take::Put).await.unwrap();
-    let gate = rig.hot.gate(Op::Head, &entry_key("k"), Phase::Pre);
+    let gate = rig.hot.gate(Op::Get, &entry_key("k"), Phase::Pre);
     let proxy = rig.proxy.clone();
     let delete = tokio::spawn(async move { proxy.delete("k").await });
     gate.parked().await;
