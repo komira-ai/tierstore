@@ -27,6 +27,8 @@ mod copy_back;
 mod evict;
 #[path = "entry_reconciler_tests/races.rs"]
 mod races;
+#[path = "entry_reconciler_tests/restart.rs"]
+mod restart;
 #[path = "entry_reconciler_tests/sweep.rs"]
 mod sweep;
 #[path = "entry_reconciler_tests/usage.rs"]
@@ -121,6 +123,7 @@ impl Rig {
             owner: owner.map(str::to_owned),
             nonce: "planted".to_owned(),
             created_ms: 0,
+            owner_boot: None,
         };
         self.hot
             .put(&entry_key(key), encode_entry(&entry))

@@ -25,14 +25,14 @@ const PERIOD: Duration = Duration::from_secs(10);
 
 /// A sleeper that records what it was asked for, tells the test it was reached, and returns only
 /// when the test lets it.
-struct Stepped {
+pub(super) struct Stepped {
     asked: Mutex<Vec<Duration>>,
     reached: Semaphore,
     go: Semaphore,
 }
 
 impl Stepped {
-    fn new() -> Arc<Self> {
+    pub(super) fn new() -> Arc<Self> {
         Arc::new(Self {
             asked: Mutex::new(Vec::new()),
             reached: Semaphore::new(0),
@@ -41,12 +41,12 @@ impl Stepped {
     }
 
     /// Returns when the loop has finished a beat and is waiting.
-    async fn beat_done(&self) {
+    pub(super) async fn beat_done(&self) {
         self.reached.acquire().await.unwrap().forget();
     }
 
     /// Lets the loop leave its wait.
-    fn next(&self) {
+    pub(super) fn next(&self) {
         self.go.add_permits(1);
     }
 
@@ -125,6 +125,129 @@ async fn an_older_registration_is_left_by_open_and_replaced_by_the_first_beat() 
     assert!(rig.proxy.start_heartbeat(sleeper.clone()));
     sleeper.beat_done().await;
     assert_eq!(registration(&rig.memory).await.unwrap().hb, 1);
+    rig.proxy.stop_heartbeat().await;
+}
+
+/// Asserts that `open` over the registration of an earlier process of this release replaces it with
+/// its own, a count of zero and a boot of its own, whether that process beat (a count of seven) or
+/// never did (zero), so that the entries of this process, which name its boot, are never taken for
+/// those of another; and that the replacement names the earlier boot and the boots that one named
+/// as peers (they may be alive), and a first open names none.
+#[tokio::test]
+async fn open_replaces_the_registration_of_an_earlier_process_and_names_it_as_a_peer() {
+    for (earlier, named) in [(7, vec!["x"]), (0, vec![])] {
+        let memory = Arc::new(MemoryBackend::new());
+        let peers = Some(named.iter().map(|boot| (*boot).to_owned()).collect());
+        let boot = "earlier".to_owned();
+        let body = Registration {
+            proto: PROTO,
+            boot,
+            hb: earlier,
+            peers,
+        }
+        .encode();
+        memory.put(&proxy_key("p1"), body).await.unwrap();
+        let rig = rig_over(memory).await;
+        let written = registration(&rig.memory).await.unwrap();
+        assert_eq!((written.proto, written.hb), (PROTO, 0));
+        assert_eq!(written.boot, rig.proxy.inner.heartbeat.boot);
+        let mut want: Vec<String> = named.iter().map(|boot| (*boot).to_owned()).collect();
+        want.insert(0, "earlier".to_owned());
+        want.sort();
+        assert_eq!(written.peers, Some(want));
+    }
+    let fresh = rig().await;
+    assert_eq!(
+        registration(&fresh.memory).await.unwrap().peers,
+        Some(vec![])
+    );
+}
+
+/// Writes the registration of another live process of the proxy id over the one there: its boot,
+/// its count and the boots it names.
+async fn write_over(memory: &MemoryBackend, boot: &str, hb: u64, peers: &[&str]) {
+    let peers = Some(peers.iter().map(|peer| (*peer).to_owned()).collect());
+    let body = Registration {
+        proto: PROTO,
+        boot: boot.to_owned(),
+        hb,
+        peers,
+    }
+    .encode();
+    memory.delete(&proxy_key("p1")).await.unwrap();
+    memory.put(&proxy_key("p1"), body).await.unwrap();
+}
+
+/// Waits for the next beat to be done.
+async fn next_beat(sleeper: &Stepped) {
+    sleeper.next();
+    sleeper.beat_done().await;
+}
+
+/// Asserts that a process that finds another's registration in place of its own hears it, names it
+/// in the beats from then on, and stops naming it after exactly six acknowledged beats (the
+/// default departure of 60 seconds in beats of 10), the last body that names it being the sixth.
+#[tokio::test]
+async fn a_boot_found_in_place_of_the_own_registration_is_named_for_the_departure_time_in_beats() {
+    let rig = rig().await;
+    let me = registration(&rig.memory).await.unwrap().boot;
+    write_over(&rig.memory, "other", 3, &[]).await;
+    let sleeper = Stepped::new();
+    assert!(rig.proxy.start_heartbeat(sleeper.clone()));
+    sleeper.beat_done().await;
+    let first = registration(&rig.memory).await.unwrap();
+    assert_eq!(
+        (first.boot, first.peers),
+        (me.clone(), Some(vec!["other".to_owned()]))
+    );
+    for _ in 2..=6 {
+        next_beat(&sleeper).await;
+        assert_eq!(
+            registration(&rig.memory).await.unwrap().peers,
+            Some(vec!["other".to_owned()])
+        );
+    }
+    next_beat(&sleeper).await;
+    assert_eq!(registration(&rig.memory).await.unwrap().peers, Some(vec![]));
+    rig.proxy.stop_heartbeat().await;
+}
+
+/// Asserts that a process that goes on overwriting the registration is named for as long as it
+/// does: after it writes over this process's registration, this process's next beat fails (the
+/// object is not the one it wrote), the one after hears it again, and it is named for six more
+/// beats from then, not from the first time it was heard.
+#[tokio::test]
+async fn a_boot_that_goes_on_writing_over_the_registration_is_named_again() {
+    let rig = rig().await;
+    write_over(&rig.memory, "other", 3, &[]).await;
+    let sleeper = Stepped::new();
+    assert!(rig.proxy.start_heartbeat(sleeper.clone()));
+    sleeper.beat_done().await;
+    for _ in 2..=4 {
+        next_beat(&sleeper).await;
+    }
+    write_over(&rig.memory, "other", 4, &["third"]).await;
+    next_beat(&sleeper).await;
+    assert_eq!(registration(&rig.memory).await.unwrap().boot, "other");
+    next_beat(&sleeper).await;
+    let renewed = registration(&rig.memory).await.unwrap();
+    assert_eq!(
+        renewed.peers,
+        Some(vec!["other".to_owned(), "third".to_owned()])
+    );
+    for _ in 0..5 {
+        next_beat(&sleeper).await;
+        assert!(
+            registration(&rig.memory)
+                .await
+                .unwrap()
+                .peers
+                .unwrap()
+                .contains(&"other".to_owned())
+        );
+    }
+    next_beat(&sleeper).await;
+    assert_eq!(registration(&rig.memory).await.unwrap().peers, Some(vec![]));
     rig.proxy.stop_heartbeat().await;
 }
 
@@ -318,6 +441,7 @@ async fn open_fails_with_the_error_of_a_registration_it_cannot_read_or_replace()
         proto: 1,
         boot: "b".into(),
         hb: 4,
+        peers: None,
     }
     .encode();
     memory.put(&proxy_key("p1"), body.clone()).await.unwrap();

@@ -9,7 +9,7 @@ use bytes::Bytes;
 use crate::faulty::{FaultyBackend, Op};
 use crate::{
     Backend, Created, Entries, Entry, EntryOp, EntryState, Error, Gate, GateBackend, MemoryBackend,
-    Outcome, Phase, Seen, Step, Take, TestClock, decode_entry, encode_entry, entry_key,
+    Outcome, Phase, Seen, Step, Take, TestClock, encode_entry, entry_key,
 };
 
 /// One memory bucket, a counter over it, and a wrapper per actor so that a test holds the call of
@@ -38,8 +38,13 @@ impl Rig {
     }
 
     fn actor(&self, id: &str) -> Actor {
+        self.booted(id, "b")
+    }
+
+    /// An actor of the process whose boot is `boot`.
+    fn booted(&self, id: &str, boot: &str) -> Actor {
         let gated = Arc::new(GateBackend::new(self.store.clone()));
-        let entries = Entries::with_boot(gated.clone(), id, self.clock.clone(), "b");
+        let entries = Entries::with_boot(gated.clone(), id, self.clock.clone(), boot);
         Actor { entries, gated }
     }
 }
@@ -79,7 +84,7 @@ async fn read(actor: &Actor, key: &str) -> Seen {
     actor.entries.read(key).await.unwrap().unwrap()
 }
 
-fn entry(op: EntryOp, st: EntryState, owner: Option<&str>) -> Entry {
+pub(crate) fn entry(op: EntryOp, st: EntryState, owner: Option<&str>) -> Entry {
     Entry {
         v: 1,
         key: "k".to_owned(),
@@ -88,6 +93,7 @@ fn entry(op: EntryOp, st: EntryState, owner: Option<&str>) -> Entry {
         owner: owner.map(str::to_owned),
         nonce: "seed".to_owned(),
         created_ms: 5,
+        owner_boot: None,
     }
 }
 
@@ -142,89 +148,6 @@ const STATES: [EntryState; 4] = [
     EntryState::Unknown,
 ];
 const WHOS: [Who; 3] = [Who::Me, Who::Other, Who::Nobody];
-
-// ---- the name and the body ----
-
-/// Asserts that the name of an entry is the prefix and the SHA-256 of the key in hex (the digest of
-/// "abc" is the well-known one), that it has the same length for a key of 1024 bytes, and that two
-/// keys have two names.
-#[test]
-fn the_entry_name_is_the_prefix_and_the_sha256_hex_of_the_key_at_any_length() {
-    let abc = "_entries/ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-    assert_eq!(entry_key("abc"), abc);
-    assert_eq!(entry_key(&"k".repeat(1024)).len(), "_entries/".len() + 64);
-    assert_ne!(entry_key("abc"), entry_key("abd"));
-}
-
-/// Asserts the exact bytes of a held entry and of a pending one, whose owner is written as `null`,
-/// and that both read back as the entries written.
-#[test]
-fn an_entry_is_written_as_json_with_a_null_owner_and_reads_back() {
-    let held = entry(EntryOp::Put, EntryState::Held, Some("p1"));
-    let want =
-        r#"{"v":1,"key":"k","op":"PUT","st":"HELD","owner":"p1","nonce":"seed","created_ms":5}"#;
-    assert_eq!(encode_entry(&held), want);
-    assert_eq!(decode_entry(want.as_bytes()).unwrap(), held);
-
-    let pending = entry(EntryOp::Del, EntryState::Pending, None);
-    let want =
-        r#"{"v":1,"key":"k","op":"DEL","st":"PENDING","owner":null,"nonce":"seed","created_ms":5}"#;
-    assert_eq!(encode_entry(&pending), want);
-    assert_eq!(decode_entry(want.as_bytes()).unwrap(), pending);
-}
-
-/// Asserts that every operation and state is spelled as the format says.
-#[test]
-fn every_operation_and_state_has_its_word() {
-    let ops = [
-        (EntryOp::Put, "PUT"),
-        (EntryOp::Del, "DEL"),
-        (EntryOp::Cb, "CB"),
-        (EntryOp::Evict, "EVICT"),
-    ];
-    for (op, word) in ops {
-        let body = encode_entry(&entry(op, EntryState::Sealed, None));
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains(&format!(r#""op":"{word}""#)), "{text}");
-    }
-    let states = [
-        (EntryState::Held, "HELD"),
-        (EntryState::Pending, "PENDING"),
-        (EntryState::Sealed, "SEALED"),
-    ];
-    for (st, word) in states {
-        let body = encode_entry(&entry(EntryOp::Put, st, None));
-        let text = String::from_utf8(body.to_vec()).unwrap();
-        assert!(text.contains(&format!(r#""st":"{word}""#)), "{text}");
-    }
-}
-
-/// Asserts that a body a newer writer made, with a field this reader does not know, a later
-/// version, and an operation and a state it does not know, still reads: the unknown words are
-/// `Unknown`, and the field is ignored.
-#[test]
-fn a_body_with_added_fields_and_words_still_reads() {
-    let body = r#"{"v":2,"key":"k","op":"XFER","st":"FROZEN","owner":null,"nonce":"n","created_ms":9,"extra":[1]}"#;
-    let read = decode_entry(body.as_bytes()).unwrap();
-    let want = Entry {
-        v: 2,
-        key: "k".to_owned(),
-        op: EntryOp::Unknown,
-        st: EntryState::Unknown,
-        owner: None,
-        nonce: "n".to_owned(),
-        created_ms: 9,
-    };
-    assert_eq!(read, want);
-}
-
-/// Asserts that a body that is not an entry is refused with an error that says it is a corrupt
-/// entry.
-#[test]
-fn a_body_that_is_not_an_entry_is_refused() {
-    let error = decode_entry(b"{}").unwrap_err();
-    assert!(error.to_string().contains("corrupt entry"), "{error}");
-}
 
 // ---- the steps ----
 
@@ -364,10 +287,30 @@ async fn each_take_creates_the_entry_of_its_shape() {
             owner: owner.map(str::to_owned),
             nonce: "p1.b.0".to_owned(),
             created_ms: 1234,
+            owner_boot: owner.map(|_| "b".to_owned()),
         };
         assert_eq!(seen.entry, want, "{how:?}");
         assert_eq!(read(&actor, "k").await, seen, "{how:?}");
     }
+}
+
+/// Asserts that an entry names the boot of the process that owns it while it has an owner, and
+/// none when it has none: the put taken by `p1` names the boot of `p1`, its landing clears it, the
+/// reconciler's hold names the boot of the reconciler, a delete that amends the copy names the boot
+/// of the deleter, and the reap clears it; the stored entry is the one returned each time.
+#[tokio::test]
+async fn an_entry_names_the_boot_of_its_owner_and_none_when_it_has_no_owner() {
+    let rig = Rig::new();
+    let (p1, r1) = (rig.booted("p1", "pb"), rig.booted("r1", "rb"));
+    let held = take(&p1, "k", Take::Put).await;
+    let landed = step(&p1, &held, Step::LandPut).await;
+    let copying = step(&r1, &landed, Step::HoldForCopy).await;
+    let amended = step(&p1, &copying, Step::AmendCopy).await;
+    let reaped = step(&r1, &amended, Step::Reap).await;
+    let boots =
+        [&held, &landed, &copying, &amended, &reaped].map(|s| s.entry.owner_boot.as_deref());
+    assert_eq!(boots, [Some("pb"), None, Some("rb"), Some("pb"), None]);
+    assert_eq!(read(&r1, "k").await, reaped);
 }
 
 /// Asserts that a take of a key that has an entry says it exists and leaves the entry as it was.

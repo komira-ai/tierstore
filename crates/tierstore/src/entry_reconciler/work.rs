@@ -35,7 +35,7 @@ pub(super) enum Replicated {
 }
 
 /// Whether `entry` is a put or a delete held by an owner other than `holder`.
-fn is_held_by_other(entry: &Entry, holder: &str) -> bool {
+pub(super) fn is_held_by_other(entry: &Entry, holder: &str) -> bool {
     matches!(entry.op, EntryOp::Put | EntryOp::Del)
         && entry.st == EntryState::Held
         && entry.owner.as_deref().is_some_and(|owner| owner != holder)
@@ -97,9 +97,10 @@ impl EntryReconciler {
     }
 
     /// An entry held by someone: its own put, left by a copy that was cut off, is copied again;
-    /// that of an owner that has departed is reaped, after the uploads it left open are aborted (a
-    /// failure there leaves the entry held by the departed owner, so that the next step does the
-    /// whole again); that of a live owner is waited for.
+    /// that of an owner that has departed, or whose process has restarted since it made the entry
+    /// (see `restart.rs`), or that has stood for `held_ttl`, is reaped, after the uploads it left
+    /// open are aborted (a failure there leaves the entry held by the former owner, so that the
+    /// next step does the whole again); that of a live owner is waited for.
     async fn held(&self, seen: &Seen, now: u64) -> Result<Verdict, Error> {
         let entry = &seen.entry;
         let Some(owner) = entry.owner.as_deref() else {
@@ -114,7 +115,8 @@ impl EntryReconciler {
         let departed = self
             .registrations
             .departed(owner, now, self.config.departure);
-        if !departed && !self.held_expired.contains(&entry.key) {
+        let expired = self.held_expired.contains(&entry.key);
+        if !departed && !expired && !self.restarted(entry, owner) {
             return Ok(Verdict::Pinned);
         }
         if entry.op == EntryOp::Put {
