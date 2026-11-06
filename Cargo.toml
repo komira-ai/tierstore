@@ -131,3 +131,11 @@ incremental = false
 [profile.test]
 debug = "line-tables-only"
 incremental = false
+
+# The model check (crates/tierstore-model) explores millions of states: optimise that crate in
+# dev and test builds so its tests run in seconds, not minutes.
+[profile.dev.package.tierstore-model]
+opt-level = 3
+
+[profile.test.package.tierstore-model]
+opt-level = 3
