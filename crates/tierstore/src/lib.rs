@@ -70,7 +70,8 @@
 //! - [`Markers`] are the calls on the marker of one key, the object named by the key in the marks
 //!   bucket of the hot tier: a create-only create ([`MarkBirth`]), a change on the content tag for
 //!   each [`MarkMove`] of the transition table, a remove, a read, a wait for a lock to end, and the
-//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. Nothing calls them yet.
+//!   lease a holder keeps its lock alive by. The body is a [`Marker`]. Only the delete of a [`Proxy`]
+//!   under the format phase `active-marks` calls them yet.
 //! - [`CachedStore`] answers repeated reads of an object's ranges from RAM in front of any
 //!   backend, typically a [`Proxy`]. It is a cache of the node it runs on, not state.
 //!

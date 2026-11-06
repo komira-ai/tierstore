@@ -2,8 +2,8 @@
 //! compare-and-swap, read, remove, wait for a lock to end, and keep a lock alive
 //! (`docs/design/put-without-lock.md`, sections 4.3 and 5.2). The body of a marker is the module
 //! `marker`; the marker of K is the object named exactly K in the marks bucket of the hot store,
-//! which is the [`Backend`] handed to [`Markers::new`]. Nothing outside this module and its tests
-//! calls it yet.
+//! which is the [`Backend`] handed to [`Markers::new`]. Only the delete of a `Proxy` under the format
+//! phase `active-marks` (`tiered/marks_delete.rs`) calls it yet.
 //!
 //! - [`MarkBirth`] is the marker a create-only write makes where none exists (M1, M3, M10, M12).
 //! - [`MarkMove`] is a transition of a marker that exists (M2, M4, M4', M5 to M7, M9, M11, M13 and

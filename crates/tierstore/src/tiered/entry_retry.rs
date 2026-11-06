@@ -69,14 +69,14 @@ impl Default for StepRetry {
 }
 
 /// The tries left of one step and the sleep before the next.
-struct Backoff {
+pub(super) struct Backoff {
     left: u32,
     delay: Duration,
     max: Duration,
 }
 
 impl Backoff {
-    fn new(retry: StepRetry) -> Self {
+    pub(super) fn new(retry: StepRetry) -> Self {
         Self {
             left: retry.attempts.saturating_sub(1),
             delay: retry.delay,
@@ -97,7 +97,7 @@ fn failed(answer: Result<Attempt, Error>) -> Result<Attempt, Error> {
 impl Inner {
     /// Sleeps the delay of `backoff` and says whether another try may be made: one is left, and
     /// the registration allows a call to start.
-    async fn again(&self, backoff: &mut Backoff) -> bool {
+    pub(super) async fn again(&self, backoff: &mut Backoff) -> bool {
         if backoff.left == 0 || !self.heartbeat.deadline.allows_start() {
             return false;
         }

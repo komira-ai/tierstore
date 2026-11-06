@@ -12,8 +12,9 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, MarkersConfig, Meta,
+    MonotonicClock, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper,
+    UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -32,6 +33,11 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod marks_delete;
+#[cfg(test)]
+mod marks_delete_failure_tests;
+#[cfg(test)]
+pub(crate) mod marks_delete_tests;
 mod pause;
 mod put;
 mod read;
@@ -42,6 +48,7 @@ mod uploads_tests;
 pub use entry_delete::DeleteWait;
 pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
+use pause::WriteMode;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -95,10 +102,19 @@ pub struct ProxyConfig {
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
-    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
-    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
-    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    /// store, for the markers of `docs/design/put-without-lock.md`. Only a delete under the format
+    /// phase `active-marks` calls it (`marks_bucket` names it); `None` is a proxy with no marks
+    /// bucket (every proxy of a library user, and a server over a `dir` hot tier, whose directory
+    /// of markers is opened by the release that uses it).
     pub marks: Option<Arc<dyn Backend>>,
+    /// The name of the bucket `marks` is, as the format record spells it. A proxy writes on markers
+    /// only while the record under `active-marks` names this bucket (two names must not be in use
+    /// at once); `None` is a proxy that never does.
+    pub marks_bucket: Option<String>,
+    /// The waits and the lease of the locks the proxy takes on markers (`lock_wait`,
+    /// `lock_poll_*`, `lock_lease`, `lock_refresh` and `queued_call_margin` of the design),
+    /// checked when the proxy is opened.
+    pub markers: MarkersConfig,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -132,6 +148,8 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            marks_bucket: None,
+            markers: MarkersConfig::default(),
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -199,7 +217,9 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// `drain` or `drained`, a put, a delete, and the create, part upload and completion of a
 /// multipart upload are answered with [`Error::Unavailable`] (a 503 at the S3 front), and reads
 /// are served. The format is read at most every [`ProxyConfig::format_refresh`], and at each
-/// heartbeat.
+/// heartbeat. Under `{"epoch": 3, "phase": "active-marks", "marks_bucket": ..}`, with the bucket
+/// of [`ProxyConfig::marks_bucket`], a delete is made on markers and every other write is still
+/// answered with [`Error::Unavailable`] (the puts of that protocol are not built yet).
 ///
 /// - **Get** reads the hot tier, else the cold tier, and reads no entry. An object it read from
 ///   the cold tier is not copied by the read: when the hot tier is below the critical mark the
@@ -230,7 +250,10 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 /// - **Delete** (`entry_delete.rs`) deletes the object from the cold tier at once and amends,
 ///   claims or creates the entry of the key; a delete that meets a copy in flight (an entry the
 ///   reconciler holds or has sealed) waits for the reconciler's release ([`DeleteWait`]) and is
-///   answered 503 at the request deadline.
+///   answered 503 at the request deadline. Under the format phase `active-marks` (and only
+///   there) a delete is made on the marker of the key instead (`marks_delete.rs`): a lock on the
+///   marker, a hot HEAD, `gone` written into the lock, a plain hot DELETE, and the answer, with no
+///   request to the cold tier, which the leader deletes from later.
 /// - **List** is the union of both tiers without duplicates (the hot tier's entry where both
 ///   hold the key), in key order, without the keys under the reserved prefixes `_journal/`,
 ///   `_tiering/` and `_entries/` (whichever tier holds them). [`Backend::list_page`] pages through
@@ -292,6 +315,8 @@ struct Inner {
     pause: Arc<Mutex<pause::Pause>>,
     /// The calls on the entries of keys, as this proxy.
     entries: Entries,
+    /// The calls on the markers of keys, as this proxy: none without a marks bucket.
+    markers: Option<Arc<Markers>>,
     /// One caller reads the format object at a time, so that a caller that waited uses the read of
     /// the caller before it. The heartbeat's look at the format goes through it too.
     format_gate: Arc<AsyncMutex<()>>,
@@ -322,6 +347,16 @@ impl Proxy {
         #[cfg(feature = "server")]
         tracing::debug!(proxy = %id, "tierstore: proxy opened");
         let entries = Entries::new(Arc::clone(&hot), id, Arc::clone(&config.clock));
+        let markers = config
+            .marks
+            .as_ref()
+            .map(|marks| {
+                let (mono, sleeper) = (Arc::clone(&config.mono), Arc::clone(&config.sleeper));
+                Markers::new(Arc::clone(marks), id, config.markers.clone(), mono, sleeper)
+            })
+            .transpose()
+            .map_err(|error| Error::Other(format!("invalid settings of the markers: {error}")))?
+            .map(Arc::new);
         let inner = Inner {
             hot,
             cold,
@@ -329,6 +364,7 @@ impl Proxy {
             capacity: Mutex::new(Capacity::default()),
             pause: Arc::default(),
             entries,
+            markers,
             format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,
@@ -524,11 +560,14 @@ impl Inner {
         }
     }
 
-    /// Deletes the object on the entry of its key (see `entry_delete.rs`): refused with
-    /// [`Error::Unavailable`] while writes are paused or the format is not active.
-    async fn delete_object(&self, key: &str) -> Result<(), Error> {
-        self.admit_write(key).await?;
-        self.delete_on_entry(key).await
+    /// Deletes the object on the entry of its key (see `entry_delete.rs`) under the format
+    /// `active`, and on the marker of its key (see `marks_delete.rs`) under `active-marks`: refused
+    /// with [`Error::Unavailable`] while writes are paused or the format is neither.
+    async fn delete_object(self: &Arc<Self>, key: &str) -> Result<(), Error> {
+        match self.write_mode(key).await? {
+            WriteMode::Entries => self.delete_on_entry(key).await,
+            WriteMode::Marks(markers) => self.delete_on_marker(markers, key).await,
+        }
     }
 }
 

@@ -174,3 +174,25 @@ fn only_the_hyphenated_word_is_the_phase_active_marks() {
         assert_eq!(format.phase, FormatPhase::Unknown, "{word}");
     }
 }
+
+/// Asserts when a record opens writes on markers and to which bucket: the phase `active-marks`, an
+/// epoch of 3 or more, and a name for the bucket, all three; not the phase `active`, not an epoch
+/// below 3 or none, not a record without a name.
+#[test]
+fn a_record_opens_writes_on_markers_only_with_the_phase_the_epoch_and_the_bucket() {
+    let opens = decoded(r#"{"phase":"active-marks","epoch":3,"marks_bucket":"m"}"#);
+    assert_eq!(opens.runs_marks(), Some("m"));
+    let later = decoded(r#"{"phase":"active-marks","epoch":4,"marks_bucket":"m"}"#);
+    assert_eq!(later.runs_marks(), Some("m"));
+    let shut = [
+        r#"{"phase":"active-marks","epoch":2,"marks_bucket":"m"}"#,
+        r#"{"phase":"active-marks","marks_bucket":"m"}"#,
+        r#"{"phase":"active-marks","epoch":3}"#,
+        r#"{"phase":"active","epoch":3,"marks_bucket":"m"}"#,
+    ];
+    for json in shut {
+        assert_eq!(decoded(json).runs_marks(), None, "{json}");
+    }
+    assert!(!opens.runs_entries());
+    assert!(!opens.pauses_writes());
+}
