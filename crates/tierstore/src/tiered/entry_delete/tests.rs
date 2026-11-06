@@ -298,10 +298,10 @@ async fn a_delete_call_that_does_not_answer_within_the_margin_is_cut_and_handed_
 }
 
 /// Asserts that a fresh delete that cannot remove its entry hands it over and is acknowledged:
-/// the objects are gone.
+/// the objects are gone. The removal is tried once (`step_attempts = 1`).
 #[tokio::test(start_paused = true)]
 async fn a_fresh_delete_that_cannot_remove_its_entry_hands_it_over_and_is_acknowledged() {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     seed_both(&rig, "k").await;
     let failure = Error::Unavailable("entry delete failed".to_owned());
     rig.hot_faults

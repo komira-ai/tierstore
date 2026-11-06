@@ -15,7 +15,7 @@ use crate::entry::{Entries, EntryOp, EntryState, Seen, Take, entry_key};
 use crate::journal::{FORMAT_KEY, USAGE_KEY, Usage};
 use crate::{
     Error, FaultyBackend, GateBackend, MemoryBackend, Mono, Op, PartBody, Proxy, ProxyConfig,
-    TestClock,
+    RecordingSleeper, TestClock,
 };
 use futures::StreamExt;
 
@@ -45,6 +45,8 @@ pub(super) struct Rig {
     pub(super) hot: Arc<GateBackend>,
     pub(super) cold: Arc<FaultyBackend>,
     pub(super) proxy: Arc<Proxy>,
+    /// Where the proxy's retries sleep: it writes the waits down and returns.
+    pub(super) sleeper: Arc<RecordingSleeper>,
 }
 
 impl Rig {
@@ -64,6 +66,25 @@ impl Rig {
         entry_rounds: u32,
         delete_wait: crate::DeleteWait,
     ) -> Self {
+        Self::build_retrying(format, entry_rounds, delete_wait, crate::StepRetry::new()).await
+    }
+
+    /// An active proxy whose last step of a put or a delete is tried once (`step_attempts = 1`).
+    pub(super) async fn single_try() -> Self {
+        let retry = crate::StepRetry {
+            attempts: 1,
+            ..crate::StepRetry::new()
+        };
+        Self::build_retrying(ACTIVE_FORMAT, 3, crate::DeleteWait::new(), retry).await
+    }
+
+    /// As [`Rig::build_waiting`], with the retry of the last step of a put or a delete.
+    pub(super) async fn build_retrying(
+        format: &str,
+        entry_rounds: u32,
+        delete_wait: crate::DeleteWait,
+        step_retry: crate::StepRetry,
+    ) -> Self {
         let clock = Arc::new(TestClock::new());
         let mono = Arc::new(Mono::new());
         let hot_mem = Arc::new(MemoryBackend::with_clock(clock.clone()));
@@ -80,6 +101,9 @@ impl Rig {
         config.format_refresh = Duration::ZERO;
         config.entry_rounds = entry_rounds;
         config.delete_wait = delete_wait;
+        config.step_retry = step_retry;
+        let sleeper = Arc::new(RecordingSleeper::new());
+        config.sleeper = sleeper.clone();
         let proxy = Proxy::open(hot.clone(), cold.clone(), config)
             .await
             .unwrap();
@@ -92,6 +116,7 @@ impl Rig {
             hot,
             cold,
             proxy: Arc::new(proxy),
+            sleeper,
         };
         rig.live();
         rig
@@ -467,10 +492,11 @@ async fn a_put_whose_entry_cannot_be_created_is_unavailable_and_leaves_no_object
 
 /// Asserts that a put whose acknowledging write of the entry fails, whether the store says
 /// unavailable (and the entry is read back unchanged) or another error, is answered
-/// `Unavailable`, and that the entry is left held by the put for the reconciler.
+/// `Unavailable`, and that the entry is left held by the put for the reconciler. The proxy tries
+/// the step once (`step_attempts = 1`); the tries of the default are in `entry_retry_tests`.
 #[tokio::test]
 async fn a_put_whose_acknowledgement_cannot_be_written_is_unavailable_and_leaves_the_entry() {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     let unavailable = Error::Unavailable("down".to_owned());
     rig.hot_faults
         .fail_next_on(Op::PutIfMatch, "_entries/", unavailable);
@@ -530,10 +556,10 @@ async fn a_put_whose_first_look_at_the_hot_tier_fails_makes_no_entry() {
 
 /// Asserts that a put whose acknowledging write of the entry was not answered, and whose entry
 /// could not be read back either, is answered with the write's own `Unavailable` and leaves the
-/// entry held.
+/// entry held, when the step is tried once (`step_attempts = 1`).
 #[tokio::test]
 async fn a_put_whose_acknowledgement_and_read_back_both_fail_is_unavailable_with_its_own_error() {
-    let rig = Rig::active().await;
+    let rig = Rig::single_try().await;
     let unanswered = Error::Unavailable("no answer".to_owned());
     rig.hot_faults
         .fail_next_on(Op::PutIfMatch, "_entries/", unanswered.clone());
