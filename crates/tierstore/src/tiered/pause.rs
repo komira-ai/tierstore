@@ -2,7 +2,8 @@
 //! [`ProxyConfig::format_refresh`](super::ProxyConfig::format_refresh)) before each write and
 //! answers it with [`Error::Unavailable`] while the format pauses writes, and until it says
 //! `{"epoch": 2, "phase": "active"}`, from when a write is made on the entry of its key. Reads are
-//! never paused.
+//! never paused; a read that misses the hot tier reads the phase from the same kept answer
+//! (`mark_reads.rs`).
 
 use std::sync::Mutex;
 use std::time::Duration;

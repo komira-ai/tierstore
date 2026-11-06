@@ -4,7 +4,12 @@
 //!
 //! Which phases of the format read the marker is [`FormatState::reads_markers`](super::pause); in
 //! the others (the entry protocol's `active`, and a store with no format object) a hot miss is
-//! the cold read alone, as it was before this module, and the marks bucket is not asked.
+//! the cold read alone and the marks bucket is not asked. The hot tier is asked what it was before
+//! this module, with one difference: the phase has to be known before the marker can be read in
+//! parallel with the cold read, so a miss reads the format object (kept for `format_refresh`)
+//! before the cold read. A head, a ranged read and a read of a key neither tier has did not read
+//! it before; a whole-object read of a cold key read it after the cold read, to ask for a
+//! copy-back on an entry.
 //!
 //! - **The pair.** `GET marks/K` and the cold read are started together. When both have answered,
 //!   `gone = true` means the key is deleted: the hot tier is asked once more (a put may have landed

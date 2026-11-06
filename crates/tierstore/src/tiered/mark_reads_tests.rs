@@ -269,6 +269,63 @@ async fn in_the_entry_protocol_a_hot_miss_reads_no_marker_and_asks_for_its_copy_
     assert_eq!(rig.marks_faults.call_log(), vec![]);
 }
 
+/// What the hot tier was asked, after the proxy was open, by `times` reads of `key` of the kind
+/// `how` that miss it (the cold tier has `key` if `present`). The format object is read at most
+/// once in an hour, so the second read of a pair shows what a cached format costs. `marks` says
+/// whether the proxy has a marks bucket; one without is the proxy as it was before the reads that
+/// read markers.
+async fn hot_requests(marks: bool, how: usize, present: bool, times: usize) -> Vec<(Op, String)> {
+    let rig = MarkRig::tuned(ENTRIES, |config| {
+        config.format_refresh = Duration::from_secs(3600);
+        if !marks {
+            config.marks = None;
+        }
+    })
+    .await;
+    if present {
+        rig.put_cold("k", "cold").await;
+    }
+    let opened = rig.hot_faults.call_log().len();
+    for _ in 0..times {
+        let _ = read(&rig, "k", how).await;
+    }
+    settle().await;
+    assert_eq!(rig.marks_faults.call_log(), vec![]);
+    rig.hot_faults.call_log().split_off(opened)
+}
+
+/// Asserts what a hot miss in the entry protocol's phase asks of the hot tier, against the same
+/// proxy with no marks bucket (the requests it made before the reads that read markers): the
+/// marks bucket is not asked; the requests are the same, in the same order, except that a read
+/// that never read the format object before (a head, a ranged read, a key neither tier has) now
+/// reads it once, and a read of a whole object reads it right after the miss, before the cold
+/// read, not after it.
+#[tokio::test]
+async fn in_the_entry_protocol_a_hot_miss_asks_the_hot_tier_for_the_format_at_most_once_more() {
+    let format = (Op::Get, FORMAT_KEY.to_owned());
+    for how in HOW {
+        for present in [true, false] {
+            for times in [1, 2] {
+                let before = hot_requests(false, how, present, times).await;
+                let now = hot_requests(true, how, present, times).await;
+                let read_it_before = before.contains(&format);
+                let mut expected = before.clone();
+                expected.extend(vec![format.clone(); usize::from(!read_it_before)]);
+                let mut sorted_now = now.clone();
+                sorted_now.sort();
+                expected.sort();
+                assert_eq!(sorted_now, expected, "{how} {present} {times}");
+                assert_eq!(
+                    now.iter().filter(|request| **request == format).count(),
+                    1,
+                    "{how} {present} {times}"
+                );
+                assert_eq!(now[1], format, "{how} {present} {times}");
+            }
+        }
+    }
+}
+
 /// Asserts that a pair that took longer than `read_window` is dropped and read again, so that a
 /// delete that came while the cold read was held is seen by the second marker read, and the
 /// cold object the first pair read is not served.
