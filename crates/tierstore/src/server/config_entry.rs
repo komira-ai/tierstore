@@ -2,7 +2,10 @@
 //! entry reconciler's retry delays, stray sweep, copy-back limits and usage and listing work, and
 //! the proxy's side of it (how long the usage object stands, how often the format object is read,
 //! how many looks at an entry, how long a delete waits for the reconciler, and how often and how
-//! fast the last step of a put or a delete is tried again).
+//! fast the last step of a put or a delete is tried again), and the keys of the proxy's reads and
+//! listings that read the markers of `docs/design/put-without-lock.md` (`read_window`,
+//! `read_retries`, `list_marker_pages`, `want_retry`, `want_recent_limit` and
+//! `copy_back_max_bytes`).
 //!
 //! Each has the value that was a constant of the code before it was a key as its default, and a
 //! range, and the relations between keys are checked here once, when the file is read, each
@@ -10,12 +13,15 @@
 
 use std::time::Duration;
 
-use crate::{DeleteWait, EntryReconcilerConfig, ProxyConfig, StepRetry};
+use crate::{DeleteWait, EntryReconcilerConfig, MarkReads, ProxyConfig, StepRetry};
 
 use super::cli_heartbeat::DEPARTURE;
 use super::config::{ConfigError, TierTable, duration, invalid, within};
 use super::config_tuning::{HOUR, MS, span};
-use super::config_units::Dur;
+use super::config_units::{Dur, Size};
+
+/// A bound on the largest size of a key: a tebibyte.
+const TIB: u64 = 1 << 40;
 
 /// A bound on the longest interval of a key: a year.
 const YEAR: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -89,6 +95,20 @@ pub struct EntryTuning {
     /// file must also be longer than `lease_ttl`, so that an entry the previous holder of the
     /// lease left held while it copied is not reaped before that lease would have lapsed.
     pub held_ttl: Duration,
+    /// `hot_store.read_window`: the longest a hot-miss pair, or the reads of a listing after its
+    /// cold page, may take before they are read again.
+    pub read_window: Duration,
+    /// `hot_store.read_retries`: how many times such a read is read again before it is 503.
+    pub read_retries: u32,
+    /// `hot_store.list_marker_pages`: the pages of marker names one round of a listing reads
+    /// beyond its first.
+    pub list_marker_pages: u32,
+    /// `hot_store.want_retry`: how long a proxy waits to ask again for the copy-back of a key.
+    pub want_retry: Duration,
+    /// `hot_store.want_recent_limit`: the most keys a proxy remembers it asked a copy-back of.
+    pub want_recent_limit: u32,
+    /// `hot_store.copy_back_max_bytes`: the largest object a read asks to have copied back.
+    pub copy_back_max_bytes: u64,
 }
 
 impl Default for EntryTuning {
@@ -116,6 +136,12 @@ impl Default for EntryTuning {
             step_retry_min: StepRetry::new().delay,
             step_retry_max: StepRetry::new().delay_max,
             held_ttl: Duration::from_secs(3600),
+            read_window: MarkReads::default().read_window,
+            read_retries: MarkReads::default().read_retries,
+            list_marker_pages: MarkReads::default().list_marker_pages,
+            want_retry: MarkReads::default().want_retry,
+            want_recent_limit: 100_000,
+            copy_back_max_bytes: MarkReads::default().copy_back_max_bytes,
         }
     }
 }
@@ -152,6 +178,14 @@ impl EntryTuning {
             attempts: self.step_attempts,
             delay: self.step_retry_min,
             delay_max: self.step_retry_max,
+        };
+        proxy.mark_reads = MarkReads {
+            read_window: self.read_window,
+            read_retries: self.read_retries,
+            list_marker_pages: self.list_marker_pages,
+            want_retry: self.want_retry,
+            want_recent_limit: self.want_recent_limit as usize,
+            copy_back_max_bytes: self.copy_back_max_bytes,
         };
     }
 }
@@ -290,6 +324,29 @@ pub(super) fn entry_tuning(
             HOUR,
         )?,
         held_ttl: time("held_ttl", hot.held_ttl, old.held_ttl, YEAR)?,
+        read_window: time("read_window", hot.read_window, old.read_window, HOUR)?,
+        read_retries: count("read_retries", hot.read_retries, old.read_retries, 100)?,
+        list_marker_pages: count(
+            "list_marker_pages",
+            hot.list_marker_pages,
+            old.list_marker_pages,
+            100,
+        )?,
+        want_retry: time("want_retry", hot.want_retry, old.want_retry, YEAR)?,
+        want_recent_limit: count(
+            "want_recent_limit",
+            hot.want_recent_limit,
+            old.want_recent_limit,
+            100_000_000,
+        )?,
+        copy_back_max_bytes: within(
+            "hot_store",
+            "copy_back_max_bytes",
+            hot.copy_back_max_bytes
+                .map_or(old.copy_back_max_bytes, |size: Size| size.0),
+            1,
+            TIB,
+        )?,
     };
     let low = ("retry_min", tuning.retry_min);
     ordered("retry_max", low, tuning.retry_max)?;

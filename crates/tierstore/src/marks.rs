@@ -461,6 +461,23 @@ impl Markers {
         Ok(Some(MarkSeen { marker, tag }))
     }
 
+    /// The names of the markers whose key starts with `prefix` and sorts after `after`, at most
+    /// `max_keys`, in key order: a page of the listing of the marks bucket, with the `prefix` and
+    /// `after` of the client's own listing (the marker of K is named K). A page of fewer than
+    /// `max_keys` names is the last.
+    ///
+    /// # Errors
+    /// The backend's error for a failed listing.
+    pub async fn names(
+        &self,
+        prefix: &str,
+        after: Option<&str>,
+        max_keys: usize,
+    ) -> Result<Vec<String>, Error> {
+        let page = self.marks.list_page(prefix, after, max_keys).await?;
+        Ok(page.into_iter().map(|listed| listed.key).collect())
+    }
+
     /// Creates the marker of `key` as `birth` says, create-only.
     ///
     /// # Errors

@@ -12,8 +12,9 @@ use tokio::time::Instant;
 use crate::journal::{USAGE_KEY, Usage, is_reserved, proxy_key};
 use crate::metrics::{Counters, Read, Tier};
 use crate::{
-    Backend, ByteRange, Clock, Entries, Error, Listed, Meta, MonotonicClock, OpenUpload, Opened,
-    PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper, UploadedPart, UploadsAfter, Window,
+    Backend, ByteRange, Clock, Entries, Error, Listed, Markers, MarkersConfig, Meta,
+    MonotonicClock, OpenUpload, Opened, PartBody, PutAnswer, ReadBody, Sleeper, Span, TokioSleeper,
+    UploadedPart, UploadsAfter, Window,
 };
 
 mod copy_back;
@@ -32,6 +33,10 @@ mod heartbeat;
 #[cfg(test)]
 mod heartbeat_tests;
 mod listing;
+mod mark_listing;
+mod mark_reads;
+#[cfg(test)]
+mod mark_rig;
 mod pause;
 mod put;
 mod read;
@@ -42,6 +47,8 @@ mod uploads_tests;
 pub use entry_delete::DeleteWait;
 pub use entry_retry::StepRetry;
 use heartbeat::Heartbeat;
+pub use mark_reads::MarkReads;
+use mark_reads::Missed;
 
 /// The settings of a [`Proxy`].
 #[derive(Clone)]
@@ -95,10 +102,18 @@ pub struct ProxyConfig {
     /// How a delete that met a copy in flight waits for the reconciler to release the entry.
     pub delete_wait: DeleteWait,
     /// The marks bucket of the hot store (`hot_store.marks_bucket`): the second handle on the hot
-    /// store, for the markers of `docs/design/put-without-lock.md`. This release does not call
-    /// it; `None` is a proxy with no marks bucket (every proxy of a library user, and a server
-    /// over a `dir` hot tier, whose directory of markers is opened by the release that uses it).
+    /// store, for the markers of `docs/design/put-without-lock.md`. This release reads it, on a
+    /// hot miss and in a listing, in the phases of the format from which a marker can be in force
+    /// (see `mark_reads.rs`); it writes to it only a `WANT` marker, in the phase `active-marks`.
+    /// `None` is a proxy with no marks bucket (every proxy of a library user, and a server over a
+    /// `dir` hot tier, whose directory of markers is opened by the release that uses it): it reads
+    /// no marker, and its registration says `proto` 2.
     pub marks: Option<Arc<dyn Backend>>,
+    /// The waits and the lease of the calls on markers. This release only reads markers, so it
+    /// uses none of them; the config of the server sets them in the release that waits for a lock.
+    pub markers: MarkersConfig,
+    /// The settings of the reads and listings that read markers.
+    pub mark_reads: MarkReads,
     /// How often and how fast the last step of a put or a delete (the landing of a put, the
     /// hand-over of a delete, the removal of an entry) is tried again when the hot tier fails it
     /// ambiguously.
@@ -132,6 +147,8 @@ impl ProxyConfig {
             entry_rounds: 3,
             delete_wait: DeleteWait::new(),
             marks: None,
+            markers: MarkersConfig::default(),
+            mark_reads: MarkReads::default(),
             step_retry: StepRetry::new(),
             sleeper: Arc::new(TokioSleeper),
         }
@@ -211,6 +228,13 @@ fn refuse_reserved(key: &str) -> Result<(), Error> {
 ///   range alone and asks for no copy-back: the memory of a read is its range, whatever the size of
 ///   the object. A failed ask does not fail the read.
 /// - **Head** reads the hot tier, else the cold tier, and asks for no copy-back.
+/// - **Markers.** Where the format object names a phase from which markers can be in force (see
+///   `mark_reads.rs`) and the proxy has a marks bucket ([`ProxyConfig::marks`]), a get or a head the
+///   hot tier misses reads the marker of the key in parallel with the cold read, and a marker that
+///   says the key is deleted makes the answer the hot tier's second read or not found, whatever the
+///   cold tier has; a listing reads a page of marker names beside the hot page and drops the keys
+///   only the cold tier lists that a marker says are deleted (`mark_listing.rs`). Under the entry
+///   protocol's `active` phase, or with no format object, none of this is done.
 /// - **Put** is refused if the key exists in either tier, is written to the hot tier create-only,
 ///   and is acknowledged when its entry says so (`entry_put.rs`): the entry is created
 ///   `(PUT, HELD)` before the object is written, so that no other put, delete or copy of the key
@@ -297,6 +321,10 @@ struct Inner {
     format_gate: Arc<AsyncMutex<()>>,
     counters: Counters,
     heartbeat: Heartbeat,
+    /// The calls on the markers of this proxy: none if it has no marks bucket.
+    markers: Option<Arc<Markers>>,
+    /// The copy-backs this proxy asked for lately.
+    wants: mark_reads::Wants,
 }
 
 impl Proxy {
@@ -317,6 +345,22 @@ impl Proxy {
         if id.is_empty() || id.contains('/') {
             return Err(Error::Other(format!("invalid proxy id {id:?}")));
         }
+        let markers = config
+            .marks
+            .as_ref()
+            .map(|marks| {
+                let (clock, sleeper) = (Arc::clone(&config.mono), Arc::clone(&config.sleeper));
+                Markers::new(
+                    Arc::clone(marks),
+                    id,
+                    config.markers.clone(),
+                    clock,
+                    sleeper,
+                )
+            })
+            .transpose()
+            .map_err(|error| Error::Other(format!("invalid marker settings: {error}")))?
+            .map(Arc::new);
         let heartbeat = Heartbeat::new(&config);
         heartbeat.register(hot.as_ref(), &proxy_key(id)).await?;
         #[cfg(feature = "server")]
@@ -332,6 +376,8 @@ impl Proxy {
             format_gate: Arc::default(),
             counters: Counters::default(),
             heartbeat,
+            markers,
+            wants: mark_reads::Wants::default(),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -465,9 +511,7 @@ impl Inner {
         refuse_reserved(key)?;
         match self.hot.get(key, range).await {
             Ok(body) => {
-                self.counters.hit(Tier::Hot, Read::Get);
-                self.counters.bytes_read(Tier::Hot, body.len());
-                self.counters.served(Tier::Hot, body.len());
+                self.count_hot_get(&body);
                 return Ok(body);
             }
             Err(Error::NotFound(_)) => self.counters.miss(Tier::Hot, Read::Get),
@@ -476,23 +520,34 @@ impl Inner {
                 return Err(error);
             }
         }
-        if let Some(part) = range {
+        let cold = move || async move { Ok(self.cold_get(key, range).await?.0) };
+        let hot_again = move || self.hot.get(key, range);
+        let (body, copy_back) = match self.miss_read(key, cold, hot_again).await? {
+            Missed::Hot(body) => {
+                self.count_hot_get(&body);
+                return Ok(body);
+            }
+            Missed::Cold { found, copy_back } => (found, copy_back),
+        };
+        if range.is_some() {
             // A read of a part asks the cold tier for that part alone and copies nothing back: a
             // whole read per chunk of a long blob would be quadratic, and would hold the whole of
             // the object in memory for a read of a part of it.
-            let (body, _) = self.cold_get(key, Some(part)).await?;
             self.note_critical().await;
-            self.counters.served(Tier::Cold, body.len());
-            return Ok(body);
-        }
-        let (body, _) = self.cold_get(key, None).await?;
-        // The level is looked at once the cold tier has the object: a key that neither tier has
-        // needs none, and the level can cost a read of the usage object.
-        if !self.note_critical().await && self.entries_active().await {
-            self.ask_copy_back(key);
+        } else if !self.note_critical().await {
+            // The level is looked at once the cold tier has the object: a key that neither tier
+            // has needs none, and the level can cost a read of the usage object.
+            self.ask_copy_back_of(copy_back, key, body.len() as u64)
+                .await;
         }
         self.counters.served(Tier::Cold, body.len());
         Ok(body)
+    }
+
+    fn count_hot_get(&self, body: &Bytes) {
+        self.counters.hit(Tier::Hot, Read::Get);
+        self.counters.bytes_read(Tier::Hot, body.len());
+        self.counters.served(Tier::Hot, body.len());
     }
 
     async fn head_object(&self, key: &str) -> Result<Meta, Error> {
@@ -508,6 +563,19 @@ impl Inner {
                 return Err(error);
             }
         }
+        let cold = || self.cold_head(key);
+        let hot_again = || self.hot.head(key);
+        match self.miss_read(key, cold, hot_again).await? {
+            Missed::Hot(meta) => {
+                self.counters.hit(Tier::Hot, Read::Head);
+                Ok(meta)
+            }
+            Missed::Cold { found, .. } => Ok(found),
+        }
+    }
+
+    /// A head of the cold tier, counted as a hit, a miss or an error of it.
+    async fn cold_head(&self, key: &str) -> Result<Meta, Error> {
         match self.cold.head(key).await {
             Ok(meta) => {
                 self.counters.hit(Tier::Cold, Read::Head);

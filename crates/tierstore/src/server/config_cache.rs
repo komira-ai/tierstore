@@ -65,10 +65,11 @@ use serde::{Deserialize, Deserializer};
 use super::cli::DEFAULT_OCI_PREFIX;
 use super::config::{
     ConfigError, OciFlags, PerRun, ServerTable, TierParts, TierTable, duration, front_of, invalid,
-    refuse, refuse_hot_keys, require, tier, within,
+    refuse, require, tier, within,
 };
 use super::config_cache_tuning;
 use super::config_handoff::{check_outside_cache, handoff_of};
+use super::config_hot_only::refuse_hot_keys;
 use super::config_interface::Interfaces;
 use super::config_policy::{Policy, check_policies, require_keeping};
 use super::config_tuning::S3Client;
