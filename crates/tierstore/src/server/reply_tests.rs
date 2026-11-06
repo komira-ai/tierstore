@@ -85,6 +85,7 @@ fn each_failure_of_the_store_has_its_status_and_code() {
     );
     check(Error::Reserved(k()), 403, "AccessDenied", None);
     check(Error::InvalidKey(k()), 400, "KeyTooLongError", None);
+    check(Error::InvalidSegment(k()), 400, "InvalidArgument", None);
     check(Error::InvalidPart(k()), 400, "InvalidPart", None);
     check(
         Error::Unsupported(k()),
