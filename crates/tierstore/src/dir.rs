@@ -174,6 +174,9 @@ pub struct DirBackend {
     copy_chunk: usize,
     /// The size of the chunks of a streamed read.
     read_chunk: u64,
+    /// Whether the conditional writes of every key take the lock between processes that those of
+    /// the keys under `_entries/` take (see [`DirBackend::with_locked_keys`]).
+    locked_keys: bool,
 }
 
 /// The error of a failed call on the file `path`.
@@ -406,7 +409,23 @@ impl DirBackend {
             root_synced: AtomicBool::new(false),
             copy_chunk: COPY_CHUNK,
             read_chunk: READ_CHUNK,
+            locked_keys: false,
         })
+    }
+
+    /// This backend taking, for every key, the lock between processes that the create-only puts,
+    /// the replacements by the tag and the deletes of the keys under `_entries/` take, so that
+    /// those calls are atomic among the processes over one directory for any key, as they are
+    /// among the calls of one backend. It is for a directory whose every object is rewritten by
+    /// compare-and-swap by more than one process: the marks bucket of a `dir:` hot tier. The lock
+    /// is the file `.entries/.lock` of the root, made by the first write; the subdirectory
+    /// holds nothing else unless the directory has keys under `_entries/`, and no key is a file of
+    /// it. Without this call only the keys under `_entries/` take it, which is what a
+    /// directory written by an earlier release is read and written as.
+    #[must_use]
+    pub fn with_locked_keys(mut self) -> Self {
+        self.locked_keys = true;
+        self
     }
 
     /// This backend joining the parts of an upload in pieces of `copy` bytes and giving a
@@ -483,7 +502,7 @@ impl DirBackend {
     /// subdirectory, and whether an earlier sync failed, no entry write returns before the
     /// subdirectory is durable.
     async fn entry_lock(&self, key: &str) -> Result<Option<entries::EntryLock>, Error> {
-        if entries::rest(key).is_none() {
+        if entries::rest(key).is_none() && !self.locked_keys {
             return Ok(None);
         }
         let syncer = Arc::clone(&self.syncer);
