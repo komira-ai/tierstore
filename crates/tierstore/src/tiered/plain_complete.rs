@@ -33,7 +33,8 @@ impl Inner {
         id: &str,
         parts: &[(u32, String)],
     ) -> Result<String, Error> {
-        let WriteRoute::Marks(markers) = self.route_write(key).await? else {
+        let (route_taken, _writing) = self.route_write(key).await?;
+        let WriteRoute::Marks(markers) = route_taken else {
             return self.complete_on_entry(key, id, parts).await;
         };
         let UploadRoute::Hot(upload) = route(id) else {

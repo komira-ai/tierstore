@@ -94,7 +94,8 @@ impl Inner {
         body: PartBody<'_>,
         claim: &PutClaim,
     ) -> Result<(), Error> {
-        if !matches!(self.route_write(key).await?, WriteRoute::Marks(_)) {
+        let (route, _writing) = self.route_write(key).await?;
+        if !matches!(route, WriteRoute::Marks(_)) {
             return self
                 .put_object_stream(key, len, body, false)
                 .await

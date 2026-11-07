@@ -131,7 +131,6 @@ impl Format {
     /// and the leader goes on working the markers of that bucket until none is left, so that the
     /// operator can write `drained` (`docs/design/put-without-lock.md`, 8.2). The pause that
     /// precedes the activation names no bucket, and the leader does nothing under it.
-    #[cfg(feature = "server")]
     pub(crate) fn rolls_back_marks(&self) -> bool {
         self.phase == FormatPhase::Drain && self.marks_bucket.is_some()
     }
