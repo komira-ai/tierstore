@@ -13,7 +13,7 @@ import { escapeText } from './layout';
 import type { Page } from './pages';
 
 /** The pages in the order the guide reads; any other page of docs/ (the metrics reference, say) follows, by name. */
-export const DOC_ORDER: readonly string[] = ['overview', 'install', 'keys', 'configuration', 'operations', 'troubleshooting', 'limits'];
+export const DOC_ORDER: readonly string[] = ['overview', 'install', 'keys', 'configure', 'configuration', 'operations', 'troubleshooting', 'limits'];
 
 /** The title of the sections that say what is planned and not in the code. */
 export const NOT_YET = 'Not in a release yet';
